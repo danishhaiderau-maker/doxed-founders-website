@@ -1,0 +1,23 @@
+﻿=== DCF RESTART CYCLE REPORT ===
+Generated: 2026-05-26 16:33:00 (agent execution)
+
+Two PowerShell windows opened (DCF-Window1 + DCF-Window2): YES
+  DCF-Window1: cmd start powershell -NoExit + dev-lan.cmd
+  DCF-Window2: cmd start powershell -NoExit + dev-tunnel.cmd
+  stop-dev.ps1 stops 3000/4000; tunnel window may stay open.
+
+--- First run test results ---
+http://127.0.0.1:4000/api/health => OK HTTP 200 | {" status\:\ok\,\services\:{\api\:\ok\,\database\:\ok\}}
+http://localhost:3000/api/health => OK HTTP 200 | {\status\:\ok\,\services\:{\api\:\ok\,\database\:\ok\}}
+http://localhost:3000/api/auth/session => OK HTTP 200 | {}
+
+--- After stop+restart test results ---
+http://127.0.0.1:4000/api/health => OK HTTP 200 | {\status\:\ok\,\services\:{\api\:\ok\,\database\:\ok\}}
+http://localhost:3000/api/health => OK HTTP 200 | {\status\:\ok\,\services\:{\api\:\ok\,\database\:\ok\}}
+http://localhost:3000/api/auth/session => OK HTTP 200 | {}
+
+Phone Web URL: https://officers-fixtures-boundary-certified.trycloudflare.com
+
+Failures:
+ - .env.tunnel.local mtime unchanged during 90s watch after starting dev-tunnel (URLs already present)
+ - Overlapping automation runs briefly logged auth/session timeout before warm-up

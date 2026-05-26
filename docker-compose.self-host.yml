@@ -1,0 +1,27 @@
+# Optional Postgres via Docker — ports bound to localhost ONLY (not exposed to LAN/internet).
+# Use only if you prefer PostgreSQL over SQLite. Redis is optional (app works without it today).
+#
+# Start: docker compose -f docker-compose.self-host.yml up -d
+# Stop:  docker compose -f docker-compose.self-host.yml down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dcf-postgres-selfhost
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: dcf
+      POSTGRES_PASSWORD: dcf_selfhost_change_me
+      POSTGRES_DB: doxedcryptofounder
+    volumes:
+      - postgres_selfhost_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dcf -d doxedcryptofounder"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_selfhost_data:

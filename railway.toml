@@ -1,0 +1,9 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm ci && npm run build:utils && npx prisma generate --schema=prisma/schema.prisma && npm run build --workspace=@dcf/api"
+
+[deploy]
+startCommand = "node scripts/start-api-prod.mjs"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"

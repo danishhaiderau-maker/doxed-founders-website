@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+.next/
+out/
+build/
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.tunnel.local
+apps/web/.env.local
+apps/api/.env.local
+.env.neon
+.env.self-host
+.selfhost-pids/
+prisma/selfhost.db
+prisma/selfhost.db-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug / local runtime
+.dev-pids/
+debug-acf3ea.log
+yarn-debug.log*
+yarn-error.log*
+
+# Prisma
+prisma/migrations/**/migration_lock.toml
+
+# Testing
+coverage/
+
+# Docker
+docker/data/

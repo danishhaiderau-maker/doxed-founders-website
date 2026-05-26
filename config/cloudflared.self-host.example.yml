@@ -1,0 +1,28 @@
+# Cloudflare Tunnel — exposes localhost to the internet WITHOUT opening router ports.
+#
+# Setup (one-time):
+#   1. Install cloudflared: winget install Cloudflare.cloudflared
+#   2. cloudflared tunnel login
+#   3. cloudflared tunnel create dcf-home
+#   4. Copy this file to ~/.cloudflared/config.yml and edit hostnames
+#   5. cloudflared tunnel route dns dcf-home YOUR-DOMAIN.com
+#   6. cloudflared tunnel route dns dcf-home api.YOUR-DOMAIN.com
+#   7. npm run start:self-host   (in one terminal)
+#   8. cloudflared tunnel run dcf-home   (in another)
+#
+# Quick test WITHOUT a domain (temporary random URL, API needs a second tunnel):
+#   Terminal 1: dev-lan.cmd
+#   Terminal 2: dev-tunnel.cmd   (or npm run dev:tunnel)
+#   Then restart dev-lan.cmd to load .env.tunnel.local (HTTPS web + API URLs)
+
+tunnel: dcf-home
+credentials-file: C:\Users\YOUR_USER\.cloudflared\TUNNEL-UUID.json
+
+ingress:
+  - hostname: YOUR-DOMAIN.com
+    service: http://127.0.0.1:3000
+  - hostname: www.YOUR-DOMAIN.com
+    service: http://127.0.0.1:3000
+  - hostname: api.YOUR-DOMAIN.com
+    service: http://127.0.0.1:4000
+  - service: http_status:404

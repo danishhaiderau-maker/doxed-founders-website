@@ -1,0 +1,189 @@
+=== DevLan Restart Report === 
+Timestamp: Tue/05/26/2026 16:07:02.62 
+ 
+--- Step 1a: stop-self-host.ps1 --- 
+Stopping self-host processes...
+Done.
+--- Step 1b: stop-dev.ps1 --- 
+Stopping dev servers on ports 3000 and 4000...
+Done.
+ 
+--- Step 2: .env.local cleanup --- 
+apps\web\.env.local absent
+apps\api\.env.local absent
+--- Step 3: start dev-lan.ps1 --- 
+Started dev-lan in new window
+--- Step 4: Wait ports (max 180s) ---
+Port 3000: NOT READY
+Port 4000: NOT READY
+
+--- Step 4b: Health checks ---
+http://127.0.0.1:4000/api/health -> FAIL Unable to connect to the remote server
+http://localhost:3000/api/health -> FAIL Unable to connect to the remote server
+http://localhost:3000/api/auth/session -> FAIL Unable to connect to the remote server
+Step 5 SKIPPED
+
+--- Step 6: next.config.ts ---
+import { loadEnvConfig } from '@next/env';
+import type { NextConfig } from 'next';
+
+// Load apps/web/.env.local before reading tunnel hostnames (written by dev-lan / dev-tunnel).
+loadEnvConfig(process.cwd());
+
+function hostnameFromUrl(url: string): string | undefined {
+  return url.match(/^https?:\/\/([^/]+)/)?.[1];
+}
+
+const allowedDevOrigins = ['127.0.0.1', 'localhost'];
+
+const lanOrigin = process.env.LAN_DEV_ORIGIN;
+if (lanOrigin) {
+  allowedDevOrigins.push(lanOrigin);
+}
+
+// Exact hostname required â€” *.trycloudflare.com wildcards are not reliably matched.
+const tunnelHost =
+  hostnameFromUrl(process.env.TUNNEL_WEB_URL ?? '') ??
+  hostnameFromUrl(process.env.NEXTAUTH_URL ?? '');
+
+if (tunnelHost) {
+  allowedDevOrigins.push(tunnelHost);
+}
+
+const apiProxyTarget = (process.env.API_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '');
+
+const nextConfig: NextConfig = {
+  transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils'],
+  allowedDevOrigins,
+  async rewrites() {
+    if (process.env.NODE_ENV !== 'development') return [];
+    return [
+      {
+        // Keep /api/auth/* on Next.js (next-auth); proxy everything else to Nest.
+        source: '/api/:path((?!auth(?:/|$)).*)',
+        destination: `${apiProxyTarget}/api/:path*`,
+      },
+    ];
+  },
+};
+
+export default nextConfig;
+
+
+--- LAN IP ---
+LAN IPv4: 172.25.64.1
+
+--- netstat ---
+
+
+--- Local commands ---
+cd "C:\Users\user\Desktop\Final Bots\doxedcryptofounder"
+powershell -ExecutionPolicy Bypass -File scripts\stop-self-host.ps1
+powershell -ExecutionPolicy Bypass -File scripts\stop-dev.ps1
+powershell -ExecutionPolicy Bypass -File scripts\dev-lan.ps1
+powershell -ExecutionPolicy Bypass -File scripts\start-quick-tunnels.ps1
+
+=== FOLLOW-UP (extra 180s wait) ===
+Port 3000: NOT READY
+Port 4000: NOT READY
+Health (follow-up):
+http://127.0.0.1:4000/api/health -> FAIL Unable to connect to the remote server
+http://localhost:3000/api/health -> FAIL Unable to connect to the remote server
+http://localhost:3000/api/auth/session -> FAIL Unable to connect to the remote server
+
+--- debug-acf3ea.log tail ---
+{"data":{"ports":{"3000":"","4000":""}},"hypothesisId":"LAN","message":"ports-after-stop","runId":"dev-lan","sessionId":"acf3ea","timestamp":1779772865790,"location":"dev-lan.ps1"}
+{"data":{"webUrl":"https://fantastic-engaging-advantage-blonde.trycloudflare.com","apiUrl":"https://relationships-organised-voters-procedure.trycloudflare.com"},"hypothesisId":"LAN","message":"tunnel-config","runId":"dev-lan","sessionId":"acf3ea","timestamp":1779772870622,"location":"dev-lan.ps1"}
+{"data":{"ports":{"3000":"","4000":""}},"hypothesisId":"LAN","message":"ports-before-stop","runId":"dev-lan","sessionId":"acf3ea","timestamp":1779773299004,"location":"dev-lan.ps1"}
+{"data":{"ports":{"3000":"","4000":""}},"hypothesisId":"LAN","message":"ports-after-stop","runId":"dev-lan","sessionId":"acf3ea","timestamp":1779773311288,"location":"dev-lan.ps1"}
+{"data":{"webUrl":"https://officers-fixtures-boundary-certified.trycloudflare.com","apiUrl":"https://slight-seekers-electro-kings.trycloudflare.com"},"hypothesisId":"LAN","message":"tunnel-config","runId":"dev-lan","sessionId":"acf3ea","timestamp":1779773317901,"location":"dev-lan.ps1"}
+
+=== FINAL RETRY (after write-dev-env.ps1 fix) ===
+Timestamp: 2026-05-26T16:21:51.1160344+10:00
+ERROR FOUND: write-dev-env.ps1 had Unicode em-dash breaking PowerShell parse (fixed to ASCII hyphen)
+Port 3000: LISTENING
+Port 4000: LISTENING
+http://127.0.0.1:4000/api/health -> HTTP 200 {"status":"ok","timestamp":"2026-05-26T06:21:44.951Z","services":{"api":"ok","database":"ok"},"pendingListings":0}
+http://localhost:3000/api/health -> HTTP 200 {"status":"ok","timestamp":"2026-05-26T06:21:48.057Z","services":{"api":"ok","database":"ok"},"pendingListings":0}
+http://localhost:3000/api/auth/session -> HTTP 200 {}
+Auth session not Nest 404: PASS
+LAN IPv4: 172.25.64.1
+Tunnel Web URL: "
+--- start-quick-tunnels output ---
+powershell.exe : At C:\Users\user\Desktop\Final Bots\doxedcryptofounder\scripts\start-quick-tunnels.ps1:125 char:88
+At line:1 char:1890
++ ... unnelOut = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Jo ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (At C:\Users\use...ps1:125 char:88:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
++ ... .local   (same-origin /api proxy â?" no stale tunnel API URL)" -Foreg ...
++                                                                 ~
+Unexpected token ')' in expression or statement.
+At C:\Users\user\Desktop\Final Bots\doxedcryptofounder\scripts\start-quick-tunnels.ps1:126 char:15
++ Write-Host "  apps/api/.env.local   (CORS for tunnel origin)" -Foregr ...
++               ~~~~~~~~~~~~~~~~~~~
+Unexpected token 'apps/api/.env.local' in expression or statement.
+At C:\Users\user\Desktop\Final Bots\doxedcryptofounder\scripts\start-quick-tunnels.ps1:151 char:34
++   Write-Host "Stopping tunnels..." -ForegroundColor DarkGray
++                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The string is missing the terminator: ".
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : UnexpectedToken
+--- .env.tunnel.local ---
+# Auto-generated by dev-tunnel — do not commit (gitignored)
+# Quick tunnel URLs change every time you restart dev-tunnel.cmd
+NEXTAUTH_URL="https://officers-fixtures-boundary-certified.trycloudflare.com"
+TUNNEL_WEB_URL="https://officers-fixtures-boundary-certified.trycloudflare.com"
+NEXT_PUBLIC_API_URL="https://slight-seekers-electro-kings.trycloudflare.com"
+API_URL="https://slight-seekers-electro-kings.trycloudflare.com"
+CORS_ORIGINS="https://officers-fixtures-boundary-certified.trycloudflare.com,http://localhost:3000,http://127.0.0.1:3000"
+--- next.config.ts auth rewrite confirmation ---
+source: /api/:path((?!auth(?:/|$)).*) - excludes /api/auth from Nest proxy
+--- dev-lan-restart.log tail ---
+  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       20084
+  TCP    0.0.0.0:4000           0.0.0.0:0              LISTENING       1604
+  TCP    127.0.0.1:4000         127.0.0.1:49873        FIN_WAIT_2      1604
+  TCP    127.0.0.1:4000         127.0.0.1:49876        TIME_WAIT       0
+  TCP    127.0.0.1:49648        127.0.0.1:3000         TIME_WAIT       0
+  TCP    127.0.0.1:49867        127.0.0.1:4000         TIME_WAIT       0
+  TCP    127.0.0.1:49873        127.0.0.1:4000         CLOSE_WAIT      16372
+  TCP    [::]:3000              [::]:0                 LISTENING       20084
+  TCP    [::1]:3000             [::1]:49875            TIME_WAIT       0
+  TCP    [::1]:3000             [::1]:49877            FIN_WAIT_2      20084
+  TCP    [::1]:49659            [::1]:3000             TIME_WAIT       0
+  TCP    [::1]:49661            [::1]:3000             TIME_WAIT       0
+  TCP    [::1]:49877            [::1]:3000             CLOSE_WAIT      16372
+
+
+=== Step 5 retry: start-quick-tunnels (after ps1 unicode fix) ===
+ERROR: cloudflared not found.
+
+Install (pick one):
+  winget install Cloudflare.cloudflared
+  https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/
+
+Then close and reopen this terminal, and run dev-tunnel.cmd again.
+--- .env.tunnel.local (updated) ---
+# Auto-generated by dev-tunnel — do not commit (gitignored)
+# Quick tunnel URLs change every time you restart dev-tunnel.cmd
+NEXTAUTH_URL="https://officers-fixtures-boundary-certified.trycloudflare.com"
+TUNNEL_WEB_URL="https://officers-fixtures-boundary-certified.trycloudflare.com"
+NEXT_PUBLIC_API_URL="https://slight-seekers-electro-kings.trycloudflare.com"
+API_URL="https://slight-seekers-electro-kings.trycloudflare.com"
+CORS_ORIGINS="https://officers-fixtures-boundary-certified.trycloudflare.com,http://localhost:3000,http://127.0.0.1:3000"
+
+=== EXECUTIVE SUMMARY (end of run) ===
+Live check API /api/health: FAIL
+Live check Web /api/health: FAIL
+Live check /api/auth/session: FAIL (not Nest 404 if 200)
+Root cause: write-dev-env.ps1 Unicode em-dash caused parse error; dev-lan never started npm run dev
+Fix: ASCII hyphens in scripts/write-dev-env.ps1 and start-quick-tunnels.ps1 (+ other scripts)
+Tunnels: cloudflared not installed; Web URL file=https://officers-fixtures-boundary-certified.trycloudflare.com (likely stale)
+LAN IP: 172.25.64.1 -> http://172.25.64.1:3000
+
+=== POST-REPORT: dev-lan restarted (keep window open) ===
+Port 3000/4000 up: True / True
+API health: 200
+Web health: 200
+Auth session: 200

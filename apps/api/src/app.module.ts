@@ -1,0 +1,44 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { AnalyticsModule } from './analytics/analytics.module';
+import { AuthModule } from './auth/auth.module';
+import { JwtAuthGuard } from './auth/guards';
+import { FeedModule } from './feed/feed.module';
+import { HealthModule } from './health/health.module';
+import { ListingApplicationsModule } from './listing-applications/listing-applications.module';
+import { PaperTradingModule } from './paper-trading/paper-trading.module';
+import { ProjectsModule } from './projects/projects.module';
+import { WatchlistModule } from './watchlist/watchlist.module';
+import { PrismaModule } from './prisma/prisma.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
+    }),
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    PrismaModule,
+    AnalyticsModule,
+    AuthModule,
+    HealthModule,
+    ListingApplicationsModule,
+    PaperTradingModule,
+    FeedModule,
+    ProjectsModule,
+    WatchlistModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+  ],
+})
+export class AppModule {}

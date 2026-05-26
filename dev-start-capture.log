@@ -1,0 +1,281 @@
+
+> doxedcryptofounder@0.1.0 dev
+> npm run build:utils && turbo run dev
+
+
+> doxedcryptofounder@0.1.0 build:utils
+> npm run build --workspace=@dcf/utils
+
+
+> @dcf/utils@0.1.0 build
+> tsc
+
+• turbo 2.9.14
+
+   • Packages in scope: @dcf/api, @dcf/config, @dcf/types, @dcf/ui, @dcf/utils, @dcf/web
+   • Running dev in 6 packages
+   • Remote caching disabled
+
+@dcf/api:dev: cache bypass, force executing 112dfeb00082dd15
+@dcf/web:dev: cache bypass, force executing 9a997630c0db2915
+@dcf/web:dev: 
+@dcf/web:dev: > @dcf/web@0.1.0 dev
+@dcf/web:dev: > next dev --port 3000
+@dcf/web:dev: 
+@dcf/api:dev: 
+@dcf/api:dev: > @dcf/api@0.1.0 dev
+@dcf/api:dev: > nest start --watch
+@dcf/api:dev: 
+@dcf/web:dev:    ▲ Next.js 15.5.18
+@dcf/web:dev:    - Local:        http://localhost:3000
+@dcf/web:dev:    - Network:      http://10.0.0.102:3000
+@dcf/web:dev: 
+@dcf/web:dev:  ✓ Starting...
+@dcf/web:dev:  ✓ Ready in 12.6s
+@dcf/web:dev: Failed to proxy http://127.0.0.1:4000/api/health Error: connect ECONNREFUSED 127.0.0.1:4000
+@dcf/web:dev:     at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+@dcf/web:dev:   errno: -4078,
+@dcf/web:dev:   code: 'ECONNREFUSED',
+@dcf/web:dev:   syscall: 'connect',
+@dcf/web:dev:   address: '127.0.0.1',
+@dcf/web:dev:   port: 4000
+@dcf/web:dev: }
+@dcf/web:dev: Error: connect ECONNREFUSED 127.0.0.1:4000
+@dcf/web:dev:     at <unknown> (Error: connect ECONNREFUSED 127.0.0.1:4000) {
+@dcf/web:dev:   errno: -4078,
+@dcf/web:dev:   code: 'ECONNREFUSED',
+@dcf/web:dev:   syscall: 'connect',
+@dcf/web:dev:   address: '127.0.0.1',
+@dcf/web:dev:   port: 4000
+@dcf/web:dev: }
+@dcf/web:dev:  ○ Compiling /api/auth/[...nextauth] ...
+@dcf/api:dev: [2J[3J[H[[90m4:20:17 pm[0m] Starting compilation in watch mode...
+@dcf/api:dev: 
+@dcf/api:dev: [[90m4:21:03 pm[0m] Found 0 errors. Watching for file changes.
+@dcf/api:dev: 
+@dcf/web:dev:  ✓ Compiled /api/auth/[...nextauth] in 74.7s (870 modules)
+@dcf/web:dev: [next-auth][warn][NEXTAUTH_URL] 
+@dcf/web:dev: https://next-auth.js.org/warnings#nextauth_url
+@dcf/web:dev: [next-auth][warn][NO_SECRET] 
+@dcf/web:dev: https://next-auth.js.org/warnings#no_secret
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [NestFactory] Starting Nest application...
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] PrismaModule dependencies initialized +177ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] PassportModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] GeckoterminalModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] ConfigHostModule dependencies initialized +127ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] ThrottlerModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] JwtModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] DexscreenerModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] AnalyticsModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] ConfigModule dependencies initialized +2ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] HealthModule dependencies initialized +2ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] FeedModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] AppModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] WatchlistModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] ProjectsModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] AuthModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] PaperTradingModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [InstanceLoader] ListingApplicationsModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] AuthController {/api/auth}: +15ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/auth/register, POST} route +10ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/auth/login, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/auth/oauth, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/auth/me, GET} route +24ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] HealthController {/api/health}: +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/health, GET} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] ListingApplicationsController {/api/listing-applications}: +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/preview-dexscreener, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/listing-applications, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/pending, GET} route +4ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/:id/review, PATCH} route +3ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/:id, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] PaperTradingController {/api/paper-trading}: +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/session, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/portfolio/:userId/public, GET} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/portfolio/:userId, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/preview, POST} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/migrate-guest, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/trade, POST} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/leaderboard, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/reset-info, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/reset, POST} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/checkout/reset, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/stripe/webhook, POST} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] FeedController {/api/feed}: +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/feed, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/comments, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/comments, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/initial-comment, POST} route +5ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] ProjectsController {/api/projects}: +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/projects, GET} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/projects/featured/list, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/projects/sync-metrics, POST} route +3ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/projects/:slug, GET} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] FoundersController {/api/founders}: +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/founders, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/founders/:slug, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RoutesResolver] WatchlistController {/api/watchlist}: +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/watchlist, GET} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/watchlist/slugs, GET} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/watchlist/:slug, POST} route +1ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [RouterExplorer] Mapped {/api/watchlist/:slug, DELETE} route +0ms
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [PrismaService] Database connected
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:41 pm     LOG [NestApplication] Nest application successfully started +14ms
+@dcf/api:dev: API running on http://0.0.0.0:4000 (/api/health)
+@dcf/api:dev: [Nest] 1604  - 26/05/2026, 4:21:43 pm     LOG [MetricsSyncService] Metrics sync: 2/2 updated (0 failed)
+@dcf/web:dev:  GET /api/auth/session 200 in 86ms
+@dcf/web:dev: [?25h
+@dcf/api:dev: [2J[3J[H[[90m5:35:06 pm[0m] File change detected. Starting incremental compilation...
+@dcf/api:dev: 
+@dcf/api:dev: [[90m5:35:28 pm[0m] Found 0 errors. Watching for file changes.
+@dcf/api:dev: 
+@dcf/api:dev: [2J[3J[H[[90m5:35:31 pm[0m] File change detected. Starting incremental compilation...
+@dcf/api:dev: 
+@dcf/api:dev: [[90m5:35:43 pm[0m] Found 0 errors. Watching for file changes.
+@dcf/api:dev: 
+@dcf/api:dev: [2J[3J[H[[90m5:35:43 pm[0m] File change detected. Starting incremental compilation...
+@dcf/api:dev: 
+@dcf/api:dev: [[90m5:35:50 pm[0m] Found 0 errors. Watching for file changes.
+@dcf/api:dev: 
+@dcf/api:dev: [2J[3J[H[[90m5:35:57 pm[0m] File change detected. Starting incremental compilation...
+@dcf/api:dev: 
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:00 pm     LOG [NestFactory] Starting Nest application...
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] PrismaModule dependencies initialized +303ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] PassportModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] GeckoterminalModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] ConfigHostModule dependencies initialized +119ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] ThrottlerModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] JwtModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] DexscreenerModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] AnalyticsModule dependencies initialized +79ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] ConfigModule dependencies initialized +4ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] HealthModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] FeedModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] AppModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] WatchlistModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] ProjectsModule dependencies initialized +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] AuthModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] PaperTradingModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [InstanceLoader] ListingApplicationsModule dependencies initialized +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] AuthController {/api/auth}: +62ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/auth/register, POST} route +87ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/auth/login, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/auth/oauth, POST} route +5ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/auth/me, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] HealthController {/api/health}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/health, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] ListingApplicationsController {/api/listing-applications}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/preview-dexscreener, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/listing-applications, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/pending, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/:id/review, PATCH} route +2ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/listing-applications/:id, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] PaperTradingController {/api/paper-trading}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/session, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/portfolio/:userId/public, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/portfolio/:userId, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/preview, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/migrate-guest, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/trade, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/leaderboard, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/reset-info, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/reset, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/checkout/reset, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/paper-trading/stripe/webhook, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] FeedController {/api/feed}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/feed, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/comments, GET} route +3ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/comments, POST} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/feed/:id/initial-comment, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] ProjectsController {/api/projects}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/projects, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/projects/featured/list, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/projects/sync-metrics, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/projects/:slug, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] FoundersController {/api/founders}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/founders, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/founders/:slug, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RoutesResolver] WatchlistController {/api/watchlist}: +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/watchlist, GET} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/watchlist/slugs, GET} route +1ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/watchlist/:slug, POST} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:01 pm     LOG [RouterExplorer] Mapped {/api/watchlist/:slug, DELETE} route +0ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:02 pm     LOG [PrismaService] Database connected
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:02 pm     LOG [NestApplication] Nest application successfully started +24ms
+@dcf/api:dev: [Nest] 21408  - 26/05/2026, 5:36:02 pm   ERROR [NestApplication] Error: listen EADDRINUSE: address already in use 0.0.0.0:4000 +293ms
+@dcf/api:dev: node:net:1940
+@dcf/api:dev:     const ex = new UVExceptionWithHostPort(err, 'listen', address, port);
+@dcf/api:dev:                ^
+@dcf/api:dev: 
+@dcf/api:dev: Error: listen EADDRINUSE: address already in use 0.0.0.0:4000
+@dcf/api:dev:     at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+@dcf/api:dev:     at listenInCluster (node:net:1997:12)
+@dcf/api:dev:     at node:net:2206:7
+@dcf/api:dev:     at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+@dcf/api:dev:   code: 'EADDRINUSE',
+@dcf/api:dev:   errno: -4091,
+@dcf/api:dev:   syscall: 'listen',
+@dcf/api:dev:   address: '0.0.0.0',
+@dcf/api:dev:   port: 4000
+@dcf/api:dev: }
+@dcf/api:dev: 
+@dcf/api:dev: Node.js v22.22.0
+@dcf/api:dev: ERROR: The process "18708" not found.
+@dcf/api:dev: ERROR: The process "18708" not found.
+@dcf/api:dev: node:child_process:991
+@dcf/api:dev:     throw err;
+@dcf/api:dev:     ^
+@dcf/api:dev: 
+@dcf/api:dev: Error: Command failed: taskkill /pid 18708 /T /F
+@dcf/api:dev: ERROR: The process "18708" not found.@dcf/api:dev: 
+@dcf/api:dev: 
+@dcf/api:dev:     at genericNodeError (node:internal/errors:983:15)
+@dcf/api:dev:     at wrappedFn (node:internal/errors:537:14)
+@dcf/api:dev:     at checkExecSyncError (node:child_process:916:11)
+@dcf/api:dev:     at execSync (node:child_process:988:15)
+@dcf/api:dev:     at treeKillSync (C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api\node_modules\@nestjs\cli\lib\utils\tree-kill.js:7:38)
+@dcf/api:dev:     at C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api\node_modules\@nestjs\cli\actions\start.action.js:69:46
+@dcf/api:dev:     at Object.onWatchStatusChange (C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api\node_modules\@nestjs\cli\lib\compiler\watch-compiler.js:82:17)
+@dcf/api:dev:     at C:\Users\user\Desktop\Final Bots\doxedcryptofounder\node_modules\typescript\lib\typescript.js:133916:30
+@dcf/api:dev:     at emitFilesAndReportErrors (C:\Users\user\Desktop\Final Bots\doxedcryptofounder\node_modules\typescript\lib\typescript.js:133737:5)
+@dcf/api:dev:     at result.afterProgramCreate (C:\Users\user\Desktop\Final Bots\doxedcryptofounder\node_modules\typescript\lib\typescript.js:133912:5) {
+@dcf/api:dev:   status: 128,
+@dcf/api:dev:   signal: null,
+@dcf/api:dev:   output: [
+@dcf/api:dev:     null,
+@dcf/api:dev:     Buffer(0) [Uint8Array] [],
+@dcf/api:dev:     Buffer(39) [Uint8Array] [
+@dcf/api:dev:        69,  82,  82,  79,  82,  58,  32,  84, 104,
+@dcf/api:dev:       101,  32, 112, 114, 111,  99, 101, 115, 115,
+@dcf/api:dev:        32,  34,  49,  56,  55,  48,  56,  34,  32,
+@dcf/api:dev:       110, 111, 116,  32, 102, 111, 117, 110, 100,
+@dcf/api:dev:        46,  13,  10
+@dcf/api:dev:     ]
+@dcf/api:dev:   ],
+@dcf/api:dev:   pid: 14764,
+@dcf/api:dev:   stdout: Buffer(0) [Uint8Array] [],
+@dcf/api:dev:   stderr: Buffer(39) [Uint8Array] [
+@dcf/api:dev:      69,  82,  82,  79,  82,  58,  32,  84, 104,
+@dcf/api:dev:     101,  32, 112, 114, 111,  99, 101, 115, 115,
+@dcf/api:dev:      32,  34,  49,  56,  55,  48,  56,  34,  32,
+@dcf/api:dev:     110, 111, 116,  32, 102, 111, 117, 110, 100,
+@dcf/api:dev:      46,  13,  10
+@dcf/api:dev:   ]
+@dcf/api:dev: }
+@dcf/api:dev: 
+@dcf/api:dev: Node.js v22.22.0
+@dcf/api:dev: npm error Lifecycle script `dev` failed with error:
+@dcf/api:dev: npm error code 1
+@dcf/api:dev: npm error path C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api
+@dcf/api:dev: npm error workspace @dcf/api@0.1.0
+@dcf/api:dev: npm error location C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api
+@dcf/api:dev: npm error command failed
+@dcf/api:dev: npm error command C:\WINDOWS\system32\cmd.exe /d /s /c nest start --watch
+ ERROR  @dcf/api#dev: command (C:\Users\user\Desktop\Final Bots\doxedcryptofounder\apps\api) C:\Program Files\nodejs\npm.cmd run dev exited (1)
+
+ Tasks:    1 successful, 2 total
+Cached:    0 cached, 2 total
+  Time:    1h17m3.188s 
+Failed:    @dcf/api#dev
+
+ ERROR  run failed: command  exited (1)

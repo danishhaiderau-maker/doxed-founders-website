@@ -1,0 +1,62 @@
+{
+  "name": "doxedcryptofounder",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:utils && turbo run dev",
+    "build:utils": "npm run build --workspace=@dcf/utils",
+    "dev:web": "turbo run dev --filter=@dcf/web",
+    "dev:api": "turbo run dev --filter=@dcf/api",
+    "dev:ensure": "powershell -ExecutionPolicy Bypass -File scripts/ensure-dev.ps1",
+    "dev:lan": "powershell -ExecutionPolicy Bypass -File scripts/dev-lan.ps1",
+    "dev:tunnel": "powershell -ExecutionPolicy Bypass -File scripts/dev-tunnel.ps1",
+    "build": "turbo run build",
+    "build:api": "npm run build:utils && node scripts/prisma-run.mjs generate && npm run build --workspace=@dcf/api",
+    "start:api:prod": "node scripts/start-api-prod.mjs",
+    "verify:prod": "powershell -ExecutionPolicy Bypass -File scripts/verify-prod-ready.ps1",
+    "smoke:test": "node scripts/smoke-test.mjs",
+    "verify:milestone": "node scripts/verify-milestone.mjs",
+    "db:deploy": "node scripts/prisma-run.mjs migrate deploy",
+    "lint": "turbo run lint",
+    "db:generate": "node scripts/prisma-run.mjs generate",
+    "db:migrate": "node scripts/prisma-run.mjs migrate dev",
+    "db:push": "node scripts/prisma-run.mjs db push",
+    "db:studio": "node scripts/prisma-run.mjs studio",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:verify": "tsx scripts/verify-seed.mjs",
+    "setup": "powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1",
+    "setup:check": "powershell -ExecutionPolicy Bypass -File scripts/check-services.ps1",
+    "setup:repair": "powershell -ExecutionPolicy Bypass -File scripts/repair-wsl.ps1",
+    "setup:neon": "powershell -ExecutionPolicy Bypass -File scripts/setup-neon.ps1",
+    "setup:production": "powershell -ExecutionPolicy Bypass -File scripts/setup-production.ps1",
+    "setup:self-host": "powershell -ExecutionPolicy Bypass -File scripts/setup-self-host.ps1",
+    "setup:self-host:admin": "powershell -ExecutionPolicy Bypass -File scripts/setup-self-host-admin.ps1 -NonInteractive",
+    "bootstrap:self-host": "node scripts/bootstrap-self-host.mjs",
+    "check:self-host": "check-self-host.cmd",
+    "start:self-host": "powershell -ExecutionPolicy Bypass -File scripts/start-self-host.ps1",
+    "stop:self-host": "powershell -ExecutionPolicy Bypass -File scripts/stop-self-host.ps1",
+    "setup:local": "powershell -ExecutionPolicy Bypass -File scripts/setup-local.ps1",
+    "stop:dev": "powershell -ExecutionPolicy Bypass -File scripts/stop-dev.ps1"
+  },
+  "devDependencies": {
+    "prisma": "^6.8.2",
+    "tsx": "^4.19.4",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.8.2",
+    "bcrypt": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@10.9.2",
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}

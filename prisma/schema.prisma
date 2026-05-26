@@ -1,0 +1,514 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ChainSlug {
+  ETHEREUM
+  SOLANA
+  POLYGON
+  ARBITRUM
+  OPTIMISM
+  BASE
+  AVALANCHE
+  BNB_CHAIN
+}
+
+enum ListingStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum VerificationType {
+  IDENTITY
+  LINKEDIN
+  GITHUB
+  KYC
+  AUDIT
+  TEAM_DOXXED
+}
+
+enum AnalyticsEventType {
+  PAGE_VIEW
+  SEARCH
+  WATCHLIST_ADD
+  WATCHLIST_REMOVE
+  PAPER_TRADE_BUY
+  PAPER_TRADE_SELL
+  PROJECT_CLICK
+}
+
+enum PaperTradeSide {
+  BUY
+  SELL
+}
+
+enum LeaderboardPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  ALL_TIME
+}
+
+enum ProjectSource {
+  CURATED
+  DYNAMIC
+}
+
+// ─── Users & Auth ────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String?
+  name          String?
+  avatarUrl     String?
+  role          UserRole  @default(USER)
+  emailVerified DateTime?
+  banned        Boolean   @default(false)
+  bannedReason  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  watchlists           Watchlist[]
+  paperPortfolio       PaperPortfolio?
+  paperTrades          PaperTrade[]
+  feedPosts            FeedPost[]
+  feedComments         FeedComment[]
+  listingApplications  ListingApplication[]
+  analyticsEvents      AnalyticsEvent[]
+  searchLogs           SearchLog[]
+  adminActions         AdminAction[]        @relation("AdminActions")
+  leaderboardEntries   LeaderboardEntry[]
+  oauthAccounts        OAuthAccount[]
+
+  @@index([email])
+  @@index([role])
+}
+
+model OAuthAccount {
+  id         String   @id @default(cuid())
+  userId     String
+  provider   String
+  providerId String
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+}
+
+// ─── Chains & Categories ─────────────────────────────────────────────────────
+
+model Chain {
+  id        String    @id @default(cuid())
+  slug      ChainSlug @unique
+  name      String
+  iconUrl   String?
+  createdAt DateTime  @default(now())
+
+  projects Project[]
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  iconUrl     String?
+  createdAt   DateTime @default(now())
+
+  projects Project[]
+}
+
+// ─── Founders ────────────────────────────────────────────────────────────────
+
+model Founder {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  bio         String?  @db.Text
+  photoUrl    String?
+  linkedInUrl String?
+  twitterUrl  String?
+  githubUrl   String?
+  videoUrl    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projects      Project[]
+  verifications FounderVerification[]
+}
+
+model FounderVerification {
+  id         String           @id @default(cuid())
+  founderId  String
+  type       VerificationType
+  verified   Boolean          @default(false)
+  verifiedAt DateTime?
+  notes      String?
+  createdAt  DateTime         @default(now())
+
+  founder Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
+
+  @@unique([founderId, type])
+  @@index([founderId])
+}
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+model Project {
+  id              String        @id @default(cuid())
+  slug            String        @unique
+  name            String
+  ticker          String
+  description     String?       @db.Text
+  summary         String?       @db.Text
+  logoUrl         String?
+  websiteUrl      String?
+  docsUrl         String?
+  whitepaperUrl   String?
+  contractAddress String?
+  dexscreenerUrl  String?
+  chainId         String
+  categoryId      String?
+  founderId       String?
+  source          ProjectSource @default(CURATED)
+  trackingActive  Boolean       @default(true)
+  lastTradeAt     DateTime?
+  featured        Boolean       @default(false)
+  approved        Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  chain    Chain     @relation(fields: [chainId], references: [id])
+  category Category? @relation(fields: [categoryId], references: [id])
+  founder  Founder?  @relation(fields: [founderId], references: [id])
+
+  metrics       ProjectMetrics?
+  socials       ProjectSocials?
+  documents     ProjectDocument[]
+  watchlists    Watchlist[]
+  paperTrades    PaperTrade[]
+  paperPositions PaperPosition[]
+  feedPosts      FeedPost[]
+  featuredEntry  FeaturedProject?
+  auditReports  AuditReport[]
+  trendingScore TrendingScore?
+  analyticsEvents AnalyticsEvent[]
+
+  @@index([slug])
+  @@index([chainId])
+  @@index([categoryId])
+  @@index([featured])
+  @@index([approved])
+  @@index([source])
+  @@index([trackingActive])
+}
+
+model ProjectMetrics {
+  id           String   @id @default(cuid())
+  projectId    String   @unique
+  priceUsd     Decimal? @db.Decimal(24, 12)
+  marketCap    Decimal? @db.Decimal(24, 2)
+  fdv          Decimal? @db.Decimal(24, 2)
+  volume24h    Decimal? @db.Decimal(24, 2)
+  liquidity    Decimal? @db.Decimal(24, 2)
+  holders      Int?
+  priceChange24h Decimal? @db.Decimal(10, 4)
+  updatedAt    DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectSocials {
+  id          String  @id @default(cuid())
+  projectId   String  @unique
+  twitterUrl  String?
+  discordUrl  String?
+  telegramUrl String?
+  githubUrl   String?
+  mediumUrl   String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectDocument {
+  id        String   @id @default(cuid())
+  projectId String
+  title     String
+  url       String
+  type      String?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model AuditReport {
+  id         String   @id @default(cuid())
+  projectId  String
+  auditor    String
+  reportUrl  String
+  auditedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model FeaturedProject {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  order     Int      @default(0)
+  note      String?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// ─── Watchlist ─────────────────────────────────────────────────────────────────
+
+model Watchlist {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([userId])
+  @@index([projectId])
+}
+
+// ─── Paper Trading ─────────────────────────────────────────────────────────────
+
+model PaperPortfolio {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  cashBalance  Decimal  @default(10000) @db.Decimal(16, 2)
+  totalValue   Decimal  @default(10000) @db.Decimal(16, 2)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  positions PaperPosition[]
+}
+
+model PaperPosition {
+  id           String  @id @default(cuid())
+  portfolioId  String
+  projectId    String
+  quantity     Decimal @db.Decimal(24, 12)
+  avgBuyPrice  Decimal @db.Decimal(24, 12)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  portfolio PaperPortfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([portfolioId, projectId])
+  @@index([portfolioId])
+  @@index([projectId])
+}
+
+model PaperTrade {
+  id        String         @id @default(cuid())
+  userId    String
+  projectId String
+  side      PaperTradeSide
+  quantity  Decimal        @db.Decimal(24, 12)
+  priceUsd  Decimal        @db.Decimal(24, 12)
+  totalUsd  Decimal        @db.Decimal(16, 2)
+  createdAt DateTime       @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  feedPost FeedPost?
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+// ─── Social Feed ───────────────────────────────────────────────────────────────
+
+model FeedPost {
+  id              String    @id @default(cuid())
+  paperTradeId    String    @unique
+  userId          String
+  projectId       String
+  initialComment  String?
+  commentCount    Int       @default(0)
+  highlightedUntil DateTime?
+  lastCommentAt   DateTime?
+  createdAt       DateTime  @default(now())
+
+  paperTrade PaperTrade    @relation(fields: [paperTradeId], references: [id], onDelete: Cascade)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project    Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments   FeedComment[]
+
+  @@index([commentCount])
+  @@index([highlightedUntil])
+  @@index([createdAt])
+  @@index([lastCommentAt])
+}
+
+model FeedComment {
+  id         String   @id @default(cuid())
+  feedPostId String
+  userId     String
+  body       String
+  createdAt  DateTime @default(now())
+
+  feedPost FeedPost @relation(fields: [feedPostId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([feedPostId])
+  @@index([createdAt])
+}
+
+// ─── Leaderboard ───────────────────────────────────────────────────────────────
+
+model LeaderboardEntry {
+  id        String            @id @default(cuid())
+  userId    String
+  period    LeaderboardPeriod
+  roi       Decimal           @db.Decimal(10, 4)
+  pnl       Decimal           @db.Decimal(16, 2)
+  rank      Int
+  computedAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, period])
+  @@index([period, rank])
+}
+
+// ─── Listing Applications ──────────────────────────────────────────────────────
+
+model ListingApplication {
+  id              String        @id @default(cuid())
+  userId          String?
+  projectName     String
+  ticker          String
+  websiteUrl      String?
+  docsUrl         String?
+  whitepaperUrl   String?
+  contractAddress String?
+  chainSlug       ChainSlug?
+  dexscreenerUrl  String?
+  logoUrl         String?
+  telegramUrl     String?
+  founderName     String?
+  founderLinkedIn String?
+  founderTwitter  String?
+  founderGithub       String?
+  founderVideoUrl     String?
+  founderInterviewUrl String?
+  companyDetails      String?       @db.Text
+  auditUrl            String?
+  summary             String?       @db.Text
+  marketPreview       Json?
+  verificationScore   Int           @default(0)
+  verificationCriteria Json?
+  status              ListingStatus @default(PENDING)
+  reviewNotes     String?       @db.Text
+  reviewedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ─── Admin ─────────────────────────────────────────────────────────────────────
+
+model AdminAction {
+  id         String   @id @default(cuid())
+  adminId    String
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  admin User @relation("AdminActions", fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([createdAt])
+}
+
+// ─── Analytics & Trending ──────────────────────────────────────────────────────
+
+model AnalyticsEvent {
+  id        String             @id @default(cuid())
+  type      AnalyticsEventType
+  userId    String?
+  projectId String?
+  metadata  Json?
+  createdAt DateTime           @default(now())
+
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([type])
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model SearchLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  query     String
+  results   Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([query])
+  @@index([createdAt])
+}
+
+model TrendingScore {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  score     Decimal  @db.Decimal(16, 6)
+  computedAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([score(sort: Desc)])
+}
+
+// ─── API Cache ─────────────────────────────────────────────────────────────────
+
+model ApiCache {
+  id        String   @id @default(cuid())
+  cacheKey  String   @unique
+  data      Json
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
