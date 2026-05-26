@@ -5,30 +5,44 @@ import { signIn } from 'next-auth/react';
 interface OAuthButtonsProps {
   callbackUrl?: string;
   enabled?: { google: boolean };
+  nextAuthUrl?: string;
 }
 
 export function OAuthButtons({
   callbackUrl = '/',
   enabled = { google: false },
+  nextAuthUrl = 'http://localhost:3000',
 }: OAuthButtonsProps) {
+  const redirectUri = `${nextAuthUrl.replace(/\/$/, '')}/api/auth/callback/google`;
+
   if (!enabled.google) {
     return (
-      <p className="rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
-        <strong className="text-white">Continue with Google</strong> (one-time setup): create OAuth
-        credentials in{' '}
-        <a
-          href="https://console.cloud.google.com/apis/credentials"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-[var(--color-accent)] hover:underline"
+      <div className="space-y-3">
+        <button
+          type="button"
+          disabled
+          className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-zinc-800/50 py-3 text-sm font-medium text-zinc-400"
         >
-          Google Cloud Console
-        </a>
-        , then add <code className="text-white">GOOGLE_CLIENT_ID</code> and{' '}
-        <code className="text-white">GOOGLE_CLIENT_SECRET</code> to your{' '}
-        <code className="text-white">.env</code>. Until then, register with your Gmail address
-        using email + password below.
-      </p>
+          <GoogleIcon />
+          Continue with Google
+        </button>
+        <p className="rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
+          One-time setup: run{' '}
+          <code className="text-white">npm run setup:google</code> and paste OAuth credentials
+          from{' '}
+          <a
+            href="https://console.cloud.google.com/apis/credentials"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--color-accent)] hover:underline"
+          >
+            Google Cloud Console
+          </a>
+          . Add redirect URI{' '}
+          <code className="break-all text-white">{redirectUri}</code>. Until then, register with
+          your Gmail using email + password below.
+        </p>
+      </div>
     );
   }
 

@@ -8,9 +8,10 @@ import { OAuthButtons } from '@/components/oauth-buttons';
 
 interface LoginPageClientProps {
   oauthEnabled: { google: boolean };
+  nextAuthUrl: string;
 }
 
-export default function LoginPageClient({ oauthEnabled }: LoginPageClientProps) {
+export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPageClientProps) {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') ?? '/';
   const [email, setEmail] = useState('');
@@ -52,7 +53,7 @@ export default function LoginPageClient({ oauthEnabled }: LoginPageClientProps) 
         </p>
 
         <div className="mt-8">
-          <OAuthButtons callbackUrl={callbackUrl} enabled={oauthEnabled} />
+          <OAuthButtons callbackUrl={callbackUrl} enabled={oauthEnabled} nextAuthUrl={nextAuthUrl} />
         </div>
 
         <div className="my-6 flex items-center gap-3">

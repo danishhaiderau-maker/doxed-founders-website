@@ -3,5 +3,6 @@ import RegisterPageClient from './page.client';
 
 export default function RegisterPage() {
   const oauth = getEnabledOAuthProviders();
-  return <RegisterPageClient oauthEnabled={oauth} />;
+  const nextAuthUrl = process.env.NEXTAUTH_URL ?? 'http://localhost:3000';
+  return <RegisterPageClient oauthEnabled={oauth} nextAuthUrl={nextAuthUrl} />;
 }

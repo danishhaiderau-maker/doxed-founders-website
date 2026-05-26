@@ -136,7 +136,12 @@ if ($usingTunnel) {
 
   Write-LanDevEnv -ProjectRoot $projectRoot -LanIp $lanIp -WebUrl $webUrl -ApiUrl $apiUrl
 
-  $env:NEXTAUTH_URL = $webUrl
+  $nextAuthUrl = if (Test-GoogleOAuthConfigured -ProjectRoot $projectRoot) {
+    'http://localhost:3000'
+  } else {
+    $webUrl
+  }
+  $env:NEXTAUTH_URL = $nextAuthUrl
   $env:NEXT_PUBLIC_API_URL = ""
   $env:API_URL = "http://127.0.0.1:4000"
   $env:CORS_ORIGINS = "$webUrl,http://localhost:3000,http://127.0.0.1:3000"
@@ -151,6 +156,9 @@ if ($usingTunnel) {
 
   Write-Host ""
   Write-Host "On THIS laptop:     http://localhost:3000" -ForegroundColor Green
+  if ($nextAuthUrl -eq 'http://localhost:3000' -and $webUrl -ne $nextAuthUrl) {
+    Write-Host "Google sign-in:     http://localhost:3000/login  (required - Google blocks LAN IPs)" -ForegroundColor Cyan
+  }
   Write-Host "On OTHER devices:   $webUrl" -ForegroundColor Green
   Write-Host "API:                proxied via Next.js (/api -> localhost:4000)" -ForegroundColor DarkGray
   Write-Host ""

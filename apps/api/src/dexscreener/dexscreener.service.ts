@@ -1,7 +1,9 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { ChainSlug } from '@prisma/client';
 import { GeckoterminalService } from '../geckoterminal/geckoterminal.service';
 import {
   buildPreviewFromPair,
+  CHAIN_SLUG_TO_DEX,
   DexScreenerPairInfo,
   DexScreenerPreview,
   parseDexScreenerUrl,
@@ -28,6 +30,71 @@ export class DexscreenerService {
         throw dexError;
       }
     }
+  }
+
+  async previewFromContract(
+    chainSlug: ChainSlug,
+    contractAddress: string,
+  ): Promise<DexScreenerPreview> {
+    const chainId = CHAIN_SLUG_TO_DEX[chainSlug];
+    if (!chainId) {
+      throw new BadRequestException(`Unsupported chain: ${chainSlug}`);
+    }
+
+    const address = contractAddress.trim();
+    if (!address) {
+      throw new BadRequestException('Contract address is required');
+    }
+
+    const pairs = await this.fetchTokenPairs(chainId, address);
+    if (pairs.length === 0) {
+      throw new BadRequestException(
+        'Token not found on DexScreener yet. Enter project name/ticker manually and submit — lookup is optional.',
+      );
+    }
+
+    const pair = [...pairs].sort(
+      (a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0),
+    )[0];
+
+    const dexscreenerUrl =
+      pair.url?.trim() ||
+      `https://dexscreener.com/${chainId}/${pair.pairAddress}`;
+    return buildPreviewFromPair(dexscreenerUrl, pair);
+  }
+
+  private async fetchTokenPairs(
+    chainId: string,
+    address: string,
+  ): Promise<DexScreenerPairInfo[]> {
+    const urls = [
+      `${this.baseUrl}/latest/dex/tokens/${chainId}/${address}`,
+      `${this.baseUrl}/token-pairs/v1/${chainId}/${address}`,
+    ];
+
+    for (const apiUrl of urls) {
+      try {
+        const response = await fetch(apiUrl);
+        if (!response.ok) continue;
+
+        const data = (await response.json()) as
+          | { pairs?: DexScreenerPairInfo[] }
+          | DexScreenerPairInfo[];
+
+        if (Array.isArray(data)) {
+          return data;
+        }
+        if (data.pairs?.length) {
+          return data.pairs;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Token lookup ${apiUrl}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    return [];
   }
 
   private async previewFromDexScreener(url: string): Promise<DexScreenerPreview> {

@@ -15,6 +15,7 @@ build/
 .env.local
 .env.*.local
 .env.tunnel.local
+google-keys.txt
 apps/web/.env.local
 apps/api/.env.local
 .env.neon

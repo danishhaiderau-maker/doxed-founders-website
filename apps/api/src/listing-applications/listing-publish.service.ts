@@ -52,7 +52,7 @@ export class ListingPublishService {
 
     if (!verification.meetsThreshold) {
       throw new BadRequestException(
-        'Cannot publish: founder verification requires at least 2 criteria',
+        'Cannot publish: need a public founder video or interview URL on the application',
       );
     }
 
@@ -64,7 +64,7 @@ export class ListingPublishService {
 
     if (!application.founderName?.trim()) {
       throw new BadRequestException(
-        'Cannot publish: founder name is required on the listing application',
+        'Cannot publish: add founder name before approving (can be filled during admin review)',
       );
     }
 

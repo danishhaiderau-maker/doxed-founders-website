@@ -5,6 +5,7 @@ import { Public } from '../auth/public.decorator';
 import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import {
   CreateListingApplicationDto,
+  PreviewContractDto,
   PreviewDexScreenerDto,
   ReviewListingApplicationDto,
 } from './dto/listing-application.dto';
@@ -22,6 +23,15 @@ export class ListingApplicationsController {
   @Post('preview-dexscreener')
   previewDexScreener(@Body() dto: PreviewDexScreenerDto) {
     return this.dexscreenerService.previewFromUrl(dto.url);
+  }
+
+  @Public()
+  @Post('preview-contract')
+  previewContract(@Body() dto: PreviewContractDto) {
+    return this.dexscreenerService.previewFromContract(
+      dto.chainSlug,
+      dto.contractAddress,
+    );
   }
 
   @Public()

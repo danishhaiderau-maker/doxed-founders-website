@@ -33,6 +33,12 @@ export class ListingApplicationsService {
   async create(dto: CreateListingApplicationDto) {
     const verification = this.computeVerification(dto);
 
+    if (!verification.meetsSubmissionThreshold) {
+      throw new BadRequestException(
+        'Add at least one public founder video or interview/podcast URL. Anyone can submit if they found public proof on X, YouTube, etc.',
+      );
+    }
+
     return this.prisma.listingApplication.create({
       data: {
         projectName: dto.projectName,

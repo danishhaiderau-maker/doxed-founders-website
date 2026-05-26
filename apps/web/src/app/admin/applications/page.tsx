@@ -121,7 +121,7 @@ export default function AdminApplicationsPage() {
           )}
           {items.map((item) => {
             const criteria = (item.verificationCriteria ?? []) as FounderVerificationCriterion[];
-            const eligible = item.verificationScore >= 2;
+            const eligible = item.verificationScore >= 1;
 
             return (
               <div

@@ -55,6 +55,17 @@ const CHAIN_MAP: Record<string, ChainSlug> = {
   bsc: 'BNB_CHAIN',
 };
 
+export const CHAIN_SLUG_TO_DEX: Record<ChainSlug, string> = {
+  SOLANA: 'solana',
+  ETHEREUM: 'ethereum',
+  POLYGON: 'polygon',
+  ARBITRUM: 'arbitrum',
+  OPTIMISM: 'optimism',
+  BASE: 'base',
+  AVALANCHE: 'avalanche',
+  BNB_CHAIN: 'bsc',
+};
+
 export function parseDexScreenerUrl(url: string): {
   chainId: string;
   address: string;

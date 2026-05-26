@@ -8,9 +8,10 @@ import { registerAccount } from '@/lib/api';
 
 interface RegisterPageClientProps {
   oauthEnabled: { google: boolean };
+  nextAuthUrl: string;
 }
 
-export default function RegisterPageClient({ oauthEnabled }: RegisterPageClientProps) {
+export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: RegisterPageClientProps) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -54,7 +55,7 @@ export default function RegisterPageClient({ oauthEnabled }: RegisterPageClientP
         </p>
 
         <div className="mt-8">
-          <OAuthButtons callbackUrl="/paper-trading" enabled={oauthEnabled} />
+          <OAuthButtons callbackUrl="/paper-trading" enabled={oauthEnabled} nextAuthUrl={nextAuthUrl} />
         </div>
 
         <div className="my-6 flex items-center gap-3">

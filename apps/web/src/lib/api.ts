@@ -156,6 +156,13 @@ export function previewDexScreener(url: string) {
   });
 }
 
+export function previewContract(chainSlug: string, contractAddress: string) {
+  return apiFetch<DexScreenerPreview>('/listing-applications/preview-contract', {
+    method: 'POST',
+    body: JSON.stringify({ chainSlug, contractAddress }),
+  });
+}
+
 export function submitListingApplication(data: ListingFormData) {
   return apiFetch<{ id: string; status: string; projectName: string; verificationScore: number }>(
     '/listing-applications',

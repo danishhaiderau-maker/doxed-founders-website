@@ -54,9 +54,18 @@ export function scoreFounderVerification(input: FounderVerificationInput) {
   }
 
   const score = criteria.length;
+  const hasPublicAppearance = Boolean(
+    input.founderVideoUrl?.trim() || input.founderInterviewUrl?.trim(),
+  );
+
   return {
     score,
     criteria,
-    meetsThreshold: score >= 2,
+    hasPublicAppearance,
+    /** Anyone can submit if they found a public founder video or interview. */
+    meetsSubmissionThreshold: hasPublicAppearance,
+    /** Admin publish prefers richer proof but video/interview alone is enough in beta. */
+    meetsThreshold: hasPublicAppearance,
+    meetsApprovalThreshold: score >= 2 || hasPublicAppearance,
   };
 }

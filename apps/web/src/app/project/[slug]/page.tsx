@@ -151,7 +151,11 @@ export default function ProjectDetailPage() {
                 <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-[var(--color-muted)]">
                   Chart
                 </h3>
-                <GeckoTerminalChart chainSlug={project.chain.slug} poolAddress={poolAddress} />
+                <GeckoTerminalChart
+                  chainSlug={project.chain.slug}
+                  poolAddress={poolAddress}
+                  dexscreenerUrl={project.dexscreenerUrl}
+                />
               </section>
             )}
 

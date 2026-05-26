@@ -8,9 +8,22 @@ import { extractPoolAddressFromDexUrl } from '@dcf/utils';
 import {
   DexScreenerPreview,
   ListingFormData,
+  previewContract,
   previewDexScreener,
   submitListingApplication,
 } from '@/lib/api';
+import { scoreFounderVerification } from '@dcf/utils';
+
+const CHAIN_OPTIONS = [
+  'SOLANA',
+  'ETHEREUM',
+  'BASE',
+  'ARBITRUM',
+  'POLYGON',
+  'OPTIMISM',
+  'AVALANCHE',
+  'BNB_CHAIN',
+] as const;
 
 const emptyForm: ListingFormData = {
   projectName: '',
@@ -35,6 +48,8 @@ const emptyForm: ListingFormData = {
 
 export default function ListYourProjectPage() {
   const [dexUrl, setDexUrl] = useState('');
+  const [contractInput, setContractInput] = useState('');
+  const [contractChain, setContractChain] = useState<string>('SOLANA');
   const [form, setForm] = useState<ListingFormData>(emptyForm);
   const [marketPreview, setMarketPreview] = useState<
     DexScreenerPreview['marketPreview'] | null
@@ -54,21 +69,7 @@ export default function ListYourProjectPage() {
     setLoading(true);
     try {
       const preview = await previewDexScreener(dexUrl);
-      setForm({
-        ...form,
-        projectName: preview.projectName,
-        ticker: preview.ticker,
-        websiteUrl: preview.websiteUrl ?? '',
-        telegramUrl: preview.telegramUrl ?? '',
-        founderTwitter: preview.founderTwitter ?? '',
-        contractAddress: preview.contractAddress,
-        chainSlug: preview.chainSlug ?? '',
-        dexscreenerUrl: preview.dexscreenerUrl,
-        logoUrl: preview.logoUrl ?? '',
-        summary: preview.summary ?? '',
-        marketPreview: preview.marketPreview,
-      });
-      setMarketPreview(preview.marketPreview);
+      applyPreview(preview);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Auto-fill failed');
     } finally {
@@ -76,16 +77,59 @@ export default function ListYourProjectPage() {
     }
   }
 
+  async function handleContractAutoFill() {
+    setError(null);
+    setLoading(true);
+    try {
+      const preview = await previewContract(contractChain, contractInput);
+      applyPreview(preview);
+    } catch (err) {
+      setError(
+        `${err instanceof Error ? err.message : 'Contract lookup failed'} — you can still fill the form manually and submit.`,
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyPreview(preview: DexScreenerPreview) {
+    setForm({
+      ...form,
+      projectName: preview.projectName,
+      ticker: preview.ticker,
+      websiteUrl: preview.websiteUrl ?? '',
+      telegramUrl: preview.telegramUrl ?? '',
+      founderTwitter: preview.founderTwitter ?? '',
+      contractAddress: preview.contractAddress,
+      chainSlug: preview.chainSlug ?? '',
+      dexscreenerUrl: preview.dexscreenerUrl,
+      logoUrl: preview.logoUrl ?? '',
+      summary: preview.summary ?? '',
+      marketPreview: preview.marketPreview,
+    });
+    setMarketPreview(preview.marketPreview);
+    setDexUrl(preview.dexscreenerUrl);
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+
+    const verification = scoreFounderVerification(form);
+    if (!verification.meetsSubmissionThreshold) {
+      setError(
+        'Add a public founder video or interview/podcast URL. You do not need to be the founder — if you found proof on X or YouTube, that is enough.',
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
-      const payload: ListingFormData = {
+      const payload = cleanListingPayload({
         ...form,
         chainSlug: form.chainSlug || undefined,
         marketPreview: marketPreview ?? undefined,
-      };
+      });
       const result = await submitListingApplication(payload);
       setSuccessId(result.id);
     } catch (err) {
@@ -93,6 +137,17 @@ export default function ListYourProjectPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function cleanListingPayload(data: ListingFormData): ListingFormData {
+    const out: ListingFormData = { ...data };
+    for (const key of Object.keys(out) as (keyof ListingFormData)[]) {
+      const value = out[key];
+      if (value === '' || value === null || value === undefined) {
+        delete out[key];
+      }
+    }
+    return out;
   }
 
   function updateField(key: keyof ListingFormData, value: string) {
@@ -136,11 +191,13 @@ export default function ListYourProjectPage() {
       <div className="mx-auto max-w-5xl px-6 py-12">
         <h1 className="text-3xl font-bold tracking-tight">List your project</h1>
         <p className="mt-3 max-w-2xl text-[var(--color-muted)]">
-          Curated listings require a public, doxxed founder with proof — video interviews,
-          LinkedIn, GitHub, or company details. Paste DexScreener to auto-fill market data.
+          Anyone can suggest a project — you do not need to be the founder. Found a public
+          video or podcast? Paste it below with basic project info. DexScreener or contract
+          lookup is optional (helps fill Telegram, Twitter, prices).
         </p>
 
-        <div className="mt-8 rounded-xl border border-[var(--color-accent)]/30 bg-[var(--color-card)] p-6">
+        <div className="mt-8 space-y-6">
+        <div className="rounded-xl border border-[var(--color-accent)]/30 bg-[var(--color-card)] p-6">
           <label className="text-sm font-medium">DexScreener link (auto-fill)</label>
           <div className="mt-2 flex flex-col gap-3 sm:flex-row">
             <input
@@ -159,6 +216,46 @@ export default function ListYourProjectPage() {
               {loading ? 'Fetching…' : 'Auto-fill from DexScreener'}
             </button>
           </div>
+        </div>
+
+        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
+          <label className="text-sm font-medium">Or contract address (auto-fill)</label>
+          <p className="mt-1 text-xs text-[var(--color-muted)]">
+            Looks up the token on DexScreener — best for Telegram, Twitter, logo, and price when listed.
+          </p>
+          <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+            <select
+              value={contractChain}
+              onChange={(e) => setContractChain(e.target.value)}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)] sm:w-44"
+            >
+              {CHAIN_OPTIONS.map((chain) => (
+                <option key={chain} value={chain}>
+                  {chain}
+                </option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={contractInput}
+              onChange={(e) => setContractInput(e.target.value)}
+              placeholder="Token contract address"
+              className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
+            />
+            <button
+              type="button"
+              onClick={handleContractAutoFill}
+              disabled={loading || !contractInput.trim()}
+              className="rounded-lg border border-[var(--color-accent)] px-5 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-accent)]/10 disabled:opacity-50"
+            >
+              {loading ? 'Fetching…' : 'Look up contract'}
+            </button>
+          </div>
+        </div>
+        </div>
+
+        {(form.dexscreenerUrl || marketPreview) && (
+        <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
           {form.dexscreenerUrl && (
             <div className="mt-3 flex flex-wrap gap-3 text-sm">
               <a
@@ -199,16 +296,18 @@ export default function ListYourProjectPage() {
           {poolAddress && (
             <div className="mt-6">
               <p className="mb-2 text-sm font-medium text-[var(--color-muted)]">
-                Live chart (GeckoTerminal)
+                Live chart
               </p>
               <GeckoTerminalChart
                 chainSlug={form.chainSlug}
                 poolAddress={poolAddress}
+                dexscreenerUrl={form.dexscreenerUrl ?? dexUrl}
                 height={360}
               />
             </div>
           )}
         </div>
+        )}
 
         {error && (
           <p className="mt-4 rounded-lg border border-[var(--color-danger)]/40 bg-red-950/30 px-4 py-3 text-sm text-red-300">
@@ -228,23 +327,23 @@ export default function ListYourProjectPage() {
             <Field label="Summary" value={form.summary ?? ''} onChange={(v) => updateField('summary', v)} multiline />
           </Section>
 
-          <Section title="Founder (public / doxxed)">
+          <Section title="Founder proof (community submissions welcome)">
             <FounderVerificationChecklist input={form} />
             <div className="mt-4 space-y-4">
-              <Field label="Founder name" value={form.founderName ?? ''} onChange={(v) => updateField('founderName', v)} required />
-              <Field label="Founder video URL (on camera)" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} placeholder="YouTube, Loom, X video…" />
-              <Field label="Public interview / talk URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} placeholder="Twitter Spaces, podcast, conference talk…" />
-              <Field label="LinkedIn" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
-              <Field label="Twitter / X" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
-              <Field label="GitHub" value={form.founderGithub ?? ''} onChange={(v) => updateField('founderGithub', v)} />
-              <Field label="Company details" value={form.companyDetails ?? ''} onChange={(v) => updateField('companyDetails', v)} multiline placeholder="Legal entity, team size, location, registration…" />
-              <Field label="Audit report URL" value={form.auditUrl ?? ''} onChange={(v) => updateField('auditUrl', v)} />
+              <Field label="Founder video URL (on camera)" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} placeholder="YouTube, Loom, X video… — required if no interview below" />
+              <Field label="Public interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} placeholder="Twitter Spaces, podcast, conference talk… — required if no video above" />
+              <Field label="Founder name (optional — admin can add later)" value={form.founderName ?? ''} onChange={(v) => updateField('founderName', v)} />
+              <Field label="LinkedIn (optional)" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
+              <Field label="Twitter / X (optional)" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
+              <Field label="GitHub (optional)" value={form.founderGithub ?? ''} onChange={(v) => updateField('founderGithub', v)} />
+              <Field label="Company details (optional)" value={form.companyDetails ?? ''} onChange={(v) => updateField('companyDetails', v)} multiline placeholder="Legal entity, team size, location…" />
+              <Field label="Audit report URL (optional)" value={form.auditUrl ?? ''} onChange={(v) => updateField('auditUrl', v)} />
             </div>
           </Section>
 
           <p className="text-xs text-[var(--color-muted)]">
-            Free listing during beta. Approval requires 2+ verification criteria. Paid featured
-            listings may be offered later.
+            Free listing during beta. Submit with one public video or interview link. Admin
+            reviews before publish.
           </p>
 
           <button
