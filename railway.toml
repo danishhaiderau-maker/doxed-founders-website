@@ -1,6 +1,6 @@
 [build]
-builder = "RAILPACK"
-buildCommand = "npm ci && npm run build:utils && npx prisma generate --schema=prisma/schema.prisma && npm run build --workspace=@dcf/api"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node scripts/start-api-prod.mjs"
