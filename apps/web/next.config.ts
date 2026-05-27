@@ -26,18 +26,28 @@ if (tunnelHost) {
 
 const apiProxyTarget = (process.env.API_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '');
 
+function isLocalApiTarget(target: string) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(target);
+}
+
+const apiRewrites = [
+  {
+    // Keep /api/auth/* on Next.js (next-auth); proxy everything else to Nest.
+    source: '/api/:path((?!auth(?:/|$)).*)',
+    destination: `${apiProxyTarget}/api/:path*`,
+  },
+];
+
 const nextConfig: NextConfig = {
   transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils'],
   allowedDevOrigins,
   async rewrites() {
-    if (process.env.NODE_ENV !== 'development') return [];
-    return [
-      {
-        // Keep /api/auth/* on Next.js (next-auth); proxy everything else to Nest.
-        source: '/api/:path((?!auth(?:/|$)).*)',
-        destination: `${apiProxyTarget}/api/:path*`,
-      },
-    ];
+    const useProxy =
+      process.env.NODE_ENV === 'development'
+        ? isLocalApiTarget(apiProxyTarget)
+        : Boolean(process.env.API_URL?.trim() && !isLocalApiTarget(apiProxyTarget));
+
+    return useProxy ? apiRewrites : [];
   },
 };
 
