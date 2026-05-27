@@ -24,14 +24,14 @@
     "react-dom": "^19.1.0",
     "recharts": "^2.15.3",
     "tailwind-merge": "^3.3.0",
+    "tailwindcss": "^4.1.7",
+    "@tailwindcss/postcss": "^4.1.7",
     "zustand": "^5.0.5"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.7",
     "@types/node": "^22.15.21",
     "@types/react": "^19.1.4",
     "@types/react-dom": "^19.1.5",
-    "tailwindcss": "^4.1.7",
     "typescript": "^5.8.3"
   }
 }
