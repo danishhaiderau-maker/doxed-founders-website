@@ -78,10 +78,8 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   );
 }
 
-const twitterClientId =
-  process.env.TWITTER_CLIENT_ID?.trim() || process.env.TWITTER_API_KEY?.trim();
-const twitterClientSecret =
-  process.env.TWITTER_CLIENT_SECRET?.trim() || process.env.TWITTER_API_SECRET?.trim();
+const twitterClientId = process.env.TWITTER_CLIENT_ID?.trim();
+const twitterClientSecret = process.env.TWITTER_CLIENT_SECRET?.trim();
 
 if (twitterClientId && twitterClientSecret) {
   providers.push(
@@ -189,4 +187,13 @@ export function getEnabledOAuthProviders() {
     google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     twitter: Boolean(twitterClientId && twitterClientSecret),
   };
+}
+
+/** True when API keys exist but OAuth 2.0 login keys are missing (common misconfiguration). */
+export function getTwitterOAuthMisconfig() {
+  const hasApiKeys = Boolean(
+    process.env.TWITTER_API_KEY?.trim() && process.env.TWITTER_API_SECRET?.trim(),
+  );
+  const hasOAuth2 = Boolean(twitterClientId && twitterClientSecret);
+  return hasApiKeys && !hasOAuth2;
 }
