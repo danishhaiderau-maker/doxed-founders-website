@@ -7,6 +7,16 @@ function formatUsd(value: number, decimals = 2): string {
   }).format(value);
 }
 
+export const SHARE_PUMP_COUNT = 18;
+export const SHARE_DUMP_COUNT = 16;
+
+export function pickShareImagePath(pnlOrRoi: number): string {
+  const side = pnlOrRoi >= 0 ? 'pump' : 'dump';
+  const count = side === 'pump' ? SHARE_PUMP_COUNT : SHARE_DUMP_COUNT;
+  const n = Math.floor(Math.random() * count) + 1;
+  return `/share/${side}/${side}_${String(n).padStart(2, '0')}.png`;
+}
+
 export function buildPortfolioPath(userId: string): string {
   return `/portfolio/${userId}`;
 }
@@ -22,7 +32,37 @@ export function buildPortfolioShareMessage(
   totalValue: number,
 ): string {
   const sign = roi >= 0 ? '+' : '';
-  return `${displayName} is paper trading on DoxedCryptoFounder — ${sign}${roi.toFixed(2)}% ROI · ${formatUsd(totalValue)} portfolio.`;
+  const emoji = roi >= 0 ? '🚀' : '📉';
+  return `${emoji} ${displayName} · ${sign}${roi.toFixed(1)}% paper ROI · ${formatUsd(totalValue)} on @DoxedCryptoFounder #ProofOfConviction`;
+}
+
+export type PositionShareInput = {
+  displayName: string;
+  ticker: string;
+  projectName: string;
+  investedUsd: number;
+  pnlUsd: number;
+  pnlPercent: number;
+  thesis?: string | null;
+};
+
+export function buildPositionShareMessage(input: PositionShareInput): string {
+  const win = input.pnlPercent >= 0;
+  const emoji = win ? '🚀' : '📉';
+  const sign = win ? '+' : '−';
+  const lines = [
+    `${emoji} ${input.displayName} on $${input.ticker}`,
+    `${input.projectName}`,
+    `💰 ${formatUsd(input.investedUsd, 0)} on this position`,
+    `${sign}${Math.abs(Math.round(input.pnlPercent))}% (${sign}${formatUsd(Math.abs(input.pnlUsd), 0)}) on this trade`,
+    `(Position P&L — not whole portfolio)`,
+  ];
+  if (input.thesis?.trim()) {
+    const t = input.thesis.trim().replace(/\s+/g, ' ');
+    lines.push(`💬 "${t.length > 100 ? `${t.slice(0, 99)}…` : t}"`);
+  }
+  lines.push('#ProofOfConviction @DoxedCryptoFounder');
+  return lines.join('\n');
 }
 
 export function buildTwitterIntentUrl(text: string, url?: string): string {
@@ -31,4 +71,9 @@ export function buildTwitterIntentUrl(text: string, url?: string): string {
     params.set('url', url);
   }
   return `https://twitter.com/intent/tweet?${params.toString()}`;
+}
+
+export function shareImageFilename(pnlOrRoi: number): string {
+  const side = pnlOrRoi >= 0 ? 'pump' : 'dump';
+  return `dcf-${side}-flex.png`;
 }
