@@ -53,19 +53,29 @@ export interface PendingApplication {
   ticker: string;
   chainSlug: string | null;
   websiteUrl: string | null;
-  founderName: string | null;
-  founderVideoUrl: string | null;
-  founderInterviewUrl: string | null;
-  founderLinkedIn: string | null;
-  founderGithub: string | null;
-  companyDetails: string | null;
+  docsUrl: string | null;
+  whitepaperUrl: string | null;
+  contractAddress: string | null;
   dexscreenerUrl: string | null;
   logoUrl: string | null;
+  telegramUrl: string | null;
+  founderName: string | null;
+  founderLinkedIn: string | null;
+  founderTwitter: string | null;
+  founderGithub: string | null;
+  founderVideoUrl: string | null;
+  founderInterviewUrl: string | null;
+  companyDetails: string | null;
+  auditUrl: string | null;
+  summary: string | null;
+  marketPreview: DexScreenerPreview['marketPreview'] | null;
   verificationScore: number;
   verificationCriteria: string[] | null;
   status: string;
   createdAt: string;
 }
+
+export type AdminApplicationUpdates = Partial<ListingFormData>;
 
 export interface PaperSession {
   userId: string;
@@ -188,13 +198,20 @@ export function reviewListingApplication(
   id: string,
   status: 'APPROVED' | 'REJECTED',
   token: string,
-  reviewNotes?: string,
+  options?: {
+    reviewNotes?: string;
+    updates?: AdminApplicationUpdates;
+  },
 ) {
   return apiFetch<ReviewListingResult>(
     `/listing-applications/${id}/review`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ status, reviewNotes }),
+      body: JSON.stringify({
+        status,
+        reviewNotes: options?.reviewNotes,
+        ...options?.updates,
+      }),
     },
     token,
   );

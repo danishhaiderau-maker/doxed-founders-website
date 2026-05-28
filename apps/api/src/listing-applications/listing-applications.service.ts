@@ -11,6 +11,11 @@ import {
   ReviewListingApplicationDto,
 } from './dto/listing-application.dto';
 import { ListingPublishService } from './listing-publish.service';
+import {
+  extractAdminReviewUpdates,
+  mergeListingApplication,
+  toPrismaAdminUpdates,
+} from './listing-application-review.util';
 
 @Injectable()
 export class ListingApplicationsService {
@@ -72,25 +77,6 @@ export class ListingApplicationsService {
     return this.prisma.listingApplication.findMany({
       where: { status: ListingStatus.PENDING },
       orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
-      select: {
-        id: true,
-        projectName: true,
-        ticker: true,
-        chainSlug: true,
-        websiteUrl: true,
-        founderName: true,
-        founderVideoUrl: true,
-        founderInterviewUrl: true,
-        founderLinkedIn: true,
-        founderGithub: true,
-        companyDetails: true,
-        dexscreenerUrl: true,
-        logoUrl: true,
-        verificationScore: true,
-        verificationCriteria: true,
-        status: true,
-        createdAt: true,
-      },
     });
   }
 
@@ -111,21 +97,26 @@ export class ListingApplicationsService {
       throw new BadRequestException('Application has already been reviewed');
     }
 
+    const adminUpdates = extractAdminReviewUpdates(dto);
+    const prismaUpdates = toPrismaAdminUpdates(adminUpdates);
+    const merged = mergeListingApplication(application, adminUpdates);
+
     const verification = scoreFounderVerification({
-      founderName: application.founderName,
-      founderLinkedIn: application.founderLinkedIn,
-      founderGithub: application.founderGithub,
-      companyDetails: application.companyDetails,
-      founderVideoUrl: application.founderVideoUrl,
-      founderInterviewUrl: application.founderInterviewUrl,
+      founderName: merged.founderName,
+      founderLinkedIn: merged.founderLinkedIn,
+      founderGithub: merged.founderGithub,
+      companyDetails: merged.companyDetails,
+      founderVideoUrl: merged.founderVideoUrl,
+      founderInterviewUrl: merged.founderInterviewUrl,
     });
 
     if (dto.status === 'APPROVED') {
-      const published = await this.publish.publishApprovedApplication(application);
+      const published = await this.publish.publishApprovedApplication(merged);
 
       const updated = await this.prisma.listingApplication.update({
         where: { id },
         data: {
+          ...prismaUpdates,
           status: ListingStatus.APPROVED,
           reviewNotes: dto.reviewNotes,
           reviewedAt: new Date(),
@@ -143,6 +134,7 @@ export class ListingApplicationsService {
     const updated = await this.prisma.listingApplication.update({
       where: { id },
       data: {
+        ...prismaUpdates,
         status: ListingStatus.REJECTED,
         reviewNotes: dto.reviewNotes,
         reviewedAt: new Date(),

@@ -5,19 +5,24 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  FOUNDER_VERIFICATION_LABELS,
-  FounderVerificationCriterion,
-} from '@dcf/utils';
-import {
+  AdminApplicationUpdates,
   fetchPendingApplications,
   PendingApplication,
   reviewListingApplication,
 } from '@/lib/api';
+import {
+  ApplicationReviewCard,
+  applicationToReviewPayload,
+  createReviewFormState,
+} from './application-review-card';
 
 export default function AdminApplicationsPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [items, setItems] = useState<PendingApplication[]>([]);
+  const [forms, setForms] = useState<Record<string, AdminApplicationUpdates>>({});
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [publishedSlug, setPublishedSlug] = useState<string | null>(null);
@@ -28,7 +33,9 @@ export default function AdminApplicationsPage() {
 
   async function load(authToken: string) {
     try {
-      setItems(await fetchPendingApplications(authToken));
+      const pending = await fetchPendingApplications(authToken);
+      setItems(pending);
+      setForms(createReviewFormState(pending));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
@@ -50,19 +57,49 @@ export default function AdminApplicationsPage() {
     }
   }, [status, isAdmin, token, router]);
 
+  function toggleExpanded(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
   async function handleReview(id: string, reviewStatus: 'APPROVED' | 'REJECTED') {
     if (!token) return;
+    const form = forms[id];
+    if (!form) return;
+
+    if (reviewStatus === 'APPROVED' && !expandedIds.has(id)) {
+      setExpandedIds((prev) => new Set(prev).add(id));
+      setError('Expand the application and review all details before approving.');
+      return;
+    }
+
     setBusyId(id);
     setSuccess(null);
     setPublishedSlug(null);
+    setError(null);
     try {
-      const result = await reviewListingApplication(id, reviewStatus, token);
+      const result = await reviewListingApplication(id, reviewStatus, token, {
+        reviewNotes: reviewNotes[id],
+        updates: applicationToReviewPayload(form),
+      });
       if (result.published) {
         setPublishedSlug(result.published.projectSlug);
         setSuccess(`Published ${result.published.projectName} to the curated directory.`);
       } else if (reviewStatus === 'REJECTED') {
         setSuccess('Application rejected.');
       }
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       await load(token);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Review failed');
@@ -97,7 +134,8 @@ export default function AdminApplicationsPage() {
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Pending listing requests</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Signed in as {session?.user?.email}. Sorted by verification score.
+          Signed in as {session?.user?.email}. Expand each application to review full details and
+          fill missing fields before approving.
         </p>
 
         {error && <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>}
@@ -119,69 +157,25 @@ export default function AdminApplicationsPage() {
           {items.length === 0 && !error && (
             <p className="text-[var(--color-muted)]">No pending requests yet.</p>
           )}
-          {items.map((item) => {
-            const criteria = (item.verificationCriteria ?? []) as FounderVerificationCriterion[];
-            const eligible = item.verificationScore >= 1;
-
-            return (
-              <div
-                key={item.id}
-                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5"
-              >
-                <div className="flex flex-col gap-4 sm:flex-row">
-                  {item.logoUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.logoUrl} alt="" className="h-14 w-14 rounded-full" />
-                  )}
-                  <div className="flex-1">
-                    <div className="flex flex-wrap items-center gap-3">
-                      <h2 className="text-lg font-semibold">
-                        {item.projectName}{' '}
-                        <span className="text-[var(--color-muted)]">({item.ticker})</span>
-                      </h2>
-                      <span
-                        className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                          eligible
-                            ? 'bg-emerald-950/50 text-[var(--color-success)]'
-                            : 'bg-amber-950/40 text-amber-300'
-                        }`}
-                      >
-                        {item.verificationScore}/6 {eligible ? '· Eligible' : '· Insufficient'}
-                      </span>
-                    </div>
-                    <ul className="mt-3 flex flex-wrap gap-2">
-                      {criteria.map((c) => (
-                        <li
-                          key={c}
-                          className="rounded-md bg-[var(--color-background)] px-2 py-1 text-xs text-white"
-                        >
-                          {FOUNDER_VERIFICATION_LABELS[c]}
-                        </li>
-                      ))}
-                    </ul>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => handleReview(item.id, 'APPROVED')}
-                        className="rounded-lg bg-[var(--color-success)]/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => handleReview(item.id, 'REJECTED')}
-                        className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-muted)] hover:text-white disabled:opacity-50"
-                      >
-                        Reject
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {items.map((item) => (
+            <ApplicationReviewCard
+              key={item.id}
+              item={item}
+              expanded={expandedIds.has(item.id)}
+              busy={busyId === item.id}
+              reviewNotes={reviewNotes[item.id] ?? ''}
+              form={forms[item.id] ?? {}}
+              onToggle={() => toggleExpanded(item.id)}
+              onNotesChange={(value) =>
+                setReviewNotes((prev) => ({ ...prev, [item.id]: value }))
+              }
+              onFormChange={(updates) =>
+                setForms((prev) => ({ ...prev, [item.id]: updates }))
+              }
+              onApprove={() => handleReview(item.id, 'APPROVED')}
+              onReject={() => handleReview(item.id, 'REJECTED')}
+            />
+          ))}
         </div>
       </div>
     </main>
