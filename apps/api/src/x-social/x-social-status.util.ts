@@ -30,8 +30,8 @@ export function getXAutomationStatus() {
       ready: loginReady,
       callbackUrl: `${siteUrl}/api/auth/callback/twitter`,
       hint: loginReady
-        ? 'Set same TWITTER_CLIENT_ID/SECRET on Vercel for web login'
-        : 'Set TWITTER_CLIENT_ID + TWITTER_CLIENT_SECRET (OAuth 2.0) on Vercel',
+        ? 'API keys present — ensure same TWITTER_CLIENT_ID/SECRET on Vercel; verify /api/auth/providers shows twitter'
+        : 'Set TWITTER_CLIENT_ID + TWITTER_CLIENT_SECRET on Vercel for web login',
     },
     dailyCron: {
       ready: cronJwt,
@@ -39,6 +39,6 @@ export function getXAutomationStatus() {
         ? 'ADMIN_SYNC_JWT set — run npm run sync:x-social-daily or GitHub Actions cron'
         : 'Set ADMIN_SYNC_JWT (admin API token) for automated daily sync',
     },
-    fullyAutomated: bearer && posting.ok && loginReady && cronJwt,
+    fullyAutomated: bearer && posting.ok && cronJwt,
   };
 }
