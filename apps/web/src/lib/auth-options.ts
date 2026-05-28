@@ -106,10 +106,39 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   );
 }
 
+const twitterApiKey = process.env.TWITTER_API_KEY?.trim();
+const twitterApiSecret = process.env.TWITTER_API_SECRET?.trim();
 const twitterClientId = process.env.TWITTER_CLIENT_ID?.trim();
 const twitterClientSecret = process.env.TWITTER_CLIENT_SECRET?.trim();
 
-if (twitterClientId && twitterClientSecret) {
+/** OAuth 1.0a works with API Key + Secret; OAuth 2.0 needs matching Client ID + Client Secret pair. */
+const useTwitterOAuth1 = Boolean(twitterApiKey && twitterApiSecret);
+
+if (useTwitterOAuth1) {
+  providers.push(
+    TwitterProvider({
+      clientId: twitterApiKey!,
+      clientSecret: twitterApiSecret!,
+      profile(profile) {
+        const p = profile as {
+          id_str: string;
+          name: string;
+          screen_name?: string;
+          email?: string;
+          profile_image_url_https?: string;
+        };
+        const handle = p.screen_name?.replace(/^@/, '');
+        return {
+          id: p.id_str,
+          name: handle ? `@${handle}` : p.name,
+          email: p.email,
+          image:
+            p.profile_image_url_https?.replace(/_normal\.(jpg|png|gif)$/, '.$1'),
+        };
+      },
+    }),
+  );
+} else if (twitterClientId && twitterClientSecret) {
   providers.push(
     TwitterProvider({
       clientId: twitterClientId,
@@ -168,7 +197,9 @@ export const authOptions: NextAuthOptions = {
         }
 
         let handle: string | null = null;
-        if (account.access_token) {
+        if (user.name?.startsWith('@')) {
+          handle = user.name.slice(1);
+        } else if (account.access_token) {
           handle = await fetchTwitterHandle(account.access_token);
         }
 
@@ -220,7 +251,7 @@ export const authOptions: NextAuthOptions = {
 export function getEnabledOAuthProviders() {
   return {
     google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-    twitter: Boolean(twitterClientId && twitterClientSecret),
+    twitter: useTwitterOAuth1 || Boolean(twitterClientId && twitterClientSecret),
   };
 }
 
