@@ -48,8 +48,14 @@ export function getXAutomationStatus(shareMedia?: XShareMediaService) {
       ready: shareImages.pump > 0 && shareImages.dump > 0,
       hint:
         shareImages.pump > 0 && shareImages.dump > 0
-          ? `${shareImages.pump} pump + ${shareImages.dump} dump images for X posts`
+          ? `${shareImages.pump} pump + ${shareImages.dump} images for user manual flex share (not auto-posted from @Bitbro4crypto)`
           : 'Run npm run prepare:x-share-images to bundle pump/dump meme images',
+    },
+    brandAccountPosts: {
+      founderUpdates: true,
+      trendingBuys24h: true,
+      traderWinLoss: process.env.X_AUTO_POST_TRADER_RESULTS === 'true',
+      hint: '@Bitbro4crypto only auto-posts founder updates + 24h trending clusters unless X_AUTO_POST_TRADER_RESULTS=true',
     },
     fullyAutomated: bearer && posting.ok && cronJwt,
   };

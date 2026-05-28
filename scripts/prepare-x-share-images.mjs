@@ -14,6 +14,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const downloads = path.join(process.env.USERPROFILE ?? process.env.HOME ?? '', 'Downloads');
 const outPump = path.join(root, 'apps', 'api', 'src', 'assets', 'x-share', 'pump');
 const outDump = path.join(root, 'apps', 'api', 'src', 'assets', 'x-share', 'dump');
+const publicPump = path.join(root, 'apps', 'web', 'public', 'share', 'pump');
+const publicDump = path.join(root, 'apps', 'web', 'public', 'share', 'dump');
 
 const sources = [
   {
@@ -21,7 +23,7 @@ const sources = [
       path.join(downloads, 'PUMP'),
       path.join(downloads, 'crypto_pump_20_images'),
     ],
-    out: outPump,
+    outs: [outPump, publicPump],
     prefix: 'pump',
   },
   {
@@ -29,7 +31,7 @@ const sources = [
       path.join(downloads, 'dump'),
       path.join(downloads, 'crypto_dump_20_images'),
     ],
-    out: outDump,
+    outs: [outDump, publicDump],
     prefix: 'dump',
   },
 ];
@@ -43,16 +45,18 @@ function resolveSourceDir(candidates) {
   return null;
 }
 
-function processFolder({ dirs, out, prefix }) {
+function processFolder({ dirs, outs, prefix }) {
   const dir = resolveSourceDir(dirs);
   if (!dir) {
     console.warn(`[prepare-x-share] Skip — no folder found among:\n  ${dirs.join('\n  ')}`);
     return 0;
   }
 
-  fs.mkdirSync(out, { recursive: true });
-  for (const file of fs.readdirSync(out)) {
-    if (/\.(png|jpe?g|webp)$/i.test(file)) fs.unlinkSync(path.join(out, file));
+  for (const out of outs) {
+    fs.mkdirSync(out, { recursive: true });
+    for (const file of fs.readdirSync(out)) {
+      if (/\.(png|jpe?g|webp)$/i.test(file)) fs.unlinkSync(path.join(out, file));
+    }
   }
 
   const files = fs
@@ -65,12 +69,14 @@ function processFolder({ dirs, out, prefix }) {
     index += 1;
     const src = path.join(dir, file);
     const ext = path.extname(file).toLowerCase() || '.png';
-    const dest = path.join(out, `${prefix}_${String(index).padStart(2, '0')}${ext}`);
-    fs.copyFileSync(src, dest);
-    console.log(`  ${path.basename(dest)} ← ${file}`);
+    const destName = `${prefix}_${String(index).padStart(2, '0')}${ext}`;
+    for (const out of outs) {
+      fs.copyFileSync(src, path.join(out, destName));
+    }
+    console.log(`  ${destName} ← ${file}`);
   }
 
-  console.log(`  (source: ${dir})`);
+  console.log(`  (source: ${dir} → ${outs.length} destinations)`);
   return index;
 }
 

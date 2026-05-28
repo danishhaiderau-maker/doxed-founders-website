@@ -1,9 +1,9 @@
 /**
  * Daily X social automation for @Bitbro4crypto:
  * 1. Sync doxxed founder tweets + repost to @Bitbro4crypto
- * 2. Scan trending paper buys + post to X + in-app alerts
- * 3. Scan 50%+ trader wins + post to X + in-app alerts
+ * 2. Scan trending paper buys (24h window) + post to X + in-app alerts
  *
+ * Trader win/loss posts are OFF by default — users flex manually via Share on X.
  * Schedule once daily (e.g. 9:00 UTC):
  *   0 9 * * * node scripts/run-x-social-daily.mjs
  *

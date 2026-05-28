@@ -7,7 +7,7 @@ import { useSession } from 'next-auth/react';
 import { TradingChart } from '@/components/trading-chart';
 import { SiteNav } from '@/components/site-nav';
 import { BustPenaltyModal, RiskDisclaimerModal } from '@/components/trade-modals';
-import { SharePortfolio } from '@/components/share-portfolio';
+import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
 import { formatUsd, formatPercent, formatPublicAccountLabel } from '@dcf/utils';
 import { AccountWelcome } from '@/components/account-welcome';
 import {
@@ -584,6 +584,20 @@ function PaperTradingPageContent() {
                     </span>
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
+                    {userId && (
+                      <SharePosition
+                        userId={userId}
+                        displayName={formatPublicAccountLabel(
+                          isLoggedIn ? session?.user?.name : portfolio?.accountName,
+                          isLoggedIn ? session?.user?.email : portfolio?.accountEmail,
+                        )}
+                        ticker={pos.ticker}
+                        projectName={pos.name}
+                        investedUsd={pos.quantity * pos.avgBuyPrice}
+                        pnlUsd={pos.pnl}
+                        pnlPercent={pos.pnlPercent}
+                      />
+                    )}
                     <button
                       type="button"
                       onClick={() => openPosition(pos, 'SELL')}

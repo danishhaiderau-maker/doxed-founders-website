@@ -111,6 +111,7 @@ export class SocialSignalsService {
   async scanTraderResults() {
     const minWin = this.traderWinMinPnl();
     const minLoss = this.traderLossMinPnl();
+    const autoPostX = process.env.X_AUTO_POST_TRADER_RESULTS === 'true';
     const portfolios = await this.prisma.paperPortfolio.findMany({
       include: {
         user: { select: { id: true, name: true, email: true, twitterHandle: true } },
@@ -184,7 +185,7 @@ export class SocialSignalsService {
         });
         notified += 1;
 
-        if (this.xPosting.isConfigured()) {
+        if (autoPostX && this.xPosting.isConfigured()) {
           const result = await this.xPosting.postTraderConviction({
             userId: portfolio.user.id,
             displayName,
@@ -215,8 +216,7 @@ export class SocialSignalsService {
 
   async runDailySocialJob() {
     const trending = await this.scanTrendingBuys();
-    const wins = await this.scanTraderResults();
-    return { trending, wins };
+    return { trending };
   }
 }
 
