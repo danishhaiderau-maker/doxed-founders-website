@@ -24,19 +24,19 @@ export default function BustedTradersPage() {
             <Link href="/paper-trading" className="text-xs text-[var(--color-muted)] hover:text-white">
               ← Paper trading
             </Link>
-            <h1 className="mt-1 text-2xl font-bold">Poor judgment hall</h1>
-            <p className="text-sm text-[var(--color-muted)]">
-              Traders who blew their $10,000 paper account. Sign in with X — your record is public.
-            </p>
+          <h1 className="mt-1 text-2xl font-bold">Transparent track records</h1>
+          <p className="text-sm text-[var(--color-muted)]">
+            Public performance history — not mockery. Anyone can talk; track records are verified.
+          </p>
           </div>
           <SiteNav />
         </div>
       </header>
 
       <div className="mx-auto max-w-4xl px-6 py-10">
-        <p className="rounded-xl border border-red-500/25 bg-red-950/10 p-4 text-sm text-red-100/90">
-          Talent should be rewarded — not deep pockets. Paper trading separates skill from wallet
-          size. These accounts hit zero. Learn from their calls or join the leaderboard instead.
+        <p className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/40 p-4 text-sm text-[var(--color-muted)]">
+          Accounts that reached zero on the $10,000 paper portfolio. Signed-in X users link their
+          handle to this record — accountability, not entertainment.
         </p>
 
         {error && <p className="mt-4 text-sm text-red-300">{error}</p>}
