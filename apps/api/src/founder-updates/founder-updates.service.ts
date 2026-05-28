@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { extractTwitterHandle } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { XPostingService } from '../x-social/x-posting.service';
 
 const PIN_HOURS = 6;
 
@@ -12,6 +13,7 @@ export class FounderUpdatesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly xPosting: XPostingService,
   ) {}
 
   async findPinned(limit = 20) {
@@ -139,6 +141,17 @@ export class FounderUpdatesService {
             },
           });
           created += 1;
+
+          if (this.xPosting.isConfigured()) {
+            const project = founder.projects[0];
+            this.xPosting
+              .repostFounderTweet(tweet.id, {
+                founderName: founder.name,
+                projectName: project?.name ?? founder.name,
+                projectSlug: project?.slug ?? 'projects',
+              })
+              .catch((err) => this.logger.warn(`X repost failed for @${handle}: ${err}`));
+          }
         }
       } catch (err) {
         this.logger.warn(`X sync failed for @${handle}: ${err}`);

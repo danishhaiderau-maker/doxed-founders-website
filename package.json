@@ -33,6 +33,8 @@
     "setup:google:easy": "powershell -ExecutionPolicy Bypass -File scripts/apply-google-keys-auto.ps1",
     "fix:google-live": "powershell -ExecutionPolicy Bypass -File scripts/fix-google-oauth-live.ps1",
     "sync:founder-updates": "node scripts/sync-founder-updates.mjs",
+    "sync:x-social-daily": "node scripts/run-x-social-daily.mjs",
+    "setup:x-api": "powershell -ExecutionPolicy Bypass -File scripts/setup-x-api.ps1",
     "db:verify": "tsx scripts/verify-seed.mjs",
     "setup": "powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1",
     "setup:check": "powershell -ExecutionPolicy Bypass -File scripts/check-services.ps1",

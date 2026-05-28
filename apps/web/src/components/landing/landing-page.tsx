@@ -137,10 +137,10 @@ export function LandingPage() {
             </p>
             <div className="mt-4 grid grid-cols-2 gap-3 text-center text-xs">
               {[
+                ['+1,000', 'Scout approved'],
                 ['+50', 'Sign up'],
+                ['+15', 'Vote on scout'],
                 ['+10', 'Paper trade'],
-                ['+5', 'Comment'],
-                ['+25', 'List project'],
               ].map(([pts, label]) => (
                 <div key={label} className="rounded-lg bg-black/30 py-3">
                   <div className="text-lg font-bold text-amber-300">{pts}</div>
@@ -148,6 +148,12 @@ export function LandingPage() {
                 </div>
               ))}
             </div>
+            <Link
+              href="/reputation"
+              className="mt-4 inline-block text-sm text-amber-300/90 hover:text-amber-200"
+            >
+              See full points & vote math →
+            </Link>
           </div>
         </div>
       </section>

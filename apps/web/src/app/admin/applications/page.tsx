@@ -132,10 +132,10 @@ export default function AdminApplicationsPage() {
         <Link href="/" className="text-sm text-[var(--color-muted)] hover:text-white">
           ← Home
         </Link>
-        <h1 className="mt-6 text-2xl font-bold">Pending listing requests</h1>
+        <h1 className="mt-6 text-2xl font-bold">Listing inbox</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Signed in as {session?.user?.email}. Expand each application to review full details and
-          fill missing fields before approving.
+          Signed in as {session?.user?.email}. Includes listings in 48h community vote (fast-track
+          approve anytime) and items ready after voting ends. Expand to edit fields before publish.
         </p>
 
         {error && <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>}

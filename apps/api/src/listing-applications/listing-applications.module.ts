@@ -1,13 +1,16 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DexscreenerModule } from '../dexscreener/dexscreener.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { PointsModule } from '../points/points.module';
 import { ListingApplicationsController } from './listing-applications.controller';
 import { ListingApplicationsService } from './listing-applications.service';
 import { ListingPublishService } from './listing-publish.service';
+import { ListingVotesService } from './listing-votes.service';
 
 @Module({
-  imports: [DexscreenerModule, AuthModule],
+  imports: [DexscreenerModule, AuthModule, PointsModule, NotificationsModule],
   controllers: [ListingApplicationsController],
-  providers: [ListingApplicationsService, ListingPublishService],
+  providers: [ListingApplicationsService, ListingPublishService, ListingVotesService],
 })
 export class ListingApplicationsModule {}

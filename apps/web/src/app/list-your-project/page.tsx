@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { FormEvent, useMemo, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import { FounderVerificationChecklist } from '@/components/founder-verification-checklist';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { extractPoolAddressFromDexUrl } from '@dcf/utils';
@@ -44,9 +45,12 @@ const emptyForm: ListingFormData = {
   companyDetails: '',
   auditUrl: '',
   summary: '',
+  whyList: '',
+  whyDoxxed: '',
 };
 
 export default function ListYourProjectPage() {
+  const { data: session } = useSession();
   const [dexUrl, setDexUrl] = useState('');
   const [contractInput, setContractInput] = useState('');
   const [contractChain, setContractChain] = useState<string>('SOLANA');
@@ -123,6 +127,13 @@ export default function ListYourProjectPage() {
       return;
     }
 
+    if (!form.whyList?.trim() || !form.whyDoxxed?.trim()) {
+      setError(
+        'Explain why this project should be listed and why the founder is doxxed. This goes on the public scout vote board.',
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
       const payload = cleanListingPayload({
@@ -130,7 +141,7 @@ export default function ListYourProjectPage() {
         chainSlug: form.chainSlug || undefined,
         marketPreview: marketPreview ?? undefined,
       });
-      const result = await submitListingApplication(payload);
+      const result = await submitListingApplication(payload, session?.accessToken);
       setSuccessId(result.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Submission failed');
@@ -161,16 +172,23 @@ export default function ListYourProjectPage() {
           <p className="text-sm uppercase tracking-widest text-[var(--color-success)]">
             Request submitted
           </p>
-          <h1 className="mt-4 text-2xl font-semibold">We received your listing</h1>
+          <h1 className="mt-4 text-2xl font-semibold">Scout listing submitted</h1>
           <p className="mt-3 text-[var(--color-muted)]">
-            Our team will review founder verification (2+ proof points required).
-            Reference: {successId.slice(0, 8)}…
+            Your project is on the scout vote board for <strong className="text-white">48 hours</strong>.
+            Traders can vote and comment; admin can fast-track approve anytime, or review after 48h.
+            {session ? ' You earned +50 scout submit points.' : ' Sign in next time to earn scout points.'}
           </p>
           <Link
-            href="/"
-            className="mt-8 inline-block rounded-lg bg-[var(--color-accent)] px-6 py-3 text-sm font-medium text-white"
+            href="/scout-votes"
+            className="mt-6 inline-block rounded-lg border border-emerald-500/50 px-6 py-3 text-sm font-medium text-emerald-200"
           >
-            Back to home
+            View scout vote board
+          </Link>
+          <Link
+            href="/reputation"
+            className="mt-4 ml-4 inline-block text-sm text-[var(--color-muted)] hover:text-white"
+          >
+            Points math →
           </Link>
         </div>
       </main>
@@ -341,9 +359,32 @@ export default function ListYourProjectPage() {
             </div>
           </Section>
 
+          <Section title="Scout thesis (public on vote board)">
+            <Field
+              label="Why should this project be listed?"
+              value={form.whyList ?? ''}
+              onChange={(v) => updateField('whyList', v)}
+              multiline
+              required
+              placeholder="Product, traction, why the community should care…"
+            />
+            <Field
+              label="Why is the founder doxxed / verified?"
+              value={form.whyDoxxed ?? ''}
+              onChange={(v) => updateField('whyDoxxed', v)}
+              multiline
+              required
+              placeholder="Video link, interview, LinkedIn, public identity proof you found…"
+            />
+          </Section>
+
           <p className="text-xs text-[var(--color-muted)]">
-            Free listing during beta. Submit with one public video or interview link. Admin
-            reviews before publish.
+            Free listing during beta. After submit, traders vote for <strong className="text-white">48 hours</strong> on the{' '}
+            <Link href="/scout-votes" className="text-emerald-400 hover:underline">
+              scout board
+            </Link>
+            . Passed listings queue sooner; after 48h all listings land in admin inbox either way.
+            {!session && ' Sign in to earn scout points (+50 submit, +1,000 if approved).'}
           </p>
 
           <button

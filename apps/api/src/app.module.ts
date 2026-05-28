@@ -15,6 +15,7 @@ import { FounderUpdatesModule } from './founder-updates/founder-updates.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PointsModule } from './points/points.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PointsModule,
     NotificationsModule,
     FounderUpdatesModule,
+    XSocialModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

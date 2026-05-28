@@ -1,7 +1,10 @@
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { AdminGuard } from '../auth/guards';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import { Public } from '../auth/public.decorator';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { AuthUser } from '../auth/auth.types';
 import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import {
   CreateListingApplicationDto,
@@ -9,13 +12,16 @@ import {
   PreviewDexScreenerDto,
   ReviewListingApplicationDto,
 } from './dto/listing-application.dto';
+import { CastListingVoteDto } from './dto/listing-vote.dto';
 import { ListingApplicationsService } from './listing-applications.service';
+import { ListingVotesService } from './listing-votes.service';
 
 @SkipThrottle()
 @Controller('listing-applications')
 export class ListingApplicationsController {
   constructor(
     private readonly listingService: ListingApplicationsService,
+    private readonly votesService: ListingVotesService,
     private readonly dexscreenerService: DexscreenerService,
   ) {}
 
@@ -35,9 +41,43 @@ export class ListingApplicationsController {
   }
 
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Post()
-  create(@Body() dto: CreateListingApplicationDto) {
-    return this.listingService.create(dto);
+  create(@Body() dto: CreateListingApplicationDto, @CurrentUser() user?: AuthUser | null) {
+    return this.listingService.create(dto, user?.id);
+  }
+
+  @Public()
+  @Get('voting/stats')
+  votingStats() {
+    return this.votesService.getVotingStats();
+  }
+
+  @Public()
+  @Get('voting/open')
+  openForVoting() {
+    return this.votesService.findOpenForVoting();
+  }
+
+  @Public()
+  @Get('voting/:id')
+  votingDetail(@Param('id') id: string) {
+    return this.votesService.findOneForVoting(id);
+  }
+
+  @Post('voting/:id/vote')
+  castVote(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CastListingVoteDto,
+  ) {
+    return this.votesService.castVote(id, user.id, dto);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('voting/expire')
+  expireVoting() {
+    return this.votesService.expireClosedVoting();
   }
 
   @UseGuards(AdminGuard)

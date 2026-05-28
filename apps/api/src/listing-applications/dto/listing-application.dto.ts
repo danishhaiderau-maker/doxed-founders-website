@@ -140,6 +140,20 @@ export class CreateListingApplicationDto {
   @MaxLength(2000)
   summary?: string;
 
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MinLength(20)
+  @MaxLength(2000)
+  whyList?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MinLength(20)
+  @MaxLength(2000)
+  whyDoxxed?: string;
+
   @IsOptional()
   marketPreview?: Record<string, unknown>;
 }

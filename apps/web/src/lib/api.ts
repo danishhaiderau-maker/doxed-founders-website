@@ -44,6 +44,8 @@ export interface ListingFormData {
   companyDetails?: string;
   auditUrl?: string;
   summary?: string;
+  whyList?: string;
+  whyDoxxed?: string;
   marketPreview?: DexScreenerPreview['marketPreview'];
 }
 
@@ -71,8 +73,70 @@ export interface PendingApplication {
   marketPreview: DexScreenerPreview['marketPreview'] | null;
   verificationScore: number;
   verificationCriteria: string[] | null;
+  whyList?: string | null;
+  whyDoxxed?: string | null;
+  requiredVoters?: number;
+  minYesPercent?: number;
+  votingClosesAt?: string | null;
   status: string;
   createdAt: string;
+  votes?: ListingVoteRecord[];
+}
+
+export interface ListingVoteRecord {
+  id: string;
+  vote: 'YES' | 'NO';
+  whyList: string | null;
+  whyDoxxed: string | null;
+  comment: string | null;
+  createdAt: string;
+  user: { id: string; name: string | null; contributorLevel: number };
+}
+
+export interface VoteTally {
+  total: number;
+  yes: number;
+  no: number;
+  yesPercent: number;
+  requiredVoters: number;
+  minYesPercent: number;
+  passed: boolean;
+  remainingVoters: number;
+}
+
+export interface ScoutListing {
+  id: string;
+  projectName: string;
+  ticker: string;
+  chainSlug: string | null;
+  logoUrl: string | null;
+  summary: string | null;
+  whyList: string | null;
+  whyDoxxed: string | null;
+  founderName: string | null;
+  founderTwitter: string | null;
+  founderVideoUrl: string | null;
+  verificationScore: number;
+  requiredVoters: number;
+  minYesPercent: number;
+  votingClosesAt: string | null;
+  status: string;
+  createdAt: string;
+  user: {
+    id: string;
+    name: string | null;
+    reputationPoints: number;
+    contributorLevel: number;
+  } | null;
+  votes: ListingVoteRecord[];
+  tally: VoteTally;
+  platformVoting: {
+    activeUsers: number;
+    requiredVoters: number;
+    minYesPercent: number;
+    votingWindowHours: number;
+    formula: string;
+  };
 }
 
 export type AdminApplicationUpdates = Partial<ListingFormData>;
@@ -173,11 +237,40 @@ export function previewContract(chainSlug: string, contractAddress: string) {
   });
 }
 
-export function submitListingApplication(data: ListingFormData) {
+export function submitListingApplication(data: ListingFormData, token?: string) {
   return apiFetch<{ id: string; status: string; projectName: string; verificationScore: number }>(
     '/listing-applications',
     { method: 'POST', body: JSON.stringify(data) },
+    token,
   );
+}
+
+export function fetchVotingStats() {
+  return apiFetch<ScoutListing['platformVoting']>('/listing-applications/voting/stats');
+}
+
+export function fetchOpenScoutListings() {
+  return apiFetch<ScoutListing[]>('/listing-applications/voting/open');
+}
+
+export function fetchScoutListing(id: string) {
+  return apiFetch<ScoutListing>(`/listing-applications/voting/${id}`);
+}
+
+export function castScoutVote(
+  id: string,
+  body: {
+    vote: 'YES' | 'NO';
+    whyList?: string;
+    whyDoxxed?: string;
+    comment?: string;
+  },
+  token: string,
+) {
+  return apiFetch<ScoutListing>(`/listing-applications/voting/${id}/vote`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, token);
 }
 
 export function fetchPendingApplications(token: string) {

@@ -31,3 +31,4 @@ export * from './display-name';
 export * from './linkify';
 export * from './share';
 export * from './reputation-points';
+export * from './listing-voting';

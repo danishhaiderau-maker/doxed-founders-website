@@ -1,9 +1,11 @@
 /**
- * Sync founder updates from X (Twitter) API every ~6 hours via cron.
- * Requires TWITTER_BEARER_TOKEN and DATABASE_URL.
+ * Sync founder updates from X (Twitter) API once per day via cron.
+ * Requires TWITTER_BEARER_TOKEN on Railway and ADMIN_SYNC_JWT for auth.
  *
- * Example cron (Railway/Vercel cron/GitHub Actions):
- *   0 0,6,12,18 * * * node scripts/sync-founder-updates.mjs
+ * Daily cron (Railway / GitHub Actions) — 9:00 UTC:
+ *   0 9 * * * node scripts/sync-founder-updates.mjs
+ *
+ * Estimated cost at ~20 founders × 5 tweets/day: ~$0.50–2/day on pay-per-use X API.
  */
 const apiUrl = (process.env.API_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '');
 const adminJwt = process.env.ADMIN_SYNC_JWT?.trim();

@@ -2,8 +2,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { POINTS } from '@dcf/utils';
 import { AnalyticsEventType, Prisma, ProjectSource } from '@prisma/client';
 import { AnalyticsService } from '../analytics/analytics.service';
+import { PointsService } from '../points/points.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 const projectInclude = {
@@ -25,6 +27,7 @@ export class WatchlistService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly analytics: AnalyticsService,
+    private readonly points: PointsService,
   ) {}
 
   async list(userId: string) {
@@ -73,6 +76,8 @@ export class WatchlistService {
       projectId: project.id,
       metadata: { slug: project.slug },
     });
+
+    await this.points.award(userId, POINTS.WATCHLIST_ADD);
 
     return { saved: true, slug: project.slug };
   }

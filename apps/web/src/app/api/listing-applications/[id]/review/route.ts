@@ -39,7 +39,10 @@ export async function PATCH(
     if (!existing) {
       return NextResponse.json({ message: 'Listing application not found' }, { status: 404 });
     }
-    if (existing.status !== ListingStatus.PENDING) {
+    if (
+      existing.status !== ListingStatus.PENDING &&
+      existing.status !== ListingStatus.COMMUNITY_VOTING
+    ) {
       return NextResponse.json(
         { message: 'Application has already been reviewed' },
         { status: 400 },

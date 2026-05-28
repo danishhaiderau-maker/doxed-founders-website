@@ -26,9 +26,15 @@ enum ChainSlug {
 }
 
 enum ListingStatus {
+  COMMUNITY_VOTING
   PENDING
   APPROVED
   REJECTED
+}
+
+enum ListingVoteValue {
+  YES
+  NO
 }
 
 enum VerificationType {
@@ -90,6 +96,7 @@ model User {
   feedPosts            FeedPost[]
   feedComments         FeedComment[]
   listingApplications  ListingApplication[]
+  listingVotes         ListingVote[]
   analyticsEvents      AnalyticsEvent[]
   searchLogs           SearchLog[]
   adminActions         AdminAction[]        @relation("AdminActions")
@@ -435,16 +442,42 @@ model ListingApplication {
   marketPreview       Json?
   verificationScore   Int           @default(0)
   verificationCriteria Json?
-  status              ListingStatus @default(PENDING)
+  whyList             String?       @db.Text
+  whyDoxxed           String?       @db.Text
+  votingOpensAt       DateTime?
+  votingClosesAt      DateTime?
+  requiredVoters      Int           @default(5)
+  minYesPercent       Int           @default(65)
+  status              ListingStatus @default(COMMUNITY_VOTING)
   reviewNotes     String?       @db.Text
   reviewedAt      DateTime?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user  User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  votes ListingVote[]
 
   @@index([status])
   @@index([createdAt])
+  @@index([votingClosesAt])
+}
+
+model ListingVote {
+  id            String           @id @default(cuid())
+  applicationId String
+  userId        String
+  vote          ListingVoteValue
+  whyList       String?          @db.Text
+  whyDoxxed     String?          @db.Text
+  comment       String?          @db.Text
+  createdAt     DateTime         @default(now())
+
+  application ListingApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, userId])
+  @@index([applicationId])
+  @@index([userId])
 }
 
 // ─── Reputation, notifications & founder updates ───────────────────────────────
@@ -452,8 +485,29 @@ model ListingApplication {
 enum NotificationType {
   FOUNDER_UPDATES
   LISTING_APPROVED
+  LISTING_VOTING
+  TRENDING_BUYS
+  TRADER_WIN
   POINTS_EARNED
   SYSTEM
+}
+
+enum XSocialPostKind {
+  FOUNDER_REPOST
+  TRENDING_BUYS
+  TRADER_WIN
+}
+
+model XSocialPostLog {
+  id         String           @id @default(cuid())
+  kind       XSocialPostKind
+  dedupeKey  String           @unique
+  tweetId    String?
+  tweetUrl   String?
+  metadata   Json?
+  createdAt  DateTime         @default(now())
+
+  @@index([kind, createdAt])
 }
 
 model Notification {

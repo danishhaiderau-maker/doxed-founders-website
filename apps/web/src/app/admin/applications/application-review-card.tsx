@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react';
 import {
   FOUNDER_VERIFICATION_LABELS,
+  contributorLevelLabel,
   scoreFounderVerification,
 } from '@dcf/utils';
 import { AdminApplicationUpdates, PendingApplication } from '@/lib/api';
@@ -193,6 +194,15 @@ export function ApplicationReviewCard({
                   }`}
                 >
                   {liveVerification.score}/6 {eligible ? '· Eligible' : '· Insufficient'}
+                </span>
+                <span
+                  className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                    item.status === 'COMMUNITY_VOTING'
+                      ? 'bg-blue-950/50 text-blue-300'
+                      : 'bg-purple-950/50 text-purple-300'
+                  }`}
+                >
+                  {item.status === 'COMMUNITY_VOTING' ? '48h vote · fast-track' : 'In admin queue'}
                 </span>
               </div>
               <p className="mt-1 text-xs text-[var(--color-muted)]">
@@ -448,6 +458,39 @@ export function ApplicationReviewCard({
             </div>
           )}
 
+          {(item.whyList || item.whyDoxxed || (item.votes && item.votes.length > 0)) && (
+            <section className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
+              <h3 className="text-sm font-semibold text-emerald-200">Community vote passed — scout thesis</h3>
+              {item.whyList && (
+                <div className="mt-3">
+                  <p className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Why list</p>
+                  <p className="mt-1 text-sm whitespace-pre-wrap">{item.whyList}</p>
+                </div>
+              )}
+              {item.whyDoxxed && (
+                <div className="mt-3">
+                  <p className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Why doxxed</p>
+                  <p className="mt-1 text-sm whitespace-pre-wrap">{item.whyDoxxed}</p>
+                </div>
+              )}
+              {item.votes && item.votes.length > 0 && (
+                <ul className="mt-4 space-y-2 border-t border-[var(--color-border)] pt-3">
+                  {item.votes.map((v) => (
+                    <li key={v.id} className="rounded-lg bg-black/20 p-3 text-xs">
+                      <span className={v.vote === 'YES' ? 'text-emerald-400' : 'text-red-400'}>
+                        {v.vote}
+                      </span>{' '}
+                      · {v.user.name ?? 'Trader'} · {contributorLevelLabel(v.user.contributorLevel)}
+                      {v.whyList && <p className="mt-1 text-white/80">List: {v.whyList}</p>}
+                      {v.whyDoxxed && <p className="mt-1 text-white/80">Doxxed: {v.whyDoxxed}</p>}
+                      {v.comment && <p className="mt-1 italic text-[var(--color-muted)]">{v.comment}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
           <div className="mt-4 flex flex-wrap gap-2">
             <button
               type="button"
@@ -462,6 +505,11 @@ export function ApplicationReviewCard({
             >
               Approve & publish
             </button>
+            {item.status === 'COMMUNITY_VOTING' && (
+              <span className="self-center text-xs text-[var(--color-muted)]">
+                Fast-track: no need to wait for 48h vote
+              </span>
+            )}
             <button
               type="button"
               disabled={busy}

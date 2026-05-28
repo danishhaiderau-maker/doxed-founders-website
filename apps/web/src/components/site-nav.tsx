@@ -52,6 +52,12 @@ export function SiteNav() {
           </Link>
         </>
       )}
+      <Link href="/scout-votes" className="text-[var(--color-muted)] hover:text-white">
+        Scout votes
+      </Link>
+      <Link href="/reputation" className="text-[var(--color-muted)] hover:text-white">
+        Points
+      </Link>
       <Link href="/leaderboard" className="text-[var(--color-muted)] hover:text-white">
         Leaderboard
       </Link>
