@@ -7,7 +7,7 @@ import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
 
 interface LoginPageClientProps {
-  oauthEnabled: { google: boolean };
+  oauthEnabled: { google: boolean; twitter?: boolean };
   nextAuthUrl: string;
 }
 
@@ -49,11 +49,16 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Sign in</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Use Google or email to access your account.
+          Best for traders: sign in with X so your paper record links to your public handle.
         </p>
 
         <div className="mt-8">
-          <OAuthButtons callbackUrl={callbackUrl} enabled={oauthEnabled} nextAuthUrl={nextAuthUrl} />
+          <OAuthButtons
+            callbackUrl={callbackUrl}
+            enabled={oauthEnabled}
+            nextAuthUrl={nextAuthUrl}
+            preferTwitter
+          />
         </div>
 
         <div className="my-6 flex items-center gap-3">

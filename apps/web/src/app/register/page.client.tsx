@@ -7,7 +7,7 @@ import { OAuthButtons } from '@/components/oauth-buttons';
 import { registerAccount } from '@/lib/api';
 
 interface RegisterPageClientProps {
-  oauthEnabled: { google: boolean };
+  oauthEnabled: { google: boolean; twitter?: boolean };
   nextAuthUrl: string;
 }
 
@@ -51,11 +51,16 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Create account</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Sign up with Google or email — includes $10,000 paper trading balance.
+          Best path: sign in with X and paper trade with your public handle on the line.
         </p>
 
         <div className="mt-8">
-          <OAuthButtons callbackUrl="/paper-trading" enabled={oauthEnabled} nextAuthUrl={nextAuthUrl} />
+          <OAuthButtons
+            callbackUrl="/paper-trading"
+            enabled={oauthEnabled}
+            nextAuthUrl={nextAuthUrl}
+            preferTwitter
+          />
         </div>
 
         <div className="my-6 flex items-center gap-3">

@@ -180,10 +180,21 @@ export interface LeaderboardEntry {
   rank: number;
   userId: string;
   displayName: string;
+  twitterHandle?: string | null;
   totalValue: number;
   pnl: number;
   roi: number;
   period: string;
+}
+
+export interface BustedTraderEntry {
+  rank: number;
+  userId: string;
+  displayName: string;
+  twitterHandle?: string | null;
+  totalValue: number;
+  pnl: number;
+  roi: number;
 }
 
 function parseApiError(body: unknown, status: number): string {
@@ -458,6 +469,10 @@ export function postInitialFeedComment(feedPostId: string, userId: string, body:
 
 export function fetchLeaderboard() {
   return apiFetch<LeaderboardEntry[]>('/paper-trading/leaderboard');
+}
+
+export function fetchBustedTraders() {
+  return apiFetch<BustedTraderEntry[]>('/paper-trading/busted');
 }
 
 export function fetchResetInfo() {

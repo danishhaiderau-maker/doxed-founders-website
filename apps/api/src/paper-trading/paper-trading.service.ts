@@ -174,6 +174,12 @@ export class PaperTradingService {
       ),
       reputationPoints: portfolio.reputationPoints,
       contributorLevel: portfolio.contributorLevel,
+      twitterHandle: (
+        await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { twitterHandle: true },
+        })
+      )?.twitterHandle ?? null,
       cashBalance: portfolio.cashBalance,
       totalValue: portfolio.totalValue,
       pnl: portfolio.pnl,
@@ -581,7 +587,11 @@ export class PaperTradingService {
         const snapshot = await this.getPortfolio(portfolio.userId);
         return {
           userId: portfolio.userId,
-          displayName: portfolio.user.name ?? 'Trader',
+          displayName: formatPublicAccountLabel(
+            portfolio.user.name,
+            portfolio.user.email,
+          ),
+          twitterHandle: portfolio.user.twitterHandle,
           totalValue: snapshot.totalValue,
           pnl: snapshot.pnl,
           roi: snapshot.roi,
@@ -596,6 +606,37 @@ export class PaperTradingService {
       ...entry,
       period: LeaderboardPeriod.ALL_TIME,
     }));
+  }
+
+  async getBustedTraders(limit = 30) {
+    const portfolios = await this.prisma.paperPortfolio.findMany({
+      include: { user: true },
+    });
+
+    const busted = await Promise.all(
+      portfolios.map(async (portfolio) => {
+        const snapshot = await this.getPortfolio(portfolio.userId);
+        if (!snapshot.isBusted) return null;
+        return {
+          userId: portfolio.userId,
+          displayName: formatPublicAccountLabel(
+            portfolio.user.name,
+            portfolio.user.email,
+          ),
+          twitterHandle: portfolio.user.twitterHandle,
+          totalValue: snapshot.totalValue,
+          pnl: snapshot.pnl,
+          roi: snapshot.roi,
+          bustedAt: portfolio.updatedAt,
+        };
+      }),
+    );
+
+    return busted
+      .filter(Boolean)
+      .sort((a, b) => (a!.totalValue ?? 0) - (b!.totalValue ?? 0))
+      .slice(0, limit)
+      .map((entry, index) => ({ rank: index + 1, ...entry! }));
   }
 
   getResetInfo() {

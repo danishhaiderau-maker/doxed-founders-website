@@ -71,7 +71,8 @@ export class AuthService {
   }
 
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {
-    const email = dto.email.trim().toLowerCase();
+    const email = this.resolveOAuthEmail(dto);
+    const twitterHandle = dto.twitterHandle?.replace(/^@/, '').trim() || undefined;
 
     const linked = await this.prisma.oAuthAccount.findUnique({
       where: {
@@ -86,6 +87,13 @@ export class AuthService {
     if (linked) {
       if (linked.user.banned) {
         throw new UnauthorizedException('This account has been suspended');
+      }
+      if (twitterHandle && linked.user.twitterHandle !== twitterHandle) {
+        const user = await this.prisma.user.update({
+          where: { id: linked.user.id },
+          data: { twitterHandle },
+        });
+        return await this.buildAuthResponse(user);
       }
       return await this.buildAuthResponse(linked.user);
     }
@@ -115,9 +123,15 @@ export class AuthService {
         },
       });
 
-      const updates: { name?: string; avatarUrl?: string; emailVerified?: Date } = {};
+      const updates: {
+        name?: string;
+        avatarUrl?: string;
+        emailVerified?: Date;
+        twitterHandle?: string;
+      } = {};
       if (dto.name && !existingUser.name) updates.name = dto.name.trim();
       if (dto.avatarUrl && !existingUser.avatarUrl) updates.avatarUrl = dto.avatarUrl;
+      if (twitterHandle) updates.twitterHandle = twitterHandle;
       updates.emailVerified = new Date();
 
       const user = await this.prisma.user.update({
@@ -133,6 +147,7 @@ export class AuthService {
         email,
         name: dto.name?.trim() || null,
         avatarUrl: dto.avatarUrl || null,
+        twitterHandle: twitterHandle ?? null,
         emailVerified: new Date(),
         role: UserRole.USER,
         oauthAccounts: {
@@ -153,6 +168,15 @@ export class AuthService {
     await this.points.award(user.id, POINTS.REGISTER);
 
     return await this.buildAuthResponse(user);
+  }
+
+  private resolveOAuthEmail(dto: OAuthLoginDto): string {
+    const trimmed = dto.email?.trim().toLowerCase();
+    if (trimmed) return trimmed;
+    if (dto.provider === 'twitter') {
+      return `twitter-${dto.providerId}@users.doxedcryptofounder.local`;
+    }
+    throw new UnauthorizedException('Email required for this sign-in provider');
   }
 
   async validatePayload(payload: JwtPayload): Promise<AuthUser | null> {
