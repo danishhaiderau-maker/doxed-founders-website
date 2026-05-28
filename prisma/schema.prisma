@@ -489,6 +489,7 @@ enum NotificationType {
   LISTING_VOTING
   TRENDING_BUYS
   TRADER_WIN
+  TRADER_LOSS
   POINTS_EARNED
   SYSTEM
 }
@@ -497,6 +498,7 @@ enum XSocialPostKind {
   FOUNDER_REPOST
   TRENDING_BUYS
   TRADER_WIN
+  TRADER_LOSS
 }
 
 model XSocialPostLog {

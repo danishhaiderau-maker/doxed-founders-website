@@ -2,6 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { XSocialPostKind, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildOAuth1Header, readOAuth1Credentials, siteUrl } from './x-oauth1';
+import { uploadTweetImage } from './x-media-upload.util';
+import { XShareMediaService } from './x-share-media.service';
+import {
+  formatFounderRepostPost,
+  formatTraderConvictionPost,
+  formatTrendingBuysPost,
+  trimTweet,
+} from './x-post-copy.util';
 
 type PostResult = { ok: true; tweetId: string; tweetUrl: string } | { ok: false; reason: string };
 
@@ -10,7 +18,10 @@ export class XPostingService {
   private readonly logger = new Logger(XPostingService.name);
   private cachedUserId: string | null = null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly shareMedia: XShareMediaService,
+  ) {}
 
   isConfigured(): boolean {
     return readOAuth1Credentials().ok;
@@ -18,20 +29,19 @@ export class XPostingService {
 
   async repostFounderTweet(
     sourceTweetId: string,
-    meta: { founderName: string; projectName: string; projectSlug: string },
+    meta: {
+      founderName: string;
+      projectName: string;
+      projectSlug: string;
+      ticker?: string | null;
+    },
   ): Promise<PostResult> {
     const dedupeKey = `founder_repost:${sourceTweetId}`;
     if (await this.alreadyPosted(dedupeKey)) {
       return { ok: false, reason: 'Already reposted' };
     }
 
-    const quoteText = this.trimTweet(
-      `📢 Doxxed founder update — ${meta.projectName}\n` +
-        `Founder: ${meta.founderName}\n` +
-        `Track verified builders → ${siteUrl()}/project/${meta.projectSlug}\n` +
-        `#doxxed #crypto`,
-    );
-
+    const quoteText = trimTweet(formatFounderRepostPost(meta));
     const quoted = await this.postTweet(quoteText, sourceTweetId);
     if (!quoted.ok) {
       const retweeted = await this.retweet(sourceTweetId);
@@ -52,6 +62,7 @@ export class XPostingService {
     founderName: string | null;
     buyerCount: number;
     windowHours: number;
+    totalInvestedUsd: number;
   }): Promise<PostResult> {
     const auth = readOAuth1Credentials();
     if (!auth.ok) return { ok: false, reason: auth.reason };
@@ -62,13 +73,11 @@ export class XPostingService {
       return { ok: false, reason: 'Already posted trending today' };
     }
 
-    const text = this.trimTweet(
-      `🐋 Hot paper buys on @${auth.brandHandle} tracker\n` +
-        `$${input.ticker} — ${input.projectName}\n` +
-        `${input.buyerCount} traders bought in ${input.windowHours}h on ${siteUrl()}\n` +
-        (input.founderName ? `Doxxed founder: ${input.founderName} ✅\n` : '') +
-        `${siteUrl()}/project/${input.slug}\n` +
-        `#doxxed #crypto #whaletracker`,
+    const text = trimTweet(
+      formatTrendingBuysPost({
+        brandHandle: auth.brandHandle,
+        ...input,
+      }),
     );
 
     const posted = await this.postTweet(text);
@@ -78,48 +87,74 @@ export class XPostingService {
     return posted;
   }
 
-  async postTraderWin(input: {
+  async postTraderConviction(input: {
     userId: string;
     displayName: string;
     projectId: string;
     projectName: string;
     ticker: string;
     slug: string;
+    investedUsd: number;
+    pnlUsd: number;
     pnlPercent: number;
     thesis: string | null;
     founderName: string | null;
-    founderVideoUrl: string | null;
-    founderTwitter: string | null;
+    founderHandle: string | null;
+    founderTweetId: string | null;
   }): Promise<PostResult> {
-    const dedupeKey = `trader_win:${input.userId}:${input.projectId}`;
+    const win = input.pnlPercent >= 0;
+    const kind = win ? XSocialPostKind.TRADER_WIN : XSocialPostKind.TRADER_LOSS;
+    const dedupeKey = `${win ? 'trader_win' : 'trader_loss'}:${input.userId}:${input.projectId}`;
     if (await this.alreadyPosted(dedupeKey)) {
-      return { ok: false, reason: 'Already shared this trader win' };
+      return { ok: false, reason: 'Already shared this trader result' };
     }
 
-    const lines = [
-      `🔥 +${Math.round(input.pnlPercent)}% paper gain on $${input.ticker}`,
-      `${input.projectName} · ${siteUrl()}/project/${input.slug}`,
-      `Trader: ${input.displayName} → ${siteUrl()}/portfolio/${input.userId}`,
-    ];
-    if (input.founderName) {
-      lines.push(`Doxxed founder: ${input.founderName}`);
-    }
-    if (input.founderTwitter) {
-      lines.push(`Founder X: ${input.founderTwitter}`);
-    }
-    if (input.founderVideoUrl) {
-      lines.push(`Founder proof: ${input.founderVideoUrl}`);
-    }
-    if (input.thesis) {
-      lines.push(`Thesis: ${input.thesis}`);
-    }
-    lines.push(`Discover doxxed founders on ${siteUrl()}`);
+    const text = trimTweet(
+      formatTraderConvictionPost({
+        displayName: input.displayName,
+        userId: input.userId,
+        projectName: input.projectName,
+        ticker: input.ticker,
+        slug: input.slug,
+        investedUsd: input.investedUsd,
+        pnlUsd: input.pnlUsd,
+        pnlPercent: input.pnlPercent,
+        thesis: input.thesis,
+        founderName: input.founderName,
+        founderHandle: input.founderHandle,
+      }),
+    );
 
-    const posted = await this.postTweet(this.trimTweet(lines.join('\n')));
+    const side = win ? 'pump' : 'dump';
+    const imageBuffer = this.shareMedia.pickImageBuffer(side);
+    let mediaIds: string[] | undefined;
+
+    const auth = readOAuth1Credentials();
+    if (imageBuffer && auth.ok) {
+      const uploaded = await uploadTweetImage(auth.creds, imageBuffer, `${side}-share.png`);
+      if (uploaded.ok) {
+        mediaIds = [uploaded.mediaId];
+      } else {
+        this.logger.warn(`Share image upload skipped: ${uploaded.reason}`);
+      }
+    }
+
+    let posted = await this.postTweet(text, input.founderTweetId ?? undefined, mediaIds);
+    if (!posted.ok && mediaIds?.length && input.founderTweetId) {
+      posted = await this.postTweet(text, undefined, mediaIds);
+    }
+    if (!posted.ok && mediaIds?.length) {
+      posted = await this.postTweet(text, input.founderTweetId ?? undefined);
+    }
     if (posted.ok) {
-      await this.logPost(XSocialPostKind.TRADER_WIN, dedupeKey, posted.tweetId, posted.tweetUrl, input);
+      await this.logPost(kind, dedupeKey, posted.tweetId, posted.tweetUrl, input);
     }
     return posted;
+  }
+
+  /** @deprecated use postTraderConviction */
+  async postTraderWin(input: Parameters<XPostingService['postTraderConviction']>[0]): Promise<PostResult> {
+    return this.postTraderConviction(input);
   }
 
   private async retweet(sourceTweetId: string): Promise<PostResult> {
@@ -156,14 +191,23 @@ export class XPostingService {
     };
   }
 
-  private async postTweet(text: string, quoteTweetId?: string): Promise<PostResult> {
+  private async postTweet(
+    text: string,
+    quoteTweetId?: string,
+    mediaIds?: string[],
+  ): Promise<PostResult> {
     const auth = readOAuth1Credentials();
     if (!auth.ok) return { ok: false, reason: auth.reason };
 
     const url = 'https://api.twitter.com/2/tweets';
     const authorization = buildOAuth1Header('POST', url, auth.creds);
-    const body: { text: string; quote_tweet_id?: string } = { text };
+    const body: {
+      text: string;
+      quote_tweet_id?: string;
+      media?: { media_ids: string[] };
+    } = { text };
     if (quoteTweetId) body.quote_tweet_id = quoteTweetId;
+    if (mediaIds?.length) body.media = { media_ids: mediaIds };
 
     const res = await fetch(url, {
       method: 'POST',
@@ -202,12 +246,6 @@ export class XPostingService {
     const data = (await res.json()) as { data?: { id: string } };
     this.cachedUserId = data.data?.id ?? null;
     return this.cachedUserId;
-  }
-
-  private trimTweet(text: string, max = 270): string {
-    const cleaned = text.replace(/\r\n/g, '\n').trim();
-    if (cleaned.length <= max) return cleaned;
-    return `${cleaned.slice(0, max - 1)}…`;
   }
 
   private async alreadyPosted(dedupeKey: string): Promise<boolean> {

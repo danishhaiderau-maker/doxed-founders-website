@@ -82,7 +82,7 @@ export class FounderUpdatesService {
         projects: {
           where: { approved: true },
           take: 1,
-          select: { id: true, slug: true, name: true },
+          select: { id: true, slug: true, name: true, ticker: true },
         },
       },
     });
@@ -149,6 +149,7 @@ export class FounderUpdatesService {
                 founderName: founder.name,
                 projectName: project?.name ?? founder.name,
                 projectSlug: project?.slug ?? 'projects',
+                ticker: project?.ticker ?? null,
               })
               .catch((err) => this.logger.warn(`X repost failed for @${handle}: ${err}`));
           }

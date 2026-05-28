@@ -87,14 +87,21 @@ export default function NotificationsPage() {
           {items.length === 0 && !error && (
             <p className="text-[var(--color-muted)]">No notifications yet.</p>
           )}
-          {items.map((n) => (
+          {items.map((n) => {
+            const isWin = n.type === 'TRADER_WIN';
+            const isLoss = n.type === 'TRADER_LOSS';
+            const accent =
+              isWin
+                ? 'border-emerald-500/40 bg-emerald-950/20'
+                : isLoss
+                  ? 'border-red-500/40 bg-red-950/20'
+                  : n.readAt
+                    ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
+                    : 'border-emerald-500/30 bg-[var(--color-card)]';
+            return (
             <article
               key={n.id}
-              className={`rounded-xl border p-4 ${
-                n.readAt
-                  ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
-                  : 'border-emerald-500/30 bg-[var(--color-card)]'
-              }`}
+              className={`rounded-xl border p-4 ${accent}`}
             >
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
@@ -125,7 +132,8 @@ export default function NotificationsPage() {
                 </div>
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       </main>
     </div>

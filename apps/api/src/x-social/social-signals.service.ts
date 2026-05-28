@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PaperTradeSide } from '@prisma/client';
-import { formatPublicAccountLabel } from '@dcf/utils';
+import { extractTwitterHandle, formatPublicAccountLabel } from '@dcf/utils';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { XPostingService } from './x-posting.service';
@@ -27,6 +27,10 @@ export class SocialSignalsService {
     return Number(process.env.TRADER_WIN_MIN_PNL_PERCENT ?? 50);
   }
 
+  private traderLossMinPnl(): number {
+    return Number(process.env.TRADER_LOSS_MIN_PNL_PERCENT ?? 25);
+  }
+
   /** Called after a paper BUY — checks if project just became trending. */
   async onPaperBuy(projectId: string) {
     try {
@@ -46,15 +50,21 @@ export class SocialSignalsService {
         createdAt: { gte: since },
         ...(onlyProjectId ? { projectId: onlyProjectId } : {}),
       },
-      select: { projectId: true, userId: true },
+      select: { projectId: true, userId: true, totalUsd: true },
     });
 
     const buyersByProject = new Map<string, Set<string>>();
+    const investedByProject = new Map<string, number>();
     for (const trade of trades) {
       if (!buyersByProject.has(trade.projectId)) {
         buyersByProject.set(trade.projectId, new Set());
+        investedByProject.set(trade.projectId, 0);
       }
       buyersByProject.get(trade.projectId)!.add(trade.userId);
+      investedByProject.set(
+        trade.projectId,
+        (investedByProject.get(trade.projectId) ?? 0) + Number(trade.totalUsd),
+      );
     }
 
     let posted = 0;
@@ -71,10 +81,12 @@ export class SocialSignalsService {
       });
       if (!project?.approved) continue;
 
+      const totalInvestedUsd = investedByProject.get(projectId) ?? 0;
+
       await this.notifications.notifyAllUsers({
         type: 'TRENDING_BUYS',
         title: `🐋 Hot buys: ${project.name}`,
-        body: `${buyers.size} traders paper-bought $${project.ticker} in the last ${this.trendingWindowHours()}h. See why on the feed.`,
+        body: `${buyers.size} traders deployed ~$${Math.round(totalInvestedUsd).toLocaleString()} paper into $${project.ticker} in ${this.trendingWindowHours()}h.`,
         link: `/project/${project.slug}`,
       });
 
@@ -87,6 +99,7 @@ export class SocialSignalsService {
           founderName: project.founder?.name ?? null,
           buyerCount: buyers.size,
           windowHours: this.trendingWindowHours(),
+          totalInvestedUsd,
         });
         if (result.ok) posted += 1;
       }
@@ -95,11 +108,12 @@ export class SocialSignalsService {
     return { scanned: buyersByProject.size, posted };
   }
 
-  async scanTraderWins() {
-    const minPnl = this.traderWinMinPnl();
+  async scanTraderResults() {
+    const minWin = this.traderWinMinPnl();
+    const minLoss = this.traderLossMinPnl();
     const portfolios = await this.prisma.paperPortfolio.findMany({
       include: {
-        user: { select: { id: true, name: true, email: true } },
+        user: { select: { id: true, name: true, email: true, twitterHandle: true } },
         positions: true,
       },
     });
@@ -122,15 +136,21 @@ export class SocialSignalsService {
 
         const price = Number(project.metrics?.priceUsd ?? position.avgBuyPrice);
         const quantity = Number(position.quantity);
-        const costBasis = quantity * Number(position.avgBuyPrice);
-        if (costBasis <= 0) continue;
-        const pnlPercent = ((quantity * price - costBasis) / costBasis) * 100;
-        if (pnlPercent < minPnl) continue;
+        const avgBuy = Number(position.avgBuyPrice);
+        const investedUsd = quantity * avgBuy;
+        if (investedUsd <= 0) continue;
 
-        const displayName = formatPublicAccountLabel(
-          portfolio.user.name,
-          portfolio.user.email,
-        );
+        const currentValue = quantity * price;
+        const pnlUsd = currentValue - investedUsd;
+        const pnlPercent = (pnlUsd / investedUsd) * 100;
+
+        const isWin = pnlPercent >= minWin;
+        const isLoss = pnlPercent <= -minLoss;
+        if (!isWin && !isLoss) continue;
+
+        const displayName = portfolio.user.twitterHandle
+          ? `@${portfolio.user.twitterHandle.replace(/^@/, '')}`
+          : formatPublicAccountLabel(portfolio.user.name, portfolio.user.email);
 
         const feedPost = await this.prisma.feedPost.findFirst({
           where: {
@@ -142,27 +162,43 @@ export class SocialSignalsService {
           select: { initialComment: true },
         });
 
+        const founderUpdate = await this.prisma.founderUpdate.findFirst({
+          where: { projectId: project.id, externalId: { not: null } },
+          orderBy: { publishedAt: 'desc' },
+          select: { externalId: true },
+        });
+
+        const founderHandle = project.founder?.twitterUrl
+          ? extractTwitterHandle(project.founder.twitterUrl)
+          : null;
+
+        const roundedPct = Math.round(Math.abs(pnlPercent));
+        const titleEmoji = isWin ? '🚀' : '📉';
+        const sign = isWin ? '+' : '−';
+
         await this.notifications.notifyAllUsers({
-          type: 'TRADER_WIN',
-          title: `🔥 ${displayName} +${Math.round(pnlPercent)}% on $${project.ticker}`,
-          body: `Paper trader hit ${Math.round(pnlPercent)}% on a doxxed founder project. View portfolio and thesis.`,
+          type: isWin ? 'TRADER_WIN' : 'TRADER_LOSS',
+          title: `${titleEmoji} ${displayName} ${sign}${roundedPct}% on $${project.ticker}`,
+          body: `${fmtUsd(investedUsd)} on this position · ${sign}${fmtUsd(Math.abs(pnlUsd))} P&L. See thesis on their portfolio.`,
           link: `/portfolio/${portfolio.user.id}`,
         });
         notified += 1;
 
         if (this.xPosting.isConfigured()) {
-          const result = await this.xPosting.postTraderWin({
+          const result = await this.xPosting.postTraderConviction({
             userId: portfolio.user.id,
             displayName,
             projectId: project.id,
             projectName: project.name,
             ticker: project.ticker,
             slug: project.slug,
+            investedUsd,
+            pnlUsd,
             pnlPercent,
             thesis: feedPost?.initialComment ?? null,
             founderName: project.founder?.name ?? null,
-            founderVideoUrl: project.founder?.videoUrl ?? null,
-            founderTwitter: project.founder?.twitterUrl ?? null,
+            founderHandle: founderHandle ? `@${founderHandle}` : null,
+            founderTweetId: founderUpdate?.externalId ?? null,
           });
           if (result.ok) posted += 1;
         }
@@ -172,9 +208,19 @@ export class SocialSignalsService {
     return { notified, posted };
   }
 
+  /** @deprecated use scanTraderResults */
+  async scanTraderWins() {
+    return this.scanTraderResults();
+  }
+
   async runDailySocialJob() {
     const trending = await this.scanTrendingBuys();
-    const wins = await this.scanTraderWins();
+    const wins = await this.scanTraderResults();
     return { trending, wins };
   }
+}
+
+function fmtUsd(value: number): string {
+  if (value >= 1000) return `$${Math.round(value).toLocaleString('en-US')}`;
+  return `$${value.toFixed(0)}`;
 }
