@@ -1,0 +1,23 @@
+name: X social daily sync
+
+on:
+  schedule:
+    # 09:00 UTC daily — founder reads + trending + trader wins on @Bitbro4crypto
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run daily X automation
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          ADMIN_SYNC_JWT: ${{ secrets.ADMIN_SYNC_JWT }}
+        run: node scripts/run-x-social-daily.mjs

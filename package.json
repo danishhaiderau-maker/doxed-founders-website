@@ -34,6 +34,8 @@
     "fix:google-live": "powershell -ExecutionPolicy Bypass -File scripts/fix-google-oauth-live.ps1",
     "sync:founder-updates": "node scripts/sync-founder-updates.mjs",
     "sync:x-social-daily": "node scripts/run-x-social-daily.mjs",
+    "bootstrap:x-automation": "powershell -ExecutionPolicy Bypass -File scripts/bootstrap-x-automation.ps1",
+    "apply:railway-x": "powershell -ExecutionPolicy Bypass -File scripts/apply-railway-x-vars.ps1",
     "setup:x-api": "powershell -ExecutionPolicy Bypass -File scripts/setup-x-api.ps1",
     "db:verify": "tsx scripts/verify-seed.mjs",
     "setup": "powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1",
