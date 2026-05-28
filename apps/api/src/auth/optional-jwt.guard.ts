@@ -1,8 +1,8 @@
-import { ExecutionContext, Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AuthUser } from './auth.types';
 
-/** Attaches user when Bearer token is valid; never blocks anonymous requests. */
+/** Attaches user when Bearer token is valid; anonymous OK without token; invalid token → 401. */
 @Injectable()
 export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
   canActivate(context: ExecutionContext) {
@@ -11,11 +11,15 @@ export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
     if (!auth?.startsWith('Bearer ')) {
       return true;
     }
-    return (super.canActivate(context) as Promise<boolean>).catch(() => true);
+    return super.canActivate(context) as Promise<boolean>;
   }
 
-  handleRequest<TUser = AuthUser>(err: unknown, user: TUser): TUser | null {
-    if (err || !user) return null;
+  handleRequest<TUser = AuthUser>(err: unknown, user: TUser): TUser {
+    if (err || !user) {
+      throw new UnauthorizedException(
+        'Session expired or invalid. Sign in again to link scout points to your account.',
+      );
+    }
     return user;
   }
 }

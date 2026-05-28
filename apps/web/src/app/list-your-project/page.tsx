@@ -127,6 +127,11 @@ export default function ListYourProjectPage() {
       return;
     }
 
+    if (!session?.accessToken) {
+      setError('Sign in first so scout points link to your account.');
+      return;
+    }
+
     if (!form.whyList?.trim() || !form.whyDoxxed?.trim()) {
       setError(
         'Explain why this project should be listed and why the founder is doxxed. This goes on the public scout vote board.',
