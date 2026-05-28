@@ -1,0 +1,25 @@
+# Copy each block into the matching dashboard (Railway / Vercel).
+# Replace placeholders after deploy.
+
+# ─── RAILWAY (API service → Variables) ───
+DATABASE_URL=YOUR_NEON_DATABASE_URL
+JWT_SECRET=YOUR_JWT_SECRET
+PRISMA_DB_PUSH=true
+PRISMA_SCHEMA=prisma/schema.prisma
+NODE_ENV=production
+CORS_ORIGINS=YOUR_VERCEL_URL
+
+# ─── VERCEL (Project → Settings → Environment Variables) ───
+NEXT_PUBLIC_API_URL=YOUR_RAILWAY_URL
+API_URL=YOUR_RAILWAY_URL
+NEXTAUTH_URL=YOUR_VERCEL_URL
+NEXTAUTH_SECRET=YOUR_NEXTAUTH_SECRET
+GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET=YOUR_GOOGLE_CLIENT_SECRET
+
+# ─── GOOGLE CLOUD (OAuth client → add URIs) ───
+# Authorized JavaScript origin: YOUR_VERCEL_URL
+# Authorized redirect URI: YOUR_VERCEL_URL/api/auth/callback/google
+
+# ─── AFTER FIRST SUCCESSFUL RAILWAY DEPLOY ───
+# Delete PRISMA_DB_PUSH from Railway variables

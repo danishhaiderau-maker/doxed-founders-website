@@ -48,3 +48,7 @@ coverage/
 
 # Docker
 docker/data/
+
+.vercel
+.env.vercel.prod
+apps/web/.env.vercel.prod
