@@ -89,6 +89,11 @@ if (twitterClientId && twitterClientSecret) {
       clientId: twitterClientId,
       clientSecret: twitterClientSecret,
       version: '2.0',
+      authorization: {
+        params: {
+          scope: 'users.read tweet.read offline.access',
+        },
+      },
     }),
   );
 }
