@@ -51,7 +51,9 @@ docker/data/
 
 .vercel
 .env.vercel.prod
+apps/.env.vercel.prod
 apps/web/.env.vercel.prod
 .env.prod.rotate
 apps/.env.prod.rotate
 .env.x.secrets
+railway-x-paste.env
