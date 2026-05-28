@@ -44,13 +44,19 @@ if (!token) {
   process.exit(1);
 }
 
+const adminPassword = process.env.ADMIN_PASSWORD?.trim();
+if (!adminPassword) {
+  console.error('Set ADMIN_PASSWORD (min 12 characters) — never commit passwords to git.');
+  process.exit(1);
+}
+
 const apiUrl = 'https://doxed-founders-website-production.up.railway.app';
 const loginRes = await fetch(`${apiUrl}/api/auth/login`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     email: 'admin@doxedcryptofounder.local',
-    password: process.env.ADMIN_PASSWORD || 'DcfSyncTest2026!X',
+    password: adminPassword,
   }),
 });
 if (!loginRes.ok) {

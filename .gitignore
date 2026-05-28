@@ -56,4 +56,5 @@ apps/web/.env.vercel.prod
 .env.prod.rotate
 apps/.env.prod.rotate
 .env.x.secrets
+.env.admin-rotate
 railway-x-paste.env
