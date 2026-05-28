@@ -1,14 +1,16 @@
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import GoogleProvider from 'next-auth/providers/google';
+import TwitterProvider from 'next-auth/providers/twitter';
 import { apiUrl } from './api-base';
 
 async function syncOAuthWithApi(input: {
   email: string;
   name?: string | null;
   avatarUrl?: string | null;
-  provider: 'google';
+  provider: 'google' | 'twitter';
   providerId: string;
+  twitterHandle?: string | null;
 }) {
   const res = await fetch(apiUrl('/auth/oauth', true), {
     method: 'POST',
@@ -76,6 +78,21 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   );
 }
 
+const twitterClientId =
+  process.env.TWITTER_CLIENT_ID?.trim() || process.env.TWITTER_API_KEY?.trim();
+const twitterClientSecret =
+  process.env.TWITTER_CLIENT_SECRET?.trim() || process.env.TWITTER_API_SECRET?.trim();
+
+if (twitterClientId && twitterClientSecret) {
+  providers.push(
+    TwitterProvider({
+      clientId: twitterClientId,
+      clientSecret: twitterClientSecret,
+      version: '2.0',
+    }),
+  );
+}
+
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: 'jwt',
@@ -85,7 +102,7 @@ export const authOptions: NextAuthOptions = {
   },
   providers,
   callbacks: {
-    async signIn({ user, account }) {
+    async signIn({ user, account, profile }) {
       if (account?.provider === 'google') {
         if (!user.email || !account.providerAccountId) {
           return false;
@@ -107,6 +124,39 @@ export const authOptions: NextAuthOptions = {
         user.role = data.user.role;
         user.accessToken = data.accessToken;
       }
+
+      if (account?.provider === 'twitter') {
+        if (!account.providerAccountId) {
+          return false;
+        }
+
+        const twitterProfile = profile as {
+          data?: { username?: string; name?: string; profile_image_url?: string };
+        } | null;
+        const handle = twitterProfile?.data?.username;
+        const email =
+          user.email?.trim() ||
+          `twitter-${account.providerAccountId}@users.doxedcryptofounder.local`;
+
+        const data = await syncOAuthWithApi({
+          email,
+          name: user.name ?? twitterProfile?.data?.name ?? handle ?? null,
+          avatarUrl: user.image ?? twitterProfile?.data?.profile_image_url ?? null,
+          provider: 'twitter',
+          providerId: account.providerAccountId,
+          twitterHandle: handle ?? null,
+        });
+
+        if (!data) {
+          return false;
+        }
+
+        user.id = data.user.id;
+        user.role = data.user.role;
+        user.accessToken = data.accessToken;
+        user.email = data.user.email;
+      }
+
       return true;
     },
     async jwt({ token, user }) {
@@ -132,5 +182,6 @@ export const authOptions: NextAuthOptions = {
 export function getEnabledOAuthProviders() {
   return {
     google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    twitter: Boolean(twitterClientId && twitterClientSecret),
   };
 }

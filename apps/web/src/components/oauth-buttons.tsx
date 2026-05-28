@@ -4,18 +4,23 @@ import { signIn } from 'next-auth/react';
 
 interface OAuthButtonsProps {
   callbackUrl?: string;
-  enabled?: { google: boolean };
+  enabled?: { google: boolean; twitter?: boolean };
   nextAuthUrl?: string;
+  /** Prefer X login for paper trading / public track record */
+  preferTwitter?: boolean;
 }
 
 export function OAuthButtons({
   callbackUrl = '/',
-  enabled = { google: false },
+  enabled = { google: false, twitter: false },
   nextAuthUrl = 'http://localhost:3000',
+  preferTwitter = false,
 }: OAuthButtonsProps) {
-  const redirectUri = `${nextAuthUrl.replace(/\/$/, '')}/api/auth/callback/google`;
+  const googleRedirect = `${nextAuthUrl.replace(/\/$/, '')}/api/auth/callback/google`;
+  const hasTwitter = Boolean(enabled.twitter);
+  const hasGoogle = Boolean(enabled.google);
 
-  if (!enabled.google) {
+  if (!hasTwitter && !hasGoogle) {
     return (
       <div className="space-y-3">
         <button
@@ -23,38 +28,63 @@ export function OAuthButtons({
           disabled
           className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-zinc-800/50 py-3 text-sm font-medium text-zinc-400"
         >
-          <GoogleIcon />
-          Continue with Google
+          <XIcon />
+          Continue with X
         </button>
         <p className="rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
-          One-time setup: run{' '}
-          <code className="text-white">npm run setup:google</code> and paste OAuth credentials
-          from{' '}
-          <a
-            href="https://console.cloud.google.com/apis/credentials"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[var(--color-accent)] hover:underline"
-          >
-            Google Cloud Console
-          </a>
-          . Add redirect URI{' '}
-          <code className="break-all text-white">{redirectUri}</code>. Until then, register with
-          your Gmail using email + password below.
+          Add <code className="text-white">TWITTER_CLIENT_ID</code> and{' '}
+          <code className="text-white">TWITTER_CLIENT_SECRET</code> on Vercel (same X app as API), or
+          use email sign-up below.
         </p>
       </div>
     );
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => signIn('google', { callbackUrl })}
-      className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-white py-3 text-sm font-medium text-zinc-900 hover:bg-zinc-100"
-    >
-      <GoogleIcon />
-      Continue with Google
-    </button>
+    <div className="space-y-3">
+      {preferTwitter && hasTwitter && (
+        <p className="text-center text-xs text-amber-200/90">
+          Sign in with X — your paper trades link to your public handle. Talent over deep pockets.
+        </p>
+      )}
+      {hasTwitter && (
+        <button
+          type="button"
+          onClick={() => signIn('twitter', { callbackUrl })}
+          className={`flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold ${
+            preferTwitter
+              ? 'bg-white text-black hover:bg-zinc-100'
+              : 'border border-[var(--color-border)] bg-[#0a0a0a] text-white hover:border-emerald-400'
+          }`}
+        >
+          <XIcon />
+          Continue with X
+        </button>
+      )}
+      {hasGoogle && (
+        <button
+          type="button"
+          onClick={() => signIn('google', { callbackUrl })}
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-white py-3 text-sm font-medium text-zinc-900 hover:bg-zinc-100"
+        >
+          <GoogleIcon />
+          Continue with Google
+        </button>
+      )}
+      {hasGoogle && !hasTwitter && (
+        <p className="text-[10px] text-[var(--color-muted)]">
+          Google redirect: <code className="break-all text-white">{googleRedirect}</code>
+        </p>
+      )}
+    </div>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+    </svg>
   );
 }
 

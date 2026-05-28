@@ -40,7 +40,7 @@ export function LandingPage() {
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(16,185,129,0.12)_0%,_transparent_55%)]" />
         <div className="relative mx-auto max-w-6xl px-6 py-20 md:py-28">
           <p className="text-sm font-medium uppercase tracking-widest text-amber-300/90">
-            Don&apos;t trust hype. Trust reputation.
+            Talent over deep pockets.
           </p>
           <h2 className="mt-4 max-w-3xl text-4xl font-bold leading-tight tracking-tight md:text-6xl">
             Would you send money to a stranger?
@@ -49,9 +49,10 @@ export function LandingPage() {
             </span>
           </h2>
           <p className="mt-6 max-w-2xl text-lg text-[var(--color-muted)]">
-            Discover crypto projects backed by transparent founders, real builders, and strong
-            communities. Trade with paper money. Post your thesis. Earn reputation. Build conviction
-            before you risk capital.
+            Crypto rewards whales and influencers. We reward{' '}
+            <strong className="text-white">skill, scouting, and conviction</strong>. Paper trade
+            with $10,000 virtual cash — no wallet size required. Sign in with X and show your
+            track record in public.
           </p>
           <div className="mt-10 flex flex-wrap gap-4">
             <Link
@@ -74,9 +75,54 @@ export function LandingPage() {
             </Link>
           </div>
           <p className="mt-6 text-xs text-[var(--color-muted)]">
-            Season 1 beta · Top contributors build public reputation · Genesis roles for early
-            believers
+            Don&apos;t trust hype. Trust reputation. · Blow $10k paper?{' '}
+            <Link href="/busted" className="text-red-300/90 hover:underline">
+              Poor judgment hall
+            </Link>{' '}
+            · Season 1 beta
           </p>
+        </div>
+      </section>
+
+      {/* Paper trading — talent not wallets */}
+      <section className="border-b border-[var(--color-border)]/60 bg-gradient-to-b from-emerald-950/15 to-transparent py-16">
+        <div className="mx-auto max-w-6xl px-6 text-center">
+          <h3 className="text-2xl font-bold md:text-3xl">
+            Deep pockets don&apos;t make you right.
+          </h3>
+          <p className="mx-auto mt-4 max-w-2xl text-[var(--color-muted)]">
+            Paper trading proves who can actually pick doxxed founders — before real money is on the
+            line. Sign in with X. Post your thesis. Win reputation. Or join the hall of shame.
+          </p>
+          <div className="mt-8 grid gap-4 sm:grid-cols-3">
+            {[
+              ['Talent > capital', 'Everyone starts with $10,000 paper. Same playing field.'],
+              ['Sign in with X', 'Your handle ties to your public portfolio — wins and wipes.'],
+              ['Scout & earn', 'Find doxxed gems first. Top scouts earn 1,000+ reputation pts.'],
+            ].map(([title, body]) => (
+              <div
+                key={title}
+                className="rounded-xl border border-emerald-500/20 bg-black/30 px-4 py-5 text-left"
+              >
+                <p className="font-semibold text-emerald-300">{title}</p>
+                <p className="mt-2 text-sm text-[var(--color-muted)]">{body}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-8 flex flex-wrap justify-center gap-4">
+            <Link
+              href="/login?callbackUrl=/paper-trading"
+              className="rounded-lg bg-white px-6 py-3 text-sm font-semibold text-black hover:bg-zinc-100"
+            >
+              Sign in with X — paper trade
+            </Link>
+            <Link
+              href="/busted"
+              className="rounded-lg border border-red-500/40 px-6 py-3 text-sm text-red-200 hover:border-red-400"
+            >
+              Who blew $10k? →
+            </Link>
+          </div>
         </div>
       </section>
 

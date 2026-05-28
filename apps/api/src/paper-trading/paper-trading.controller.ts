@@ -57,6 +57,11 @@ export class PaperTradingController {
     return this.paperTrading.getLeaderboard();
   }
 
+  @Get('busted')
+  busted() {
+    return this.paperTrading.getBustedTraders();
+  }
+
   @Get('reset-info')
   resetInfo() {
     return this.paperTrading.getResetInfo();

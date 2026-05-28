@@ -23,7 +23,10 @@ export default function LeaderboardPage() {
         </Link>
         <h1 className="mt-6 text-3xl font-bold">Paper Trading Leaderboard</h1>
         <p className="mt-2 text-[var(--color-muted)]">
-          Ranked by total portfolio value. Everyone starts with $10,000 virtual cash.
+          Ranked by total portfolio value. Everyone starts with $10,000 virtual cash.{' '}
+          <Link href="/busted" className="text-red-300 hover:underline">
+            See who wiped out →
+          </Link>
         </p>
 
         {error && <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>}
@@ -64,6 +67,16 @@ export default function LeaderboardPage() {
                     >
                       {entry.displayName}
                     </Link>
+                    {entry.twitterHandle && (
+                      <a
+                        href={`https://x.com/${entry.twitterHandle}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-2 text-xs text-sky-400 hover:underline"
+                      >
+                        @{entry.twitterHandle}
+                      </a>
+                    )}
                   </td>
                   <td className="px-4 py-3">{formatUsd(entry.totalValue)}</td>
                   <td
