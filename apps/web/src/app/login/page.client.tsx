@@ -124,10 +124,10 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
 function oauthErrorMessage(code: string): string {
   switch (code) {
     case 'OAuthCallback':
-      return 'X sign-in failed after authorization. In the X Developer Portal, confirm OAuth 2.0 Client ID + Client Secret (from User authentication settings, not API Key) and callback URL https://doxxedcrypto.digital/api/auth/callback/twitter';
+      return 'X sign-in failed after authorization. We use your X API Key + Secret for login (OAuth 1.0a). In the X Developer Portal, enable 3-legged OAuth and set callback https://doxxedcrypto.digital/api/auth/callback/twitter';
     case 'OAuthSignin':
     case 'twitter':
-      return 'Could not start X sign-in. Check TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET on Vercel (OAuth 2.0 keys from User authentication settings).';
+      return 'Could not start X sign-in. Check TWITTER_API_KEY and TWITTER_API_SECRET on Vercel (from X Developer Portal → Keys and tokens).';
     case 'AccessDenied':
       return 'X sign-in was denied or our server could not finish linking your account. Try again, or use Google / email login.';
     case 'Configuration':

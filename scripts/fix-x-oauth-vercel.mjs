@@ -42,19 +42,16 @@ function setVercel(name, value) {
 }
 
 const env = readEnv(secretsPath);
-if (!env.TWITTER_CLIENT_ID || !env.TWITTER_CLIENT_SECRET) {
-  console.error('Missing TWITTER_CLIENT_ID / TWITTER_CLIENT_SECRET in .env.x.secrets');
-  process.exit(1);
-}
-
-if (env.TWITTER_CLIENT_ID === env.TWITTER_API_KEY) {
-  console.error('TWITTER_CLIENT_ID equals TWITTER_API_KEY — use OAuth 2.0 Client ID from User authentication settings');
+if (!env.TWITTER_API_KEY || !env.TWITTER_API_SECRET) {
+  console.error('Missing TWITTER_API_KEY / TWITTER_API_SECRET in .env.x.secrets (required for X login)');
   process.exit(1);
 }
 
 console.log('=== Fix X OAuth on Vercel ===\n');
 
 const vars = {
+  TWITTER_API_KEY: env.TWITTER_API_KEY,
+  TWITTER_API_SECRET: env.TWITTER_API_SECRET,
   TWITTER_CLIENT_ID: env.TWITTER_CLIENT_ID,
   TWITTER_CLIENT_SECRET: env.TWITTER_CLIENT_SECRET,
   API_URL: env.API_URL || 'https://doxed-founders-website-production.up.railway.app',
