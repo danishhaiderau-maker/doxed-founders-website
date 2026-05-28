@@ -14,6 +14,7 @@ interface LoginPageClientProps {
 export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPageClientProps) {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') ?? '/';
+  const oauthError = searchParams.get('error');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +54,11 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
         </p>
 
         <div className="mt-8">
+          {oauthError && (
+            <p className="mb-4 rounded-lg border border-red-500/40 bg-red-950/30 p-3 text-sm text-red-200">
+              {oauthErrorMessage(oauthError)}
+            </p>
+          )}
           <OAuthButtons
             callbackUrl={callbackUrl}
             enabled={oauthEnabled}
@@ -113,4 +119,20 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
       </div>
     </main>
   );
+}
+
+function oauthErrorMessage(code: string): string {
+  switch (code) {
+    case 'OAuthCallback':
+      return 'X sign-in failed after authorization. In the X Developer Portal, confirm OAuth 2.0 Client ID + Client Secret (from User authentication settings, not API Key) and callback URL https://doxxedcrypto.digital/api/auth/callback/twitter';
+    case 'OAuthSignin':
+    case 'twitter':
+      return 'Could not start X sign-in. Check TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET on Vercel (OAuth 2.0 keys from User authentication settings).';
+    case 'AccessDenied':
+      return 'X sign-in was denied or our server could not finish linking your account. Try again, or use Google / email login.';
+    case 'Configuration':
+      return 'Login is misconfigured on the server (NEXTAUTH_URL / NEXTAUTH_SECRET). Contact support.';
+    default:
+      return `Sign-in error (${code}). Try again or use Google / email login.`;
+  }
 }

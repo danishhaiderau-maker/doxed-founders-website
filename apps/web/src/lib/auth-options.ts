@@ -12,13 +12,27 @@ async function syncOAuthWithApi(input: {
   providerId: string;
   twitterHandle?: string | null;
 }) {
+  const payload: Record<string, string | null | undefined> = {
+    email: input.email,
+    name: input.name ?? undefined,
+    avatarUrl: input.avatarUrl ?? undefined,
+    provider: input.provider,
+    providerId: input.providerId,
+  };
+  const handle = input.twitterHandle?.replace(/^@/, '').trim();
+  if (handle) payload.twitterHandle = handle;
+
   const res = await fetch(apiUrl('/auth/oauth', true), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(
+      `[auth] OAuth sync failed (${input.provider}): ${res.status} ${body.slice(0, 400)}`,
+    );
     return null;
   }
 
@@ -26,6 +40,20 @@ async function syncOAuthWithApi(input: {
     accessToken: string;
     user: { id: string; email: string; name: string | null; role: string };
   }>;
+}
+
+async function fetchTwitterHandle(accessToken: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      'https://api.twitter.com/2/users/me?user.fields=username,profile_image_url',
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: { username?: string } };
+    return data.data?.username?.replace(/^@/, '') ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const providers: NextAuthOptions['providers'] = [
@@ -92,6 +120,11 @@ if (twitterClientId && twitterClientSecret) {
           scope: 'users.read tweet.read offline.access',
         },
       },
+      userinfo: {
+        params: {
+          'user.fields': 'profile_image_url,username',
+        },
+      },
     }),
   );
 }
@@ -102,10 +135,11 @@ export const authOptions: NextAuthOptions = {
   },
   pages: {
     signIn: '/login',
+    error: '/login',
   },
   providers,
   callbacks: {
-    async signIn({ user, account, profile }) {
+    async signIn({ user, account }) {
       if (account?.provider === 'google') {
         if (!user.email || !account.providerAccountId) {
           return false;
@@ -133,21 +167,22 @@ export const authOptions: NextAuthOptions = {
           return false;
         }
 
-        const twitterProfile = profile as {
-          data?: { username?: string; name?: string; profile_image_url?: string };
-        } | null;
-        const handle = twitterProfile?.data?.username;
+        let handle: string | null = null;
+        if (account.access_token) {
+          handle = await fetchTwitterHandle(account.access_token);
+        }
+
         const email =
           user.email?.trim() ||
           `twitter-${account.providerAccountId}@users.doxedcryptofounder.local`;
 
         const data = await syncOAuthWithApi({
           email,
-          name: user.name ?? twitterProfile?.data?.name ?? handle ?? null,
-          avatarUrl: user.image ?? twitterProfile?.data?.profile_image_url ?? null,
+          name: user.name ?? (handle ? `@${handle}` : null),
+          avatarUrl: user.image ?? null,
           provider: 'twitter',
           providerId: account.providerAccountId,
-          twitterHandle: handle ?? null,
+          twitterHandle: handle,
         });
 
         if (!data) {
