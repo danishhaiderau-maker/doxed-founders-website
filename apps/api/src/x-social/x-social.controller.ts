@@ -1,7 +1,9 @@
-import { Controller, Post, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Public } from '../auth/public.decorator';
 import { AdminGuard } from '../auth/guards';
 import { SocialSignalsService } from './social-signals.service';
 import { XPostingService } from './x-posting.service';
+import { getXAutomationStatus } from './x-social-status.util';
 
 @Controller('x-social')
 export class XSocialController {
@@ -9,6 +11,12 @@ export class XSocialController {
     private readonly signals: SocialSignalsService,
     private readonly xPosting: XPostingService,
   ) {}
+
+  @Public()
+  @Get('status')
+  status() {
+    return getXAutomationStatus();
+  }
 
   @UseGuards(AdminGuard)
   @Post('daily-run')
