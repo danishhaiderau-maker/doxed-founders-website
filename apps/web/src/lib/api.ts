@@ -471,6 +471,48 @@ export function fetchLeaderboard() {
   return apiFetch<LeaderboardEntry[]>('/paper-trading/leaderboard');
 }
 
+export interface ReputationLeaderboardEntry {
+  rank: number;
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  reputationPoints: number;
+  contributorLevel: number;
+  airdropPoolPercent: number;
+  supplyPercent: number;
+  estimatedTokens: number;
+  estimatedUsd: number;
+}
+
+export interface ReputationMe {
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  reputationPoints: number;
+  contributorLevel: number;
+  rank: number | null;
+  totalParticipants: number;
+  totalPoints: number;
+  airdropPoolPercent: number;
+  supplyPercent: number;
+  estimatedTokens: number;
+  estimatedUsd: number;
+}
+
+export interface ReputationLeaderboardResponse {
+  entries: ReputationLeaderboardEntry[];
+  totalParticipants: number;
+  totalPoints: number;
+}
+
+export function fetchReputationLeaderboard(limit = 50) {
+  return apiFetch<ReputationLeaderboardResponse>(`/reputation/leaderboard?limit=${limit}`);
+}
+
+export function fetchReputationMe(token: string) {
+  return apiFetch<ReputationMe>('/reputation/me', undefined, token);
+}
+
 export function fetchBustedTraders() {
   return apiFetch<BustedTraderEntry[]>('/paper-trading/busted');
 }

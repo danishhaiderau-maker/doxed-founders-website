@@ -10,6 +10,7 @@ import { HealthModule } from './health/health.module';
 import { ListingApplicationsModule } from './listing-applications/listing-applications.module';
 import { PaperTradingModule } from './paper-trading/paper-trading.module';
 import { ProjectsModule } from './projects/projects.module';
+import { ReputationModule } from './reputation/reputation.module';
 import { WatchlistModule } from './watchlist/watchlist.module';
 import { FounderUpdatesModule } from './founder-updates/founder-updates.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -37,6 +38,7 @@ import { XSocialModule } from './x-social/x-social.module';
     FeedModule,
     ProjectsModule,
     WatchlistModule,
+    ReputationModule,
   ],
   providers: [
     {
