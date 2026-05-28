@@ -3,7 +3,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 # Monorepo: install and build NestJS API only
-COPY package.json package-lock.json turbo.json ./
+COPY package.json package-lock.json turbo.json tsconfig.base.json ./
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
