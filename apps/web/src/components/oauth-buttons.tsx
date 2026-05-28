@@ -32,9 +32,10 @@ export function OAuthButtons({
           Continue with X
         </button>
         <p className="rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
-          Add <code className="text-white">TWITTER_CLIENT_ID</code> and{' '}
-          <code className="text-white">TWITTER_CLIENT_SECRET</code> on Vercel (same X app as API), or
-          use email sign-up below.
+          In X Developer Portal → your app → <strong className="text-white">User authentication settings</strong>{' '}
+          → generate OAuth 2.0 <strong className="text-white">Client ID</strong> and{' '}
+          <strong className="text-white">Client Secret</strong> (not the API Key). Callback:{' '}
+          <code className="break-all text-white">{nextAuthUrl.replace(/\/$/, '')}/api/auth/callback/twitter</code>
         </p>
       </div>
     );
