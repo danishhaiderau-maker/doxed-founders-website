@@ -11,6 +11,9 @@ import { ListingApplicationsModule } from './listing-applications/listing-applic
 import { PaperTradingModule } from './paper-trading/paper-trading.module';
 import { ProjectsModule } from './projects/projects.module';
 import { WatchlistModule } from './watchlist/watchlist.module';
+import { FounderUpdatesModule } from './founder-updates/founder-updates.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { PointsModule } from './points/points.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
@@ -21,6 +24,9 @@ import { PrismaModule } from './prisma/prisma.module';
     }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
     PrismaModule,
+    PointsModule,
+    NotificationsModule,
+    FounderUpdatesModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

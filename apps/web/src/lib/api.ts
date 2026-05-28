@@ -249,6 +249,8 @@ export function fetchPaperPortfolio(userId: string) {
 export interface PublicPortfolio {
   userId: string;
   displayName: string;
+  reputationPoints: number;
+  contributorLevel: number;
   cashBalance: number;
   totalValue: number;
   pnl: number;
@@ -509,4 +511,77 @@ export function removeFromWatchlist(slug: string, token: string) {
   return apiFetch<{ saved: boolean; slug: string }>(`/watchlist/${slug}`, {
     method: 'DELETE',
   }, token);
+}
+
+export interface SpotlightProject {
+  slug: string;
+  name: string;
+  ticker: string;
+  summary: string | null;
+  logoUrl: string | null;
+  chain: { slug: string; name: string };
+  founder: {
+    slug: string;
+    name: string;
+    twitterUrl: string | null;
+    videoUrl: string | null;
+  } | null;
+  socials: {
+    twitterUrl: string | null;
+  } | null;
+  metrics: ProjectMetrics | null;
+}
+
+export interface FounderUpdate {
+  id: string;
+  sourceUrl: string;
+  headline: string;
+  summary: string | null;
+  publishedAt: string;
+  project: {
+    slug: string;
+    name: string;
+    ticker: string;
+    logoUrl: string | null;
+  } | null;
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    twitterUrl: string | null;
+  } | null;
+}
+
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  link: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export function fetchSpotlightProjects() {
+  return apiFetch<SpotlightProject[]>('/founder-updates/spotlight');
+}
+
+export function fetchPinnedFounderUpdates() {
+  return apiFetch<FounderUpdate[]>('/founder-updates/pinned');
+}
+
+export function fetchNotifications(token: string) {
+  return apiFetch<AppNotification[]>('/notifications', undefined, token);
+}
+
+export function fetchUnreadNotificationCount(token: string) {
+  return apiFetch<{ count: number }>('/notifications/unread-count', undefined, token);
+}
+
+export function markNotificationRead(id: string, token: string) {
+  return apiFetch(`/notifications/${id}/read`, { method: 'PATCH' }, token);
+}
+
+export function markAllNotificationsRead(token: string) {
+  return apiFetch('/notifications/read-all', { method: 'PATCH' }, token);
 }

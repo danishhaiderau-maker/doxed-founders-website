@@ -5,7 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PaperTradeSide, Prisma } from '@prisma/client';
+import { POINTS } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { PointsService } from '../points/points.service';
 import { AddInitialCommentDto, CreateFeedCommentDto } from './dto/feed.dto';
 
 const HIGHLIGHT_HOURS = 6;
@@ -14,7 +16,10 @@ const MAX_HIGHLIGHTED = 3;
 
 @Injectable()
 export class FeedService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly points: PointsService,
+  ) {}
 
   async createPostForTrade(
     paperTradeId: string,
@@ -172,6 +177,8 @@ export class FeedService {
     });
 
     await this.refreshHighlights();
+
+    await this.points.award(dto.userId, POINTS.FEED_COMMENT);
 
     return {
       id: comment.id,

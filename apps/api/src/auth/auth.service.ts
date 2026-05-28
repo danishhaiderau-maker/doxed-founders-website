@@ -6,7 +6,9 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { POINTS } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { PointsService } from '../points/points.service';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
 import { OAuthLoginDto } from './dto/oauth.dto';
 import { AuthResponse, AuthUser, JwtPayload } from './auth.types';
@@ -18,6 +20,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly points: PointsService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -43,7 +46,9 @@ export class AuthService {
       },
     });
 
-    return this.buildAuthResponse(user);
+    await this.points.award(user.id, POINTS.REGISTER);
+
+    return await this.buildAuthResponse(user);
   }
 
   async login(dto: LoginDto): Promise<AuthResponse> {
@@ -62,7 +67,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    return this.buildAuthResponse(user);
+    return await this.buildAuthResponse(user);
   }
 
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {
@@ -82,7 +87,7 @@ export class AuthService {
       if (linked.user.banned) {
         throw new UnauthorizedException('This account has been suspended');
       }
-      return this.buildAuthResponse(linked.user);
+      return await this.buildAuthResponse(linked.user);
     }
 
     const existingUser = await this.prisma.user.findUnique({ where: { email } });
@@ -120,7 +125,7 @@ export class AuthService {
         data: updates,
       });
 
-      return this.buildAuthResponse(user);
+      return await this.buildAuthResponse(user);
     }
 
     const user = await this.prisma.user.create({
@@ -145,7 +150,9 @@ export class AuthService {
       },
     });
 
-    return this.buildAuthResponse(user);
+    await this.points.award(user.id, POINTS.REGISTER);
+
+    return await this.buildAuthResponse(user);
   }
 
   async validatePayload(payload: JwtPayload): Promise<AuthUser | null> {
@@ -157,6 +164,8 @@ export class AuthService {
         name: true,
         role: true,
         banned: true,
+        reputationPoints: true,
+        contributorLevel: true,
       },
     });
 
@@ -169,6 +178,8 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      reputationPoints: user.reputationPoints,
+      contributorLevel: user.contributorLevel,
     };
   }
 
@@ -181,6 +192,8 @@ export class AuthService {
         name: true,
         role: true,
         banned: true,
+        reputationPoints: true,
+        contributorLevel: true,
       },
     });
 
@@ -193,15 +206,18 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      reputationPoints: user.reputationPoints,
+      contributorLevel: user.contributorLevel,
     };
   }
 
-  private buildAuthResponse(user: {
+  private async buildAuthResponse(user: {
     id: string;
     email: string;
     name: string | null;
     role: UserRole;
-  }): AuthResponse {
+  }): Promise<AuthResponse> {
+    const profile = await this.getProfile(user.id);
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
@@ -211,12 +227,7 @@ export class AuthService {
     const accessToken = this.jwt.sign(payload);
     return {
       accessToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-      },
+      user: profile,
     };
   }
 }

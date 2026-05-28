@@ -1,0 +1,10 @@
+{
+  "name": "DoxedCryptoFounder",
+  "short_name": "DoxedFounders",
+  "description": "The reputation layer for crypto — verified founders, paper trading, and community conviction.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050508",
+  "theme_color": "#10b981",
+  "orientation": "portrait-primary"
+}

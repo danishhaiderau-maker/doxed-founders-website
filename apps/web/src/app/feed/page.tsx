@@ -9,8 +9,10 @@ import { formatUsd } from '@dcf/utils';
 import {
   FeedComment,
   FeedPost,
+  FounderUpdate,
   fetchFeed,
   fetchFeedComments,
+  fetchPinnedFounderUpdates,
   postFeedComment,
   postInitialFeedComment,
 } from '@/lib/api';
@@ -44,6 +46,7 @@ export default function FeedPage() {
   const [filter, setFilter] = useState<Filter>('recent');
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [highlighted, setHighlighted] = useState<FeedPost[]>([]);
+  const [pinnedUpdates, setPinnedUpdates] = useState<FounderUpdate[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -65,7 +68,15 @@ export default function FeedPage() {
 
   useEffect(() => {
     load(filter);
-    const interval = setInterval(() => load(filter), 60000);
+    fetchPinnedFounderUpdates()
+      .then(setPinnedUpdates)
+      .catch(() => setPinnedUpdates([]));
+    const interval = setInterval(() => {
+      load(filter);
+      fetchPinnedFounderUpdates()
+        .then(setPinnedUpdates)
+        .catch(() => setPinnedUpdates([]));
+    }, 60000);
     return () => clearInterval(interval);
   }, [filter, load]);
 
@@ -85,6 +96,53 @@ export default function FeedPage() {
 
       <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 md:grid-cols-[1fr_320px] md:px-6">
         <div>
+          {pinnedUpdates.length > 0 && (
+            <section className="mb-6 rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-300">
+                📌 Pinned · Doxxed founder updates (X)
+              </h2>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                Refreshed every 6 hours when X API sync is enabled · project-relevant only
+              </p>
+              <div className="mt-4 space-y-3">
+                {pinnedUpdates.map((update) => (
+                  <article
+                    key={update.id}
+                    className="rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-card)] p-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
+                      {update.project && (
+                        <Link
+                          href={`/project/${update.project.slug}`}
+                          className="font-semibold text-emerald-300 hover:underline"
+                        >
+                          {update.project.name} ({update.project.ticker})
+                        </Link>
+                      )}
+                      {update.founder && <span>· {update.founder.name}</span>}
+                    </div>
+                    <p className="mt-2 text-sm font-semibold leading-snug tracking-wide text-white">
+                      {update.headline}
+                    </p>
+                    {update.summary && (
+                      <p className="mt-2 line-clamp-2 text-xs text-[var(--color-muted)]">
+                        {update.summary}
+                      </p>
+                    )}
+                    <a
+                      href={update.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-3 inline-block text-xs text-[var(--color-accent)] hover:underline"
+                    >
+                      View on X →
+                    </a>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
           {highlighted.length > 0 && filter !== 'highlighted' && (
             <section className="mb-6">
               <div className="mb-3 flex items-center justify-between">

@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { slugify, formatPublicAccountLabel } from '@dcf/utils';
+import { slugify, formatPublicAccountLabel, POINTS } from '@dcf/utils';
 import {
   AnalyticsEventType,
   LeaderboardPeriod,
@@ -17,6 +17,7 @@ import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import { parseDexScreenerUrl } from '../dexscreener/dexscreener.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from '../feed/feed.service';
+import { PointsService } from '../points/points.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 
 const STARTING_CASH = 10_000;
@@ -28,6 +29,7 @@ export class PaperTradingService {
     private readonly dexscreener: DexscreenerService,
     private readonly feedService: FeedService,
     private readonly analytics: AnalyticsService,
+    private readonly points: PointsService,
   ) {}
 
   async createSession(displayName?: string) {
@@ -94,7 +96,7 @@ export class PaperTradingService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { name: true, email: true },
+      select: { name: true, email: true, reputationPoints: true, contributorLevel: true },
     });
 
     const positions = await Promise.all(
@@ -144,6 +146,8 @@ export class PaperTradingService {
       userId,
       accountName: user?.name ?? null,
       accountEmail: user?.email ?? null,
+      reputationPoints: user?.reputationPoints ?? 0,
+      contributorLevel: user?.contributorLevel ?? 1,
       cashBalance,
       totalValue,
       pnl,
@@ -166,6 +170,8 @@ export class PaperTradingService {
         portfolio.accountName,
         portfolio.accountEmail,
       ),
+      reputationPoints: portfolio.reputationPoints,
+      contributorLevel: portfolio.contributorLevel,
       cashBalance: portfolio.cashBalance,
       totalValue: portfolio.totalValue,
       pnl: portfolio.pnl,
@@ -543,6 +549,8 @@ export class PaperTradingService {
     );
 
     await this.cleanupInactiveTracking();
+
+    await this.points.award(dto.userId, POINTS.PAPER_TRADE);
 
     return {
       success: true,

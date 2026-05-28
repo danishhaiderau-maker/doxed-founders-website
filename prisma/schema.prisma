@@ -79,6 +79,8 @@ model User {
   emailVerified DateTime?
   banned        Boolean   @default(false)
   bannedReason  String?
+  reputationPoints Int    @default(0)
+  contributorLevel Int    @default(1)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -93,6 +95,7 @@ model User {
   adminActions         AdminAction[]        @relation("AdminActions")
   leaderboardEntries   LeaderboardEntry[]
   oauthAccounts        OAuthAccount[]
+  notifications        Notification[]
 
   @@index([email])
   @@index([role])
@@ -151,6 +154,7 @@ model Founder {
 
   projects      Project[]
   verifications FounderVerification[]
+  founderUpdates FounderUpdate[]
 }
 
 model FounderVerification {
@@ -209,6 +213,7 @@ model Project {
   auditReports  AuditReport[]
   trendingScore TrendingScore?
   analyticsEvents AnalyticsEvent[]
+  founderUpdates FounderUpdate[]
 
   @@index([slug])
   @@index([chainId])
@@ -440,6 +445,51 @@ model ListingApplication {
 
   @@index([status])
   @@index([createdAt])
+}
+
+// ─── Reputation, notifications & founder updates ───────────────────────────────
+
+enum NotificationType {
+  FOUNDER_UPDATES
+  LISTING_APPROVED
+  POINTS_EARNED
+  SYSTEM
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType @default(SYSTEM)
+  title     String
+  body      String           @db.Text
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+}
+
+model FounderUpdate {
+  id          String    @id @default(cuid())
+  projectId   String?
+  founderId   String?
+  sourceUrl   String
+  headline    String
+  summary     String?   @db.Text
+  pinned      Boolean   @default(true)
+  pinnedUntil DateTime?
+  externalId  String?   @unique
+  publishedAt DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  founder Founder? @relation(fields: [founderId], references: [id], onDelete: SetNull)
+
+  @@index([pinned, pinnedUntil])
+  @@index([publishedAt])
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────

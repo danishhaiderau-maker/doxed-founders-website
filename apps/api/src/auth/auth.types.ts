@@ -9,6 +9,8 @@ export interface AuthUser {
   email: string;
   name: string | null;
   role: string;
+  reputationPoints: number;
+  contributorLevel: number;
 }
 
 export interface AuthResponse {

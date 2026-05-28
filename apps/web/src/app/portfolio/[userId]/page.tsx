@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatPercent, formatUsd } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { SharePortfolio } from '@/components/share-portfolio';
+import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
 
 export default function PublicPortfolioPage() {
@@ -63,6 +64,12 @@ export default function PublicPortfolioPage() {
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
               <p className="text-sm text-[var(--color-muted)]">Trader</p>
               <h2 className="mt-1 text-2xl font-bold">{portfolio.displayName}</h2>
+              <div className="mt-3">
+                <ReputationBadge
+                  points={portfolio.reputationPoints}
+                  level={portfolio.contributorLevel}
+                />
+              </div>
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <Stat label="Portfolio" value={formatUsd(portfolio.totalValue)} />
                 <Stat

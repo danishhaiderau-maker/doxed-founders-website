@@ -2,6 +2,8 @@
 
 import Link from 'next/link';
 import { useSession, signOut } from 'next-auth/react';
+import { useEffect, useState } from 'react';
+import { fetchUnreadNotificationCount } from '@/lib/api';
 import { AccountLabel } from '@/components/account-welcome';
 
 const SESSION_KEY = 'dcf-paper-user-id';
@@ -9,6 +11,17 @@ const SESSION_KEY = 'dcf-paper-user-id';
 export function SiteNav() {
   const { data: session } = useSession();
   const isAdmin = session?.user?.role === 'ADMIN';
+  const [unread, setUnread] = useState(0);
+
+  useEffect(() => {
+    if (!session?.accessToken) {
+      setUnread(0);
+      return;
+    }
+    fetchUnreadNotificationCount(session.accessToken)
+      .then((r) => setUnread(r.count))
+      .catch(() => setUnread(0));
+  }, [session?.accessToken]);
 
   return (
     <nav className="flex flex-wrap items-center gap-3 text-sm md:gap-4">
@@ -22,9 +35,22 @@ export function SiteNav() {
         Trade
       </Link>
       {session && (
-        <Link href="/watchlist" className="text-[var(--color-muted)] hover:text-white">
-          Watchlist
-        </Link>
+        <>
+          <Link href="/watchlist" className="text-[var(--color-muted)] hover:text-white">
+            Watchlist
+          </Link>
+          <Link
+            href="/notifications"
+            className="relative text-[var(--color-muted)] hover:text-white"
+          >
+            Alerts
+            {unread > 0 && (
+              <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
+                {unread > 9 ? '9+' : unread}
+              </span>
+            )}
+          </Link>
+        </>
       )}
       <Link href="/leaderboard" className="text-[var(--color-muted)] hover:text-white">
         Leaderboard
@@ -39,6 +65,13 @@ export function SiteNav() {
           <span className="hidden text-[var(--color-muted)] sm:inline">
             <AccountLabel name={session.user?.name} email={session.user?.email} />
           </span>
+          <Link
+            href={`/portfolio/${session.user?.id}`}
+            className="hidden rounded-full border border-amber-500/30 px-2.5 py-0.5 text-xs text-amber-200 sm:inline"
+            title="Your public profile & points"
+          >
+            Profile
+          </Link>
           <button
             type="button"
             onClick={() => signOut({ callbackUrl: '/' })}
