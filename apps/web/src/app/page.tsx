@@ -90,12 +90,6 @@ export default function HomePage() {
             >
               Paper trade any token — $10,000
             </Link>
-            <Link
-              href="/admin/applications"
-              className="rounded-lg border border-[var(--color-border)] px-6 py-3 text-sm font-medium text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white"
-            >
-              Admin review (sign in)
-            </Link>
           </div>
           <p className="mt-4 text-sm text-[var(--color-muted)]">
             Curated listings require 2+ founder proof points. Save projects to your watchlist when

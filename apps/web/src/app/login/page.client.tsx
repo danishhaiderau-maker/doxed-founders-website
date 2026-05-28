@@ -99,10 +99,12 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
             Create one
           </Link>
         </p>
-        <p className="mt-4 rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
-          Dev admin: <code className="text-white">admin@doxedcryptofounder.local</code> /{' '}
-          <code className="text-white">Admin123!</code>
-        </p>
+        {process.env.NODE_ENV === 'development' && (
+          <p className="mt-4 rounded-lg bg-[var(--color-background)] p-3 text-xs text-[var(--color-muted)]">
+            Local dev admin uses <code className="text-white">SEED_ADMIN_PASSWORD</code> from your{' '}
+            <code className="text-white">.env</code> (not shown here).
+          </p>
+        )}
       </div>
     </main>
   );
