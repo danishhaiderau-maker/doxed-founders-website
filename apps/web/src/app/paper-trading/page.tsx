@@ -560,7 +560,9 @@ function PaperTradingPageContent() {
               {portfolio?.positions.map((pos) => (
                 <li
                   key={pos.projectId}
-                  className="rounded-lg bg-[var(--color-background)] p-3 text-sm"
+                  className={`rounded-lg bg-[var(--color-background)] p-3 text-sm ${
+                    pos.pnl < 0 ? 'position-loss-glow border border-red-500/30' : ''
+                  } ${pos.pnl > 0 ? 'border border-emerald-500/20' : ''}`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>

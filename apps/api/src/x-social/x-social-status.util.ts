@@ -1,6 +1,8 @@
+import { Injectable, Logger } from '@nestjs/common';
 import { readOAuth1Credentials } from './x-oauth1';
+import { XShareMediaService } from './x-share-media.service';
 
-export function getXAutomationStatus() {
+export function getXAutomationStatus(shareMedia?: XShareMediaService) {
   const bearer = Boolean(process.env.TWITTER_BEARER_TOKEN?.trim());
   const posting = readOAuth1Credentials();
   const twitterClientId =
@@ -10,6 +12,7 @@ export function getXAutomationStatus() {
   const loginReady = Boolean(twitterClientId && twitterClientSecret);
   const cronJwt = Boolean(process.env.ADMIN_SYNC_JWT?.trim());
   const siteUrl = (process.env.PUBLIC_SITE_URL ?? 'https://doxxedcrypto.digital').replace(/\/$/, '');
+  const shareImages = shareMedia?.imageCount() ?? { pump: 0, dump: 0 };
 
   return {
     brandHandle: process.env.X_BRAND_HANDLE?.replace(/^@/, '') ?? 'Bitbro4crypto',
@@ -38,6 +41,15 @@ export function getXAutomationStatus() {
       hint: cronJwt
         ? 'ADMIN_SYNC_JWT set — run npm run sync:x-social-daily or GitHub Actions cron'
         : 'Set ADMIN_SYNC_JWT (admin API token) for automated daily sync',
+    },
+    shareImages: {
+      pump: shareImages.pump,
+      dump: shareImages.dump,
+      ready: shareImages.pump > 0 && shareImages.dump > 0,
+      hint:
+        shareImages.pump > 0 && shareImages.dump > 0
+          ? `${shareImages.pump} pump + ${shareImages.dump} dump images for X posts`
+          : 'Run npm run prepare:x-share-images to bundle pump/dump meme images',
     },
     fullyAutomated: bearer && posting.ok && cronJwt,
   };

@@ -3,6 +3,7 @@ import { Public } from '../auth/public.decorator';
 import { AdminGuard } from '../auth/guards';
 import { SocialSignalsService } from './social-signals.service';
 import { XPostingService } from './x-posting.service';
+import { XShareMediaService } from './x-share-media.service';
 import { getXAutomationStatus } from './x-social-status.util';
 
 @Controller('x-social')
@@ -10,12 +11,13 @@ export class XSocialController {
   constructor(
     private readonly signals: SocialSignalsService,
     private readonly xPosting: XPostingService,
+    private readonly shareMedia: XShareMediaService,
   ) {}
 
   @Public()
   @Get('status')
   status() {
-    return getXAutomationStatus();
+    return getXAutomationStatus(this.shareMedia);
   }
 
   @UseGuards(AdminGuard)

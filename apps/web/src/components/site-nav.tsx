@@ -18,9 +18,14 @@ export function SiteNav() {
       setUnread(0);
       return;
     }
-    fetchUnreadNotificationCount(session.accessToken)
-      .then((r) => setUnread(r.count))
-      .catch(() => setUnread(0));
+    const refresh = () => {
+      fetchUnreadNotificationCount(session.accessToken!)
+        .then((r) => setUnread(r.count))
+        .catch(() => setUnread(0));
+    };
+    refresh();
+    const interval = setInterval(refresh, 30_000);
+    return () => clearInterval(interval);
   }, [session?.accessToken]);
 
   return (
