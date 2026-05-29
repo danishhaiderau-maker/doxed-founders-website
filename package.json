@@ -53,7 +53,10 @@
     "start:self-host": "powershell -ExecutionPolicy Bypass -File scripts/start-self-host.ps1",
     "stop:self-host": "powershell -ExecutionPolicy Bypass -File scripts/stop-self-host.ps1",
     "setup:local": "powershell -ExecutionPolicy Bypass -File scripts/setup-local.ps1",
-    "stop:dev": "powershell -ExecutionPolicy Bypass -File scripts/stop-dev.ps1"
+    "stop:dev": "powershell -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
+    "secrets:link": "powershell -ExecutionPolicy Bypass -File scripts/link-secrets.ps1",
+    "secrets:strip": "powershell -ExecutionPolicy Bypass -File scripts/strip-repo-secrets.ps1",
+    "audit:export": "node scripts/prepare-audit-export.mjs"
   },
   "devDependencies": {
     "prisma": "^6.8.2",

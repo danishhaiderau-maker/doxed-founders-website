@@ -1,9 +1,12 @@
 # Writes Railway Raw Editor block from .env.x.secrets -> railway-x-paste.env (gitignored)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$secretsFile = Join-Path $root ".env.x.secrets"
-$outFile = Join-Path $root "railway-x-paste.env"
-if (-not (Test-Path $secretsFile)) { throw "Missing .env.x.secrets" }
+$vaultRoot = Join-Path (Split-Path $root -Parent) "doxedcryptofounder-secrets"
+$secretsFile = Join-Path $vaultRoot "vault" ".env.x.secrets"
+if (-not (Test-Path $secretsFile)) { $secretsFile = Join-Path $root ".env.x.secrets" }
+$outFile = Join-Path $vaultRoot "vault" "railway-x-paste.env"
+if (-not (Test-Path (Split-Path $outFile -Parent))) { $outFile = Join-Path $root "railway-x-paste.env" }
+if (-not (Test-Path $secretsFile)) { throw "Missing secrets. Run: npm run secrets:link" }
 
 function Read-DotEnv($path) {
   $map = @{}
