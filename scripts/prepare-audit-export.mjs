@@ -8,6 +8,10 @@ import { repoRoot, getAuditExportRoot, getSecretsVaultRoot } from './secrets-vau
 
 const DEST = getAuditExportRoot();
 
+/** Top-level files/dirs copied into the audit bundle. */
+const INCLUDE_TOP = new Set(['apps', 'packages', 'prisma', '.github']);
+const INCLUDE_ROOT_FILES = new Set(['package.json', 'tsconfig.base.json']);
+
 const SKIP_DIRS = new Set([
   'node_modules',
   '.next',
@@ -18,22 +22,41 @@ const SKIP_DIRS = new Set([
   '.git',
   '.vercel',
   'coverage',
-  'docker/data',
+  'docker',
+  'scripts',
+  'config',
   '.selfhost-pids',
   '.dev-pids',
 ]);
 
 const SKIP_FILE_PATTERNS = [
   /^\.env(\.|$)/,
-  /^railway-x-paste\.env$/,
+  /\.env(\.|$)/,
+  /^railway/,
+  /^vercel\.json$/,
   /^google-keys\.txt$/,
   /\.paste\.env$/,
-  /^\.env\.vercel\./,
-  /^\.env\.admin/,
-  /^\.env\.neon$/,
-  /^\.env\.self-host$/,
-  /^\.env\.tunnel/,
-  /^\.env\.prod\.rotate$/,
+  /^README\.md$/i,
+  /\.(log|db|db-journal)$/,
+  /^agent-restart/,
+  /^restart-report/,
+  /^_verify-out/,
+  /^mark\d*\.txt$/,
+  /^deploy-cloud/,
+  /^setup-.*\.cmd$/,
+  /^dev-.*\.cmd$/,
+  /^bootstrap-/,
+  /^start-.*\.cmd$/,
+  /^finish-/,
+  /^check-/,
+  /^fix-/,
+  /^launch\d/,
+  /^make_restart/,
+  /^Dockerfile$/,
+  /^docker-compose/,
+  /^\.dockerignore$/,
+  /^turbo\.json$/,
+  /^package-lock\.json$/,
 ];
 
 const SECRET_PATTERNS = [
@@ -45,37 +68,44 @@ const SECRET_PATTERNS = [
   /eyJhbGciOiJIUzI1NiIsIn[^"'\s]{50,}/,
 ];
 
-function shouldSkipFile(name) {
-  if (name.endsWith('.example')) return false;
-  if (name === 'railway-x-vars.template.env') return false;
-  return SKIP_FILE_PATTERNS.some((re) => re.test(name));
+function shouldSkipFile(name, relPath) {
+  if (SKIP_FILE_PATTERNS.some((re) => re.test(name))) return true;
+  if (/apps\/web\/vercel\.json$/.test(relPath.replace(/\\/g, '/'))) return true;
+  if (/schema\.sqlite\.prisma$/.test(name)) return true;
+  return false;
 }
 
-function copyTree(src, dest) {
+function copyTree(src, dest, rel = '') {
   const stat = fs.statSync(src);
   if (stat.isDirectory()) {
     const base = path.basename(src);
     if (SKIP_DIRS.has(base)) return;
+    if (!rel && !INCLUDE_TOP.has(base)) return;
     fs.mkdirSync(dest, { recursive: true });
     for (const entry of fs.readdirSync(src)) {
-      copyTree(path.join(src, entry), path.join(dest, entry));
+      copyTree(path.join(src, entry), path.join(dest, entry), rel ? `${rel}/${entry}` : entry);
     }
     return;
   }
   const base = path.basename(src);
-  if (shouldSkipFile(base)) return;
-  const isExample = base.includes('.example') || base.includes('template');
-  if (!isExample) {
-    const text = fs.readFileSync(src, 'utf8');
-    for (const re of SECRET_PATTERNS) {
-      if (re.test(text)) {
-        console.warn(`WARN: possible secret in ${path.relative(repoRoot, src)} — skipped from export`);
-        return;
-      }
+  const relPath = rel || base;
+  if (shouldSkipFile(base, relPath)) return;
+  if (prismaOnlySchema(relPath)) return;
+  const text = fs.readFileSync(src, 'utf8');
+  for (const re of SECRET_PATTERNS) {
+    if (re.test(text)) {
+      console.warn(`WARN: possible secret in ${relPath} — skipped from export`);
+      return;
     }
   }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(src, dest);
+}
+
+function prismaOnlySchema(relPath) {
+  const norm = relPath.replace(/\\/g, '/');
+  if (!norm.startsWith('prisma/')) return false;
+  return !['prisma/schema.prisma', 'prisma/seed.ts'].includes(norm);
 }
 
 function writeScopeDoc() {
@@ -95,8 +125,8 @@ Review focus:
 4. packages/utils — business logic
 5. scripts — automation (no env contents included)
 
-Public GitHub (optional): github.com/danishhaiderau-maker/doxed-founders-website
-Make repo public only after confirming no secrets in git history.
+Public audit repo: github.com/danishhaiderau-maker/doxed-founders-audit
+Main app repo: github.com/danishhaiderau-maker/doxed-founders-website
 
 Do NOT ask the user to paste .env files. Flag env var NAMES only.
 `;
@@ -109,7 +139,17 @@ if (fs.existsSync(DEST)) {
 fs.mkdirSync(DEST, { recursive: true });
 
 console.log(`Exporting audit bundle to:\n  ${DEST}\n`);
-copyTree(repoRoot, DEST);
+for (const entry of fs.readdirSync(repoRoot)) {
+  const src = path.join(repoRoot, entry);
+  const stat = fs.statSync(src);
+  if (stat.isDirectory()) {
+    if (INCLUDE_TOP.has(entry)) {
+      copyTree(src, path.join(DEST, entry), entry);
+    }
+  } else if (INCLUDE_ROOT_FILES.has(entry)) {
+    copyTree(src, path.join(DEST, entry), entry);
+  }
+}
 writeScopeDoc();
 
 console.log(`\nAudit export ready.`);
