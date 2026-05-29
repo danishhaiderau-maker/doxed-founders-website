@@ -34,6 +34,9 @@ export default function SecuritySettingsPage() {
             <Link href="/founder-den" className="mb-6 inline-block text-sm text-emerald-400 hover:underline">
               ← Back to Founder Workspace
             </Link>
+            <Link href="/settings/builder" className="mb-4 inline-block text-sm text-violet-300 hover:underline">
+              Builder settings (AI keys · GitHub) →
+            </Link>
             <SecuritySettingsPanel accessToken={session.accessToken} />
           </>
         )}

@@ -18,11 +18,12 @@ import {
   CommandBarIntent,
   buildCursorCopyBlock,
   processCommandBar,
-  processQuickBuild,
   runWorkforceAgent,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { GitHubApiService } from '../github/github-api.service';
+import { BuilderService } from '../builder/builder.service';
 
 function serializeItem(item: {
   id: string;
@@ -54,6 +55,8 @@ export class BuildQueueService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly github: GitHubApiService,
+    private readonly builder: BuilderService,
   ) {}
 
   private async requireFounder(userId: string) {
@@ -86,26 +89,15 @@ export class BuildQueueService {
     });
 
     const gh = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
+    const repo = await this.github.resolveRepo(userId, founder.githubRepoFullName, project?.githubRepoFullName);
+    const githubTokenConnected = await this.github.hasToken(userId);
+
     let commits: { sha: string; message: string; date: string }[] = [];
-    const repo = gh?.repoFullName ?? founder.githubRepoFullName ?? project?.githubRepoFullName;
+    let pullRequests: { title: string; url: string; state: string; number: number }[] = [];
     if (repo) {
-      try {
-        const res = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=10`, {
-          headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'DoxxedCrypto-FounderOS' },
-        });
-        if (res.ok) {
-          const data = (await res.json()) as {
-            sha: string;
-            commit: { message: string; author: { date: string } };
-          }[];
-          commits = data.map((c) => ({
-            sha: c.sha.slice(0, 7),
-            message: c.commit.message.split('\n')[0] ?? c.commit.message,
-            date: c.commit.author.date,
-          }));
-        }
-      } catch {
-        /* public repo fetch optional */
+      commits = await this.github.listCommits(userId, repo);
+      if (githubTokenConnected) {
+        pullRequests = await this.github.listPullRequests(userId, repo);
       }
     }
 
@@ -141,10 +133,15 @@ export class BuildQueueService {
 
     const openIssues = grouped.issues.filter((i) => i.status !== BuildQueueStatus.DONE);
 
+    const builderSettings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+
     return {
       repoFullName: repo ?? null,
       cursorConnected,
       githubConnected: Boolean(gh || repo),
+      githubTokenConnected,
+      defaultAiProvider: builderSettings?.defaultProvider ?? 'RULE_BASED',
+      autoCreateGitHubIssues: builderSettings?.autoCreateGitHubIssues ?? false,
       grouped: {
         ideas: grouped.ideas.map(serializeItem),
         tasks: grouped.tasks.map(serializeItem),
@@ -160,7 +157,7 @@ export class BuildQueueService {
         status: d.status,
         createdAt: d.createdAt.toISOString(),
       })),
-      pullRequests: [] as { title: string; url: string; state: string }[],
+      pullRequests,
       pendingSuggestions: pendingPublish.map((s) => ({
         id: s.id,
         headline: s.headline,
@@ -194,7 +191,7 @@ export class BuildQueueService {
     if (!prompt) throw new BadRequestException('Describe what to build');
 
     const project = founder.projects[0];
-    const parsed = processQuickBuild(prompt, project?.name);
+    const parsed = await this.builder.enhanceQuickBuild(userId, prompt, project?.name);
 
     const source =
       input.source === 'VOICE' ? BuildQueueSource.VOICE : BuildQueueSource.QUICK_BUILD;
@@ -296,10 +293,18 @@ export class BuildQueueService {
       ),
     );
 
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    let githubIssuesCreated = 0;
+    if (settings?.autoCreateGitHubIssues) {
+      githubIssuesCreated = await this.publishIssueRows(userId, founder.id, issueItems, parsed.spec);
+    }
+
     await this.notifications.notifyUser(userId, {
       type: NotificationType.BUILD_QUEUE,
       title: 'Quick Build captured',
-      body: `"${parsed.ideaTitle.slice(0, 80)}" → ${taskItems.length} tasks, ${issueItems.length} GitHub issues queued.`,
+      body: `"${parsed.ideaTitle.slice(0, 80)}" → ${taskItems.length} tasks, ${issueItems.length} issues queued${
+        githubIssuesCreated ? `, ${githubIssuesCreated} on GitHub` : ''
+      }.`,
       link: '/founder-den?tab=build',
     });
 
@@ -309,6 +314,7 @@ export class BuildQueueService {
       roadmapItemId,
       taskIds: taskItems.map((t) => t.id),
       issueIds: issueItems.map((i) => i.id),
+      githubIssuesCreated,
       cursorPrompt: parsed.cursorPrompt,
       cursorCopy: buildCursorCopyBlock({
         title: parsed.ideaTitle,
@@ -537,5 +543,67 @@ export class BuildQueueService {
       body: `${output.tasks.length} tasks added to your build queue.`,
       link: '/founder-den?tab=build',
     });
+  }
+
+  async publishGitHubIssues(userId: string) {
+    const founder = await this.requireFounder(userId);
+    const project = founder.projects[0];
+    const repo = await this.github.resolveRepo(userId, founder.githubRepoFullName, project?.githubRepoFullName);
+    if (!repo) throw new BadRequestException('Connect a GitHub repository first');
+
+    const issues = await this.prisma.buildQueueItem.findMany({
+      where: {
+        founderId: founder.id,
+        kind: BuildQueueItemKind.GITHUB_ISSUE,
+        githubIssueUrl: null,
+        status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+      },
+      take: 20,
+    });
+
+    const created = await this.publishIssueRows(userId, founder.id, issues);
+    return { created, repoFullName: repo };
+  }
+
+  private async publishIssueRows(
+    userId: string,
+    founderId: string,
+    items: { id: string; githubIssueTitle: string | null; title: string; spec: string | null; githubIssueUrl?: string | null }[],
+    specBody?: string,
+  ): Promise<number> {
+    const founder = await this.prisma.founder.findUnique({
+      where: { id: founderId },
+      include: { projects: { take: 1 } },
+    });
+    if (!founder) return 0;
+
+    const repo = await this.github.resolveRepo(
+      userId,
+      founder.githubRepoFullName,
+      founder.projects[0]?.githubRepoFullName,
+    );
+    if (!repo || !(await this.github.hasToken(userId))) return 0;
+
+    let count = 0;
+    for (const item of items) {
+      if (item.githubIssueUrl) continue;
+      try {
+        const title = item.githubIssueTitle ?? item.title;
+        const body = item.spec ?? specBody ?? title;
+        const created = await this.github.createIssue(userId, repo, title, body);
+        await this.prisma.buildQueueItem.update({
+          where: { id: item.id },
+          data: {
+            githubIssueUrl: created.url,
+            status: BuildQueueStatus.QUEUED,
+            metadata: { githubNumber: created.number } as Prisma.InputJsonValue,
+          },
+        });
+        count += 1;
+      } catch {
+        /* skip failed issue */
+      }
+    }
+    return count;
   }
 }

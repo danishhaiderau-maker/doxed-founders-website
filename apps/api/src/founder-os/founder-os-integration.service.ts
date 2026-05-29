@@ -2,13 +2,17 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { INTEGRATION_PROVIDERS } from '@dcf/utils';
+import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type VerifyResult = { accountName: string; metadata: Record<string, unknown> };
 
 @Injectable()
 export class FounderOsIntegrationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly crypto: CredentialsCryptoService,
+  ) {}
 
   getProviderConfigs() {
     return INTEGRATION_PROVIDERS.map((p) => ({
@@ -190,18 +194,20 @@ export class FounderOsIntegrationService {
       (metadata.webhookSecret as string | undefined) ??
       randomBytes(16).toString('hex');
 
+    const storedToken = token ? this.crypto.encrypt(token) : null;
+
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider } },
       create: {
         userId,
         provider,
-        token,
+        token: storedToken,
         metadata: metadata as Prisma.InputJsonValue,
         webhookSecret,
         verifiedAt: new Date(),
       },
       update: {
-        token,
+        token: storedToken,
         metadata: metadata as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
