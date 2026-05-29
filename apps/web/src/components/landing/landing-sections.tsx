@@ -24,9 +24,9 @@ export function LandingHero() {
           Build in public. Publish everywhere. Prove it before you raise.
         </h1>
         <p className="mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400 md:text-xl">
-          Connect GitHub, Vercel, Railway, Neon, and X. Sync commits, translate dev work for
-          traders, and post to your build feed, community, and X in one click — the operating
-          system for transparent crypto startups.
+          Connect GitHub, Vercel, Railway, Neon, and X. Run founder agents, sync commits,
+          translate dev work for traders, and publish to your build feed, community, and X in one
+          click — the operating system for transparent crypto startups.
         </p>
         <div className="mt-10 flex flex-wrap gap-3">
           <Link
@@ -40,6 +40,12 @@ export function LandingHero() {
             className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-6 py-3.5 text-sm font-semibold text-white transition hover:border-emerald-500/50 hover:bg-zinc-900"
           >
             Explore projects
+          </Link>
+          <Link
+            href="/agents"
+            className="rounded-xl border border-purple-500/30 bg-purple-950/20 px-6 py-3.5 text-sm font-semibold text-purple-200 transition hover:bg-purple-950/40"
+          >
+            Agent Hub
           </Link>
           <Link
             href="/paper-trading"
@@ -104,6 +110,7 @@ const FAILURES = [
 const SOLUTIONS = [
   'Verified public founders',
   'GitHub → translate → publish everywhere',
+  'Founder workforce agents on every project',
   'Proof of Conviction on every trade',
   'Quality rewards — not spam points',
   'Simulated fundraising demand',

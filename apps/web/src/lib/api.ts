@@ -1494,3 +1494,74 @@ export function walletVerify(
 export function disconnectWallet(token: string) {
   return apiFetch('/security/wallet', { method: 'DELETE' }, token);
 }
+
+// ─── Agents ──────────────────────────────────────────────────────────────────
+
+export interface FounderAgentSummary {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  category: string;
+  template: string;
+  isPublic: boolean;
+  followerCount: number;
+  usageCount: number;
+  rating: number;
+  ratingCount: number;
+  revenueCredits: number;
+  founder: { id: string; slug: string; name: string };
+  project: { id: string; slug: string; name: string } | null;
+  createdAt: string;
+  installed?: boolean;
+  following?: boolean;
+}
+
+export interface AgentHubResponse {
+  agents: FounderAgentSummary[];
+  templates: { key: string; label: string; category: string; description: string }[];
+  categories: string[];
+}
+
+export function fetchAgentHub(category?: string) {
+  const q = category ? `?category=${encodeURIComponent(category)}` : '';
+  return apiFetch<AgentHubResponse>(`/agents${q}`);
+}
+
+export function fetchAgent(slug: string, token?: string) {
+  return apiFetch<FounderAgentSummary>(`/agents/${slug}`, {}, token);
+}
+
+export function fetchMyAgents(token: string) {
+  return apiFetch<{ created: FounderAgentSummary[]; installed: FounderAgentSummary[] }>(
+    '/agents/my/list',
+    {},
+    token,
+  );
+}
+
+export function createAgent(
+  data: { name: string; description?: string; category: string; template?: string; projectId?: string },
+  token: string,
+) {
+  return apiFetch<FounderAgentSummary>('/agents', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export function installAgent(agentId: string, token: string) {
+  return apiFetch(`/agents/${agentId}/install`, { method: 'POST' }, token);
+}
+
+export function runAgent(agentId: string, prompt: string, token: string) {
+  return apiFetch<{
+    runId: string;
+    creditsSpent: number;
+    output: {
+      title: string;
+      summary: string;
+      tasks: string[];
+      githubIssues: string[];
+      buildPlan: string[];
+      traderView: string;
+    };
+  }>(`/agents/${agentId}/run`, { method: 'POST', body: JSON.stringify({ prompt }) }, token);
+}

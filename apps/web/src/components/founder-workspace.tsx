@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { FounderOsPanel } from '@/components/founder-os-panel';
+import { AgentsWorkspacePanel } from '@/components/agents-workspace-panel';
 import { DiscoverProjectCard } from '@/components/discover-project-card';
 import {
   EcosystemPulse,
@@ -148,9 +149,6 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
             }`}
           >
             {t.label}
-            {t.id === 'agents' && (
-              <span className="ml-1 text-[10px] opacity-70">soon</span>
-            )}
           </button>
         ))}
       </nav>
@@ -326,15 +324,18 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
         </OsSection>
       )}
 
-      {tab === 'agents' && (
+      {tab === 'agents' && session && (
+        <AgentsWorkspacePanel accessToken={session.accessToken} founderActive={hasFounder} />
+      )}
+
+      {tab === 'agents' && !session && (
         <section className="rounded-2xl border border-dashed border-purple-500/40 bg-purple-950/10 p-8 text-center">
-          <p className="text-3xl">🤖</p>
-          <h3 className="mt-3 text-lg font-semibold text-white">Agent Hub — next release</h3>
-          <p className="mx-auto mt-2 max-w-md text-sm text-zinc-400">
-            Research, Community, Audit, and Launch agents attached to your founder profile and project.
-            Stronger trust than standalone agent marketplaces.
+          <p className="text-sm text-zinc-400">
+            <Link href="/login?callbackUrl=/founder-den?tab=agents" className="text-purple-300 underline">
+              Sign in
+            </Link>{' '}
+            to create and run founder agents.
           </p>
-          <p className="mt-4 text-xs text-purple-300">Coming in the next push</p>
         </section>
       )}
 

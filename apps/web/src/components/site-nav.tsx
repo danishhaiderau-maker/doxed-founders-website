@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useSearchParams } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
 import { useEffect, useState, Suspense } from 'react';
 import { cn } from '@dcf/utils';
@@ -15,7 +15,7 @@ const NAV_LINKS = [
   { href: '/projects', label: 'Projects' },
   { href: '/build-feed', label: 'Build feed' },
   { href: '/founder-den', label: 'Founder OS', auth: true },
-  { href: '/founder-den?tab=agents', label: 'Agents', auth: true },
+  { href: '/agents', label: 'Agents' },
   { href: '/paper-trading', label: 'Trade' },
   { href: '/watchlist', label: 'Watchlist', auth: true },
   { href: '/notifications', label: 'Alerts', auth: true },
@@ -24,16 +24,12 @@ const NAV_LINKS = [
   { href: '/leaderboard', label: 'Leaderboard' },
 ] as const;
 
-function navActive(pathname: string, href: string, tabParam: string | null) {
+function navActive(pathname: string, href: string) {
   if (href === '/discover') return pathname === '/discover';
   if (href === '/feed') return pathname === '/feed';
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
-  if (href === '/founder-den?tab=agents') {
-    return pathname === '/founder-den' && tabParam === 'agents';
-  }
-  if (href === '/founder-den') {
-    return pathname === '/founder-den' && tabParam !== 'agents';
-  }
+  if (href === '/agents') return pathname.startsWith('/agents');
+  if (href === '/founder-den') return pathname === '/founder-den';
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -48,8 +44,6 @@ export function SiteNav() {
 
 function SiteNavInner() {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const tabParam = searchParams.get('tab');
   const { data: session } = useSession();
   const isAdmin = session?.user?.role === 'ADMIN';
   const [unread, setUnread] = useState(0);
@@ -73,7 +67,7 @@ function SiteNavInner() {
     <nav className="flex flex-wrap items-center gap-2 text-sm md:gap-2.5">
       {NAV_LINKS.map((item) => {
         if ('auth' in item && item.auth && !session) return null;
-        const active = navActive(pathname, item.href, tabParam);
+        const active = navActive(pathname, item.href);
         return (
           <Link
             key={item.href}

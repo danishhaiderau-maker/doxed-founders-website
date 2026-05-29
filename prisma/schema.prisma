@@ -166,6 +166,37 @@ enum SuggestedUpdateStatus {
   DISMISSED
 }
 
+enum AgentCategory {
+  RESEARCH
+  TRADING
+  COMMUNITY
+  SUPPORT
+  MARKETING
+  TOKENOMICS
+  AUDIT
+  BUILDER
+  FUNDRAISING
+  LAUNCH
+}
+
+enum AgentWorkforceTemplate {
+  PRODUCT_MANAGER
+  RESEARCHER
+  BUILDER
+  MARKETER
+  COMMUNITY_MANAGER
+  FUNDRAISING
+  LAUNCH
+  CUSTOM
+}
+
+enum AgentRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -221,6 +252,10 @@ model User {
   recoveryCodes        RecoveryCode[]
   walletConnections    WalletConnection[]
   authPendingChallenges AuthPendingChallenge[]
+  createdAgents        FounderAgent[] @relation("AgentCreator")
+  agentInstalls        AgentInstall[]
+  agentRuns            AgentRun[]
+  agentFollows         AgentFollow[]
 
   @@index([email])
   @@index([role])
@@ -300,6 +335,7 @@ model Founder {
   creditLedger     FounderCreditLedger[]
   suggestedUpdates    SuggestedBuildUpdate[]
   cursorBuildSessions CursorBuildSession[]
+  agents              FounderAgent[]
 }
 
 model FounderVerification {
@@ -378,6 +414,7 @@ model Project {
   bounties         FounderBounty[]
   helpfulMarks     HelpfulMark[]
   earlyScouts      EarlyScoutRecord[]
+  agents           FounderAgent[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -1169,6 +1206,87 @@ model TrendingScore {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([score(sort: Desc)])
+}
+
+// ─── Founder Agents (Phase 3) ──────────────────────────────────────────────────
+
+model FounderAgent {
+  id             String                 @id @default(cuid())
+  slug           String                 @unique
+  founderId      String
+  projectId      String?
+  creatorUserId  String
+  name           String
+  description    String?                @db.Text
+  category       AgentCategory
+  template       AgentWorkforceTemplate @default(CUSTOM)
+  isPublic       Boolean                @default(true)
+  config         Json?
+  followerCount  Int                    @default(0)
+  usageCount     Int                    @default(0)
+  ratingSum      Int                    @default(0)
+  ratingCount    Int                    @default(0)
+  revenueCredits Int                    @default(0)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  founder Founder  @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  creator User     @relation("AgentCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  installs AgentInstall[]
+  runs     AgentRun[]
+  followers AgentFollow[]
+
+  @@index([founderId])
+  @@index([projectId])
+  @@index([category])
+  @@index([usageCount(sort: Desc)])
+}
+
+model AgentInstall {
+  id          String   @id @default(cuid())
+  agentId     String
+  userId      String
+  projectId   String?
+  config      Json?
+  installedAt DateTime @default(now())
+
+  agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId])
+  @@index([userId])
+}
+
+model AgentRun {
+  id           String         @id @default(cuid())
+  agentId      String
+  userId       String
+  inputPrompt  String?        @db.Text
+  output       Json?
+  status       AgentRunStatus @default(COMPLETED)
+  creditsSpent Int            @default(0)
+  createdAt    DateTime       @default(now())
+  completedAt  DateTime?
+
+  agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([userId])
+}
+
+model AgentFollow {
+  id        String   @id @default(cuid())
+  agentId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId])
+  @@index([userId])
 }
 
 // ─── Account Security ──────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import { ConvictionShareModule } from './conviction-share/conviction-share.modul
 import { EngagementRewardsModule } from './engagement-rewards/engagement-rewards.module';
 import { FounderOsModule } from './founder-os/founder-os.module';
 import { SecurityModule } from './security/security.module';
+import { AgentsModule } from './agents/agents.module';
 import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
@@ -39,6 +40,7 @@ import { XSocialModule } from './x-social/x-social.module';
     EngagementRewardsModule,
     FounderOsModule,
     SecurityModule,
+    AgentsModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,
