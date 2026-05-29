@@ -73,6 +73,24 @@ export class AuthService {
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {
     const email = this.resolveOAuthEmail(dto);
     const twitterHandle = dto.twitterHandle?.replace(/^@/, '').trim() || undefined;
+    const tokenData =
+      dto.oauthAccessToken && dto.oauthAccessTokenSecret
+        ? {
+            accessToken: dto.oauthAccessToken,
+            accessTokenSecret: dto.oauthAccessTokenSecret,
+          }
+        : null;
+
+    const upsertOAuthTokens = async (oauthAccountId: string) => {
+      if (!tokenData) return;
+      await this.prisma.oAuthAccount.update({
+        where: { id: oauthAccountId },
+        data: {
+          accessToken: tokenData.accessToken,
+          accessTokenSecret: tokenData.accessTokenSecret,
+        },
+      });
+    };
 
     const linked = await this.prisma.oAuthAccount.findUnique({
       where: {
@@ -87,6 +105,9 @@ export class AuthService {
     if (linked) {
       if (linked.user.banned) {
         throw new UnauthorizedException('This account has been suspended');
+      }
+      if (tokenData) {
+        await upsertOAuthTokens(linked.id);
       }
       if (twitterHandle && linked.user.twitterHandle !== twitterHandle) {
         const user = await this.prisma.user.update({
@@ -110,6 +131,8 @@ export class AuthService {
           userId: existingUser.id,
           provider: dto.provider,
           providerId: dto.providerId,
+          accessToken: tokenData?.accessToken,
+          accessTokenSecret: tokenData?.accessTokenSecret,
         },
       });
 
@@ -154,6 +177,8 @@ export class AuthService {
           create: {
             provider: dto.provider,
             providerId: dto.providerId,
+            accessToken: tokenData?.accessToken,
+            accessTokenSecret: tokenData?.accessTokenSecret,
           },
         },
         paperPortfolio: {

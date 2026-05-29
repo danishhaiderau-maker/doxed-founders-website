@@ -154,6 +154,13 @@ export class PaperTradingService {
           marketCap: project?.metrics?.marketCap ? Number(project.metrics.marketCap) : null,
           liquidity: project?.metrics?.liquidity ? Number(project.metrics.liquidity) : null,
           volume24h: project?.metrics?.volume24h ? Number(project.metrics.volume24h) : null,
+          convictionThesis: position.convictionThesis,
+          convictionCatalyst: position.convictionCatalyst,
+          convictionTargetUsd: position.convictionTargetUsd
+            ? Number(position.convictionTargetUsd)
+            : null,
+          convictionRecordedAt: position.convictionRecordedAt?.toISOString() ?? null,
+          positionOpenedAt: position.createdAt.toISOString(),
         };
       }),
     );
@@ -524,10 +531,30 @@ export class PaperTradingService {
             projectId: project.id,
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
+            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd
+              ? {
+                  convictionThesis: dto.comment?.trim() || undefined,
+                  convictionCatalyst: dto.catalyst?.trim() || undefined,
+                  convictionTargetUsd: dto.targetUsd
+                    ? new Prisma.Decimal(dto.targetUsd)
+                    : undefined,
+                  convictionRecordedAt: new Date(),
+                }
+              : {}),
           },
           update: {
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
+            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd
+              ? {
+                  convictionThesis: dto.comment?.trim() || undefined,
+                  convictionCatalyst: dto.catalyst?.trim() || undefined,
+                  convictionTargetUsd: dto.targetUsd
+                    ? new Prisma.Decimal(dto.targetUsd)
+                    : undefined,
+                  convictionRecordedAt: new Date(),
+                }
+              : {}),
           },
         });
       } else {

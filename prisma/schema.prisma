@@ -185,17 +185,22 @@ model User {
   projectFollows       ProjectFollow[]
   founderApplications  FounderApplication[]
   economyEvents        VirtualEconomyEvent[]
+  reputationAwards     ReputationAward[]
+  engagementLotteryWins EngagementLotteryWinner[]
 
   @@index([email])
   @@index([role])
 }
 
 model OAuthAccount {
-  id         String   @id @default(cuid())
-  userId     String
-  provider   String
-  providerId String
-  createdAt  DateTime @default(now())
+  id                String   @id @default(cuid())
+  userId            String
+  provider          String
+  providerId        String
+  accessToken       String?  @db.Text
+  accessTokenSecret String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -435,11 +440,15 @@ model PaperPortfolio {
 }
 
 model PaperPosition {
-  id           String  @id @default(cuid())
+  id           String   @id @default(cuid())
   portfolioId  String
   projectId    String
-  quantity     Decimal @db.Decimal(24, 12)
-  avgBuyPrice  Decimal @db.Decimal(24, 12)
+  quantity     Decimal  @db.Decimal(24, 12)
+  avgBuyPrice  Decimal  @db.Decimal(24, 12)
+  convictionThesis    String?  @db.Text
+  convictionCatalyst  String?
+  convictionTargetUsd Decimal? @db.Decimal(24, 12)
+  convictionRecordedAt DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -817,6 +826,47 @@ model VirtualEconomyEvent {
 
   @@index([type])
   @@index([createdAt])
+}
+
+model ReputationAward {
+  id        String   @id @default(cuid())
+  userId    String
+  actionKey String
+  amount    Int
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, actionKey])
+  @@index([actionKey])
+}
+
+model EngagementLotteryDraw {
+  id           String   @id @default(cuid())
+  drawDate     DateTime @db.Date
+  activeUsers  Int
+  winnerCount  Int
+  totalPaidUsd Decimal  @db.Decimal(16, 2)
+  createdAt    DateTime @default(now())
+
+  winners EngagementLotteryWinner[]
+
+  @@unique([drawDate])
+}
+
+model EngagementLotteryWinner {
+  id            String   @id @default(cuid())
+  drawId        String
+  userId        String
+  amountUsd     Decimal  @db.Decimal(16, 2)
+  activityScore Int
+  createdAt     DateTime @default(now())
+
+  draw EngagementLotteryDraw @relation(fields: [drawId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([drawId])
 }
 
 model CommunityThread {

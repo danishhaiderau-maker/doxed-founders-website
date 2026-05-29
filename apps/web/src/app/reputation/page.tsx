@@ -26,8 +26,10 @@ import {
   fetchReputationLeaderboard,
   fetchReputationMe,
   fetchVotingStats,
+  fetchEngagementStats,
   ReputationLeaderboardEntry,
   ReputationMe,
+  EngagementStats,
 } from '@/lib/api';
 
 export default function ReputationPage() {
@@ -36,6 +38,7 @@ export default function ReputationPage() {
   const [leaderboard, setLeaderboard] = useState<ReputationLeaderboardEntry[]>([]);
   const [totalParticipants, setTotalParticipants] = useState(0);
   const [me, setMe] = useState<ReputationMe | null>(null);
+  const [engagement, setEngagement] = useState<EngagementStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const exampleThreshold = computeVotingThreshold(activeUsers);
@@ -55,6 +58,12 @@ export default function ReputationPage() {
         setTotalParticipants(data.totalParticipants);
       })
       .catch((err: Error) => setError(err.message));
+  }, []);
+
+  useEffect(() => {
+    fetchEngagementStats()
+      .then(setEngagement)
+      .catch(() => setEngagement(null));
   }, []);
 
   useEffect(() => {
@@ -99,6 +108,58 @@ export default function ReputationPage() {
             guaranteed allocations.
           </p>
         </section>
+
+        {engagement && (
+          <section className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-950/25 to-transparent p-6">
+            <h2 className="text-lg font-semibold text-emerald-200">Daily engagement lottery</h2>
+            <p className="mt-2 text-sm text-[var(--color-muted)]">
+              Every day we credit <strong className="text-white">$500–$2,000 paper cash</strong> straight
+              to trading accounts for the most active members. Winners are drawn from{' '}
+              <strong className="text-white">0.2% of users active in the last 24 hours</strong> — weighted
+              by trades, comments, votes, build posts, and community participation. More activity = better
+              odds.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <Stat
+                label="Active (24h)"
+                value={engagement.activeUsers24h.toLocaleString()}
+                hint="Eligible pool"
+              />
+              <Stat
+                label="Winners today"
+                value={String(engagement.expectedWinnersToday)}
+                hint="~0.2% of actives"
+              />
+              <Stat
+                label="Last draw paid"
+                value={
+                  engagement.latestDraw.totalPaidUsd > 0
+                    ? formatUsd(engagement.latestDraw.totalPaidUsd, 0)
+                    : '—'
+                }
+                hint={engagement.latestDraw.drawDate ?? 'Not run yet'}
+              />
+            </div>
+            {engagement.latestDraw.winners.length > 0 && (
+              <ul className="mt-4 space-y-2 text-sm">
+                {engagement.latestDraw.winners.slice(0, 5).map((w, i) => (
+                  <li key={i} className="flex justify-between rounded-lg bg-black/20 px-3 py-2">
+                    <span>{w.displayName}</span>
+                    <span className="font-medium text-emerald-300">
+                      {formatUsd(w.amountUsd, 0)} · score {w.activityScore}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <Link
+              href="/paper-trading"
+              className="mt-4 inline-block text-sm text-emerald-300 hover:underline"
+            >
+              Trade, comment, vote — stay active →
+            </Link>
+          </section>
+        )}
 
         {session && me && (
           <section className="rounded-2xl border border-amber-500/40 bg-amber-950/20 p-6">
@@ -250,12 +311,14 @@ export default function ReputationPage() {
         </section>
 
         <section className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-transparent p-6">
-          <h2 className="text-lg font-semibold text-amber-200">Biggest reward: scout verified listings</h2>
+          <h2 className="text-lg font-semibold text-amber-200">Biggest point rewards</h2>
           <p className="mt-2 text-sm text-[var(--color-muted)]">
-            The hardest bottleneck for this platform is verified, doxxed projects. If you scout a
-            founder, submit proof, pass community vote, and admin approves — you earn{' '}
-            <strong className="text-amber-300">{POINTS.LISTING_SCOUT_APPROVED.toLocaleString()} points</strong>.
-            That is intentionally the highest action on the site.
+            <strong className="text-amber-300">Founders</strong> earn{' '}
+            {POINTS.FOUNDER_PROJECT_LAUNCH.toLocaleString()} points when launching a project on Founder
+            Den, plus points for every build post, video, and community update.{' '}
+            <strong className="text-amber-300">Scouts</strong> earn{' '}
+            {POINTS.LISTING_SCOUT_APPROVED.toLocaleString()} points when a listing they submitted passes
+            community vote and admin approval — the highest single action for non-founders.
           </p>
         </section>
 

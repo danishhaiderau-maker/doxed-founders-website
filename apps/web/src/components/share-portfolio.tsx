@@ -14,6 +14,7 @@ type SharePortfolioProps = {
   displayName: string;
   roi: number;
   totalValue: number;
+  accessToken?: string;
   compact?: boolean;
 };
 
@@ -22,13 +23,14 @@ export function SharePortfolio({
   displayName,
   roi,
   totalValue,
+  accessToken,
   compact = false,
 }: SharePortfolioProps) {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://doxxedcrypto.digital';
 
   const flex = useMemo(
-    () => buildPortfolioFlexShare({ displayName, roi, totalValue, userId, origin }),
-    [displayName, roi, totalValue, userId, origin],
+    () => buildPortfolioFlexShare({ displayName, roi, totalValue, userId, origin, accessToken }),
+    [displayName, roi, totalValue, userId, origin, accessToken],
   );
 
   const { openFlex, modal } = useShareFlex(flex);
@@ -44,7 +46,7 @@ export function SharePortfolio({
             onClick={openFlex}
             className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-300 hover:bg-sky-500/25"
           >
-            {roi >= 0 ? '🚀 Flex on X' : '📉 Flex on X'}
+            📜 Share conviction
           </button>
           <CopyLinkButton url={shareUrl} compact />
         </div>
@@ -56,9 +58,9 @@ export function SharePortfolio({
     <>
       {modal}
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-4">
-        <h3 className="text-sm font-semibold">Share your results on X</h3>
+        <h3 className="text-sm font-semibold">Share Proof of Conviction</h3>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
-          Pick a pump or dump meme, download it, and post from your own account — not @Bitbro4crypto.
+          Auto-written thread + meme. Sign in with X to post in one tap — no download or paste.
         </p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
@@ -75,7 +77,7 @@ export function SharePortfolio({
                 roi >= 0 ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
               }`}
             >
-              {roi >= 0 ? '🚀 Flex on X' : '📉 Flex on X'}
+              📜 Share conviction
             </button>
           </div>
         </div>
@@ -86,27 +88,17 @@ export function SharePortfolio({
 
 type SharePositionProps = PositionShareInput & {
   userId: string;
+  projectId: string;
+  accessToken?: string;
 };
 
 export function SharePosition(props: SharePositionProps) {
-  const { userId, pnlPercent, ticker, projectName, displayName, investedUsd, pnlUsd, thesis } =
-    props;
+  const { userId, projectId, pnlPercent, accessToken } = props;
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://doxxedcrypto.digital';
 
   const flex = useMemo(
-    () =>
-      buildPositionFlexShare({
-        displayName,
-        ticker,
-        projectName,
-        investedUsd,
-        pnlUsd,
-        pnlPercent,
-        thesis,
-        userId,
-        origin,
-      }),
-    [displayName, ticker, projectName, investedUsd, pnlUsd, pnlPercent, thesis, userId, origin],
+    () => buildPositionFlexShare({ ...props, userId, origin, projectId, accessToken }),
+    [props, userId, origin, projectId, accessToken],
   );
 
   const { openFlex, modal } = useShareFlex(flex);
@@ -122,7 +114,7 @@ export function SharePosition(props: SharePositionProps) {
           win ? 'bg-emerald-600/90 hover:bg-emerald-600' : 'bg-red-600/90 hover:bg-red-600'
         }`}
       >
-        {win ? '🚀 Flex' : '📉 Flex'}
+        📜 Share
       </button>
     </>
   );

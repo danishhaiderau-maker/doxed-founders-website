@@ -17,6 +17,8 @@ import { FounderUpdatesModule } from './founder-updates/founder-updates.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PointsModule } from './points/points.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { ConvictionShareModule } from './conviction-share/conviction-share.module';
+import { EngagementRewardsModule } from './engagement-rewards/engagement-rewards.module';
 import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
@@ -31,6 +33,8 @@ import { XSocialModule } from './x-social/x-social.module';
     NotificationsModule,
     FounderUpdatesModule,
     FounderDenModule,
+    ConvictionShareModule,
+    EngagementRewardsModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,

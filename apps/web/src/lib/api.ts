@@ -182,6 +182,11 @@ export interface PaperPortfolio {
     marketCap?: number | null;
     liquidity?: number | null;
     volume24h?: number | null;
+    convictionThesis?: string | null;
+    convictionCatalyst?: string | null;
+    convictionTargetUsd?: number | null;
+    convictionRecordedAt?: string | null;
+    positionOpenedAt?: string | null;
   }[];
 }
 
@@ -422,6 +427,8 @@ export function executePaperTrade(input: {
   side: 'BUY' | 'SELL';
   amountUsd: number;
   comment?: string;
+  catalyst?: string;
+  targetUsd?: number;
 }) {
   return apiFetch<{
     success: boolean;
@@ -1126,6 +1133,46 @@ export function createBuildPost(
     { method: 'POST', body: JSON.stringify(data) },
     token,
   );
+}
+
+export interface XConnectionStatus {
+  connected: boolean;
+  canPostInstantly: boolean;
+  twitterHandle: string | null;
+  message: string;
+}
+
+export function fetchXConnectionStatus(token: string) {
+  return apiFetch<XConnectionStatus>('/conviction-share/x-status', undefined, token);
+}
+
+export function postProofOfConvictionToX(
+  input: { projectId: string; text: string; pnlPercent: number },
+  token: string,
+) {
+  return apiFetch<{ ok: true; tweetId: string; tweetUrl: string }>(
+    '/conviction-share/post-to-x',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export interface EngagementStats {
+  activeUsers24h: number;
+  expectedWinnersToday: number;
+  prizeRangeUsd: { min: number; max: number };
+  winnerRatePercent: number;
+  latestDraw: {
+    drawDate: string | null;
+    activeUsers: number;
+    winnerCount: number;
+    totalPaidUsd: number;
+    winners: { displayName: string; amountUsd: number; activityScore: number }[];
+  };
+}
+
+export function fetchEngagementStats() {
+  return apiFetch<EngagementStats>('/engagement-rewards/stats');
 }
 
 export function allocateToRaise(raiseId: string, amountUsd: number, token: string) {

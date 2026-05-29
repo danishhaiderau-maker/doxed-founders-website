@@ -17,6 +17,10 @@ type TradeAccountabilityModalProps = {
   resetFeeUsd: number;
   thesis: string;
   onThesisChange: (v: string) => void;
+  catalyst: string;
+  onCatalystChange: (v: string) => void;
+  targetUsd: string;
+  onTargetUsdChange: (v: string) => void;
   founderDoxxedTick: boolean;
   onFounderDoxxedTickChange: (v: boolean) => void;
   onCancel: () => void;
@@ -38,6 +42,10 @@ export function TradeAccountabilityModal({
   resetFeeUsd,
   thesis,
   onThesisChange,
+  catalyst,
+  onCatalystChange,
+  targetUsd,
+  onTargetUsdChange,
   founderDoxxedTick,
   onFounderDoxxedTickChange,
   onCancel,
@@ -190,19 +198,50 @@ export function TradeAccountabilityModal({
             />
           </div>
 
-          {/* Thesis */}
-          <label className="block">
-            <span className="text-sm font-medium text-zinc-300">
-              Why are you buying this token? <span className="text-zinc-500">(Optional)</span>
-            </span>
-            <textarea
-              value={thesis}
-              onChange={(e) => onThesisChange(e.target.value)}
-              rows={3}
-              placeholder="Bullish on narrative · Strong chart · Long-term hold · Community traction…"
-              className="mt-2 w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
-            />
-          </label>
+          {/* Record conviction */}
+          <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-4">
+            <p className="text-sm font-semibold text-emerald-200">Record conviction</p>
+            <p className="mt-1 text-xs text-emerald-100/70">
+              Optional — stored on your position. Months later, Share Conviction shows your thesis
+              before the move happened.
+            </p>
+            <label className="mt-3 block">
+              <span className="text-sm font-medium text-zinc-300">
+                Why are you buying? <span className="text-zinc-500">(max 280 chars)</span>
+              </span>
+              <textarea
+                value={thesis}
+                onChange={(e) => onThesisChange(e.target.value.slice(0, 280))}
+                rows={3}
+                placeholder="Doge ETF narrative is underpriced · Strong chart · Long-term hold…"
+                className="mt-2 w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
+              />
+            </label>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-400">Catalyst?</span>
+                <input
+                  type="text"
+                  value={catalyst}
+                  onChange={(e) => onCatalystChange(e.target.value.slice(0, 120))}
+                  placeholder="ETF approval, listing, macro…"
+                  className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-400">Price target (USD)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={targetUsd}
+                  onChange={(e) => onTargetUsdChange(e.target.value)}
+                  placeholder="0.50"
+                  className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
+                />
+              </label>
+            </div>
+          </div>
 
           {!isVerifiedDoxxed && (
             <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 transition hover:border-zinc-700">

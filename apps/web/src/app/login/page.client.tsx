@@ -50,7 +50,9 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Sign in</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Best for traders: sign in with X so your paper record links to your public handle.
+          <strong className="text-white">Sign in with X</strong> to unlock Proof of Conviction — post
+          your thesis and P&amp;L to followers in one click, with auto-written threads. No download or
+          paste.
         </p>
 
         <div className="mt-8">

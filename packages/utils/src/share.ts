@@ -44,7 +44,55 @@ export type PositionShareInput = {
   pnlUsd: number;
   pnlPercent: number;
   thesis?: string | null;
+  entryPrice?: number;
+  currentPrice?: number;
+  catalyst?: string | null;
+  targetPrice?: number | null;
+  recordedAt?: string | null;
+  positionOpenedAt?: string | null;
+  daysHeld?: number;
+  portfolioRoi?: number;
 };
+
+export type ProofOfConvictionInput = {
+  ticker: string;
+  entryPrice: number;
+  currentPrice: number;
+  returnPct: number;
+  thesis?: string | null;
+  catalyst?: string | null;
+  targetPrice?: number | null;
+  recordedAt?: string | null;
+  portfolioRoi?: number | null;
+  proofUrl?: string;
+};
+
+function formatTokenPrice(value: number): string {
+  if (value >= 1) return formatUsd(value, 2);
+  if (value >= 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(8).replace(/0+$/, '').replace(/\.$/, '')}`;
+}
+
+export function buildProofOfConvictionMessage(input: ProofOfConvictionInput): string {
+  const win = input.returnPct >= 0;
+  const sign = win ? '+' : '';
+  const lines = [
+    `I publicly bought $${input.ticker} at ${formatTokenPrice(input.entryPrice)}.`,
+    '',
+    `Current: ${formatTokenPrice(input.currentPrice)}`,
+    `Return: ${sign}${Math.round(input.returnPct)}%`,
+  ];
+  if (input.thesis?.trim()) {
+    const t = input.thesis.trim().replace(/\s+/g, ' ');
+    lines.push('', `Reason: "${t.length > 80 ? `${t.slice(0, 79)}…` : t}"`);
+  }
+  if (input.recordedAt) {
+    lines.push(`Recorded: ${new Date(input.recordedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`);
+  }
+  lines.push('', '#ProofOfConviction @DoxxedCrypto');
+  if (input.proofUrl) lines.push(input.proofUrl);
+  return lines.join('\n').slice(0, 280);
+}
 
 export function buildPositionShareMessage(input: PositionShareInput): string {
   const win = input.pnlPercent >= 0;

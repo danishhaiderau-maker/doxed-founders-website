@@ -51,7 +51,9 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Create account</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Best path: sign in with X and paper trade with your public handle on the line.
+          Most traders start with <strong className="text-white">Sign up with X</strong> — your paper
+          portfolio links to your handle, and you can share Proof of Conviction instantly (auto-written
+          posts, 1-click to X, better engagement with followers).
         </p>
 
         <div className="mt-8">
