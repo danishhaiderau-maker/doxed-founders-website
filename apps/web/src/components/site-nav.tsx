@@ -14,7 +14,7 @@ const NAV_LINKS = [
   { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
   { href: '/build-feed', label: 'Build feed' },
-  { href: '/founder-den', label: 'Founder Den', auth: true },
+  { href: '/founder-den', label: 'Founder OS', auth: true },
   { href: '/feed', label: 'Feed' },
   { href: '/paper-trading', label: 'Trade' },
   { href: '/watchlist', label: 'Watchlist', auth: true },

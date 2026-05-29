@@ -18,22 +18,22 @@ export function LandingHero() {
       <div className="relative mx-auto max-w-6xl px-6 py-24 md:py-32">
         <p className="inline-flex items-center gap-2 rounded-full border border-emerald-500/25 bg-emerald-950/30 px-3 py-1 text-xs font-medium uppercase tracking-widest text-emerald-300">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          Trust + proof of execution
+          Founder OS · live now
         </p>
         <h1 className="mt-6 max-w-4xl text-4xl font-bold leading-[1.08] tracking-tight text-white md:text-6xl lg:text-7xl">
-          Build trust before you raise capital
+          Build in public. Publish everywhere. Prove it before you raise.
         </h1>
         <p className="mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400 md:text-xl">
-          Verify your identity, build in public, validate demand, connect your GitHub, and prove
-          your startup before launching a token. The operating system for transparent crypto
-          startups.
+          Connect GitHub, Vercel, Railway, Neon, and X. Sync commits, translate dev work for
+          traders, and post to your build feed, community, and X in one click — the operating
+          system for transparent crypto startups.
         </p>
         <div className="mt-10 flex flex-wrap gap-3">
           <Link
-            href="/list-your-project"
+            href="/founder-den"
             className="rounded-xl bg-white px-6 py-3.5 text-sm font-semibold text-black transition hover:bg-zinc-100"
           >
-            Verify founder
+            Open Founder OS
           </Link>
           <Link
             href="/projects"
@@ -45,7 +45,7 @@ export function LandingHero() {
             href="/paper-trading"
             className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-6 py-3.5 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-950/40"
           >
-            Paper trade — $10,000
+            Proof of Conviction — $10k paper
           </Link>
         </div>
       </div>
@@ -95,17 +95,17 @@ export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
 
 const FAILURES = [
   'Anonymous founders',
-  'No product shipped',
-  'Fake Telegram communities',
-  'Bought followers & bots',
+  'Building in silence',
+  'Updates scattered across 5 apps',
+  'Spam communities & bot followers',
   'Zero market validation',
 ];
 
 const SOLUTIONS = [
   'Verified public founders',
-  'Build-in-public updates',
-  'GitHub activity proof',
-  'Community scout validation',
+  'GitHub → translate → publish everywhere',
+  'Proof of Conviction on every trade',
+  'Quality rewards — not spam points',
   'Simulated fundraising demand',
 ];
 
@@ -114,19 +114,19 @@ export function LandingProblemSolution() {
     <section className="border-b border-zinc-800/80 py-20 md:py-28">
       <div className="mx-auto max-w-6xl px-6">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
-          The problem
+          The insight
         </p>
         <h2 className="mt-3 max-w-2xl text-3xl font-bold tracking-tight text-white md:text-4xl">
-          Why most crypto projects fail
+          Building and marketing should be the same action
         </h2>
         <p className="mt-4 max-w-2xl text-zinc-400">
-          Most platforms optimize for hype. Doxxed crypto optimizes for trust and proof of
-          execution — before anyone touches real capital.
+          Founders spend too much time updating Telegram, Discord, X, and Medium. Founder OS
+          turns every commit and deploy into community content — automatically.
         </p>
 
         <div className="mt-12 grid gap-8 lg:grid-cols-2">
           <div>
-            <p className="mb-4 text-sm font-semibold text-red-400">What kills projects</p>
+            <p className="mb-4 text-sm font-semibold text-red-400">The old workflow</p>
             <ul className="space-y-3">
               {FAILURES.map((item) => (
                 <li
@@ -142,7 +142,7 @@ export function LandingProblemSolution() {
             </ul>
           </div>
           <div>
-            <p className="mb-4 text-sm font-semibold text-emerald-400">What we replace it with</p>
+            <p className="mb-4 text-sm font-semibold text-emerald-400">Founder OS workflow</p>
             <ul className="space-y-3">
               {SOLUTIONS.map((item) => (
                 <li
@@ -163,13 +163,68 @@ export function LandingProblemSolution() {
   );
 }
 
+const OS_WORKFLOW = [
+  { step: 'Connect', desc: 'GitHub, Vercel, Railway, Neon, X' },
+  { step: 'Ship', desc: 'Commit or deploy — webhook auto-drafts update' },
+  { step: 'Translate', desc: 'Dev view + trader view, no LLM bill' },
+  { step: 'Approve', desc: 'Review suggested post in Founder OS' },
+  { step: 'Publish', desc: 'Build feed + X + project room — one click' },
+];
+
+export function LandingFounderOsWorkflow() {
+  return (
+    <section className="border-b border-zinc-800/80 bg-gradient-to-b from-indigo-950/20 to-transparent py-20 md:py-28">
+      <div className="mx-auto max-w-6xl px-6">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-400">
+          Live today
+        </p>
+        <h2 className="mt-3 text-3xl font-bold tracking-tight text-white md:text-4xl">
+          GitHub commit → translate → publish everywhere
+        </h2>
+        <p className="mt-4 max-w-2xl text-zinc-400">
+          One unified founder workflow. Connect your stack once — every ship becomes transparency,
+          community engagement, and reputation.
+        </p>
+
+        <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {OS_WORKFLOW.map((item, i) => (
+            <div
+              key={item.step}
+              className="relative rounded-2xl border border-indigo-500/20 bg-zinc-900/40 p-5"
+            >
+              <span className="text-xs font-bold text-indigo-400">{String(i + 1).padStart(2, '0')}</span>
+              <p className="mt-2 font-semibold text-white">{item.step}</p>
+              <p className="mt-1 text-xs text-zinc-500">{item.desc}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-10 flex flex-wrap gap-3">
+          <Link
+            href="/founder-den"
+            className="rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white hover:bg-indigo-500"
+          >
+            Open Founder OS
+          </Link>
+          <Link
+            href="/build-feed"
+            className="rounded-xl border border-zinc-700 px-6 py-3 text-sm text-zinc-300 hover:text-white"
+          >
+            See build feed
+          </Link>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 const JOURNEY_STEPS = [
   { title: 'Idea', desc: 'Founder submits vision & identity' },
   { title: 'Prototype', desc: 'Early product or smart contract' },
-  { title: 'Public build', desc: 'Daily updates & GitHub proof' },
+  { title: 'Public build', desc: 'GitHub sync & publish everywhere' },
   { title: 'Demand validation', desc: 'Community votes & paper capital' },
   { title: 'Simulated raise', desc: 'Virtual ICO — no real money' },
-  { title: 'Community growth', desc: 'Feedback, scouts, reputation' },
+  { title: 'Community growth', desc: 'Helpful marks, bounties, scouts' },
   { title: 'Real launch', desc: 'Token only when execution is proven' },
 ];
 
@@ -178,14 +233,13 @@ export function LandingFounderJourney() {
     <section className="border-b border-zinc-800/80 bg-zinc-950/30 py-20 md:py-28">
       <div className="mx-auto max-w-6xl px-6">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
-          Core visual identity
+          Founder journey
         </p>
         <h2 className="mt-3 text-3xl font-bold tracking-tight text-white md:text-4xl">
-          The founder journey
+          Verify first. Build publicly. Raise last.
         </h2>
         <p className="mt-4 max-w-2xl text-zinc-400">
-          Flip the launch order: verify first, build publicly, validate demand, then raise — not
-          the other way around.
+          Flip the launch order — prove execution before anyone touches real capital.
         </p>
 
         <div className="mt-14 flex flex-col items-start gap-0 md:flex-row md:items-stretch md:gap-0">
@@ -252,55 +306,75 @@ export function LandingTrustSecurity() {
   );
 }
 
-const ROADMAP = [
+const LIVE_FEATURES = [
   {
-    title: 'Founder Den',
-    desc: 'Dashboard for identity, build log, funding simulation, and community.',
-    status: 'In progress',
+    title: 'Founder OS dashboard',
+    desc: 'Credits, bounties, community pool, connected stack — one place.',
+    status: 'Live',
   },
   {
-    title: 'GitHub integration',
-    desc: 'Commits, releases, and builder score on every founder profile.',
-    status: 'Planned',
+    title: 'Publish everywhere',
+    desc: 'Build feed + X + project room from a single approved update.',
+    status: 'Live',
   },
   {
-    title: 'Proof of Demand',
-    desc: 'Simulated ICO — community allocates virtual capital before real raise.',
-    status: 'Planned',
+    title: 'GitHub & deploy sync',
+    desc: 'Commits and Vercel/Railway webhooks auto-draft build updates.',
+    status: 'Live',
   },
+  {
+    title: 'Proof of Conviction',
+    desc: 'Record thesis at buy, share to X in one tap after OAuth sign-in.',
+    status: 'Live',
+  },
+  {
+    title: 'Simulated raises',
+    desc: 'Community allocates paper capital — demand proof before real raise.',
+    status: 'Live',
+  },
+  {
+    title: 'Quality rewards',
+    desc: 'Top 0.2% useful contributors win daily paper cash — spam excluded.',
+    status: 'Live',
+  },
+];
+
+const COMING_FEATURES = [
   {
     title: 'Trust ring reputation',
     desc: 'Visual score: identity, GitHub, delivery, community, transparency.',
-    status: 'Planned',
+    status: 'Coming',
   },
   {
-    title: 'Public roadmaps',
-    desc: 'Founders ship in public — community follows every milestone.',
-    status: 'Planned',
+    title: 'Discord & Telegram publish',
+    desc: 'Extend publish everywhere to community channels.',
+    status: 'Coming',
   },
   {
     title: 'Founder battle arena',
     desc: 'Two projects, community votes — viral discovery loop.',
-    status: 'Planned',
+    status: 'Coming',
   },
 ];
 
 export function LandingRoadmap() {
+  const all = [...LIVE_FEATURES, ...COMING_FEATURES];
+
   return (
     <section className="py-20 md:py-28">
       <div className="mx-auto max-w-6xl px-6">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
-          What&apos;s next
+          Platform
         </p>
         <h2 className="mt-3 text-3xl font-bold tracking-tight text-white">
-          The founder operating system
+          What&apos;s live vs what&apos;s next
         </h2>
         <p className="mt-4 max-w-2xl text-zinc-400">
-          One place for GitHub, funding simulation, community, roadmaps, and reputation — so
-          founders stop juggling Telegram, Discord, and ten other tools.
+          Founder OS is shipping — not a roadmap slide. Connect your stack and start publishing
+          today.
         </p>
         <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {ROADMAP.map((item) => (
+          {all.map((item) => (
             <div
               key={item.title}
               className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5 transition hover:border-zinc-700"
@@ -309,7 +383,7 @@ export function LandingRoadmap() {
                 <h3 className="font-semibold text-white">{item.title}</h3>
                 <span
                   className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-                    item.status === 'In progress'
+                    item.status === 'Live'
                       ? 'bg-emerald-950/50 text-emerald-400'
                       : 'bg-zinc-800 text-zinc-500'
                   }`}
@@ -335,18 +409,18 @@ export function LandingProofLayer() {
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
               Live today
             </p>
-            <h2 className="mt-3 text-3xl font-bold text-white">Proof of conviction layer</h2>
+            <h2 className="mt-3 text-3xl font-bold text-white">Proof of Conviction</h2>
             <p className="mt-4 text-zinc-400">
-              Paper trade with live DexScreener prices. Post your thesis. Scout listings. Every
-              action compounds your public reputation — like GitHub meets AngelList for crypto
-              founders.
+              Paper trade with live prices. Record your thesis at buy. Share conviction to X in one
+              click. Scouts validate listings. Founders mark helpful replies — quality over spam.
             </p>
             <ul className="mt-6 space-y-2 text-sm text-zinc-300">
               {[
-                'Verified founder discovery & verification dossiers',
-                '$10,000 paper trading with risk guardrails',
-                'Scout vote board — community filters before admin review',
-                'Public portfolios, leaderboards, and reputation points',
+                '1-click X posting after sign-in with X',
+                '$10,000 paper trading with conviction fields',
+                'Daily quality lottery for top 0.2% contributors',
+                '25,000 Founder Credits + community pool on launch',
+                'Public portfolios, leaderboards, Early Scout badges',
               ].map((item) => (
                 <li key={item} className="flex gap-2">
                   <span className="text-emerald-400">→</span> {item}
@@ -364,36 +438,36 @@ export function LandingProofLayer() {
                 href="/reputation"
                 className="rounded-xl border border-zinc-700 px-5 py-2.5 text-sm text-zinc-300 hover:text-white"
               >
-                How reputation works
+                Points & rewards
               </Link>
             </div>
           </div>
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
             <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">
-              Reputation preview
+              Stack hub · connect once
             </p>
-            <div className="mt-6 flex items-center justify-center">
-              <div className="relative flex h-36 w-36 items-center justify-center rounded-full border-4 border-emerald-500/40 bg-zinc-950">
-                <div className="text-center">
-                  <p className="text-3xl font-bold text-emerald-400">94</p>
-                  <p className="text-[10px] uppercase tracking-wider text-zinc-500">Trust score</p>
-                </div>
-              </div>
-            </div>
-            <dl className="mt-6 space-y-2 text-sm">
-              {[
-                ['Identity', '100'],
-                ['GitHub', '92'],
-                ['Delivery', '89'],
-                ['Community', '97'],
-              ].map(([k, v]) => (
-                <div key={k} className="flex justify-between border-b border-zinc-800 py-2">
-                  <dt className="text-zinc-500">{k}</dt>
-                  <dd className="font-medium text-white">{v}</dd>
-                </div>
-              ))}
-            </dl>
-            <p className="mt-4 text-center text-xs text-zinc-600">Illustrative — full ring coming in Founder Den</p>
+            <ul className="mt-4 space-y-2 text-sm">
+              {['GitHub', 'Vercel', 'Railway', 'Neon', 'DigitalOcean', 'Supabase', 'X', 'Cursor Build Room'].map(
+                (name) => (
+                  <li
+                    key={name}
+                    className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2"
+                  >
+                    <span className="text-zinc-300">{name}</span>
+                    <span className="text-[10px] uppercase text-emerald-500">Connect in Founder OS</span>
+                  </li>
+                ),
+              )}
+            </ul>
+            <p className="mt-4 text-xs text-zinc-600">
+              Deploy webhooks auto-draft updates — one dashboard instead of five separate tools.
+            </p>
+            <Link
+              href="/founder-den"
+              className="mt-4 inline-block text-sm font-medium text-emerald-400 hover:underline"
+            >
+              Connect your stack →
+            </Link>
           </div>
         </div>
       </div>
@@ -406,18 +480,18 @@ export function LandingFinalCta() {
     <section className="border-t border-zinc-800/80 py-24">
       <div className="mx-auto max-w-3xl px-6 text-center">
         <h2 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
-          Earn trust before you raise capital
+          The public startup operating system
         </h2>
         <p className="mt-4 text-zinc-400">
-          Founders build in public. Traders prove conviction. Scouts validate demand. The
-          transparent crypto startup ecosystem starts here.
+          Founders build in public. Traders prove conviction. Every minute shipping becomes
+          marketing, transparency, and community growth.
         </p>
         <div className="mt-10 flex flex-wrap justify-center gap-3">
           <Link
-            href="/list-your-project"
+            href="/founder-den"
             className="rounded-xl bg-white px-8 py-3.5 font-semibold text-black hover:bg-zinc-100"
           >
-            List your project
+            Open Founder OS
           </Link>
           <Link
             href="/register"

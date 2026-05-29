@@ -8,6 +8,7 @@ import {
   LandingHero,
   LandingLiveMetrics,
   LandingProblemSolution,
+  LandingFounderOsWorkflow,
   LandingFounderJourney,
   LandingProofLayer,
   LandingTrustSecurity,
@@ -17,7 +18,7 @@ import {
 import {
   LatestFounderVideos,
   DemandHeatmapSection,
-  FounderDenHubTeaser,
+  FounderOsHubTeaser,
 } from '@/components/landing/founder-hub-sections';
 import {
   fetchFeaturedProjects,
@@ -46,7 +47,7 @@ export function LandingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div>
             <p className="text-[10px] font-medium uppercase tracking-[0.25em] text-emerald-500/80">
-              Proof of execution
+              Founder OS
             </p>
             <SiteBrand />
           </div>
@@ -57,6 +58,7 @@ export function LandingPage() {
       <LandingHero />
       <LandingLiveMetrics stats={stats} />
       <LandingProblemSolution />
+      <LandingFounderOsWorkflow />
       <LandingFounderJourney />
       <LatestFounderVideos />
       <LandingProofLayer />
@@ -72,7 +74,7 @@ export function LandingPage() {
       <LandingTrustSecurity />
       <DemandHeatmapSection />
       <LandingRoadmap />
-      <FounderDenHubTeaser />
+      <FounderOsHubTeaser />
 
       {featured.length > 0 && (
         <section className="border-t border-zinc-800/80 py-16">
