@@ -788,3 +788,175 @@ export function markNotificationRead(id: string, token: string) {
 export function markAllNotificationsRead(token: string) {
   return apiFetch('/notifications/read-all', { method: 'PATCH' }, token);
 }
+
+// ─── Founder Den / Public Founder Presence ───────────────────────────────────
+
+export interface FounderVideo {
+  id: string;
+  type: string;
+  title: string;
+  url: string;
+  durationMin: number | null;
+  publishedAt: string;
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    presenceLevel: string;
+  };
+  project: {
+    slug: string;
+    name: string;
+    ticker: string;
+    logoUrl: string | null;
+  } | null;
+}
+
+export interface FounderBuildPost {
+  id: string;
+  dayNumber: number | null;
+  headline: string;
+  body: string;
+  githubUrl: string | null;
+  publishedAt: string;
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    presenceLevel: string;
+  };
+  project: {
+    slug: string;
+    name: string;
+    ticker: string;
+    logoUrl: string | null;
+  } | null;
+}
+
+export interface FounderRoom {
+  slug: string;
+  name: string;
+  bio: string | null;
+  photoUrl: string | null;
+  linkedInUrl: string | null;
+  twitterUrl: string | null;
+  githubUrl: string | null;
+  githubUsername: string | null;
+  websiteUrl: string | null;
+  journeyStage: string;
+  buildStreakDays: number;
+  reputationScore: number;
+  presenceLevel: string;
+  reputation: {
+    total: number;
+    videoActivity: number;
+    githubActivity: number;
+    communityTrust: number;
+    productDelivery: number;
+    consistency: number;
+  };
+  videos: FounderVideo[];
+  buildPosts: FounderBuildPost[];
+  projects: ProjectSummary[];
+  heatmap: { date: string; count: number }[];
+  stats: {
+    videos: number;
+    buildPosts: number;
+    roadmapDone: number;
+    githubConnected: boolean;
+    buildStreakDays: number;
+  };
+}
+
+export interface ProjectRoom {
+  slug: string;
+  name: string;
+  ticker: string;
+  summary: string | null;
+  description: string | null;
+  logoUrl: string | null;
+  websiteUrl: string | null;
+  dexscreenerUrl: string | null;
+  chain: { slug: string; name: string };
+  category: { slug: string; name: string } | null;
+  metrics: ProjectMetrics | null;
+  socials: ProjectDetail['socials'];
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    presenceLevel: string;
+    reputationScore: number;
+    journeyStage: string;
+    twitterUrl: string | null;
+    githubUrl: string | null;
+  } | null;
+  videos: FounderVideo[];
+  buildPosts: FounderBuildPost[];
+  roadmap: { id: string; title: string; status: string; sortOrder: number }[];
+  activeRaise: {
+    id: string;
+    goalUsd: number;
+    tokenAllocation: string | null;
+    durationDays: number;
+    status: string;
+    totalAllocated: number;
+    allocatorCount: number;
+  } | null;
+  demandPolls: {
+    id: string;
+    type: string;
+    question: string;
+    options: unknown;
+    voteCounts: Record<string, number>;
+  }[];
+}
+
+export function fetchLatestFounderVideos(limit = 12) {
+  return apiFetch<FounderVideo[]>(`/founder-den/videos/latest?limit=${limit}`);
+}
+
+export function fetchBuildFeed(limit = 40) {
+  return apiFetch<FounderBuildPost[]>(`/founder-den/build-feed?limit=${limit}`);
+}
+
+export function fetchFounderRoom(slug: string) {
+  return apiFetch<FounderRoom>(`/founder-den/founders/${slug}`);
+}
+
+export function fetchProjectRoom(slug: string) {
+  return apiFetch<ProjectRoom>(`/founder-den/projects/${slug}/room`);
+}
+
+export function fetchDemandHeatmap() {
+  return apiFetch<
+    { project: { slug: string; name: string; ticker: string; logoUrl: string | null }; goalUsd: number; totalDemand: number; allocatorCount: number }[]
+  >('/founder-den/demand-heatmap');
+}
+
+export function createBuildPost(
+  data: { headline: string; body: string; projectId?: string; dayNumber?: number; githubUrl?: string },
+  token: string,
+) {
+  return apiFetch<{ buildStreakDays?: number }>(
+    '/founder-den/build-posts',
+    { method: 'POST', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function allocateToRaise(raiseId: string, amountUsd: number, token: string) {
+  return apiFetch(
+    `/founder-den/raises/${raiseId}/allocate`,
+    { method: 'POST', body: JSON.stringify({ amountUsd }) },
+    token,
+  );
+}
+
+export function voteDemandPoll(pollId: string, optionKey: string, token: string) {
+  return apiFetch(
+    `/founder-den/polls/${pollId}/vote`,
+    { method: 'POST', body: JSON.stringify({ optionKey }) },
+    token,
+  );
+}

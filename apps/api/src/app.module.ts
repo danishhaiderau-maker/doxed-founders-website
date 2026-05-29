@@ -12,6 +12,7 @@ import { PaperTradingModule } from './paper-trading/paper-trading.module';
 import { ProjectsModule } from './projects/projects.module';
 import { ReputationModule } from './reputation/reputation.module';
 import { WatchlistModule } from './watchlist/watchlist.module';
+import { FounderDenModule } from './founder-den/founder-den.module';
 import { FounderUpdatesModule } from './founder-updates/founder-updates.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PointsModule } from './points/points.module';
@@ -29,6 +30,7 @@ import { XSocialModule } from './x-social/x-social.module';
     PointsModule,
     NotificationsModule,
     FounderUpdatesModule,
+    FounderDenModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,
