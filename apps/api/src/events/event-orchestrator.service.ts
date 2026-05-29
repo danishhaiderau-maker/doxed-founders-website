@@ -38,6 +38,7 @@ export class EventOrchestratorService {
           break;
         case FounderEventType.COPILOT_COMMAND:
         case FounderEventType.QUICK_COMMAND:
+        case FounderEventType.RAISE_ALLOCATION:
           await this.onActivity(event);
           break;
         default:

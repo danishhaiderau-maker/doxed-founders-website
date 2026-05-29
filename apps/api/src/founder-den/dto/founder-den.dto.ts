@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -72,6 +73,23 @@ export class VotePollDto {
   optionKey!: string;
 }
 
+export class ScoutStakeDto {
+  @IsIn(['YES', 'NO'])
+  side!: 'YES' | 'NO';
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(10)
+  amountUsd!: number;
+}
+
+export class FounderBrainAskDto {
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  question!: string;
+}
+
 export class FounderApplicationDto {
   @IsString()
   @MinLength(2)
@@ -124,6 +142,18 @@ export class CreateSimulatedRaiseDto {
   @IsOptional()
   @IsString()
   plannedLaunchDate?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  communityTokenPercent?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  maxParticipantSlots?: number;
 }
 
 export class ListTokenDto {

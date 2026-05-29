@@ -348,6 +348,7 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
                   bs58.encode(signature),
                   message,
                   accessToken,
+                  'SOLANA',
                 );
                 setMsg('Wallet verified and linked');
                 load();
@@ -360,6 +361,41 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
             Connect wallet
           </button>
         )}
+      </section>
+
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <h2 className="font-semibold text-white">EVM wallet (MetaMask / Rabby)</h2>
+        <p className="mt-1 text-xs text-zinc-500">
+          Sign-message only — used for Raise Room participant export and token distribution. Non-custodial.
+        </p>
+        <button
+          type="button"
+          onClick={async () => {
+            setErr(null);
+            const eth = (window as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
+            if (!eth) {
+              setErr('Install MetaMask or Rabby');
+              return;
+            }
+            try {
+              const { challengeToken, message } = await walletChallenge(accessToken);
+              const accounts = (await eth.request({ method: 'eth_requestAccounts' })) as string[];
+              const address = accounts[0];
+              const signature = (await eth.request({
+                method: 'personal_sign',
+                params: [message, address],
+              })) as string;
+              await walletVerify(challengeToken, address, signature, message, accessToken, 'ETHEREUM');
+              setMsg('EVM wallet verified — linked for ICO distribution');
+              load();
+            } catch (e) {
+              setErr(e instanceof Error ? e.message : 'EVM wallet connect failed');
+            }
+          }}
+          className="mt-4 rounded-lg bg-orange-600 px-4 py-2 text-sm text-white"
+        >
+          Connect MetaMask
+        </button>
       </section>
     </div>
   );

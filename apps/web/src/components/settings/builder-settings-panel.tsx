@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   BuilderSettings,
   connectAiProvider,
+  connectDeskProvider,
   connectGitHubToken,
   disconnectAiProvider,
   disconnectGitHubToken,
@@ -51,6 +52,20 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Save failed');
+    }
+  }
+
+  async function handleConnectDesk(providerKey: string) {
+    setConnecting(providerKey);
+    setErr(null);
+    try {
+      const result = await connectDeskProvider(providerKey, accessToken);
+      setMsg(`${result.label} desk workflow enabled — use "${result.copyCommand}" in Founder Copilot`);
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Connect failed');
+    } finally {
+      setConnecting(null);
     }
   }
 
@@ -162,8 +177,10 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       </section>
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="text-lg font-semibold text-white">AI providers (your keys)</h2>
-        <p className="mt-1 text-sm text-zinc-500">Encrypted at rest (AES-256-GCM). Founder OS never pays AI costs.</p>
+        <h2 className="text-lg font-semibold text-white">AI providers</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          API keys (remote) or desk workflows (copy prompts — no remote API). Encrypted at rest where keys apply.
+        </p>
         <div className="mt-4 space-y-4">
           {aiProviders.map((p) => (
             <div key={p.key} className="rounded-xl border border-zinc-800 p-4">
@@ -208,10 +225,29 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                   )}
                 </div>
               )}
-              {p.key === 'CURSOR' && (
-                <p className="mt-2 text-xs text-indigo-300">
-                  No remote API — use Copy for builder in Founder Copilot when at your desk.
-                </p>
+              {!p.needsApiKey && p.key !== 'RULE_BASED' && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={connecting === p.key}
+                    onClick={() => handleConnectDesk(p.key)}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {p.connected ? 'Desk workflow active' : 'Enable desk workflow'}
+                  </button>
+                  {p.connected && p.credentialProvider && (
+                    <button
+                      type="button"
+                      onClick={() => handleDisconnect(p.credentialProvider!)}
+                      className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+                    >
+                      Disable
+                    </button>
+                  )}
+                  <p className="text-xs text-indigo-300">
+                    No remote API — copy prompts from Founder Copilot into {p.label}.
+                  </p>
+                </div>
               )}
             </div>
           ))}

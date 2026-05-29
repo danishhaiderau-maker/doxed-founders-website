@@ -119,11 +119,15 @@ This bundle contains application source only. It intentionally excludes:
 - Production credentials (Railway, Vercel, Neon, X OAuth)
 
 Review focus:
-1. apps/api/src — NestJS API, auth, founder-os, conviction-share, engagement-rewards
+1. apps/api/src — NestJS API, auth, founder-os, builder, events, founder-den
 2. apps/web/src — Next.js UI, auth-options, API client
-3. prisma/schema.prisma — data model (OAuth tokens stored encrypted-at-app-level: NO — flag this)
-4. packages/utils — business logic
-5. scripts — automation (no env contents included)
+3. prisma/schema.prisma — data model (Phase 6 Raise Room, Phase 7 Scout Markets / Founder Brain)
+4. packages/utils — business logic (ai-providers desk workflow, scout-markets, founder-brain)
+5. Integration credentials encrypted at rest (AES-256-GCM) — verify key handling
+
+Phases in this export:
+- Phase 6: Raise Room (1% allocation burn, participant export, EVM wallet verify)
+- Phase 7: Scout prediction markets, Founder Brain Q&A, desk AI providers (Cursor, Claude Code, Codex, Windsurf, OpenHands, OpenClaw)
 
 Public audit repo: github.com/danishhaiderau-maker/doxed-founders-audit
 Main app repo: github.com/danishhaiderau-maker/doxed-founders-website

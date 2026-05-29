@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
+import { RaiseRoomPanel } from '@/components/raise-room-panel';
 import { BuildRoom2 } from '@/components/build-room-2';
 import { FounderInboxPanel } from '@/components/founder-inbox-panel';
 import { AgentsWorkspacePanel } from '@/components/agents-workspace-panel';
@@ -28,7 +29,7 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'activity', label: 'Activity' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'community', label: 'Community' },
-  { id: 'funding', label: 'Funding' },
+  { id: 'funding', label: 'Raise Room' },
   { id: 'agents', label: 'Agents' },
   { id: 'build', label: 'Founder Copilot' },
   { id: 'analytics', label: 'Analytics' },
@@ -86,6 +87,8 @@ export type FounderWorkspaceProps = {
     goalUsd: string;
     durationDays: string;
     tokenAllocation: string;
+    communityTokenPercent: string;
+    maxParticipantSlots: string;
     plannedLaunchDate: string;
   };
   setRaiseForm: React.Dispatch<React.SetStateAction<FounderWorkspaceProps['raiseForm']>>;
@@ -293,28 +296,51 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
       )}
 
       {tab === 'funding' && (
-        <OsSection title="Funding & demand" subtitle="Simulated raise · launch readiness" disabled={!hasFounder}>
+        <OsSection title="Raise Room" subtitle="Public ICO slots · paper dollar demand · token distribution" disabled={!hasFounder}>
           {room?.activeRaise ? (
-            <div className="text-sm text-zinc-300">
-              <p>Goal {formatUsd(room.activeRaise.goalUsd, 0)}</p>
-              <p className="mt-1">
-                Demand {formatUsd(room.activeRaise.totalAllocated, 0)} ·{' '}
-                {room.activeRaise.allocatorCount} backers
-              </p>
-            </div>
+            <RaiseRoomPanel
+              room={room}
+              accessToken={session?.accessToken}
+              allocAmount="500"
+              onAllocAmountChange={() => {}}
+              onAllocate={() => {}}
+              onMessage={onWorkspaceMessage}
+              onRefresh={onRefresh}
+            />
           ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2">
               <input
                 value={raiseForm.goalUsd}
                 onChange={(e) => setRaiseForm({ ...raiseForm, goalUsd: e.target.value })}
-                placeholder="Funding goal"
+                placeholder="Raise target ($)"
                 disabled={!hasFounder}
                 className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm disabled:opacity-50"
               />
               <input
                 value={raiseForm.durationDays}
                 onChange={(e) => setRaiseForm({ ...raiseForm, durationDays: e.target.value })}
-                placeholder="Days"
+                placeholder="Days open"
+                disabled={!hasFounder}
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm disabled:opacity-50"
+              />
+              <input
+                value={raiseForm.tokenAllocation}
+                onChange={(e) => setRaiseForm({ ...raiseForm, tokenAllocation: e.target.value })}
+                placeholder="Token allocation label (e.g. 15% public sale)"
+                disabled={!hasFounder}
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm disabled:opacity-50"
+              />
+              <input
+                value={raiseForm.communityTokenPercent}
+                onChange={(e) => setRaiseForm({ ...raiseForm, communityTokenPercent: e.target.value })}
+                placeholder="Community token % for Raise Room"
+                disabled={!hasFounder}
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm disabled:opacity-50"
+              />
+              <input
+                value={raiseForm.maxParticipantSlots}
+                onChange={(e) => setRaiseForm({ ...raiseForm, maxParticipantSlots: e.target.value })}
+                placeholder="Max ICO slots (optional)"
                 disabled={!hasFounder}
                 className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm disabled:opacity-50"
               />
@@ -322,10 +348,14 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
                 type="button"
                 onClick={onLaunchRaise}
                 disabled={!hasFounder}
-                className="sm:col-span-2 rounded-lg border border-emerald-500/40 py-2 text-sm text-emerald-200 disabled:opacity-40"
+                className="sm:col-span-2 rounded-lg bg-violet-600 py-2.5 text-sm font-semibold text-white disabled:opacity-40"
               >
-                Launch simulated raise
+                Open Raise Room (public ICO slots)
               </button>
+              <p className="sm:col-span-2 text-xs text-zinc-500">
+                Investors allocate paper dollars publicly. 1% burned on each commit — removed from circulation.
+                Recharge paper dollars for $25 when balance drops below $1,000.
+              </p>
             </div>
           )}
         </OsSection>

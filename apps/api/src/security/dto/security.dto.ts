@@ -46,6 +46,10 @@ export class WalletVerifyDto {
 
   @IsString()
   message!: string;
+
+  @IsOptional()
+  @IsString()
+  chain?: 'SOLANA' | 'ETHEREUM';
 }
 
 export class PasskeyVerifyDto {

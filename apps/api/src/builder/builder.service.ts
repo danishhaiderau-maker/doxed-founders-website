@@ -5,6 +5,7 @@ import {
   QUICK_BUILD_AI_SYSTEM,
   QuickBuildResult,
   aiProviderConfig,
+  isDeskWorkflowProvider,
   processQuickBuild,
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
@@ -20,6 +21,7 @@ export class BuilderService {
   async getSettings(userId: string) {
     const settings = await this.ensureSettings(userId);
     const connected = await this.listConnectedProviders(userId);
+    const deskConnected = await this.listDeskConnectedProviders(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -29,7 +31,12 @@ export class BuilderService {
       currentGoalFocus: settings.currentGoalFocus,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
-        connected: p.credentialProvider ? connected.has(p.credentialProvider) : p.key === 'RULE_BASED',
+        connected:
+          p.connectMode === 'none'
+            ? p.key === 'RULE_BASED'
+            : p.connectMode === 'desk'
+              ? deskConnected.has(p.credentialProvider!)
+              : connected.has(p.credentialProvider!),
       })),
       githubTokenConnected: Boolean(
         await this.prisma.gitHubConnection.findFirst({
@@ -60,6 +67,13 @@ export class BuilderService {
           : null;
         if (!cred?.token) {
           throw new BadRequestException(`Connect ${cfg.label} API key before setting as default`);
+        }
+      } else if (cfg.connectMode === 'desk' && cfg.credentialProvider) {
+        const desk = await this.prisma.connectedAppStatus.findUnique({
+          where: { userId_provider: { userId, provider: cfg.credentialProvider } },
+        });
+        if (!desk?.connected) {
+          throw new BadRequestException(`Enable ${cfg.label} desk workflow before setting as default`);
         }
       }
     }
@@ -135,6 +149,31 @@ export class BuilderService {
     return { success: true, provider, accountName: verified.accountName };
   }
 
+  async connectDeskProvider(userId: string, providerKey: AiProvider) {
+    const cfg = aiProviderConfig(providerKey);
+    if (!cfg || cfg.connectMode !== 'desk' || !cfg.credentialProvider) {
+      throw new BadRequestException('Not a desk workflow provider');
+    }
+
+    await this.prisma.connectedAppStatus.upsert({
+      where: { userId_provider: { userId, provider: cfg.credentialProvider } },
+      create: {
+        userId,
+        provider: cfg.credentialProvider,
+        connected: true,
+        label: cfg.label,
+        metadata: { mode: 'desk', copyCommand: cfg.copyCommand } as Prisma.InputJsonValue,
+      },
+      update: {
+        connected: true,
+        label: cfg.label,
+        metadata: { mode: 'desk', copyCommand: cfg.copyCommand } as Prisma.InputJsonValue,
+      },
+    });
+
+    return { success: true, provider: providerKey, label: cfg.label, copyCommand: cfg.copyCommand };
+  }
+
   async disconnectAiProvider(userId: string, provider: string) {
     await this.prisma.integrationCredential.deleteMany({ where: { userId, provider } });
     await this.prisma.connectedAppStatus.updateMany({
@@ -161,7 +200,7 @@ export class BuilderService {
     userPrompt: string,
   ): Promise<string | null> {
     const settings = await this.ensureSettings(userId);
-    if (settings.defaultProvider === AiProvider.RULE_BASED || settings.defaultProvider === AiProvider.CURSOR) {
+    if (isDeskWorkflowProvider(settings.defaultProvider)) {
       return null;
     }
 
@@ -232,6 +271,14 @@ export class BuilderService {
       select: { provider: true },
     });
     return new Set(creds.map((c) => c.provider));
+  }
+
+  private async listDeskConnectedProviders(userId: string) {
+    const apps = await this.prisma.connectedAppStatus.findMany({
+      where: { userId, connected: true },
+      select: { provider: true },
+    });
+    return new Set(apps.map((a) => a.provider));
   }
 
   private async verifyAiKey(provider: string, key: string): Promise<{ accountName: string }> {

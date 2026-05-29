@@ -102,11 +102,12 @@ export class SecurityController {
       body.address,
       body.signature,
       body.message,
+      body.chain ?? 'SOLANA',
     );
   }
 
-  @Delete('wallet')
-  disconnectWallet(@CurrentUser() user: AuthUser) {
-    return this.security.disconnectWallet(user.id);
+  @Delete('wallet/:chain')
+  disconnectWallet(@CurrentUser() user: AuthUser, @Param('chain') chain: string) {
+    return this.security.disconnectWallet(user.id, chain);
   }
 }

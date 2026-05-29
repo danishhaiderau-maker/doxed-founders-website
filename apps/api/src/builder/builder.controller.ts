@@ -32,6 +32,11 @@ export class BuilderController {
     return this.builder.updateSettings(user.id, body);
   }
 
+  @Post('providers/desk-connect')
+  connectDeskProvider(@CurrentUser() user: AuthUser, @Body() body: { provider: AiProvider }) {
+    return this.builder.connectDeskProvider(user.id, body.provider);
+  }
+
   @Post('providers/connect')
   connectProvider(@CurrentUser() user: AuthUser, @Body() body: { provider: string; apiKey: string }) {
     return this.builder.connectAiProvider(user.id, body.provider, body.apiKey);

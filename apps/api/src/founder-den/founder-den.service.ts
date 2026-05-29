@@ -6,6 +6,8 @@ import {
   UserProgressTier,
   FounderApplicationStatus,
   BountyStatus,
+  FounderEventType,
+  UserRole,
 } from '@prisma/client';
 import {
   computeFounderReputation,
@@ -23,12 +25,26 @@ import {
   computeJourneyProgress,
   POINTS,
   FOUNDER_LAUNCH_REPUTATION_POINTS,
+  computeRaiseAllocationFee,
+  buildParticipantExport,
+  formatRaiseMomentum,
+  formatPublicAccountLabel,
+  RAISE_ALLOCATION_FEE_PERCENT,
+  TOKEN_LAUNCH_FEE_PERCENT,
+  WEEKLY_STIPEND_USD,
+  DEFAULT_SCOUT_QUESTIONS,
+  computeScoutConviction,
+  buildFounderBrainContextBlock,
+  FOUNDER_BRAIN_SYSTEM,
+  FounderBrainContext,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
-import { NotificationType } from '@prisma/client';
+import { EventsService } from '../events/events.service';
+import { BuilderService } from '../builder/builder.service';
+import { NotificationType, ScoutMarketStatus } from '@prisma/client';
 
 const founderRoomInclude = {
   user: { select: { id: true, name: true, email: true } },
@@ -73,6 +89,8 @@ export class FounderDenService {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly founderOs: FounderOsService,
+    private readonly events: EventsService,
+    private readonly builder: BuilderService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -262,19 +280,32 @@ export class FounderDenService {
             id: activeRaise.id,
             goalUsd: Number(activeRaise.goalUsd),
             tokenAllocation: activeRaise.tokenAllocation,
+            communityTokenPercent: activeRaise.communityTokenPercent,
+            maxParticipantSlots: activeRaise.maxParticipantSlots,
+            totalBurnedUsd: Number(activeRaise.totalBurnedUsd),
+            slotsLocked: activeRaise.slotsLocked,
             durationDays: activeRaise.durationDays,
             plannedLaunchDate: activeRaise.plannedLaunchDate,
             status: activeRaise.status,
             startsAt: activeRaise.startsAt,
             endsAt: activeRaise.endsAt,
             totalAllocated,
-            allocatorCount: activeRaise.allocations.length,
+            allocatorCount: activeRaise.allocations.filter((a) => Number(a.amountUsd) > 0).length,
             convictionScore: Math.min(
               100,
               Math.round((totalAllocated / Number(activeRaise.goalUsd || 1)) * 100),
             ),
+            momentumScore: formatRaiseMomentum(
+              totalAllocated,
+              Number(activeRaise.goalUsd),
+              activeRaise.allocations.filter((a) => Number(a.amountUsd) > 0).length,
+            ),
+            allocationFeePercent: RAISE_ALLOCATION_FEE_PERCENT,
           }
         : null,
+      allocationLeaderboard: activeRaise
+        ? await this.buildAllocationLeaderboard(activeRaise.id)
+        : [],
       demandAnalytics: {
         interestedUsers: project._count.followers + (activeRaise?.allocations.length ?? 0),
         averageCommitment: Math.round(avgCommitment),
@@ -392,10 +423,16 @@ export class FounderDenService {
 
     const raise = await this.prisma.simulatedRaise.findUnique({
       where: { id: raiseId },
-      include: { allocations: true },
+      include: {
+        allocations: true,
+        project: { include: { founder: true } },
+      },
     });
     if (!raise || raise.status !== SimulatedRaiseStatus.ACTIVE) {
       throw new BadRequestException('Raise is not active');
+    }
+    if (raise.slotsLocked) {
+      throw new BadRequestException('Raise slots are locked — allocation closed');
     }
 
     const portfolio = await this.prisma.paperPortfolio.findUnique({ where: { userId } });
@@ -410,31 +447,77 @@ export class FounderDenService {
 
     const existing = raise.allocations.find((a) => a.userId === userId);
     const existingAmt = existing ? Number(existing.amountUsd) : 0;
-    if (amountUsd - existingAmt > cash) {
-      throw new BadRequestException('Insufficient virtual cash for this allocation');
+    const existingBurned = existing ? Number(existing.burnedUsd) : 0;
+    const delta = amountUsd - existingAmt;
+
+    if (raise.maxParticipantSlots != null && !existing && amountUsd > 0) {
+      const participantCount = raise.allocations.filter((a) => Number(a.amountUsd) > 0).length;
+      if (participantCount >= raise.maxParticipantSlots) {
+        throw new BadRequestException(`All ${raise.maxParticipantSlots} ICO slots are reserved`);
+      }
     }
+
+    const { computeRaiseAllocationFee } = await import('@dcf/utils');
+    const fee = computeRaiseAllocationFee(delta);
+    const totalDebit = delta > 0 ? delta + fee : delta;
+
+    if (totalDebit > cash) {
+      throw new BadRequestException(
+        `Insufficient virtual cash (includes ${fee > 0 ? `1% allocation fee $${fee.toFixed(2)}` : 'no fee'})`,
+      );
+    }
+
+    const wallets = await this.prisma.walletConnection.findMany({ where: { userId } });
+    const walletAddress = wallets[0]?.address ?? null;
 
     await this.prisma.$transaction(async (tx) => {
       await tx.raiseAllocation.upsert({
         where: { raiseId_userId: { raiseId, userId } },
-        create: { raiseId, userId, amountUsd: new Prisma.Decimal(amountUsd) },
-        update: { amountUsd: new Prisma.Decimal(amountUsd) },
+        create: {
+          raiseId,
+          userId,
+          amountUsd: new Prisma.Decimal(amountUsd),
+          burnedUsd: new Prisma.Decimal(fee),
+          walletAddress,
+          slotReserved: amountUsd > 0,
+        },
+        update: {
+          amountUsd: new Prisma.Decimal(amountUsd),
+          burnedUsd: new Prisma.Decimal(existingBurned + fee),
+          walletAddress: walletAddress ?? undefined,
+          slotReserved: amountUsd > 0,
+        },
       });
 
-      const delta = amountUsd - existingAmt;
-      if (delta !== 0) {
+      if (totalDebit !== 0) {
         await tx.paperPortfolio.update({
           where: { userId },
-          data: { cashBalance: { increment: -delta } },
+          data: { cashBalance: { increment: -totalDebit } },
         });
-        await tx.virtualEconomyEvent.create({
-          data: {
-            userId,
-            type: delta > 0 ? 'RAISE_ALLOCATE' : 'RAISE_DEALLOCATE',
-            amountUsd: new Prisma.Decimal(Math.abs(delta)),
-            note: `Simulated raise ${raiseId}`,
-          },
-        });
+        if (delta !== 0) {
+          await tx.virtualEconomyEvent.create({
+            data: {
+              userId,
+              type: delta > 0 ? 'RAISE_ALLOCATE' : 'RAISE_DEALLOCATE',
+              amountUsd: new Prisma.Decimal(Math.abs(delta)),
+              note: `Raise Room ${raiseId}`,
+            },
+          });
+        }
+        if (fee > 0) {
+          await tx.virtualEconomyEvent.create({
+            data: {
+              userId,
+              type: 'PAPER_BURN',
+              amountUsd: new Prisma.Decimal(fee),
+              note: 'Raise allocation fee (1%) — removed from circulation',
+            },
+          });
+          await tx.simulatedRaise.update({
+            where: { id: raiseId },
+            data: { totalBurnedUsd: { increment: fee } },
+          });
+        }
       }
     });
 
@@ -445,7 +528,19 @@ export class FounderDenService {
     const followerCount = await this.prisma.projectFollow.count({ where: { projectId: raise.projectId } });
     await this.founderOs.recordEarlyScout(userId, raise.projectId, amountUsd, followerCount);
 
-    return { success: true, amountUsd };
+    if (raise.project.founder && delta > 0) {
+      await this.events.emit({
+        founderId: raise.project.founder.id,
+        projectId: raise.projectId,
+        userId,
+        type: FounderEventType.RAISE_ALLOCATION,
+        source: 'raise-room',
+        title: `$${amountUsd.toLocaleString()} allocated to Raise Room`,
+        payload: { raiseId, amountUsd, feeBurned: fee },
+      });
+    }
+
+    return { success: true, amountUsd, feeBurned: fee };
   }
 
   async votePoll(userId: string, pollId: string, optionKey: string) {
@@ -685,6 +780,8 @@ export class FounderDenService {
       durationDays: number;
       tokenAllocation?: string;
       plannedLaunchDate?: string;
+      communityTokenPercent?: number;
+      maxParticipantSlots?: number;
     },
   ) {
     const founder = await this.prisma.founder.findUnique({ where: { userId } });
@@ -709,6 +806,8 @@ export class FounderDenService {
           projectId,
           goalUsd: new Prisma.Decimal(dto.goalUsd),
           tokenAllocation: dto.tokenAllocation,
+          communityTokenPercent: dto.communityTokenPercent ?? 10,
+          maxParticipantSlots: dto.maxParticipantSlots,
           durationDays: dto.durationDays,
           plannedLaunchDate: dto.plannedLaunchDate ? new Date(dto.plannedLaunchDate) : null,
           status: SimulatedRaiseStatus.ACTIVE,
@@ -1394,5 +1493,439 @@ export class FounderDenService {
       twitterUrl: founder.twitterUrl,
       githubUrl: founder.githubUrl,
     };
+  }
+
+  async buildAllocationLeaderboard(raiseId: string) {
+    const rows = await this.prisma.raiseAllocation.findMany({
+      where: { raiseId, amountUsd: { gt: 0 } },
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { amountUsd: 'desc' },
+      take: 50,
+    });
+    return rows.map((r, i) => ({
+      rank: i + 1,
+      userId: r.userId,
+      displayName: formatPublicAccountLabel(r.user.name, r.user.email),
+      amountUsd: Number(r.amountUsd),
+      burnedUsd: Number(r.burnedUsd),
+      walletAddress: r.walletAddress,
+      slotReserved: r.slotReserved,
+    }));
+  }
+
+  async getRaiseParticipants(raiseId: string) {
+    const raise = await this.prisma.simulatedRaise.findUnique({
+      where: { id: raiseId },
+      include: { project: { select: { slug: true, name: true } } },
+    });
+    if (!raise) throw new NotFoundException('Raise not found');
+    const leaderboard = await this.buildAllocationLeaderboard(raiseId);
+    const totalAllocated = leaderboard.reduce((s, r) => s + r.amountUsd, 0);
+    return {
+      raiseId,
+      project: raise.project,
+      goalUsd: Number(raise.goalUsd),
+      totalAllocated,
+      communityTokenPercent: raise.communityTokenPercent,
+      slotsLocked: raise.slotsLocked,
+      participants: leaderboard,
+    };
+  }
+
+  async exportRaiseParticipants(userId: string, raiseId: string) {
+    const raise = await this.prisma.simulatedRaise.findUnique({
+      where: { id: raiseId },
+      include: { project: { include: { founder: true } } },
+    });
+    if (!raise) throw new NotFoundException('Raise not found');
+    if (raise.project.founder?.userId !== userId) {
+      throw new ForbiddenException('Only the project founder can export participants');
+    }
+
+    const rows = await this.prisma.raiseAllocation.findMany({
+      where: { raiseId, slotReserved: true, amountUsd: { gt: 0 } },
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { amountUsd: 'desc' },
+    });
+
+    const participants = buildParticipantExport(
+      rows.map((r) => ({
+        userId: r.userId,
+        displayName: formatPublicAccountLabel(r.user.name, r.user.email),
+        amountUsd: Number(r.amountUsd),
+        burnedUsd: Number(r.burnedUsd),
+        walletAddress: r.walletAddress,
+        slotReserved: r.slotReserved,
+      })),
+      raise.communityTokenPercent,
+    );
+
+    return {
+      projectName: raise.project.name,
+      raiseId,
+      communityTokenPercent: raise.communityTokenPercent,
+      totalAllocated: participants.reduce((s, p) => s + p.amountUsd, 0),
+      participantCount: participants.length,
+      tokenLaunchFeePercent: TOKEN_LAUNCH_FEE_PERCENT,
+      participants,
+      csv: [
+        'displayName,walletAddress,amountUsd,burnedUsd,tokenSharePercent',
+        ...participants.map(
+          (p) =>
+            `"${p.displayName}","${p.walletAddress ?? ''}",${p.amountUsd},${p.burnedUsd},${p.allocationSharePercent}`,
+        ),
+      ].join('\n'),
+    };
+  }
+
+  async lockRaiseSlots(userId: string, raiseId: string) {
+    const raise = await this.prisma.simulatedRaise.findUnique({
+      where: { id: raiseId },
+      include: { project: { include: { founder: true } } },
+    });
+    if (!raise) throw new NotFoundException('Raise not found');
+    if (raise.project.founder?.userId !== userId) {
+      throw new ForbiddenException('Only the project founder can lock slots');
+    }
+
+    await this.prisma.simulatedRaise.update({
+      where: { id: raiseId },
+      data: { slotsLocked: true, status: SimulatedRaiseStatus.COMPLETED },
+    });
+
+    if (raise.project.founder) {
+      await this.events.emit({
+        founderId: raise.project.founder.id,
+        projectId: raise.projectId,
+        userId,
+        type: FounderEventType.RAISE_ALLOCATION,
+        source: 'raise-room',
+        title: 'Raise Room slots locked — ready for token distribution',
+        payload: { raiseId, action: 'lock_slots' },
+      });
+    }
+
+    return { success: true, message: 'ICO slots locked. Export participant list for one-click distribution.' };
+  }
+
+  async getPlatformEconomy() {
+    const treasury = await this.prisma.platformTreasury.findUnique({ where: { id: 'default' } });
+    const burned = await this.prisma.virtualEconomyEvent.aggregate({
+      where: { type: 'PAPER_BURN' },
+      _sum: { amountUsd: true },
+    });
+    return {
+      raiseAllocationFeePercent: RAISE_ALLOCATION_FEE_PERCENT,
+      tokenLaunchFeePercent: TOKEN_LAUNCH_FEE_PERCENT,
+      weeklyStipendUsd: WEEKLY_STIPEND_USD,
+      rechargeFeeUsd: TOP_UP_FEE_USD,
+      restrictedCashThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
+      totalPaperBurned: Number(burned._sum.amountUsd ?? 0),
+      treasury: {
+        solana: treasury?.solanaTreasuryAddress ?? null,
+        evm: treasury?.evmTreasuryAddress ?? null,
+      },
+      paperDollarSinks: [
+        'Raise Room allocations (1% burned on commit)',
+        'Agent marketplace installs',
+        'Founder bounties',
+        'Scout votes',
+        'Project boosts',
+        'Token launch fee (0.2%)',
+      ],
+    };
+  }
+
+  async updatePlatformTreasury(
+    userId: string,
+    input: { solanaTreasuryAddress?: string; evmTreasuryAddress?: string },
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Admin account required');
+    }
+
+    const treasury = await this.prisma.platformTreasury.upsert({
+      where: { id: 'default' },
+      create: {
+        id: 'default',
+        solanaTreasuryAddress: input.solanaTreasuryAddress,
+        evmTreasuryAddress: input.evmTreasuryAddress,
+        updatedByUserId: userId,
+      },
+      update: {
+        ...(input.solanaTreasuryAddress !== undefined
+          ? { solanaTreasuryAddress: input.solanaTreasuryAddress }
+          : {}),
+        ...(input.evmTreasuryAddress !== undefined ? { evmTreasuryAddress: input.evmTreasuryAddress } : {}),
+        updatedByUserId: userId,
+      },
+    });
+
+    return { success: true, treasury };
+  }
+
+  async listScoutMarkets(slug: string, viewerUserId?: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { slug },
+      include: { founder: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    let markets = await this.prisma.scoutMarket.findMany({
+      where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
+      orderBy: { createdAt: 'asc' },
+      include: { positions: true },
+    });
+
+    if (markets.length === 0 && project.founder) {
+      await this.prisma.scoutMarket.createMany({
+        data: DEFAULT_SCOUT_QUESTIONS.map((question) => ({
+          projectId: project.id,
+          question,
+        })),
+      });
+      markets = await this.prisma.scoutMarket.findMany({
+        where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
+        orderBy: { createdAt: 'asc' },
+        include: { positions: true },
+      });
+    }
+
+    return markets.map((m) => {
+      const yesPool = Number(m.yesPoolUsd);
+      const noPool = Number(m.noPoolUsd);
+      const viewerPosition = viewerUserId
+        ? m.positions.find((p) => p.userId === viewerUserId)
+        : undefined;
+      return {
+        id: m.id,
+        question: m.question,
+        status: m.status,
+        yesPoolUsd: yesPool,
+        noPoolUsd: noPool,
+        conviction: computeScoutConviction(yesPool, noPool),
+        participantCount: m.positions.filter((p) => Number(p.amountUsd) > 0).length,
+        viewerPosition: viewerPosition
+          ? {
+              side: viewerPosition.side,
+              amountUsd: Number(viewerPosition.amountUsd),
+            }
+          : null,
+      };
+    });
+  }
+
+  async stakeScoutMarket(
+    userId: string,
+    marketId: string,
+    side: 'YES' | 'NO',
+    amountUsd: number,
+  ) {
+    if (amountUsd < 10) throw new BadRequestException('Minimum scout stake is $10');
+    if (side !== 'YES' && side !== 'NO') throw new BadRequestException('Side must be YES or NO');
+
+    const market = await this.prisma.scoutMarket.findUnique({
+      where: { id: marketId },
+      include: { project: { include: { founder: true } }, positions: true },
+    });
+    if (!market || market.status !== ScoutMarketStatus.OPEN) {
+      throw new BadRequestException('Scout market is not open');
+    }
+
+    const portfolio = await this.prisma.paperPortfolio.findUnique({ where: { userId } });
+    if (!portfolio) throw new BadRequestException('Start a paper trading session first');
+
+    const cash = Number(portfolio.cashBalance);
+    if (cash < RESTRICTED_CASH_THRESHOLD_USD) {
+      throw new BadRequestException(
+        `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to stake.`,
+      );
+    }
+
+    const existing = market.positions.find((p) => p.userId === userId);
+    const existingAmt = existing ? Number(existing.amountUsd) : 0;
+    const delta = amountUsd - existingAmt;
+
+    if (delta > cash) {
+      throw new BadRequestException('Insufficient virtual cash for scout stake');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.scoutMarketPosition.upsert({
+        where: { marketId_userId: { marketId, userId } },
+        create: {
+          marketId,
+          userId,
+          side,
+          amountUsd: new Prisma.Decimal(amountUsd),
+        },
+        update: {
+          side,
+          amountUsd: new Prisma.Decimal(amountUsd),
+        },
+      });
+
+      const prevSide = existing?.side;
+      const prevAmt = existingAmt;
+      let yesDelta = 0;
+      let noDelta = 0;
+
+      if (prevSide === 'YES') yesDelta -= prevAmt;
+      if (prevSide === 'NO') noDelta -= prevAmt;
+      if (side === 'YES') yesDelta += amountUsd;
+      if (side === 'NO') noDelta += amountUsd;
+
+      await tx.scoutMarket.update({
+        where: { id: marketId },
+        data: {
+          yesPoolUsd: { increment: yesDelta },
+          noPoolUsd: { increment: noDelta },
+        },
+      });
+
+      if (delta !== 0) {
+        await tx.paperPortfolio.update({
+          where: { userId },
+          data: { cashBalance: { increment: -delta } },
+        });
+        await tx.virtualEconomyEvent.create({
+          data: {
+            userId,
+            type: delta > 0 ? 'SCOUT_STAKE' : 'SCOUT_UNSTAKE',
+            amountUsd: new Prisma.Decimal(Math.abs(delta)),
+            note: `Scout market ${marketId}`,
+          },
+        });
+      }
+    });
+
+    if (market.project.founder) {
+      await this.events.emit({
+        founderId: market.project.founder.id,
+        projectId: market.projectId,
+        userId,
+        type: FounderEventType.SCOUT_MARKET_STAKE,
+        source: 'scout-markets',
+        title: `Scout stake: ${side} on "${market.question.slice(0, 60)}"`,
+        payload: { marketId, side, amountUsd },
+      });
+    }
+
+    await this.syncUserProgressTier(userId);
+    await this.points.awardOnce(userId, `SCOUT_STAKE:${marketId}`, POINTS.PROJECT_FOLLOW);
+
+    const updated = await this.prisma.scoutMarket.findUnique({ where: { id: marketId } });
+    const yesPool = Number(updated?.yesPoolUsd ?? 0);
+    const noPool = Number(updated?.noPoolUsd ?? 0);
+
+    return {
+      success: true,
+      conviction: computeScoutConviction(yesPool, noPool),
+      yesPoolUsd: yesPool,
+      noPoolUsd: noPool,
+    };
+  }
+
+  async askFounderBrain(slug: string, question: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { slug },
+      include: {
+        founder: {
+          include: {
+            user: { include: { builderSettings: true } },
+            buildQueueItems: {
+              where: { status: { notIn: ['DONE', 'DISMISSED'] } },
+              orderBy: { updatedAt: 'desc' },
+              take: 5,
+            },
+          },
+        },
+        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 3 },
+        simulatedRaises: {
+          where: { status: SimulatedRaiseStatus.ACTIVE },
+          include: { allocations: true },
+          take: 1,
+        },
+        _count: { select: { followers: true } },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const activeRaise = project.simulatedRaises[0];
+    const totalAllocated =
+      activeRaise?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
+
+    const ctx: FounderBrainContext = {
+      projectName: project.name,
+      lifecycleStage: project.lifecycleStage,
+      launchReadiness: project.launchReadiness,
+      followerCount: project._count.followers,
+      raiseAllocated: totalAllocated,
+      raiseGoal: activeRaise ? Number(activeRaise.goalUsd) : 0,
+      lastBuildHeadlines: project.buildPosts.map((p) => p.headline),
+      openTasks: project.founder?.buildQueueItems.map((t) => t.title) ?? [],
+      currentGoal: project.founder?.user?.builderSettings?.currentGoalFocus ?? undefined,
+    };
+
+    const contextBlock = buildFounderBrainContextBlock(ctx);
+    const founderUserId = project.founder?.userId;
+
+    let answer: string | null = null;
+    if (founderUserId) {
+      answer = await this.builder.tryAiCompletion(
+        founderUserId,
+        FOUNDER_BRAIN_SYSTEM,
+        `Project context:\n${contextBlock}\n\nQuestion: ${question.trim()}`,
+      );
+    }
+
+    if (!answer) {
+      answer = this.ruleBasedFounderBrainAnswer(ctx, question);
+    }
+
+    return {
+      question: question.trim(),
+      answer,
+      source: answer.includes('has not published') ? 'context' : founderUserId ? 'ai_or_context' : 'context',
+      starterQuestions: [
+        'What changed this week?',
+        'Why does this token exist?',
+        'When is launch?',
+        'What is the founder building now?',
+        'What risks remain?',
+      ],
+    };
+  }
+
+  private ruleBasedFounderBrainAnswer(ctx: FounderBrainContext, question: string): string {
+    const q = question.toLowerCase().trim();
+    if (q.includes('launch') || q.includes('when')) {
+      if (ctx.raiseGoal > 0 && ctx.raiseAllocated >= ctx.raiseGoal * 0.8) {
+        return `${ctx.projectName} is at ${ctx.launchReadiness}% launch readiness with Raise Room at $${ctx.raiseAllocated.toLocaleString()} / $${ctx.raiseGoal.toLocaleString()}. The founder has not published a firm launch date yet — follow build logs for updates.`;
+      }
+      return `${ctx.projectName} is in ${ctx.lifecycleStage.replace(/_/g, ' ')} stage (${ctx.launchReadiness}% launch ready). No confirmed launch date is published yet.`;
+    }
+    if (q.includes('token') || q.includes('why')) {
+      return `${ctx.projectName} is building in public on Founder OS. Token details depend on the founder's Raise Room and roadmap — check the Raise Room tab for allocation momentum and community token %.`;
+    }
+    if (q.includes('building') || q.includes('now') || q.includes('goal')) {
+      if (ctx.currentGoal) {
+        return `Current focus: ${ctx.currentGoal}.${ctx.openTasks.length ? ` Open queue: ${ctx.openTasks.slice(0, 3).join('; ')}.` : ''}`;
+      }
+      if (ctx.openTasks.length) {
+        return `Open build queue: ${ctx.openTasks.slice(0, 4).join('; ')}.`;
+      }
+      return `The founder has not published a current goal in Founder Copilot yet. Recent builds: ${ctx.lastBuildHeadlines.length ? ctx.lastBuildHeadlines.join('; ') : 'none yet'}.`;
+    }
+    if (q.includes('risk')) {
+      return `Public signals: ${ctx.launchReadiness}% launch readiness, ${ctx.followerCount} followers.${ctx.raiseGoal > 0 ? ` Raise at ${Math.round((ctx.raiseAllocated / ctx.raiseGoal) * 100)}% of goal.` : ' No active Raise Room.'} Review build logs and community threads for detailed risk assessment.`;
+    }
+    if (q.includes('week') || q.includes('changed')) {
+      return ctx.lastBuildHeadlines.length
+        ? `Recent build headlines: ${ctx.lastBuildHeadlines.join(' · ')}. Stage: ${ctx.lifecycleStage.replace(/_/g, ' ')}.`
+        : `No build posts published recently. Project stage: ${ctx.lifecycleStage.replace(/_/g, ' ')}.`;
+    }
+    return `Based on published data: ${ctx.projectName} is ${ctx.launchReadiness}% launch ready with ${ctx.followerCount} followers.${ctx.raiseGoal > 0 ? ` Raise Room: $${ctx.raiseAllocated.toLocaleString()} / $${ctx.raiseGoal.toLocaleString()}.` : ''} Ask about launch timing, current build focus, or risks for more detail.`;
   }
 }

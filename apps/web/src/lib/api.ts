@@ -943,13 +943,21 @@ export interface ProjectRoom {
     id: string;
     goalUsd: number;
     tokenAllocation: string | null;
+    communityTokenPercent?: number;
+    maxParticipantSlots?: number | null;
+    totalBurnedUsd?: number;
+    slotsLocked?: boolean;
     durationDays: number;
     plannedLaunchDate: string | null;
     status: string;
+    endsAt?: string | null;
     totalAllocated: number;
     allocatorCount: number;
     convictionScore: number;
+    momentumScore?: number;
+    allocationFeePercent?: number;
   } | null;
+  allocationLeaderboard?: RaiseAllocationLeaderboardEntry[];
   demandAnalytics: {
     interestedUsers: number;
     averageCommitment: number;
@@ -1132,10 +1140,60 @@ export function createSimulatedRaise(
     durationDays: number;
     tokenAllocation?: string;
     plannedLaunchDate?: string;
+    communityTokenPercent?: number;
+    maxParticipantSlots?: number;
   },
   token: string,
 ) {
   return apiFetch('/founder-den/simulated-raises', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export interface RaiseAllocationLeaderboardEntry {
+  rank: number;
+  userId: string;
+  displayName: string;
+  amountUsd: number;
+  burnedUsd: number;
+  walletAddress: string | null;
+  slotReserved: boolean;
+}
+
+export interface PlatformEconomy {
+  raiseAllocationFeePercent: number;
+  tokenLaunchFeePercent: number;
+  weeklyStipendUsd: number;
+  rechargeFeeUsd: number;
+  restrictedCashThresholdUsd: number;
+  totalPaperBurned: number;
+  treasury: { solana: string | null; evm: string | null };
+  paperDollarSinks: string[];
+}
+
+export function fetchPlatformEconomy() {
+  return apiFetch<PlatformEconomy>('/founder-den/platform/economy');
+}
+
+export function exportRaiseParticipants(raiseId: string, token: string) {
+  return apiFetch<{
+    projectName: string;
+    participantCount: number;
+    communityTokenPercent: number;
+    csv: string;
+    participants: {
+      displayName: string;
+      walletAddress: string | null;
+      amountUsd: number;
+      allocationSharePercent: number;
+    }[];
+  }>(`/founder-den/raises/${raiseId}/export`, undefined, token);
+}
+
+export function lockRaiseSlots(raiseId: string, token: string) {
+  return apiFetch<{ success: boolean; message: string }>(
+    `/founder-den/raises/${raiseId}/lock-slots`,
+    { method: 'POST' },
+    token,
+  );
 }
 
 export function followProject(projectId: string, token: string) {
@@ -1485,15 +1543,16 @@ export function walletVerify(
   signature: string,
   message: string,
   token: string,
+  chain?: 'SOLANA' | 'ETHEREUM',
 ) {
   return apiFetch('/security/wallet/verify', {
     method: 'POST',
-    body: JSON.stringify({ challengeToken, address, signature, message }),
+    body: JSON.stringify({ challengeToken, address, signature, message, chain }),
   }, token);
 }
 
-export function disconnectWallet(token: string) {
-  return apiFetch('/security/wallet', { method: 'DELETE' }, token);
+export function disconnectWallet(token: string, chain = 'SOLANA') {
+  return apiFetch(`/security/wallet/${chain}`, { method: 'DELETE' }, token);
 }
 
 // ─── Agents ──────────────────────────────────────────────────────────────────
@@ -1672,7 +1731,7 @@ export function publishGitHubIssues(token: string) {
 export interface BuilderSettings {
   defaultProvider: string;
   preferredModel: string | null;
-      autoCreateGitHubIssues: boolean;
+  autoCreateGitHubIssues: boolean;
   autoPublishOnEvent: boolean;
   currentGoalFocus: string | null;
   githubTokenConnected: boolean;
@@ -1680,9 +1739,11 @@ export interface BuilderSettings {
     key: string;
     label: string;
     needsApiKey: boolean;
+    connectMode?: string;
     defaultModel: string | null;
     billTip: string;
     credentialProvider: string | null;
+    copyCommand?: string;
     connected: boolean;
   }[];
 }
@@ -1708,6 +1769,14 @@ export function connectAiProvider(provider: string, apiKey: string, token: strin
   return apiFetch<{ success: boolean; accountName: string }>(
     '/builder/providers/connect',
     { method: 'POST', body: JSON.stringify({ provider, apiKey }) },
+    token,
+  );
+}
+
+export function connectDeskProvider(provider: string, token: string) {
+  return apiFetch<{ success: boolean; label: string; copyCommand?: string }>(
+    '/builder/providers/desk-connect',
+    { method: 'POST', body: JSON.stringify({ provider }) },
     token,
   );
 }
@@ -1817,5 +1886,37 @@ export function copilotResume(token: string) {
     '/copilot/resume',
     { method: 'POST' },
     token,
+  );
+}
+
+// ─── Scout Markets & Founder Brain (Phase 7) ─────────────────────────────────
+
+export interface ScoutMarketItem {
+  id: string;
+  question: string;
+  status: string;
+  yesPoolUsd: number;
+  noPoolUsd: number;
+  conviction: number;
+  participantCount: number;
+  viewerPosition: { side: string; amountUsd: number } | null;
+}
+
+export function fetchScoutMarkets(slug: string, token?: string) {
+  return apiFetch<ScoutMarketItem[]>(`/founder-den/projects/${slug}/scout-markets`, undefined, token);
+}
+
+export function stakeScoutMarket(marketId: string, side: 'YES' | 'NO', amountUsd: number, token: string) {
+  return apiFetch<{ success: boolean; conviction: number; yesPoolUsd: number; noPoolUsd: number }>(
+    `/founder-den/scout-markets/${marketId}/stake`,
+    { method: 'POST', body: JSON.stringify({ side, amountUsd }) },
+    token,
+  );
+}
+
+export function askFounderBrain(slug: string, question: string) {
+  return apiFetch<{ question: string; answer: string; source: string; starterQuestions: string[] }>(
+    `/founder-den/projects/${slug}/brain/ask`,
+    { method: 'POST', body: JSON.stringify({ question }) },
   );
 }

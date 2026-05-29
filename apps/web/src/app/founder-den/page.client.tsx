@@ -57,6 +57,8 @@ export default function FounderDenPageClient() {
     goalUsd: '500000',
     durationDays: '30',
     tokenAllocation: '15%',
+    communityTokenPercent: '10',
+    maxParticipantSlots: '',
     plannedLaunchDate: '',
   });
 
@@ -127,11 +129,15 @@ export default function FounderDenPageClient() {
           goalUsd: Number(raiseForm.goalUsd),
           durationDays: Number(raiseForm.durationDays),
           tokenAllocation: raiseForm.tokenAllocation,
+          communityTokenPercent: Number(raiseForm.communityTokenPercent) || 10,
+          maxParticipantSlots: raiseForm.maxParticipantSlots
+            ? Number(raiseForm.maxParticipantSlots)
+            : undefined,
           plannedLaunchDate: raiseForm.plannedLaunchDate || undefined,
         },
         session.accessToken,
       );
-      setMessage('Simulated raise is live');
+      setMessage('Raise Room is live — public ICO slots open');
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start raise');
