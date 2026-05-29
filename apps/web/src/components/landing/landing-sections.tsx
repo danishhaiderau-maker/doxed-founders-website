@@ -1,32 +1,47 @@
 'use client';
 
 import Link from 'next/link';
-import { formatUsd } from '@dcf/utils';
-import type { PlatformStats } from '@/lib/api';
+import { useEffect, useState } from 'react';
+import type { PlatformActivityItem } from '@/lib/api';
+import { fetchPlatformActivity } from '@/lib/api';
 
-function formatStatNumber(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return n.toLocaleString();
-  return String(n);
+function activityTimeAgo(iso: string) {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return 'Yesterday';
+  return `${days}d ago`;
+}
+
+function activityIcon(kind: PlatformActivityItem['kind']) {
+  if (kind === 'build') return '🔨';
+  if (kind === 'video') return '🎥';
+  return '💰';
 }
 
 export function LandingHero() {
   return (
     <section className="relative overflow-hidden border-b border-zinc-800/80">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(16,185,129,0.15),transparent)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,transparent,rgba(5,5,8,0.8))]" />
-      <div className="relative mx-auto max-w-6xl px-6 py-24 md:py-32">
-        <p className="inline-flex items-center gap-2 rounded-full border border-emerald-500/25 bg-emerald-950/30 px-3 py-1 text-xs font-medium uppercase tracking-widest text-emerald-300">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          Founder OS · live now
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(59,130,246,0.12),transparent)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,transparent,rgba(5,5,8,0.85))]" />
+      <div className="relative mx-auto max-w-6xl px-6 py-20 md:py-28">
+        <p className="inline-flex items-center gap-2 rounded-full border border-blue-500/25 bg-blue-950/30 px-3 py-1 text-xs font-medium uppercase tracking-widest text-blue-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+          Founder OS
         </p>
-        <h1 className="mt-6 max-w-4xl text-4xl font-bold leading-[1.08] tracking-tight text-white md:text-6xl lg:text-7xl">
-          Build in public. Publish everywhere. Prove it before you raise.
+        <h1 className="mt-6 max-w-3xl text-4xl font-bold leading-[1.1] tracking-tight text-white md:text-6xl">
+          Build in public.
+          <br />
+          Validate demand.
+          <br />
+          Launch with trust.
         </h1>
-        <p className="mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400 md:text-xl">
-          Connect GitHub, Vercel, Railway, Neon, and X. Run founder agents, sync commits,
-          translate dev work for traders, and publish to your build feed, community, and X in one
-          click — the operating system for transparent crypto startups.
+        <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-400">
+          The operating system for crypto-native startups — ship on GitHub, prove execution publicly,
+          and show real demand before you raise.
         </p>
         <div className="mt-10 flex flex-wrap gap-3">
           <Link
@@ -36,22 +51,10 @@ export function LandingHero() {
             Open Founder OS
           </Link>
           <Link
-            href="/projects"
-            className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-6 py-3.5 text-sm font-semibold text-white transition hover:border-emerald-500/50 hover:bg-zinc-900"
+            href="/discover"
+            className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-6 py-3.5 text-sm font-semibold text-white transition hover:border-blue-500/50"
           >
-            Explore projects
-          </Link>
-          <Link
-            href="/agents"
-            className="rounded-xl border border-purple-500/30 bg-purple-950/20 px-6 py-3.5 text-sm font-semibold text-purple-200 transition hover:bg-purple-950/40"
-          >
-            Agent Hub
-          </Link>
-          <Link
-            href="/paper-trading"
-            className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-6 py-3.5 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-950/40"
-          >
-            Proof of Conviction — $10k paper
+            Discover projects
           </Link>
         </div>
       </div>
@@ -59,44 +62,181 @@ export function LandingHero() {
   );
 }
 
-export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
-  const items = stats
-    ? [
-        { label: 'Verified founders', value: formatStatNumber(stats.verifiedFounders) },
-        { label: 'Active projects', value: formatStatNumber(stats.activeProjects) },
-        {
-          label: 'Simulated capital',
-          value: formatUsd(stats.simulatedCapital, 0),
-        },
-        { label: 'Community members', value: formatStatNumber(stats.communityMembers) },
-      ]
-    : [
-        { label: 'Verified founders', value: '—' },
-        { label: 'Active projects', value: '—' },
-        { label: 'Simulated capital', value: '—' },
-        { label: 'Community members', value: '—' },
-      ];
+const THREE_PHASES = [
+  {
+    step: '01',
+    title: 'Build',
+    color: 'blue',
+    summary: 'Connect GitHub. Ship in public. Publish everywhere in one click.',
+    bullets: ['GitHub → translate → build feed', 'Founder Copilot & agents', 'Stack hub: Vercel, Railway, Neon'],
+    href: '/founder-den',
+    cta: 'Start building',
+  },
+  {
+    step: '02',
+    title: 'Validate',
+    color: 'amber',
+    summary: 'Prove demand with paper capital, scout markets, and public conviction.',
+    bullets: ['Raise Room simulated allocations', 'Proof of Conviction thesis', 'Community scout votes'],
+    href: '/raise-room',
+    cta: 'See demand signals',
+  },
+  {
+    step: '03',
+    title: 'Launch',
+    color: 'emerald',
+    summary: 'Launch only when execution and demand are visible — not before.',
+    bullets: ['Verified founder presence', 'Launch readiness score', 'Trust without oversharing'],
+    href: '/projects',
+    cta: 'Explore launch-ready',
+  },
+] as const;
 
+const phaseStyles = {
+  blue: {
+    border: 'border-blue-500/25',
+    bg: 'bg-blue-950/20',
+    badge: 'text-blue-400',
+    dot: 'bg-blue-400',
+  },
+  amber: {
+    border: 'border-amber-500/25',
+    bg: 'bg-amber-950/20',
+    badge: 'text-amber-400',
+    dot: 'bg-amber-400',
+  },
+  emerald: {
+    border: 'border-emerald-500/25',
+    bg: 'bg-emerald-950/20',
+    badge: 'text-emerald-400',
+    dot: 'bg-emerald-400',
+  },
+};
+
+export function LandingThreePhases() {
   return (
-    <section className="border-b border-zinc-800/80 bg-zinc-950/50">
-      <div className="mx-auto grid max-w-6xl grid-cols-2 divide-x divide-y divide-zinc-800/80 md:grid-cols-4 md:divide-y-0">
-        {items.map((item) => (
-          <div key={item.label} className="px-6 py-8 text-center md:py-10">
-            <p className="text-2xl font-bold tracking-tight text-white md:text-3xl">{item.value}</p>
-            <p className="mt-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-              {item.label}
-            </p>
-          </div>
-        ))}
-      </div>
-      {stats && stats.totalTrades > 0 && (
-        <p className="border-t border-zinc-800/80 py-3 text-center text-xs text-zinc-600">
-          {stats.totalTrades.toLocaleString()} paper trades logged · {stats.paperTraders.toLocaleString()}{' '}
-          active traders
+    <section className="border-b border-zinc-800/80 py-16 md:py-20">
+      <div className="mx-auto max-w-6xl px-6">
+        <p className="text-center text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+          How it works
         </p>
-      )}
+        <div className="mt-10 grid gap-6 md:grid-cols-3">
+          {THREE_PHASES.map((phase) => {
+            const style = phaseStyles[phase.color];
+            return (
+              <div
+                key={phase.title}
+                className={`rounded-2xl border ${style.border} ${style.bg} p-6`}
+              >
+                <p className={`text-xs font-bold tracking-widest ${style.badge}`}>{phase.step}</p>
+                <h2 className="mt-2 text-2xl font-bold text-white">{phase.title}</h2>
+                <p className="mt-3 text-sm leading-relaxed text-zinc-400">{phase.summary}</p>
+                <ul className="mt-4 space-y-2 text-sm text-zinc-300">
+                  {phase.bullets.map((b) => (
+                    <li key={b} className="flex gap-2">
+                      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
+                      {b}
+                    </li>
+                  ))}
+                </ul>
+                <Link
+                  href={phase.href}
+                  className="mt-5 inline-block text-sm font-medium text-white hover:underline"
+                >
+                  {phase.cta} →
+                </Link>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </section>
   );
+}
+
+export function LandingLiveActivity() {
+  const [items, setItems] = useState<PlatformActivityItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchPlatformActivity(8)
+      .then(setItems)
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <section className="border-b border-zinc-800/80 bg-zinc-950/40">
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest text-zinc-500">
+              Live on Founder OS
+            </p>
+            <h2 className="mt-1 text-lg font-semibold text-white">Real activity — not vanity metrics</h2>
+          </div>
+          <Link href="/build-feed" className="text-sm text-blue-400 hover:underline">
+            Build feed →
+          </Link>
+        </div>
+        {loading ? (
+          <div className="mt-6 space-y-3">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="h-14 animate-pulse rounded-xl bg-zinc-900" />
+            ))}
+          </div>
+        ) : items.length === 0 ? (
+          <p className="mt-6 text-sm text-zinc-500">
+            Founders are shipping — be the first to publish from{' '}
+            <Link href="/founder-den" className="text-blue-400 hover:underline">
+              Founder OS
+            </Link>
+            .
+          </p>
+        ) : (
+          <ul className="mt-6 divide-y divide-zinc-800/80 rounded-xl border border-zinc-800/80 bg-zinc-900/30">
+            {items.map((item) => (
+              <li key={item.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3.5 sm:px-5">
+                <span className="text-lg" aria-hidden>
+                  {activityIcon(item.kind)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-white">
+                    {item.founderSlug ? (
+                      <Link href={`/founder/${item.founderSlug}`} className="font-semibold hover:text-blue-300">
+                        {item.founderName}
+                      </Link>
+                    ) : (
+                      <span className="font-semibold">{item.founderName}</span>
+                    )}
+                    {item.projectSlug && item.projectName && (
+                      <>
+                        {' · '}
+                        <Link href={`/project/${item.projectSlug}`} className="text-zinc-400 hover:text-white">
+                          {item.projectName}
+                        </Link>
+                      </>
+                    )}
+                  </p>
+                  <p className="mt-0.5 text-sm text-zinc-400">{item.headline}</p>
+                  {item.detail && (
+                    <p className="text-xs text-zinc-600">{item.detail}</p>
+                  )}
+                </div>
+                <span className="shrink-0 text-xs text-zinc-600">{activityTimeAgo(item.at)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** @deprecated use LandingLiveActivity */
+export function LandingLiveMetrics({ stats }: { stats: { verifiedFounders: number } | null }) {
+  void stats;
+  return <LandingLiveActivity />;
 }
 
 const FAILURES = [
@@ -110,10 +250,8 @@ const FAILURES = [
 const SOLUTIONS = [
   'Verified public founders',
   'GitHub → translate → publish everywhere',
-  'Founder workforce agents on every project',
-  'Proof of Conviction on every trade',
-  'Quality rewards — not spam points',
-  'Simulated fundraising demand',
+  'Demand validation before real raises',
+  'Public reasoning — not anonymous hype',
 ];
 
 export function LandingProblemSolution() {
@@ -487,11 +625,10 @@ export function LandingFinalCta() {
     <section className="border-t border-zinc-800/80 py-24">
       <div className="mx-auto max-w-3xl px-6 text-center">
         <h2 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
-          The public startup operating system
+          Build. Validate. Launch.
         </h2>
         <p className="mt-4 text-zinc-400">
-          Founders build in public. Traders prove conviction. Every minute shipping becomes
-          marketing, transparency, and community growth.
+          Prove execution publicly. Show real demand. Launch with a reputation graph — not anonymous hype.
         </p>
         <div className="mt-10 flex flex-wrap justify-center gap-3">
           <Link
@@ -501,10 +638,10 @@ export function LandingFinalCta() {
             Open Founder OS
           </Link>
           <Link
-            href="/register"
-            className="rounded-xl border border-zinc-600 px-8 py-3.5 font-semibold text-white hover:border-emerald-500/50"
+            href="/list-your-project"
+            className="rounded-xl border border-zinc-600 px-8 py-3.5 font-semibold text-white hover:border-blue-500/50"
           >
-            Join the community
+            List your project
           </Link>
         </div>
       </div>

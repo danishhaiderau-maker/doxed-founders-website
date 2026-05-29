@@ -37,11 +37,57 @@ export const LIFECYCLE_STAGES = [
 export type StageBucket = 'IDEA_STAGE' | 'BUILDING' | 'LAUNCH_READY' | 'LIVE_TOKEN';
 
 export const STAGE_BUCKETS: { key: StageBucket; label: string; color: string; border: string }[] = [
-  { key: 'IDEA_STAGE', label: 'Idea stage', color: '#3b82f6', border: '#60a5fa' },
-  { key: 'BUILDING', label: 'Building', color: '#22c55e', border: '#4ade80' },
-  { key: 'LAUNCH_READY', label: 'Launch ready', color: '#eab308', border: '#facc15' },
-  { key: 'LIVE_TOKEN', label: 'Live tokens', color: '#a855f7', border: '#c084fc' },
+  { key: 'IDEA_STAGE', label: 'Building', color: '#3b82f6', border: '#60a5fa' },
+  { key: 'BUILDING', label: 'Building', color: '#3b82f6', border: '#60a5fa' },
+  { key: 'LAUNCH_READY', label: 'Validation', color: '#eab308', border: '#facc15' },
+  { key: 'LIVE_TOKEN', label: 'Live', color: '#a855f7', border: '#c084fc' },
 ];
+
+/** Scan-friendly stage colors: blue = building, yellow = validation, green = launch ready, purple = live */
+export type StageColorTheme = 'building' | 'validation' | 'launch_ready' | 'live';
+
+export function getStageColorTheme(stage: string, isLiveToken?: boolean): StageColorTheme {
+  if (isLiveToken || stage === 'TOKEN_LAUNCH' || stage === 'LIVE_TRADING') return 'live';
+  if (stage === 'LAUNCH_READY') return 'launch_ready';
+  if (stage === 'DEMAND_VALIDATION' || stage === 'SIMULATED_RAISE') return 'validation';
+  return 'building';
+}
+
+export const STAGE_COLOR_CLASSES: Record<
+  StageColorTheme,
+  { badge: string; text: string; dot: string }
+> = {
+  building: {
+    badge: 'border-blue-500/30 bg-blue-500/10',
+    text: 'text-blue-300',
+    dot: 'bg-blue-400',
+  },
+  validation: {
+    badge: 'border-amber-500/30 bg-amber-500/10',
+    text: 'text-amber-300',
+    dot: 'bg-amber-400',
+  },
+  launch_ready: {
+    badge: 'border-emerald-500/30 bg-emerald-500/10',
+    text: 'text-emerald-300',
+    dot: 'bg-emerald-400',
+  },
+  live: {
+    badge: 'border-purple-500/30 bg-purple-500/10',
+    text: 'text-purple-300',
+    dot: 'bg-purple-400',
+  },
+};
+
+export function getStageColorLabel(theme: StageColorTheme): string {
+  const labels: Record<StageColorTheme, string> = {
+    building: 'Building',
+    validation: 'Validation',
+    launch_ready: 'Launch ready',
+    live: 'Live',
+  };
+  return labels[theme];
+}
 
 const STAGE_INDEX: Record<string, number> = Object.fromEntries(
   LIFECYCLE_STAGES.map((s, i) => [s.key, i]),

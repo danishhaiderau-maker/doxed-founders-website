@@ -716,6 +716,23 @@ export function fetchPlatformStats() {
   return apiFetch<PlatformStats>('/projects/platform/stats');
 }
 
+export interface PlatformActivityItem {
+  id: string;
+  kind: 'build' | 'video' | 'demand';
+  founderName: string;
+  founderSlug?: string;
+  projectSlug?: string;
+  projectName?: string;
+  headline: string;
+  detail?: string;
+  amountUsd?: number;
+  at: string;
+}
+
+export function fetchPlatformActivity(limit = 10) {
+  return apiFetch<PlatformActivityItem[]>(`/projects/platform/activity?limit=${limit}`);
+}
+
 export function fetchProject(slug: string) {
   return apiFetch<ProjectDetail>(`/projects/${slug}`);
 }

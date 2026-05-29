@@ -34,6 +34,12 @@ export class ProjectsController {
     return this.projects.getPlatformStats();
   }
 
+  @Get('platform/activity')
+  platformActivity(@Query('limit') limit?: string) {
+    const n = limit ? Number.parseInt(limit, 10) : 10;
+    return this.projects.getPlatformActivity(Number.isFinite(n) ? n : 10);
+  }
+
   @Post('sync-metrics')
   syncMetrics() {
     return this.metricsSync.syncStaleProjects();

@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProjectSource } from '@prisma/client';
+import { formatUsd } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
 
@@ -90,6 +91,93 @@ export class ProjectsService {
       paperTraders: portfolioAgg._count,
       totalTrades: tradeCount,
     };
+  }
+
+  async getPlatformActivity(limit = 10) {
+    const take = Math.min(Math.max(limit, 1), 20);
+
+    const [buildPosts, videos, allocations] = await Promise.all([
+      this.prisma.founderBuildPost.findMany({
+        orderBy: { publishedAt: 'desc' },
+        take,
+        include: {
+          founder: { select: { slug: true, name: true } },
+          project: { select: { slug: true, name: true, ticker: true } },
+        },
+      }),
+      this.prisma.founderVideo.findMany({
+        orderBy: { publishedAt: 'desc' },
+        take,
+        include: {
+          founder: { select: { slug: true, name: true } },
+          project: { select: { slug: true, name: true, ticker: true } },
+        },
+      }),
+      this.prisma.raiseAllocation.findMany({
+        orderBy: { createdAt: 'desc' },
+        take,
+        include: {
+          raise: {
+            include: {
+              project: { select: { slug: true, name: true, ticker: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    type ActivityItem = {
+      id: string;
+      kind: 'build' | 'video' | 'demand';
+      founderName: string;
+      founderSlug?: string;
+      projectSlug?: string;
+      projectName?: string;
+      headline: string;
+      detail?: string;
+      amountUsd?: number;
+      at: string;
+    };
+
+    const items: ActivityItem[] = [
+      ...buildPosts.map((p) => ({
+        id: `build-${p.id}`,
+        kind: 'build' as const,
+        founderName: p.founder.name,
+        founderSlug: p.founder.slug,
+        projectSlug: p.project?.slug,
+        projectName: p.project?.name,
+        headline: p.headline,
+        detail: p.githubUrl ? 'Shipped & published' : 'Build update',
+        at: p.publishedAt.toISOString(),
+      })),
+      ...videos.map((v) => ({
+        id: `video-${v.id}`,
+        kind: 'video' as const,
+        founderName: v.founder.name,
+        founderSlug: v.founder.slug,
+        projectSlug: v.project?.slug,
+        projectName: v.project?.name,
+        headline: v.title,
+        detail: 'Founder video uploaded',
+        at: v.publishedAt.toISOString(),
+      })),
+      ...allocations.map((a) => ({
+        id: `demand-${a.id}`,
+        kind: 'demand' as const,
+        founderName: a.raise.project.name,
+        projectSlug: a.raise.project.slug,
+        projectName: a.raise.project.name,
+        headline: `${formatUsd(Number(a.amountUsd))} demand allocated`,
+        detail: 'Raise Room · paper capital',
+        amountUsd: Number(a.amountUsd),
+        at: a.createdAt.toISOString(),
+      })),
+    ];
+
+    return items
+      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+      .slice(0, take);
   }
 
   async findBySlug(slug: string) {

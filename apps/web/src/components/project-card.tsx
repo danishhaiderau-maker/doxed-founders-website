@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { formatUsd, formatTokenPrice, LIFECYCLE_STAGES } from '@dcf/utils';
+import { formatUsd, formatTokenPrice, LIFECYCLE_STAGES, getStageColorTheme, getStageColorLabel, STAGE_COLOR_CLASSES } from '@dcf/utils';
 import { FounderBadges } from '@/components/founder-badges';
 import type { ProjectSummary } from '@/lib/api';
 
@@ -29,6 +29,9 @@ export function ProjectCard({ project }: ProjectCardProps) {
   const stage = project.lifecycleStage
     ? LIFECYCLE_STAGES.find((s) => s.key === project.lifecycleStage)
     : null;
+  const colorTheme = getStageColorTheme(project.lifecycleStage ?? 'IDEA', project.isLiveToken);
+  const colorClasses = STAGE_COLOR_CLASSES[colorTheme];
+  const stageLabel = stage ? `${stage.emoji} ${stage.label}` : getStageColorLabel(colorTheme);
 
   return (
     <Link
@@ -90,9 +93,9 @@ export function ProjectCard({ project }: ProjectCardProps) {
       {(stage || project.launchReadiness != null) && (
         <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
           {stage && (
-            <div className="rounded-lg bg-zinc-900/50 px-2 py-1.5">
+            <div className={`rounded-lg border px-2 py-1.5 ${colorClasses.badge}`}>
               <span className="text-[var(--color-muted)]">Stage </span>
-              <span className="font-medium text-emerald-300/90">{stage.emoji} {stage.label}</span>
+              <span className={`font-medium ${colorClasses.text}`}>{stageLabel}</span>
             </div>
           )}
           {project.launchReadiness != null && (
