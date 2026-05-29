@@ -25,4 +25,13 @@ export class OAuthLoginDto {
   @IsString()
   @MinLength(1)
   twitterHandle?: string;
+
+  /** OAuth 1.0a user tokens for one-click X posting */
+  @IsOptional()
+  @IsString()
+  oauthAccessToken?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthAccessTokenSecret?: string;
 }

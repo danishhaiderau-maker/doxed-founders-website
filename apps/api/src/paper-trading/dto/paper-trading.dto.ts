@@ -40,6 +40,17 @@ export class PaperTradeDto {
   @IsString()
   @MaxLength(2000)
   comment?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(280)
+  catalyst?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  targetUsd?: number;
 }
 
 export class PreviewPaperTradeDto {

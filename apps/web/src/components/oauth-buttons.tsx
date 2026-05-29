@@ -44,9 +44,14 @@ export function OAuthButtons({
   return (
     <div className="space-y-3">
       {preferTwitter && hasTwitter && (
-        <p className="text-center text-xs text-amber-200/90">
-          Sign in with X — your paper trades link to your public handle. Talent over deep pockets.
-        </p>
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-3 text-left">
+          <p className="text-sm font-semibold text-emerald-200">Recommended: sign up with X</p>
+          <ul className="mt-2 space-y-1 text-xs text-emerald-100/85">
+            <li>· <strong>Post Instantly</strong> — share Proof of Conviction in 1 click (no download or paste)</li>
+            <li>· Auto-written threads with your entry, thesis, and return</li>
+            <li>· Paper trades linked to your public handle for followers</li>
+          </ul>
+        </div>
       )}
       {hasTwitter && (
         <button
@@ -71,6 +76,11 @@ export function OAuthButtons({
           <GoogleIcon />
           Continue with Google
         </button>
+      )}
+      {preferTwitter && hasTwitter && (
+        <p className="text-center text-[10px] text-[var(--color-muted)]">
+          Email signup works too — connect X later from Share Conviction to unlock 1-click posting.
+        </p>
       )}
       {hasGoogle && !hasTwitter && (
         <p className="text-[10px] text-[var(--color-muted)]">

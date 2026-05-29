@@ -20,8 +20,12 @@ import {
   inferProjectLifecycleStage,
   getStageBucket,
   computeJourneyProgress,
+  POINTS,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { PointsService } from '../points/points.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '@prisma/client';
 
 const founderRoomInclude = {
   user: { select: { id: true, name: true, email: true } },
@@ -61,7 +65,11 @@ const DEFAULT_POLL_TEMPLATES = [
 
 @Injectable()
 export class FounderDenService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly points: PointsService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async getLatestVideos(limit = 12) {
     const videos = await this.prisma.founderVideo.findMany({
@@ -319,6 +327,7 @@ export class FounderDenService {
 
     const streak = await this.updateBuildStreak(founder.id);
     await this.syncPresenceLevel(founder.id);
+    await this.points.award(userId, POINTS.FOUNDER_BUILD_POST);
 
     return { ...post, buildStreakDays: streak };
   }
@@ -350,6 +359,7 @@ export class FounderDenService {
     });
 
     await this.syncPresenceLevel(founder.id);
+    await this.points.award(userId, POINTS.FOUNDER_VIDEO);
     return video;
   }
 
@@ -406,6 +416,7 @@ export class FounderDenService {
 
     await this.syncUserProgressTier(userId);
     await this.refreshLaunchReadiness(raise.projectId);
+    await this.points.awardOnce(userId, `RAISE_ALLOCATE:${raiseId}`, POINTS.RAISE_ALLOCATE);
     return { success: true, amountUsd };
   }
 
@@ -420,6 +431,7 @@ export class FounderDenService {
     });
 
     await this.syncUserProgressTier(userId);
+    await this.points.awardOnce(userId, `DEMAND_POLL_VOTE:${pollId}`, POINTS.DEMAND_POLL_VOTE);
     return { success: true };
   }
 
@@ -608,6 +620,20 @@ export class FounderDenService {
     await this.refreshLaunchReadiness(result.project.id);
     await this.refreshBubbleScore(result.project.id);
 
+    const awarded = await this.points.awardOnce(
+      userId,
+      `FOUNDER_PROJECT:${result.project.id}`,
+      POINTS.FOUNDER_PROJECT_LAUNCH,
+    );
+    if (awarded) {
+      await this.notifications.notifyUser(userId, {
+        type: NotificationType.POINTS_EARNED,
+        title: '+25,000 reputation points',
+        body: `Your project "${dto.projectName}" is live on Founder Den. Keep communicating with your community to climb the board.`,
+        link: '/founder-den',
+      });
+    }
+
     return {
       success: true,
       founderSlug: result.founder.slug,
@@ -747,6 +773,7 @@ export class FounderDenService {
     });
     await this.syncUserProgressTier(userId);
     await this.refreshBubbleScore(projectId);
+    await this.points.awardOnce(userId, `PROJECT_FOLLOW:${projectId}`, POINTS.PROJECT_FOLLOW);
     return { success: true };
   }
 
@@ -782,6 +809,11 @@ export class FounderDenService {
     });
 
     await this.syncUserProgressTier(userId);
+    if (isFounder) {
+      await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST);
+    } else {
+      await this.points.award(userId, POINTS.COMMUNITY_THREAD);
+    }
     return thread;
   }
 
@@ -803,6 +835,7 @@ export class FounderDenService {
     });
 
     await this.syncUserProgressTier(userId);
+    await this.points.award(userId, POINTS.COMMUNITY_COMMENT);
     return comment;
   }
 
@@ -977,7 +1010,7 @@ export class FounderDenService {
   }
 
   async getEconomyStats() {
-    const [cashAgg, allocAgg, grants, fees] = await Promise.all([
+    const [cashAgg, allocAgg, grants, fees, lotteryPaid] = await Promise.all([
       this.prisma.paperPortfolio.aggregate({ _sum: { cashBalance: true } }),
       this.prisma.raiseAllocation.aggregate({ _sum: { amountUsd: true } }),
       this.prisma.virtualEconomyEvent.aggregate({
@@ -988,12 +1021,17 @@ export class FounderDenService {
         where: { type: 'TOP_UP_FEE' },
         _sum: { amountUsd: true },
       }),
+      this.prisma.virtualEconomyEvent.aggregate({
+        where: { type: 'ENGAGEMENT_LOTTERY' },
+        _sum: { amountUsd: true },
+      }),
     ]);
 
     const cashInCirculation = Number(cashAgg._sum.cashBalance ?? 0);
     const inRaises = Number(allocAgg._sum.amountUsd ?? 0);
     const totalMinted = Number(grants._sum.amountUsd ?? 0);
     const topUpFees = Number(fees._sum.amountUsd ?? 0);
+    const engagementLotteryPaid = Number(lotteryPaid._sum.amountUsd ?? 0);
 
     return {
       cashInCirculation,
@@ -1001,6 +1039,7 @@ export class FounderDenService {
       totalVirtualSupply: cashInCirculation + inRaises,
       totalMinted,
       topUpFeesCollected: topUpFees,
+      engagementLotteryPaidUsd: engagementLotteryPaid,
       startingCashUsd: STARTING_CASH_USD,
       restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       topUpFeeUsd: TOP_UP_FEE_USD,

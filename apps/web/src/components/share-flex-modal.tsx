@@ -1,37 +1,104 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   buildPortfolioShareMessage,
   buildPortfolioShareUrl,
-  buildPositionShareMessage,
+  buildProofOfConvictionMessage,
+  buildProofOfConvictionThread,
   buildTwitterIntentUrl,
+  formatTokenPrice,
   pickShareImagePath,
   shareImageFilename,
 } from '@dcf/utils';
-import type { PositionShareInput } from '@dcf/utils';
+import type { PositionShareInput, ProofOfConvictionInput } from '@dcf/utils';
+import { fetchXConnectionStatus, postProofOfConvictionToX } from '@/lib/api';
 
-type ShareFlexModalProps = {
-  open: boolean;
-  onClose: () => void;
+export type ShareConvictionConfig = {
   pnlOrRoi: number;
   tweetText: string;
+  instantTweetText: string;
+  threadPreview: string;
   shareUrl?: string;
   title: string;
+  ticker?: string;
+  projectId?: string;
+  accessToken?: string;
+  conviction?: {
+    entryPrice?: number;
+    currentPrice?: number;
+    thesis?: string | null;
+    catalyst?: string | null;
+    targetPrice?: number | null;
+    recordedAt?: string | null;
+    daysHeld?: number;
+  };
 };
+
+type ShareFlexModalProps = ShareConvictionConfig & {
+  open: boolean;
+  onClose: () => void;
+};
+
+function formatRecordedDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
 
 export function ShareFlexModal({
   open,
   onClose,
   pnlOrRoi,
   tweetText,
+  instantTweetText,
+  threadPreview,
   shareUrl,
   title,
+  ticker,
+  projectId,
+  accessToken,
+  conviction,
 }: ShareFlexModalProps) {
   const imagePath = useMemo(() => pickShareImagePath(pnlOrRoi), [pnlOrRoi, open]);
   const win = pnlOrRoi >= 0;
   const twitterUrl = buildTwitterIntentUrl(tweetText, shareUrl);
   const [copied, setCopied] = useState(false);
+  const [flipped, setFlipped] = useState(false);
+  const [posting, setPosting] = useState(false);
+  const [postError, setPostError] = useState<string | null>(null);
+  const [postedUrl, setPostedUrl] = useState<string | null>(null);
+  const [xStatus, setXStatus] = useState<{
+    canPostInstantly: boolean;
+    twitterHandle: string | null;
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setFlipped(false);
+      setPostError(null);
+      setPostedUrl(null);
+      return;
+    }
+    if (!accessToken) {
+      setXStatus(null);
+      return;
+    }
+    fetchXConnectionStatus(accessToken)
+      .then(setXStatus)
+      .catch(() =>
+        setXStatus({
+          canPostInstantly: false,
+          twitterHandle: null,
+          message: 'Sign in with X to post in one tap.',
+        }),
+      );
+  }, [open, accessToken]);
 
   const copyImageToClipboard = useCallback(async () => {
     try {
@@ -63,7 +130,7 @@ export function ShareFlexModal({
     }
   }, [imagePath, pnlOrRoi]);
 
-  const postOnX = useCallback(async () => {
+  const openComposer = useCallback(async () => {
     const copiedOk = await copyImageToClipboard();
     if (!copiedOk) {
       await downloadImage();
@@ -71,7 +138,27 @@ export function ShareFlexModal({
     window.open(twitterUrl, '_blank', 'noopener,noreferrer');
   }, [copyImageToClipboard, downloadImage, twitterUrl]);
 
+  const postInstantly = useCallback(async () => {
+    if (!accessToken || !projectId) return;
+    setPosting(true);
+    setPostError(null);
+    try {
+      const result = await postProofOfConvictionToX(
+        { projectId, text: instantTweetText, pnlPercent: pnlOrRoi },
+        accessToken,
+      );
+      setPostedUrl(result.tweetUrl);
+    } catch (err) {
+      setPostError(err instanceof Error ? err.message : 'Could not post to X');
+    } finally {
+      setPosting(false);
+    }
+  }, [accessToken, projectId, instantTweetText, pnlOrRoi]);
+
   if (!open) return null;
+
+  const canInstant = Boolean(accessToken && projectId && xStatus?.canPostInstantly);
+  const sign = win ? '+' : '';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -88,7 +175,7 @@ export function ShareFlexModal({
       >
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-wider text-zinc-400">Flex on X</p>
+            <p className="text-xs uppercase tracking-wider text-zinc-400">Proof of Conviction</p>
             <h3 className="mt-1 text-lg font-bold text-white">{title}</h3>
           </div>
           <button
@@ -101,37 +188,169 @@ export function ShareFlexModal({
           </button>
         </div>
 
+        {conviction && ticker && (
+          <div className="mt-4 perspective-[1000px]">
+            <button
+              type="button"
+              onClick={() => setFlipped((f) => !f)}
+              className="relative h-44 w-full [transform-style:preserve-3d] transition-transform duration-500"
+              style={{ transform: flipped ? 'rotateY(180deg)' : undefined }}
+            >
+              <div
+                className={`absolute inset-0 flex flex-col items-center justify-center rounded-xl border p-4 [backface-visibility:hidden] ${
+                  win
+                    ? 'border-emerald-500/30 bg-gradient-to-br from-emerald-950/80 to-black'
+                    : 'border-red-500/30 bg-gradient-to-br from-red-950/80 to-black'
+                }`}
+              >
+                <p className="text-xs uppercase tracking-widest text-zinc-500">Thesis played out</p>
+                <p className="mt-2 text-3xl font-black text-white">${ticker}</p>
+                <p
+                  className={`mt-1 text-2xl font-bold ${win ? 'text-emerald-400' : 'text-red-400'}`}
+                >
+                  {sign}
+                  {Math.abs(Math.round(pnlOrRoi))}%
+                </p>
+                <p className="mt-3 text-[10px] text-zinc-500">Tap to flip card</p>
+              </div>
+              <div
+                className="absolute inset-0 flex flex-col justify-center rounded-xl border border-white/10 bg-zinc-950/90 p-4 text-left [backface-visibility:hidden] [transform:rotateY(180deg)]"
+              >
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                  <div>
+                    <p className="text-zinc-500">Entry</p>
+                    <p className="font-semibold text-white">
+                      {conviction.entryPrice != null
+                        ? formatTokenPrice(conviction.entryPrice)
+                        : '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500">Current</p>
+                    <p className="font-semibold text-white">
+                      {conviction.currentPrice != null
+                        ? formatTokenPrice(conviction.currentPrice)
+                        : '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500">Held</p>
+                    <p className="font-semibold text-white">
+                      {conviction.daysHeld != null ? `${conviction.daysHeld} days` : '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500">Recorded</p>
+                    <p className="font-semibold text-white">
+                      {formatRecordedDate(conviction.recordedAt)}
+                    </p>
+                  </div>
+                </div>
+                {conviction.thesis?.trim() && (
+                  <p className="mt-3 line-clamp-2 text-xs italic text-zinc-300">
+                    &ldquo;{conviction.thesis.trim()}&rdquo;
+                  </p>
+                )}
+                {conviction.targetPrice != null && conviction.targetPrice > 0 && (
+                  <p className="mt-1 text-[10px] text-zinc-500">
+                    Target: {formatTokenPrice(conviction.targetPrice)}
+                  </p>
+                )}
+              </div>
+            </button>
+          </div>
+        )}
+
         <div className="mt-4 overflow-hidden rounded-xl border border-white/10">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={imagePath} alt={win ? 'Pump meme' : 'Dump meme'} className="w-full object-cover" />
         </div>
 
-        <p className="mt-3 rounded-lg bg-black/30 p-3 text-xs leading-relaxed whitespace-pre-wrap text-zinc-300">
-          {tweetText}
-        </p>
+        <div className="mt-3">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            Auto-written thread
+          </p>
+          <p className="mt-1 max-h-40 overflow-y-auto rounded-lg bg-black/30 p-3 text-xs leading-relaxed whitespace-pre-wrap text-zinc-300">
+            {threadPreview}
+          </p>
+        </div>
 
-        <ol className="mt-3 space-y-1 text-xs text-zinc-400">
-          <li>1. Tap <strong className="text-zinc-200">Post on X</strong> — we copy the meme to your clipboard</li>
-          <li>2. On X, paste the image (Ctrl+V / long-press paste) into the compose box</li>
-          <li>3. Tweet text is pre-filled — X cannot attach images via link for security</li>
-        </ol>
+        {accessToken && xStatus && (
+          <div
+            className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+              canInstant
+                ? 'border-emerald-500/30 bg-emerald-950/20 text-emerald-100'
+                : 'border-amber-500/30 bg-amber-950/20 text-amber-100'
+            }`}
+          >
+            {canInstant ? (
+              <>
+                Connected as @{xStatus.twitterHandle?.replace(/^@/, '')} — post with image in one tap.
+              </>
+            ) : (
+              <>
+                {xStatus.message}{' '}
+                <Link href="/login" className="font-medium underline hover:text-white">
+                  Sign in with X
+                </Link>{' '}
+                to enable Post Instantly.
+              </>
+            )}
+          </div>
+        )}
 
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        {!accessToken && (
+          <div className="mt-3 rounded-lg border border-sky-500/30 bg-sky-950/20 px-3 py-2 text-xs text-sky-100">
+            <strong>Tip:</strong> Sign up with X for 1-click Proof of Conviction — no download, no paste.{' '}
+            <Link href="/register" className="font-medium underline hover:text-white">
+              Create account with X
+            </Link>
+          </div>
+        )}
+
+        {postError && (
+          <p className="mt-3 rounded-lg border border-red-500/40 bg-red-950/30 p-2 text-xs text-red-200">
+            {postError}
+          </p>
+        )}
+
+        {postedUrl && (
+          <p className="mt-3 rounded-lg border border-emerald-500/40 bg-emerald-950/30 p-2 text-xs text-emerald-200">
+            Posted!{' '}
+            <a href={postedUrl} target="_blank" rel="noopener noreferrer" className="underline">
+              View on X
+            </a>
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-col gap-2">
+          {canInstant && !postedUrl && (
+            <button
+              type="button"
+              onClick={postInstantly}
+              disabled={posting}
+              className={`rounded-lg py-2.5 text-sm font-semibold text-white disabled:opacity-50 ${
+                win ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
+              }`}
+            >
+              {posting ? 'Posting…' : 'Post Instantly'}
+            </button>
+          )}
+          {!postedUrl && (
+            <button
+              type="button"
+              onClick={openComposer}
+              className="rounded-lg bg-sky-500 py-2.5 text-sm font-medium text-white hover:bg-sky-400"
+            >
+              {copied ? 'Image copied — open X' : canInstant ? 'Share via composer' : 'Open X composer'}
+            </button>
+          )}
           <button
             type="button"
             onClick={downloadImage}
-            className={`flex-1 rounded-lg py-2.5 text-sm font-medium text-white ${
-              win ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
-            }`}
+            className="rounded-lg border border-white/10 py-2 text-xs text-zinc-400 hover:text-white"
           >
             Download image
-          </button>
-          <button
-            type="button"
-            onClick={postOnX}
-            className="flex-1 rounded-lg bg-sky-500 py-2.5 text-sm font-medium text-white hover:bg-sky-400"
-          >
-            {copied ? 'Image copied — open X' : 'Post on X'}
           </button>
         </div>
       </div>
@@ -139,34 +358,82 @@ export function ShareFlexModal({
   );
 }
 
-type UseShareFlexOptions = {
-  pnlOrRoi: number;
-  tweetText: string;
-  shareUrl?: string;
-  title: string;
-};
-
-export function useShareFlex({ pnlOrRoi, tweetText, shareUrl, title }: UseShareFlexOptions) {
+export function useShareFlex(config: ShareConvictionConfig) {
   const [open, setOpen] = useState(false);
   const modal = (
-    <ShareFlexModal
-      open={open}
-      onClose={() => setOpen(false)}
-      pnlOrRoi={pnlOrRoi}
-      tweetText={tweetText}
-      shareUrl={shareUrl}
-      title={title}
-    />
+    <ShareFlexModal {...config} open={open} onClose={() => setOpen(false)} />
   );
   return { openFlex: () => setOpen(true), modal };
 }
 
-export function buildPositionFlexShare(input: PositionShareInput & { userId: string; origin: string }) {
+function daysBetween(iso: string | null | undefined): number | undefined {
+  if (!iso) return undefined;
+  const start = new Date(iso).getTime();
+  const now = Date.now();
+  return Math.max(0, Math.floor((now - start) / (1000 * 60 * 60 * 24)));
+}
+
+function buildProofInput(
+  input: PositionShareInput & { userId: string; origin: string; projectId?: string },
+): ProofOfConvictionInput {
+  const entryPrice =
+    input.entryPrice ??
+    (input.investedUsd > 0 && input.pnlPercent !== 0
+      ? input.investedUsd / (1 + input.pnlUsd / input.investedUsd)
+      : input.investedUsd);
+  const currentPrice =
+    input.currentPrice ??
+    (input.entryPrice != null
+      ? input.entryPrice * (1 + input.pnlPercent / 100)
+      : entryPrice * (1 + input.pnlPercent / 100));
+
+  return {
+    ticker: input.ticker,
+    entryPrice,
+    currentPrice,
+    returnPct: input.pnlPercent,
+    thesis: input.thesis,
+    catalyst: input.catalyst,
+    targetPrice: input.targetPrice,
+    recordedAt: input.recordedAt,
+    portfolioRoi: input.portfolioRoi,
+    proofUrl: buildPortfolioShareUrl(input.origin, input.userId),
+  };
+}
+
+export function buildPositionFlexShare(
+  input: PositionShareInput & {
+    userId: string;
+    origin: string;
+    projectId?: string;
+    accessToken?: string;
+  },
+): ShareConvictionConfig {
+  const proof = buildProofInput(input);
+  const entryPrice = input.entryPrice;
+  const currentPrice =
+    input.currentPrice ??
+    (entryPrice != null ? entryPrice * (1 + input.pnlPercent / 100) : undefined);
+
   return {
     pnlOrRoi: input.pnlPercent,
-    tweetText: buildPositionShareMessage(input),
+    tweetText: buildProofOfConvictionThread(proof),
+    instantTweetText: buildProofOfConvictionMessage(proof),
+    threadPreview: buildProofOfConvictionThread(proof),
     shareUrl: buildPortfolioShareUrl(input.origin, input.userId),
-    title: `$${input.ticker} · ${input.pnlPercent >= 0 ? 'Gain' : 'Loss'} flex`,
+    title: `$${input.ticker} · thesis ${input.pnlPercent >= 0 ? 'playing out' : 'update'}`,
+    ticker: input.ticker,
+    projectId: input.projectId,
+    accessToken: input.accessToken,
+    conviction: {
+      entryPrice,
+      currentPrice,
+      thesis: input.thesis,
+      catalyst: input.catalyst,
+      targetPrice: input.targetPrice,
+      recordedAt: input.recordedAt,
+      daysHeld: input.daysHeld ?? daysBetween(input.recordedAt ?? input.positionOpenedAt),
+    },
   };
 }
 
@@ -176,11 +443,16 @@ export function buildPortfolioFlexShare(input: {
   totalValue: number;
   userId: string;
   origin: string;
-}) {
+  accessToken?: string;
+}): ShareConvictionConfig {
+  const tweetText = buildPortfolioShareMessage(input.displayName, input.roi, input.totalValue);
   return {
     pnlOrRoi: input.roi,
-    tweetText: buildPortfolioShareMessage(input.displayName, input.roi, input.totalValue),
+    tweetText,
+    instantTweetText: tweetText,
+    threadPreview: `${input.displayName} paper portfolio\n\nROI: ${input.roi >= 0 ? '+' : ''}${input.roi.toFixed(1)}%\nTotal: $${input.totalValue.toLocaleString()}\n\n#ProofOfConviction @DoxxedCrypto`,
     shareUrl: buildPortfolioShareUrl(input.origin, input.userId),
-    title: 'Portfolio flex',
+    title: 'Portfolio conviction',
+    accessToken: input.accessToken,
   };
 }

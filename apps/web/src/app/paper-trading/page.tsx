@@ -53,6 +53,8 @@ function PaperTradingPageContent() {
   const [preview, setPreview] = useState<DexScreenerPreview | null>(null);
   const [amountUsd, setAmountUsd] = useState('500');
   const [tradeComment, setTradeComment] = useState('');
+  const [tradeCatalyst, setTradeCatalyst] = useState('');
+  const [tradeTargetUsd, setTradeTargetUsd] = useState('');
   const [lastFeedPostId, setLastFeedPostId] = useState<string | null>(null);
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [loading, setLoading] = useState(false);
@@ -261,9 +263,13 @@ function PaperTradingPageContent() {
         side,
         amountUsd: Number(amountUsd),
         comment: buildTradeComment(),
+        catalyst: tradeCatalyst.trim() || undefined,
+        targetUsd: tradeTargetUsd.trim() ? Number(tradeTargetUsd) : undefined,
       });
       setLastFeedPostId(result.feedPostId);
       setTradeComment('');
+      setTradeCatalyst('');
+      setTradeTargetUsd('');
       setFounderDoxxedTick(false);
       setShowAccountabilityModal(false);
       await refreshPortfolio(userId);
@@ -626,6 +632,8 @@ function PaperTradingPageContent() {
                     {userId && (
                       <SharePosition
                         userId={userId}
+                        projectId={pos.projectId}
+                        accessToken={session?.accessToken}
                         displayName={formatPublicAccountLabel(
                           isLoggedIn ? session?.user?.name : portfolio?.accountName,
                           isLoggedIn ? session?.user?.email : portfolio?.accountEmail,
@@ -635,6 +643,14 @@ function PaperTradingPageContent() {
                         investedUsd={pos.quantity * pos.avgBuyPrice}
                         pnlUsd={pos.pnl}
                         pnlPercent={pos.pnlPercent}
+                        entryPrice={pos.avgBuyPrice}
+                        currentPrice={pos.priceUsd}
+                        thesis={pos.convictionThesis}
+                        catalyst={pos.convictionCatalyst}
+                        targetPrice={pos.convictionTargetUsd}
+                        recordedAt={pos.convictionRecordedAt}
+                        positionOpenedAt={pos.positionOpenedAt}
+                        portfolioRoi={portfolio?.roi}
                       />
                     )}
                     <button
@@ -662,6 +678,7 @@ function PaperTradingPageContent() {
           {portfolio && userId && (
             <SharePortfolio
               userId={userId}
+              accessToken={session?.accessToken}
               displayName={formatPublicAccountLabel(
                 isLoggedIn ? session?.user?.name : portfolio.accountName,
                 isLoggedIn ? session?.user?.email : portfolio.accountEmail,
@@ -701,6 +718,10 @@ function PaperTradingPageContent() {
           resetFeeUsd={portfolio.resetFeeUsd ?? 25}
           thesis={tradeComment}
           onThesisChange={setTradeComment}
+          catalyst={tradeCatalyst}
+          onCatalystChange={setTradeCatalyst}
+          targetUsd={tradeTargetUsd}
+          onTargetUsdChange={setTradeTargetUsd}
           founderDoxxedTick={founderDoxxedTick}
           onFounderDoxxedTickChange={setFounderDoxxedTick}
           onCancel={() => setShowAccountabilityModal(false)}

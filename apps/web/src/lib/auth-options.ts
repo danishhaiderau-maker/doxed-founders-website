@@ -11,6 +11,8 @@ async function syncOAuthWithApi(input: {
   provider: 'google' | 'twitter';
   providerId: string;
   twitterHandle?: string | null;
+  oauthAccessToken?: string | null;
+  oauthAccessTokenSecret?: string | null;
 }) {
   const payload: Record<string, string | null | undefined> = {
     email: input.email,
@@ -21,6 +23,8 @@ async function syncOAuthWithApi(input: {
   };
   const handle = input.twitterHandle?.replace(/^@/, '').trim();
   if (handle) payload.twitterHandle = handle;
+  if (input.oauthAccessToken) payload.oauthAccessToken = input.oauthAccessToken;
+  if (input.oauthAccessTokenSecret) payload.oauthAccessTokenSecret = input.oauthAccessTokenSecret;
 
   const res = await fetch(apiUrl('/auth/oauth', true), {
     method: 'POST',
@@ -214,6 +218,12 @@ export const authOptions: NextAuthOptions = {
           provider: 'twitter',
           providerId: account.providerAccountId,
           twitterHandle: handle,
+          oauthAccessToken:
+            (account as { oauth_token?: string }).oauth_token ?? account.access_token ?? null,
+          oauthAccessTokenSecret:
+            (account as { oauth_token_secret?: string }).oauth_token_secret ??
+            (account as { refresh_token?: string }).refresh_token ??
+            null,
         });
 
         if (!data) {
