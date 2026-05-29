@@ -147,6 +147,25 @@ enum FounderApplicationStatus {
   REJECTED
 }
 
+enum BountyStatus {
+  OPEN
+  AWARDED
+  CANCELLED
+}
+
+enum UserBadgeKind {
+  EARLY_SCOUT
+  CONNECTOR
+  HELPFUL_CONTRIBUTOR
+  ANALYST
+}
+
+enum SuggestedUpdateStatus {
+  PENDING
+  PUBLISHED
+  DISMISSED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -187,6 +206,14 @@ model User {
   economyEvents        VirtualEconomyEvent[]
   reputationAwards     ReputationAward[]
   engagementLotteryWins EngagementLotteryWinner[]
+  helpfulMarksGiven    HelpfulMark[] @relation("HelpfulMarker")
+  helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
+  userBadges           UserBadge[]
+  githubConnection     GitHubConnection?
+  connectedApps        ConnectedAppStatus[]
+  founderCreditLedger  FounderCreditLedger[]
+  bountyAwards         FounderBounty[] @relation("BountyAwardee")
+  earlyScouts          EarlyScoutRecord[]
 
   @@index([email])
   @@index([role])
@@ -250,6 +277,8 @@ model Founder {
   journeyStage        FounderJourneyStage  @default(IDEA)
   reputationScore     Int                  @default(0)
   buildStreakDays     Int                  @default(0)
+  founderCredits      Int                  @default(0)
+  githubRepoFullName  String?
   lastBuildPostAt     DateTime?
   publicBuildingSince DateTime?
   createdAt           DateTime             @default(now())
@@ -261,6 +290,8 @@ model Founder {
   founderUpdates     FounderUpdate[]
   videos             FounderVideo[]
   buildPosts         FounderBuildPost[]
+  creditLedger     FounderCreditLedger[]
+  suggestedUpdates SuggestedBuildUpdate[]
 }
 
 model FounderVerification {
@@ -308,6 +339,8 @@ model Project {
   isLiveToken     Boolean       @default(false)
   launchPriceUsd  Decimal?      @db.Decimal(24, 12)
   bubbleScore     Int           @default(0)
+  communityRewardPool Int       @default(10000)
+  githubRepoFullName  String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -334,6 +367,9 @@ model Project {
   buildPosts     FounderBuildPost[]
   followers      ProjectFollow[]
   communityThreads CommunityThread[]
+  bounties         FounderBounty[]
+  helpfulMarks     HelpfulMark[]
+  earlyScouts      EarlyScoutRecord[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -896,9 +932,137 @@ model CommunityComment {
   thread  CommunityThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
   parent  CommunityComment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
   replies CommunityComment[] @relation("CommentReplies")
+  helpfulMark HelpfulMark?
 
   @@index([threadId])
   @@index([parentId])
+}
+
+model HelpfulMark {
+  id              String   @id @default(cuid())
+  projectId       String
+  commentId       String   @unique
+  markedByUserId  String
+  recipientUserId String
+  pointsAwarded   Int      @default(0)
+  poolCreditsUsed Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  project   Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comment   CommunityComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  markedBy  User             @relation("HelpfulMarker", fields: [markedByUserId], references: [id], onDelete: Cascade)
+  recipient User             @relation("HelpfulRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([recipientUserId])
+}
+
+model FounderBounty {
+  id            String       @id @default(cuid())
+  projectId     String
+  title         String
+  description   String       @db.Text
+  rewardCredits Int
+  rewardPoints  Int          @default(0)
+  status        BountyStatus @default(OPEN)
+  awardeeUserId String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  awardee User?   @relation("BountyAwardee", fields: [awardeeUserId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status])
+}
+
+model EarlyScoutRecord {
+  id                   String   @id @default(cuid())
+  userId               String
+  projectId            String
+  followerCountAtScout Int
+  allocationUsd        Decimal? @db.Decimal(16, 2)
+  createdAt            DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([projectId])
+}
+
+model UserBadge {
+  id        String        @id @default(cuid())
+  userId    String
+  kind      UserBadgeKind
+  projectId String?
+  label     String?
+  createdAt DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind, projectId])
+  @@index([userId])
+}
+
+model FounderCreditLedger {
+  id           String   @id @default(cuid())
+  userId       String
+  founderId    String?
+  projectId    String?
+  delta        Int
+  balanceAfter Int
+  reason       String
+  createdAt    DateTime @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  founder Founder? @relation(fields: [founderId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([founderId])
+}
+
+model GitHubConnection {
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  githubUsername String
+  repoFullName   String
+  lastSyncedAt   DateTime?
+  lastCommitSha  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SuggestedBuildUpdate {
+  id            String                @id @default(cuid())
+  founderId     String
+  projectId     String?
+  headline      String
+  body          String                @db.Text
+  devSummary    String                @db.Text
+  traderSummary String                @db.Text
+  commitShas    Json
+  status        SuggestedUpdateStatus @default(PENDING)
+  buildPostId   String?
+  createdAt     DateTime              @default(now())
+
+  founder Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
+
+  @@index([founderId, status])
+}
+
+model ConnectedAppStatus {
+  id        String   @id @default(cuid())
+  userId    String
+  provider  String
+  connected Boolean  @default(false)
+  label     String?
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────

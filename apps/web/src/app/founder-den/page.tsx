@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatUsd, formatTierLabel, LIFECYCLE_STAGES } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
+import { FounderOsPanel } from '@/components/founder-os-panel';
 import { DiscoverProjectCard } from '@/components/discover-project-card';
 import {
   createBuildPost,
@@ -157,9 +158,9 @@ export default function FounderDenPage() {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">Founder Den</h1>
+            <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
             <p className="text-sm text-zinc-500">
-              Idea → build → validation → community → simulated raise → launch → live token
+              Build in public · GitHub → translate → publish · Credits · Community · Raise · Launch
             </p>
           </div>
           <SiteNav />
@@ -274,6 +275,18 @@ export default function FounderDenPage() {
                 Sign in
               </Link>{' '}
               to save your profile and run simulated raises with $10,000 paper capital.
+            </div>
+          )}
+
+          {session?.accessToken && hasFounder && (
+            <div className="mt-6">
+              <FounderOsPanel
+                accessToken={session.accessToken}
+                founderCredits={dashboard?.founderCredits}
+                communityRewardPool={dashboard?.communityRewardPool}
+                projectId={room?.id}
+                onRefresh={load}
+              />
             </div>
           )}
 

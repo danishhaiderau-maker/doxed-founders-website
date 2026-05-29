@@ -963,6 +963,22 @@ export interface ProjectRoom {
     pinned: boolean;
     createdAt: string;
     commentCount: number;
+    comments?: {
+      id: string;
+      userId: string;
+      body: string;
+      createdAt: string;
+      isHelpful: boolean;
+    }[];
+  }[];
+  isProjectFounder?: boolean;
+  communityRewardPool?: number;
+  openBounties?: {
+    id: string;
+    title: string;
+    description: string;
+    rewardCredits: number;
+    rewardPoints: number;
   }[];
   launchpadAccess: {
     unlocked: boolean;
@@ -983,6 +999,8 @@ export interface FounderDashboard {
   hasFounderProfile: boolean;
   primaryProjectSlug: string | null;
   founderSlug: string | null;
+  founderCredits: number;
+  communityRewardPool: number;
   applicationPending: number;
 }
 
@@ -1158,10 +1176,13 @@ export function postProofOfConvictionToX(
 }
 
 export interface EngagementStats {
-  activeUsers24h: number;
+  activeContributors24h?: number;
+  activeUsers24h?: number;
+  topTierSize?: number;
   expectedWinnersToday: number;
   prizeRangeUsd: { min: number; max: number };
   winnerRatePercent: number;
+  model?: string;
   latestDraw: {
     drawDate: string | null;
     activeUsers: number;
@@ -1169,6 +1190,79 @@ export interface EngagementStats {
     totalPaidUsd: number;
     winners: { displayName: string; amountUsd: number; activityScore: number }[];
   };
+}
+
+export interface FounderOsDashboard {
+  founderCredits: number;
+  communityRewardPool: number;
+  primaryProject: { id: string; slug: string; name: string; communityRewardPool: number } | null;
+  connectedApps: { provider: string; label: string; connected: boolean; reputationBoost: number }[];
+  pendingSuggestions: {
+    id: string;
+    headline: string;
+    body: string;
+    devSummary: string;
+    traderSummary: string;
+    createdAt: string;
+  }[];
+  openBounties: { id: string; title: string; description: string; rewardCredits: number; rewardPoints: number }[];
+}
+
+export function fetchFounderOsDashboard(token: string) {
+  return apiFetch<FounderOsDashboard>('/founder-os/dashboard', undefined, token);
+}
+
+export function connectGitHubRepo(repoFullName: string, token: string) {
+  return apiFetch<{ success: boolean; repoFullName: string }>(
+    '/founder-os/github/connect',
+    { method: 'POST', body: JSON.stringify({ repoFullName }) },
+    token,
+  );
+}
+
+export function syncGitHubCommits(token: string) {
+  return apiFetch<{
+    commits: { sha: string; message: string; date: string }[];
+    suggestion: { id: string; headline: string; body: string; devSummary: string; traderSummary: string };
+  }>('/founder-os/github/sync', { method: 'POST' }, token);
+}
+
+export function publishSuggestedUpdate(suggestionId: string, token: string) {
+  return apiFetch<{ success: boolean; buildPostId: string }>(
+    `/founder-os/suggestions/${suggestionId}/publish`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function markCommentHelpful(projectId: string, commentId: string, token: string) {
+  return apiFetch<{ success: boolean; pointsAwarded: number }>(
+    `/founder-os/projects/${projectId}/comments/${commentId}/helpful`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function createFounderBounty(
+  projectId: string,
+  data: { title: string; description: string; rewardCredits: number; rewardPoints?: number },
+  token: string,
+) {
+  return apiFetch(`/founder-os/projects/${projectId}/bounties`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }, token);
+}
+
+export function postCommunityComment(
+  threadId: string,
+  body: string,
+  token: string,
+) {
+  return apiFetch(`/founder-den/threads/${threadId}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  }, token);
 }
 
 export function fetchEngagementStats() {
