@@ -11,6 +11,7 @@ import { AccountLabel } from '@/components/account-welcome';
 const SESSION_KEY = 'dcf-paper-user-id';
 
 const NAV_LINKS = [
+  { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
   { href: '/build-feed', label: 'Build feed' },
   { href: '/founder-den', label: 'Founder Den', auth: true },
@@ -24,6 +25,7 @@ const NAV_LINKS = [
 ] as const;
 
 function navActive(pathname: string, href: string) {
+  if (href === '/discover') return pathname === '/discover';
   if (href === '/feed') return pathname === '/feed';
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';

@@ -590,6 +590,14 @@ export interface ProjectSummary {
   dexscreenerUrl: string | null;
   featured: boolean;
   source: string;
+  lifecycleStage?: string;
+  launchReadiness?: number;
+  bubbleScore?: number;
+  isLiveToken?: boolean;
+  followerCount?: number;
+  founderScore?: number;
+  buildStreakDays?: number;
+  simulatedDemand?: number;
   chain: { slug: string; name: string };
   category: { slug: string; name: string } | null;
   founder: {
@@ -869,6 +877,7 @@ export interface FounderRoom {
 }
 
 export interface ProjectRoom {
+  id: string;
   slug: string;
   name: string;
   ticker: string;
@@ -879,6 +888,25 @@ export interface ProjectRoom {
   dexscreenerUrl: string | null;
   chain: { slug: string; name: string };
   category: { slug: string; name: string } | null;
+  lifecycleStage: string;
+  launchReadiness: number;
+  plannedLaunchDate: string | null;
+  launchRequestedAt: string | null;
+  isLiveToken: boolean;
+  launchPriceUsd: number | null;
+  followerCount: number;
+  isFollowing: boolean;
+  founderScore: number;
+  buildStreakDays: number;
+  genome: {
+    execution: number;
+    demand: number;
+    community: number;
+    transparency: number;
+    launchReady: number;
+    overall: number;
+  };
+  lifecycleStages: { key: string; label: string; emoji: string }[];
   metrics: ProjectMetrics | null;
   socials: ProjectDetail['socials'];
   founder: {
@@ -899,10 +927,19 @@ export interface ProjectRoom {
     goalUsd: number;
     tokenAllocation: string | null;
     durationDays: number;
+    plannedLaunchDate: string | null;
     status: string;
     totalAllocated: number;
     allocatorCount: number;
+    convictionScore: number;
   } | null;
+  demandAnalytics: {
+    interestedUsers: number;
+    averageCommitment: number;
+    largestCommitment: number;
+    demandRank: number | null;
+    totalDemand: number;
+  };
   demandPolls: {
     id: string;
     type: string;
@@ -910,6 +947,61 @@ export interface ProjectRoom {
     options: unknown;
     voteCounts: Record<string, number>;
   }[];
+  communityChannels: string[];
+  communityThreads: {
+    id: string;
+    channel: string;
+    title: string;
+    body: string;
+    pinned: boolean;
+    createdAt: string;
+    commentCount: number;
+  }[];
+  launchpadAccess: {
+    unlocked: boolean;
+    launchReadiness: number;
+    checks: Record<string, boolean>;
+  };
+}
+
+export interface FounderDashboard {
+  progressTier: string;
+  founderScore: number;
+  currentStage: string;
+  followers: number;
+  buildStreakDays: number;
+  simulatedDemand: number;
+  launchReadiness: number;
+  cashBalance: number;
+  hasFounderProfile: boolean;
+  primaryProjectSlug: string | null;
+  founderSlug: string | null;
+  applicationPending: number;
+}
+
+export interface DiscoverProject {
+  slug: string;
+  name: string;
+  ticker: string;
+  summary: string | null;
+  logoUrl: string | null;
+  lifecycleStage: string;
+  launchReadiness: number;
+  bubbleScore: number;
+  followerCount: number;
+  founderScore: number;
+  buildStreakDays: number;
+  simulatedDemand: number;
+  isLiveToken: boolean;
+  category: { slug: string; name: string } | null;
+  chain: { slug: string; name: string };
+  founder: {
+    slug: string;
+    name: string;
+    photoUrl: string | null;
+    reputationScore: number;
+    buildStreakDays: number;
+  } | null;
 }
 
 export function fetchLatestFounderVideos(limit = 12) {
@@ -924,8 +1016,67 @@ export function fetchFounderRoom(slug: string) {
   return apiFetch<FounderRoom>(`/founder-den/founders/${slug}`);
 }
 
-export function fetchProjectRoom(slug: string) {
-  return apiFetch<ProjectRoom>(`/founder-den/projects/${slug}/room`);
+export function fetchProjectRoom(slug: string, token?: string) {
+  return apiFetch<ProjectRoom>(`/founder-den/projects/${slug}/room`, undefined, token);
+}
+
+export function fetchFounderDashboard(token: string) {
+  return apiFetch<FounderDashboard>('/founder-den/dashboard', undefined, token);
+}
+
+export function fetchDiscoverProjects(filter?: string) {
+  const q = filter ? `?filter=${encodeURIComponent(filter)}` : '';
+  return apiFetch<DiscoverProject[]>(`/founder-den/discover${q}`);
+}
+
+export function fetchEconomyStats() {
+  return apiFetch<{
+    cashInCirculation: number;
+    allocatedToRaises: number;
+    totalVirtualSupply: number;
+    topUpFeeUsd: number;
+    restrictedThresholdUsd: number;
+  }>('/founder-den/economy/stats');
+}
+
+export function submitFounderApplication(
+  data: {
+    projectName: string;
+    websiteUrl?: string;
+    twitterHandle?: string;
+    githubUrl?: string;
+    videoUrl?: string;
+    ideaDescription: string;
+    lifecycleStage: string;
+  },
+  token: string,
+) {
+  return apiFetch<{ founderSlug: string; projectSlug: string }>(
+    '/founder-den/founder-application',
+    { method: 'POST', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function createSimulatedRaise(
+  data: {
+    projectId: string;
+    goalUsd: number;
+    durationDays: number;
+    tokenAllocation?: string;
+    plannedLaunchDate?: string;
+  },
+  token: string,
+) {
+  return apiFetch('/founder-den/simulated-raises', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export function followProject(projectId: string, token: string) {
+  return apiFetch(`/founder-den/projects/${projectId}/follow`, { method: 'POST' }, token);
+}
+
+export function unfollowProject(projectId: string, token: string) {
+  return apiFetch(`/founder-den/projects/${projectId}/unfollow`, { method: 'POST' }, token);
 }
 
 export function fetchDemandHeatmap() {

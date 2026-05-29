@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { formatUsd, formatTokenPrice } from '@dcf/utils';
+import { formatUsd, formatTokenPrice, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderBadges } from '@/components/founder-badges';
 import type { ProjectSummary } from '@/lib/api';
 
@@ -26,6 +26,9 @@ interface ProjectCardProps {
 
 export function ProjectCard({ project }: ProjectCardProps) {
   const change = project.metrics?.priceChange24h;
+  const stage = project.lifecycleStage
+    ? LIFECYCLE_STAGES.find((s) => s.key === project.lifecycleStage)
+    : null;
 
   return (
     <Link
@@ -82,6 +85,35 @@ export function ProjectCard({ project }: ProjectCardProps) {
 
       {project.summary && (
         <p className="mt-3 line-clamp-2 text-sm text-[var(--color-muted)]">{project.summary}</p>
+      )}
+
+      {(stage || project.launchReadiness != null) && (
+        <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
+          {stage && (
+            <div className="rounded-lg bg-zinc-900/50 px-2 py-1.5">
+              <span className="text-[var(--color-muted)]">Stage </span>
+              <span className="font-medium text-emerald-300/90">{stage.emoji} {stage.label}</span>
+            </div>
+          )}
+          {project.launchReadiness != null && (
+            <div className="rounded-lg bg-zinc-900/50 px-2 py-1.5">
+              <span className="text-[var(--color-muted)]">Launch </span>
+              <span className="font-medium">{project.launchReadiness}%</span>
+            </div>
+          )}
+          {project.followerCount != null && (
+            <div className="rounded-lg bg-zinc-900/50 px-2 py-1.5">
+              <span className="text-[var(--color-muted)]">Followers </span>
+              <span className="font-medium">{project.followerCount.toLocaleString()}</span>
+            </div>
+          )}
+          {project.simulatedDemand != null && project.simulatedDemand > 0 && (
+            <div className="rounded-lg bg-zinc-900/50 px-2 py-1.5">
+              <span className="text-[var(--color-muted)]">Demand </span>
+              <span className="font-medium">{formatUsd(project.simulatedDemand, 0)}</span>
+            </div>
+          )}
+        </div>
       )}
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
