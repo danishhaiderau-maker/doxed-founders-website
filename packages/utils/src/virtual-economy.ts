@@ -33,6 +33,60 @@ export const LIFECYCLE_STAGES = [
   { key: 'LIVE_TRADING', label: 'Live trading', emoji: '📊' },
 ] as const;
 
+/** High-level buckets for Discover and journey UX */
+export type StageBucket = 'IDEA_STAGE' | 'BUILDING' | 'LAUNCH_READY' | 'LIVE_TOKEN';
+
+export const STAGE_BUCKETS: { key: StageBucket; label: string; color: string; border: string }[] = [
+  { key: 'IDEA_STAGE', label: 'Idea stage', color: '#3b82f6', border: '#60a5fa' },
+  { key: 'BUILDING', label: 'Building', color: '#22c55e', border: '#4ade80' },
+  { key: 'LAUNCH_READY', label: 'Launch ready', color: '#eab308', border: '#facc15' },
+  { key: 'LIVE_TOKEN', label: 'Live tokens', color: '#a855f7', border: '#c084fc' },
+];
+
+const STAGE_INDEX: Record<string, number> = Object.fromEntries(
+  LIFECYCLE_STAGES.map((s, i) => [s.key, i]),
+);
+
+export function getStageBucket(stage: string, isLiveToken?: boolean): StageBucket {
+  if (isLiveToken || stage === 'TOKEN_LAUNCH' || stage === 'LIVE_TRADING') {
+    return 'LIVE_TOKEN';
+  }
+  if (['LAUNCH_READY', 'SIMULATED_RAISE', 'DEMAND_VALIDATION'].includes(stage)) {
+    return 'LAUNCH_READY';
+  }
+  if (['MVP', 'BETA'].includes(stage)) return 'BUILDING';
+  return 'IDEA_STAGE';
+}
+
+export function getStageBucketMeta(bucket: StageBucket) {
+  return STAGE_BUCKETS.find((b) => b.key === bucket) ?? STAGE_BUCKETS[0];
+}
+
+export function computeJourneyProgress(stage: string): number {
+  const idx = STAGE_INDEX[stage] ?? 0;
+  return Math.round(((idx + 1) / LIFECYCLE_STAGES.length) * 100);
+}
+
+/** Infer lifecycle for curated/live projects still marked IDEA in DB */
+export function inferProjectLifecycleStage(input: {
+  lifecycleStage: string;
+  isLiveToken: boolean;
+  dexscreenerUrl?: string | null;
+  contractAddress?: string | null;
+  marketCap?: number | null;
+}): string {
+  if (input.isLiveToken) return 'LIVE_TRADING';
+  const hasMarket =
+    Boolean(input.dexscreenerUrl) &&
+    (input.marketCap != null && input.marketCap > 0 || Boolean(input.contractAddress));
+  if (hasMarket) return 'LIVE_TRADING';
+  return input.lifecycleStage;
+}
+
+export function formatStageBucketLabel(bucket: StageBucket): string {
+  return getStageBucketMeta(bucket).label;
+}
+
 export type StartupGenome = {
   execution: number;
   demand: number;

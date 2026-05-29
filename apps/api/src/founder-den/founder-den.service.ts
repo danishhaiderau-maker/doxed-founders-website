@@ -17,6 +17,9 @@ import {
   RESTRICTED_CASH_THRESHOLD_USD,
   TOP_UP_FEE_USD,
   slugify,
+  inferProjectLifecycleStage,
+  getStageBucket,
+  computeJourneyProgress,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -821,7 +824,7 @@ export class FounderDenService {
     return { ...thread, comments: roots };
   }
 
-  async getDiscover(filter?: string) {
+  async getDiscover(filter?: string, stageBucket?: string) {
     const projects = await this.prisma.project.findMany({
       where: { approved: true, founderId: { not: null } },
       include: {
@@ -834,7 +837,9 @@ export class FounderDenService {
             photoUrl: true,
             reputationScore: true,
             buildStreakDays: true,
+            videoUrl: true,
             verifications: { where: { verified: true }, select: { type: true } },
+            videos: { orderBy: { publishedAt: 'desc' }, take: 1 },
           },
         },
         metrics: true,
@@ -842,35 +847,96 @@ export class FounderDenService {
           where: { status: SimulatedRaiseStatus.ACTIVE },
           include: { allocations: true },
         },
+        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 1 },
         _count: { select: { followers: true } },
       },
       take: 100,
     });
 
-    const mapped = projects.map((p) => {
-      const demand = p.simulatedRaises[0]?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
-      return {
-        slug: p.slug,
-        name: p.name,
-        ticker: p.ticker,
-        summary: p.summary,
-        logoUrl: p.logoUrl,
-        lifecycleStage: p.lifecycleStage,
-        launchReadiness: p.launchReadiness,
-        bubbleScore: p.bubbleScore,
-        followerCount: p._count.followers,
-        founderScore: p.founder?.reputationScore ?? 0,
-        buildStreakDays: p.founder?.buildStreakDays ?? 0,
-        simulatedDemand: demand,
-        category: p.category,
-        chain: p.chain,
-        founder: p.founder,
-        isLiveToken: p.isLiveToken,
-        createdAt: p.createdAt,
-      };
-    });
+    const mapped = await Promise.all(
+      projects.map(async (p) => {
+        const marketCap = p.metrics?.marketCap ? Number(p.metrics.marketCap) : null;
+        const effectiveStage = inferProjectLifecycleStage({
+          lifecycleStage: p.lifecycleStage,
+          isLiveToken: p.isLiveToken,
+          dexscreenerUrl: p.dexscreenerUrl,
+          contractAddress: p.contractAddress,
+          marketCap,
+        });
 
-    const sorted = [...mapped].sort((a, b) => {
+        if (
+          effectiveStage !== p.lifecycleStage &&
+          (effectiveStage === 'LIVE_TRADING' || effectiveStage === 'TOKEN_LAUNCH')
+        ) {
+          await this.prisma.project.update({
+            where: { id: p.id },
+            data: {
+              lifecycleStage: effectiveStage as ProjectLifecycleStage,
+              isLiveToken: true,
+            },
+          });
+        }
+
+        const activeRaise = p.simulatedRaises[0];
+        const demand = activeRaise?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
+        const goalUsd = activeRaise ? Number(activeRaise.goalUsd) : 0;
+        const demandPct = goalUsd > 0 ? Math.min(100, Math.round((demand / goalUsd) * 100)) : 0;
+        const bucket = getStageBucket(effectiveStage, p.isLiveToken || effectiveStage === 'LIVE_TRADING');
+        const latestVideo = p.founder?.videos[0];
+        const latestPost = p.buildPosts[0];
+
+        return {
+          slug: p.slug,
+          name: p.name,
+          ticker: p.ticker,
+          summary: p.summary,
+          logoUrl: p.logoUrl,
+          lifecycleStage: effectiveStage,
+          stageBucket: bucket,
+          journeyProgress: computeJourneyProgress(effectiveStage),
+          launchReadiness: p.launchReadiness,
+          bubbleScore: Math.max(
+            p.bubbleScore,
+            p.isLiveToken || effectiveStage === 'LIVE_TRADING'
+              ? 200 + Math.round((marketCap ?? 0) / 10_000)
+              : p.bubbleScore,
+          ),
+          followerCount: p._count.followers,
+          founderScore: p.founder?.reputationScore ?? 0,
+          buildStreakDays: p.founder?.buildStreakDays ?? 0,
+          simulatedDemand: demand,
+          raiseGoalUsd: goalUsd,
+          demandPct,
+          marketCap,
+          priceUsd: p.metrics?.priceUsd ? Number(p.metrics.priceUsd) : null,
+          volume24h: p.metrics?.volume24h ? Number(p.metrics.volume24h) : null,
+          category: p.category,
+          chain: p.chain,
+          founder: p.founder
+            ? {
+                slug: p.founder.slug,
+                name: p.founder.name,
+                photoUrl: p.founder.photoUrl,
+                reputationScore: p.founder.reputationScore,
+                buildStreakDays: p.founder.buildStreakDays,
+              }
+            : null,
+          founderVideoUrl: latestVideo?.url ?? p.founder?.videoUrl ?? null,
+          founderVideoTitle: latestVideo?.title ?? 'Founder intro',
+          lastUpdateAt: latestPost?.publishedAt ?? p.updatedAt,
+          lastUpdateHeadline: latestPost?.headline ?? null,
+          isLiveToken: p.isLiveToken || effectiveStage === 'LIVE_TRADING',
+          createdAt: p.createdAt,
+        };
+      }),
+    );
+
+    let filtered = mapped;
+    if (stageBucket) {
+      filtered = mapped.filter((p) => p.stageBucket === stageBucket);
+    }
+
+    const sorted = [...filtered].sort((a, b) => {
       switch (filter) {
         case 'most_followed':
           return b.followerCount - a.followerCount;
@@ -879,6 +945,8 @@ export class FounderDenService {
         case 'launch_ready':
           return b.launchReadiness - a.launchReadiness;
         case 'recently_launched':
+          return (b.isLiveToken ? 1 : 0) - (a.isLiveToken ? 1 : 0);
+        case 'live_tokens':
           return (b.isLiveToken ? 1 : 0) - (a.isLiveToken ? 1 : 0);
         case 'newest':
           return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -889,6 +957,23 @@ export class FounderDenService {
     });
 
     return sorted;
+  }
+
+  async getEcosystemPulse() {
+    const [activity, projects, raises] = await Promise.all([
+      this.getBuildFeed(12),
+      this.getDiscover('trending'),
+      this.getDemandHeatmap(),
+    ]);
+
+    return {
+      recentActivity: activity,
+      trendingProjects: projects.slice(0, 8),
+      topRaises: raises.slice(0, 6),
+      liveTokenCount: projects.filter((p) => p.isLiveToken).length,
+      buildingCount: projects.filter((p) => p.stageBucket === 'BUILDING').length,
+      ideaCount: projects.filter((p) => p.stageBucket === 'IDEA_STAGE').length,
+    };
   }
 
   async getEconomyStats() {
