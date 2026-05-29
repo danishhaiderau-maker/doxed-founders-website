@@ -4,21 +4,31 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { BountyStatus, NotificationType, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
+import { BountyStatus, NotificationType, Prisma, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
 import {
   COMMUNITY_REWARD_POOL_DEFAULT,
-  CONNECTED_APP_PROVIDERS,
+  CURSOR_BUILD_SESSION_CREDITS,
+  INTEGRATION_PROVIDERS,
   EARLY_SCOUT_FOLLOWER_THRESHOLD,
   EARLY_SCOUT_POINTS,
   FOUNDER_LAUNCH_CREDITS,
   HELPFUL_MARK_POINTS,
   HELPFUL_MARK_POOL_CREDITS,
   POINTS,
+  PublishChannelResult,
+  PublishDestinations,
+  buildCommunityAnnouncement,
+  buildDeploySuggestion,
+  buildFeedPostBody,
+  buildSuggestionFromBuildPrompt,
   buildSuggestedUpdateFromCommits,
+  buildXUpdateTweet,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { UserXPostingService } from '../x-social/user-x-posting.service';
+import { FounderOsIntegrationService } from './founder-os-integration.service';
 
 @Injectable()
 export class FounderOsService {
@@ -26,6 +36,8 @@ export class FounderOsService {
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
+    private readonly userX: UserXPostingService,
+    private readonly integrations: FounderOsIntegrationService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -92,21 +104,51 @@ export class FounderOsService {
         })
       : [];
 
+    const recentBuildSessions = founder
+      ? await this.prisma.cursorBuildSession.findMany({
+          where: { founderId: founder.id },
+          orderBy: { createdAt: 'desc' },
+          take: 3,
+          select: { id: true, title: true, creditsSpent: true, createdAt: true },
+        })
+      : [];
+
     return {
       founderCredits: founder?.founderCredits ?? 0,
       communityRewardPool: founder?.projects[0]?.communityRewardPool ?? 0,
       primaryProject: founder?.projects[0] ?? null,
       connectedApps,
+      integrationProviders: this.integrations.getProviderConfigs(),
       pendingSuggestions: pendingSuggestions.map((s) => ({
         id: s.id,
         headline: s.headline,
         body: s.body,
         devSummary: s.devSummary,
         traderSummary: s.traderSummary,
+        source: s.source,
         createdAt: s.createdAt.toISOString(),
       })),
       openBounties: bounties,
+      recentBuildSessions: recentBuildSessions.map((s) => ({
+        ...s,
+        createdAt: s.createdAt.toISOString(),
+      })),
     };
+  }
+
+  getIntegrationProviders() {
+    return this.integrations.getProviderConfigs();
+  }
+
+  connectIntegration(
+    userId: string,
+    input: { provider: string; token?: string; repoFullName?: string; projectName?: string },
+  ) {
+    return this.integrations.connectIntegration(userId, input);
+  }
+
+  disconnectIntegration(userId: string, provider: string) {
+    return this.integrations.disconnectIntegration(userId, provider);
   }
 
   async getConnectedApps(userId: string, founder?: { githubUrl?: string | null; githubUsername?: string | null; githubRepoFullName?: string | null; userId?: string | null } | null) {
@@ -116,18 +158,27 @@ export class FounderOsService {
     });
     const gh = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
     const stored = await this.prisma.connectedAppStatus.findMany({ where: { userId } });
+    const creds = await this.prisma.integrationCredential.findMany({ where: { userId } });
     const map = new Map(stored.map((s) => [s.provider, s]));
+    const credMap = new Map(creds.map((c) => [c.provider, c]));
 
-    return CONNECTED_APP_PROVIDERS.map((p) => {
+    return INTEGRATION_PROVIDERS.map((p) => {
       let connected = map.get(p.key)?.connected ?? false;
+      const meta = (map.get(p.key)?.metadata ?? credMap.get(p.key)?.metadata) as Record<string, unknown> | undefined;
       if (p.key === 'github') connected = connected || Boolean(gh || founder?.githubUrl || founder?.githubRepoFullName);
       if (p.key === 'x') connected = connected || Boolean(user?.twitterHandle || user?.oauthAccounts.length);
-      if (p.key === 'cursor') connected = map.get('cursor')?.connected ?? false;
+      if (['vercel', 'railway', 'neon', 'digitalocean', 'supabase'].includes(p.key)) {
+        connected = connected || Boolean(credMap.get(p.key)?.verifiedAt);
+      }
+      if (p.key === 'cursor') connected = connected || Boolean(credMap.get('cursor')?.verifiedAt);
       return {
         provider: p.key,
         label: p.label,
         connected,
         reputationBoost: p.reputationBoost,
+        billTip: p.billTip,
+        accountName: (meta?.accountName as string | undefined) ?? null,
+        webhookUrl: (meta?.webhookUrl as string | undefined) ?? null,
       };
     });
   }
@@ -208,6 +259,7 @@ export class FounderOsService {
         devSummary: suggested.devSummary,
         traderSummary: suggested.traderSummary,
         commitShas: commits.map((c) => c.sha),
+        source: 'github',
       },
     });
 
@@ -235,8 +287,95 @@ export class FounderOsService {
     };
   }
 
-  async publishSuggestedUpdate(userId: string, suggestionId: string) {
+  async runCursorBuildRoom(userId: string, input: { title: string; prompt: string }) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { take: 1 } },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+    if (founder.founderCredits < CURSOR_BUILD_SESSION_CREDITS) {
+      throw new BadRequestException(`Need ${CURSOR_BUILD_SESSION_CREDITS} Founder Credits for a build room session`);
+    }
+
+    const dayNumber = (founder.buildStreakDays || 0) + 1;
+    const suggested = buildSuggestionFromBuildPrompt(input.prompt, dayNumber);
+
+    const updated = await this.prisma.founder.update({
+      where: { id: founder.id },
+      data: { founderCredits: { decrement: CURSOR_BUILD_SESSION_CREDITS } },
+    });
+
+    await this.prisma.founderCreditLedger.create({
+      data: {
+        userId,
+        founderId: founder.id,
+        projectId: founder.projects[0]?.id,
+        delta: -CURSOR_BUILD_SESSION_CREDITS,
+        balanceAfter: updated.founderCredits,
+        reason: 'CURSOR_BUILD_ROOM',
+      },
+    });
+
+    const suggestion = await this.prisma.suggestedBuildUpdate.create({
+      data: {
+        founderId: founder.id,
+        projectId: founder.projects[0]?.id,
+        headline: suggested.headline,
+        body: suggested.body,
+        devSummary: suggested.devSummary,
+        traderSummary: suggested.traderSummary,
+        commitShas: [],
+        source: 'cursor',
+      },
+    });
+
+    const session = await this.prisma.cursorBuildSession.create({
+      data: {
+        userId,
+        founderId: founder.id,
+        title: input.title.trim() || 'Build session',
+        userPrompt: input.prompt.trim(),
+        suggestionId: suggestion.id,
+        creditsSpent: CURSOR_BUILD_SESSION_CREDITS,
+      },
+    });
+
+    await this.integrations.connectIntegration(userId, { provider: 'cursor' });
+
+    return {
+      sessionId: session.id,
+      creditsSpent: CURSOR_BUILD_SESSION_CREDITS,
+      suggestion: {
+        id: suggestion.id,
+        headline: suggestion.headline,
+        body: suggestion.body,
+        devSummary: suggestion.devSummary,
+        traderSummary: suggestion.traderSummary,
+      },
+    };
+  }
+
+  async dismissSuggestion(userId: string, suggestionId: string) {
     const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const updated = await this.prisma.suggestedBuildUpdate.updateMany({
+      where: { id: suggestionId, founderId: founder.id, status: SuggestedUpdateStatus.PENDING },
+      data: { status: SuggestedUpdateStatus.DISMISSED },
+    });
+    if (updated.count === 0) throw new NotFoundException('Suggestion not found');
+    return { success: true };
+  }
+
+  async publishSuggestedUpdate(
+    userId: string,
+    suggestionId: string,
+    destinations: Partial<PublishDestinations> = {},
+  ) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { take: 1 } },
+    });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
     const suggestion = await this.prisma.suggestedBuildUpdate.findFirst({
@@ -244,22 +383,195 @@ export class FounderOsService {
     });
     if (!suggestion) throw new NotFoundException('Suggestion not found');
 
-    const post = await this.prisma.founderBuildPost.create({
-      data: {
-        founderId: founder.id,
-        projectId: suggestion.projectId,
-        headline: suggestion.headline,
-        body: `${suggestion.body}\n\n---\n**Trader view:**\n${suggestion.traderSummary}`,
-      },
-    });
+    const dest: PublishDestinations = {
+      buildFeed: destinations.buildFeed ?? true,
+      x: destinations.x ?? true,
+      community: destinations.community ?? true,
+    };
+
+    const project = suggestion.projectId
+      ? await this.prisma.project.findUnique({ where: { id: suggestion.projectId } })
+      : founder.projects[0];
+
+    const results: PublishChannelResult = {};
+    let buildPostId: string | undefined;
+    let communityThreadId: string | undefined;
+    let xTweetUrl: string | undefined;
+
+    if (dest.buildFeed) {
+      try {
+        const dayNumber = (founder.buildStreakDays || 0) + 1;
+        const post = await this.prisma.founderBuildPost.create({
+          data: {
+            founderId: founder.id,
+            projectId: suggestion.projectId ?? project?.id,
+            dayNumber,
+            headline: suggestion.headline,
+            body: buildFeedPostBody({
+              body: suggestion.body,
+              devSummary: suggestion.devSummary,
+              traderSummary: suggestion.traderSummary,
+            }),
+          },
+        });
+        buildPostId = post.id;
+        await this.updateBuildStreak(founder.id);
+        await this.points.award(userId, POINTS.FOUNDER_BUILD_POST);
+        results.buildFeed = { ok: true, buildPostId: post.id };
+      } catch (err) {
+        results.buildFeed = {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Build feed failed',
+        };
+      }
+    }
+
+    if (dest.community && project?.id) {
+      try {
+        const ann = buildCommunityAnnouncement({
+          headline: suggestion.headline,
+          body: suggestion.body,
+          traderSummary: suggestion.traderSummary,
+        });
+        const thread = await this.prisma.communityThread.create({
+          data: {
+            projectId: project.id,
+            channel: 'DEVELOPMENT',
+            title: ann.title,
+            body: ann.body,
+            authorId: userId,
+            pinned: false,
+          },
+        });
+        communityThreadId = thread.id;
+        await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST);
+        results.community = { ok: true, threadId: thread.id };
+      } catch (err) {
+        results.community = {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Community post failed',
+        };
+      }
+    } else if (dest.community) {
+      results.community = { ok: false, skipped: true, error: 'No project linked' };
+    }
+
+    if (dest.x) {
+      const xStatus = await this.userX.canUserPost(userId);
+      if (!xStatus.canPost) {
+        results.x = { ok: false, skipped: true, error: xStatus.connected ? 'Reconnect X for posting' : 'X not connected' };
+      } else {
+        try {
+          const tweetText = buildXUpdateTweet({
+            headline: suggestion.headline,
+            traderSummary: suggestion.traderSummary,
+            projectName: project?.name,
+          });
+          const tweet = await this.userX.postTweet(userId, tweetText);
+          if (tweet.ok) {
+            xTweetUrl = tweet.tweetUrl;
+            results.x = { ok: true, tweetUrl: tweet.tweetUrl };
+          } else {
+            results.x = { ok: false, error: tweet.reason };
+          }
+        } catch (err) {
+          results.x = {
+            ok: false,
+            error: err instanceof Error ? err.message : 'X post failed',
+          };
+        }
+      }
+    }
+
+    const anyOk = Object.values(results).some((r) => r?.ok);
+    if (!anyOk) {
+      throw new BadRequestException(
+        `Publish failed on all destinations: ${JSON.stringify(results)}`,
+      );
+    }
 
     await this.prisma.suggestedBuildUpdate.update({
       where: { id: suggestionId },
-      data: { status: SuggestedUpdateStatus.PUBLISHED, buildPostId: post.id },
+      data: {
+        status: SuggestedUpdateStatus.PUBLISHED,
+        buildPostId,
+        communityThreadId,
+        xTweetUrl,
+        publishLog: results as Prisma.InputJsonValue,
+      },
     });
 
-    await this.points.award(userId, POINTS.FOUNDER_BUILD_POST);
-    return { success: true, buildPostId: post.id };
+    return {
+      success: true,
+      buildPostId,
+      communityThreadId,
+      xTweetUrl,
+      destinations: results,
+    };
+  }
+
+  async handleDeployWebhook(
+    webhookSecret: string,
+    payload: { provider?: string; projectName?: string; environment?: string },
+  ) {
+    const cred = await this.integrations.findByWebhookSecret(webhookSecret);
+    if (!cred?.user?.founder) throw new NotFoundException('Webhook not found');
+
+    const suggested = buildDeploySuggestion({
+      provider: payload.provider ?? cred.provider,
+      projectName: payload.projectName ?? (cred.metadata as { projectName?: string })?.projectName,
+      environment: payload.environment,
+    });
+
+    const founder = cred.user.founder;
+    const record = await this.prisma.suggestedBuildUpdate.create({
+      data: {
+        founderId: founder.id,
+        projectId: founder.projects[0]?.id,
+        headline: suggested.headline,
+        body: suggested.body,
+        devSummary: suggested.devSummary,
+        traderSummary: suggested.traderSummary,
+        commitShas: [],
+        source: `deploy:${cred.provider}`,
+      },
+    });
+
+    if (cred.userId) {
+      await this.notifications.notifyUser(cred.userId, {
+        type: NotificationType.POINTS_EARNED,
+        title: 'Deploy detected',
+        body: `New suggested update ready — review and publish everywhere.`,
+        link: '/founder-den',
+      });
+    }
+
+    return { success: true, suggestionId: record.id };
+  }
+
+  private async updateBuildStreak(founderId: string) {
+    const founder = await this.prisma.founder.findUnique({ where: { id: founderId } });
+    if (!founder) return 0;
+
+    const now = new Date();
+    const last = founder.lastBuildPostAt;
+    let streak = founder.buildStreakDays;
+    if (!last) {
+      streak = 1;
+    } else {
+      const daysSince = Math.floor((now.getTime() - last.getTime()) / 86400000);
+      streak = daysSince <= 7 ? streak + 1 : 1;
+    }
+
+    await this.prisma.founder.update({
+      where: { id: founderId },
+      data: {
+        buildStreakDays: streak,
+        lastBuildPostAt: now,
+        publicBuildingSince: founder.publicBuildingSince ?? now,
+      },
+    });
+    return streak;
   }
 
   async markCommentHelpful(founderUserId: string, projectId: string, commentId: string) {

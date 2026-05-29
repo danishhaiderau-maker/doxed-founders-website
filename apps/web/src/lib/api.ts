@@ -1196,20 +1196,76 @@ export interface FounderOsDashboard {
   founderCredits: number;
   communityRewardPool: number;
   primaryProject: { id: string; slug: string; name: string; communityRewardPool: number } | null;
-  connectedApps: { provider: string; label: string; connected: boolean; reputationBoost: number }[];
+  connectedApps: {
+    provider: string;
+    label: string;
+    connected: boolean;
+    reputationBoost: number;
+    billTip?: string;
+    accountName?: string | null;
+    webhookUrl?: string | null;
+  }[];
+  integrationProviders?: IntegrationProviderConfig[];
   pendingSuggestions: {
     id: string;
     headline: string;
     body: string;
     devSummary: string;
     traderSummary: string;
+    source?: string;
     createdAt: string;
   }[];
   openBounties: { id: string; title: string; description: string; rewardCredits: number; rewardPoints: number }[];
+  recentBuildSessions?: { id: string; title: string; creditsSpent: number; createdAt: string }[];
 }
+
+export interface IntegrationProviderConfig {
+  key: string;
+  label: string;
+  connectType: 'repo' | 'oauth' | 'token' | 'toggle';
+  reputationBoost: number;
+  billTip: string;
+  fields: { key: string; label: string; placeholder: string; required: boolean; secret?: boolean }[];
+}
+
+export type PublishDestinationsInput = { buildFeed?: boolean; x?: boolean; community?: boolean };
 
 export function fetchFounderOsDashboard(token: string) {
   return apiFetch<FounderOsDashboard>('/founder-os/dashboard', undefined, token);
+}
+
+export function fetchIntegrationProviders() {
+  return apiFetch<IntegrationProviderConfig[]>('/founder-os/integrations');
+}
+
+export function connectIntegration(
+  data: { provider: string; token?: string; projectName?: string },
+  token: string,
+) {
+  return apiFetch<{ success: boolean; accountName: string; webhookUrl?: string }>(
+    '/founder-os/integrations/connect',
+    { method: 'POST', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function disconnectIntegration(provider: string, token: string) {
+  return apiFetch<{ success: boolean }>(
+    `/founder-os/integrations/${provider}/disconnect`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function runCursorBuildRoom(
+  data: { title: string; prompt: string },
+  token: string,
+) {
+  return apiFetch<{
+    sessionId: string;
+    creditsSpent: number;
+    suggestion: { id: string; headline: string; body: string; devSummary: string; traderSummary: string };
+  }>('/founder-os/build-room', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
 export function connectGitHubRepo(repoFullName: string, token: string) {
@@ -1227,9 +1283,27 @@ export function syncGitHubCommits(token: string) {
   }>('/founder-os/github/sync', { method: 'POST' }, token);
 }
 
-export function publishSuggestedUpdate(suggestionId: string, token: string) {
-  return apiFetch<{ success: boolean; buildPostId: string }>(
+export function publishSuggestedUpdate(
+  suggestionId: string,
+  token: string,
+  destinations?: PublishDestinationsInput,
+) {
+  return apiFetch<{
+    success: boolean;
+    buildPostId?: string;
+    communityThreadId?: string;
+    xTweetUrl?: string;
+    destinations: Record<string, { ok: boolean; error?: string; skipped?: boolean; tweetUrl?: string }>;
+  }>(
     `/founder-os/suggestions/${suggestionId}/publish`,
+    { method: 'POST', body: JSON.stringify(destinations ?? {}) },
+    token,
+  );
+}
+
+export function dismissSuggestedUpdate(suggestionId: string, token: string) {
+  return apiFetch<{ success: boolean }>(
+    `/founder-os/suggestions/${suggestionId}/dismiss`,
     { method: 'POST' },
     token,
   );

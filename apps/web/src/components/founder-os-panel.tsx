@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   connectGitHubRepo,
+  connectIntegration,
   createFounderBounty,
+  disconnectIntegration,
   fetchFounderOsDashboard,
   FounderOsDashboard,
+  IntegrationProviderConfig,
   publishSuggestedUpdate,
+  runCursorBuildRoom,
   syncGitHubCommits,
 } from '@/lib/api';
 
@@ -30,6 +34,11 @@ export function FounderOsPanel({
   const [bountyTitle, setBountyTitle] = useState('');
   const [bountyDesc, setBountyDesc] = useState('');
   const [bountyCredits, setBountyCredits] = useState('500');
+  const [buildTitle, setBuildTitle] = useState('');
+  const [buildPrompt, setBuildPrompt] = useState('');
+  const [connectProvider, setConnectProvider] = useState<IntegrationProviderConfig | null>(null);
+  const [connectFields, setConnectFields] = useState<Record<string, string>>({});
+  const [publishDest, setPublishDest] = useState({ buildFeed: true, x: true, community: true });
   const [msg, setMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -59,7 +68,7 @@ export function FounderOsPanel({
   async function handleSyncGitHub() {
     try {
       const result = await syncGitHubCommits(accessToken);
-      setMsg(`Synced ${result.commits.length} commits — review suggested update below`);
+      setMsg(`Synced ${result.commits.length} commits — review and publish everywhere`);
       load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Sync failed');
@@ -68,12 +77,71 @@ export function FounderOsPanel({
 
   async function handlePublish(suggestionId: string) {
     try {
-      await publishSuggestedUpdate(suggestionId, accessToken);
-      setMsg('Published to build feed');
+      const result = await publishSuggestedUpdate(suggestionId, accessToken, publishDest);
+      const parts: string[] = [];
+      if (result.destinations?.buildFeed?.ok) parts.push('build feed');
+      if (result.destinations?.x?.ok) parts.push('X');
+      if (result.destinations?.community?.ok) parts.push('community');
+      setMsg(parts.length ? `Published to ${parts.join(', ')}` : 'Published');
       load();
       onRefresh?.();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Publish failed');
+    }
+  }
+
+  async function handleConnectProvider() {
+    if (!connectProvider) return;
+    try {
+      if (connectProvider.connectType === 'toggle') {
+        await connectIntegration({ provider: connectProvider.key }, accessToken);
+        setMsg(`${connectProvider.label} connected`);
+      } else {
+        const result = await connectIntegration(
+          {
+            provider: connectProvider.key,
+            token: connectFields.token,
+            projectName: connectFields.projectName,
+          },
+          accessToken,
+        );
+        setMsg(
+          result.webhookUrl
+            ? `${connectProvider.label} connected — webhook: ${result.webhookUrl}`
+            : `${connectProvider.label} connected (${result.accountName})`,
+        );
+      }
+      setConnectProvider(null);
+      setConnectFields({});
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Connect failed');
+    }
+  }
+
+  async function handleDisconnect(provider: string) {
+    try {
+      await disconnectIntegration(provider, accessToken);
+      setMsg('Disconnected');
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Disconnect failed');
+    }
+  }
+
+  async function handleBuildRoom() {
+    if (!buildPrompt.trim()) return;
+    try {
+      const result = await runCursorBuildRoom(
+        { title: buildTitle.trim() || 'Build session', prompt: buildPrompt.trim() },
+        accessToken,
+      );
+      setMsg(`Build room draft ready (${result.creditsSpent} credits) — publish everywhere below`);
+      setBuildPrompt('');
+      setBuildTitle('');
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Build room failed');
     }
   }
 
@@ -101,6 +169,7 @@ export function FounderOsPanel({
   }
 
   const apps = data?.connectedApps ?? [];
+  const providers = data?.integrationProviders ?? [];
 
   return (
     <div className="space-y-6">
@@ -110,7 +179,7 @@ export function FounderOsPanel({
           <p className="mt-1 text-2xl font-bold text-white">
             {(data?.founderCredits ?? founderCredits).toLocaleString()}
           </p>
-          <p className="mt-1 text-xs text-zinc-500">Bounties · demand tests · rewards</p>
+          <p className="mt-1 text-xs text-zinc-500">Bounties · build room · rewards</p>
         </div>
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4">
           <p className="text-[10px] uppercase text-emerald-300">Community Pool</p>
@@ -120,29 +189,61 @@ export function FounderOsPanel({
           <p className="mt-1 text-xs text-zinc-500">Mark helpful replies to distribute</p>
         </div>
         <div className="rounded-xl border border-sky-500/30 bg-sky-950/20 p-4">
-          <p className="text-[10px] uppercase text-sky-300">Founder OS</p>
-          <p className="mt-1 text-sm font-semibold text-white">Build → translate → publish</p>
-          <p className="mt-1 text-xs text-zinc-500">One workflow, not five apps</p>
+          <p className="text-[10px] uppercase text-sky-300">Stack hub</p>
+          <p className="mt-1 text-sm font-semibold text-white">
+            {apps.filter((a) => a.connected).length} / {apps.length} connected
+          </p>
+          <p className="mt-1 text-xs text-zinc-500">One dashboard — fewer tools to pay for</p>
         </div>
       </div>
 
       {msg && <p className="text-sm text-emerald-300">{msg}</p>}
 
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-        <p className="text-xs uppercase tracking-widest text-zinc-500">Connected apps</p>
-        <div className="mt-3 flex flex-wrap gap-2">
+        <p className="text-xs uppercase tracking-widest text-zinc-500">Connected stack</p>
+        <p className="mt-1 text-xs text-zinc-600">
+          Link GitHub, Vercel, Railway, Neon, DigitalOcean, Supabase — deploy webhooks auto-draft updates.
+        </p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {apps.map((a) => (
-            <span
+            <div
               key={a.provider}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+              className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs ${
                 a.connected
-                  ? 'bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-500/30'
-                  : 'bg-zinc-800 text-zinc-500'
+                  ? 'bg-emerald-500/10 text-emerald-100 ring-1 ring-emerald-500/25'
+                  : 'bg-zinc-800/80 text-zinc-500'
               }`}
             >
-              {a.label} {a.connected ? '✓' : '—'}
-            </span>
+              <div>
+                <span className="font-medium">{a.label}</span>
+                {a.accountName && <span className="ml-2 text-zinc-500">· {a.accountName}</span>}
+              </div>
+              {a.connected && a.provider !== 'github' && a.provider !== 'x' ? (
+                <button type="button" onClick={() => handleDisconnect(a.provider)} className="text-zinc-400 hover:text-white">
+                  ×
+                </button>
+              ) : (
+                <span>{a.connected ? '✓' : '—'}</span>
+              )}
+            </div>
           ))}
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {providers
+            .filter((p) => p.connectType === 'token' || p.connectType === 'toggle')
+            .map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => {
+                  setConnectProvider(p);
+                  setConnectFields({});
+                }}
+                className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-300 hover:border-sky-500/50"
+              >
+                + {p.label}
+              </button>
+            ))}
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <input
@@ -168,12 +269,68 @@ export function FounderOsPanel({
         </div>
       </div>
 
+      <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
+        <p className="text-sm font-semibold text-indigo-200">Cursor Build Room</p>
+        <p className="mt-1 text-xs text-zinc-500">
+          Describe what you shipped — get dev + trader summaries (50 Founder Credits, no extra AI subscription).
+        </p>
+        <input
+          value={buildTitle}
+          onChange={(e) => setBuildTitle(e.target.value)}
+          placeholder="Session title"
+          className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+        />
+        <textarea
+          value={buildPrompt}
+          onChange={(e) => setBuildPrompt(e.target.value)}
+          placeholder="What did you build? One line per item…"
+          rows={3}
+          className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+        />
+        <button
+          type="button"
+          onClick={handleBuildRoom}
+          className="mt-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white"
+        >
+          Generate update (50 credits)
+        </button>
+      </div>
+
       {(data?.pendingSuggestions?.length ?? 0) > 0 && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4">
           <p className="text-sm font-semibold text-amber-200">Suggested update — publish everywhere</p>
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-400">
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={publishDest.buildFeed}
+                onChange={(e) => setPublishDest({ ...publishDest, buildFeed: e.target.checked })}
+              />
+              Build feed
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={publishDest.x}
+                onChange={(e) => setPublishDest({ ...publishDest, x: e.target.checked })}
+              />
+              X
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={publishDest.community}
+                onChange={(e) => setPublishDest({ ...publishDest, community: e.target.checked })}
+              />
+              Project room
+            </label>
+          </div>
           {data!.pendingSuggestions.map((s) => (
             <div key={s.id} className="mt-3 rounded-lg border border-zinc-800 bg-black/20 p-3">
               <p className="font-medium text-white">{s.headline}</p>
+              {s.source && (
+                <p className="mt-1 text-[10px] uppercase text-zinc-600">via {s.source}</p>
+              )}
               <p className="mt-2 text-xs text-zinc-400 whitespace-pre-wrap">{s.body}</p>
               <details className="mt-2 text-xs text-zinc-500">
                 <summary className="cursor-pointer text-sky-300">Trader view</summary>
@@ -184,10 +341,45 @@ export function FounderOsPanel({
                 onClick={() => handlePublish(s.id)}
                 className="mt-3 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white"
               >
-                Publish to build feed
+                Publish everywhere
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {connectProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-5">
+            <p className="font-semibold text-white">Connect {connectProvider.label}</p>
+            <p className="mt-1 text-xs text-zinc-500">{connectProvider.billTip}</p>
+            {connectProvider.fields.map((f) => (
+              <input
+                key={f.key}
+                type={f.secret ? 'password' : 'text'}
+                value={connectFields[f.key] ?? ''}
+                onChange={(e) => setConnectFields({ ...connectFields, [f.key]: e.target.value })}
+                placeholder={f.placeholder}
+                className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+              />
+            ))}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={handleConnectProvider}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white"
+              >
+                Connect
+              </button>
+              <button
+                type="button"
+                onClick={() => setConnectProvider(null)}
+                className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

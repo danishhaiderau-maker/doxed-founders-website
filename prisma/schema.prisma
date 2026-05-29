@@ -210,7 +210,9 @@ model User {
   helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
   userBadges           UserBadge[]
   githubConnection     GitHubConnection?
-  connectedApps        ConnectedAppStatus[]
+  connectedApps           ConnectedAppStatus[]
+  integrationCredentials  IntegrationCredential[]
+  cursorBuildSessions     CursorBuildSession[]
   founderCreditLedger  FounderCreditLedger[]
   bountyAwards         FounderBounty[] @relation("BountyAwardee")
   earlyScouts          EarlyScoutRecord[]
@@ -291,7 +293,8 @@ model Founder {
   videos             FounderVideo[]
   buildPosts         FounderBuildPost[]
   creditLedger     FounderCreditLedger[]
-  suggestedUpdates SuggestedBuildUpdate[]
+  suggestedUpdates    SuggestedBuildUpdate[]
+  cursorBuildSessions CursorBuildSession[]
 }
 
 model FounderVerification {
@@ -1035,17 +1038,21 @@ model GitHubConnection {
 }
 
 model SuggestedBuildUpdate {
-  id            String                @id @default(cuid())
-  founderId     String
-  projectId     String?
-  headline      String
-  body          String                @db.Text
-  devSummary    String                @db.Text
-  traderSummary String                @db.Text
-  commitShas    Json
-  status        SuggestedUpdateStatus @default(PENDING)
-  buildPostId   String?
-  createdAt     DateTime              @default(now())
+  id                  String                @id @default(cuid())
+  founderId           String
+  projectId           String?
+  headline            String
+  body                String                @db.Text
+  devSummary          String                @db.Text
+  traderSummary       String                @db.Text
+  commitShas          Json                  @default("[]")
+  status              SuggestedUpdateStatus @default(PENDING)
+  buildPostId         String?
+  communityThreadId   String?
+  xTweetUrl           String?
+  publishLog          Json?
+  source              String                @default("github")
+  createdAt           DateTime              @default(now())
 
   founder Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
 
@@ -1058,11 +1065,46 @@ model ConnectedAppStatus {
   provider  String
   connected Boolean  @default(false)
   label     String?
+  metadata  Json?
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider])
+}
+
+model IntegrationCredential {
+  id           String   @id @default(cuid())
+  userId       String
+  provider     String
+  token        String?  @db.Text
+  metadata     Json?
+  webhookSecret String? @unique
+  verifiedAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([webhookSecret])
+}
+
+model CursorBuildSession {
+  id           String   @id @default(cuid())
+  userId       String
+  founderId    String
+  title        String
+  userPrompt   String   @db.Text
+  suggestionId String?
+  creditsSpent Int      @default(50)
+  createdAt    DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  founder Founder @relation(fields: [founderId], references: [id], onDelete: Cascade)
+
+  @@index([founderId])
+  @@index([userId])
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────
