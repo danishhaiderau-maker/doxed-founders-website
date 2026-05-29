@@ -240,12 +240,64 @@ export class FounderCopilotService {
       payload: { action: 'resume', suggestedNext: prompt },
     });
 
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    let message = `Resuming: ${prompt}`;
+    let cursorCloudDispatch:
+      | Awaited<ReturnType<BuilderService['dispatchCursorBuildTask']>>
+      | { error: string }
+      | null = null;
+    let openHandsDispatch:
+      | Awaited<ReturnType<BuilderService['dispatchOpenHandsBuildTask']>>
+      | { error: string }
+      | null = null;
+
+    if (settings?.defaultProvider === 'CURSOR') {
+      try {
+        cursorCloudDispatch = await this.builder.dispatchCursorBuildTask(userId, {
+          spec: memory.currentGoal,
+          cursorPrompt: prompt,
+          repository: memory.repoFullName ?? undefined,
+        });
+        message =
+          cursorCloudDispatch.mode === 'follow_up'
+            ? `Cursor agent resumed — follow-up run started on ${memory.repoFullName ?? 'your repo'}.`
+            : `Cursor cloud agent started — building on ${memory.repoFullName ?? 'GitHub'}.`;
+      } catch (err) {
+        cursorCloudDispatch = {
+          error: err instanceof Error ? err.message : 'Cursor dispatch failed',
+        };
+      }
+    } else if (settings?.defaultProvider === 'OPENHANDS') {
+      try {
+        openHandsDispatch = await this.builder.dispatchOpenHandsBuildTask(userId, {
+          spec: memory.currentGoal,
+          cursorPrompt: prompt,
+          repository: memory.repoFullName ?? undefined,
+        });
+        message = `OpenHands task dispatched — ${prompt}`;
+      } catch (err) {
+        openHandsDispatch = {
+          error: err instanceof Error ? err.message : 'OpenHands dispatch failed',
+        };
+      }
+    }
+
+    const agentUrl =
+      cursorCloudDispatch && 'agentUrl' in cursorCloudDispatch
+        ? cursorCloudDispatch.agentUrl
+        : openHandsDispatch && 'conversationUrl' in openHandsDispatch
+          ? openHandsDispatch.conversationUrl
+          : null;
+
     return {
-      message: `Resuming: ${prompt}`,
+      message,
       memory,
       cursorCopy: memory.cursorCopy,
-      dispatchHint:
-        'Copy the prompt into your connected builder (Cursor, Claude Code, etc.) or type "Finish it" to queue via hands-free.',
+      cursorCloudDispatch,
+      openHandsDispatch,
+      dispatchHint: agentUrl
+        ? `Remote agent running — open ${agentUrl}`
+        : 'Copy the prompt into your connected builder (Cursor, Claude Code, etc.) or type "Finish it" to queue via hands-free.',
     };
   }
 

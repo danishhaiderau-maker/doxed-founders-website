@@ -325,6 +325,11 @@ export class BuildQueueService {
       | (Awaited<ReturnType<BuilderService['dispatchOpenHandsBuildTask']>> & { error?: undefined })
       | { error: string }
       | null = null;
+    let cursorCloudDispatch:
+      | (Awaited<ReturnType<BuilderService['dispatchCursorBuildTask']>> & { error?: undefined })
+      | { error: string }
+      | null = null;
+
     if (settings?.defaultProvider === 'OPENHANDS') {
       try {
         const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
@@ -340,6 +345,23 @@ export class BuildQueueService {
       } catch (err) {
         openHandsDispatch = {
           error: err instanceof Error ? err.message : 'OpenHands dispatch failed',
+        };
+      }
+    } else if (settings?.defaultProvider === 'CURSOR') {
+      try {
+        const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
+        cursorCloudDispatch = await this.builder.dispatchCursorBuildTask(userId, {
+          spec: parsed.spec,
+          cursorPrompt: parsed.cursorPrompt,
+          repository: repo,
+        });
+        await this.prisma.buildQueueItem.update({
+          where: { id: specItem.id },
+          data: { status: BuildQueueStatus.IN_PROGRESS },
+        });
+      } catch (err) {
+        cursorCloudDispatch = {
+          error: err instanceof Error ? err.message : 'Cursor dispatch failed',
         };
       }
     }
@@ -359,6 +381,7 @@ export class BuildQueueService {
         githubIssues: parsed.githubIssues.map((title) => ({ title })),
       }),
       openHandsDispatch,
+      cursorCloudDispatch,
       parsed,
     };
   }

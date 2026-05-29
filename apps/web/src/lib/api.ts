@@ -1720,6 +1720,14 @@ export function quickBuild(prompt: string, token: string, source?: 'QUICK_BUILD'
       status?: string;
       error?: string;
     } | null;
+    cursorCloudDispatch?: {
+      agentUrl?: string;
+      agentId?: string;
+      runId?: string;
+      status?: string;
+      mode?: 'create' | 'follow_up';
+      error?: string;
+    } | null;
     parsed: { ideaTitle: string; tasks: string[]; githubIssues: string[] };
   }>('/build-queue/quick-build', { method: 'POST', body: JSON.stringify({ prompt, source }) }, token);
 }
@@ -1766,6 +1774,7 @@ export interface BuilderSettings {
   currentGoalFocus: string | null;
   githubTokenConnected: boolean;
   openHandsBaseUrl: string | null;
+  cursorAgentUrl: string | null;
   providers: {
     key: string;
     label: string;
@@ -1817,6 +1826,18 @@ export function connectOpenHands(baseUrl: string, apiKey: string, token: string)
   );
 }
 
+export function connectCursorCloud(apiKey: string, token: string) {
+  return apiFetch<{
+    success: boolean;
+    accountName: string;
+    agentUrl: string | null;
+  }>(
+    '/builder/providers/cursor-connect',
+    { method: 'POST', body: JSON.stringify({ apiKey }) },
+    token,
+  );
+}
+
 export function dispatchOpenHandsBuild(
   data: { spec: string; cursorPrompt?: string; repository?: string },
   token: string,
@@ -1828,6 +1849,19 @@ export function dispatchOpenHandsBuild(
     status: string;
     conversationUrl: string | null;
   }>('/builder/openhands/dispatch', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export function dispatchCursorCloudBuild(
+  data: { spec: string; cursorPrompt?: string; repository?: string },
+  token: string,
+) {
+  return apiFetch<{
+    agentId: string;
+    runId: string;
+    status: string;
+    agentUrl: string;
+    mode: 'create' | 'follow_up';
+  }>('/builder/cursor/dispatch', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
 export function disconnectAiProvider(provider: string, token: string) {
@@ -1931,11 +1965,25 @@ export function fetchCopilotStandup(token: string) {
 }
 
 export function copilotResume(token: string) {
-  return apiFetch<{ message: string; memory: ProjectMemory; cursorCopy: string }>(
-    '/copilot/resume',
-    { method: 'POST' },
-    token,
-  );
+  return apiFetch<{
+    message: string;
+    memory: ProjectMemory;
+    cursorCopy: string;
+    dispatchHint?: string;
+    cursorCloudDispatch?: {
+      agentUrl?: string;
+      agentId?: string;
+      runId?: string;
+      status?: string;
+      mode?: 'create' | 'follow_up';
+      error?: string;
+    } | null;
+    openHandsDispatch?: {
+      conversationUrl?: string | null;
+      status?: string;
+      error?: string;
+    } | null;
+  }>('/copilot/resume', { method: 'POST' }, token);
 }
 
 // ─── Scout Markets & Founder Brain (Phase 7) ─────────────────────────────────

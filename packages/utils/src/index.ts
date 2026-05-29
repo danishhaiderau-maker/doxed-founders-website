@@ -56,3 +56,4 @@ export * from './raise-room';
 export * from './scout-markets';
 export * from './founder-brain';
 export * from './openhands';
+export * from './cursor-cloud';

@@ -5,12 +5,19 @@ import {
   QUICK_BUILD_AI_SYSTEM,
   QuickBuildResult,
   aiProviderConfig,
+  buildCursorCloudTaskMessage,
   buildOpenHandsTaskMessage,
+  githubRepoToUrl,
   isRemoteAgentProvider,
   processQuickBuild,
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  CursorCredentialMeta,
+  dispatchCursorCloudTask,
+  verifyCursorCloudConnection,
+} from './cursor-cloud.client';
 import {
   OpenHandsCredentialMeta,
   dispatchOpenHandsTask,
@@ -29,6 +36,7 @@ export class BuilderService {
     const connected = await this.listConnectedProviders(userId);
 
     const openHandsMeta = await this.getOpenHandsMeta(userId);
+    const cursorMeta = await this.getCursorMeta(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -37,6 +45,7 @@ export class BuilderService {
       autoPublishOnEvent: settings.autoPublishOnEvent,
       currentGoalFocus: settings.currentGoalFocus,
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
+      cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected:
@@ -74,7 +83,7 @@ export class BuilderService {
         if (!cred?.token) {
           throw new BadRequestException(`Connect ${cfg.label} before setting as default`);
         }
-        if (cfg.connectMode === 'remote_agent') {
+        if (cfg.connectMode === 'remote_agent' && cfg.key === 'OPENHANDS') {
           const meta = cred.metadata as OpenHandsCredentialMeta | null;
           if (!meta?.baseUrl) {
             throw new BadRequestException('Connect OpenHands base URL before setting as default');
@@ -116,7 +125,7 @@ export class BuilderService {
   async connectAiProvider(userId: string, provider: string, apiKey: string) {
     const cfg = AI_PROVIDERS.find((p) => p.credentialProvider === provider);
     if (!cfg?.needsApiKey || cfg.connectMode === 'remote_agent') {
-      throw new BadRequestException('Use OpenHands connect for remote agent');
+      throw new BadRequestException('Use OpenHands or Cursor connect for remote agents');
     }
 
     const key = apiKey.trim();
@@ -210,6 +219,106 @@ export class BuilderService {
       baseUrl: normalized,
       apiVersion: verified.apiVersion,
     };
+  }
+
+  async connectCursor(userId: string, apiKey: string) {
+    const key = apiKey.trim();
+    if (!key) throw new BadRequestException('Cursor API key required');
+
+    const verified = await verifyCursorCloudConnection(key);
+    const encrypted = this.crypto.encrypt(key);
+    const existing = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+    });
+    const prevMeta = (existing?.metadata as CursorCredentialMeta | null) ?? {};
+
+    await this.prisma.integrationCredential.upsert({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+      create: {
+        userId,
+        provider: 'cursor',
+        token: encrypted,
+        metadata: {
+          accountName: verified.accountName,
+          agentId: prevMeta.agentId ?? null,
+          agentRepoUrl: prevMeta.agentRepoUrl ?? null,
+          latestRunId: prevMeta.latestRunId ?? null,
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+      update: {
+        token: encrypted,
+        metadata: {
+          accountName: verified.accountName,
+          agentId: prevMeta.agentId ?? null,
+          agentRepoUrl: prevMeta.agentRepoUrl ?? null,
+          latestRunId: prevMeta.latestRunId ?? null,
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+    });
+
+    await this.prisma.connectedAppStatus.upsert({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+      create: {
+        userId,
+        provider: 'cursor',
+        connected: true,
+        label: 'Cursor Cloud Agents',
+        metadata: { accountName: verified.accountName, mode: 'remote_agent' } as Prisma.InputJsonValue,
+      },
+      update: {
+        connected: true,
+        metadata: { accountName: verified.accountName, mode: 'remote_agent' } as Prisma.InputJsonValue,
+      },
+    });
+
+    return {
+      success: true,
+      accountName: verified.accountName,
+      agentUrl: prevMeta.agentId ? `https://cursor.com/agents/${prevMeta.agentId}` : null,
+    };
+  }
+
+  async dispatchCursorBuildTask(
+    userId: string,
+    input: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+    });
+    if (!cred?.token) {
+      throw new BadRequestException('Connect Cursor in Settings → Builder first');
+    }
+
+    const meta = (cred.metadata as CursorCredentialMeta | null) ?? {};
+    const apiKey = this.crypto.decrypt(cred.token);
+    if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
+
+    const taskPrompt = buildCursorCloudTaskMessage(input.spec, input.cursorPrompt);
+    const repoUrl = input.repository ? githubRepoToUrl(input.repository) : null;
+
+    const result = await dispatchCursorCloudTask({
+      apiKey,
+      taskPrompt,
+      repository: input.repository,
+      agentId: meta.agentId,
+      agentRepoUrl: meta.agentRepoUrl,
+    });
+
+    await this.prisma.integrationCredential.update({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+      data: {
+        metadata: {
+          ...meta,
+          agentId: result.agentId,
+          agentRepoUrl: repoUrl ?? meta.agentRepoUrl ?? null,
+          latestRunId: result.runId,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return result;
   }
 
   async dispatchOpenHandsBuildTask(
@@ -336,6 +445,13 @@ export class BuilderService {
       where: { userId_provider: { userId, provider: 'openhands' } },
     });
     return (cred?.metadata as OpenHandsCredentialMeta | null) ?? null;
+  }
+
+  private async getCursorMeta(userId: string): Promise<CursorCredentialMeta | null> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+    });
+    return (cred?.metadata as CursorCredentialMeta | null) ?? null;
   }
 
   private async ensureSettings(userId: string) {
