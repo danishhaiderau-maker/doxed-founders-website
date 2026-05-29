@@ -13,6 +13,9 @@ import {
   updateBuildQueueItem,
 } from '@/lib/api';
 import { FounderOsPanel } from '@/components/founder-os-panel';
+import { FounderCopilotBar } from '@/components/founder-copilot-bar';
+import { HandsFreeModal, shouldShowHandsFreeIntro } from '@/components/hands-free-modal';
+import { copilotHandsFree } from '@/lib/api';
 
 type BuildRoomTab = 'ideas' | 'tasks' | 'issues' | 'commits' | 'deployments' | 'prs';
 
@@ -111,6 +114,11 @@ export function BuildRoom2({
   const [cmdBusy, setCmdBusy] = useState(false);
   const [publishBusy, setPublishBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showHandsFree, setShowHandsFree] = useState(false);
+
+  useEffect(() => {
+    if (shouldShowHandsFreeIntro()) setShowHandsFree(true);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -166,6 +174,22 @@ export function BuildRoom2({
     }
   }
 
+  async function handleHandsFreeExample(example: string) {
+    setShowHandsFree(false);
+    if (!founderActive) {
+      onMessage?.('Activate your founder profile first');
+      return;
+    }
+    try {
+      const result = await copilotHandsFree(example, accessToken);
+      onMessage?.(result.answer);
+      load();
+      onRefresh?.();
+    } catch (err) {
+      onMessage?.(err instanceof Error ? err.message : 'Hands-free failed');
+    }
+  }
+
   async function copyCursor() {
     if (!room?.cursorCopy) return;
     await navigator.clipboard.writeText(room.cursorCopy);
@@ -177,6 +201,15 @@ export function BuildRoom2({
 
   return (
     <div className="space-y-6">
+      {showHandsFree && (
+        <HandsFreeModal
+          onTry={handleHandsFreeExample}
+          onDismiss={() => setShowHandsFree(false)}
+        />
+      )}
+
+      <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-zinc-500">
           Provider: <span className="text-violet-300">{room?.defaultAiProvider ?? 'RULE_BASED'}</span>

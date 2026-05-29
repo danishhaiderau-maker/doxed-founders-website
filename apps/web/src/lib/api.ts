@@ -1672,7 +1672,8 @@ export function publishGitHubIssues(token: string) {
 export interface BuilderSettings {
   defaultProvider: string;
   preferredModel: string | null;
-  autoCreateGitHubIssues: boolean;
+      autoCreateGitHubIssues: boolean;
+  autoPublishOnEvent: boolean;
   githubTokenConnected: boolean;
   providers: {
     key: string;
@@ -1690,7 +1691,12 @@ export function fetchBuilderSettings(token: string) {
 }
 
 export function updateBuilderSettings(
-  data: { defaultProvider?: string; preferredModel?: string; autoCreateGitHubIssues?: boolean },
+  data: {
+    defaultProvider?: string;
+    preferredModel?: string;
+    autoCreateGitHubIssues?: boolean;
+    autoPublishOnEvent?: boolean;
+  },
   token: string,
 ) {
   return apiFetch('/builder/settings', { method: 'PATCH', body: JSON.stringify(data) }, token);
@@ -1718,4 +1724,54 @@ export function connectGitHubToken(githubToken: string, token: string) {
 
 export function disconnectGitHubToken(token: string) {
   return apiFetch('/builder/github-token', { method: 'DELETE' }, token);
+}
+
+// ─── Event Bus & Copilot (Phase 5) ───────────────────────────────────────────
+
+export interface FounderEventItem {
+  id: string;
+  type: string;
+  source: string;
+  title: string;
+  payload: unknown;
+  status: string;
+  createdAt: string;
+}
+
+export interface EventActivityFeed {
+  projectName: string;
+  launchReadiness: number;
+  buildStreakDays: number;
+  weekStats: {
+    commits: number;
+    deploys: number;
+    followers: number;
+    featureRequests: number;
+    events: number;
+  };
+  recentEvents: { id: string; type: string; source: string; title: string; createdAt: string }[];
+}
+
+export function fetchEvents(token: string) {
+  return apiFetch<{ events: FounderEventItem[] }>('/events', undefined, token);
+}
+
+export function fetchEventActivity(token: string) {
+  return apiFetch<EventActivityFeed>('/events/activity', undefined, token);
+}
+
+export function copilotAsk(prompt: string, token: string) {
+  return apiFetch<{ answer: string; stats: Record<string, number> }>(
+    '/copilot/ask',
+    { method: 'POST', body: JSON.stringify({ prompt }) },
+    token,
+  );
+}
+
+export function copilotHandsFree(prompt: string, token: string) {
+  return apiFetch<{ action: string; answer: string }>(
+    '/copilot/hands-free',
+    { method: 'POST', body: JSON.stringify({ prompt }) },
+    token,
+  );
 }

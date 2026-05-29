@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { BountyStatus, NotificationType, Prisma, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
+import { BountyStatus, FounderEventType, NotificationType, Prisma, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
 import {
   COMMUNITY_REWARD_POOL_DEFAULT,
   CURSOR_BUILD_SESSION_CREDITS,
@@ -29,6 +29,7 @@ import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { UserXPostingService } from '../x-social/user-x-posting.service';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
+import { EventsService } from '../events/events.service';
 
 @Injectable()
 export class FounderOsService {
@@ -38,6 +39,7 @@ export class FounderOsService {
     private readonly notifications: NotificationsService,
     private readonly userX: UserXPostingService,
     private readonly integrations: FounderOsIntegrationService,
+    private readonly events: EventsService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -275,6 +277,22 @@ export class FounderOsService {
       update: { lastSyncedAt: new Date(), lastCommitSha: data[0]?.sha },
     });
 
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: founder.projects[0]?.id,
+      userId,
+      type: FounderEventType.GITHUB_COMMIT,
+      source: 'github',
+      title: suggested.headline,
+      payload: {
+        suggestionId: record.id,
+        commitCount: commits.length,
+        autoPublish: settings?.autoPublishOnEvent ?? false,
+      },
+      dedupeKey: data[0]?.sha ? `github:${founder.id}:${data[0].sha}` : undefined,
+    });
+
     return {
       commits,
       suggestion: {
@@ -341,6 +359,16 @@ export class FounderOsService {
     });
 
     await this.integrations.connectIntegration(userId, { provider: 'cursor' });
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: founder.projects[0]?.id,
+      userId,
+      type: FounderEventType.CURSOR_BUILD_SESSION,
+      source: 'cursor',
+      title: suggested.headline,
+      payload: { sessionId: session.id, suggestionId: suggestion.id },
+    });
 
     return {
       sessionId: session.id,
@@ -501,6 +529,16 @@ export class FounderOsService {
       },
     });
 
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: suggestion.projectId ?? project?.id,
+      userId,
+      type: FounderEventType.BUILD_PUBLISHED,
+      source: 'founder-os',
+      title: `Published: ${suggestion.headline.slice(0, 72)}`,
+      payload: { suggestionId, destinations: results },
+    });
+
     return {
       success: true,
       buildPostId,
@@ -539,12 +577,31 @@ export class FounderOsService {
 
     if (cred.userId) {
       await this.notifications.notifyUser(cred.userId, {
-        type: NotificationType.POINTS_EARNED,
+        type: NotificationType.FOUNDER_EVENT,
         title: 'Deploy detected',
         body: `New suggested update ready — review and publish everywhere.`,
-        link: '/founder-den',
+        link: '/founder-den?tab=build',
       });
     }
+
+    const settings = cred.userId
+      ? await this.prisma.founderBuilderSettings.findUnique({ where: { userId: cred.userId } })
+      : null;
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: founder.projects[0]?.id,
+      userId: cred.userId ?? undefined,
+      type: FounderEventType.DEPLOY_SUCCESS,
+      source: cred.provider,
+      title: suggested.headline,
+      payload: {
+        suggestionId: record.id,
+        provider: payload.provider ?? cred.provider,
+        autoPublish: settings?.autoPublishOnEvent ?? false,
+      },
+      dedupeKey: `deploy:${record.id}`,
+    });
 
     return { success: true, suggestionId: record.id };
   }

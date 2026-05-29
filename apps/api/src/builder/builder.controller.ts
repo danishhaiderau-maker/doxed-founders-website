@@ -25,6 +25,7 @@ export class BuilderController {
       defaultProvider?: AiProvider;
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
+      autoPublishOnEvent?: boolean;
     },
   ) {
     return this.builder.updateSettings(user.id, body);

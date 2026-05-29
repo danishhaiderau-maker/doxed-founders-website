@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { quickBuild } from '@/lib/api';
+import { copilotHandsFree } from '@/lib/api';
 
 type QuickBuildBarProps = {
   accessToken: string;
@@ -49,7 +49,7 @@ export function QuickBuildBar({
 
   useEffect(() => () => stopVoice(), [stopVoice]);
 
-  async function handleSubmit(source: 'QUICK_BUILD' | 'VOICE' = 'QUICK_BUILD') {
+  async function handleSubmit() {
     if (!founderActive) {
       onMessage?.('Activate your founder profile first');
       return;
@@ -57,10 +57,9 @@ export function QuickBuildBar({
     if (!prompt.trim() || busy) return;
     setBusy(true);
     try {
-      const result = await quickBuild(prompt.trim(), accessToken, source);
-      onMessage?.(
-        `Captured: ${result.parsed.ideaTitle.slice(0, 60)} → ${result.parsed.tasks.length} tasks queued`,
-      );
+      const text = listening ? `[voice] ${prompt.trim()}` : prompt.trim();
+      const result = await copilotHandsFree(text, accessToken);
+      onMessage?.(result.answer);
       setPrompt('');
       setOpen(false);
       onCaptured?.();
@@ -141,7 +140,7 @@ export function QuickBuildBar({
             <input
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSubmit(listening ? 'VOICE' : 'QUICK_BUILD')}
+              onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
               placeholder="Add dark mode… Add Backpack wallet support…"
               className="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-black px-3 py-2.5 text-sm text-white placeholder:text-zinc-600"
             />
@@ -160,7 +159,7 @@ export function QuickBuildBar({
             <button
               type="button"
               disabled={busy || !prompt.trim()}
-              onClick={() => handleSubmit(listening ? 'VOICE' : 'QUICK_BUILD')}
+              onClick={handleSubmit}
               className="shrink-0 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
             >
               {busy ? '…' : 'Queue'}
