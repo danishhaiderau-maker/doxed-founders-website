@@ -671,6 +671,19 @@ export function fetchFeaturedProjects() {
   return apiFetch<ProjectSummary[]>('/projects/featured/list');
 }
 
+export interface PlatformStats {
+  verifiedFounders: number;
+  activeProjects: number;
+  communityMembers: number;
+  simulatedCapital: number;
+  paperTraders: number;
+  totalTrades: number;
+}
+
+export function fetchPlatformStats() {
+  return apiFetch<PlatformStats>('/projects/platform/stats');
+}
+
 export function fetchProject(slug: string) {
   return apiFetch<ProjectDetail>(`/projects/${slug}`);
 }

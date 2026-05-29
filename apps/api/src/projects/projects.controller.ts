@@ -29,6 +29,11 @@ export class ProjectsController {
     return this.projects.findAll({ featured: true });
   }
 
+  @Get('platform/stats')
+  platformStats() {
+    return this.projects.getPlatformStats();
+  }
+
   @Post('sync-metrics')
   syncMetrics() {
     return this.metricsSync.syncStaleProjects();
