@@ -108,7 +108,7 @@ export function FounderCopilotBriefing({
 
         {memory.openTasks.length > 0 && (
           <div className="mt-4">
-            <p className="text-[10px] uppercase text-zinc-500">Open tasks</p>
+            <p className="text-[10px] uppercase text-zinc-500">Remaining</p>
             <ul className="mt-2 space-y-1">
               {memory.openTasks.map((t) => (
                 <li key={t.id} className="flex items-start gap-2 text-sm text-zinc-300">

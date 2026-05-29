@@ -9,7 +9,6 @@ import { QuickBuildBar } from '@/components/quick-build-bar';
 import {
   createBuildPost,
   createSimulatedRaise,
-  fetchEcosystemPulse,
   fetchFounderDashboard,
   fetchProjectRoom,
   FounderDashboard,
@@ -36,7 +35,6 @@ export default function FounderDenPageClient() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<WorkspaceTab>(() => parseTab(searchParams.get('tab')));
-  const [pulse, setPulse] = useState<Awaited<ReturnType<typeof fetchEcosystemPulse>> | null>(null);
   const [dashboard, setDashboard] = useState<FounderDashboard | null>(null);
   const [room, setRoom] = useState<ProjectRoom | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -70,7 +68,6 @@ export default function FounderDenPageClient() {
   const currentStage = room?.lifecycleStage ?? dashboard?.currentStage ?? 'IDEA';
 
   const load = useCallback(async () => {
-    fetchEcosystemPulse().then(setPulse).catch(() => setPulse(null));
     if (!session?.accessToken) return;
     try {
       const dash = await fetchFounderDashboard(session.accessToken);
@@ -159,9 +156,9 @@ export default function FounderDenPageClient() {
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">Founder Workspace</h1>
+            <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
             <p className="text-sm text-zinc-500">
-              Build in public · GitHub · Cursor · Community · Funding · Launch
+              Mission control · build in public · validate demand · launch with trust
             </p>
           </div>
           <SiteNav />
@@ -186,7 +183,6 @@ export default function FounderDenPageClient() {
           session={session?.accessToken ? { accessToken: session.accessToken } : null}
           hasFounder={hasFounder}
           currentStage={currentStage}
-          pulse={pulse}
           dashboard={dashboard}
           room={room}
           onRefresh={load}
