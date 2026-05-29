@@ -126,24 +126,24 @@ export function DemandHeatmapSection() {
   );
 }
 
-export function FounderDenHubTeaser() {
+export function FounderOsHubTeaser() {
   const { data: session } = useSession();
 
   return (
     <section className="border-t border-zinc-800/80 bg-zinc-950/50 py-20">
       <div className="mx-auto max-w-6xl px-6 text-center">
-        <p className="text-xs font-semibold uppercase tracking-widest text-emerald-500">Founder Den</p>
-        <h2 className="mt-3 text-3xl font-bold text-white">Your founder operating system</h2>
+        <p className="text-xs font-semibold uppercase tracking-widest text-emerald-500">Founder OS</p>
+        <h2 className="mt-3 text-3xl font-bold text-white">Build → translate → publish everywhere</h2>
         <p className="mx-auto mt-4 max-w-2xl text-zinc-400">
-          Video introductions, build logs, GitHub proof, demand testing, and simulated raises — all
-          in one place. No Telegram chaos. No document vault.
+          GitHub sync, Cursor Build Room, stack integrations, simulated raises, bounties, and
+          one-click publish to build feed, X, and your project room — no Telegram chaos.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link
             href={session ? '/founder-den' : '/login?callbackUrl=/founder-den'}
             className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500"
           >
-            Open Founder Den
+            Open Founder OS
           </Link>
           <Link href="/founders" className="rounded-xl border border-zinc-700 px-6 py-3 text-sm text-zinc-300 hover:text-white">
             Browse founders
@@ -153,3 +153,6 @@ export function FounderDenHubTeaser() {
     </section>
   );
 }
+
+/** @deprecated use FounderOsHubTeaser */
+export const FounderDenHubTeaser = FounderOsHubTeaser;
