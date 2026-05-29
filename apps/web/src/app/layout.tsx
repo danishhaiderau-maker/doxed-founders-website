@@ -4,9 +4,9 @@ import { NotificationFlashProvider } from '@/components/notification-flash';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Doxxed crypto — The Reputation Layer for Crypto',
+  title: 'Doxxed crypto — Build publicly. Earn trust. Launch responsibly.',
   description:
-    'Would you send money to a stranger? Discover doxxed founders, paper trade, earn reputation, and find conviction before liquidity.',
+    'Founder reputation network and startup validation platform. Public video presence, build logs, simulated demand — no passport uploads.',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,

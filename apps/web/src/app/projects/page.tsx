@@ -65,7 +65,8 @@ export default function ProjectsPage() {
       <main className="mx-auto max-w-6xl px-4 py-8 md:px-6">
         <p className="max-w-2xl text-[var(--color-muted)]">
           Verified founders, documented teams, and transparent project profiles. Every listing
-          meets our doxxed-founder threshold before publication.
+          Verify through public presence — video introductions, build logs, and community
+          validation. No passport uploads required.
         </p>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">

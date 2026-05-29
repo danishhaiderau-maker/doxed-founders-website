@@ -15,6 +15,11 @@ import {
   LandingFinalCta,
 } from '@/components/landing/landing-sections';
 import {
+  LatestFounderVideos,
+  DemandHeatmapSection,
+  FounderDenHubTeaser,
+} from '@/components/landing/founder-hub-sections';
+import {
   fetchFeaturedProjects,
   fetchPlatformStats,
   fetchSpotlightProjects,
@@ -53,6 +58,7 @@ export function LandingPage() {
       <LandingLiveMetrics stats={stats} />
       <LandingProblemSolution />
       <LandingFounderJourney />
+      <LatestFounderVideos />
       <LandingProofLayer />
 
       {spotlight.length > 0 && (
@@ -64,7 +70,9 @@ export function LandingPage() {
       )}
 
       <LandingTrustSecurity />
+      <DemandHeatmapSection />
       <LandingRoadmap />
+      <FounderDenHubTeaser />
 
       {featured.length > 0 && (
         <section className="border-t border-zinc-800/80 py-16">

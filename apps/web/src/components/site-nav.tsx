@@ -12,6 +12,8 @@ const SESSION_KEY = 'dcf-paper-user-id';
 
 const NAV_LINKS = [
   { href: '/projects', label: 'Projects' },
+  { href: '/build-feed', label: 'Build feed' },
+  { href: '/founder-den', label: 'Founder Den', auth: true },
   { href: '/feed', label: 'Feed' },
   { href: '/paper-trading', label: 'Trade' },
   { href: '/watchlist', label: 'Watchlist', auth: true },

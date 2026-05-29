@@ -73,6 +73,50 @@ enum ProjectSource {
   DYNAMIC
 }
 
+enum FounderPresenceLevel {
+  UNVERIFIED
+  PUBLIC_FOUNDER
+  VERIFIED_BUILDER
+  TRANSPARENT_FOUNDER
+  PROVEN_FOUNDER
+}
+
+enum FounderVideoType {
+  INTRODUCTION
+  DEEP_DIVE
+  MONTHLY_UPDATE
+  QA
+}
+
+enum FounderJourneyStage {
+  IDEA
+  PROTOTYPE
+  MVP
+  BETA
+  DEMAND_VALIDATED
+  LAUNCH
+  REVENUE
+}
+
+enum DemandPollType {
+  WOULD_USE
+  WOULD_PAY
+  TOKEN_INTEREST
+}
+
+enum RoadmapStatus {
+  PLANNED
+  IN_PROGRESS
+  DONE
+}
+
+enum SimulatedRaiseStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -104,6 +148,9 @@ model User {
   leaderboardEntries   LeaderboardEntry[]
   oauthAccounts        OAuthAccount[]
   notifications        Notification[]
+  founder              Founder?
+  raiseAllocations     RaiseAllocation[]
+  demandPollVotes      DemandPollVote[]
 
   @@index([email])
   @@index([role])
@@ -148,21 +195,33 @@ model Category {
 // ─── Founders ────────────────────────────────────────────────────────────────
 
 model Founder {
-  id          String   @id @default(cuid())
-  slug        String   @unique
-  name        String
-  bio         String?  @db.Text
-  photoUrl    String?
-  linkedInUrl String?
-  twitterUrl  String?
-  githubUrl   String?
-  videoUrl    String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                  String               @id @default(cuid())
+  slug                String               @unique
+  userId              String?              @unique
+  name                String
+  bio                 String?              @db.Text
+  photoUrl            String?
+  linkedInUrl         String?
+  twitterUrl          String?
+  githubUrl           String?
+  githubUsername      String?
+  websiteUrl          String?
+  videoUrl            String?
+  presenceLevel       FounderPresenceLevel @default(UNVERIFIED)
+  journeyStage        FounderJourneyStage  @default(IDEA)
+  reputationScore     Int                  @default(0)
+  buildStreakDays     Int                  @default(0)
+  lastBuildPostAt     DateTime?
+  publicBuildingSince DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
 
-  projects      Project[]
-  verifications FounderVerification[]
-  founderUpdates FounderUpdate[]
+  user               User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  projects           Project[]
+  verifications      FounderVerification[]
+  founderUpdates     FounderUpdate[]
+  videos             FounderVideo[]
+  buildPosts         FounderBuildPost[]
 }
 
 model FounderVerification {
@@ -222,6 +281,11 @@ model Project {
   trendingScore TrendingScore?
   analyticsEvents AnalyticsEvent[]
   founderUpdates FounderUpdate[]
+  roadmapItems   ProjectRoadmapItem[]
+  simulatedRaises SimulatedRaise[]
+  demandPolls    DemandPoll[]
+  founderVideos  FounderVideo[]
+  buildPosts     FounderBuildPost[]
 
   @@index([slug])
   @@index([chainId])
@@ -547,6 +611,118 @@ model FounderUpdate {
 
   @@index([pinned, pinnedUntil])
   @@index([publishedAt])
+}
+
+model FounderVideo {
+  id          String           @id @default(cuid())
+  founderId   String
+  projectId   String?
+  type        FounderVideoType @default(INTRODUCTION)
+  title       String
+  url         String
+  durationMin Int?
+  publishedAt DateTime         @default(now())
+  createdAt   DateTime         @default(now())
+
+  founder Founder  @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([founderId])
+  @@index([publishedAt])
+}
+
+model FounderBuildPost {
+  id          String   @id @default(cuid())
+  founderId   String
+  projectId   String?
+  dayNumber   Int?
+  headline    String
+  body        String   @db.Text
+  githubUrl   String?
+  publishedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  founder Founder  @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([founderId])
+  @@index([publishedAt])
+}
+
+model ProjectRoadmapItem {
+  id        String        @id @default(cuid())
+  projectId String
+  title     String
+  status    RoadmapStatus @default(PLANNED)
+  sortOrder Int           @default(0)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model SimulatedRaise {
+  id              String               @id @default(cuid())
+  projectId       String
+  goalUsd         Decimal              @db.Decimal(16, 2)
+  tokenAllocation String?
+  durationDays    Int                  @default(14)
+  status          SimulatedRaiseStatus @default(DRAFT)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  project     Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  allocations RaiseAllocation[]
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model RaiseAllocation {
+  id        String   @id @default(cuid())
+  raiseId   String
+  userId    String
+  amountUsd Decimal  @db.Decimal(16, 2)
+  createdAt DateTime @default(now())
+
+  raise SimulatedRaise @relation(fields: [raiseId], references: [id], onDelete: Cascade)
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([raiseId, userId])
+  @@index([raiseId])
+}
+
+model DemandPoll {
+  id        String         @id @default(cuid())
+  projectId String
+  type      DemandPollType
+  question  String
+  options   Json
+  active    Boolean        @default(true)
+  createdAt DateTime       @default(now())
+
+  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  votes   DemandPollVote[]
+
+  @@index([projectId])
+}
+
+model DemandPollVote {
+  id        String   @id @default(cuid())
+  pollId    String
+  userId    String
+  optionKey String
+  createdAt DateTime @default(now())
+
+  poll DemandPoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pollId, userId])
+  @@index([pollId])
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ const VERIFICATION_LABELS: Record<string, string> = {
   GITHUB: 'GitHub active',
   KYC: 'KYC documented',
   AUDIT: 'Audit published',
-  TEAM_DOXXED: 'Team doxxed',
+  TEAM_DOXXED: 'Public founder presence',
 };
 
 interface FounderBadgesProps {

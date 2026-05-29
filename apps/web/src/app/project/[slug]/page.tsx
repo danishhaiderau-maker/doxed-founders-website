@@ -8,6 +8,7 @@ import { SiteNav } from '@/components/site-nav';
 import { FounderBadges } from '@/components/founder-badges';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ProjectMetricsGrid } from '@/components/project-card';
+import { ProjectRoomPanel } from '@/components/project-room';
 import { WatchlistButton } from '@/components/watchlist-button';
 import { fetchProject, ProjectDetail } from '@/lib/api';
 
@@ -384,6 +385,16 @@ export default function ProjectDetailPage() {
                 </code>
               </section>
             )}
+
+            <section>
+              <h3 className="mb-2 text-sm font-semibold uppercase tracking-widest text-emerald-400/90">
+                Project room
+              </h3>
+              <p className="mb-4 text-sm text-[var(--color-muted)]">
+                Videos, build logs, roadmap, demand testing, and simulated raise — all in one place.
+              </p>
+              <ProjectRoomPanel slug={slug} />
+            </section>
           </div>
         )}
       </main>
