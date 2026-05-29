@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
+import { Public } from '../auth/public.decorator';
 import { FounderOsService } from './founder-os.service';
 
 @Controller('founder-os')
@@ -62,6 +63,7 @@ export class FounderOsController {
     return this.founderOs.dismissSuggestion(user.id, id);
   }
 
+  @Public()
   @Post('webhooks/deploy/:secret')
   deployWebhook(
     @Param('secret') secret: string,

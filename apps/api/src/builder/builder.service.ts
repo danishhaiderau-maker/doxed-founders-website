@@ -25,6 +25,7 @@ export class BuilderService {
       defaultProvider: settings.defaultProvider,
       preferredModel: settings.preferredModel,
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
+      autoPublishOnEvent: settings.autoPublishOnEvent,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected: p.credentialProvider ? connected.has(p.credentialProvider) : p.key === 'RULE_BASED',
@@ -43,6 +44,7 @@ export class BuilderService {
       defaultProvider?: AiProvider;
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
+      autoPublishOnEvent?: boolean;
     },
   ) {
     if (input.defaultProvider) {
@@ -67,12 +69,16 @@ export class BuilderService {
         defaultProvider: input.defaultProvider ?? AiProvider.RULE_BASED,
         preferredModel: input.preferredModel,
         autoCreateGitHubIssues: input.autoCreateGitHubIssues ?? false,
+        autoPublishOnEvent: input.autoPublishOnEvent ?? false,
       },
       update: {
         ...(input.defaultProvider !== undefined ? { defaultProvider: input.defaultProvider } : {}),
         ...(input.preferredModel !== undefined ? { preferredModel: input.preferredModel } : {}),
         ...(input.autoCreateGitHubIssues !== undefined
           ? { autoCreateGitHubIssues: input.autoCreateGitHubIssues }
+          : {}),
+        ...(input.autoPublishOnEvent !== undefined
+          ? { autoPublishOnEvent: input.autoPublishOnEvent }
           : {}),
       },
     });

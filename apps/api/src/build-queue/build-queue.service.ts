@@ -8,6 +8,7 @@ import {
   BuildQueueItemKind,
   BuildQueueSource,
   BuildQueueStatus,
+  FounderEventType,
   NotificationType,
   Prisma,
   RoadmapStatus,
@@ -24,6 +25,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from '../builder/builder.service';
+import { EventsService } from '../events/events.service';
 
 function serializeItem(item: {
   id: string;
@@ -57,6 +59,7 @@ export class BuildQueueService {
     private readonly notifications: NotificationsService,
     private readonly github: GitHubApiService,
     private readonly builder: BuilderService,
+    private readonly events: EventsService,
   ) {}
 
   private async requireFounder(userId: string) {
@@ -308,6 +311,16 @@ export class BuildQueueService {
       link: '/founder-den?tab=build',
     });
 
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.BUILD_QUEUE_CAPTURED,
+      source: source === BuildQueueSource.VOICE ? 'voice' : 'founder-os',
+      title: parsed.ideaTitle.slice(0, 120),
+      payload: { ideaId: idea.id, taskCount: taskItems.length, issueCount: issueItems.length },
+    });
+
     return {
       ideaId: idea.id,
       specId: specItem.id,
@@ -402,6 +415,16 @@ export class BuildQueueService {
       title: result.title,
       body: result.summary,
       link: '/founder-den?tab=build',
+    });
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.QUICK_COMMAND,
+      source: 'command-bar',
+      title: result.title,
+      payload: { intent: input.intent, parentId: parent.id },
     });
 
     return {
@@ -537,6 +560,16 @@ export class BuildQueueService {
       ),
     ]);
 
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.AGENT_RUN_COMPLETE,
+      source: 'agent',
+      title: output.title.slice(0, 120),
+      payload: { agentRunId, taskCount: output.tasks.length },
+    });
+
     await this.notifications.notifyUser(userId, {
       type: NotificationType.AGENT_RESULT,
       title: `Agent: ${output.title.slice(0, 60)}`,
@@ -562,6 +595,17 @@ export class BuildQueueService {
     });
 
     const created = await this.publishIssueRows(userId, founder.id, issues);
+    if (created > 0) {
+      await this.events.emit({
+        founderId: founder.id,
+        projectId: project?.id,
+        userId,
+        type: FounderEventType.GITHUB_ISSUE_CREATED,
+        source: 'github',
+        title: `Published ${created} GitHub issue(s)`,
+        payload: { created, repo },
+      });
+    }
     return { created, repoFullName: repo };
   }
 

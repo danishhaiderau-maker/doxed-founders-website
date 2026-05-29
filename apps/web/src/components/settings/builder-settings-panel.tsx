@@ -41,6 +41,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     defaultProvider?: string;
     preferredModel?: string;
     autoCreateGitHubIssues?: boolean;
+    autoPublishOnEvent?: boolean;
   }) {
     setErr(null);
     try {
@@ -133,6 +134,14 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           </label>
         </div>
         <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={settings.autoPublishOnEvent}
+            onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
+          />
+          Auto-publish when deploy/commit events create suggested updates
+        </label>
+        <label className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
           <input
             type="checkbox"
             checked={settings.autoCreateGitHubIssues}

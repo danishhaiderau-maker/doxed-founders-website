@@ -24,6 +24,7 @@ import { SecurityModule } from './security/security.module';
 import { AgentsModule } from './agents/agents.module';
 import { BuildQueueModule } from './build-queue/build-queue.module';
 import { BuilderModule } from './builder/builder.module';
+import { EventsModule } from './events/events.module';
 import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
@@ -45,6 +46,7 @@ import { XSocialModule } from './x-social/x-social.module';
     AgentsModule,
     BuildQueueModule,
     BuilderModule,
+    EventsModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,
