@@ -8,6 +8,8 @@ import {
   allocateToRaise,
   fetchProjectRoom,
   followProject,
+  markCommentHelpful,
+  postCommunityComment,
   ProjectRoom,
   unfollowProject,
   voteDemandPoll,
@@ -31,6 +33,8 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
   const [allocAmount, setAllocAmount] = useState('500');
   const [communityChannel, setCommunityChannel] = useState('GENERAL');
   const [msg, setMsg] = useState<string | null>(null);
+  const [replyThreadId, setReplyThreadId] = useState<string | null>(null);
+  const [replyBody, setReplyBody] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +88,30 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
       load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Follow failed');
+    }
+  }
+
+  async function handleReply(threadId: string) {
+    if (!session?.accessToken || !replyBody.trim()) return;
+    try {
+      await postCommunityComment(threadId, replyBody.trim(), session.accessToken);
+      setReplyBody('');
+      setReplyThreadId(null);
+      setMsg('Reply posted — earn points when the founder marks it helpful');
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Reply failed');
+    }
+  }
+
+  async function handleHelpful(commentId: string) {
+    if (!session?.accessToken || !room) return;
+    try {
+      const result = await markCommentHelpful(room.id, commentId, session.accessToken);
+      setMsg(`Marked helpful — +${result.pointsAwarded} pts to contributor`);
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Could not mark helpful');
     }
   }
 
@@ -166,6 +194,23 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
 
       {tab === 'Community' && (
         <div className="space-y-4">
+          {(room.communityRewardPool ?? 0) > 0 && (
+            <p className="rounded-lg border border-violet-500/30 bg-violet-950/15 px-3 py-2 text-xs text-violet-200">
+              Community reward pool: {room.communityRewardPool?.toLocaleString()} pts — founders mark helpful replies to distribute rewards (anti-spam).
+            </p>
+          )}
+          {(room.openBounties?.length ?? 0) > 0 && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
+              <p className="text-xs font-semibold uppercase text-amber-300">Open bounties</p>
+              <ul className="mt-2 space-y-2">
+                {room.openBounties!.map((b) => (
+                  <li key={b.id} className="text-sm text-zinc-300">
+                    <span className="font-medium text-white">{b.title}</span> — {b.rewardCredits} credits
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             {room.communityChannels.map((ch) => (
               <button
@@ -187,6 +232,58 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
                   {t.pinned && <span className="text-[10px] font-semibold uppercase text-emerald-400">Pinned</span>}
                   <p className="font-medium text-white">{t.title}</p>
                   <p className="mt-2 text-sm text-zinc-400">{t.body}</p>
+                  {(t.comments?.length ?? 0) > 0 && (
+                    <ul className="mt-3 space-y-2 border-l border-zinc-800 pl-3">
+                      {t.comments!.map((c) => (
+                        <li key={c.id} className="text-sm">
+                          <p className="text-zinc-300">{c.body}</p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            {c.isHelpful && (
+                              <span className="text-[10px] font-semibold uppercase text-emerald-400">Helpful ✓</span>
+                            )}
+                            {room.isProjectFounder && !c.isHelpful && (
+                              <button
+                                type="button"
+                                onClick={() => handleHelpful(c.id)}
+                                className="text-[10px] text-sky-400 hover:underline"
+                              >
+                                Mark helpful
+                              </button>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {session && (
+                    <div className="mt-3">
+                      {replyThreadId === t.id ? (
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                          <input
+                            value={replyBody}
+                            onChange={(e) => setReplyBody(e.target.value)}
+                            placeholder="Thoughtful reply (no spam)…"
+                            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleReply(t.id)}
+                            className="rounded-lg bg-emerald-600 px-3 py-2 text-xs text-white"
+                          >
+                            Post
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setReplyThreadId(t.id)}
+                          className="text-xs text-zinc-500 hover:text-white"
+                        >
+                          Reply
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <p className="mt-2 text-xs text-zinc-600">{t.commentCount} replies</p>
                 </li>
               ))}

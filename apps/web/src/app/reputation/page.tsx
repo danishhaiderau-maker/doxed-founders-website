@@ -111,24 +111,22 @@ export default function ReputationPage() {
 
         {engagement && (
           <section className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-950/25 to-transparent p-6">
-            <h2 className="text-lg font-semibold text-emerald-200">Daily engagement lottery</h2>
+            <h2 className="text-lg font-semibold text-emerald-200">Daily discovery rewards</h2>
             <p className="mt-2 text-sm text-[var(--color-muted)]">
-              Every day we credit <strong className="text-white">$500–$2,000 paper cash</strong> straight
-              to trading accounts for the most active members. Winners are drawn from{' '}
-              <strong className="text-white">0.2% of users active in the last 24 hours</strong> — weighted
-              by trades, comments, votes, build posts, and community participation. More activity = better
-              odds.
+              Every day the <strong className="text-white">top 0.2% of quality contributors</strong> enter a reward pool.
+              Winners receive <strong className="text-white">$500–$2,000 paper cash</strong>. Spam comments don&apos;t count —
+              founders must mark replies <strong className="text-white">Helpful</strong>, or earn via bounties, conviction, and early scouting.
             </p>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <Stat
-                label="Active (24h)"
-                value={engagement.activeUsers24h.toLocaleString()}
-                hint="Eligible pool"
+                label="Quality contributors (24h)"
+                value={(engagement.activeContributors24h ?? engagement.activeUsers24h ?? 0).toLocaleString()}
+                hint="Scored on usefulness"
               />
               <Stat
-                label="Winners today"
-                value={String(engagement.expectedWinnersToday)}
-                hint="~0.2% of actives"
+                label="Top tier size"
+                value={String(engagement.topTierSize ?? engagement.expectedWinnersToday)}
+                hint="~0.2% enter pool"
               />
               <Stat
                 label="Last draw paid"
@@ -313,12 +311,8 @@ export default function ReputationPage() {
         <section className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-transparent p-6">
           <h2 className="text-lg font-semibold text-amber-200">Biggest point rewards</h2>
           <p className="mt-2 text-sm text-[var(--color-muted)]">
-            <strong className="text-amber-300">Founders</strong> earn{' '}
-            {POINTS.FOUNDER_PROJECT_LAUNCH.toLocaleString()} points when launching a project on Founder
-            Den, plus points for every build post, video, and community update.{' '}
-            <strong className="text-amber-300">Scouts</strong> earn{' '}
-            {POINTS.LISTING_SCOUT_APPROVED.toLocaleString()} points when a listing they submitted passes
-            community vote and admin approval — the highest single action for non-founders.
+            Founders earn <strong className="text-amber-300">25,000 Founder Credits</strong> + 500 reputation points when launching.
+            Community earns points when founders mark contributions <strong className="text-white">Helpful</strong> — not for spam.
           </p>
         </section>
 

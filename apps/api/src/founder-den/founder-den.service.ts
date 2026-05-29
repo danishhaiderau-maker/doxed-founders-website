@@ -5,6 +5,7 @@ import {
   ProjectLifecycleStage,
   UserProgressTier,
   FounderApplicationStatus,
+  BountyStatus,
 } from '@prisma/client';
 import {
   computeFounderReputation,
@@ -21,10 +22,12 @@ import {
   getStageBucket,
   computeJourneyProgress,
   POINTS,
+  FOUNDER_LAUNCH_REPUTATION_POINTS,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { FounderOsService } from '../founder-os/founder-os.service';
 import { NotificationType } from '@prisma/client';
 
 const founderRoomInclude = {
@@ -69,6 +72,7 @@ export class FounderDenService {
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
+    private readonly founderOs: FounderOsService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -133,8 +137,8 @@ export class FounderDenService {
         category: { select: { slug: true, name: true } },
         founder: {
           include: {
-            videos: { orderBy: { publishedAt: 'desc' }, take: 10 },
             user: { select: { id: true } },
+            videos: { orderBy: { publishedAt: 'desc' }, take: 10 },
           },
         },
         metrics: true,
@@ -156,6 +160,7 @@ export class FounderDenService {
               where: { parentId: null },
               orderBy: { createdAt: 'asc' },
               take: 20,
+              include: { helpfulMark: true },
             },
           },
         },
@@ -197,6 +202,15 @@ export class FounderDenService {
     const isFollowing = viewerUserId
       ? project.followers.some((f) => f.userId === viewerUserId)
       : false;
+    const isProjectFounder = Boolean(
+      viewerUserId && project.founder?.user?.id === viewerUserId,
+    );
+
+    const bounties = await this.prisma.founderBounty.findMany({
+      where: { projectId: project.id, status: BountyStatus.OPEN },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
 
     return {
       id: project.id,
@@ -218,6 +232,9 @@ export class FounderDenService {
       launchPriceUsd: project.launchPriceUsd ? Number(project.launchPriceUsd) : null,
       followerCount: project._count.followers,
       isFollowing,
+      isProjectFounder,
+      communityRewardPool: project.communityRewardPool,
+      openBounties: bounties,
       genome,
       lifecycleStages: LIFECYCLE_STAGES,
       metrics: project.metrics
@@ -281,6 +298,13 @@ export class FounderDenService {
         pinned: t.pinned,
         createdAt: t.createdAt,
         commentCount: t.comments.length,
+        comments: t.comments.map((c) => ({
+          id: c.id,
+          userId: c.userId,
+          body: c.body,
+          createdAt: c.createdAt,
+          isHelpful: Boolean(c.helpfulMark),
+        })),
       })),
       launchpadAccess: launchpadRequirements,
     };
@@ -417,6 +441,10 @@ export class FounderDenService {
     await this.syncUserProgressTier(userId);
     await this.refreshLaunchReadiness(raise.projectId);
     await this.points.awardOnce(userId, `RAISE_ALLOCATE:${raiseId}`, POINTS.RAISE_ALLOCATE);
+
+    const followerCount = await this.prisma.projectFollow.count({ where: { projectId: raise.projectId } });
+    await this.founderOs.recordEarlyScout(userId, raise.projectId, amountUsd, followerCount);
+
     return { success: true, amountUsd };
   }
 
@@ -483,6 +511,8 @@ export class FounderDenService {
       hasFounderProfile: Boolean(founder),
       primaryProjectSlug: primaryProject?.slug ?? null,
       founderSlug: founder?.slug ?? null,
+      founderCredits: founder?.founderCredits ?? 0,
+      communityRewardPool: primaryProject?.communityRewardPool ?? 0,
       applicationPending: await this.prisma.founderApplication.count({
         where: { userId, status: FounderApplicationStatus.SUBMITTED },
       }),
@@ -623,13 +653,19 @@ export class FounderDenService {
     const awarded = await this.points.awardOnce(
       userId,
       `FOUNDER_PROJECT:${result.project.id}`,
-      POINTS.FOUNDER_PROJECT_LAUNCH,
+      FOUNDER_LAUNCH_REPUTATION_POINTS,
+    );
+    await this.founderOs.grantLaunchCredits(
+      userId,
+      result.founder.id,
+      result.project.id,
+      dto.projectName,
     );
     if (awarded) {
       await this.notifications.notifyUser(userId, {
         type: NotificationType.POINTS_EARNED,
-        title: '+25,000 reputation points',
-        body: `Your project "${dto.projectName}" is live on Founder Den. Keep communicating with your community to climb the board.`,
+        title: `+${FOUNDER_LAUNCH_REPUTATION_POINTS} reputation points`,
+        body: `Your project "${dto.projectName}" is live on Founder OS.`,
         link: '/founder-den',
       });
     }
@@ -811,8 +847,6 @@ export class FounderDenService {
     await this.syncUserProgressTier(userId);
     if (isFounder) {
       await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST);
-    } else {
-      await this.points.award(userId, POINTS.COMMUNITY_THREAD);
     }
     return thread;
   }
@@ -835,7 +869,6 @@ export class FounderDenService {
     });
 
     await this.syncUserProgressTier(userId);
-    await this.points.award(userId, POINTS.COMMUNITY_COMMENT);
     return comment;
   }
 

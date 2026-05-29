@@ -9,8 +9,8 @@ export const POINTS = {
   LISTING_VOTE: 15,
   /** Scout bonus when admin approves and project goes live — highest reward. */
   LISTING_SCOUT_APPROVED: 1000,
-  /** Founder launches a project on the platform (once per project). */
-  FOUNDER_PROJECT_LAUNCH: 25_000,
+  /** Founder launches a project — reputation points (credits granted separately). */
+  FOUNDER_PROJECT_LAUNCH: 500,
   /** Founder build-in-public post. */
   FOUNDER_BUILD_POST: 100,
   /** Founder community thread or announcement. */
@@ -27,6 +27,10 @@ export const POINTS = {
   RAISE_ALLOCATE: 20,
   /** Follow a founder project. */
   PROJECT_FOLLOW: 5,
+  /** Founder marked your community reply helpful (anti-spam quality reward). */
+  HELPFUL_MARK: 75,
+  /** Early scout — backed a project before 50 followers. */
+  EARLY_SCOUT: 200,
 } as const;
 
 export type PointAction = {
@@ -42,7 +46,7 @@ export const POINT_ACTIONS: PointAction[] = [
     key: 'FOUNDER_PROJECT_LAUNCH',
     label: 'Launch a founder project',
     description:
-      'Start a project on Founder Den and open community channels. One-time bonus per project.',
+      'Start a project on Founder OS — earn 25,000 Founder Credits + 500 reputation points (once per project).',
     amount: POINTS.FOUNDER_PROJECT_LAUNCH,
     repeatable: true,
   },
@@ -92,15 +96,29 @@ export const POINT_ACTIONS: PointAction[] = [
   {
     key: 'COMMUNITY_THREAD',
     label: 'Start community thread',
-    description: 'Open a discussion in a founder project room.',
-    amount: POINTS.COMMUNITY_THREAD,
+    description: 'Community threads earn points when founders mark replies helpful — not for spam.',
+    amount: 0,
     repeatable: true,
   },
   {
     key: 'COMMUNITY_COMMENT',
     label: 'Community reply',
-    description: 'Thoughtful reply on a project community thread.',
-    amount: POINTS.COMMUNITY_COMMENT,
+    description: 'Earn +75 pts when a founder marks your reply Helpful. Raw comments do not auto-reward.',
+    amount: 0,
+    repeatable: true,
+  },
+  {
+    key: 'HELPFUL_MARK',
+    label: 'Marked helpful by founder',
+    description: 'Founder verified your reply was useful — quality over spam.',
+    amount: POINTS.HELPFUL_MARK,
+    repeatable: true,
+  },
+  {
+    key: 'EARLY_SCOUT',
+    label: 'Early scout badge',
+    description: 'Backed a project in simulated raise before it hit 50 followers.',
+    amount: POINTS.EARLY_SCOUT,
     repeatable: true,
   },
   {

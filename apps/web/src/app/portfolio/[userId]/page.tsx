@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import { formatPercent, formatUsd } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
@@ -14,6 +15,7 @@ type PublicPosition = PublicPortfolio['positions'][number];
 
 export default function PublicPortfolioPage() {
   const params = useParams<{ userId: string }>();
+  const { data: session } = useSession();
   const userId = params.userId;
   const [portfolio, setPortfolio] = useState<PublicPortfolio | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +119,7 @@ export default function PublicPortfolioPage() {
               displayName={portfolio.displayName}
               roi={portfolio.roi}
               totalValue={portfolio.totalValue}
+              accessToken={session?.accessToken}
             />
 
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">

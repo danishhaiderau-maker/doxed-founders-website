@@ -39,4 +39,7 @@ export * from './risk-score';
 export * from './founder-presence';
 export * from './virtual-economy';
 export * from './engagement-rewards';
+export * from './founder-os';
+export * from './github-translate';
+export * from './quality-rewards';
 export * from './conviction-share';

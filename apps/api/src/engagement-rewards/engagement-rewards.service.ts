@@ -2,17 +2,20 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { NotificationType } from '@prisma/client';
 import {
-  ACTIVITY_WEIGHTS,
   ENGAGEMENT_ACTIVITY_WINDOW_HOURS,
   STARTING_CASH_USD,
+  QUALITY_WEIGHTS,
   engagementLotteryWinnerCount,
+  isLikelySpamComment,
   pickWeightedWinners,
+  qualityTierPoolSize,
   randomEngagementPrizeUsd,
+  takeTopQualityTier,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
-type ActivityEntry = { userId: string; score: number };
+type QualityEntry = { userId: string; score: number };
 
 @Injectable()
 export class EngagementRewardsService {
@@ -23,7 +26,8 @@ export class EngagementRewardsService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async computeActivityScores(since: Date): Promise<ActivityEntry[]> {
+  /** Quality score — rewards validated usefulness, not spam volume */
+  async computeQualityScores(since: Date): Promise<QualityEntry[]> {
     const scores = new Map<string, number>();
 
     const add = (userId: string, weight: number, count = 1) => {
@@ -32,36 +36,34 @@ export class EngagementRewardsService {
     };
 
     const [
-      trades,
-      feedComments,
-      communityComments,
-      communityThreads,
+      helpfulMarks,
+      bountyAwards,
+      earlyScouts,
       buildPosts,
+      videos,
       pollVotes,
       listingVotes,
       raiseAllocs,
-      follows,
+      convictions,
+      rawComments,
     ] = await Promise.all([
-      this.prisma.paperTrade.groupBy({
-        by: ['userId'],
-        where: { createdAt: { gte: since }, user: { banned: false } },
-        _count: { id: true },
-      }),
-      this.prisma.feedComment.groupBy({
-        by: ['userId'],
-        where: { createdAt: { gte: since }, user: { banned: false } },
-        _count: { id: true },
-      }),
-      this.prisma.communityComment.groupBy({
-        by: ['userId'],
+      this.prisma.helpfulMark.findMany({
         where: { createdAt: { gte: since } },
-        _count: { id: true },
+        select: { recipientUserId: true },
       }),
-      this.prisma.communityThread.findMany({
-        where: { createdAt: { gte: since }, authorId: { not: null } },
-        select: { authorId: true },
+      this.prisma.founderBounty.findMany({
+        where: { status: 'AWARDED', updatedAt: { gte: since }, awardeeUserId: { not: null } },
+        select: { awardeeUserId: true },
+      }),
+      this.prisma.earlyScoutRecord.findMany({
+        where: { createdAt: { gte: since } },
+        select: { userId: true },
       }),
       this.prisma.founderBuildPost.findMany({
+        where: { createdAt: { gte: since } },
+        select: { founder: { select: { userId: true } } },
+      }),
+      this.prisma.founderVideo.findMany({
         where: { createdAt: { gte: since } },
         select: { founder: { select: { userId: true } } },
       }),
@@ -80,29 +82,41 @@ export class EngagementRewardsService {
         where: { createdAt: { gte: since }, user: { banned: false } },
         _count: { id: true },
       }),
-      this.prisma.projectFollow.groupBy({
-        by: ['userId'],
-        where: { createdAt: { gte: since }, user: { banned: false } },
-        _count: { id: true },
+      this.prisma.paperPosition.findMany({
+        where: {
+          convictionRecordedAt: { gte: since },
+          convictionThesis: { not: null },
+        },
+        select: { portfolio: { select: { userId: true } } },
+      }),
+      this.prisma.communityComment.findMany({
+        where: { createdAt: { gte: since } },
+        select: { userId: true, body: true, helpfulMark: true },
       }),
     ]);
 
-    for (const row of trades) add(row.userId, ACTIVITY_WEIGHTS.PAPER_TRADE, row._count.id);
-    for (const row of feedComments) add(row.userId, ACTIVITY_WEIGHTS.FEED_COMMENT, row._count.id);
-    for (const row of communityComments) {
-      add(row.userId, ACTIVITY_WEIGHTS.COMMUNITY_COMMENT, row._count.id);
+    for (const h of helpfulMarks) add(h.recipientUserId, QUALITY_WEIGHTS.HELPFUL_MARK);
+    for (const b of bountyAwards) {
+      if (b.awardeeUserId) add(b.awardeeUserId, QUALITY_WEIGHTS.BOUNTY_AWARDED);
     }
-    for (const row of communityThreads) {
-      if (row.authorId) add(row.authorId, ACTIVITY_WEIGHTS.COMMUNITY_THREAD);
+    for (const s of earlyScouts) add(s.userId, QUALITY_WEIGHTS.EARLY_SCOUT);
+    for (const p of buildPosts) {
+      const uid = p.founder.userId;
+      if (uid) add(uid, QUALITY_WEIGHTS.BUILD_POST);
     }
-    for (const row of buildPosts) {
-      const uid = row.founder.userId;
-      if (uid) add(uid, ACTIVITY_WEIGHTS.BUILD_POST);
+    for (const v of videos) {
+      const uid = v.founder.userId;
+      if (uid) add(uid, QUALITY_WEIGHTS.FOUNDER_VIDEO);
     }
-    for (const row of pollVotes) add(row.userId, ACTIVITY_WEIGHTS.DEMAND_POLL_VOTE, row._count.id);
-    for (const row of listingVotes) add(row.userId, ACTIVITY_WEIGHTS.LISTING_VOTE, row._count.id);
-    for (const row of raiseAllocs) add(row.userId, ACTIVITY_WEIGHTS.RAISE_ALLOCATE, row._count.id);
-    for (const row of follows) add(row.userId, ACTIVITY_WEIGHTS.PROJECT_FOLLOW, row._count.id);
+    for (const row of pollVotes) add(row.userId, QUALITY_WEIGHTS.DEMAND_POLL_VOTE, row._count.id);
+    for (const row of listingVotes) add(row.userId, QUALITY_WEIGHTS.LISTING_VOTE, row._count.id);
+    for (const row of raiseAllocs) add(row.userId, QUALITY_WEIGHTS.RAISE_ALLOCATE, row._count.id);
+    for (const c of convictions) add(c.portfolio.userId, QUALITY_WEIGHTS.CONVICTION_WITH_THESIS);
+    for (const c of rawComments) {
+      if (c.helpfulMark) continue;
+      if (isLikelySpamComment(c.body)) continue;
+      add(c.userId, QUALITY_WEIGHTS.RAW_COMMENT);
+    }
 
     return [...scores.entries()]
       .map(([userId, score]) => ({ userId, score }))
@@ -169,11 +183,13 @@ export class EngagementRewardsService {
     }
 
     const since = new Date(Date.now() - ENGAGEMENT_ACTIVITY_WINDOW_HOURS * 60 * 60 * 1000);
-    const activity = await this.computeActivityScores(since);
-    const activeUsers = activity.length;
-    const winnerCount = engagementLotteryWinnerCount(activeUsers);
+    const allScored = await this.computeQualityScores(since);
+    const activeUsers = allScored.length;
+    const tierSize = qualityTierPoolSize(activeUsers);
+    const tier = takeTopQualityTier(allScored, tierSize);
+    const winnerCount = engagementLotteryWinnerCount(tier.length);
 
-    if (winnerCount === 0) {
+    if (winnerCount === 0 || tier.length === 0) {
       const draw = await this.prisma.engagementLotteryDraw.create({
         data: {
           drawDate: today,
@@ -182,23 +198,22 @@ export class EngagementRewardsService {
           totalPaidUsd: 0,
         },
       });
-      return { skipped: false, activeUsers, winnerCount: 0, drawId: draw.id, winners: [] };
+      return { skipped: false, activeUsers, tierSize, winnerCount: 0, drawId: draw.id, winners: [] };
     }
 
-    const winnerIds = pickWeightedWinners(activity, winnerCount);
+    const winnerIds = pickWeightedWinners(tier, winnerCount);
     const winnerDetails: {
       userId: string;
       amountUsd: number;
       activityScore: number;
-      displayName: string;
     }[] = [];
 
     let totalPaid = 0;
     for (const userId of winnerIds) {
       const amountUsd = randomEngagementPrizeUsd();
-      const activityScore = activity.find((a) => a.userId === userId)?.score ?? 0;
+      const activityScore = tier.find((a) => a.userId === userId)?.score ?? 0;
       totalPaid += amountUsd;
-      winnerDetails.push({ userId, amountUsd, activityScore, displayName: '' });
+      winnerDetails.push({ userId, amountUsd, activityScore });
     }
 
     const draw = await this.prisma.$transaction(async (tx) => {
@@ -229,32 +244,29 @@ export class EngagementRewardsService {
       await this.creditPaperCash(
         w.userId,
         w.amountUsd,
-        `Daily engagement lottery ${today.toISOString().slice(0, 10)}`,
+        `Daily quality lottery ${today.toISOString().slice(0, 10)}`,
       );
 
       await this.notifications.notifyUser(w.userId, {
         type: NotificationType.SYSTEM,
-        title: '🎉 Engagement lottery winner',
-        body: `You won $${w.amountUsd.toLocaleString()} paper cash for being active in the community. It's in your trading account now.`,
+        title: 'Daily discovery reward',
+        body: `Top contributor tier — you won $${w.amountUsd.toLocaleString()} paper cash for valuable participation.`,
         link: '/paper-trading',
       });
     }
 
     this.logger.log(
-      `Engagement lottery: ${winnerIds.length} winners from ${activeUsers} active users ($${totalPaid} paid)`,
+      `Quality lottery: ${winnerIds.length} winners from top ${tier.length}/${activeUsers} contributors ($${totalPaid})`,
     );
 
     return {
       skipped: false,
       drawId: draw.id,
       activeUsers,
+      tierSize,
       winnerCount: winnerIds.length,
       totalPaidUsd: totalPaid,
-      winners: winnerDetails.map((w) => ({
-        userId: w.userId,
-        amountUsd: w.amountUsd,
-        activityScore: w.activityScore,
-      })),
+      winners: winnerDetails,
     };
   }
 
@@ -287,7 +299,7 @@ export class EngagementRewardsService {
       winnerCount: draw.winnerCount,
       totalPaidUsd: Number(draw.totalPaidUsd),
       winners: draw.winners.map((w) => ({
-        displayName: w.user.name ?? w.user.twitterHandle ?? 'Trader',
+        displayName: w.user.name ?? w.user.twitterHandle ?? 'Contributor',
         amountUsd: Number(w.amountUsd),
         activityScore: w.activityScore,
       })),
@@ -296,14 +308,17 @@ export class EngagementRewardsService {
 
   async getEngagementStats() {
     const since = new Date(Date.now() - ENGAGEMENT_ACTIVITY_WINDOW_HOURS * 60 * 60 * 1000);
-    const activity = await this.computeActivityScores(since);
+    const scored = await this.computeQualityScores(since);
     const latest = await this.getLatestLottery();
+    const tierSize = qualityTierPoolSize(scored.length);
 
     return {
-      activeUsers24h: activity.length,
-      expectedWinnersToday: engagementLotteryWinnerCount(activity.length),
+      activeContributors24h: scored.length,
+      topTierSize: tierSize,
+      expectedWinnersToday: engagementLotteryWinnerCount(tierSize),
       prizeRangeUsd: { min: 500, max: 2000 },
       winnerRatePercent: 0.2,
+      model: 'quality',
       latestDraw: latest,
     };
   }
