@@ -66,8 +66,29 @@ const providers: NextAuthOptions['providers'] = [
     credentials: {
       email: { label: 'Email', type: 'email' },
       password: { label: 'Password', type: 'password' },
+      accessToken: { label: 'Access Token', type: 'text' },
     },
     async authorize(credentials) {
+      if (credentials?.accessToken) {
+        const res = await fetch(apiUrl('/auth/me', true), {
+          headers: { Authorization: `Bearer ${credentials.accessToken}` },
+        });
+        if (!res.ok) return null;
+        const user = (await res.json()) as {
+          id: string;
+          email: string;
+          name: string | null;
+          role: string;
+        };
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          accessToken: credentials.accessToken,
+        };
+      }
+
       if (!credentials?.email || !credentials?.password) {
         return null;
       }

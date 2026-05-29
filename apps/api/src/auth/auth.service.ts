@@ -9,6 +9,7 @@ import * as bcrypt from 'bcrypt';
 import { POINTS } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
+import { hashToken, randomToken } from '../security/security-crypto.util';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
 import { OAuthLoginDto } from './dto/oauth.dto';
 import { AuthResponse, AuthUser, JwtPayload } from './auth.types';
@@ -67,7 +68,39 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
+    if (await this.userRequires2Fa(user.id)) {
+      const pendingToken = randomToken();
+      await this.prisma.authPendingChallenge.create({
+        data: {
+          userId: user.id,
+          tokenHash: hashToken(pendingToken),
+          kind: 'LOGIN_2FA',
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+        },
+      });
+      const methods: string[] = [];
+      const totp = await this.prisma.userTotp.findUnique({ where: { userId: user.id } });
+      const passkeyCount = await this.prisma.webAuthnCredential.count({ where: { userId: user.id } });
+      if (totp?.enabled) methods.push('totp');
+      if (passkeyCount > 0) methods.push('passkey', 'recovery');
+      return { requires2fa: true, pendingToken, methods };
+    }
+
     return await this.buildAuthResponse(user);
+  }
+
+  private async userRequires2Fa(userId: string): Promise<boolean> {
+    const [totp, passkeyCount] = await Promise.all([
+      this.prisma.userTotp.findUnique({ where: { userId } }),
+      this.prisma.webAuthnCredential.count({ where: { userId } }),
+    ]);
+    return Boolean(totp?.enabled) || passkeyCount > 0;
+  }
+
+  async buildAuthResponseForUserId(userId: string): Promise<AuthResponse> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.banned) throw new UnauthorizedException('User not found');
+    return this.buildAuthResponse(user);
   }
 
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {

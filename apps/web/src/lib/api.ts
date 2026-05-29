@@ -1,4 +1,5 @@
 import { apiUrl, describeApiTarget } from './api-base';
+import type { SecurityScoreResult } from '@dcf/utils';
 
 export interface DexScreenerPreview {
   dexscreenerUrl: string;
@@ -346,8 +347,16 @@ export function registerAccount(input: {
   );
 }
 
+export interface LoginApiResponse {
+  accessToken?: string;
+  user?: { id: string; email: string; name: string | null; role: string };
+  requires2fa?: boolean;
+  pendingToken?: string;
+  methods?: string[];
+}
+
 export function loginAccount(input: { email: string; password: string }) {
-  return apiFetch<{ accessToken: string; user: { id: string; email: string; role: string } }>(
+  return apiFetch<LoginApiResponse>(
     '/auth/login',
     { method: 'POST', body: JSON.stringify(input) },
   );
@@ -1357,4 +1366,131 @@ export function voteDemandPoll(pollId: string, optionKey: string, token: string)
     { method: 'POST', body: JSON.stringify({ optionKey }) },
     token,
   );
+}
+
+// ─── Security ────────────────────────────────────────────────────────────────
+
+export interface SecurityProfile {
+  email: string;
+  hasPassword: boolean;
+  totpEnabled: boolean;
+  totpPendingSetup: boolean;
+  passkeys: {
+    id: string;
+    credentialId: string;
+    label: string | null;
+    deviceType: string | null;
+    backedUp: boolean;
+    createdAt: string;
+    lastUsedAt: string | null;
+  }[];
+  recoveryCodesRemaining: number;
+  wallet: { chain: string; address: string; verifiedAt: string } | null;
+  securityScore: SecurityScoreResult;
+}
+
+export function verify2FaLogin(pendingToken: string, totpCode?: string, recoveryCode?: string) {
+  return apiFetch<LoginApiResponse>('/auth/verify-2fa', {
+    method: 'POST',
+    body: JSON.stringify({ pendingToken, totpCode, recoveryCode }),
+  });
+}
+
+export function fetchSecurityProfile(token: string) {
+  return apiFetch<SecurityProfile>('/security/profile', {}, token);
+}
+
+export function changePassword(currentPassword: string, newPassword: string, token: string) {
+  return apiFetch('/security/password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  }, token);
+}
+
+export function setupTotp(token: string) {
+  return apiFetch<{ secret: string; otpauthUrl: string }>('/security/totp/setup', { method: 'POST' }, token);
+}
+
+export function enableTotp(code: string, token: string) {
+  return apiFetch('/security/totp/enable', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  }, token);
+}
+
+export function disableTotp(code: string, token: string) {
+  return apiFetch('/security/totp/disable', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  }, token);
+}
+
+export function generateRecoveryCodes(code: string, token: string) {
+  return apiFetch<{ codes: string[] }>('/security/recovery-codes', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  }, token);
+}
+
+export function passkeyRegisterOptions(token: string) {
+  return apiFetch<{ options: PublicKeyCredentialCreationOptions; registerToken: string }>(
+    '/security/passkey/register-options',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function passkeyRegisterVerify(
+  registerToken: string,
+  response: Record<string, unknown>,
+  token: string,
+  label?: string,
+) {
+  return apiFetch('/security/passkey/register-verify', {
+    method: 'POST',
+    body: JSON.stringify({ registerToken, response, label }),
+  }, token);
+}
+
+export function passkeyLoginOptions(pendingToken: string) {
+  return apiFetch<{ options: PublicKeyCredentialRequestOptions; passkeyToken: string }>(
+    '/security/passkey/login-options',
+    { method: 'POST', body: JSON.stringify({ pendingToken }) },
+  );
+}
+
+export function passkeyLoginVerify(passkeyToken: string, response: Record<string, unknown>) {
+  return apiFetch<LoginApiResponse>('/security/passkey/login-verify', {
+    method: 'POST',
+    body: JSON.stringify({ passkeyToken, response }),
+  });
+}
+
+export function deletePasskey(credentialId: string, token: string) {
+  return apiFetch(`/security/passkey/${encodeURIComponent(credentialId)}`, { method: 'DELETE' }, token);
+}
+
+export function walletChallenge(token: string) {
+  return apiFetch<{ challengeToken: string; message: string }>(
+    '/security/wallet/challenge',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function walletVerify(
+  challengeToken: string,
+  address: string,
+  signature: string,
+  message: string,
+  token: string,
+) {
+  return apiFetch('/security/wallet/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeToken, address, signature, message }),
+  }, token);
+}
+
+export function disconnectWallet(token: string) {
+  return apiFetch('/security/wallet', { method: 'DELETE' }, token);
 }
