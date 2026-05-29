@@ -986,13 +986,24 @@ export interface DiscoverProject {
   summary: string | null;
   logoUrl: string | null;
   lifecycleStage: string;
+  stageBucket: string;
+  journeyProgress: number;
   launchReadiness: number;
   bubbleScore: number;
   followerCount: number;
   founderScore: number;
   buildStreakDays: number;
   simulatedDemand: number;
+  raiseGoalUsd: number;
+  demandPct: number;
+  marketCap: number | null;
+  priceUsd: number | null;
+  volume24h: number | null;
   isLiveToken: boolean;
+  founderVideoUrl: string | null;
+  founderVideoTitle: string | null;
+  lastUpdateAt: string;
+  lastUpdateHeadline: string | null;
   category: { slug: string; name: string } | null;
   chain: { slug: string; name: string };
   founder: {
@@ -1002,6 +1013,20 @@ export interface DiscoverProject {
     reputationScore: number;
     buildStreakDays: number;
   } | null;
+}
+
+export interface EcosystemPulse {
+  recentActivity: FounderBuildPost[];
+  trendingProjects: DiscoverProject[];
+  topRaises: {
+    project: { slug: string; name: string; ticker: string; logoUrl: string | null };
+    goalUsd: number;
+    totalDemand: number;
+    allocatorCount: number;
+  }[];
+  liveTokenCount: number;
+  buildingCount: number;
+  ideaCount: number;
 }
 
 export function fetchLatestFounderVideos(limit = 12) {
@@ -1024,9 +1049,16 @@ export function fetchFounderDashboard(token: string) {
   return apiFetch<FounderDashboard>('/founder-den/dashboard', undefined, token);
 }
 
-export function fetchDiscoverProjects(filter?: string) {
-  const q = filter ? `?filter=${encodeURIComponent(filter)}` : '';
-  return apiFetch<DiscoverProject[]>(`/founder-den/discover${q}`);
+export function fetchDiscoverProjects(filter?: string, stageBucket?: string) {
+  const qs = new URLSearchParams();
+  if (filter) qs.set('filter', filter);
+  if (stageBucket) qs.set('stageBucket', stageBucket);
+  const q = qs.toString();
+  return apiFetch<DiscoverProject[]>(`/founder-den/discover${q ? `?${q}` : ''}`);
+}
+
+export function fetchEcosystemPulse() {
+  return apiFetch<EcosystemPulse>('/founder-den/ecosystem/pulse');
 }
 
 export function fetchEconomyStats() {

@@ -42,8 +42,14 @@ export class FounderDenController {
 
   @Public()
   @Get('discover')
-  discover(@Query('filter') filter?: string) {
-    return this.founderDen.getDiscover(filter);
+  discover(@Query('filter') filter?: string, @Query('stageBucket') stageBucket?: string) {
+    return this.founderDen.getDiscover(filter, stageBucket);
+  }
+
+  @Public()
+  @Get('ecosystem/pulse')
+  ecosystemPulse() {
+    return this.founderDen.getEcosystemPulse();
   }
 
   @Public()
