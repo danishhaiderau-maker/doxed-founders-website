@@ -197,6 +197,33 @@ enum AgentRunStatus {
   FAILED
 }
 
+enum BuildQueueItemKind {
+  IDEA
+  TASK
+  GITHUB_ISSUE
+  ROADMAP
+  SPEC
+}
+
+enum BuildQueueStatus {
+  CAPTURED
+  SPECCED
+  QUEUED
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  DISMISSED
+}
+
+enum BuildQueueSource {
+  QUICK_BUILD
+  VOICE
+  AGENT
+  COMMAND_BAR
+  MANUAL
+  BUILD_ROOM
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -336,6 +363,7 @@ model Founder {
   suggestedUpdates    SuggestedBuildUpdate[]
   cursorBuildSessions CursorBuildSession[]
   agents              FounderAgent[]
+  buildQueueItems     BuildQueueItem[]
 }
 
 model FounderVerification {
@@ -415,6 +443,7 @@ model Project {
   helpfulMarks     HelpfulMark[]
   earlyScouts      EarlyScoutRecord[]
   agents           FounderAgent[]
+  buildQueueItems  BuildQueueItem[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -690,6 +719,8 @@ enum NotificationType {
   TRADER_WIN
   TRADER_LOSS
   POINTS_EARNED
+  BUILD_QUEUE
+  AGENT_RESULT
   SYSTEM
 }
 
@@ -793,9 +824,44 @@ model ProjectRoadmapItem {
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  buildQueueItems BuildQueueItem[]
 
   @@index([projectId])
+}
+
+model BuildQueueItem {
+  id               String             @id @default(cuid())
+  founderId        String
+  projectId        String?
+  parentId         String?
+  kind             BuildQueueItemKind
+  status           BuildQueueStatus   @default(CAPTURED)
+  source           BuildQueueSource   @default(MANUAL)
+  title            String
+  description      String?            @db.Text
+  spec             String?            @db.Text
+  githubIssueTitle String?
+  githubIssueUrl   String?
+  cursorPrompt     String?            @db.Text
+  roadmapItemId    String?
+  agentRunId       String?
+  sortOrder        Int                @default(0)
+  metadata         Json?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  founder     Founder             @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  project     Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  parent      BuildQueueItem?     @relation("QueueTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    BuildQueueItem[]    @relation("QueueTree")
+  roadmapItem ProjectRoadmapItem? @relation(fields: [roadmapItemId], references: [id], onDelete: SetNull)
+  agentRun    AgentRun?           @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+
+  @@index([founderId, status])
+  @@index([founderId, kind])
+  @@index([projectId])
+  @@index([createdAt(sort: Desc)])
 }
 
 model SimulatedRaise {
@@ -1271,6 +1337,7 @@ model AgentRun {
 
   agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
   user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  buildQueueItems BuildQueueItem[]
 
   @@index([agentId])
   @@index([userId])

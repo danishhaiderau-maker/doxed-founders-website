@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Patch, Query } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { NotificationsService } from './notifications.service';
@@ -8,8 +8,8 @@ export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 
   @Get()
-  list(@CurrentUser() user: AuthUser) {
-    return this.notifications.listForUser(user.id);
+  list(@CurrentUser() user: AuthUser, @Query('category') category?: string) {
+    return this.notifications.listForUser(user.id, 40, category);
   }
 
   @Get('unread-count')

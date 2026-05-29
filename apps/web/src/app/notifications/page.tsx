@@ -90,8 +90,14 @@ export default function NotificationsPage() {
           {items.map((n) => {
             const isWin = n.type === 'TRADER_WIN';
             const isLoss = n.type === 'TRADER_LOSS';
+            const isBuild = n.type === 'BUILD_QUEUE';
+            const isAgent = n.type === 'AGENT_RESULT';
             const accent =
-              isWin
+              isBuild
+                ? 'border-violet-500/40 bg-violet-950/20'
+                : isAgent
+                  ? 'border-purple-500/40 bg-purple-950/20'
+                  : isWin
                 ? 'border-emerald-500/40 bg-emerald-950/20'
                 : isLoss
                   ? 'border-red-500/40 bg-red-950/20'

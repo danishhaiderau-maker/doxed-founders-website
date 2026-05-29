@@ -14,6 +14,7 @@ import {
   slugify,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { BuildQueueService } from '../build-queue/build-queue.service';
 
 function serializeAgent(agent: Prisma.FounderAgentGetPayload<{
   include: {
@@ -42,7 +43,10 @@ function serializeAgent(agent: Prisma.FounderAgentGetPayload<{
 
 @Injectable()
 export class AgentsService implements OnModuleInit {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly buildQueue: BuildQueueService,
+  ) {}
 
   async onModuleInit() {
     await this.ensureSeedAgents().catch(() => undefined);
@@ -280,6 +284,8 @@ export class AgentsService implements OnModuleInit {
         revenueCredits: { increment: Math.floor(AGENT_RUN_CREDITS / 2) },
       },
     });
+
+    await this.buildQueue.createFromAgentRun(userId, run.id, agent, prompt, output);
 
     return { runId: run.id, creditsSpent: AGENT_RUN_CREDITS, output };
   }
