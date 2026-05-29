@@ -107,6 +107,17 @@ function SiteNavInner() {
             <AccountLabel name={session.user?.name} email={session.user?.email} />
           </span>
           <Link
+            href="/settings/builder"
+            className={cn(
+              'hidden rounded-lg px-2.5 py-1 text-xs sm:inline',
+              pathname.startsWith('/settings/builder')
+                ? 'bg-violet-500/25 font-semibold text-violet-100 ring-1 ring-violet-500/40'
+                : 'border border-violet-500/30 text-violet-200',
+            )}
+          >
+            Builder
+          </Link>
+          <Link
             href="/settings/security"
             className={cn(
               'hidden rounded-lg px-2.5 py-1 text-xs sm:inline',

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import {
   BuildQueueItem,
@@ -7,6 +8,7 @@ import {
   CommandBarIntent,
   dismissBuildQueueItem,
   fetchBuildRoom,
+  publishGitHubIssues,
   runCommandBar,
   updateBuildQueueItem,
 } from '@/lib/api';
@@ -48,6 +50,16 @@ function ItemRow({
           </p>
           {item.description && (
             <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.description}</p>
+          )}
+          {item.githubIssueUrl && (
+            <a
+              href={item.githubIssueUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 inline-block text-[10px] text-sky-400 hover:underline"
+            >
+              View on GitHub →
+            </a>
           )}
         </div>
         <div className="flex shrink-0 gap-1">
@@ -97,6 +109,7 @@ export function BuildRoom2({
   const [cmdIntent, setCmdIntent] = useState<CommandBarIntent>('roadmap');
   const [cmdPrompt, setCmdPrompt] = useState('');
   const [cmdBusy, setCmdBusy] = useState(false);
+  const [publishBusy, setPublishBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
@@ -140,6 +153,19 @@ export function BuildRoom2({
     }
   }
 
+  async function handlePublishIssues() {
+    setPublishBusy(true);
+    try {
+      const result = await publishGitHubIssues(accessToken);
+      onMessage?.(`Created ${result.created} GitHub issue(s) on ${result.repoFullName}`);
+      load();
+    } catch (err) {
+      onMessage?.(err instanceof Error ? err.message : 'Publish failed');
+    } finally {
+      setPublishBusy(false);
+    }
+  }
+
   async function copyCursor() {
     if (!room?.cursorCopy) return;
     await navigator.clipboard.writeText(room.cursorCopy);
@@ -151,6 +177,18 @@ export function BuildRoom2({
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-zinc-500">
+          Provider: <span className="text-violet-300">{room?.defaultAiProvider ?? 'RULE_BASED'}</span>
+          {room?.githubTokenConnected && (
+            <span className="ml-2 text-emerald-400">· GitHub token connected</span>
+          )}
+        </p>
+        <Link href="/settings/builder" className="text-xs text-emerald-400 hover:underline">
+          Builder settings →
+        </Link>
+      </div>
+
       <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
         <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
           <p className="text-[10px] uppercase text-zinc-500">Ideas</p>
@@ -265,16 +303,32 @@ export function BuildRoom2({
           </ul>
         )}
         {tab === 'issues' && (
-          <ul className="space-y-2">
-            {(room?.grouped.issues ?? []).map((item) => (
-              <ItemRow key={item.id} item={item} onDone={handleDone} onDismiss={handleDismiss} />
-            ))}
-            {room?.repoFullName && (
-              <p className="mt-2 text-xs text-zinc-600">
-                GitHub: {room.repoFullName} — create issues manually or connect token (v2).
+          <div className="space-y-3">
+            {room?.githubTokenConnected && (room?.grouped.issues ?? []).some((i) => !i.githubIssueUrl) && (
+              <button
+                type="button"
+                disabled={publishBusy}
+                onClick={handlePublishIssues}
+                className="rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {publishBusy ? 'Publishing…' : 'Publish queued issues to GitHub'}
+              </button>
+            )}
+            <ul className="space-y-2">
+              {(room?.grouped.issues ?? []).map((item) => (
+                <ItemRow key={item.id} item={item} onDone={handleDone} onDismiss={handleDismiss} />
+              ))}
+            </ul>
+            {room?.repoFullName && !room.githubTokenConnected && (
+              <p className="text-xs text-amber-400/90">
+                Add a GitHub token in{' '}
+                <Link href="/settings/builder" className="underline">
+                  Builder settings
+                </Link>{' '}
+                to auto-create issues on {room.repoFullName}.
               </p>
             )}
-          </ul>
+          </div>
         )}
         {tab === 'commits' && (
           <ul className="space-y-2">
@@ -308,9 +362,23 @@ export function BuildRoom2({
           </ul>
         )}
         {tab === 'prs' && (
-          <p className="text-sm text-zinc-500">
-            Pull requests — connect GitHub app (coming soon). Commits sync is live today.
-          </p>
+          <ul className="space-y-2">
+            {(room?.pullRequests ?? []).length === 0 && (
+              <p className="text-sm text-zinc-500">
+                {room?.githubTokenConnected
+                  ? 'No pull requests found.'
+                  : 'Connect a GitHub token in Builder settings to list PRs.'}
+              </p>
+            )}
+            {(room?.pullRequests ?? []).map((pr) => (
+              <li key={pr.url} className="rounded-lg border border-zinc-800 px-3 py-2">
+                <a href={pr.url} target="_blank" rel="noopener noreferrer" className="text-sm text-sky-300 hover:underline">
+                  {pr.title}
+                </a>
+                <span className="ml-2 text-[10px] uppercase text-zinc-600">{pr.state}</span>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 

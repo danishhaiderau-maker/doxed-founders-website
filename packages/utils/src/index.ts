@@ -49,3 +49,4 @@ export * from './integration-providers';
 export * from './security-score';
 export * from './founder-agents';
 export * from './build-queue';
+export * from './ai-providers';

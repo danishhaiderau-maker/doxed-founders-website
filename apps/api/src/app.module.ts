@@ -23,6 +23,7 @@ import { FounderOsModule } from './founder-os/founder-os.module';
 import { SecurityModule } from './security/security.module';
 import { AgentsModule } from './agents/agents.module';
 import { BuildQueueModule } from './build-queue/build-queue.module';
+import { BuilderModule } from './builder/builder.module';
 import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
@@ -43,6 +44,7 @@ import { XSocialModule } from './x-social/x-social.module';
     SecurityModule,
     AgentsModule,
     BuildQueueModule,
+    BuilderModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,

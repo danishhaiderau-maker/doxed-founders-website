@@ -1602,6 +1602,9 @@ export interface BuildRoomData {
   repoFullName: string | null;
   cursorConnected: boolean;
   githubConnected: boolean;
+  githubTokenConnected?: boolean;
+  defaultAiProvider?: string;
+  autoCreateGitHubIssues?: boolean;
   grouped: {
     ideas: BuildQueueItem[];
     tasks: BuildQueueItem[];
@@ -1611,7 +1614,7 @@ export interface BuildRoomData {
   };
   commits: { sha: string; message: string; date: string }[];
   deployments: { id: string; headline: string; source: string; status: string; createdAt: string }[];
-  pullRequests: { title: string; url: string; state: string }[];
+  pullRequests: { title: string; url: string; state: string; number?: number }[];
   pendingSuggestions: { id: string; headline: string; body: string; source: string; createdAt: string }[];
   cursorCopy: string;
   stats: { ideas: number; tasks: number; issues: number; commits: number };
@@ -1654,4 +1657,65 @@ export function updateBuildQueueItem(
 
 export function dismissBuildQueueItem(id: string, token: string) {
   return apiFetch(`/build-queue/${id}/dismiss`, { method: 'POST' }, token);
+}
+
+export function publishGitHubIssues(token: string) {
+  return apiFetch<{ created: number; repoFullName: string }>(
+    '/build-queue/publish-github-issues',
+    { method: 'POST' },
+    token,
+  );
+}
+
+// ─── Builder settings (Phase 4B) ───────────────────────────────────────────────
+
+export interface BuilderSettings {
+  defaultProvider: string;
+  preferredModel: string | null;
+  autoCreateGitHubIssues: boolean;
+  githubTokenConnected: boolean;
+  providers: {
+    key: string;
+    label: string;
+    needsApiKey: boolean;
+    defaultModel: string | null;
+    billTip: string;
+    credentialProvider: string | null;
+    connected: boolean;
+  }[];
+}
+
+export function fetchBuilderSettings(token: string) {
+  return apiFetch<BuilderSettings>('/builder/settings', undefined, token);
+}
+
+export function updateBuilderSettings(
+  data: { defaultProvider?: string; preferredModel?: string; autoCreateGitHubIssues?: boolean },
+  token: string,
+) {
+  return apiFetch('/builder/settings', { method: 'PATCH', body: JSON.stringify(data) }, token);
+}
+
+export function connectAiProvider(provider: string, apiKey: string, token: string) {
+  return apiFetch<{ success: boolean; accountName: string }>(
+    '/builder/providers/connect',
+    { method: 'POST', body: JSON.stringify({ provider, apiKey }) },
+    token,
+  );
+}
+
+export function disconnectAiProvider(provider: string, token: string) {
+  return apiFetch(`/builder/providers/${provider}/disconnect`, { method: 'POST' }, token);
+}
+
+export function connectGitHubToken(githubToken: string, token: string) {
+  return apiFetch<{ success: boolean; githubUsername: string }>(
+    '/builder/github-token',
+    { method: 'POST', body: JSON.stringify({ token: githubToken }) },
+    token,
+  );
+}
+
+export function disconnectGitHubToken(token: string) {
+  return apiFetch('/builder/github-token', { method: 'DELETE' }, token);
 }

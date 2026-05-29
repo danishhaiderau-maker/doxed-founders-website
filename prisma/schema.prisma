@@ -224,6 +224,14 @@ enum BuildQueueSource {
   BUILD_ROOM
 }
 
+enum AiProvider {
+  RULE_BASED
+  OPENAI
+  ANTHROPIC
+  GEMINI
+  CURSOR
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -283,6 +291,7 @@ model User {
   agentInstalls        AgentInstall[]
   agentRuns            AgentRun[]
   agentFollows         AgentFollow[]
+  builderSettings      FounderBuilderSettings?
 
   @@index([email])
   @@index([role])
@@ -1133,14 +1142,27 @@ model FounderCreditLedger {
 }
 
 model GitHubConnection {
-  id             String    @id @default(cuid())
-  userId         String    @unique
-  githubUsername String
-  repoFullName   String
-  lastSyncedAt   DateTime?
-  lastCommitSha  String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                    String    @id @default(cuid())
+  userId                String    @unique
+  githubUsername        String
+  repoFullName          String
+  accessTokenEncrypted  String?   @db.Text
+  lastSyncedAt          DateTime?
+  lastCommitSha         String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model FounderBuilderSettings {
+  id                     String     @id @default(cuid())
+  userId                 String     @unique
+  defaultProvider        AiProvider @default(RULE_BASED)
+  preferredModel         String?
+  autoCreateGitHubIssues Boolean    @default(false)
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

@@ -19,6 +19,11 @@ export class BuildQueueController {
     return this.buildQueue.getBuildRoom(user.id);
   }
 
+  @Post('publish-github-issues')
+  publishGitHubIssues(@CurrentUser() user: AuthUser) {
+    return this.buildQueue.publishGitHubIssues(user.id);
+  }
+
   @Post('quick-build')
   quickBuild(
     @CurrentUser() user: AuthUser,
