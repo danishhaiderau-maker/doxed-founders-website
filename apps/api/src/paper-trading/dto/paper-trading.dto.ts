@@ -51,6 +51,11 @@ export class PaperTradeDto {
   @IsNumber()
   @Min(0)
   targetUsd?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  timeHorizon?: string;
 }
 
 export class PreviewPaperTradeDto {

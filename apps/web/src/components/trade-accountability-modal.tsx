@@ -21,6 +21,8 @@ type TradeAccountabilityModalProps = {
   onCatalystChange: (v: string) => void;
   targetUsd: string;
   onTargetUsdChange: (v: string) => void;
+  timeHorizon: string;
+  onTimeHorizonChange: (v: string) => void;
   founderDoxxedTick: boolean;
   onFounderDoxxedTickChange: (v: boolean) => void;
   onCancel: () => void;
@@ -46,6 +48,8 @@ export function TradeAccountabilityModal({
   onCatalystChange,
   targetUsd,
   onTargetUsdChange,
+  timeHorizon,
+  onTimeHorizonChange,
   founderDoxxedTick,
   onFounderDoxxedTickChange,
   onCancel,
@@ -224,7 +228,7 @@ export function TradeAccountabilityModal({
                   type="text"
                   value={catalyst}
                   onChange={(e) => onCatalystChange(e.target.value.slice(0, 120))}
-                  placeholder="ETF approval, listing, macro…"
+                  placeholder="Public launch, listing, macro…"
                   className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
                 />
               </label>
@@ -236,11 +240,21 @@ export function TradeAccountabilityModal({
                   step="any"
                   value={targetUsd}
                   onChange={(e) => onTargetUsdChange(e.target.value)}
-                  placeholder="0.50"
+                  placeholder="0.000001"
                   className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
                 />
               </label>
             </div>
+            <label className="mt-3 block">
+              <span className="text-xs font-medium text-zinc-400">Time horizon</span>
+              <input
+                type="text"
+                value={timeHorizon}
+                onChange={(e) => onTimeHorizonChange(e.target.value.slice(0, 80))}
+                placeholder="3–6 months, until launch, Q3 2026…"
+                className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
+              />
+            </label>
           </div>
 
           {!isVerifiedDoxxed && (

@@ -155,6 +155,7 @@ export class ConvictionShareService {
       thesis: position.convictionThesis ?? feed?.initialComment ?? null,
       catalyst: position.convictionCatalyst ?? null,
       targetPrice: position.convictionTargetUsd ? Number(position.convictionTargetUsd) : null,
+      timeHorizon: position.convictionTimeHorizon ?? null,
       recordedAt: (position.convictionRecordedAt ?? feed?.createdAt)?.toISOString() ?? null,
       feedPostId: feed?.id ?? null,
     };

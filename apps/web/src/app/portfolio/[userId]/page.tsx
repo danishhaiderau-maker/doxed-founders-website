@@ -120,6 +120,9 @@ export default function PublicPortfolioPage() {
               roi={portfolio.roi}
               totalValue={portfolio.totalValue}
               accessToken={session?.accessToken}
+              highlightPosition={
+                portfolio.positions.find((p) => p.convictionThesis) ?? portfolio.positions[0]
+              }
             />
 
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">

@@ -186,6 +186,7 @@ export interface PaperPortfolio {
     convictionThesis?: string | null;
     convictionCatalyst?: string | null;
     convictionTargetUsd?: number | null;
+    convictionTimeHorizon?: string | null;
     convictionRecordedAt?: string | null;
     positionOpenedAt?: string | null;
   }[];
@@ -406,6 +407,12 @@ export interface PublicPortfolio {
     marketCap?: number | null;
     liquidity?: number | null;
     volume24h?: number | null;
+    convictionThesis?: string | null;
+    convictionCatalyst?: string | null;
+    convictionTargetUsd?: number | null;
+    convictionTimeHorizon?: string | null;
+    convictionRecordedAt?: string | null;
+    positionOpenedAt?: string | null;
   }[];
 }
 
@@ -438,6 +445,7 @@ export function executePaperTrade(input: {
   comment?: string;
   catalyst?: string;
   targetUsd?: number;
+  timeHorizon?: string;
 }) {
   return apiFetch<{
     success: boolean;

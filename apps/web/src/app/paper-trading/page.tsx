@@ -55,6 +55,7 @@ function PaperTradingPageContent() {
   const [tradeComment, setTradeComment] = useState('');
   const [tradeCatalyst, setTradeCatalyst] = useState('');
   const [tradeTargetUsd, setTradeTargetUsd] = useState('');
+  const [tradeTimeHorizon, setTradeTimeHorizon] = useState('');
   const [lastFeedPostId, setLastFeedPostId] = useState<string | null>(null);
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [loading, setLoading] = useState(false);
@@ -265,11 +266,13 @@ function PaperTradingPageContent() {
         comment: buildTradeComment(),
         catalyst: tradeCatalyst.trim() || undefined,
         targetUsd: tradeTargetUsd.trim() ? Number(tradeTargetUsd) : undefined,
+        timeHorizon: tradeTimeHorizon.trim() || undefined,
       });
       setLastFeedPostId(result.feedPostId);
       setTradeComment('');
       setTradeCatalyst('');
       setTradeTargetUsd('');
+      setTradeTimeHorizon('');
       setFounderDoxxedTick(false);
       setShowAccountabilityModal(false);
       await refreshPortfolio(userId);
@@ -648,6 +651,7 @@ function PaperTradingPageContent() {
                         thesis={pos.convictionThesis}
                         catalyst={pos.convictionCatalyst}
                         targetPrice={pos.convictionTargetUsd}
+                        timeHorizon={pos.convictionTimeHorizon}
                         recordedAt={pos.convictionRecordedAt}
                         positionOpenedAt={pos.positionOpenedAt}
                         portfolioRoi={portfolio?.roi}
@@ -685,6 +689,9 @@ function PaperTradingPageContent() {
               )}
               roi={portfolio.roi}
               totalValue={portfolio.totalValue}
+              highlightPosition={
+                portfolio.positions.find((p) => p.convictionThesis) ?? portfolio.positions[0]
+              }
             />
           )}
         </div>
@@ -722,6 +729,8 @@ function PaperTradingPageContent() {
           onCatalystChange={setTradeCatalyst}
           targetUsd={tradeTargetUsd}
           onTargetUsdChange={setTradeTargetUsd}
+          timeHorizon={tradeTimeHorizon}
+          onTimeHorizonChange={setTradeTimeHorizon}
           founderDoxxedTick={founderDoxxedTick}
           onFounderDoxxedTickChange={setFounderDoxxedTick}
           onCancel={() => setShowAccountabilityModal(false)}

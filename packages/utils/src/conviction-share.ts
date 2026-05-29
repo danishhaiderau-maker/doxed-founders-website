@@ -1,21 +1,7 @@
+import { formatTokenPrice } from './token-price';
 import { type ProofOfConvictionInput } from './share';
 
-function formatUsd(value: number, decimals = 2): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  }).format(value);
-}
-
-function formatTokenPrice(value: number): string {
-  if (value >= 1) return formatUsd(value, 2);
-  if (value >= 0.01) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(8).replace(/0+$/, '').replace(/\.$/, '')}`;
-}
-
-function formatDate(iso: string): string {
+function formatConvictionDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -23,22 +9,39 @@ function formatDate(iso: string): string {
   });
 }
 
-/** Rich thread-style copy for Proof of Conviction shares */
+function formatPlPct(returnPct: number): string {
+  const sign = returnPct >= 0 ? '+' : '';
+  return `${sign}${returnPct.toFixed(1)}%`;
+}
+
+function clip(text: string, max: number): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+/** Full story thread for X composer — not limited to 280 chars */
 export function buildProofOfConvictionThread(input: ProofOfConvictionInput): string {
-  const win = input.returnPct >= 0;
-  const sign = win ? '+' : '';
-  const lines = [
-    `I opened $${input.ticker} at ${formatTokenPrice(input.entryPrice)}.`,
+  const lines = ['🚨 Proof of Conviction', '', `Bought $${input.ticker}`];
+
+  if (input.recordedAt) {
+    lines.push('', 'Date:', formatConvictionDate(input.recordedAt));
+  }
+
+  lines.push(
     '',
-    'Current Price:',
+    'Entry:',
+    formatTokenPrice(input.entryPrice),
+    '',
+    'Current:',
     formatTokenPrice(input.currentPrice),
     '',
-    'Return:',
-    `${sign}${Math.round(input.returnPct)}%`,
-  ];
+    'Current P/L:',
+    formatPlPct(input.returnPct),
+  );
 
   if (input.thesis?.trim()) {
-    lines.push('', 'Reason I Bought:', `"${input.thesis.trim()}"`);
+    lines.push('', 'Original Thesis:', `"${input.thesis.trim()}"`);
   }
   if (input.catalyst?.trim()) {
     lines.push('', 'Catalyst:', input.catalyst.trim());
@@ -46,17 +49,45 @@ export function buildProofOfConvictionThread(input: ProofOfConvictionInput): str
   if (input.targetPrice != null && input.targetPrice > 0) {
     lines.push('', 'Target:', formatTokenPrice(input.targetPrice));
   }
-  if (input.recordedAt) {
-    lines.push('', 'Conviction Recorded:', formatDate(input.recordedAt));
-  }
-  if (input.portfolioRoi != null) {
-    lines.push('', 'Portfolio ROI:', `${input.portfolioRoi >= 0 ? '+' : ''}${input.portfolioRoi.toFixed(1)}%`);
+  if (input.timeHorizon?.trim()) {
+    lines.push('', 'Time horizon:', input.timeHorizon.trim());
   }
   if (input.proofUrl) {
     lines.push('', 'Proof:', input.proofUrl);
   }
-  lines.push('', '#ProofOfConviction @DoxxedCrypto');
+
+  lines.push('', '#ProofOfConviction');
   return lines.join('\n');
+}
+
+/** Single-tweet instant post (≤280 chars) with story beats */
+export function buildProofOfConvictionMessage(input: ProofOfConvictionInput): string {
+  const parts = [
+    `🚨 Proof of Conviction · $${input.ticker}`,
+    `Entry ${formatTokenPrice(input.entryPrice)} → ${formatTokenPrice(input.currentPrice)}`,
+    `P/L ${formatPlPct(input.returnPct)}`,
+  ];
+
+  if (input.thesis?.trim()) {
+    parts.push(`"${clip(input.thesis.trim(), 72)}"`);
+  }
+  if (input.proofUrl) {
+    parts.push(input.proofUrl);
+  }
+  parts.push('#ProofOfConviction');
+
+  let text = parts.join('\n');
+  if (text.length > 280) {
+    text = [
+      `🚨 $${input.ticker} · ${formatPlPct(input.returnPct)}`,
+      `Entry ${formatTokenPrice(input.entryPrice)} → ${formatTokenPrice(input.currentPrice)}`,
+      input.proofUrl ?? '#ProofOfConviction',
+    ]
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 280);
+  }
+  return text;
 }
 
 export type { ProofOfConvictionInput };

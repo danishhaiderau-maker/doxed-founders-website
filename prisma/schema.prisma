@@ -601,6 +601,7 @@ model PaperPosition {
   convictionThesis    String?  @db.Text
   convictionCatalyst  String?
   convictionTargetUsd Decimal? @db.Decimal(24, 12)
+  convictionTimeHorizon String?
   convictionRecordedAt DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
