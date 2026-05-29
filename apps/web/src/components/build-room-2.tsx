@@ -292,9 +292,9 @@ export function BuildRoom2({
         <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <p className="text-sm font-semibold text-indigo-200">Copy for Cursor</p>
+              <p className="text-sm font-semibold text-indigo-200">Agent prompt (fallback)</p>
               <p className="text-xs text-zinc-500">
-                Desktop not connected — paste this prompt when you&apos;re at your desk.
+                No remote agent connected — paste manually, or connect OpenHands in Settings → Builder.
               </p>
             </div>
             <button

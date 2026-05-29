@@ -32,9 +32,20 @@ export class BuilderController {
     return this.builder.updateSettings(user.id, body);
   }
 
-  @Post('providers/desk-connect')
-  connectDeskProvider(@CurrentUser() user: AuthUser, @Body() body: { provider: AiProvider }) {
-    return this.builder.connectDeskProvider(user.id, body.provider);
+  @Post('providers/openhands-connect')
+  connectOpenHands(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { baseUrl: string; apiKey: string },
+  ) {
+    return this.builder.connectOpenHands(user.id, body.baseUrl, body.apiKey);
+  }
+
+  @Post('openhands/dispatch')
+  dispatchOpenHands(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    return this.builder.dispatchOpenHandsBuildTask(user.id, body);
   }
 
   @Post('providers/connect')

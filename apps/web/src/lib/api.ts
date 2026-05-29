@@ -1690,6 +1690,11 @@ export function quickBuild(prompt: string, token: string, source?: 'QUICK_BUILD'
     ideaId: string;
     cursorPrompt: string;
     cursorCopy: string;
+    openHandsDispatch?: {
+      conversationUrl?: string | null;
+      status?: string;
+      error?: string;
+    } | null;
     parsed: { ideaTitle: string; tasks: string[]; githubIssues: string[] };
   }>('/build-queue/quick-build', { method: 'POST', body: JSON.stringify({ prompt, source }) }, token);
 }
@@ -1735,15 +1740,16 @@ export interface BuilderSettings {
   autoPublishOnEvent: boolean;
   currentGoalFocus: string | null;
   githubTokenConnected: boolean;
+  openHandsBaseUrl: string | null;
   providers: {
     key: string;
     label: string;
     needsApiKey: boolean;
     connectMode?: string;
+    needsBaseUrl?: boolean;
     defaultModel: string | null;
     billTip: string;
     credentialProvider: string | null;
-    copyCommand?: string;
     connected: boolean;
   }[];
 }
@@ -1773,12 +1779,30 @@ export function connectAiProvider(provider: string, apiKey: string, token: strin
   );
 }
 
-export function connectDeskProvider(provider: string, token: string) {
-  return apiFetch<{ success: boolean; label: string; copyCommand?: string }>(
-    '/builder/providers/desk-connect',
-    { method: 'POST', body: JSON.stringify({ provider }) },
+export function connectOpenHands(baseUrl: string, apiKey: string, token: string) {
+  return apiFetch<{
+    success: boolean;
+    accountName: string;
+    baseUrl: string;
+    apiVersion: string;
+  }>(
+    '/builder/providers/openhands-connect',
+    { method: 'POST', body: JSON.stringify({ baseUrl, apiKey }) },
     token,
   );
+}
+
+export function dispatchOpenHandsBuild(
+  data: { spec: string; cursorPrompt?: string; repository?: string },
+  token: string,
+) {
+  return apiFetch<{
+    apiVersion: string;
+    startTaskId: string;
+    conversationId: string | null;
+    status: string;
+    conversationUrl: string | null;
+  }>('/builder/openhands/dispatch', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
 export function disconnectAiProvider(provider: string, token: string) {

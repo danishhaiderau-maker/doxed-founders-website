@@ -321,6 +321,29 @@ export class BuildQueueService {
       payload: { ideaId: idea.id, taskCount: taskItems.length, issueCount: issueItems.length },
     });
 
+    let openHandsDispatch:
+      | (Awaited<ReturnType<BuilderService['dispatchOpenHandsBuildTask']>> & { error?: undefined })
+      | { error: string }
+      | null = null;
+    if (settings?.defaultProvider === 'OPENHANDS') {
+      try {
+        const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
+        openHandsDispatch = await this.builder.dispatchOpenHandsBuildTask(userId, {
+          spec: parsed.spec,
+          cursorPrompt: parsed.cursorPrompt,
+          repository: repo,
+        });
+        await this.prisma.buildQueueItem.update({
+          where: { id: specItem.id },
+          data: { status: BuildQueueStatus.IN_PROGRESS },
+        });
+      } catch (err) {
+        openHandsDispatch = {
+          error: err instanceof Error ? err.message : 'OpenHands dispatch failed',
+        };
+      }
+    }
+
     return {
       ideaId: idea.id,
       specId: specItem.id,
@@ -335,6 +358,7 @@ export class BuildQueueService {
         cursorPrompt: parsed.cursorPrompt,
         githubIssues: parsed.githubIssues.map((title) => ({ title })),
       }),
+      openHandsDispatch,
       parsed,
     };
   }
