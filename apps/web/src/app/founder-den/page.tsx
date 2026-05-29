@@ -278,7 +278,14 @@ export default function FounderDenPage() {
             </div>
           )}
 
-          {session?.accessToken && hasFounder && (
+          {session?.accessToken && !hasFounder && (
+            <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
+              <strong className="text-white">Activate founder profile</strong> below to unlock GitHub
+              sync, Cursor Build Room, stack integrations, and Publish Everywhere.
+            </div>
+          )}
+
+          {session?.accessToken && (
             <div className="mt-6">
               <FounderOsPanel
                 accessToken={session.accessToken}
@@ -286,6 +293,7 @@ export default function FounderDenPage() {
                 communityRewardPool={dashboard?.communityRewardPool}
                 projectId={room?.id}
                 onRefresh={load}
+                founderActive={hasFounder}
               />
             </div>
           )}
