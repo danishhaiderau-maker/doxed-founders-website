@@ -5,11 +5,9 @@ import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { RaiseRoomPanel } from '@/components/raise-room-panel';
 import { BuildRoom2 } from '@/components/build-room-2';
-import { FounderInboxPanel } from '@/components/founder-inbox-panel';
 import { AgentsWorkspacePanel } from '@/components/agents-workspace-panel';
-import { DiscoverProjectCard } from '@/components/discover-project-card';
+import { FounderMissionControl } from '@/components/founder-mission-control';
 import {
-  EcosystemPulse,
   FounderDashboard,
   ProjectRoom,
 } from '@/lib/api';
@@ -26,13 +24,13 @@ export type WorkspaceTab =
   | 'analytics';
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
-  { id: 'activity', label: 'Activity' },
+  { id: 'activity', label: 'Mission control' },
+  { id: 'build', label: 'Founder Copilot' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'community', label: 'Community' },
   { id: 'funding', label: 'Raise Room' },
   { id: 'agents', label: 'Agents' },
-  { id: 'build', label: 'Founder Copilot' },
-  { id: 'analytics', label: 'Analytics' },
+  { id: 'analytics', label: 'Settings' },
 ];
 
 function OsSection({
@@ -66,7 +64,6 @@ export type FounderWorkspaceProps = {
   session: { accessToken: string } | null;
   hasFounder: boolean;
   currentStage: string;
-  pulse: EcosystemPulse | null;
   dashboard: FounderDashboard | null;
   room: ProjectRoom | null;
   onRefresh: () => void;
@@ -104,7 +101,6 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     session,
     hasFounder,
     currentStage,
-    pulse,
     dashboard,
     room,
     onRefresh,
@@ -124,8 +120,8 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white">Founder Workspace</h2>
-          <p className="text-sm text-zinc-500">Your daily command center — build, ship, fund, grow</p>
+          <h2 className="text-xl font-bold text-white">Founder OS</h2>
+          <p className="text-sm text-zinc-500">Mission control · build · validate · launch</p>
         </div>
         {session && (
           <Link
@@ -137,10 +133,12 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
         )}
       </div>
 
-      <FounderJourneyProgress
-        currentStage={currentStage}
-        label={hasFounder ? 'Your journey' : 'The founder journey — start anywhere'}
-      />
+      {tab !== 'activity' && (
+        <FounderJourneyProgress
+          currentStage={currentStage}
+          label={hasFounder ? 'Project stage' : 'The founder journey — start anywhere'}
+        />
+      )}
 
       <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
         {TABS.map((t) => (
@@ -170,68 +168,21 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
 
       {session && !hasFounder && tab !== 'activity' && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          Activate your founder profile in Analytics to unlock GitHub,
+          Activate your founder profile in Settings to unlock GitHub,
           Founder Copilot, and integrations.
         </div>
       )}
 
       {tab === 'activity' && (
-        <div className="space-y-6">
-          {session && <FounderInboxPanel accessToken={session.accessToken} />}
-          {pulse && (
-            <section className="grid gap-6 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">
-                  Recent founder activity
-                </h3>
-                <ul className="mt-3 space-y-3">
-                  {pulse.recentActivity.slice(0, 8).map((post) => (
-                    <li key={post.id} className="rounded-xl border border-zinc-800 bg-zinc-900/30 px-4 py-3">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-                        {post.dayNumber != null && (
-                          <span className="font-semibold text-emerald-500">Day {post.dayNumber}</span>
-                        )}
-                        <Link href={`/founder/${post.founder.slug}`} className="hover:text-emerald-400">
-                          {post.founder.name}
-                        </Link>
-                      </div>
-                      <p className="mt-1 font-medium text-white">{post.headline}</p>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">
-                  Ecosystem pulse
-                </h3>
-                <div className="mt-3 space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 text-sm">
-                  <p className="flex justify-between">
-                    <span className="text-zinc-500">Live tokens</span>
-                    <span className="font-semibold text-purple-300">{pulse.liveTokenCount}</span>
-                  </p>
-                  <p className="flex justify-between">
-                    <span className="text-zinc-500">Building</span>
-                    <span className="font-semibold text-emerald-300">{pulse.buildingCount}</span>
-                  </p>
-                  <p className="flex justify-between">
-                    <span className="text-zinc-500">Idea stage</span>
-                    <span className="font-semibold text-blue-300">{pulse.ideaCount}</span>
-                  </p>
-                </div>
-              </div>
-            </section>
-          )}
-          {pulse && pulse.trendingProjects.length > 0 && (
-            <section>
-              <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">Trending</h3>
-              <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {pulse.trendingProjects.slice(0, 3).map((p) => (
-                  <DiscoverProjectCard key={p.slug} project={p} />
-                ))}
-              </div>
-            </section>
-          )}
-        </div>
+        <FounderMissionControl
+          session={session}
+          hasFounder={hasFounder}
+          dashboard={dashboard}
+          room={room}
+          onTabChange={onTabChange}
+          onRefresh={onRefresh}
+          onMessage={onWorkspaceMessage}
+        />
       )}
 
       {tab === 'tasks' && session && (
