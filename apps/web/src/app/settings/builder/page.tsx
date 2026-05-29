@@ -27,7 +27,7 @@ export default function BuilderSettingsPage() {
             Security →
           </Link>
           <Link href="/founder-den?tab=build" className="text-emerald-400 hover:underline">
-            ← Build Room 2.0
+            ← Founder Copilot
           </Link>
         </div>
 

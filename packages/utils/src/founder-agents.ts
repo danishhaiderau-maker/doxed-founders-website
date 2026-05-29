@@ -55,7 +55,7 @@ export function runWorkforceAgent(
     case 'PRODUCT_MANAGER':
       return {
         title: `Spec: ${goal.slice(0, 72)}`,
-        summary: `Product spec for ${name}. Scope derived from founder prompt — review before Build Room.`,
+        summary: `Product spec for ${name}. Scope derived from founder prompt — review in Founder Copilot.`,
         tasks: [
           'Define MVP user stories',
           'List acceptance criteria',
@@ -119,7 +119,7 @@ export function runWorkforceAgent(
         summary: built.devSummary,
         tasks: lines.slice(1).length ? lines.slice(1) : [goal],
         githubIssues: [`[Build] ${goal.slice(0, 55)}`],
-        buildPlan: ['Open Cursor Build Room', 'Sync GitHub', 'Publish everywhere'],
+        buildPlan: ['Open Founder Copilot', 'Sync GitHub', 'Publish everywhere'],
         traderView: built.traderSummary,
       };
     }

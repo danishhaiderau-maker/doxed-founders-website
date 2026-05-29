@@ -135,7 +135,7 @@ export function FounderOsHubTeaser() {
         <p className="text-xs font-semibold uppercase tracking-widest text-emerald-500">Founder OS</p>
         <h2 className="mt-3 text-3xl font-bold text-white">Build → translate → publish everywhere</h2>
         <p className="mx-auto mt-4 max-w-2xl text-zinc-400">
-          GitHub sync, Cursor Build Room, stack integrations, simulated raises, bounties, and
+          GitHub sync, Founder Copilot, stack integrations, simulated raises, bounties, and
           one-click publish to build feed, X, and your project room — no Telegram chaos.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">

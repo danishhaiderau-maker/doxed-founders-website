@@ -285,7 +285,7 @@ export function FounderOsPanel({
       </div>
 
       <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
-        <p className="text-sm font-semibold text-indigo-200">Cursor Build Room</p>
+        <p className="text-sm font-semibold text-indigo-200">Founder Copilot · Publish</p>
         <p className="mt-1 text-xs text-zinc-500">
           Describe what you shipped — get dev + trader summaries (50 Founder Credits, no extra AI subscription).
         </p>

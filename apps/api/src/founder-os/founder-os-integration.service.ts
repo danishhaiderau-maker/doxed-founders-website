@@ -34,11 +34,11 @@ export class FounderOsIntegrationService {
 
     if (config.connectType === 'toggle') {
       await this.upsertCredential(userId, input.provider, null, {
-        accountName: 'Build Room enabled',
+        accountName: 'Founder Copilot enabled',
         enabledAt: new Date().toISOString(),
       });
-      await this.upsertAppStatus(userId, input.provider, true, { accountName: 'Build Room enabled' });
-      return { success: true, provider: input.provider, accountName: 'Build Room enabled' };
+      await this.upsertAppStatus(userId, input.provider, true, { accountName: 'Founder Copilot enabled' });
+      return { success: true, provider: input.provider, accountName: 'Founder Copilot enabled' };
     }
 
     if (config.connectType === 'oauth') {

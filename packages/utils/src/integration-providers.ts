@@ -26,7 +26,7 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderConfig[] = [
   },
   {
     key: 'cursor',
-    label: 'Cursor Build Room',
+    label: 'Founder Copilot (Cursor)',
     reputationBoost: 8,
     connectType: 'toggle',
     billTip: 'Uses Founder Credits instead of separate AI subscriptions for update drafts.',

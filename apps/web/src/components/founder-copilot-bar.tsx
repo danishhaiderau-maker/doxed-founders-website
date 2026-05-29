@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { copilotAsk, EventActivityFeed, fetchEventActivity } from '@/lib/api';
+import { copilotAsk, EventActivityFeed, fetchCopilotMemory, fetchEventActivity, ProjectMemory } from '@/lib/api';
 
 type FounderCopilotBarProps = {
   accessToken: string;
@@ -12,13 +12,20 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [feed, setFeed] = useState<EventActivityFeed | null>(null);
+  const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [lastAnswer, setLastAnswer] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setFeed(await fetchEventActivity(accessToken));
+      const [activity, mem] = await Promise.all([
+        fetchEventActivity(accessToken),
+        fetchCopilotMemory(accessToken),
+      ]);
+      setFeed(activity);
+      setMemory(mem);
     } catch {
       setFeed(null);
+      setMemory(null);
     }
   }, [accessToken]);
 
@@ -46,10 +53,19 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
 
   return (
     <section className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
-      <p className="text-sm font-semibold text-amber-200">Founder Copilot</p>
+      <p className="text-sm font-semibold text-amber-200">Ask Founder Copilot</p>
       <p className="mt-1 text-xs text-zinc-500">
-        Ask what happened this week — event bus aggregates commits, deploys, community, launch readiness.
+        Project memory loaded — ask about progress, deploys, or what to ship next.
       </p>
+
+      {memory && (
+        <div className="mt-3 rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-[11px] text-zinc-400">
+          <span className="text-zinc-300">{memory.project?.name ?? 'Your project'}</span>
+          {' · '}
+          {memory.progressPercent}% · next:{' '}
+          <span className="text-amber-200">{memory.suggestedNextStep}</span>
+        </div>
+      )}
 
       {stats && (
         <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
@@ -77,7 +93,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleAsk()}
-          placeholder="What happened this week?"
+          placeholder='Try "What changed this week?" or "Finish it."'
           className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
         />
         <button

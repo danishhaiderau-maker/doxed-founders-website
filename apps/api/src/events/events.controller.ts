@@ -21,6 +21,21 @@ export class EventsController {
     return this.events.getActivityFeed(user.id);
   }
 
+  @Get('copilot/memory')
+  memory(@CurrentUser() user: AuthUser) {
+    return this.copilot.getProjectMemory(user.id);
+  }
+
+  @Get('copilot/standup')
+  standup(@CurrentUser() user: AuthUser) {
+    return this.copilot.getDailyStandup(user.id);
+  }
+
+  @Post('copilot/resume')
+  resume(@CurrentUser() user: AuthUser) {
+    return this.copilot.resumeWork(user.id);
+  }
+
   @Post('copilot/ask')
   ask(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
     return this.copilot.ask(user.id, body.prompt);

@@ -5,15 +5,20 @@ import {
   Injectable,
   forwardRef,
 } from '@nestjs/common';
-import { FounderEventType, SuggestedUpdateStatus } from '@prisma/client';
+import { BuildQueueStatus, FounderEventType, RoadmapStatus, SimulatedRaiseStatus, SuggestedUpdateStatus } from '@prisma/client';
 import {
   buildCommunityUpdateFromSummary,
+  buildDailyStandup,
+  buildResumeCursorPrompt,
   buildWeeklySummary,
+  computeProjectProgress,
   detectHandsFreeAction,
+  formatRelativeTime,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
 import { BuilderService } from '../builder/builder.service';
+import { GitHubApiService } from '../github/github-api.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from './events.service';
 import { FounderMetricsService } from './founder-metrics.service';
@@ -25,13 +30,227 @@ export class FounderCopilotService {
     private readonly events: EventsService,
     private readonly metrics: FounderMetricsService,
     private readonly builder: BuilderService,
+    private readonly github: GitHubApiService,
     @Inject(forwardRef(() => BuildQueueService))
     private readonly buildQueue: BuildQueueService,
     @Inject(forwardRef(() => FounderOsService))
     private readonly founderOs: FounderOsService,
   ) {}
 
+  async getProjectMemory(userId: string) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: {
+        user: { select: { name: true } },
+        projects: {
+          where: { approved: true },
+          take: 1,
+          include: {
+            roadmapItems: { orderBy: { sortOrder: 'asc' } },
+            simulatedRaises: {
+              where: { status: SimulatedRaiseStatus.ACTIVE },
+              include: { allocations: true },
+              take: 1,
+            },
+            _count: { select: { followers: true } },
+          },
+        },
+      },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const project = founder.projects[0];
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+
+    const openQueue = await this.prisma.buildQueueItem.findMany({
+      where: {
+        founderId: founder.id,
+        status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+      take: 30,
+    });
+
+    const ideas = openQueue.filter((i) => i.kind === 'IDEA');
+    const tasks = openQueue.filter((i) => i.kind === 'TASK');
+    const doneTasks = await this.prisma.buildQueueItem.count({
+      where: { founderId: founder.id, kind: 'TASK', status: BuildQueueStatus.DONE },
+    });
+
+    const lastEvent = await this.prisma.founderEvent.findFirst({
+      where: { founderId: founder.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const repo = project
+      ? await this.github.resolveRepo(userId, founder.githubRepoFullName, project.githubRepoFullName)
+      : null;
+    const commits = repo ? await this.github.listCommits(userId, repo, 3) : [];
+    const lastCommit = commits[0]?.message ?? null;
+
+    const readiness = project
+      ? await this.metrics.refreshLaunchReadiness(project.id)
+      : { score: 0, previous: 0 };
+
+    const progressPercent = computeProjectProgress({
+      launchReadiness: readiness.score,
+      openTasks: tasks.length,
+      doneTasks,
+    });
+
+    const currentGoal =
+      settings?.currentGoalFocus?.trim() ||
+      ideas[0]?.title ||
+      project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS)?.title ||
+      project?.roadmapItems[0]?.title ||
+      'Define your next milestone in Founder Copilot';
+
+    const suggestedNext =
+      tasks[0]?.title ||
+      openQueue.find((i) => i.kind === 'GITHUB_ISSUE')?.title ||
+      `Start: ${currentGoal}`;
+
+    const connected = await this.prisma.connectedAppStatus.findMany({ where: { userId } });
+    const deployments: { provider: string; label: string; healthy: boolean }[] = connected
+      .filter((c) => ['vercel', 'railway', 'neon', 'supabase', 'digitalocean'].includes(c.provider) && c.connected)
+      .map((c) => ({
+        provider: c.provider,
+        label: c.label ?? c.provider,
+        healthy: true,
+      }));
+
+    const activeRaise = project?.simulatedRaises[0];
+    const raiseAllocated =
+      activeRaise?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
+
+    const featureRequests = project
+      ? await this.prisma.communityThread.count({
+          where: { projectId: project.id, channel: 'FEATURE_REQUESTS' },
+        })
+      : 0;
+
+    const cursorCopy = buildResumeCursorPrompt({
+      projectName: project?.name ?? founder.name,
+      currentGoal,
+      suggestedNext,
+      openTasks: tasks.map((t) => t.title),
+      lastCommit: lastCommit ?? undefined,
+    });
+
+    return {
+      welcomeMessage: `Welcome back${founder.user?.name ? `, ${founder.user.name.split(' ')[0]}` : ''}.`,
+      project: project
+        ? { id: project.id, name: project.name, slug: project.slug, lifecycleStage: project.lifecycleStage }
+        : null,
+      currentGoal,
+      progressPercent,
+      launchReadiness: readiness.score,
+      buildStreakDays: founder.buildStreakDays,
+      lastActivityAt: lastEvent?.createdAt.toISOString() ?? null,
+      lastActivityLabel: formatRelativeTime(lastEvent?.createdAt),
+      lastCommit,
+      repoFullName: repo,
+      currentBranch: repo ? 'main' : null,
+      openTasks: tasks.slice(0, 8).map((t) => ({
+        id: t.id,
+        title: t.title,
+        kind: t.kind,
+        status: t.status,
+        done: false,
+      })),
+      suggestedNextStep: suggestedNext,
+      deployments,
+      raiseStatus: activeRaise
+        ? {
+            goalUsd: Number(activeRaise.goalUsd),
+            allocatedUsd: raiseAllocated,
+            participantCount: activeRaise.allocations.length,
+            status: activeRaise.status,
+          }
+        : null,
+      community: {
+        followers: project?._count.followers ?? 0,
+        featureRequests,
+      },
+      defaultAiProvider: settings?.defaultProvider ?? 'RULE_BASED',
+      cursorCopy,
+    };
+  }
+
+  async getDailyStandup(userId: string) {
+    const memory = await this.getProjectMemory(userId);
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { user: { select: { name: true } } },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const dayAgo = new Date(Date.now() - 86400000);
+    const [yCommits, yDeploys, yEvents] = await Promise.all([
+      this.prisma.founderEvent.count({
+        where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: dayAgo } },
+      }),
+      this.prisma.founderEvent.count({
+        where: { founderId: founder.id, type: FounderEventType.DEPLOY_SUCCESS, createdAt: { gte: dayAgo } },
+      }),
+      this.prisma.founderEvent.findMany({
+        where: { founderId: founder.id, createdAt: { gte: dayAgo } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    const openTaskTitles = memory.openTasks.map((t) => t.title);
+    const estimatedDays = Math.max(1, Math.ceil((100 - memory.progressPercent) / 25));
+
+    const standup = buildDailyStandup({
+      founderName: founder.user?.name ?? 'Founder',
+      projectName: memory.project?.name ?? founder.name,
+      yesterdayCommits: yCommits,
+      yesterdayDeploys: yDeploys,
+      yesterdayHighlights: yEvents.map((e) => e.title),
+      openTasks: openTaskTitles,
+      suggestedNext: memory.suggestedNextStep,
+      progressPercent: memory.progressPercent,
+      estimatedDays,
+    });
+
+    return { standup, memory };
+  }
+
+  async resumeWork(userId: string) {
+    const memory = await this.getProjectMemory(userId);
+
+    if (memory.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional sync */
+      }
+    }
+
+    const prompt = memory.suggestedNextStep;
+    await this.events.emit({
+      founderId: (await this.prisma.founder.findUnique({ where: { userId } }))!.id,
+      projectId: memory.project?.id,
+      userId,
+      type: FounderEventType.COPILOT_COMMAND,
+      source: 'copilot',
+      title: 'Resume work',
+      payload: { action: 'resume', suggestedNext: prompt },
+    });
+
+    return {
+      message: `Resuming: ${prompt}`,
+      memory,
+      cursorCopy: memory.cursorCopy,
+      dispatchHint:
+        'Copy the prompt into your connected builder (Cursor, Claude Code, etc.) or type "Finish it" to queue via hands-free.',
+    };
+  }
+
   async ask(userId: string, prompt: string) {
+    const memory = await this.getProjectMemory(userId);
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: {
@@ -79,8 +298,8 @@ export class FounderCopilotService {
 
     const aiAnswer = await this.builder.tryAiCompletion(
       userId,
-      'You are Founder Copilot — concise, founder-friendly weekly ops assistant.',
-      `${prompt}\n\nContext:\n${summary.body}`,
+      'You are Founder Copilot — persistent project memory for crypto founders. Answer from context; never ask what they are building.',
+      `${prompt}\n\nProject memory:\nGoal: ${memory.currentGoal}\nProgress: ${memory.progressPercent}%\nLast commit: ${memory.lastCommit ?? 'none'}\nSuggested next: ${memory.suggestedNextStep}\nOpen tasks: ${memory.openTasks.map((t) => t.title).join(', ') || 'none'}\n\nWeekly summary:\n${summary.body}`,
     );
 
     await this.events.emit({
@@ -172,6 +391,20 @@ export class FounderCopilotService {
       case 'roadmap': {
         const result = await this.buildQueue.runCommand(userId, { intent: 'roadmap', prompt: text });
         return { action, answer: result.result.body, creditsSpent: result.creditsSpent };
+      }
+      case 'resume_work': {
+        const result = await this.resumeWork(userId);
+        const queued = await this.buildQueue.quickBuild(userId, {
+          prompt: result.memory.suggestedNextStep,
+          source: 'QUICK_BUILD',
+        });
+        return {
+          action,
+          answer: `${result.message} Task queued for your connected builder.`,
+          memory: result.memory,
+          cursorCopy: result.cursorCopy,
+          queued,
+        };
       }
       case 'quick_build':
       default: {

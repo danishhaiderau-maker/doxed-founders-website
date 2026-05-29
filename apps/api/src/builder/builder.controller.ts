@@ -26,6 +26,7 @@ export class BuilderController {
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
+      currentGoalFocus?: string;
     },
   ) {
     return this.builder.updateSettings(user.id, body);
