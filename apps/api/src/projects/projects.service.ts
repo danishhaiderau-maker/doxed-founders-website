@@ -56,6 +56,42 @@ export class ProjectsService {
     return projects.map((p) => this.mapProjectSummary(p));
   }
 
+  async getPlatformStats() {
+    const curatedWhere = {
+      approved: true,
+      source: ProjectSource.CURATED,
+      founderId: { not: null },
+    } as const;
+
+    const [verifiedFounders, activeProjects, communityMembers, portfolioAgg, tradeCount] =
+      await Promise.all([
+        this.prisma.founder.count({
+          where: { projects: { some: curatedWhere } },
+        }),
+        this.prisma.project.count({ where: curatedWhere }),
+        this.prisma.user.count({ where: { banned: false } }),
+        this.prisma.paperPortfolio.aggregate({
+          _sum: { totalValue: true },
+          _count: true,
+        }),
+        this.prisma.paperTrade.count(),
+      ]);
+
+    const simulatedCapital =
+      Number(portfolioAgg._sum.totalValue ?? 0) > 0
+        ? Number(portfolioAgg._sum.totalValue)
+        : portfolioAgg._count * 10_000;
+
+    return {
+      verifiedFounders,
+      activeProjects,
+      communityMembers,
+      simulatedCapital: Math.round(simulatedCapital),
+      paperTraders: portfolioAgg._count,
+      totalTrades: tradeCount,
+    };
+  }
+
   async findBySlug(slug: string) {
     await this.metricsSync.syncBySlugIfStale(slug);
 
