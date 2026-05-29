@@ -25,10 +25,14 @@ export type HandsFreeAction =
   | 'create_github_issues'
   | 'launch_report'
   | 'roadmap'
-  | 'community_update';
+  | 'community_update'
+  | 'resume_work';
 
 export function detectHandsFreeAction(prompt: string): HandsFreeAction {
   const p = prompt.toLowerCase();
+  if (/^(finish|continue|resume|where i left|pick up)/.test(p.trim()) || /\bfinish it\b/.test(p)) {
+    return 'resume_work';
+  }
   if (/publish|push.*(community|everywhere|progress|update)/.test(p)) return 'publish_progress';
   if (/community update|announce.*community/.test(p)) return 'community_update';
   if (/github issue|create issue/.test(p)) return 'create_github_issues';

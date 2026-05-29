@@ -26,6 +26,7 @@ export class BuilderService {
       preferredModel: settings.preferredModel,
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
       autoPublishOnEvent: settings.autoPublishOnEvent,
+      currentGoalFocus: settings.currentGoalFocus,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected: p.credentialProvider ? connected.has(p.credentialProvider) : p.key === 'RULE_BASED',
@@ -45,6 +46,7 @@ export class BuilderService {
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
+      currentGoalFocus?: string;
     },
   ) {
     if (input.defaultProvider) {
@@ -70,6 +72,7 @@ export class BuilderService {
         preferredModel: input.preferredModel,
         autoCreateGitHubIssues: input.autoCreateGitHubIssues ?? false,
         autoPublishOnEvent: input.autoPublishOnEvent ?? false,
+        currentGoalFocus: input.currentGoalFocus,
       },
       update: {
         ...(input.defaultProvider !== undefined ? { defaultProvider: input.defaultProvider } : {}),
@@ -80,6 +83,7 @@ export class BuilderService {
         ...(input.autoPublishOnEvent !== undefined
           ? { autoPublishOnEvent: input.autoPublishOnEvent }
           : {}),
+        ...(input.currentGoalFocus !== undefined ? { currentGoalFocus: input.currentGoalFocus } : {}),
       },
     });
 

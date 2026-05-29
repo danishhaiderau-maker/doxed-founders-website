@@ -1674,6 +1674,7 @@ export interface BuilderSettings {
   preferredModel: string | null;
       autoCreateGitHubIssues: boolean;
   autoPublishOnEvent: boolean;
+  currentGoalFocus: string | null;
   githubTokenConnected: boolean;
   providers: {
     key: string;
@@ -1696,6 +1697,7 @@ export function updateBuilderSettings(
     preferredModel?: string;
     autoCreateGitHubIssues?: boolean;
     autoPublishOnEvent?: boolean;
+    currentGoalFocus?: string;
   },
   token: string,
 ) {
@@ -1769,9 +1771,51 @@ export function copilotAsk(prompt: string, token: string) {
 }
 
 export function copilotHandsFree(prompt: string, token: string) {
-  return apiFetch<{ action: string; answer: string }>(
+  return apiFetch<{ action: string; answer: string; cursorCopy?: string }>(
     '/copilot/hands-free',
     { method: 'POST', body: JSON.stringify({ prompt }) },
+    token,
+  );
+}
+
+export interface ProjectMemory {
+  welcomeMessage: string;
+  project: { id: string; name: string; slug: string; lifecycleStage: string } | null;
+  currentGoal: string;
+  progressPercent: number;
+  launchReadiness: number;
+  buildStreakDays: number;
+  lastActivityAt: string | null;
+  lastActivityLabel: string;
+  lastCommit: string | null;
+  repoFullName: string | null;
+  currentBranch: string | null;
+  openTasks: { id: string; title: string; kind: string; status: string; done: boolean }[];
+  suggestedNextStep: string;
+  deployments: { provider: string; label: string; healthy: boolean }[];
+  raiseStatus: {
+    goalUsd: number;
+    allocatedUsd: number;
+    participantCount: number;
+    status: string;
+  } | null;
+  community: { followers: number; featureRequests: number };
+  defaultAiProvider: string;
+  cursorCopy: string;
+}
+
+export function fetchCopilotMemory(token: string) {
+  return apiFetch<ProjectMemory>('/copilot/memory', undefined, token);
+}
+
+export function fetchCopilotStandup(token: string) {
+  return apiFetch<{ standup: string; memory: ProjectMemory }>('/copilot/standup', undefined, token);
+}
+
+export function copilotResume(token: string) {
+  return apiFetch<{ message: string; memory: ProjectMemory; cursorCopy: string }>(
+    '/copilot/resume',
+    { method: 'POST' },
     token,
   );
 }

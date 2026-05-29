@@ -51,3 +51,4 @@ export * from './founder-agents';
 export * from './build-queue';
 export * from './ai-providers';
 export * from './event-bus';
+export * from './project-memory';

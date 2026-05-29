@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { BuilderModule } from '../builder/builder.module';
+import { GitHubModule } from '../github/github.module';
 import { BuildQueueModule } from '../build-queue/build-queue.module';
 import { FounderOsModule } from '../founder-os/founder-os.module';
 import { EventOrchestratorService } from './event-orchestrator.service';
@@ -13,6 +14,7 @@ import { FounderMetricsService } from './founder-metrics.service';
   imports: [
     NotificationsModule,
     BuilderModule,
+    GitHubModule,
     forwardRef(() => BuildQueueModule),
     forwardRef(() => FounderOsModule),
   ],

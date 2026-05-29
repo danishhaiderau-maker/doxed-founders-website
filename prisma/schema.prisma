@@ -1187,6 +1187,7 @@ model FounderBuilderSettings {
   preferredModel         String?
   autoCreateGitHubIssues Boolean    @default(false)
   autoPublishOnEvent     Boolean    @default(false)
+  currentGoalFocus       String?
   createdAt              DateTime   @default(now())
   updatedAt              DateTime   @updatedAt
 

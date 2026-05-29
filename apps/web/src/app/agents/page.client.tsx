@@ -48,7 +48,7 @@ export default function AgentsPageClient() {
           <p className="mt-2 max-w-2xl text-sm text-zinc-400">
             Install research, community, audit, and launch agents tied to verified founders and real
             projects. Every agent run produces specs, tasks, and GitHub-ready output — then sync to
-            Build Room.
+            Founder Copilot.
           </p>
           {session ? (
             <Link

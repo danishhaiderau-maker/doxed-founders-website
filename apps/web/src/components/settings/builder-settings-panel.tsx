@@ -42,6 +42,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     preferredModel?: string;
     autoCreateGitHubIssues?: boolean;
     autoPublishOnEvent?: boolean;
+    currentGoalFocus?: string;
   }) {
     setErr(null);
     try {
@@ -149,6 +150,15 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           />
           Auto-create GitHub issues when Quick Build captures ideas
         </label>
+        <label className="mt-4 block text-sm">
+          <span className="text-zinc-400">Current goal focus</span>
+          <input
+            defaultValue={settings.currentGoalFocus ?? ''}
+            onBlur={(e) => saveSettings({ currentGoalFocus: e.target.value.trim() || undefined })}
+            placeholder="e.g. Referral System — shown on welcome-back briefing"
+            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
+          />
+        </label>
       </section>
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
@@ -200,7 +210,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               )}
               {p.key === 'CURSOR' && (
                 <p className="mt-2 text-xs text-indigo-300">
-                  No remote API — use Copy for Cursor in Build Room when at your desk.
+                  No remote API — use Copy for builder in Founder Copilot when at your desk.
                 </p>
               )}
             </div>
@@ -213,7 +223,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         <p className="mt-1 text-sm text-zinc-500">
           Required for creating issues and listing PRs on private repos. Connect repo in{' '}
           <Link href="/founder-den?tab=build" className="text-emerald-400 underline">
-            Build Room
+            Founder Copilot
           </Link>{' '}
           first.
         </p>

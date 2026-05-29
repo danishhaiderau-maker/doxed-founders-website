@@ -3,12 +3,12 @@
 const STORAGE_KEY = 'dcf-hands-free-intro-seen';
 
 const EXAMPLES = [
-  'Build a referral system.',
+  'Finish it.',
+  'Continue where I left off.',
   'Generate this week\'s update.',
   'Create GitHub issues from roadmap.',
   'Publish latest progress everywhere.',
   'Summarize commits for traders.',
-  'Create launch readiness report.',
 ];
 
 export type HandsFreeModalProps = {
@@ -32,8 +32,8 @@ export function HandsFreeModal({ onTry, onDismiss }: HandsFreeModalProps) {
         <p className="text-2xl">🚀</p>
         <h2 className="mt-2 text-xl font-bold text-white">Hands-Free Mode</h2>
         <p className="mt-2 text-sm text-zinc-400">
-          Tell Founder OS what you want. It coordinates your connected tools through the event bus —
-          tasks, GitHub, community, and publish everywhere.
+          Tell Founder OS what you want — even from mobile. Type &quot;Finish it&quot; to resume your
+          suggested next task via your connected builder.
         </p>
         <ul className="mt-4 space-y-2">
           {EXAMPLES.map((ex) => (

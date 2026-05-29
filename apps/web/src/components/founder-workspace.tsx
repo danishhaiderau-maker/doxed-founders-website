@@ -30,7 +30,7 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'community', label: 'Community' },
   { id: 'funding', label: 'Funding' },
   { id: 'agents', label: 'Agents' },
-  { id: 'build', label: 'Build Room 2.0' },
+  { id: 'build', label: 'Founder Copilot' },
   { id: 'analytics', label: 'Analytics' },
 ];
 
@@ -167,8 +167,8 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
 
       {session && !hasFounder && tab !== 'activity' && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          <strong className="text-white">Activate founder profile</strong> in Analytics to unlock GitHub,
-          Build Room, and integrations.
+          Activate your founder profile in Analytics to unlock GitHub,
+          Founder Copilot, and integrations.
         </div>
       )}
 
@@ -236,7 +236,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           <p className="text-sm text-zinc-400">
             Open{' '}
             <button type="button" onClick={() => onTabChange('build')} className="text-emerald-400 underline">
-              Build Room 2.0
+              Founder Copilot
             </button>{' '}
             to manage ideas, tasks, and GitHub issues. Capture ideas on mobile with Quick Build before you forget.
           </p>

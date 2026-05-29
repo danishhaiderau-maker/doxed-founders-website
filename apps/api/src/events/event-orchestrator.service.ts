@@ -63,7 +63,7 @@ export class EventOrchestratorService {
       await this.notifications.notifyUser(event.userId, {
         type: NotificationType.FOUNDER_EVENT,
         title: event.title,
-        body: 'Review the suggested update in Build Room — publish everywhere when ready.',
+        body: 'Review the suggested update in Founder Copilot — publish everywhere when ready.',
         link: '/founder-den?tab=build',
       });
     }

@@ -12,8 +12,9 @@ import {
   runCommandBar,
   updateBuildQueueItem,
 } from '@/lib/api';
-import { FounderOsPanel } from '@/components/founder-os-panel';
+import { FounderCopilotBriefing } from '@/components/founder-copilot-briefing';
 import { FounderCopilotBar } from '@/components/founder-copilot-bar';
+import { FounderOsPanel } from '@/components/founder-os-panel';
 import { HandsFreeModal, shouldShowHandsFreeIntro } from '@/components/hands-free-modal';
 import { copilotHandsFree } from '@/lib/api';
 
@@ -207,6 +208,15 @@ export function BuildRoom2({
           onDismiss={() => setShowHandsFree(false)}
         />
       )}
+
+      <FounderCopilotBriefing
+        accessToken={accessToken}
+        onMessage={onMessage}
+        onRefresh={() => {
+          load();
+          onRefresh?.();
+        }}
+      />
 
       <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
 

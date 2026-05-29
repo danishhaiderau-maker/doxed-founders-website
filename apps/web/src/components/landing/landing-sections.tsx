@@ -454,7 +454,7 @@ export function LandingProofLayer() {
               Stack hub · connect once
             </p>
             <ul className="mt-4 space-y-2 text-sm">
-              {['GitHub', 'Vercel', 'Railway', 'Neon', 'DigitalOcean', 'Supabase', 'X', 'Cursor Build Room'].map(
+              {['GitHub', 'Vercel', 'Railway', 'Neon', 'DigitalOcean', 'Supabase', 'X', 'Founder Copilot'].map(
                 (name) => (
                   <li
                     key={name}
