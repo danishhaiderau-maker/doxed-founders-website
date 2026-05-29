@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { slugify, formatPublicAccountLabel, POINTS } from '@dcf/utils';
+import { slugify, formatPublicAccountLabel, POINTS, STARTING_CASH_USD, RESTRICTED_CASH_THRESHOLD_USD, TOP_UP_FEE_USD } from '@dcf/utils';
 import {
   AnalyticsEventType,
   LeaderboardPeriod,
@@ -21,7 +21,7 @@ import { PointsService } from '../points/points.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 
-const STARTING_CASH = 10_000;
+const STARTING_CASH = STARTING_CASH_USD;
 
 @Injectable()
 export class PaperTradingService {
@@ -65,15 +65,27 @@ export class PaperTradingService {
       throw new NotFoundException('User not found');
     }
 
-    return this.prisma.paperPortfolio.upsert({
-      where: { userId },
-      update: {},
-      create: {
+    const existing = await this.prisma.paperPortfolio.findUnique({ where: { userId } });
+    if (existing) return existing;
+
+    const portfolio = await this.prisma.paperPortfolio.create({
+      data: {
         userId,
         cashBalance: STARTING_CASH,
         totalValue: STARTING_CASH,
       },
     });
+
+    await this.prisma.virtualEconomyEvent.create({
+      data: {
+        userId,
+        type: 'INITIAL_GRANT',
+        amountUsd: new Prisma.Decimal(STARTING_CASH),
+        note: 'Signup paper trading grant',
+      },
+    });
+
+    return portfolio;
   }
 
   async getPortfolio(userId: string) {
@@ -169,11 +181,10 @@ export class PaperTradingService {
       roi,
       startingCash: STARTING_CASH,
       positions,
-      isBusted:
-        cashBalance < 1 &&
-        positions.length === 0 &&
-        positionsValue < 1,
-      resetFeeUsd: 50,
+      isBusted: cashBalance < RESTRICTED_CASH_THRESHOLD_USD,
+      isRestricted: cashBalance < RESTRICTED_CASH_THRESHOLD_USD,
+      restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
+      resetFeeUsd: TOP_UP_FEE_USD,
     };
   }
 
@@ -263,7 +274,7 @@ export class PaperTradingService {
       );
     }
 
-    await this.assertBustedForReset(userId);
+    await this.assertRestrictedForTopUp(userId);
 
     const portfolio = await this.prisma.paperPortfolio.findUnique({
       where: { userId },
@@ -272,26 +283,47 @@ export class PaperTradingService {
       throw new NotFoundException('Paper portfolio not found');
     }
 
-    await this.prisma.paperPortfolio.update({
-      where: { id: portfolio.id },
-      data: {
-        cashBalance: STARTING_CASH,
-        totalValue: STARTING_CASH,
-      },
+    const priorCash = Number(portfolio.cashBalance);
+    const creditUsd = STARTING_CASH - priorCash;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.paperPortfolio.update({
+        where: { id: portfolio.id },
+        data: {
+          cashBalance: STARTING_CASH,
+          totalValue: { increment: creditUsd > 0 ? creditUsd : 0 },
+        },
+      });
+      await tx.virtualEconomyEvent.create({
+        data: {
+          userId,
+          type: 'TOP_UP_CREDIT',
+          amountUsd: new Prisma.Decimal(creditUsd > 0 ? creditUsd : 0),
+          note: `Portfolio top-up: cash restored to $${STARTING_CASH}`,
+        },
+      });
+      await tx.virtualEconomyEvent.create({
+        data: {
+          userId,
+          type: 'TOP_UP_FEE',
+          amountUsd: new Prisma.Decimal(TOP_UP_FEE_USD),
+          note: 'Real-money top-up fee (virtual economy sink)',
+        },
+      });
     });
 
     return {
       success: true,
-      resetFeeUsd: 50,
+      resetFeeUsd: TOP_UP_FEE_USD,
       message:
         source === 'stripe'
-          ? 'Payment received. Fresh $10,000 paper cash unlocked — trade smarter.'
-          : 'Penalty paid (dev mode). Fresh $10,000 paper cash unlocked. Trade smarter.',
+          ? 'Payment received. Virtual cash restored to $10,000 — trade and allocate again.'
+          : 'Top-up complete (dev mode). Virtual cash restored to $10,000.',
       cashBalance: STARTING_CASH,
     };
   }
 
-  async assertBustedForReset(userId: string) {
+  async assertRestrictedForTopUp(userId: string) {
     const portfolio = await this.prisma.paperPortfolio.findUnique({
       where: { userId },
       include: { positions: true },
@@ -302,15 +334,20 @@ export class PaperTradingService {
     }
 
     const cashBalance = Number(portfolio.cashBalance);
-    const isBusted = cashBalance < 1 && portfolio.positions.length === 0;
+    const isRestricted = cashBalance < RESTRICTED_CASH_THRESHOLD_USD;
 
-    if (!isBusted) {
+    if (!isRestricted) {
       throw new BadRequestException(
-        'Reset only available when your balance is wiped (under $1 with no open positions).',
+        `Top-up only required when cash falls below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}.`,
       );
     }
 
     return portfolio;
+  }
+
+  /** @deprecated use assertRestrictedForTopUp */
+  async assertBustedForReset(userId: string) {
+    return this.assertRestrictedForTopUp(userId);
   }
 
   async migrateGuestPortfolio(guestUserId: string, targetUserId: string) {
@@ -444,6 +481,11 @@ export class PaperTradingService {
     const quantity = amountUsd / price;
 
     if (dto.side === PaperTradeSide.BUY) {
+      if (Number(portfolio.cashBalance) < RESTRICTED_CASH_THRESHOLD_USD) {
+        throw new BadRequestException(
+          `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to continue buying.`,
+        );
+      }
       if (Number(portfolio.cashBalance) < amountUsd) {
         throw new BadRequestException('Insufficient paper cash balance');
       }
@@ -680,11 +722,12 @@ export class PaperTradingService {
     const stripeEnabled = Boolean(process.env.STRIPE_SECRET_KEY?.trim());
     return {
       available: true,
-      resetFeeUsd: 50,
+      resetFeeUsd: TOP_UP_FEE_USD,
+      restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       stripeEnabled,
       message: stripeEnabled
-        ? 'Wiped out? Pay the $50 penalty via Stripe to restart with $10,000 virtual cash.'
-        : 'Wiped out? Pay the $50 penalty to restart with $10,000 (dev mode simulates payment).',
+        ? `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} via Stripe to restore $10,000 virtual cash.`
+        : `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} to restore $10,000 virtual cash (dev mode simulates payment).`,
     };
   }
 

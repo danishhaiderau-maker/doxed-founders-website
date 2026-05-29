@@ -37,3 +37,4 @@ export * from './token-price';
 export * from './token-input';
 export * from './risk-score';
 export * from './founder-presence';
+export * from './virtual-economy';

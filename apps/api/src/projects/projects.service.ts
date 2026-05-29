@@ -240,6 +240,10 @@ export class ProjectsService {
       dexscreenerUrl: project.dexscreenerUrl,
       featured: project.featured,
       source: project.source,
+      lifecycleStage: project.lifecycleStage,
+      launchReadiness: project.launchReadiness,
+      bubbleScore: project.bubbleScore,
+      isLiveToken: project.isLiveToken,
       chain: project.chain,
       category: project.category,
       founder: project.founder

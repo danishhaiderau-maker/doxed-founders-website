@@ -117,6 +117,36 @@ enum SimulatedRaiseStatus {
   CANCELLED
 }
 
+enum ProjectLifecycleStage {
+  IDEA
+  BRAINSTORMING
+  PROTOTYPE
+  MVP
+  BETA
+  DEMAND_VALIDATION
+  SIMULATED_RAISE
+  LAUNCH_READY
+  TOKEN_LAUNCH
+  LIVE_TRADING
+}
+
+enum UserProgressTier {
+  EXPLORER
+  TRADER
+  COMMUNITY_CONTRIBUTOR
+  FOUNDER_IDEA
+  FOUNDER_BUILDING
+  LAUNCH_CANDIDATE
+  PROVEN_FOUNDER
+}
+
+enum FounderApplicationStatus {
+  DRAFT
+  SUBMITTED
+  ACTIVE
+  REJECTED
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -132,6 +162,7 @@ model User {
   bannedReason  String?
   reputationPoints Int    @default(0)
   contributorLevel Int    @default(1)
+  progressTier     UserProgressTier @default(EXPLORER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -151,6 +182,9 @@ model User {
   founder              Founder?
   raiseAllocations     RaiseAllocation[]
   demandPollVotes      DemandPollVote[]
+  projectFollows       ProjectFollow[]
+  founderApplications  FounderApplication[]
+  economyEvents        VirtualEconomyEvent[]
 
   @@index([email])
   @@index([role])
@@ -262,6 +296,13 @@ model Project {
   lastTradeAt     DateTime?
   featured        Boolean       @default(false)
   approved        Boolean       @default(false)
+  lifecycleStage  ProjectLifecycleStage @default(IDEA)
+  launchReadiness Int           @default(0)
+  plannedLaunchDate DateTime?
+  launchRequestedAt DateTime?
+  isLiveToken     Boolean       @default(false)
+  launchPriceUsd  Decimal?      @db.Decimal(24, 12)
+  bubbleScore     Int           @default(0)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -286,8 +327,12 @@ model Project {
   demandPolls    DemandPoll[]
   founderVideos  FounderVideo[]
   buildPosts     FounderBuildPost[]
+  followers      ProjectFollow[]
+  communityThreads CommunityThread[]
 
   @@index([slug])
+  @@index([lifecycleStage])
+  @@index([bubbleScore])
   @@index([chainId])
   @@index([categoryId])
   @@index([featured])
@@ -669,6 +714,7 @@ model SimulatedRaise {
   goalUsd         Decimal              @db.Decimal(16, 2)
   tokenAllocation String?
   durationDays    Int                  @default(14)
+  plannedLaunchDate DateTime?
   status          SimulatedRaiseStatus @default(DRAFT)
   startsAt        DateTime?
   endsAt          DateTime?
@@ -723,6 +769,86 @@ model DemandPollVote {
 
   @@unique([pollId, userId])
   @@index([pollId])
+}
+
+model ProjectFollow {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([projectId])
+}
+
+model FounderApplication {
+  id              String                    @id @default(cuid())
+  userId          String
+  projectName     String
+  websiteUrl      String?
+  twitterHandle   String?
+  githubUrl       String?
+  videoUrl        String?
+  ideaDescription String                    @db.Text
+  lifecycleStage  ProjectLifecycleStage     @default(IDEA)
+  status          FounderApplicationStatus  @default(SUBMITTED)
+  projectId       String?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+}
+
+model VirtualEconomyEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  type      String
+  amountUsd Decimal  @db.Decimal(16, 2)
+  note      String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([type])
+  @@index([createdAt])
+}
+
+model CommunityThread {
+  id        String   @id @default(cuid())
+  projectId String
+  channel   String
+  title     String
+  body      String   @db.Text
+  authorId  String?
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  project  Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments CommunityComment[]
+
+  @@index([projectId, channel])
+}
+
+model CommunityComment {
+  id        String   @id @default(cuid())
+  threadId  String
+  parentId  String?
+  userId    String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  thread  CommunityThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  parent  CommunityComment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies CommunityComment[] @relation("CommentReplies")
+
+  @@index([threadId])
+  @@index([parentId])
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────

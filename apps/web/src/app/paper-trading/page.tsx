@@ -573,14 +573,14 @@ function PaperTradingPageContent() {
             <div className="rounded-xl border border-red-500/40 bg-red-950/20 p-4 text-sm">
               <p className="font-medium text-red-200">💀 Portfolio wiped</p>
               <p className="mt-2 text-[var(--color-muted)]">
-                Pay the $50 penalty to restart with $10,000 paper cash.
+                Cash below $1,000. Top up for $25 to restore $10,000 virtual cash.
               </p>
               <button
                 type="button"
                 onClick={() => setShowBustModal(true)}
                 className="mt-3 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
               >
-                Pay $50 &amp; restart
+                Top up $25 &amp; continue
               </button>
             </div>
           )}
@@ -698,7 +698,7 @@ function PaperTradingPageContent() {
           preview={preview}
           amountUsd={Number(amountUsd)}
           cashBalance={portfolio.cashBalance}
-          resetFeeUsd={portfolio.resetFeeUsd ?? 50}
+          resetFeeUsd={portfolio.resetFeeUsd ?? 25}
           thesis={tradeComment}
           onThesisChange={setTradeComment}
           founderDoxxedTick={founderDoxxedTick}
@@ -714,7 +714,7 @@ function PaperTradingPageContent() {
 
       <BustPenaltyModal
         open={showBustModal}
-        resetFeeUsd={portfolio?.resetFeeUsd ?? 50}
+        resetFeeUsd={portfolio?.resetFeeUsd ?? 25}
         stripeEnabled={resetInfo?.stripeEnabled ?? false}
         loading={resetLoading}
         onClose={() => {

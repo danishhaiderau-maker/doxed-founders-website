@@ -1,9 +1,22 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
-import { Prisma, SimulatedRaiseStatus } from '@prisma/client';
+import {
+  Prisma,
+  SimulatedRaiseStatus,
+  ProjectLifecycleStage,
+  UserProgressTier,
+  FounderApplicationStatus,
+} from '@prisma/client';
 import {
   computeFounderReputation,
   computePresenceLevel,
   JOURNEY_STAGES,
+  computeStartupGenome,
+  computeLaunchReadiness,
+  LIFECYCLE_STAGES,
+  STARTING_CASH_USD,
+  RESTRICTED_CASH_THRESHOLD_USD,
+  TOP_UP_FEE_USD,
+  slugify,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -26,6 +39,22 @@ const founderRoomInclude = {
   videos: { orderBy: { publishedAt: 'desc' as const } },
   buildPosts: { orderBy: { publishedAt: 'desc' as const }, take: 50 },
 } satisfies Prisma.FounderInclude;
+
+const COMMUNITY_CHANNELS = [
+  'ANNOUNCEMENTS',
+  'GENERAL',
+  'FEATURE_REQUESTS',
+  'QUESTIONS',
+  'LAUNCH',
+  'DEVELOPMENT',
+] as const;
+
+const DEFAULT_POLL_TEMPLATES = [
+  { type: 'WOULD_USE' as const, question: 'Would you use this?', options: ['Yes', 'Maybe', 'No'] },
+  { type: 'WOULD_PAY' as const, question: 'Would you pay for this?', options: ['Yes', 'Maybe', 'No'] },
+  { type: 'TOKEN_INTEREST' as const, question: 'Do we need a token?', options: ['Yes', 'No', 'Not sure'] },
+  { type: 'WOULD_USE' as const, question: 'What should we build next?', options: ['Feature A', 'Feature B', 'Other'] },
+];
 
 @Injectable()
 export class FounderDenService {
@@ -85,7 +114,7 @@ export class FounderDenService {
     };
   }
 
-  async getProjectRoom(slug: string) {
+  async getProjectRoom(slug: string, viewerUserId?: string) {
     const project = await this.prisma.project.findFirst({
       where: { slug, approved: true },
       include: {
@@ -94,6 +123,7 @@ export class FounderDenService {
         founder: {
           include: {
             videos: { orderBy: { publishedAt: 'desc' }, take: 10 },
+            user: { select: { id: true } },
           },
         },
         metrics: true,
@@ -106,6 +136,19 @@ export class FounderDenService {
         },
         demandPolls: { where: { active: true }, include: { votes: true } },
         buildPosts: { orderBy: { publishedAt: 'desc' }, take: 30 },
+        followers: true,
+        communityThreads: {
+          orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
+          take: 50,
+          include: {
+            comments: {
+              where: { parentId: null },
+              orderBy: { createdAt: 'asc' },
+              take: 20,
+            },
+          },
+        },
+        _count: { select: { followers: true, buildPosts: true } },
       },
     });
 
@@ -116,7 +159,36 @@ export class FounderDenService {
       ? activeRaise.allocations.reduce((s, a) => s + Number(a.amountUsd), 0)
       : 0;
 
+    const amounts = activeRaise?.allocations.map((a) => Number(a.amountUsd)) ?? [];
+    const avgCommitment = amounts.length
+      ? amounts.reduce((s, v) => s + v, 0) / amounts.length
+      : 0;
+    const largestCommitment = amounts.length ? Math.max(...amounts) : 0;
+
+    const demandRank = await this.getDemandRank(project.id, totalAllocated);
+    const launchReadiness = await this.refreshLaunchReadiness(project.id);
+
+    const githubConnected = Boolean(
+      project.socials?.githubUrl || project.founder?.githubUrl || project.founder?.githubUsername,
+    );
+    const pollVoteCount = project.demandPolls.reduce((s, p) => s + p.votes.length, 0);
+    const genome = computeStartupGenome({
+      buildPostCount: project._count.buildPosts,
+      githubConnected,
+      simulatedDemandUsd: totalAllocated,
+      followerCount: project._count.followers,
+      videoCount: project.founder?.videos.length ?? 0,
+      pollVoteCount,
+      launchReadiness,
+    });
+
+    const launchpadRequirements = this.computeLaunchpadRequirements(project, totalAllocated, launchReadiness);
+    const isFollowing = viewerUserId
+      ? project.followers.some((f) => f.userId === viewerUserId)
+      : false;
+
     return {
+      id: project.id,
       slug: project.slug,
       name: project.name,
       ticker: project.ticker,
@@ -127,9 +199,33 @@ export class FounderDenService {
       dexscreenerUrl: project.dexscreenerUrl,
       chain: project.chain,
       category: project.category,
-      metrics: project.metrics,
+      lifecycleStage: project.lifecycleStage,
+      launchReadiness,
+      plannedLaunchDate: project.plannedLaunchDate,
+      launchRequestedAt: project.launchRequestedAt,
+      isLiveToken: project.isLiveToken,
+      launchPriceUsd: project.launchPriceUsd ? Number(project.launchPriceUsd) : null,
+      followerCount: project._count.followers,
+      isFollowing,
+      genome,
+      lifecycleStages: LIFECYCLE_STAGES,
+      metrics: project.metrics
+        ? {
+            priceUsd: project.metrics.priceUsd ? Number(project.metrics.priceUsd) : null,
+            marketCap: project.metrics.marketCap ? Number(project.metrics.marketCap) : null,
+            fdv: project.metrics.fdv ? Number(project.metrics.fdv) : null,
+            volume24h: project.metrics.volume24h ? Number(project.metrics.volume24h) : null,
+            liquidity: project.metrics.liquidity ? Number(project.metrics.liquidity) : null,
+            holders: project.metrics.holders,
+            priceChange24h: project.metrics.priceChange24h
+              ? Number(project.metrics.priceChange24h)
+              : null,
+          }
+        : null,
       socials: project.socials,
       founder: project.founder ? this.mapFounderBrief(project.founder) : null,
+      founderScore: project.founder?.reputationScore ?? 0,
+      buildStreakDays: project.founder?.buildStreakDays ?? 0,
       videos: project.founder?.videos ?? [],
       buildPosts: project.buildPosts,
       roadmap: project.roadmapItems,
@@ -139,13 +235,25 @@ export class FounderDenService {
             goalUsd: Number(activeRaise.goalUsd),
             tokenAllocation: activeRaise.tokenAllocation,
             durationDays: activeRaise.durationDays,
+            plannedLaunchDate: activeRaise.plannedLaunchDate,
             status: activeRaise.status,
             startsAt: activeRaise.startsAt,
             endsAt: activeRaise.endsAt,
             totalAllocated,
             allocatorCount: activeRaise.allocations.length,
+            convictionScore: Math.min(
+              100,
+              Math.round((totalAllocated / Number(activeRaise.goalUsd || 1)) * 100),
+            ),
           }
         : null,
+      demandAnalytics: {
+        interestedUsers: project._count.followers + (activeRaise?.allocations.length ?? 0),
+        averageCommitment: Math.round(avgCommitment),
+        largestCommitment,
+        demandRank,
+        totalDemand: totalAllocated,
+      },
       demandPolls: project.demandPolls.map((p) => ({
         id: p.id,
         type: p.type,
@@ -153,6 +261,17 @@ export class FounderDenService {
         options: p.options,
         voteCounts: this.tallyPollVotes(p.votes, p.options as string[]),
       })),
+      communityChannels: COMMUNITY_CHANNELS,
+      communityThreads: project.communityThreads.map((t) => ({
+        id: t.id,
+        channel: t.channel,
+        title: t.title,
+        body: t.body,
+        pinned: t.pinned,
+        createdAt: t.createdAt,
+        commentCount: t.comments.length,
+      })),
+      launchpadAccess: launchpadRequirements,
     };
   }
 
@@ -245,9 +364,15 @@ export class FounderDenService {
     const portfolio = await this.prisma.paperPortfolio.findUnique({ where: { userId } });
     if (!portfolio) throw new BadRequestException('Start a paper trading session first');
 
+    const cash = Number(portfolio.cashBalance);
+    if (cash < RESTRICTED_CASH_THRESHOLD_USD) {
+      throw new BadRequestException(
+        `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to allocate.`,
+      );
+    }
+
     const existing = raise.allocations.find((a) => a.userId === userId);
     const existingAmt = existing ? Number(existing.amountUsd) : 0;
-    const cash = Number(portfolio.cashBalance);
     if (amountUsd - existingAmt > cash) {
       throw new BadRequestException('Insufficient virtual cash for this allocation');
     }
@@ -265,9 +390,19 @@ export class FounderDenService {
           where: { userId },
           data: { cashBalance: { increment: -delta } },
         });
+        await tx.virtualEconomyEvent.create({
+          data: {
+            userId,
+            type: delta > 0 ? 'RAISE_ALLOCATE' : 'RAISE_DEALLOCATE',
+            amountUsd: new Prisma.Decimal(Math.abs(delta)),
+            note: `Simulated raise ${raiseId}`,
+          },
+        });
       }
     });
 
+    await this.syncUserProgressTier(userId);
+    await this.refreshLaunchReadiness(raise.projectId);
     return { success: true, amountUsd };
   }
 
@@ -281,7 +416,510 @@ export class FounderDenService {
       update: { optionKey },
     });
 
+    await this.syncUserProgressTier(userId);
     return { success: true };
+  }
+
+  async getDashboard(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        founder: {
+          include: {
+            projects: {
+              where: { approved: true },
+              include: {
+                simulatedRaises: {
+                  where: { status: SimulatedRaiseStatus.ACTIVE },
+                  include: { allocations: true },
+                },
+                _count: { select: { followers: true } },
+              },
+            },
+          },
+        },
+        paperPortfolio: true,
+        raiseAllocations: { include: { raise: { include: { project: true } } } },
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const founder = user.founder;
+    const primaryProject = founder?.projects[0];
+    const activeRaise = primaryProject?.simulatedRaises[0];
+    const simulatedDemand = activeRaise
+      ? activeRaise.allocations.reduce((s, a) => s + Number(a.amountUsd), 0)
+      : 0;
+
+    let launchReadiness = primaryProject?.launchReadiness ?? 0;
+    if (primaryProject) {
+      launchReadiness = await this.refreshLaunchReadiness(primaryProject.id);
+    }
+
+    return {
+      progressTier: user.progressTier,
+      founderScore: founder?.reputationScore ?? 0,
+      currentStage: primaryProject?.lifecycleStage ?? 'IDEA',
+      followers: primaryProject?._count.followers ?? 0,
+      buildStreakDays: founder?.buildStreakDays ?? 0,
+      simulatedDemand,
+      launchReadiness,
+      cashBalance: user.paperPortfolio ? Number(user.paperPortfolio.cashBalance) : STARTING_CASH_USD,
+      hasFounderProfile: Boolean(founder),
+      primaryProjectSlug: primaryProject?.slug ?? null,
+      founderSlug: founder?.slug ?? null,
+      applicationPending: await this.prisma.founderApplication.count({
+        where: { userId, status: FounderApplicationStatus.SUBMITTED },
+      }),
+    };
+  }
+
+  async submitFounderApplication(
+    userId: string,
+    dto: {
+      projectName: string;
+      websiteUrl?: string;
+      twitterHandle?: string;
+      githubUrl?: string;
+      videoUrl?: string;
+      ideaDescription: string;
+      lifecycleStage: ProjectLifecycleStage;
+    },
+  ) {
+    const existingFounder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (existingFounder) {
+      throw new BadRequestException('You already have an active founder profile.');
+    }
+
+    const chain = await this.prisma.chain.findFirst();
+    if (!chain) throw new BadRequestException('Platform not configured — no chains seeded.');
+
+    const baseSlug = slugify(dto.projectName);
+    let slug = baseSlug;
+    let n = 1;
+    while (await this.prisma.project.findUnique({ where: { slug } })) {
+      slug = `${baseSlug}-${n++}`;
+    }
+
+    const founderSlug = slugify(dto.projectName + '-founder').slice(0, 48);
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const founderName = user?.name ?? dto.projectName;
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const founder = await tx.founder.create({
+        data: {
+          slug: founderSlug,
+          userId,
+          name: founderName,
+          websiteUrl: dto.websiteUrl?.trim(),
+          twitterUrl: dto.twitterHandle
+            ? dto.twitterHandle.startsWith('http')
+              ? dto.twitterHandle
+              : `https://x.com/${dto.twitterHandle.replace(/^@/, '')}`
+            : undefined,
+          githubUrl: dto.githubUrl?.trim(),
+          videoUrl: dto.videoUrl?.trim(),
+          publicBuildingSince: new Date(),
+        },
+      });
+
+      const project = await tx.project.create({
+        data: {
+          slug,
+          name: dto.projectName.trim(),
+          ticker: dto.projectName.slice(0, 6).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'IDEA',
+          summary: dto.ideaDescription.slice(0, 280),
+          description: dto.ideaDescription.trim(),
+          websiteUrl: dto.websiteUrl?.trim(),
+          chainId: chain.id,
+          founderId: founder.id,
+          approved: true,
+          source: 'DYNAMIC',
+          lifecycleStage: dto.lifecycleStage,
+          socials: {
+            create: {
+              githubUrl: dto.githubUrl?.trim(),
+              twitterUrl: dto.twitterHandle
+                ? dto.twitterHandle.startsWith('http')
+                  ? dto.twitterHandle
+                  : `https://x.com/${dto.twitterHandle.replace(/^@/, '')}`
+                : undefined,
+            },
+          },
+        },
+      });
+
+      if (dto.videoUrl?.trim()) {
+        await tx.founderVideo.create({
+          data: {
+            founderId: founder.id,
+            projectId: project.id,
+            type: 'INTRODUCTION',
+            title: 'Founder introduction',
+            url: dto.videoUrl.trim(),
+            durationMin: 5,
+          },
+        });
+      }
+
+      for (const tpl of DEFAULT_POLL_TEMPLATES) {
+        await tx.demandPoll.create({
+          data: {
+            projectId: project.id,
+            type: tpl.type,
+            question: tpl.question,
+            options: tpl.options,
+          },
+        });
+      }
+
+      const application = await tx.founderApplication.create({
+        data: {
+          userId,
+          projectName: dto.projectName.trim(),
+          websiteUrl: dto.websiteUrl?.trim(),
+          twitterHandle: dto.twitterHandle?.trim(),
+          githubUrl: dto.githubUrl?.trim(),
+          videoUrl: dto.videoUrl?.trim(),
+          ideaDescription: dto.ideaDescription.trim(),
+          lifecycleStage: dto.lifecycleStage,
+          status: FounderApplicationStatus.ACTIVE,
+          projectId: project.id,
+        },
+      });
+
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          progressTier:
+            dto.lifecycleStage === 'IDEA' || dto.lifecycleStage === 'BRAINSTORMING'
+              ? UserProgressTier.FOUNDER_IDEA
+              : UserProgressTier.FOUNDER_BUILDING,
+        },
+      });
+
+      return { founder, project, application };
+    });
+
+    await this.syncPresenceLevel(result.founder.id);
+    await this.refreshLaunchReadiness(result.project.id);
+    await this.refreshBubbleScore(result.project.id);
+
+    return {
+      success: true,
+      founderSlug: result.founder.slug,
+      projectSlug: result.project.slug,
+    };
+  }
+
+  async createSimulatedRaise(
+    userId: string,
+    projectId: string,
+    dto: {
+      goalUsd: number;
+      durationDays: number;
+      tokenAllocation?: string;
+      plannedLaunchDate?: string;
+    },
+  ) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, founderId: founder.id },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const startsAt = new Date();
+    const endsAt = new Date(startsAt.getTime() + dto.durationDays * 86400000);
+
+    const raise = await this.prisma.$transaction(async (tx) => {
+      await tx.simulatedRaise.updateMany({
+        where: { projectId, status: SimulatedRaiseStatus.ACTIVE },
+        data: { status: SimulatedRaiseStatus.CANCELLED },
+      });
+
+      return tx.simulatedRaise.create({
+        data: {
+          projectId,
+          goalUsd: new Prisma.Decimal(dto.goalUsd),
+          tokenAllocation: dto.tokenAllocation,
+          durationDays: dto.durationDays,
+          plannedLaunchDate: dto.plannedLaunchDate ? new Date(dto.plannedLaunchDate) : null,
+          status: SimulatedRaiseStatus.ACTIVE,
+          startsAt,
+          endsAt,
+        },
+      });
+    });
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: {
+        lifecycleStage: ProjectLifecycleStage.SIMULATED_RAISE,
+        plannedLaunchDate: dto.plannedLaunchDate ? new Date(dto.plannedLaunchDate) : undefined,
+      },
+    });
+
+    await this.syncUserProgressTier(userId, UserProgressTier.LAUNCH_CANDIDATE);
+    await this.refreshLaunchReadiness(projectId);
+
+    return raise;
+  }
+
+  async requestLaunchpadAccess(userId: string, projectId: string) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, founderId: founder.id },
+      include: {
+        simulatedRaises: { where: { status: SimulatedRaiseStatus.ACTIVE }, include: { allocations: true } },
+        buildPosts: true,
+        founder: { include: { videos: true } },
+        _count: { select: { followers: true } },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const totalDemand = project.simulatedRaises[0]?.allocations.reduce(
+      (s, a) => s + Number(a.amountUsd),
+      0,
+    ) ?? 0;
+    const readiness = await this.refreshLaunchReadiness(projectId);
+    const reqs = this.computeLaunchpadRequirements(project, totalDemand, readiness);
+
+    if (!reqs.unlocked) {
+      throw new BadRequestException('Launchpad requirements not met yet.');
+    }
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: {
+        launchRequestedAt: new Date(),
+        lifecycleStage: ProjectLifecycleStage.LAUNCH_READY,
+      },
+    });
+
+    return { success: true, requestedAt: new Date() };
+  }
+
+  async listToken(
+    userId: string,
+    projectId: string,
+    dto: { contractAddress: string; chainSlug: string; websiteUrl?: string; dexscreenerUrl?: string },
+  ) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const chain = await this.prisma.chain.findUnique({ where: { slug: dto.chainSlug as never } });
+    if (!chain) throw new BadRequestException('Invalid chain');
+
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, founderId: founder.id },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: {
+        contractAddress: dto.contractAddress.trim(),
+        chainId: chain.id,
+        websiteUrl: dto.websiteUrl?.trim() ?? project.websiteUrl,
+        dexscreenerUrl: dto.dexscreenerUrl?.trim(),
+        isLiveToken: true,
+        lifecycleStage: ProjectLifecycleStage.LIVE_TRADING,
+      },
+    });
+
+    await this.syncUserProgressTier(userId, UserProgressTier.PROVEN_FOUNDER);
+    return { success: true };
+  }
+
+  async followProject(userId: string, projectId: string) {
+    await this.prisma.projectFollow.upsert({
+      where: { userId_projectId: { userId, projectId } },
+      create: { userId, projectId },
+      update: {},
+    });
+    await this.syncUserProgressTier(userId);
+    await this.refreshBubbleScore(projectId);
+    return { success: true };
+  }
+
+  async unfollowProject(userId: string, projectId: string) {
+    await this.prisma.projectFollow.deleteMany({ where: { userId, projectId } });
+    await this.refreshBubbleScore(projectId);
+    return { success: true };
+  }
+
+  async createCommunityThread(
+    userId: string,
+    projectId: string,
+    dto: { channel: string; title: string; body: string },
+  ) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    const isFounder = founder
+      ? await this.prisma.project.count({ where: { id: projectId, founderId: founder.id } })
+      : 0;
+
+    if (dto.channel === 'ANNOUNCEMENTS' && !isFounder) {
+      throw new ForbiddenException('Only founders can post announcements.');
+    }
+
+    const thread = await this.prisma.communityThread.create({
+      data: {
+        projectId,
+        channel: dto.channel,
+        title: dto.title.trim(),
+        body: dto.body.trim(),
+        authorId: userId,
+        pinned: dto.channel === 'ANNOUNCEMENTS',
+      },
+    });
+
+    await this.syncUserProgressTier(userId);
+    return thread;
+  }
+
+  async addCommunityComment(
+    userId: string,
+    threadId: string,
+    dto: { body: string; parentId?: string },
+  ) {
+    const thread = await this.prisma.communityThread.findUnique({ where: { id: threadId } });
+    if (!thread) throw new NotFoundException('Thread not found');
+
+    const comment = await this.prisma.communityComment.create({
+      data: {
+        threadId,
+        userId,
+        body: dto.body.trim(),
+        parentId: dto.parentId,
+      },
+    });
+
+    await this.syncUserProgressTier(userId);
+    return comment;
+  }
+
+  async getCommunityThread(threadId: string) {
+    const thread = await this.prisma.communityThread.findUnique({
+      where: { id: threadId },
+      include: {
+        comments: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            replies: { orderBy: { createdAt: 'asc' } },
+          },
+        },
+      },
+    });
+    if (!thread) throw new NotFoundException('Thread not found');
+
+    const roots = thread.comments.filter((c) => !c.parentId);
+    return { ...thread, comments: roots };
+  }
+
+  async getDiscover(filter?: string) {
+    const projects = await this.prisma.project.findMany({
+      where: { approved: true, founderId: { not: null } },
+      include: {
+        chain: { select: { slug: true, name: true } },
+        category: { select: { slug: true, name: true } },
+        founder: {
+          select: {
+            slug: true,
+            name: true,
+            photoUrl: true,
+            reputationScore: true,
+            buildStreakDays: true,
+            verifications: { where: { verified: true }, select: { type: true } },
+          },
+        },
+        metrics: true,
+        simulatedRaises: {
+          where: { status: SimulatedRaiseStatus.ACTIVE },
+          include: { allocations: true },
+        },
+        _count: { select: { followers: true } },
+      },
+      take: 100,
+    });
+
+    const mapped = projects.map((p) => {
+      const demand = p.simulatedRaises[0]?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
+      return {
+        slug: p.slug,
+        name: p.name,
+        ticker: p.ticker,
+        summary: p.summary,
+        logoUrl: p.logoUrl,
+        lifecycleStage: p.lifecycleStage,
+        launchReadiness: p.launchReadiness,
+        bubbleScore: p.bubbleScore,
+        followerCount: p._count.followers,
+        founderScore: p.founder?.reputationScore ?? 0,
+        buildStreakDays: p.founder?.buildStreakDays ?? 0,
+        simulatedDemand: demand,
+        category: p.category,
+        chain: p.chain,
+        founder: p.founder,
+        isLiveToken: p.isLiveToken,
+        createdAt: p.createdAt,
+      };
+    });
+
+    const sorted = [...mapped].sort((a, b) => {
+      switch (filter) {
+        case 'most_followed':
+          return b.followerCount - a.followerCount;
+        case 'highest_demand':
+          return b.simulatedDemand - a.simulatedDemand;
+        case 'launch_ready':
+          return b.launchReadiness - a.launchReadiness;
+        case 'recently_launched':
+          return (b.isLiveToken ? 1 : 0) - (a.isLiveToken ? 1 : 0);
+        case 'newest':
+          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        case 'trending':
+        default:
+          return b.bubbleScore - a.bubbleScore;
+      }
+    });
+
+    return sorted;
+  }
+
+  async getEconomyStats() {
+    const [cashAgg, allocAgg, grants, fees] = await Promise.all([
+      this.prisma.paperPortfolio.aggregate({ _sum: { cashBalance: true } }),
+      this.prisma.raiseAllocation.aggregate({ _sum: { amountUsd: true } }),
+      this.prisma.virtualEconomyEvent.aggregate({
+        where: { type: 'INITIAL_GRANT' },
+        _sum: { amountUsd: true },
+      }),
+      this.prisma.virtualEconomyEvent.aggregate({
+        where: { type: 'TOP_UP_FEE' },
+        _sum: { amountUsd: true },
+      }),
+    ]);
+
+    const cashInCirculation = Number(cashAgg._sum.cashBalance ?? 0);
+    const inRaises = Number(allocAgg._sum.amountUsd ?? 0);
+    const totalMinted = Number(grants._sum.amountUsd ?? 0);
+    const topUpFees = Number(fees._sum.amountUsd ?? 0);
+
+    return {
+      cashInCirculation,
+      allocatedToRaises: inRaises,
+      totalVirtualSupply: cashInCirculation + inRaises,
+      totalMinted,
+      topUpFeesCollected: topUpFees,
+      startingCashUsd: STARTING_CASH_USD,
+      restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
+      topUpFeeUsd: TOP_UP_FEE_USD,
+    };
   }
 
   /** Migrate legacy videoUrl → FounderVideo rows and compute levels for all founders */
@@ -311,6 +949,148 @@ export class FounderDenService {
       await this.syncPresenceLevel(f.id);
     }
     return { migrated, total: founders.length };
+  }
+
+  private async getDemandRank(projectId: string, totalDemand: number) {
+    const raises = await this.prisma.simulatedRaise.findMany({
+      where: { status: SimulatedRaiseStatus.ACTIVE },
+      include: { allocations: true },
+    });
+    const ranked = raises
+      .map((r) => ({
+        projectId: r.projectId,
+        total: r.allocations.reduce((s, a) => s + Number(a.amountUsd), 0),
+      }))
+      .sort((a, b) => b.total - a.total);
+    const idx = ranked.findIndex((r) => r.projectId === projectId);
+    return idx >= 0 ? idx + 1 : null;
+  }
+
+  private async refreshLaunchReadiness(projectId: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        founder: { include: { videos: true } },
+        simulatedRaises: {
+          where: { status: SimulatedRaiseStatus.ACTIVE },
+          include: { allocations: true },
+        },
+        _count: { select: { followers: true, buildPosts: true } },
+        socials: true,
+      },
+    });
+    if (!project) return 0;
+
+    const activeRaise = project.simulatedRaises[0];
+    const totalDemand = activeRaise?.allocations.reduce((s, a) => s + Number(a.amountUsd), 0) ?? 0;
+    const score = computeLaunchReadiness({
+      videoCount: project.founder?.videos.length ?? 0,
+      buildPostCount: project._count.buildPosts,
+      followerCount: project._count.followers,
+      simulatedDemandUsd: totalDemand,
+      goalUsd: activeRaise ? Number(activeRaise.goalUsd) : 0,
+      githubConnected: Boolean(project.socials?.githubUrl || project.founder?.githubUrl),
+      hasActiveRaise: Boolean(activeRaise),
+    });
+
+    if (score !== project.launchReadiness) {
+      await this.prisma.project.update({
+        where: { id: projectId },
+        data: { launchReadiness: score },
+      });
+    }
+    return score;
+  }
+
+  private computeLaunchpadRequirements(
+    project: {
+      founder?: { videos: unknown[] } | null;
+      buildPosts?: unknown[];
+      _count?: { followers: number };
+    },
+    totalDemand: number,
+    launchReadiness: number,
+  ) {
+    const checks = {
+      founderVideo: (project.founder?.videos.length ?? 0) >= 1,
+      buildLogs: (project.buildPosts?.length ?? 0) >= 2,
+      demandValidated: totalDemand >= 10_000,
+      simulatedRaiseComplete: totalDemand >= 50_000,
+      communityScore: (project._count?.followers ?? 0) >= 5,
+    };
+    const unlocked =
+      checks.founderVideo &&
+      checks.buildLogs &&
+      checks.demandValidated &&
+      launchReadiness >= 60;
+    return { unlocked, checks, launchReadiness };
+  }
+
+  private async refreshBubbleScore(projectId: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        simulatedRaises: {
+          where: { status: SimulatedRaiseStatus.ACTIVE },
+          include: { allocations: true },
+        },
+        _count: { select: { followers: true, buildPosts: true } },
+      },
+    });
+    if (!project) return;
+
+    const demand = project.simulatedRaises[0]?.allocations.reduce(
+      (s, a) => s + Number(a.amountUsd),
+      0,
+    ) ?? 0;
+    const bubbleScore = Math.min(
+      1000,
+      project._count.followers * 3 +
+        project._count.buildPosts * 5 +
+        Math.round(demand / 1000) +
+        project.launchReadiness,
+    );
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: { bubbleScore },
+    });
+  }
+
+  private async syncUserProgressTier(userId: string, forceTier?: UserProgressTier) {
+    if (forceTier) {
+      await this.prisma.user.update({ where: { id: userId }, data: { progressTier: forceTier } });
+      return;
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        founder: true,
+        paperTrades: { take: 1 },
+        demandPollVotes: { take: 1 },
+        raiseAllocations: { take: 1 },
+      },
+    });
+    if (!user) return;
+
+    let tier = user.progressTier;
+    if (user.founder) {
+      tier =
+        user.founder.presenceLevel === 'PROVEN_FOUNDER'
+          ? UserProgressTier.PROVEN_FOUNDER
+          : user.progressTier;
+    } else if (user.raiseAllocations.length > 0 || user.demandPollVotes.length > 0) {
+      tier = UserProgressTier.COMMUNITY_CONTRIBUTOR;
+    } else if (user.paperTrades.length > 0) {
+      tier = UserProgressTier.TRADER;
+    } else {
+      tier = UserProgressTier.EXPLORER;
+    }
+
+    if (tier !== user.progressTier) {
+      await this.prisma.user.update({ where: { id: userId }, data: { progressTier: tier } });
+    }
   }
 
   private async computeFounderStats(founderId: string) {
