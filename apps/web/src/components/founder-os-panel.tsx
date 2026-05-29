@@ -20,6 +20,8 @@ type FounderOsPanelProps = {
   communityRewardPool?: number;
   projectId?: string;
   onRefresh?: () => void;
+  /** When false, actions require activating a founder profile first. */
+  founderActive?: boolean;
 };
 
 export function FounderOsPanel({
@@ -28,6 +30,7 @@ export function FounderOsPanel({
   communityRewardPool = 0,
   projectId,
   onRefresh,
+  founderActive = true,
 }: FounderOsPanelProps) {
   const [data, setData] = useState<FounderOsDashboard | null>(null);
   const [repoInput, setRepoInput] = useState('');
@@ -54,6 +57,10 @@ export function FounderOsPanel({
   }, [load]);
 
   async function handleConnectGitHub() {
+    if (!founderActive) {
+      setMsg('Activate your founder profile first (Project section below)');
+      return;
+    }
     if (!repoInput.trim()) return;
     try {
       await connectGitHubRepo(repoInput.trim(), accessToken);
@@ -66,6 +73,10 @@ export function FounderOsPanel({
   }
 
   async function handleSyncGitHub() {
+    if (!founderActive) {
+      setMsg('Activate your founder profile first (Project section below)');
+      return;
+    }
     try {
       const result = await syncGitHubCommits(accessToken);
       setMsg(`Synced ${result.commits.length} commits — review and publish everywhere`);
@@ -130,6 +141,10 @@ export function FounderOsPanel({
   }
 
   async function handleBuildRoom() {
+    if (!founderActive) {
+      setMsg('Activate your founder profile first (Project section below)');
+      return;
+    }
     if (!buildPrompt.trim()) return;
     try {
       const result = await runCursorBuildRoom(
