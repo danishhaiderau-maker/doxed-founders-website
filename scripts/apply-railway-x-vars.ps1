@@ -1,9 +1,13 @@
 # Writes Railway variable commands from .env.x.secrets (run after: railway login)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$secretsFile = Join-Path $root ".env.x.secrets"
+$vaultRoot = Join-Path (Split-Path $root -Parent) "doxedcryptofounder-secrets"
+$secretsFile = Join-Path $vaultRoot "vault" ".env.x.secrets"
 if (-not (Test-Path $secretsFile)) {
-  Write-Host "Missing .env.x.secrets" -ForegroundColor Red
+  $secretsFile = Join-Path $root ".env.x.secrets"
+}
+if (-not (Test-Path $secretsFile)) {
+  Write-Host "Missing secrets. Run: npm run secrets:link" -ForegroundColor Red
   exit 1
 }
 

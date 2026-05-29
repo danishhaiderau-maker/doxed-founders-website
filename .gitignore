@@ -57,4 +57,10 @@ apps/web/.env.vercel.prod
 apps/.env.prod.rotate
 .env.x.secrets
 .env.admin-rotate
+.env.vercel.check
+.env.prod.rotate
+*.paste.env
 railway-x-paste.env
+
+# Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
+# Audit export (code-only): ../doxedcryptofounder-audit/

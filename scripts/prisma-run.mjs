@@ -2,19 +2,11 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadVaultEnv } from './load-vault-env.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const envPath = path.join(root, '.env');
 
-function loadEnv() {
-  if (!fs.existsSync(envPath)) return;
-  for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
-    const match = line.match(/^([A-Z_]+)="?([^"\n]*)"?$/);
-    if (match && !process.env[match[1]]) {
-      process.env[match[1]] = match[2];
-    }
-  }
-}
+loadVaultEnv(root);
 
 function getSchema() {
   if (process.env.PRISMA_SCHEMA) {
@@ -30,8 +22,6 @@ function getSchema() {
   }
   return 'prisma/schema.prisma';
 }
-
-loadEnv();
 
 const schema = getSchema();
 const args = process.argv.slice(2);
