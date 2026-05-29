@@ -410,31 +410,52 @@ export class SecurityService {
     return { challengeToken: token, message };
   }
 
-  async walletVerify(userId: string, challengeToken: string, address: string, signature: string, message: string) {
+  async walletVerify(
+    userId: string,
+    challengeToken: string,
+    address: string,
+    signature: string,
+    message: string,
+    chain: 'SOLANA' | 'ETHEREUM' = 'SOLANA',
+  ) {
     const challenge = await this.consumePending(challengeToken, 'WALLET_VERIFY');
     if (challenge.userId !== userId) throw new UnauthorizedException('Challenge mismatch');
     const payload = challenge.payload as { message: string; nonce: string };
     if (payload.message !== message) throw new BadRequestException('Message mismatch');
-    if (!this.verifySolanaSignature(message, signature, address)) {
-      throw new BadRequestException('Invalid wallet signature');
-    }
+
+    const valid =
+      chain === 'ETHEREUM'
+        ? this.verifyEvmSignature(message, signature, address)
+        : this.verifySolanaSignature(message, signature, address);
+    if (!valid) throw new BadRequestException('Invalid wallet signature');
+
     await this.prisma.walletConnection.upsert({
-      where: { userId_chain: { userId, chain: 'SOLANA' } },
-      create: { userId, chain: 'SOLANA', address },
+      where: { userId_chain: { userId, chain } },
+      create: { userId, chain, address },
       update: { address, verifiedAt: new Date() },
     });
-    return { ok: true, address };
+    return { ok: true, address, chain };
   }
 
-  async disconnectWallet(userId: string) {
+  async disconnectWallet(userId: string, chain = 'SOLANA') {
     await this.prisma.walletConnection.deleteMany({
-      where: { userId, chain: 'SOLANA' },
+      where: { userId, chain: chain as 'SOLANA' | 'ETHEREUM' },
     });
     return { ok: true };
   }
 
   private verifyTotpToken(token: string, secret: string): boolean {
     return verifySync({ token, secret }).valid;
+  }
+
+  private verifyEvmSignature(message: string, signature: string, address: string): boolean {
+    try {
+      const { verifyMessage } = require('ethers') as typeof import('ethers');
+      const recovered = verifyMessage(message, signature);
+      return recovered.toLowerCase() === address.toLowerCase();
+    } catch {
+      return false;
+    }
   }
 
   private verifySolanaSignature(message: string, signature: string, address: string): boolean {

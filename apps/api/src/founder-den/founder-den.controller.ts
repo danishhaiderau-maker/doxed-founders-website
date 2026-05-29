@@ -13,7 +13,9 @@ import {
   CreateFounderVideoDto,
   CreateSimulatedRaiseDto,
   FounderApplicationDto,
+  FounderBrainAskDto,
   ListTokenDto,
+  ScoutStakeDto,
   VotePollDto,
 } from './dto/founder-den.dto';
 
@@ -152,5 +154,57 @@ export class FounderDenController {
   @Post('polls/:pollId/vote')
   votePoll(@CurrentUser() user: AuthUser, @Param('pollId') pollId: string, @Body() dto: VotePollDto) {
     return this.founderDen.votePoll(user.id, pollId, dto.optionKey);
+  }
+
+  @Public()
+  @Get('raises/:raiseId/participants')
+  raiseParticipants(@Param('raiseId') raiseId: string) {
+    return this.founderDen.getRaiseParticipants(raiseId);
+  }
+
+  @Get('raises/:raiseId/export')
+  exportRaise(@CurrentUser() user: AuthUser, @Param('raiseId') raiseId: string) {
+    return this.founderDen.exportRaiseParticipants(user.id, raiseId);
+  }
+
+  @Post('raises/:raiseId/lock-slots')
+  lockRaiseSlots(@CurrentUser() user: AuthUser, @Param('raiseId') raiseId: string) {
+    return this.founderDen.lockRaiseSlots(user.id, raiseId);
+  }
+
+  @Public()
+  @Get('platform/economy')
+  platformEconomy() {
+    return this.founderDen.getPlatformEconomy();
+  }
+
+  @Post('platform/treasury')
+  updateTreasury(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { solanaTreasuryAddress?: string; evmTreasuryAddress?: string },
+  ) {
+    return this.founderDen.updatePlatformTreasury(user.id, body);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get('projects/:slug/scout-markets')
+  scoutMarkets(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {
+    return this.founderDen.listScoutMarkets(slug, user?.id);
+  }
+
+  @Post('scout-markets/:marketId/stake')
+  stakeScoutMarket(
+    @CurrentUser() user: AuthUser,
+    @Param('marketId') marketId: string,
+    @Body() dto: ScoutStakeDto,
+  ) {
+    return this.founderDen.stakeScoutMarket(user.id, marketId, dto.side, dto.amountUsd);
+  }
+
+  @Public()
+  @Post('projects/:slug/brain/ask')
+  askFounderBrain(@Param('slug') slug: string, @Body() dto: FounderBrainAskDto) {
+    return this.founderDen.askFounderBrain(slug, dto.question);
   }
 }

@@ -18,9 +18,12 @@ import { FounderPresenceBadge } from '@/components/founder-presence';
 import { ProjectLifecycleBar } from '@/components/lifecycle-bar';
 import { StartupGenomePanel } from '@/components/startup-genome';
 import { ProjectMetricsGrid } from '@/components/project-card';
+import { RaiseRoomPanel } from '@/components/raise-room-panel';
+import { ScoutMarketsPanel } from '@/components/scout-markets-panel';
+import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 
-const TABS = ['Overview', 'Community', 'Demand', 'Build log', 'Trade'] as const;
+const TABS = ['Overview', 'Scout Markets', 'Community', 'Raise Room', 'Build log', 'Trade'] as const;
 
 function stageLabel(key: string) {
   return LIFECYCLE_STAGES.find((s) => s.key === key)?.label ?? key.replace(/_/g, ' ');
@@ -51,9 +54,6 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
   if (!room) return null;
 
   const poolAddress = room.dexscreenerUrl ? extractPoolAddressFromDexUrl(room.dexscreenerUrl) : null;
-  const demandPct = room.activeRaise
-    ? Math.min(100, Math.round((room.activeRaise.totalAllocated / room.activeRaise.goalUsd) * 100))
-    : 0;
 
   async function handleAllocate() {
     if (!session?.accessToken || !room?.activeRaise) return;
@@ -174,6 +174,7 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
 
       {tab === 'Overview' && (
         <div className="space-y-6">
+          <FounderBrainPanel slug={slug} projectName={room.name} />
           {room.founder && (
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-5">
               <div className="flex flex-wrap items-center gap-3">
@@ -190,6 +191,10 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
             <GeckoTerminalChart chainSlug={room.chain.slug} poolAddress={poolAddress} dexscreenerUrl={room.dexscreenerUrl ?? undefined} />
           )}
         </div>
+      )}
+
+      {tab === 'Scout Markets' && (
+        <ScoutMarketsPanel slug={slug} accessToken={session?.accessToken} onMessage={setMsg} />
       )}
 
       {tab === 'Community' && (
@@ -292,42 +297,20 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
         </div>
       )}
 
-      {tab === 'Demand' && (
+      {tab === 'Raise Room' && (
         <div className="space-y-6">
           {room.activeRaise ? (
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-5">
-              <h3 className="font-semibold text-emerald-200">Simulated raise</h3>
-              <p className="mt-2 text-sm text-zinc-400">
-                Goal {formatUsd(room.activeRaise.goalUsd, 0)} · {room.activeRaise.tokenAllocation ?? '—'} allocation ·{' '}
-                {room.activeRaise.durationDays} days
-              </p>
-              <div className="mt-4">
-                <div className="flex justify-between text-xs text-zinc-500">
-                  <span>Current demand</span>
-                  <span>{formatUsd(room.activeRaise.totalAllocated, 0)} ({demandPct}%)</span>
-                </div>
-                <div className="mt-1 h-3 overflow-hidden rounded-full bg-zinc-800">
-                  <div className="h-full bg-emerald-500 transition-all" style={{ width: `${demandPct}%` }} />
-                </div>
-                <p className="mt-2 text-xs text-zinc-500">
-                  {room.activeRaise.allocatorCount} investors · Conviction {room.activeRaise.convictionScore}%
-                </p>
-              </div>
-              {session ? (
-                <div className="mt-4 flex gap-2">
-                  <input type="number" value={allocAmount} onChange={(e) => setAllocAmount(e.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-                  <button type="button" onClick={handleAllocate} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white">
-                    Allocate paper $
-                  </button>
-                </div>
-              ) : (
-                <Link href="/login" className="mt-3 inline-block text-sm text-emerald-400 hover:underline">
-                  Sign in — $10,000 virtual cash to allocate
-                </Link>
-              )}
-            </div>
+            <RaiseRoomPanel
+              room={room}
+              accessToken={session?.accessToken}
+              allocAmount={allocAmount}
+              onAllocAmountChange={setAllocAmount}
+              onAllocate={handleAllocate}
+              onMessage={setMsg}
+              onRefresh={load}
+            />
           ) : (
-            <p className="text-sm text-zinc-500">No active simulated raise. Founder can launch one from Founder Den.</p>
+            <p className="text-sm text-zinc-500">No active Raise Room — founder has not opened public ICO slots yet.</p>
           )}
           {room.demandPolls.map((poll) => (
             <div key={poll.id} className="rounded-xl border border-zinc-800 p-5">

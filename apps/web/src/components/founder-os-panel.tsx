@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   connectGitHubRepo,
   connectIntegration,
+  copilotHandsFree,
   createFounderBounty,
   disconnectIntegration,
   fetchFounderOsDashboard,
@@ -13,6 +14,15 @@ import {
   runCursorBuildRoom,
   syncGitHubCommits,
 } from '@/lib/api';
+
+const COPILOT_ACTIONS = [
+  { label: 'Generate weekly update', prompt: 'Generate this week\'s update.' },
+  { label: 'Publish everywhere', prompt: 'Publish latest progress everywhere.' },
+  { label: 'Create GitHub issues', prompt: 'Create GitHub issues from roadmap.' },
+  { label: 'Prepare Raise Room', prompt: 'Prepare launch roadmap for Raise Room.' },
+  { label: 'Launch readiness', prompt: 'Create launch readiness report.' },
+  { label: 'Tokenomics draft', prompt: 'Create tokenomics draft for community allocation.' },
+];
 
 type FounderOsPanelProps = {
   accessToken: string;
@@ -285,30 +295,60 @@ export function FounderOsPanel({
       </div>
 
       <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
-        <p className="text-sm font-semibold text-indigo-200">Founder Copilot · Publish</p>
+        <p className="text-sm font-semibold text-indigo-200">Founder Copilot · What would you like to do?</p>
         <p className="mt-1 text-xs text-zinc-500">
-          Describe what you shipped — get dev + trader summaries (50 Founder Credits, no extra AI subscription).
+          Action workflows — not a blank prompt. Syncs GitHub, queue, Raise Room, and publish everywhere.
         </p>
-        <input
-          value={buildTitle}
-          onChange={(e) => setBuildTitle(e.target.value)}
-          placeholder="Session title"
-          className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-        />
-        <textarea
-          value={buildPrompt}
-          onChange={(e) => setBuildPrompt(e.target.value)}
-          placeholder="What did you build? One line per item…"
-          rows={3}
-          className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-        />
-        <button
-          type="button"
-          onClick={handleBuildRoom}
-          className="mt-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white"
-        >
-          Generate update (50 credits)
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {COPILOT_ACTIONS.map((a) => (
+            <button
+              key={a.label}
+              type="button"
+              onClick={async () => {
+                if (!founderActive) {
+                  setMsg('Activate your founder profile first');
+                  return;
+                }
+                try {
+                  const result = await copilotHandsFree(a.prompt, accessToken);
+                  setMsg(result.answer);
+                  load();
+                  onRefresh?.();
+                } catch (err) {
+                  setMsg(err instanceof Error ? err.message : 'Action failed');
+                }
+              }}
+              className="rounded-lg border border-indigo-500/30 bg-black/30 px-3 py-1.5 text-xs text-indigo-100 hover:border-indigo-400/50 hover:text-white"
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+        <details className="mt-4">
+          <summary className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">
+            Manual session draft (50 credits)
+          </summary>
+          <input
+            value={buildTitle}
+            onChange={(e) => setBuildTitle(e.target.value)}
+            placeholder="Session title"
+            className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+          />
+          <textarea
+            value={buildPrompt}
+            onChange={(e) => setBuildPrompt(e.target.value)}
+            placeholder="What did you ship? One line per item…"
+            rows={3}
+            className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+          />
+          <button
+            type="button"
+            onClick={handleBuildRoom}
+            className="mt-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white"
+          >
+            Generate update (50 credits)
+          </button>
+        </details>
       </div>
 
       {(data?.pendingSuggestions?.length ?? 0) > 0 && (

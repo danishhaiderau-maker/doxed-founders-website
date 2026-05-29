@@ -230,6 +230,11 @@ enum AiProvider {
   ANTHROPIC
   GEMINI
   CURSOR
+  CLAUDE_CODE
+  CODEX
+  WINDSURF
+  OPENHANDS
+  OPENCLAW
 }
 
 enum FounderEventType {
@@ -245,6 +250,9 @@ enum FounderEventType {
   COMMUNITY_ACTIVITY
   QUICK_COMMAND
   COPILOT_COMMAND
+  RAISE_ALLOCATION
+  WALLET_CONNECTED
+  SCOUT_MARKET_STAKE
 }
 
 enum FounderEventStatus {
@@ -296,6 +304,7 @@ model User {
   helpfulMarksGiven    HelpfulMark[] @relation("HelpfulMarker")
   helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
   userBadges           UserBadge[]
+  scoutMarketPositions ScoutMarketPosition[]
   githubConnection     GitHubConnection?
   connectedApps           ConnectedAppStatus[]
   integrationCredentials  IntegrationCredential[]
@@ -477,6 +486,7 @@ model Project {
   agents           FounderAgent[]
   buildQueueItems  BuildQueueItem[]
   founderEvents    FounderEvent[]
+  scoutMarkets     ScoutMarket[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -899,17 +909,21 @@ model BuildQueueItem {
 }
 
 model SimulatedRaise {
-  id              String               @id @default(cuid())
-  projectId       String
-  goalUsd         Decimal              @db.Decimal(16, 2)
-  tokenAllocation String?
-  durationDays    Int                  @default(14)
-  plannedLaunchDate DateTime?
-  status          SimulatedRaiseStatus @default(DRAFT)
-  startsAt        DateTime?
-  endsAt          DateTime?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  id                    String               @id @default(cuid())
+  projectId             String
+  goalUsd               Decimal              @db.Decimal(16, 2)
+  tokenAllocation       String?
+  communityTokenPercent Int                  @default(10)
+  maxParticipantSlots   Int?
+  totalBurnedUsd        Decimal              @default(0) @db.Decimal(16, 2)
+  slotsLocked           Boolean              @default(false)
+  durationDays          Int                  @default(14)
+  plannedLaunchDate     DateTime?
+  status                SimulatedRaiseStatus @default(DRAFT)
+  startsAt              DateTime?
+  endsAt                DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
 
   project     Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   allocations RaiseAllocation[]
@@ -919,17 +933,70 @@ model SimulatedRaise {
 }
 
 model RaiseAllocation {
-  id        String   @id @default(cuid())
-  raiseId   String
-  userId    String
-  amountUsd Decimal  @db.Decimal(16, 2)
-  createdAt DateTime @default(now())
+  id            String   @id @default(cuid())
+  raiseId       String
+  userId        String
+  amountUsd     Decimal  @db.Decimal(16, 2)
+  burnedUsd     Decimal  @default(0) @db.Decimal(16, 2)
+  slotReserved  Boolean  @default(true)
+  walletAddress String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   raise SimulatedRaise @relation(fields: [raiseId], references: [id], onDelete: Cascade)
   user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([raiseId, userId])
   @@index([raiseId])
+}
+
+model PlatformTreasury {
+  id                    String   @id @default("default")
+  solanaTreasuryAddress String?
+  evmTreasuryAddress    String?
+  updatedByUserId       String?
+  updatedAt             DateTime @updatedAt
+}
+
+enum ScoutMarketStatus {
+  OPEN
+  RESOLVED
+  CANCELLED
+}
+
+model ScoutMarket {
+  id         String            @id @default(cuid())
+  projectId  String
+  question   String
+  status     ScoutMarketStatus @default(OPEN)
+  yesPoolUsd Decimal           @default(0) @db.Decimal(16, 2)
+  noPoolUsd  Decimal           @default(0) @db.Decimal(16, 2)
+  outcome    Boolean?
+  resolvesAt DateTime?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  project   Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  positions ScoutMarketPosition[]
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model ScoutMarketPosition {
+  id        String   @id @default(cuid())
+  marketId  String
+  userId    String
+  side      String
+  amountUsd Decimal  @db.Decimal(16, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  market ScoutMarket @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([marketId, userId])
+  @@index([marketId])
 }
 
 model DemandPoll {
