@@ -14,6 +14,9 @@ export interface AuthUser {
 }
 
 export interface AuthResponse {
-  accessToken: string;
-  user: AuthUser;
+  accessToken?: string;
+  user?: AuthUser;
+  requires2fa?: boolean;
+  pendingToken?: string;
+  methods?: string[];
 }
