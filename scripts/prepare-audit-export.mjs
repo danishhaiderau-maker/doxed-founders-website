@@ -127,7 +127,8 @@ Review focus:
 
 Phases in this export:
 - Phase 6: Raise Room (1% allocation burn, participant export, EVM wallet verify)
-- Phase 7: Scout prediction markets, Founder Brain Q&A, desk AI providers (Cursor, Claude Code, Codex, Windsurf, OpenHands, OpenClaw)
+- Phase 7: Scout prediction markets, Founder Brain Q&A
+- OpenHands remote agent (URL + API key) — desk copy-paste providers removed
 
 Public audit repo: github.com/danishhaiderau-maker/doxed-founders-audit
 Main app repo: github.com/danishhaiderau-maker/doxed-founders-website

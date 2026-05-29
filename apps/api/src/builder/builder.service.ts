@@ -5,11 +5,17 @@ import {
   QUICK_BUILD_AI_SYSTEM,
   QuickBuildResult,
   aiProviderConfig,
-  isDeskWorkflowProvider,
+  buildOpenHandsTaskMessage,
+  isRemoteAgentProvider,
   processQuickBuild,
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  OpenHandsCredentialMeta,
+  dispatchOpenHandsTask,
+  verifyOpenHandsConnection,
+} from './openhands.client';
 
 @Injectable()
 export class BuilderService {
@@ -21,7 +27,8 @@ export class BuilderService {
   async getSettings(userId: string) {
     const settings = await this.ensureSettings(userId);
     const connected = await this.listConnectedProviders(userId);
-    const deskConnected = await this.listDeskConnectedProviders(userId);
+
+    const openHandsMeta = await this.getOpenHandsMeta(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -29,14 +36,13 @@ export class BuilderService {
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
       autoPublishOnEvent: settings.autoPublishOnEvent,
       currentGoalFocus: settings.currentGoalFocus,
+      openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected:
           p.connectMode === 'none'
             ? p.key === 'RULE_BASED'
-            : p.connectMode === 'desk'
-              ? deskConnected.has(p.credentialProvider!)
-              : connected.has(p.credentialProvider!),
+            : connected.has(p.credentialProvider!),
       })),
       githubTokenConnected: Boolean(
         await this.prisma.gitHubConnection.findFirst({
@@ -59,21 +65,20 @@ export class BuilderService {
     if (input.defaultProvider) {
       const cfg = aiProviderConfig(input.defaultProvider);
       if (!cfg) throw new BadRequestException('Unknown provider');
-      if (cfg.needsApiKey) {
+      if (cfg.needsApiKey || cfg.connectMode === 'remote_agent') {
         const cred = cfg.credentialProvider
           ? await this.prisma.integrationCredential.findUnique({
               where: { userId_provider: { userId, provider: cfg.credentialProvider } },
             })
           : null;
         if (!cred?.token) {
-          throw new BadRequestException(`Connect ${cfg.label} API key before setting as default`);
+          throw new BadRequestException(`Connect ${cfg.label} before setting as default`);
         }
-      } else if (cfg.connectMode === 'desk' && cfg.credentialProvider) {
-        const desk = await this.prisma.connectedAppStatus.findUnique({
-          where: { userId_provider: { userId, provider: cfg.credentialProvider } },
-        });
-        if (!desk?.connected) {
-          throw new BadRequestException(`Enable ${cfg.label} desk workflow before setting as default`);
+        if (cfg.connectMode === 'remote_agent') {
+          const meta = cred.metadata as OpenHandsCredentialMeta | null;
+          if (!meta?.baseUrl) {
+            throw new BadRequestException('Connect OpenHands base URL before setting as default');
+          }
         }
       }
     }
@@ -110,7 +115,9 @@ export class BuilderService {
 
   async connectAiProvider(userId: string, provider: string, apiKey: string) {
     const cfg = AI_PROVIDERS.find((p) => p.credentialProvider === provider);
-    if (!cfg?.needsApiKey) throw new BadRequestException('Provider does not use API keys');
+    if (!cfg?.needsApiKey || cfg.connectMode === 'remote_agent') {
+      throw new BadRequestException('Use OpenHands connect for remote agent');
+    }
 
     const key = apiKey.trim();
     if (!key) throw new BadRequestException('API key required');
@@ -149,29 +156,96 @@ export class BuilderService {
     return { success: true, provider, accountName: verified.accountName };
   }
 
-  async connectDeskProvider(userId: string, providerKey: AiProvider) {
-    const cfg = aiProviderConfig(providerKey);
-    if (!cfg || cfg.connectMode !== 'desk' || !cfg.credentialProvider) {
-      throw new BadRequestException('Not a desk workflow provider');
-    }
+  async connectOpenHands(userId: string, baseUrl: string, apiKey: string) {
+    const url = baseUrl.trim();
+    const key = apiKey.trim();
+    if (!url || !key) throw new BadRequestException('OpenHands base URL and API key required');
 
-    await this.prisma.connectedAppStatus.upsert({
-      where: { userId_provider: { userId, provider: cfg.credentialProvider } },
+    const verified = await verifyOpenHandsConnection(url, key);
+    const encrypted = this.crypto.encrypt(key);
+    const normalized = url.replace(/\/+$/, '');
+
+    await this.prisma.integrationCredential.upsert({
+      where: { userId_provider: { userId, provider: 'openhands' } },
       create: {
         userId,
-        provider: cfg.credentialProvider,
-        connected: true,
-        label: cfg.label,
-        metadata: { mode: 'desk', copyCommand: cfg.copyCommand } as Prisma.InputJsonValue,
+        provider: 'openhands',
+        token: encrypted,
+        metadata: {
+          baseUrl: normalized,
+          accountName: verified.accountName,
+          apiVersion: verified.apiVersion,
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
       },
       update: {
-        connected: true,
-        label: cfg.label,
-        metadata: { mode: 'desk', copyCommand: cfg.copyCommand } as Prisma.InputJsonValue,
+        token: encrypted,
+        metadata: {
+          baseUrl: normalized,
+          accountName: verified.accountName,
+          apiVersion: verified.apiVersion,
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
       },
     });
 
-    return { success: true, provider: providerKey, label: cfg.label, copyCommand: cfg.copyCommand };
+    await this.prisma.connectedAppStatus.upsert({
+      where: { userId_provider: { userId, provider: 'openhands' } },
+      create: {
+        userId,
+        provider: 'openhands',
+        connected: true,
+        label: 'OpenHands',
+        metadata: { baseUrl: normalized, mode: 'remote_agent' } as Prisma.InputJsonValue,
+      },
+      update: {
+        connected: true,
+        metadata: { baseUrl: normalized, mode: 'remote_agent' } as Prisma.InputJsonValue,
+      },
+    });
+
+    return {
+      success: true,
+      accountName: verified.accountName,
+      baseUrl: normalized,
+      apiVersion: verified.apiVersion,
+    };
+  }
+
+  async dispatchOpenHandsBuildTask(
+    userId: string,
+    input: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'openhands' } },
+    });
+    if (!cred?.token) {
+      throw new BadRequestException('Connect OpenHands in Settings → Builder first');
+    }
+
+    const meta = cred.metadata as OpenHandsCredentialMeta | null;
+    if (!meta?.baseUrl) throw new BadRequestException('OpenHands base URL missing — reconnect');
+
+    const apiKey = this.crypto.decrypt(cred.token);
+    if (!apiKey) throw new BadRequestException('OpenHands API key invalid — reconnect');
+
+    const taskPrompt = buildOpenHandsTaskMessage(input.spec, input.cursorPrompt);
+    const result = await dispatchOpenHandsTask(
+      {
+        baseUrl: meta.baseUrl,
+        apiKey,
+        taskPrompt,
+        repository: input.repository,
+      },
+      meta.apiVersion,
+    );
+
+    return result;
+  }
+
+  async isOpenHandsDefault(userId: string): Promise<boolean> {
+    const settings = await this.ensureSettings(userId);
+    return settings.defaultProvider === AiProvider.OPENHANDS;
   }
 
   async disconnectAiProvider(userId: string, provider: string) {
@@ -200,12 +274,12 @@ export class BuilderService {
     userPrompt: string,
   ): Promise<string | null> {
     const settings = await this.ensureSettings(userId);
-    if (isDeskWorkflowProvider(settings.defaultProvider)) {
+    if (isRemoteAgentProvider(settings.defaultProvider)) {
       return null;
     }
 
     const cfg = aiProviderConfig(settings.defaultProvider);
-    if (!cfg?.credentialProvider) return null;
+    if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') return null;
 
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: cfg.credentialProvider } },
@@ -257,6 +331,13 @@ export class BuilderService {
     }
   }
 
+  private async getOpenHandsMeta(userId: string): Promise<OpenHandsCredentialMeta | null> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'openhands' } },
+    });
+    return (cred?.metadata as OpenHandsCredentialMeta | null) ?? null;
+  }
+
   private async ensureSettings(userId: string) {
     return this.prisma.founderBuilderSettings.upsert({
       where: { userId },
@@ -271,14 +352,6 @@ export class BuilderService {
       select: { provider: true },
     });
     return new Set(creds.map((c) => c.provider));
-  }
-
-  private async listDeskConnectedProviders(userId: string) {
-    const apps = await this.prisma.connectedAppStatus.findMany({
-      where: { userId, connected: true },
-      select: { provider: true },
-    });
-    return new Set(apps.map((a) => a.provider));
   }
 
   private async verifyAiKey(provider: string, key: string): Promise<{ accountName: string }> {

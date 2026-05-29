@@ -1,39 +1,25 @@
-export type AiProviderConnectMode = 'none' | 'api_key' | 'desk';
+export type AiProviderConnectMode = 'none' | 'api_key' | 'remote_agent';
 
 export type AiProviderKey =
   | 'RULE_BASED'
   | 'OPENAI'
   | 'ANTHROPIC'
   | 'GEMINI'
-  | 'CURSOR'
-  | 'CLAUDE_CODE'
-  | 'CODEX'
-  | 'WINDSURF'
-  | 'OPENHANDS'
-  | 'OPENCLAW';
+  | 'OPENHANDS';
 
 export type AiProviderConfig = {
   key: AiProviderKey;
   label: string;
   connectMode: AiProviderConnectMode;
   needsApiKey: boolean;
+  needsBaseUrl?: boolean;
   defaultModel: string | null;
   billTip: string;
   credentialProvider: string | null;
-  copyCommand?: string;
 };
 
-export const DESK_WORKFLOW_PROVIDER_KEYS: AiProviderKey[] = [
-  'CURSOR',
-  'CLAUDE_CODE',
-  'CODEX',
-  'WINDSURF',
-  'OPENHANDS',
-  'OPENCLAW',
-];
-
-export function isDeskWorkflowProvider(key: string): boolean {
-  return DESK_WORKFLOW_PROVIDER_KEYS.includes(key as AiProviderKey);
+export function isRemoteAgentProvider(key: string): boolean {
+  return key === 'OPENHANDS';
 }
 
 export const AI_PROVIDERS: AiProviderConfig[] = [
@@ -52,7 +38,7 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     connectMode: 'api_key',
     needsApiKey: true,
     defaultModel: 'gpt-4o-mini',
-    billTip: 'Remote AI — your OpenAI key, billed to your account.',
+    billTip: 'Remote LLM — your OpenAI key for Quick Build specs and Founder Brain.',
     credentialProvider: 'openai',
   },
   {
@@ -61,7 +47,7 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     connectMode: 'api_key',
     needsApiKey: true,
     defaultModel: 'claude-3-5-haiku-latest',
-    billTip: 'Remote AI — your Anthropic key, Founder OS orchestrates.',
+    billTip: 'Remote LLM — your Anthropic key, Founder OS orchestrates.',
     credentialProvider: 'anthropic',
   },
   {
@@ -70,68 +56,19 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     connectMode: 'api_key',
     needsApiKey: true,
     defaultModel: 'gemini-2.0-flash',
-    billTip: 'Remote AI — your Gemini API key.',
+    billTip: 'Remote LLM — your Gemini API key.',
     credentialProvider: 'gemini',
   },
   {
-    key: 'CURSOR',
-    label: 'Cursor',
-    connectMode: 'desk',
-    needsApiKey: false,
-    defaultModel: null,
-    billTip: 'Desk workflow — copy prompts from Founder Copilot into Cursor Desktop.',
-    credentialProvider: 'cursor',
-    copyCommand: 'Copy for Cursor',
-  },
-  {
-    key: 'CLAUDE_CODE',
-    label: 'Claude Code',
-    connectMode: 'desk',
-    needsApiKey: false,
-    defaultModel: null,
-    billTip: 'Desk workflow — paste resume prompt into Claude Code CLI / IDE extension.',
-    credentialProvider: 'claude_code',
-    copyCommand: 'Copy for Claude Code',
-  },
-  {
-    key: 'CODEX',
-    label: 'OpenAI Codex',
-    connectMode: 'desk',
-    needsApiKey: false,
-    defaultModel: null,
-    billTip: 'Desk workflow — use Codex CLI or ChatGPT coding agent with copied context.',
-    credentialProvider: 'codex',
-    copyCommand: 'Copy for Codex',
-  },
-  {
-    key: 'WINDSURF',
-    label: 'Windsurf (Codeium)',
-    connectMode: 'desk',
-    needsApiKey: false,
-    defaultModel: null,
-    billTip: 'Desk workflow — paste into Windsurf Cascade with project memory attached.',
-    credentialProvider: 'windsurf',
-    copyCommand: 'Copy for Windsurf',
-  },
-  {
     key: 'OPENHANDS',
-    label: 'OpenHands',
-    connectMode: 'desk',
-    needsApiKey: false,
+    label: 'OpenHands (remote agent)',
+    connectMode: 'remote_agent',
+    needsApiKey: true,
+    needsBaseUrl: true,
     defaultModel: null,
-    billTip: 'Desk workflow — feed task spec to OpenHands agent from Founder Copilot export.',
+    billTip:
+      'Self-hosted or OpenHands Cloud — Founder OS dispatches build tasks via REST (URL + API key). LLM cost is on your OpenHands instance.',
     credentialProvider: 'openhands',
-    copyCommand: 'Copy for OpenHands',
-  },
-  {
-    key: 'OPENCLAW',
-    label: 'OpenClaw',
-    connectMode: 'desk',
-    needsApiKey: false,
-    defaultModel: null,
-    billTip: 'Desk workflow — dispatch via OpenClaw with Founder OS cursor copy payload.',
-    credentialProvider: 'openclaw',
-    copyCommand: 'Copy for OpenClaw',
   },
 ];
 
