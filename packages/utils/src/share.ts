@@ -33,7 +33,7 @@ export function buildPortfolioShareMessage(
 ): string {
   const sign = roi >= 0 ? '+' : '';
   const emoji = roi >= 0 ? '🚀' : '📉';
-  return `${emoji} ${displayName} · ${sign}${roi.toFixed(1)}% paper ROI · ${formatUsd(totalValue)} on @DoxedCryptoFounder #ProofOfConviction`;
+  return `${emoji} ${displayName} · ${sign}${roi.toFixed(1)}% paper ROI · ${formatUsd(totalValue)} on @DoxxedCrypto #ProofOfConviction`;
 }
 
 export type PositionShareInput = {
@@ -61,7 +61,7 @@ export function buildPositionShareMessage(input: PositionShareInput): string {
     const t = input.thesis.trim().replace(/\s+/g, ' ');
     lines.push(`💬 "${t.length > 100 ? `${t.slice(0, 99)}…` : t}"`);
   }
-  lines.push('#ProofOfConviction @DoxedCryptoFounder');
+  lines.push('#ProofOfConviction @DoxxedCrypto');
   return lines.join('\n');
 }
 

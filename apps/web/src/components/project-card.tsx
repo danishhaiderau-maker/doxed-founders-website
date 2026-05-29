@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { formatUsd } from '@dcf/utils';
+import { formatUsd, formatTokenPrice } from '@dcf/utils';
 import { FounderBadges } from '@/components/founder-badges';
 import type { ProjectSummary } from '@/lib/api';
 
@@ -68,7 +68,7 @@ export function ProjectCard({ project }: ProjectCardProps) {
         <div className="shrink-0 text-right">
           <p className="font-medium">
             {project.metrics?.priceUsd != null
-              ? formatUsd(project.metrics.priceUsd, project.metrics.priceUsd < 1 ? 4 : 2)
+              ? formatTokenPrice(project.metrics.priceUsd)
               : '—'}
           </p>
           {change != null && (
@@ -115,7 +115,7 @@ export function ProjectMetricsGrid({
   }
 
   const items = [
-    { label: 'Price', value: metrics.priceUsd != null ? formatUsd(metrics.priceUsd, metrics.priceUsd < 1 ? 4 : 2) : '—' },
+    { label: 'Price', value: metrics.priceUsd != null ? formatTokenPrice(metrics.priceUsd) : '—' },
     { label: 'Market cap', value: formatMc(metrics.marketCap) },
     { label: 'FDV', value: formatMc(metrics.fdv) },
     { label: '24h volume', value: formatMc(metrics.volume24h) },

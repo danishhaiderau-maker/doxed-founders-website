@@ -15,6 +15,7 @@ const projectInclude = {
       linkedInUrl: true,
       twitterUrl: true,
       githubUrl: true,
+      videoUrl: true,
       verifications: { where: { verified: true }, select: { type: true } },
     },
   },
@@ -73,7 +74,63 @@ export class ProjectsService {
       throw new NotFoundException('Project not found');
     }
 
-    return this.mapProjectDetail(project);
+    const listing = await this.prisma.listingApplication.findFirst({
+      where: {
+        status: 'APPROVED',
+        ticker: project.ticker,
+      },
+      orderBy: { reviewedAt: 'desc' },
+      select: {
+        founderName: true,
+        founderTwitter: true,
+        founderLinkedIn: true,
+        founderGithub: true,
+        founderVideoUrl: true,
+        founderInterviewUrl: true,
+        companyDetails: true,
+        whyList: true,
+        whyDoxxed: true,
+        verificationScore: true,
+        verificationCriteria: true,
+        websiteUrl: true,
+        telegramUrl: true,
+        auditUrl: true,
+      },
+    });
+
+    return {
+      ...this.mapProjectDetail(project),
+      verificationDossier: listing
+        ? {
+            founderName: listing.founderName,
+            founderTwitter: listing.founderTwitter,
+            founderLinkedIn: listing.founderLinkedIn,
+            founderGithub: listing.founderGithub,
+            founderVideoUrl: listing.founderVideoUrl,
+            founderInterviewUrl: listing.founderInterviewUrl,
+            companyDetails: listing.companyDetails,
+            whyList: listing.whyList,
+            whyDoxxed: listing.whyDoxxed,
+            verificationScore: listing.verificationScore,
+            verificationCriteria: listing.verificationCriteria as string[] | null,
+            websiteUrl: listing.websiteUrl,
+            telegramUrl: listing.telegramUrl,
+            auditUrl: listing.auditUrl,
+          }
+        : project.founder
+          ? {
+              founderName: project.founder.name,
+              founderTwitter: project.founder.twitterUrl,
+              founderLinkedIn: project.founder.linkedInUrl,
+              founderGithub: project.founder.githubUrl,
+              founderVideoUrl: project.founder.videoUrl,
+              whyList: null,
+              whyDoxxed: null,
+              verificationScore: null,
+              verificationCriteria: project.founder.verifications.map((v) => v.type),
+            }
+          : null,
+    };
   }
 
   async findFounders() {

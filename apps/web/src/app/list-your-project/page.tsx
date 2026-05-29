@@ -205,7 +205,7 @@ export default function ListYourProjectPage() {
       <header className="border-b border-[var(--color-border)]">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
           <Link href="/" className="text-sm text-[var(--color-muted)] hover:text-white">
-            ← DoxedCryptoFounder
+            ← Doxxed crypto
           </Link>
           <span className="text-sm text-[var(--color-muted)]">Listing application</span>
         </div>

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ChainSlug } from '@prisma/client';
+import { CONTRACT_CHAIN_FALLBACK, parseTokenInput } from '@dcf/utils';
 import { GeckoterminalService } from '../geckoterminal/geckoterminal.service';
 import {
   buildPreviewFromPair,
@@ -61,6 +62,28 @@ export class DexscreenerService {
       pair.url?.trim() ||
       `https://dexscreener.com/${chainId}/${pair.pairAddress}`;
     return buildPreviewFromPair(dexscreenerUrl, pair);
+  }
+
+  async previewFromInput(input: string): Promise<DexScreenerPreview> {
+    const trimmed = input.trim();
+    const parsed = parseTokenInput(trimmed);
+
+    if (!parsed || parsed.kind === 'url') {
+      return this.previewFromUrl(trimmed);
+    }
+
+    const chains = parsed.chainHint
+      ? [parsed.chainHint]
+      : [...CONTRACT_CHAIN_FALLBACK];
+    let lastError: Error | null = null;
+    for (const chain of chains) {
+      try {
+        return await this.previewFromContract(chain as ChainSlug, parsed.address);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    throw lastError ?? new BadRequestException('Token not found for contract address');
   }
 
   private async fetchTokenPairs(

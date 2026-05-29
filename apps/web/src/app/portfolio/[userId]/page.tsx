@@ -4,10 +4,13 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { formatPercent, formatUsd } from '@dcf/utils';
-import { SiteNav } from '@/components/site-nav';
+import { SiteNav, SiteBrand } from '@/components/site-nav';
+import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio } from '@/components/share-portfolio';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
+
+type PublicPosition = PublicPortfolio['positions'][number];
 
 export default function PublicPortfolioPage() {
   const params = useParams<{ userId: string }>();
@@ -15,6 +18,7 @@ export default function PublicPortfolioPage() {
   const [portfolio, setPortfolio] = useState<PublicPortfolio | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [intelPosition, setIntelPosition] = useState<CoinIntelData | null>(null);
 
   const load = useCallback(async () => {
     if (!userId) return;
@@ -34,14 +38,36 @@ export default function PublicPortfolioPage() {
     load();
   }, [load]);
 
+  function openIntel(pos: PublicPosition) {
+    setIntelPosition({
+      ticker: pos.ticker,
+      name: pos.name,
+      logoUrl: pos.logoUrl,
+      priceUsd: pos.priceUsd,
+      marketCap: pos.marketCap,
+      liquidity: pos.liquidity,
+      volume24h: pos.volume24h,
+      contractAddress: pos.contractAddress,
+      dexscreenerUrl: pos.dexscreenerUrl,
+      websiteUrl: pos.websiteUrl,
+      twitterUrl: pos.twitterUrl,
+      telegramUrl: pos.telegramUrl,
+      isDoxxedCurated: pos.isDoxxedCurated,
+      founderName: pos.founderName,
+      quantity: pos.quantity,
+      avgBuyPrice: pos.avgBuyPrice,
+      pnl: pos.pnl,
+      pnlPercent: pos.pnlPercent,
+      marketValue: pos.marketValue,
+    });
+  }
+
   return (
     <main className="min-h-screen bg-[#050508]">
       <header className="border-b border-[var(--color-border)]">
         <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
-            <Link href="/" className="text-sm text-[var(--color-muted)] hover:text-white">
-              ← DoxedCryptoFounder
-            </Link>
+            <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-semibold">Paper Trading Portfolio</h1>
           </div>
           <SiteNav />
@@ -95,14 +121,19 @@ export default function PublicPortfolioPage() {
 
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
               <h3 className="font-semibold">Open positions</h3>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">Tap a position for token details</p>
               {portfolio.positions.length === 0 ? (
                 <p className="mt-3 text-sm text-[var(--color-muted)]">No open positions.</p>
               ) : (
                 <ul className="mt-3 space-y-3">
                   {portfolio.positions.map((pos) => (
                     <li
-                      key={pos.ticker}
-                      className="flex items-center justify-between rounded-lg bg-[var(--color-background)] p-3 text-sm"
+                      key={`${pos.ticker}-${pos.projectId ?? pos.name}`}
+                      className="flex cursor-pointer items-center justify-between rounded-lg bg-[var(--color-background)] p-3 text-sm transition hover:ring-1 hover:ring-[var(--color-accent)]/40"
+                      onClick={() => openIntel(pos)}
+                      onKeyDown={(e) => e.key === 'Enter' && openIntel(pos)}
+                      role="button"
+                      tabIndex={0}
                     >
                       <div className="flex items-center gap-3">
                         {pos.logoUrl ? (
@@ -153,6 +184,10 @@ export default function PublicPortfolioPage() {
           </>
         )}
       </div>
+
+      {intelPosition && (
+        <CoinIntelligencePanel data={intelPosition} onClose={() => setIntelPosition(null)} />
+      )}
     </main>
   );
 }

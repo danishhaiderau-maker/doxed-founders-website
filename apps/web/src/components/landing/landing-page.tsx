@@ -29,7 +29,7 @@ export function LandingPage() {
             <p className="text-xs uppercase tracking-[0.25em] text-emerald-400/80">
               Proof of Conviction
             </p>
-            <h1 className="text-xl font-semibold tracking-tight">DoxedCryptoFounder</h1>
+            <h1 className="text-xl font-semibold tracking-tight">Doxxed crypto</h1>
           </div>
           <SiteNav />
         </div>

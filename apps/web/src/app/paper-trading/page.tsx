@@ -5,10 +5,12 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { TradingChart } from '@/components/trading-chart';
-import { SiteNav } from '@/components/site-nav';
-import { BustPenaltyModal, RiskDisclaimerModal } from '@/components/trade-modals';
+import { SiteNav, SiteBrand } from '@/components/site-nav';
+import { BustPenaltyModal } from '@/components/trade-modals';
+import { TradeAccountabilityModal } from '@/components/trade-accountability-modal';
+import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
-import { formatUsd, formatPercent, formatPublicAccountLabel } from '@dcf/utils';
+import { formatUsd, formatPercent, formatPublicAccountLabel, formatTokenPrice } from '@dcf/utils';
 import { AccountWelcome } from '@/components/account-welcome';
 import {
   createPaperSession,
@@ -24,7 +26,6 @@ import {
 } from '@/lib/api';
 
 const SESSION_KEY = 'dcf-paper-user-id';
-const RISK_ACCEPT_PREFIX = 'dcf-risk-accept-';
 
 type Position = PaperPortfolio['positions'][number];
 
@@ -63,8 +64,10 @@ function PaperTradingPageContent() {
   const [activeChartUrl, setActiveChartUrl] = useState<string | null>(null);
   const [guestPortfolioNotice, setGuestPortfolioNotice] = useState<string | null>(null);
   const [migrationDone, setMigrationDone] = useState(false);
-  const [showRiskModal, setShowRiskModal] = useState(false);
+  const [showAccountabilityModal, setShowAccountabilityModal] = useState(false);
   const [showBustModal, setShowBustModal] = useState(false);
+  const [founderDoxxedTick, setFounderDoxxedTick] = useState(false);
+  const [intelPosition, setIntelPosition] = useState<CoinIntelData | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
   const [bustDismissed, setBustDismissed] = useState(false);
 
@@ -146,6 +149,19 @@ function PaperTradingPageContent() {
   }, [searchParams, userId, refreshPortfolio]);
 
   useEffect(() => {
+    const dex = searchParams.get('dex');
+    if (dex && userId) {
+      setDexUrl(dex);
+      previewPaperTrade(dex)
+        .then((data) => {
+          setPreview(data);
+          setActiveChartUrl(data.dexscreenerUrl);
+        })
+        .catch(() => {});
+    }
+  }, [searchParams, userId]);
+
+  useEffect(() => {
     if (portfolio?.isBusted && !bustDismissed) {
       setShowBustModal(true);
     }
@@ -183,20 +199,55 @@ function PaperTradingPageContent() {
     }
   }
 
-  async function openPosition(pos: Position, mode: 'SELL' | 'VIEW') {
-    if (!pos.dexscreenerUrl) {
-      setError(`No DexScreener link stored for ${pos.ticker}. Paste the URL manually to sell.`);
+  async function openPosition(pos: Position, mode: 'SELL' | 'VIEW' | 'INTEL') {
+    if (mode === 'INTEL') {
+      setIntelPosition({
+        ticker: pos.ticker,
+        name: pos.name,
+        logoUrl: pos.logoUrl,
+        priceUsd: pos.priceUsd,
+        marketCap: pos.marketCap,
+        liquidity: pos.liquidity,
+        volume24h: pos.volume24h,
+        contractAddress: pos.contractAddress,
+        dexscreenerUrl: pos.dexscreenerUrl,
+        websiteUrl: pos.websiteUrl,
+        twitterUrl: pos.twitterUrl,
+        telegramUrl: pos.telegramUrl,
+        isDoxxedCurated: pos.isDoxxedCurated,
+        founderName: pos.founderName,
+        quantity: pos.quantity,
+        avgBuyPrice: pos.avgBuyPrice,
+        pnl: pos.pnl,
+        pnlPercent: pos.pnlPercent,
+        marketValue: pos.marketValue,
+      });
+      return;
+    }
+
+    const input = pos.dexscreenerUrl ?? pos.contractAddress;
+    if (!input) {
+      setError(`No DexScreener link or contract stored for ${pos.ticker}. Paste manually to trade.`);
       return;
     }
     setSide(mode === 'SELL' ? 'SELL' : 'BUY');
-    setActiveChartUrl(pos.dexscreenerUrl);
-    await loadPreview(pos.dexscreenerUrl);
+    setActiveChartUrl(pos.dexscreenerUrl ?? null);
+    await loadPreview(input);
     if (mode === 'SELL') {
       setTradeComment('');
       const maxSell =
         Math.floor(pos.quantity * pos.priceUsd * 999) / 1000;
       setAmountUsd(String(Math.max(0.01, maxSell)));
     }
+  }
+
+  function buildTradeComment(): string | undefined {
+    let comment = tradeComment.trim();
+    if (founderDoxxedTick) {
+      const note = '[Trader marks founder as publicly doxxed]';
+      comment = comment ? `${comment}\n\n${note}` : note;
+    }
+    return comment || undefined;
   }
 
   async function executeTrade() {
@@ -209,10 +260,12 @@ function PaperTradingPageContent() {
         dexscreenerUrl: preview.dexscreenerUrl,
         side,
         amountUsd: Number(amountUsd),
-        comment: tradeComment.trim() || undefined,
+        comment: buildTradeComment(),
       });
       setLastFeedPostId(result.feedPostId);
       setTradeComment('');
+      setFounderDoxxedTick(false);
+      setShowAccountabilityModal(false);
       await refreshPortfolio(userId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Trade failed');
@@ -223,23 +276,15 @@ function PaperTradingPageContent() {
 
   function handleTradeClick() {
     if (!preview) return;
-
-    if (side === 'BUY' && !preview.isDoxxedCurated) {
-      const key = `${RISK_ACCEPT_PREFIX}${preview.ticker}`;
-      if (!sessionStorage.getItem(key)) {
-        setShowRiskModal(true);
-        return;
-      }
+    if (side === 'BUY') {
+      setShowAccountabilityModal(true);
+      return;
     }
-
     executeTrade();
   }
 
-  function handleAcceptRisk() {
-    if (preview) {
-      sessionStorage.setItem(`${RISK_ACCEPT_PREFIX}${preview.ticker}`, '1');
-    }
-    setShowRiskModal(false);
+  function handleConfirmBuy() {
+    setShowAccountabilityModal(false);
     executeTrade();
   }
 
@@ -327,9 +372,7 @@ function PaperTradingPageContent() {
       <header className="border-b border-[var(--color-border)]">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
-            <Link href="/" className="text-sm text-[var(--color-muted)] hover:text-white">
-              ← DoxedCryptoFounder
-            </Link>
+            <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-semibold">Paper Trading Terminal</h1>
             {isLoggedIn && (
               <div className="mt-2">
@@ -403,15 +446,15 @@ function PaperTradingPageContent() {
         )}
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-            <h2 className="font-semibold">Trade any DexScreener token</h2>
+            <h2 className="font-semibold">Trade any token</h2>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
-              Load a token to buy or sell. Use &ldquo;Close position&rdquo; on holdings below to sell quickly.
+              Paste a DexScreener link or contract address (Solana, Base, ETH…).
             </p>
             <input
-              type="url"
+              type="text"
               value={dexUrl}
               onChange={(e) => setDexUrl(e.target.value)}
-              placeholder="https://dexscreener.com/solana/..."
+              placeholder="DexScreener URL or contract address (0x… / Solana CA)"
               className="mt-4 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
             />
             <button
@@ -435,7 +478,7 @@ function PaperTradingPageContent() {
                       {preview.projectName} ({preview.ticker})
                     </p>
                     <p className="text-sm text-[var(--color-muted)]">
-                      ${preview.marketPreview.priceUsd ?? '—'}
+                      {formatTokenPrice(Number(preview.marketPreview.priceUsd) || null)}
                     </p>
                   </div>
                 </div>
@@ -475,18 +518,9 @@ function PaperTradingPageContent() {
                   />
                 </label>
                 {side === 'BUY' && (
-                  <label className="mt-4 block text-sm">
-                    <span className="text-[var(--color-muted)]">
-                      Your thesis (optional — shows on feed)
-                    </span>
-                    <textarea
-                      value={tradeComment}
-                      onChange={(e) => setTradeComment(e.target.value)}
-                      rows={2}
-                      placeholder="Why could this run?"
-                      className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
-                    />
-                  </label>
+                  <p className="mt-3 text-xs text-[var(--color-muted)]">
+                    You&apos;ll confirm risks and optional thesis before buying.
+                  </p>
                 )}
                 {side === 'SELL' && (
                   <label className="mt-4 block text-sm">
@@ -504,7 +538,7 @@ function PaperTradingPageContent() {
                 )}
                 {!preview.isDoxxedCurated && side === 'BUY' && (
                   <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
-                    ⚠️ Non-doxxed token — you&apos;ll confirm risk before buying.
+                    ⚠️ Non-doxxed token — risk review required before buying.
                   </p>
                 )}
                 {preview.isDoxxedCurated && side === 'BUY' && (
@@ -560,9 +594,13 @@ function PaperTradingPageContent() {
               {portfolio?.positions.map((pos) => (
                 <li
                   key={pos.projectId}
-                  className={`rounded-lg bg-[var(--color-background)] p-3 text-sm ${
+                  className={`cursor-pointer rounded-lg bg-[var(--color-background)] p-3 text-sm transition hover:ring-1 hover:ring-[var(--color-accent)]/40 ${
                     pos.pnl < 0 ? 'position-loss-glow border border-red-500/30' : ''
                   } ${pos.pnl > 0 ? 'border border-emerald-500/20' : ''}`}
+                  onClick={() => openPosition(pos, 'INTEL')}
+                  onKeyDown={(e) => e.key === 'Enter' && openPosition(pos, 'INTEL')}
+                  role="button"
+                  tabIndex={0}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>
@@ -572,8 +610,9 @@ function PaperTradingPageContent() {
                     <span className="font-medium">{formatUsd(pos.marketValue)}</span>
                   </div>
                   <p className="mt-2 text-xs text-[var(--color-muted)]">
-                    {pos.quantity.toFixed(4)} tokens @ {formatUsd(pos.avgBuyPrice, 4)}
+                    {pos.quantity.toFixed(4)} tokens @ {formatTokenPrice(pos.avgBuyPrice)}
                   </p>
+                  <p className="mt-1 text-[10px] text-[var(--color-accent)]">Tap for coin intel →</p>
                   <p className="mt-1 text-xs">
                     <span
                       className={
@@ -583,7 +622,7 @@ function PaperTradingPageContent() {
                       {formatUsd(pos.pnl)} ({formatPercent(pos.pnlPercent)})
                     </span>
                   </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
+                  <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
                     {userId && (
                       <SharePosition
                         userId={userId}
@@ -653,12 +692,26 @@ function PaperTradingPageContent() {
         <p className="mx-auto mb-8 max-w-6xl px-6 text-sm text-red-300">{error}</p>
       )}
 
-      <RiskDisclaimerModal
-        open={showRiskModal}
-        ticker={preview?.ticker ?? 'this token'}
-        onCancel={() => setShowRiskModal(false)}
-        onAccept={handleAcceptRisk}
-      />
+      {preview && portfolio && (
+        <TradeAccountabilityModal
+          open={showAccountabilityModal}
+          preview={preview}
+          amountUsd={Number(amountUsd)}
+          cashBalance={portfolio.cashBalance}
+          resetFeeUsd={portfolio.resetFeeUsd ?? 50}
+          thesis={tradeComment}
+          onThesisChange={setTradeComment}
+          founderDoxxedTick={founderDoxxedTick}
+          onFounderDoxxedTickChange={setFounderDoxxedTick}
+          onCancel={() => setShowAccountabilityModal(false)}
+          onConfirm={handleConfirmBuy}
+        />
+      )}
+
+      {intelPosition && (
+        <CoinIntelligencePanel data={intelPosition} onClose={() => setIntelPosition(null)} />
+      )}
+
       <BustPenaltyModal
         open={showBustModal}
         resetFeeUsd={portfolio?.resetFeeUsd ?? 50}

@@ -31,6 +31,22 @@ export function ShareFlexModal({
   const imagePath = useMemo(() => pickShareImagePath(pnlOrRoi), [pnlOrRoi, open]);
   const win = pnlOrRoi >= 0;
   const twitterUrl = buildTwitterIntentUrl(tweetText, shareUrl);
+  const [copied, setCopied] = useState(false);
+
+  const copyImageToClipboard = useCallback(async () => {
+    try {
+      const res = await fetch(imagePath);
+      const blob = await res.blob();
+      if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        setCopied(true);
+        return true;
+      }
+    } catch {
+      /* fallback to download */
+    }
+    return false;
+  }, [imagePath]);
 
   const downloadImage = useCallback(async () => {
     try {
@@ -46,6 +62,14 @@ export function ShareFlexModal({
       window.open(imagePath, '_blank');
     }
   }, [imagePath, pnlOrRoi]);
+
+  const postOnX = useCallback(async () => {
+    const copiedOk = await copyImageToClipboard();
+    if (!copiedOk) {
+      await downloadImage();
+    }
+    window.open(twitterUrl, '_blank', 'noopener,noreferrer');
+  }, [copyImageToClipboard, downloadImage, twitterUrl]);
 
   if (!open) return null;
 
@@ -87,9 +111,9 @@ export function ShareFlexModal({
         </p>
 
         <ol className="mt-3 space-y-1 text-xs text-zinc-400">
-          <li>1. Download the {win ? '🚀 pump' : '📉 dump'} image</li>
-          <li>2. Open X and attach the image to your post</li>
-          <li>3. Paste the text (pre-filled when you tap Post on X)</li>
+          <li>1. Tap <strong className="text-zinc-200">Post on X</strong> — we copy the meme to your clipboard</li>
+          <li>2. On X, paste the image (Ctrl+V / long-press paste) into the compose box</li>
+          <li>3. Tweet text is pre-filled — X cannot attach images via link for security</li>
         </ol>
 
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
@@ -102,14 +126,13 @@ export function ShareFlexModal({
           >
             Download image
           </button>
-          <a
-            href={twitterUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex-1 rounded-lg bg-sky-500 py-2.5 text-center text-sm font-medium text-white hover:bg-sky-400"
+          <button
+            type="button"
+            onClick={postOnX}
+            className="flex-1 rounded-lg bg-sky-500 py-2.5 text-sm font-medium text-white hover:bg-sky-400"
           >
-            Post on X
-          </a>
+            {copied ? 'Image copied — open X' : 'Post on X'}
+          </button>
         </div>
       </div>
     </div>

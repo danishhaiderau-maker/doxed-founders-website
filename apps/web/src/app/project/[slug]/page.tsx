@@ -168,6 +168,119 @@ export default function ProjectDetailPage() {
               </section>
             )}
 
+            {project.verificationDossier && (
+              <section className="rounded-xl border border-emerald-500/20 bg-[var(--color-card)] p-6">
+                <h3 className="text-sm font-semibold uppercase tracking-widest text-emerald-300">
+                  Verification dossier
+                </h3>
+                <p className="mt-2 text-xs text-[var(--color-muted)]">
+                  Information submitted when this project was listed as team doxxed / public identity.
+                </p>
+                <dl className="mt-4 space-y-3 text-sm">
+                  {project.verificationDossier.whyDoxxed && (
+                    <div>
+                      <dt className="text-xs uppercase text-[var(--color-muted)]">Why doxxed</dt>
+                      <dd className="mt-1 whitespace-pre-wrap">{project.verificationDossier.whyDoxxed}</dd>
+                    </div>
+                  )}
+                  {project.verificationDossier.whyList && (
+                    <div>
+                      <dt className="text-xs uppercase text-[var(--color-muted)]">Why list</dt>
+                      <dd className="mt-1 whitespace-pre-wrap">{project.verificationDossier.whyList}</dd>
+                    </div>
+                  )}
+                  {project.verificationDossier.companyDetails && (
+                    <div>
+                      <dt className="text-xs uppercase text-[var(--color-muted)]">Company details</dt>
+                      <dd className="mt-1 whitespace-pre-wrap">{project.verificationDossier.companyDetails}</dd>
+                    </div>
+                  )}
+                  {project.verificationDossier.verificationCriteria &&
+                    project.verificationDossier.verificationCriteria.length > 0 && (
+                      <div>
+                        <dt className="text-xs uppercase text-[var(--color-muted)]">Criteria met</dt>
+                        <dd className="mt-1 flex flex-wrap gap-2">
+                          {project.verificationDossier.verificationCriteria.map((c) => (
+                            <span
+                              key={c}
+                              className="rounded bg-emerald-950/40 px-2 py-0.5 text-xs text-emerald-200"
+                            >
+                              {c}
+                            </span>
+                          ))}
+                        </dd>
+                      </div>
+                    )}
+                </dl>
+                <div className="mt-4 flex flex-wrap gap-3 text-sm">
+                  {project.verificationDossier.founderTwitter && (
+                    <a
+                      href={
+                        project.verificationDossier.founderTwitter.startsWith('http')
+                          ? project.verificationDossier.founderTwitter
+                          : `https://x.com/${project.verificationDossier.founderTwitter.replace(/^@/, '')}`
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sky-300 hover:text-white"
+                    >
+                      Founder X / Twitter
+                    </a>
+                  )}
+                  {project.verificationDossier.founderLinkedIn && (
+                    <a
+                      href={project.verificationDossier.founderLinkedIn}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--color-accent)] hover:text-white"
+                    >
+                      LinkedIn
+                    </a>
+                  )}
+                  {project.verificationDossier.founderGithub && (
+                    <a
+                      href={project.verificationDossier.founderGithub}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--color-accent)] hover:text-white"
+                    >
+                      GitHub
+                    </a>
+                  )}
+                  {project.verificationDossier.founderVideoUrl && (
+                    <a
+                      href={project.verificationDossier.founderVideoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--color-accent)] hover:text-white"
+                    >
+                      Founder video
+                    </a>
+                  )}
+                  {project.verificationDossier.founderInterviewUrl && (
+                    <a
+                      href={project.verificationDossier.founderInterviewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--color-accent)] hover:text-white"
+                    >
+                      Interview
+                    </a>
+                  )}
+                  {project.verificationDossier.auditUrl && (
+                    <a
+                      href={project.verificationDossier.auditUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--color-accent)] hover:text-white"
+                    >
+                      Audit
+                    </a>
+                  )}
+                </div>
+              </section>
+            )}
+
             {project.founder && (
               <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
                 <h3 className="text-sm font-semibold uppercase tracking-widest text-[var(--color-muted)]">

@@ -105,7 +105,12 @@ export class PaperTradingService {
       portfolio.positions.map(async (position) => {
         const project = await this.prisma.project.findUnique({
           where: { id: position.projectId },
-          include: { metrics: true },
+          include: {
+            metrics: true,
+            socials: true,
+            founder: { include: { verifications: { where: { verified: true } } } },
+            chain: true,
+          },
         });
         const price = Number(project?.metrics?.priceUsd ?? position.avgBuyPrice);
         const quantity = Number(position.quantity);
@@ -120,15 +125,23 @@ export class PaperTradingService {
           ticker: project!.ticker,
           logoUrl: project!.logoUrl,
           dexscreenerUrl: project!.dexscreenerUrl,
-          chainSlug: (
-            await this.prisma.chain.findUnique({ where: { id: project!.chainId } })
-          )?.slug,
+          contractAddress: project!.contractAddress,
+          websiteUrl: project!.websiteUrl,
+          chainSlug: project!.chain.slug,
+          twitterUrl: project!.socials?.twitterUrl ?? project!.founder?.twitterUrl ?? null,
+          telegramUrl: project!.socials?.telegramUrl ?? null,
+          isDoxxedCurated:
+            project!.source === ProjectSource.CURATED && Boolean(project!.founderId),
+          founderName: project!.founder?.name ?? null,
           quantity,
           avgBuyPrice: Number(position.avgBuyPrice),
           priceUsd: price,
           marketValue,
           pnl,
           pnlPercent,
+          marketCap: project?.metrics?.marketCap ? Number(project.metrics.marketCap) : null,
+          liquidity: project?.metrics?.liquidity ? Number(project.metrics.liquidity) : null,
+          volume24h: project?.metrics?.volume24h ? Number(project.metrics.volume24h) : null,
         };
       }),
     );
@@ -187,26 +200,50 @@ export class PaperTradingService {
       startingCash: portfolio.startingCash,
       positionCount: portfolio.positions.length,
       positions: portfolio.positions.map((p) => ({
+        projectId: p.projectId,
         ticker: p.ticker,
         name: p.name,
         logoUrl: p.logoUrl,
+        dexscreenerUrl: p.dexscreenerUrl,
+        contractAddress: p.contractAddress,
+        websiteUrl: p.websiteUrl,
+        chainSlug: p.chainSlug,
+        twitterUrl: p.twitterUrl,
+        telegramUrl: p.telegramUrl,
+        isDoxxedCurated: p.isDoxxedCurated,
+        founderName: p.founderName,
+        quantity: p.quantity,
+        avgBuyPrice: p.avgBuyPrice,
+        priceUsd: p.priceUsd,
         marketValue: p.marketValue,
         pnl: p.pnl,
         pnlPercent: p.pnlPercent,
+        marketCap: p.marketCap,
+        liquidity: p.liquidity,
+        volume24h: p.volume24h,
       })),
     };
   }
 
   async previewToken(url: string) {
-    const preview = await this.dexscreener.previewFromUrl(url);
+    return this.previewTokenInput(url);
+  }
+
+  async previewTokenInput(input: string) {
+    const trimmed = input.trim();
+    const preview = await this.dexscreener.previewFromInput(trimmed);
+
     const curated = await this.prisma.project.findFirst({
       where: {
         approved: true,
         source: ProjectSource.CURATED,
         founderId: { not: null },
         OR: [
-          { dexscreenerUrl: url.trim() },
+          { dexscreenerUrl: preview.dexscreenerUrl?.trim() },
           { ticker: preview.ticker.toUpperCase() },
+          ...(preview.contractAddress
+            ? [{ contractAddress: preview.contractAddress }]
+            : []),
         ],
       },
       select: { slug: true, name: true },
@@ -368,10 +405,10 @@ export class PaperTradingService {
   }
 
   async executeTrade(dto: PaperTradeDto) {
-    const preview = await this.dexscreener.previewFromUrl(dto.dexscreenerUrl);
-    const parsed = parseDexScreenerUrl(dto.dexscreenerUrl);
+    const preview = await this.previewTokenInput(dto.dexscreenerUrl.trim());
+    const parsed = parseDexScreenerUrl(preview.dexscreenerUrl);
     if (!parsed) {
-      throw new BadRequestException('Invalid DexScreener URL');
+      throw new BadRequestException('Invalid DexScreener URL from token preview');
     }
 
     const price = Number(preview.marketPreview.priceUsd);
