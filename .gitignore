@@ -42,6 +42,18 @@ yarn-error.log*
 
 # Prisma
 prisma/migrations/**/migration_lock.toml
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+prisma/*.db-journal
+
+# Local logs / agent artifacts (never publish)
+*.log
+agent-restart-report*.txt
+restart-report.txt
+_verify-out.txt
+mark.txt
+mark2.txt
 
 # Testing
 coverage/
