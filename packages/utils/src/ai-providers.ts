@@ -5,7 +5,8 @@ export type AiProviderKey =
   | 'OPENAI'
   | 'ANTHROPIC'
   | 'GEMINI'
-  | 'OPENHANDS';
+  | 'OPENHANDS'
+  | 'CURSOR';
 
 export type AiProviderConfig = {
   key: AiProviderKey;
@@ -19,7 +20,7 @@ export type AiProviderConfig = {
 };
 
 export function isRemoteAgentProvider(key: string): boolean {
-  return key === 'OPENHANDS';
+  return key === 'OPENHANDS' || key === 'CURSOR';
 }
 
 export const AI_PROVIDERS: AiProviderConfig[] = [
@@ -69,6 +70,16 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     billTip:
       'Self-hosted or OpenHands Cloud — Founder OS dispatches build tasks via REST (URL + API key). LLM cost is on your OpenHands instance.',
     credentialProvider: 'openhands',
+  },
+  {
+    key: 'CURSOR',
+    label: 'Cursor Cloud Agents',
+    connectMode: 'remote_agent',
+    needsApiKey: true,
+    defaultModel: null,
+    billTip:
+      'Cursor Cloud Agents API — Founder OS creates/resumes cloud agents on your GitHub repo. Billing is on your Cursor account (api.cursor.com).',
+    credentialProvider: 'cursor',
   },
 ];
 

@@ -41,7 +41,16 @@ export function FounderCopilotBriefing({
     setBusy(true);
     try {
       const result = await copilotResume(accessToken);
-      onMessage?.(result.message);
+      const dispatch = result.cursorCloudDispatch ?? result.openHandsDispatch;
+      if (dispatch && 'error' in dispatch && dispatch.error) {
+        onMessage?.(`${result.message} (${dispatch.error})`);
+      } else if (dispatch && 'agentUrl' in dispatch && dispatch.agentUrl) {
+        onMessage?.(`${result.message} Open agent: ${dispatch.agentUrl}`);
+      } else if (dispatch && 'conversationUrl' in dispatch && dispatch.conversationUrl) {
+        onMessage?.(`${result.message} Open: ${dispatch.conversationUrl}`);
+      } else {
+        onMessage?.(result.dispatchHint ?? result.message);
+      }
       load();
       onRefresh?.();
     } catch (err) {

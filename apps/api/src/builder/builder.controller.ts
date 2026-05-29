@@ -40,12 +40,25 @@ export class BuilderController {
     return this.builder.connectOpenHands(user.id, body.baseUrl, body.apiKey);
   }
 
+  @Post('providers/cursor-connect')
+  connectCursor(@CurrentUser() user: AuthUser, @Body() body: { apiKey: string }) {
+    return this.builder.connectCursor(user.id, body.apiKey);
+  }
+
   @Post('openhands/dispatch')
   dispatchOpenHands(
     @CurrentUser() user: AuthUser,
     @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
   ) {
     return this.builder.dispatchOpenHandsBuildTask(user.id, body);
+  }
+
+  @Post('cursor/dispatch')
+  dispatchCursor(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    return this.builder.dispatchCursorBuildTask(user.id, body);
   }
 
   @Post('providers/connect')

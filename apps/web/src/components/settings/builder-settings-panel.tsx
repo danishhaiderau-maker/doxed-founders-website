@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   BuilderSettings,
   connectAiProvider,
+  connectCursorCloud,
   connectGitHubToken,
   connectOpenHands,
   disconnectAiProvider,
@@ -25,6 +26,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const [apiKeyInput, setApiKeyInput] = useState<Record<string, string>>({});
   const [openhandsUrl, setOpenhandsUrl] = useState('');
   const [openhandsKey, setOpenhandsKey] = useState('');
+  const [cursorKey, setCursorKey] = useState('');
   const [githubToken, setGithubToken] = useState('');
 
   const load = useCallback(async () => {
@@ -100,6 +102,29 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     }
   }
 
+  async function handleConnectCursor() {
+    if (!cursorKey.trim()) {
+      setErr('Cursor API key required');
+      return;
+    }
+    setConnecting('cursor');
+    setErr(null);
+    try {
+      const result = await connectCursorCloud(cursorKey.trim(), accessToken);
+      setMsg(
+        `${result.accountName} connected — Quick Build and Continue will dispatch to Cursor Cloud Agents${
+          result.agentUrl ? ` (${result.agentUrl})` : ''
+        }`,
+      );
+      setCursorKey('');
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Cursor connect failed');
+    } finally {
+      setConnecting(null);
+    }
+  }
+
   async function handleDisconnect(provider: string) {
     try {
       await disconnectAiProvider(provider, accessToken);
@@ -127,16 +152,17 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   }
 
   const llmProviders = settings.providers.filter(
-    (p) => p.key !== 'RULE_BASED' && p.key !== 'OPENHANDS',
+    (p) => p.key !== 'RULE_BASED' && p.key !== 'OPENHANDS' && p.key !== 'CURSOR',
   );
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
+  const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
 
   return (
     <div className="space-y-8">
       <section className="rounded-2xl border border-violet-500/30 bg-violet-950/10 p-6">
         <h2 className="text-lg font-semibold text-white">Default builder</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Remote LLM for specs, or OpenHands for full agent dispatch — no copy-paste desk tools.
+          Remote LLM for specs, or Cursor / OpenHands for full agent dispatch — no copy-paste desk tools.
         </p>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <label className="block text-sm">
@@ -188,6 +214,58 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
           />
         </label>
+      </section>
+
+      <section className="rounded-2xl border border-sky-500/30 bg-sky-950/10 p-6">
+        <h2 className="text-lg font-semibold text-white">Cursor Cloud Agents</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an API key
+          in{' '}
+          <a href="https://cursor.com/dashboard" className="text-sky-300 underline" target="_blank" rel="noreferrer">
+            Cursor Dashboard → Integrations
+          </a>
+          .
+        </p>
+        {cursorProvider?.connected && (
+          <p className="mt-2 text-xs text-emerald-300">
+            Connected — Quick Build and Continue dispatch remotely
+            {settings.cursorAgentUrl ? (
+              <>
+                {' '}
+                ·{' '}
+                <a href={settings.cursorAgentUrl} className="underline" target="_blank" rel="noreferrer">
+                  Open agent
+                </a>
+              </>
+            ) : null}
+          </p>
+        )}
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+          <input
+            type="password"
+            value={cursorKey}
+            onChange={(e) => setCursorKey(e.target.value)}
+            placeholder="Cursor API key"
+            className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+          />
+          <button
+            type="button"
+            disabled={connecting === 'cursor'}
+            onClick={handleConnectCursor}
+            className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {cursorProvider?.connected ? 'Update connection' : 'Connect Cursor'}
+          </button>
+          {cursorProvider?.connected && (
+            <button
+              type="button"
+              onClick={() => handleDisconnect('cursor')}
+              className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
       </section>
 
       <section className="rounded-2xl border border-indigo-500/30 bg-indigo-950/10 p-6">
