@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  buildPortfolioShareMessage,
   buildPortfolioShareUrl,
   buildProofOfConvictionMessage,
   buildProofOfConvictionThread,
@@ -31,6 +30,7 @@ export type ShareConvictionConfig = {
     thesis?: string | null;
     catalyst?: string | null;
     targetPrice?: number | null;
+    timeHorizon?: string | null;
     recordedAt?: string | null;
     daysHeld?: number;
   };
@@ -251,9 +251,19 @@ export function ShareFlexModal({
                     &ldquo;{conviction.thesis.trim()}&rdquo;
                   </p>
                 )}
+                {conviction.catalyst?.trim() && (
+                  <p className="mt-2 line-clamp-2 text-xs text-zinc-400">
+                    Catalyst: {conviction.catalyst.trim()}
+                  </p>
+                )}
                 {conviction.targetPrice != null && conviction.targetPrice > 0 && (
                   <p className="mt-1 text-[10px] text-zinc-500">
                     Target: {formatTokenPrice(conviction.targetPrice)}
+                  </p>
+                )}
+                {conviction.timeHorizon?.trim() && (
+                  <p className="mt-1 text-[10px] text-zinc-500">
+                    Horizon: {conviction.timeHorizon.trim()}
                   </p>
                 )}
               </div>
@@ -378,14 +388,11 @@ function buildProofInput(
 ): ProofOfConvictionInput {
   const entryPrice =
     input.entryPrice ??
-    (input.investedUsd > 0 && input.pnlPercent !== 0
-      ? input.investedUsd / (1 + input.pnlUsd / input.investedUsd)
-      : input.investedUsd);
+    (input.currentPrice != null
+      ? input.currentPrice / (1 + input.pnlPercent / 100)
+      : 0);
   const currentPrice =
-    input.currentPrice ??
-    (input.entryPrice != null
-      ? input.entryPrice * (1 + input.pnlPercent / 100)
-      : entryPrice * (1 + input.pnlPercent / 100));
+    input.currentPrice ?? entryPrice * (1 + input.pnlPercent / 100);
 
   return {
     ticker: input.ticker,
@@ -395,8 +402,8 @@ function buildProofInput(
     thesis: input.thesis,
     catalyst: input.catalyst,
     targetPrice: input.targetPrice,
-    recordedAt: input.recordedAt,
-    portfolioRoi: input.portfolioRoi,
+    timeHorizon: input.timeHorizon,
+    recordedAt: input.recordedAt ?? input.positionOpenedAt,
     proofUrl: buildPortfolioShareUrl(input.origin, input.userId),
   };
 }
@@ -431,6 +438,7 @@ export function buildPositionFlexShare(
       thesis: input.thesis,
       catalyst: input.catalyst,
       targetPrice: input.targetPrice,
+      timeHorizon: input.timeHorizon,
       recordedAt: input.recordedAt,
       daysHeld: input.daysHeld ?? daysBetween(input.recordedAt ?? input.positionOpenedAt),
     },
@@ -445,13 +453,29 @@ export function buildPortfolioFlexShare(input: {
   origin: string;
   accessToken?: string;
 }): ShareConvictionConfig {
-  const tweetText = buildPortfolioShareMessage(input.displayName, input.roi, input.totalValue);
+  const proofUrl = buildPortfolioShareUrl(input.origin, input.userId);
+  const sign = input.roi >= 0 ? '+' : '';
+  const threadPreview = [
+    '🚨 Proof of Conviction · Portfolio',
+    '',
+    `${input.displayName}`,
+    `Overall ROI: ${sign}${input.roi.toFixed(1)}%`,
+    `Total value: $${input.totalValue.toLocaleString()}`,
+    '',
+    'Tip: Share from an individual position for full thesis + entry story.',
+    '',
+    'Proof:',
+    proofUrl,
+    '',
+    '#ProofOfConviction',
+  ].join('\n');
+  const tweetText = threadPreview;
   return {
     pnlOrRoi: input.roi,
     tweetText,
-    instantTweetText: tweetText,
-    threadPreview: `${input.displayName} paper portfolio\n\nROI: ${input.roi >= 0 ? '+' : ''}${input.roi.toFixed(1)}%\nTotal: $${input.totalValue.toLocaleString()}\n\n#ProofOfConviction @DoxxedCrypto`,
-    shareUrl: buildPortfolioShareUrl(input.origin, input.userId),
+    instantTweetText: `🚨 Portfolio · ${sign}${input.roi.toFixed(1)}% paper ROI\n${proofUrl}\n#ProofOfConviction`,
+    threadPreview,
+    shareUrl: proofUrl,
     title: 'Portfolio conviction',
     accessToken: input.accessToken,
   };

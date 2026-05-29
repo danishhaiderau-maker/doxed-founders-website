@@ -159,6 +159,7 @@ export class PaperTradingService {
           convictionTargetUsd: position.convictionTargetUsd
             ? Number(position.convictionTargetUsd)
             : null,
+          convictionTimeHorizon: position.convictionTimeHorizon,
           convictionRecordedAt: position.convictionRecordedAt?.toISOString() ?? null,
           positionOpenedAt: position.createdAt.toISOString(),
         };
@@ -239,6 +240,12 @@ export class PaperTradingService {
         marketCap: p.marketCap,
         liquidity: p.liquidity,
         volume24h: p.volume24h,
+        convictionThesis: p.convictionThesis,
+        convictionCatalyst: p.convictionCatalyst,
+        convictionTargetUsd: p.convictionTargetUsd,
+        convictionTimeHorizon: p.convictionTimeHorizon,
+        convictionRecordedAt: p.convictionRecordedAt,
+        positionOpenedAt: p.positionOpenedAt,
       })),
     };
   }
@@ -531,13 +538,14 @@ export class PaperTradingService {
             projectId: project.id,
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
-            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd
+            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd || dto.timeHorizon?.trim()
               ? {
                   convictionThesis: dto.comment?.trim() || undefined,
                   convictionCatalyst: dto.catalyst?.trim() || undefined,
                   convictionTargetUsd: dto.targetUsd
                     ? new Prisma.Decimal(dto.targetUsd)
                     : undefined,
+                  convictionTimeHorizon: dto.timeHorizon?.trim() || undefined,
                   convictionRecordedAt: new Date(),
                 }
               : {}),
@@ -545,13 +553,14 @@ export class PaperTradingService {
           update: {
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
-            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd
+            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd || dto.timeHorizon?.trim()
               ? {
                   convictionThesis: dto.comment?.trim() || undefined,
                   convictionCatalyst: dto.catalyst?.trim() || undefined,
                   convictionTargetUsd: dto.targetUsd
                     ? new Prisma.Decimal(dto.targetUsd)
                     : undefined,
+                  convictionTimeHorizon: dto.timeHorizon?.trim() || undefined,
                   convictionRecordedAt: new Date(),
                 }
               : {}),

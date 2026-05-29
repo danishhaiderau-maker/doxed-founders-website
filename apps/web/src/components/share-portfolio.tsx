@@ -9,6 +9,23 @@ import {
   useShareFlex,
 } from '@/components/share-flex-modal';
 
+type HighlightPosition = {
+  projectId?: string;
+  ticker: string;
+  name: string;
+  quantity?: number;
+  avgBuyPrice?: number;
+  priceUsd?: number;
+  pnl: number;
+  pnlPercent: number;
+  convictionThesis?: string | null;
+  convictionCatalyst?: string | null;
+  convictionTargetUsd?: number | null;
+  convictionTimeHorizon?: string | null;
+  convictionRecordedAt?: string | null;
+  positionOpenedAt?: string | null;
+};
+
 type SharePortfolioProps = {
   userId: string;
   displayName: string;
@@ -16,6 +33,7 @@ type SharePortfolioProps = {
   totalValue: number;
   accessToken?: string;
   compact?: boolean;
+  highlightPosition?: HighlightPosition;
 };
 
 export function SharePortfolio({
@@ -25,13 +43,43 @@ export function SharePortfolio({
   totalValue,
   accessToken,
   compact = false,
+  highlightPosition,
 }: SharePortfolioProps) {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://doxxedcrypto.digital';
 
-  const flex = useMemo(
-    () => buildPortfolioFlexShare({ displayName, roi, totalValue, userId, origin, accessToken }),
-    [displayName, roi, totalValue, userId, origin, accessToken],
-  );
+  const flex = useMemo(() => {
+    if (highlightPosition) {
+      const pos = highlightPosition;
+      const positionInput: PositionShareInput & {
+        userId: string;
+        origin: string;
+        projectId: string;
+        accessToken?: string;
+      } = {
+        userId,
+        origin,
+        projectId: pos.projectId ?? '',
+        accessToken,
+        displayName,
+        ticker: pos.ticker,
+        projectName: pos.name,
+        investedUsd: (pos.quantity ?? 0) * (pos.avgBuyPrice ?? 0),
+        pnlUsd: pos.pnl,
+        pnlPercent: pos.pnlPercent,
+        entryPrice: pos.avgBuyPrice,
+        currentPrice: pos.priceUsd,
+        thesis: pos.convictionThesis,
+        catalyst: pos.convictionCatalyst,
+        targetPrice: pos.convictionTargetUsd,
+        timeHorizon: pos.convictionTimeHorizon,
+        recordedAt: pos.convictionRecordedAt,
+        positionOpenedAt: pos.positionOpenedAt,
+        portfolioRoi: roi,
+      };
+      return buildPositionFlexShare(positionInput);
+    }
+    return buildPortfolioFlexShare({ displayName, roi, totalValue, userId, origin, accessToken });
+  }, [displayName, roi, totalValue, userId, origin, accessToken, highlightPosition]);
 
   const { openFlex, modal } = useShareFlex(flex);
   const shareUrl = buildPortfolioShareUrl(origin, userId);
@@ -60,7 +108,9 @@ export function SharePortfolio({
       <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-4">
         <h3 className="text-sm font-semibold">Share Proof of Conviction</h3>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
-          Auto-written thread + meme. Sign in with X to post in one tap — no download or paste.
+          {highlightPosition
+            ? `Story tweet for $${highlightPosition.ticker} with your recorded thesis — or share per-position from the list above.`
+            : 'Open a position and record conviction at buy time for the richest share story.'}
         </p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
@@ -74,7 +124,9 @@ export function SharePortfolio({
               type="button"
               onClick={openFlex}
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white ${
-                roi >= 0 ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
+                (highlightPosition?.pnlPercent ?? roi) >= 0
+                  ? 'bg-emerald-600 hover:bg-emerald-500'
+                  : 'bg-red-600 hover:bg-red-500'
               }`}
             >
               📜 Share conviction
@@ -120,16 +172,16 @@ export function SharePosition(props: SharePositionProps) {
   );
 }
 
-function CopyLinkButton({ url, compact = false }: { url: string; compact?: boolean }) {
+function CopyLinkButton({ url, compact }: { url: string; compact?: boolean }) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), 2000);
     } catch {
-      window.prompt('Copy link:', url);
+      /* ignore */
     }
   }
 
@@ -139,11 +191,11 @@ function CopyLinkButton({ url, compact = false }: { url: string; compact?: boole
       onClick={copy}
       className={
         compact
-          ? 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white'
-          : 'rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-medium hover:border-[var(--color-accent)]'
+          ? 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-zinc-400 hover:text-white'
+          : 'rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs text-zinc-400 hover:text-white'
       }
     >
-      {copied ? 'Copied!' : compact ? 'Copy link' : 'Copy'}
+      {copied ? 'Copied!' : 'Copy link'}
     </button>
   );
 }
