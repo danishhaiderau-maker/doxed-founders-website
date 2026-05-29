@@ -4,7 +4,7 @@ import { NotificationFlashProvider } from '@/components/notification-flash';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'DoxedCryptoFounder — The Reputation Layer for Crypto',
+  title: 'Doxxed crypto — The Reputation Layer for Crypto',
   description:
     'Would you send money to a stranger? Discover doxxed founders, paper trade, earn reputation, and find conviction before liquidity.',
   manifest: '/manifest.json',

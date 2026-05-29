@@ -47,7 +47,7 @@ export function RiskDisclaimerModal({
         to run.
       </p>
       <p className="mt-3 text-sm leading-relaxed text-[var(--color-muted)]">
-        DoxedCryptoFounder exists to protect retail: buy doxxed founders with a solid track
+        Doxxed crypto exists to protect retail: buy doxxed founders with a solid track
         record. Only proceed if you accept the risk.
       </p>
       <div className="mt-6 flex gap-3">

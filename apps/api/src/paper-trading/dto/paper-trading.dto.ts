@@ -4,7 +4,6 @@ import {
   IsNumber,
   IsOptional,
   IsString,
-  IsUrl,
   Max,
   MaxLength,
   Min,
@@ -24,7 +23,8 @@ export class PaperTradeDto {
   @IsString()
   userId!: string;
 
-  @IsUrl()
+  @IsString()
+  @MinLength(10)
   dexscreenerUrl!: string;
 
   @IsEnum(PaperTradeSide)

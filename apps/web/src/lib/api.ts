@@ -166,13 +166,22 @@ export interface PaperPortfolio {
     ticker: string;
     logoUrl: string | null;
     dexscreenerUrl: string | null;
+    contractAddress?: string | null;
+    websiteUrl?: string | null;
     chainSlug?: string;
+    twitterUrl?: string | null;
+    telegramUrl?: string | null;
+    isDoxxedCurated?: boolean;
+    founderName?: string | null;
     quantity: number;
     avgBuyPrice: number;
     priceUsd: number;
     marketValue: number;
     pnl: number;
     pnlPercent: number;
+    marketCap?: number | null;
+    liquidity?: number | null;
+    volume24h?: number | null;
   }[];
 }
 
@@ -362,12 +371,27 @@ export interface PublicPortfolio {
   startingCash: number;
   positionCount: number;
   positions: {
+    projectId?: string;
     ticker: string;
     name: string;
     logoUrl: string | null;
+    dexscreenerUrl?: string | null;
+    contractAddress?: string | null;
+    websiteUrl?: string | null;
+    chainSlug?: string;
+    twitterUrl?: string | null;
+    telegramUrl?: string | null;
+    isDoxxedCurated?: boolean;
+    founderName?: string | null;
+    quantity?: number;
+    avgBuyPrice?: number;
+    priceUsd?: number;
     marketValue: number;
     pnl: number;
     pnlPercent: number;
+    marketCap?: number | null;
+    liquidity?: number | null;
+    volume24h?: number | null;
   }[];
 }
 
@@ -599,6 +623,22 @@ export interface ProjectDetail extends ProjectSummary {
     twitterUrl: string | null;
     githubUrl: string | null;
     verifications: string[];
+  } | null;
+  verificationDossier?: {
+    founderName?: string | null;
+    founderTwitter?: string | null;
+    founderLinkedIn?: string | null;
+    founderGithub?: string | null;
+    founderVideoUrl?: string | null;
+    founderInterviewUrl?: string | null;
+    companyDetails?: string | null;
+    whyList?: string | null;
+    whyDoxxed?: string | null;
+    verificationScore?: number | null;
+    verificationCriteria?: string[] | null;
+    websiteUrl?: string | null;
+    telegramUrl?: string | null;
+    auditUrl?: string | null;
   } | null;
 }
 

@@ -28,7 +28,7 @@ export class ListingApplicationsController {
   @Public()
   @Post('preview-dexscreener')
   previewDexScreener(@Body() dto: PreviewDexScreenerDto) {
-    return this.dexscreenerService.previewFromUrl(dto.url);
+    return this.dexscreenerService.previewFromInput(dto.url);
   }
 
   @Public()

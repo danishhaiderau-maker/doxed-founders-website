@@ -54,7 +54,7 @@ export default function ProjectsPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 md:px-6">
           <div>
             <Link href="/" className="text-xs uppercase tracking-widest text-[var(--color-muted)]">
-              DoxedCryptoFounder
+              Doxxed crypto
             </Link>
             <h1 className="text-xl font-bold">Curated Projects</h1>
           </div>
