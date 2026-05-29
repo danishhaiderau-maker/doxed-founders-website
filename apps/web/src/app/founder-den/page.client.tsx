@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { FounderWorkspace, WorkspaceTab } from '@/components/founder-workspace';
+import { QuickBuildBar } from '@/components/quick-build-bar';
 import {
   createBuildPost,
   createSimulatedRaise,
@@ -183,6 +184,10 @@ export default function FounderDenPageClient() {
           dashboard={dashboard}
           room={room}
           onRefresh={load}
+          onWorkspaceMessage={(msg) => {
+            setMessage(msg);
+            load();
+          }}
           appForm={appForm}
           setAppForm={setAppForm}
           buildForm={buildForm}
@@ -194,6 +199,19 @@ export default function FounderDenPageClient() {
           onLaunchRaise={launchRaise}
         />
       </div>
+
+      {session?.accessToken && (
+        <QuickBuildBar
+          accessToken={session.accessToken}
+          founderActive={hasFounder}
+          onCaptured={load}
+          onMessage={(msg) => {
+            setMessage(msg);
+            if (tab !== 'build') handleTabChange('build');
+            load();
+          }}
+        />
+      )}
     </main>
   );
 }

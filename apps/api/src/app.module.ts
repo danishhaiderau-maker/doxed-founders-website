@@ -22,6 +22,7 @@ import { EngagementRewardsModule } from './engagement-rewards/engagement-rewards
 import { FounderOsModule } from './founder-os/founder-os.module';
 import { SecurityModule } from './security/security.module';
 import { AgentsModule } from './agents/agents.module';
+import { BuildQueueModule } from './build-queue/build-queue.module';
 import { XSocialModule } from './x-social/x-social.module';
 
 @Module({
@@ -41,6 +42,7 @@ import { XSocialModule } from './x-social/x-social.module';
     FounderOsModule,
     SecurityModule,
     AgentsModule,
+    BuildQueueModule,
     XSocialModule,
     AnalyticsModule,
     AuthModule,

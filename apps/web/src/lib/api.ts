@@ -797,8 +797,9 @@ export function fetchPinnedFounderUpdates() {
   return apiFetch<FounderUpdate[]>('/founder-updates/pinned');
 }
 
-export function fetchNotifications(token: string) {
-  return apiFetch<AppNotification[]>('/notifications', undefined, token);
+export function fetchNotifications(token: string, category?: string) {
+  const q = category ? `?category=${encodeURIComponent(category)}` : '';
+  return apiFetch<AppNotification[]>(`/notifications${q}`, undefined, token);
 }
 
 export function fetchUnreadNotificationCount(token: string) {
@@ -1564,4 +1565,93 @@ export function runAgent(agentId: string, prompt: string, token: string) {
       traderView: string;
     };
   }>(`/agents/${agentId}/run`, { method: 'POST', body: JSON.stringify({ prompt }) }, token);
+}
+
+// ─── Build Queue (Phase 4) ───────────────────────────────────────────────────
+
+export type BuildQueueItemKind = 'IDEA' | 'TASK' | 'GITHUB_ISSUE' | 'ROADMAP' | 'SPEC';
+export type BuildQueueStatus =
+  | 'CAPTURED'
+  | 'SPECCED'
+  | 'QUEUED'
+  | 'IN_PROGRESS'
+  | 'BLOCKED'
+  | 'DONE'
+  | 'DISMISSED';
+
+export interface BuildQueueItem {
+  id: string;
+  kind: BuildQueueItemKind;
+  status: BuildQueueStatus;
+  source: string;
+  title: string;
+  description: string | null;
+  spec: string | null;
+  githubIssueTitle: string | null;
+  githubIssueUrl: string | null;
+  cursorPrompt: string | null;
+  roadmapItemId: string | null;
+  agentRunId: string | null;
+  sortOrder: number;
+  parentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BuildRoomData {
+  repoFullName: string | null;
+  cursorConnected: boolean;
+  githubConnected: boolean;
+  grouped: {
+    ideas: BuildQueueItem[];
+    tasks: BuildQueueItem[];
+    issues: BuildQueueItem[];
+    specs: BuildQueueItem[];
+    roadmap: BuildQueueItem[];
+  };
+  commits: { sha: string; message: string; date: string }[];
+  deployments: { id: string; headline: string; source: string; status: string; createdAt: string }[];
+  pullRequests: { title: string; url: string; state: string }[];
+  pendingSuggestions: { id: string; headline: string; body: string; source: string; createdAt: string }[];
+  cursorCopy: string;
+  stats: { ideas: number; tasks: number; issues: number; commits: number };
+}
+
+export type CommandBarIntent = 'roadmap' | 'release_notes' | 'weekly_summary';
+
+export function fetchBuildRoom(token: string) {
+  return apiFetch<BuildRoomData>('/build-queue/room', undefined, token);
+}
+
+export function quickBuild(prompt: string, token: string, source?: 'QUICK_BUILD' | 'VOICE') {
+  return apiFetch<{
+    ideaId: string;
+    cursorPrompt: string;
+    cursorCopy: string;
+    parsed: { ideaTitle: string; tasks: string[]; githubIssues: string[] };
+  }>('/build-queue/quick-build', { method: 'POST', body: JSON.stringify({ prompt, source }) }, token);
+}
+
+export function runCommandBar(intent: CommandBarIntent, prompt: string | undefined, token: string) {
+  return apiFetch<{
+    creditsSpent: number;
+    cursorCopy: string;
+    result: { title: string; summary: string; body: string };
+  }>('/build-queue/command', { method: 'POST', body: JSON.stringify({ intent, prompt }) }, token);
+}
+
+export function updateBuildQueueItem(
+  id: string,
+  data: { status?: BuildQueueStatus; title?: string },
+  token: string,
+) {
+  return apiFetch<{ item: BuildQueueItem | null }>(
+    `/build-queue/${id}`,
+    { method: 'PATCH', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function dismissBuildQueueItem(id: string, token: string) {
+  return apiFetch(`/build-queue/${id}/dismiss`, { method: 'POST' }, token);
 }

@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
-import { FounderOsPanel } from '@/components/founder-os-panel';
+import { BuildRoom2 } from '@/components/build-room-2';
+import { FounderInboxPanel } from '@/components/founder-inbox-panel';
 import { AgentsWorkspacePanel } from '@/components/agents-workspace-panel';
 import { DiscoverProjectCard } from '@/components/discover-project-card';
 import {
@@ -29,7 +30,7 @@ const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'community', label: 'Community' },
   { id: 'funding', label: 'Funding' },
   { id: 'agents', label: 'Agents' },
-  { id: 'build', label: 'Build Room' },
+  { id: 'build', label: 'Build Room 2.0' },
   { id: 'analytics', label: 'Analytics' },
 ];
 
@@ -68,6 +69,7 @@ export type FounderWorkspaceProps = {
   dashboard: FounderDashboard | null;
   room: ProjectRoom | null;
   onRefresh: () => void;
+  onWorkspaceMessage?: (msg: string) => void;
   appForm: {
     projectName: string;
     websiteUrl: string;
@@ -103,6 +105,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     dashboard,
     room,
     onRefresh,
+    onWorkspaceMessage,
     appForm,
     setAppForm,
     buildForm,
@@ -171,6 +174,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
 
       {tab === 'activity' && (
         <div className="space-y-6">
+          {session && <FounderInboxPanel accessToken={session.accessToken} />}
           {pulse && (
             <section className="grid gap-6 lg:grid-cols-3">
               <div className="lg:col-span-2">
@@ -228,10 +232,13 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
       )}
 
       {tab === 'tasks' && session && (
-        <OsSection title="Open tasks" subtitle="GitHub suggestions · bounties · publish queue" disabled={!hasFounder}>
+        <OsSection title="Build queue tasks" subtitle="Quick Build · agents · command bar · bounties" disabled={!hasFounder}>
           <p className="text-sm text-zinc-400">
-            Sync GitHub in Build Room to generate suggested updates. Create bounties to delegate work to
-            the community.
+            Open{' '}
+            <button type="button" onClick={() => onTabChange('build')} className="text-emerald-400 underline">
+              Build Room 2.0
+            </button>{' '}
+            to manage ideas, tasks, and GitHub issues. Capture ideas on mobile with Quick Build before you forget.
           </p>
           {room?.openBounties && room.openBounties.length > 0 && (
             <ul className="mt-4 space-y-2">
@@ -340,13 +347,14 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
       )}
 
       {tab === 'build' && session && (
-        <FounderOsPanel
+        <BuildRoom2
           accessToken={session.accessToken}
           founderCredits={dashboard?.founderCredits}
           communityRewardPool={dashboard?.communityRewardPool}
           projectId={room?.id}
           onRefresh={onRefresh}
           founderActive={hasFounder}
+          onMessage={onWorkspaceMessage}
         />
       )}
 

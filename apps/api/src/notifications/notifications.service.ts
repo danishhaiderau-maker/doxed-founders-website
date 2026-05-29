@@ -1,14 +1,30 @@
 import { Injectable } from '@nestjs/common';
-import { NotificationType } from '@prisma/client';
+import { NotificationType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+
+function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | undefined {
+  switch (category) {
+    case 'build':
+      return { type: NotificationType.BUILD_QUEUE };
+    case 'agents':
+      return { type: NotificationType.AGENT_RESULT };
+    case 'community':
+      return { type: { in: [NotificationType.FOUNDER_UPDATES, NotificationType.POINTS_EARNED] } };
+    case 'funding':
+      return { type: NotificationType.POINTS_EARNED };
+    default:
+      return undefined;
+  }
+}
 
 @Injectable()
 export class NotificationsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async listForUser(userId: string, limit = 30) {
+  async listForUser(userId: string, limit = 30, category?: string) {
+    const categoryFilter = category ? inboxCategoryFilter(category) : undefined;
     return this.prisma.notification.findMany({
-      where: { userId },
+      where: { userId, ...categoryFilter },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
