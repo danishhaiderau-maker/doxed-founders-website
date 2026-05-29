@@ -25,6 +25,7 @@
     "db:generate": "node scripts/prisma-run.mjs generate",
     "db:migrate": "node scripts/prisma-run.mjs migrate dev",
     "db:push": "node scripts/prisma-run.mjs db push",
+    "db:push:neon": "node scripts/push-neon-schema.mjs",
     "db:studio": "node scripts/prisma-run.mjs studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:clear-samples": "node scripts/clear-sample-data.mjs",
