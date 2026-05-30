@@ -10,7 +10,7 @@ import { BustPenaltyModal } from '@/components/trade-modals';
 import { TradeAccountabilityModal } from '@/components/trade-accountability-modal';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
-import { formatUsd, formatPercent, formatPublicAccountLabel, formatTokenPrice } from '@dcf/utils';
+import { formatUsd, formatPercent, formatPublicAccountLabel, formatTokenPrice, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD, TOP_UP_FEE_USD } from '@dcf/utils';
 import { AccountWelcome } from '@/components/account-welcome';
 import {
   createPaperSession,
@@ -587,7 +587,9 @@ function PaperTradingPageContent() {
             <div className="rounded-xl border border-red-500/40 bg-red-950/20 p-4 text-sm">
               <p className="font-medium text-red-200">💀 Portfolio wiped</p>
               <p className="mt-2 text-[var(--color-muted)]">
-                Cash below $1,000. Top up for $25 to restore $10,000 virtual cash.
+                Cash below {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions).
+                Top up for {formatUsd(TOP_UP_FEE_USD, 0)} USDC to restore {formatUsd(STARTING_CASH_USD, 0)}{' '}
+                paper cash.
               </p>
               <button
                 type="button"
