@@ -4,33 +4,29 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { SiteNav, getActiveUserId } from '@/components/site-nav';
+import { PushNotificationPrompt } from '@/components/push-notification-prompt';
 import { LinkifiedText } from '@/components/linkified-text';
 import { formatUsd } from '@dcf/utils';
 import {
   FeedComment,
   FeedPost,
-  FounderUpdate,
+  UnifiedFeedCategory,
+  UnifiedFeedItem,
+  PlatformPulseItem,
   fetchFeed,
   fetchFeedComments,
-  fetchPinnedFounderUpdates,
+  fetchUnifiedFeed,
   postFeedComment,
   postInitialFeedComment,
 } from '@/lib/api';
 
-type Filter = 'recent' | 'discussed' | 'highlighted';
-
-function formatMc(value: number | null) {
-  if (value == null) return null;
-  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B MC`;
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M MC`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K MC`;
-  return `$${value.toFixed(0)} MC`;
-}
-
-function formatAmount(usd: number) {
-  if (usd >= 1000) return `$${(usd / 1000).toFixed(1)}K`;
-  return formatUsd(usd, 0);
-}
+const CATEGORIES: { id: UnifiedFeedCategory; label: string }[] = [
+  { id: 'all', label: 'All activity' },
+  { id: 'founder', label: 'Founder' },
+  { id: 'trading', label: 'Trading' },
+  { id: 'market', label: 'Market' },
+  { id: 'community', label: 'Community' },
+];
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -41,25 +37,36 @@ function timeAgo(iso: string) {
   return `${Math.floor(hrs / 24)}d`;
 }
 
+function tierBorder(tier: number) {
+  if (tier === 1) return 'border-amber-500/40 bg-amber-950/10';
+  if (tier === 2) return 'border-emerald-500/25 bg-emerald-950/5';
+  return 'border-[var(--color-border)] bg-[var(--color-card)]';
+}
+
 export default function FeedPage() {
   const { data: session } = useSession();
-  const [filter, setFilter] = useState<Filter>('recent');
-  const [posts, setPosts] = useState<FeedPost[]>([]);
-  const [highlighted, setHighlighted] = useState<FeedPost[]>([]);
-  const [pinnedUpdates, setPinnedUpdates] = useState<FounderUpdate[]>([]);
+  const [category, setCategory] = useState<UnifiedFeedCategory>('all');
+  const [items, setItems] = useState<UnifiedFeedItem[]>([]);
+  const [pulse, setPulse] = useState<PlatformPulseItem[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
+  const [tradePosts, setTradePosts] = useState<Record<string, FeedPost>>({});
 
-  const load = useCallback(async (f: Filter) => {
+  const load = useCallback(async (cat: UnifiedFeedCategory) => {
     try {
-      const data = await fetchFeed(f);
-      setPosts(data.posts);
+      const data = await fetchUnifiedFeed(cat);
+      setItems(data.items);
+      setPulse(data.pulse);
       setError(null);
-      if (f !== 'highlighted') {
-        const hot = await fetchFeed('highlighted');
-        setHighlighted(hot.posts);
-      } else {
-        setHighlighted(data.posts);
+
+      const tradeIds = data.items.filter((i) => i.tradePostId).map((i) => i.tradePostId!);
+      if (tradeIds.length > 0) {
+        const recent = await fetchFeed('recent');
+        const map: Record<string, FeedPost> = {};
+        for (const p of recent.posts) {
+          if (tradeIds.includes(p.id)) map[p.id] = p;
+        }
+        setTradePosts(map);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load feed');
@@ -67,132 +74,75 @@ export default function FeedPage() {
   }, []);
 
   useEffect(() => {
-    load(filter);
-    fetchPinnedFounderUpdates()
-      .then(setPinnedUpdates)
-      .catch(() => setPinnedUpdates([]));
-    const interval = setInterval(() => {
-      load(filter);
-      fetchPinnedFounderUpdates()
-        .then(setPinnedUpdates)
-        .catch(() => setPinnedUpdates([]));
-    }, 60000);
+    load(category);
+    const interval = setInterval(() => load(category), 60_000);
     return () => clearInterval(interval);
-  }, [filter, load]);
+  }, [category, load]);
 
   return (
     <div className="min-h-screen bg-[#050508]">
+      <PushNotificationPrompt />
       <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[#050508]/95 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 md:px-6">
           <div>
             <Link href="/" className="text-xs uppercase tracking-widest text-[var(--color-muted)]">
               Doxxed crypto
             </Link>
-            <h1 className="text-xl font-bold">Trading Feed</h1>
+            <h1 className="text-xl font-bold">Feed</h1>
+            <p className="text-xs text-[var(--color-muted)]">Builders · traders · market pulse</p>
           </div>
           <SiteNav />
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 md:grid-cols-[1fr_320px] md:px-6">
+      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 md:grid-cols-[1fr_300px] md:px-6">
         <div>
-          {pinnedUpdates.length > 0 && (
-            <section className="mb-6 rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
+          {pulse.length > 0 && (
+            <section className="mb-6 rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-zinc-950 p-4">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-300">
-                📌 Pinned · Doxxed founder updates (X)
+                Platform pulse
               </h2>
-              <p className="mt-1 text-xs text-[var(--color-muted)]">
-                Refreshed every 6 hours when X API sync is enabled · project-relevant only
-              </p>
-              <div className="mt-4 space-y-3">
-                {pinnedUpdates.map((update) => (
-                  <article
-                    key={update.id}
-                    className="rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-card)] p-4"
-                  >
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
-                      {update.project && (
-                        <Link
-                          href={`/project/${update.project.slug}`}
-                          className="font-semibold text-emerald-300 hover:underline"
-                        >
-                          {update.project.name} ({update.project.ticker})
-                        </Link>
-                      )}
-                      {update.founder && <span>· {update.founder.name}</span>}
-                    </div>
-                    <p className="mt-2 text-sm font-semibold leading-snug tracking-wide text-white">
-                      {update.headline}
-                    </p>
-                    {update.summary && (
-                      <p className="mt-2 line-clamp-2 text-xs text-[var(--color-muted)]">
-                        {update.summary}
-                      </p>
+              <ul className="mt-3 space-y-2">
+                {pulse.map((p) => (
+                  <li key={p.id}>
+                    {p.link ? (
+                      <Link
+                        href={p.link}
+                        className="flex gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-black/30"
+                      >
+                        <span>{p.emoji}</span>
+                        <span>
+                          <span className="font-medium text-white">{p.headline}</span>
+                          {p.detail && (
+                            <span className="ml-2 text-xs text-zinc-500">{p.detail}</span>
+                          )}
+                        </span>
+                      </Link>
+                    ) : (
+                      <div className="flex gap-2 px-2 py-1.5 text-sm">
+                        <span>{p.emoji}</span>
+                        <span className="font-medium text-white">{p.headline}</span>
+                      </div>
                     )}
-                    <a
-                      href={update.sourceUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mt-3 inline-block text-xs text-[var(--color-accent)] hover:underline"
-                    >
-                      View on X →
-                    </a>
-                  </article>
+                  </li>
                 ))}
-              </div>
-            </section>
-          )}
-
-          {highlighted.length > 0 && filter !== 'highlighted' && (
-            <section className="mb-6">
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-emerald-400">🔥 Most discussed (6h spotlight)</h2>
-                <button
-                  type="button"
-                  onClick={() => setFilter('highlighted')}
-                  className="text-xs text-[var(--color-accent)] hover:underline"
-                >
-                  View all
-                </button>
-              </div>
-              <div className="flex gap-3 overflow-x-auto pb-2">
-                {highlighted.map((post) => (
-                  <button
-                    key={post.id}
-                    type="button"
-                    onClick={() => setExpandedId(post.id)}
-                    className="min-w-[220px] shrink-0 rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 text-left hover:border-emerald-500/60"
-                  >
-                    <p className="text-xs text-emerald-300">{post.trader.name}</p>
-                    <p className="mt-1 font-semibold">{post.project.ticker}</p>
-                    <p className="mt-2 text-lg font-bold text-emerald-400">
-                      {post.commentCount} comments
-                    </p>
-                  </button>
-                ))}
-              </div>
+              </ul>
             </section>
           )}
 
           <div className="mb-4 flex flex-wrap gap-2">
-            {(
-              [
-                ['recent', 'Recent'],
-                ['discussed', 'Most discussed'],
-                ['highlighted', 'Hot now'],
-              ] as const
-            ).map(([key, label]) => (
+            {CATEGORIES.map((c) => (
               <button
-                key={key}
+                key={c.id}
                 type="button"
-                onClick={() => setFilter(key)}
+                onClick={() => setCategory(c.id)}
                 className={`rounded-full px-4 py-1.5 text-sm ${
-                  filter === key
+                  category === c.id
                     ? 'bg-[var(--color-accent)] text-white'
                     : 'border border-[var(--color-border)] text-[var(--color-muted)] hover:text-white'
                 }`}
               >
-                {label}
+                {c.label}
               </button>
             ))}
           </div>
@@ -200,47 +150,59 @@ export default function FeedPage() {
           {error && <p className="mb-4 text-sm text-red-300">{error}</p>}
 
           <div className="space-y-3">
-            {posts.length === 0 && !error && (
+            {items.length === 0 && !error && (
               <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
-                No trades yet.{' '}
+                No activity yet.{' '}
                 <Link href="/paper-trading" className="text-[var(--color-accent)]">
-                  Make the first paper trade →
+                  Open Trading Alpha →
                 </Link>
               </div>
             )}
-            {posts.map((post) => (
-              <FeedCard
-                key={post.id}
-                post={post}
-                expanded={expandedId === post.id}
-                onToggle={() => setExpandedId(expandedId === post.id ? null : post.id)}
-                userId={getActiveUserId(session?.user?.id)}
-                onCommentPosted={() => load(filter)}
-              />
-            ))}
+            {items.map((item) =>
+              item.tradePostId && tradePosts[item.tradePostId] ? (
+                <TradeFeedCard
+                  key={item.id}
+                  item={item}
+                  post={tradePosts[item.tradePostId]}
+                  expanded={expandedTradeId === item.tradePostId}
+                  onToggle={() =>
+                    setExpandedTradeId(
+                      expandedTradeId === item.tradePostId ? null : item.tradePostId!,
+                    )
+                  }
+                  userId={getActiveUserId(session?.user?.id)}
+                  onRefresh={() => load(category)}
+                />
+              ) : (
+                <ActivityCard key={item.id} item={item} />
+              ),
+            )}
           </div>
         </div>
 
         <aside className="hidden md:block">
           <div className="sticky top-24 space-y-4">
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-              <h3 className="font-semibold">How the feed works</h3>
+              <h3 className="font-semibold">Unified activity</h3>
               <ul className="mt-3 space-y-2 text-sm text-[var(--color-muted)]">
-                <li>Every paper trade appears here.</li>
-                <li>Add your thesis when you buy — others can debate it.</li>
-                <li>Top commented trades get a 6-hour spotlight.</li>
-                <li>Rankings refresh as new discussions heat up.</li>
+                <li>Founder builds, deploys, and raise room signals</li>
+                <li>Trader positions and conviction posts</li>
+                <li>Hot buys when ≥2% of active traders align</li>
+                <li>Scout votes and community follows</li>
               </ul>
               <Link
                 href="/paper-trading"
                 className="mt-4 block rounded-lg bg-[var(--color-accent)] py-2.5 text-center text-sm font-medium text-white"
               >
-                Open terminal
+                Trading Alpha terminal
               </Link>
             </div>
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5 text-sm text-[var(--color-muted)]">
-              Inspired by social trading apps — customized for curated, doxxed-founder intelligence on web.
-            </div>
+            <Link
+              href="/scout-votes"
+              className="block rounded-xl border border-violet-500/30 bg-violet-950/20 p-4 text-sm text-violet-200 hover:border-violet-500/50"
+            >
+              Scout votes → validate listings before launch
+            </Link>
           </div>
         </aside>
       </main>
@@ -248,24 +210,58 @@ export default function FeedPage() {
   );
 }
 
-function FeedCard({
+function ActivityCard({ item }: { item: UnifiedFeedItem }) {
+  const inner = (
+    <article className={`rounded-xl border p-4 ${tierBorder(item.tier)}`}>
+      <div className="flex items-start gap-3">
+        <span className="text-lg">{item.emoji ?? '•'}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
+            <span className="rounded bg-zinc-800 px-1.5 py-0.5 uppercase tracking-wide">
+              {item.category}
+            </span>
+            <span>{timeAgo(item.at)}</span>
+            {item.tier === 1 && (
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">Priority</span>
+            )}
+          </div>
+          <p className="mt-1 font-semibold text-white">{item.headline}</p>
+          {item.detail && <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>}
+        </div>
+      </div>
+    </article>
+  );
+
+  if (item.link) {
+    return (
+      <Link href={item.link} className="block transition hover:opacity-95">
+        {inner}
+      </Link>
+    );
+  }
+  return inner;
+}
+
+function TradeFeedCard({
+  item,
   post,
   expanded,
   onToggle,
   userId,
-  onCommentPosted,
+  onRefresh,
 }: {
+  item: UnifiedFeedItem;
   post: FeedPost;
   expanded: boolean;
   onToggle: () => void;
   userId: string | null;
-  onCommentPosted: () => void;
+  onRefresh: () => void;
 }) {
   const [comments, setComments] = useState<FeedComment[]>([]);
   const [initialComment, setInitialComment] = useState<string | null>(post.initialComment);
   const [reply, setReply] = useState('');
-  const [loading, setLoading] = useState(false);
   const [thesis, setThesis] = useState('');
+  const [loading, setLoading] = useState(false);
   const isBuy = post.side === 'BUY';
   const isOwner = userId === post.trader.id;
 
@@ -286,7 +282,7 @@ function FeedCard({
       const c = await postFeedComment(post.id, userId, reply.trim());
       setComments((prev) => [...prev, c]);
       setReply('');
-      onCommentPosted();
+      onRefresh();
     } finally {
       setLoading(false);
     }
@@ -299,111 +295,62 @@ function FeedCard({
       await postInitialFeedComment(post.id, userId, thesis.trim());
       setInitialComment(thesis.trim());
       setThesis('');
-      onCommentPosted();
+      onRefresh();
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <article
-      className={`rounded-xl border bg-[var(--color-card)] p-4 transition ${
-        post.highlighted
-          ? 'border-emerald-500/40 shadow-[0_0_24px_rgba(16,185,129,0.08)]'
-          : 'border-[var(--color-border)]'
-      }`}
-    >
+    <article className={`rounded-xl border p-4 ${tierBorder(item.tier)}`}>
       <div className="flex items-start gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)]/20 text-sm font-bold text-[var(--color-accent)]">
-          {post.trader.name.slice(0, 2).toUpperCase()}
-        </div>
+        <span className="text-lg">{item.emoji ?? '📈'}</span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <Link
-              href={`/portfolio/${post.trader.id}`}
-              className="font-semibold hover:text-[var(--color-accent)]"
-            >
+            <Link href={`/portfolio/${post.trader.id}`} className="font-semibold hover:text-[var(--color-accent)]">
               {post.trader.name}
             </Link>
             <span
               className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
-                isBuy
-                  ? 'bg-emerald-500/15 text-emerald-400'
-                  : 'bg-orange-500/15 text-orange-400'
+                isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-orange-500/15 text-orange-400'
               }`}
             >
               {post.side}
             </span>
-            <span className="text-xs text-[var(--color-muted)]">{timeAgo(post.createdAt)}</span>
-            {post.highlighted && (
-              <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300">
-                Hot
-              </span>
-            )}
+            <span className="text-xs text-[var(--color-muted)]">{timeAgo(item.at)}</span>
           </div>
-
           <div className="mt-3 flex items-center gap-3 rounded-lg bg-[var(--color-background)] p-3">
-            {post.project.logoUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={post.project.logoUrl} alt="" className="h-10 w-10 rounded-full" />
-            ) : (
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-border)] text-xs font-bold">
-                {post.project.ticker.slice(0, 2)}
-              </div>
-            )}
             <div className="flex-1">
-              {post.project.slug ? (
-                <Link
-                  href={`/project/${post.project.slug}`}
-                  className="font-bold hover:text-[var(--color-accent)]"
-                >
-                  {post.project.ticker}
-                </Link>
-              ) : (
-                <p className="font-bold">{post.project.ticker}</p>
-              )}
-              <p className="text-xs text-[var(--color-muted)]">
-                {formatMc(post.project.marketCap) ?? post.project.name}
-              </p>
+              <Link href={`/project/${post.project.slug}`} className="font-bold hover:text-[var(--color-accent)]">
+                {post.project.ticker}
+              </Link>
+              <p className="text-xs text-[var(--color-muted)]">{post.project.name}</p>
             </div>
             <div className="text-right">
-              <p className="font-semibold">{formatAmount(post.amountUsd)}</p>
-              <p className="text-xs text-[var(--color-muted)]">paper trade</p>
+              <p className="font-semibold">{formatUsd(post.amountUsd, 0)}</p>
+              <p className="text-xs text-[var(--color-muted)]">paper</p>
             </div>
           </div>
-
           {initialComment && (
             <p className="mt-3 rounded-lg bg-[var(--color-background)] p-3 text-sm italic text-zinc-300">
-              &ldquo;
-              <LinkifiedText text={initialComment} />
-              &rdquo;
+              &ldquo;<LinkifiedText text={initialComment} />&rdquo;
             </p>
           )}
-
-          <button
-            type="button"
-            onClick={onToggle}
-            className="mt-3 text-sm text-[var(--color-accent)] hover:underline"
-          >
-            {expanded ? 'Hide' : 'View'} {post.commentCount} comment
-            {post.commentCount === 1 ? '' : 's'}
+          <button type="button" onClick={onToggle} className="mt-3 text-sm text-[var(--color-accent)] hover:underline">
+            {expanded ? 'Hide' : 'View'} discussion ({post.commentCount})
           </button>
         </div>
       </div>
-
       {expanded && (
-        <div className="mt-4 border-t border-[var(--color-border)] pt-4 pl-[52px]">
+        <div className="mt-4 border-t border-[var(--color-border)] pt-4 pl-10">
           {isOwner && !initialComment && (
             <div className="mb-4">
-              <p className="mb-2 text-xs text-[var(--color-muted)]">
-                Share why you made this trade — your thesis hooks the discussion.
-              </p>
               <textarea
                 value={thesis}
                 onChange={(e) => setThesis(e.target.value)}
                 rows={2}
-                placeholder="I think this could run because… Paste an X post link for context."
-                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                placeholder="Share your conviction thesis…"
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm"
               />
               <button
                 type="button"
@@ -415,25 +362,21 @@ function FeedCard({
               </button>
             </div>
           )}
-
-          <ul className="space-y-3">
+          <ul className="space-y-2">
             {comments.map((c) => (
-              <li key={c.id} className="flex gap-2 text-sm">
-                <span className="font-medium text-[var(--color-accent)]">{c.user.name}:</span>
-                <span className="text-zinc-300">
-                  <LinkifiedText text={c.body} />
-                </span>
+              <li key={c.id} className="text-sm">
+                <span className="font-medium text-[var(--color-accent)]">{c.user.name}:</span>{' '}
+                <LinkifiedText text={c.body} />
               </li>
             ))}
           </ul>
-
           {userId ? (
             <div className="mt-4 flex gap-2">
               <input
                 value={reply}
                 onChange={(e) => setReply(e.target.value)}
-                placeholder="Why do you agree or disagree? Paste X/Twitter links — they’ll open in a new tab."
-                className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                placeholder="Agree or disagree…"
+                className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm"
               />
               <button
                 type="button"
@@ -449,7 +392,7 @@ function FeedCard({
               <Link href="/login" className="text-[var(--color-accent)]">
                 Sign in
               </Link>{' '}
-              or start paper trading to join the discussion.
+              to join the discussion.
             </p>
           )}
         </div>

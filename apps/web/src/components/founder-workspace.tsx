@@ -204,7 +204,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
               ))}
             </ul>
           )}
-          <Link href="/build-feed" className="mt-4 inline-block text-sm text-emerald-400 hover:underline">
+          <Link href="/feed" className="mt-4 inline-block text-sm text-emerald-400 hover:underline">
             View build feed →
           </Link>
         </OsSection>

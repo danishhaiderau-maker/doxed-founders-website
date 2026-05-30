@@ -13,29 +13,27 @@ const SESSION_KEY = 'dcf-paper-user-id';
 const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
-  { href: '/build-feed', label: 'Build feed' },
+  { href: '/feed', label: 'Feed' },
   { href: '/founder-den', label: 'Founder OS', auth: true },
+  { href: '/paper-trading', label: 'Trading Alpha' },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/agents', label: 'Agents' },
 ] as const;
 
 const SECONDARY_NAV = [
-  { href: '/paper-trading', label: 'Trade' },
   { href: '/watchlist', label: 'Watchlist', auth: true },
-  { href: '/notifications', label: 'Alerts', auth: true },
-  { href: '/scout-votes', label: 'Scout votes' },
   { href: '/reputation', label: 'Points' },
   { href: '/leaderboard', label: 'Leaderboard' },
 ] as const;
 
 function navActive(pathname: string, href: string) {
   if (href === '/discover') return pathname === '/discover';
+  if (href === '/feed') return pathname === '/feed' || pathname === '/build-feed';
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
   if (href === '/agents') return pathname.startsWith('/agents');
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
-  if (href === '/build-feed') return pathname === '/build-feed';
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
@@ -83,7 +81,9 @@ function SiteNavInner() {
   const secondaryVisible = SECONDARY_NAV.filter(
     (item) => !('auth' in item && item.auth && !session),
   );
-  const moreActive = secondaryVisible.some((item) => navActive(pathname, item.href));
+  const moreActive =
+    secondaryVisible.some((item) => navActive(pathname, item.href)) ||
+    (isAdmin && pathname.startsWith('/admin'));
 
   return (
     <nav className="flex flex-wrap items-center gap-2 text-sm md:gap-2.5">
@@ -106,6 +106,26 @@ function SiteNavInner() {
         );
       })}
 
+      {session && (
+        <Link
+          href="/notifications"
+          className={cn(
+            'relative rounded-lg px-2.5 py-1.5 transition',
+            pathname === '/notifications'
+              ? 'bg-emerald-500/20 font-semibold text-emerald-100 ring-1 ring-emerald-500/40'
+              : 'text-[var(--color-muted)] hover:bg-white/5 hover:text-white',
+          )}
+          title="Alerts"
+        >
+          Alerts
+          {unread > 0 && (
+            <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
+        </Link>
+      )}
+
       <div className="relative" ref={moreRef}>
         <button
           type="button"
@@ -118,11 +138,6 @@ function SiteNavInner() {
           )}
         >
           More
-          {unread > 0 && (
-            <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
-              {unread > 9 ? '9+' : unread}
-            </span>
-          )}
         </button>
         {moreOpen && (
           <div className="absolute right-0 top-full z-50 mt-1 min-w-[168px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
@@ -137,30 +152,24 @@ function SiteNavInner() {
                 )}
               >
                 {item.label}
-                {item.href === '/notifications' && unread > 0 && (
-                  <span className="rounded-full bg-emerald-500 px-1.5 text-[10px] font-bold text-black">
-                    {unread > 9 ? '9+' : unread}
-                  </span>
-                )}
               </Link>
             ))}
+            {isAdmin && (
+              <Link
+                href="/admin/applications"
+                onClick={() => setMoreOpen(false)}
+                className={cn(
+                  'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
+                  pathname.startsWith('/admin') ? 'text-amber-200' : 'text-zinc-400',
+                )}
+              >
+                Admin
+              </Link>
+            )}
           </div>
         )}
       </div>
 
-      {isAdmin && (
-        <Link
-          href="/admin/applications"
-          className={cn(
-            'rounded-lg px-2.5 py-1.5 transition',
-            pathname.startsWith('/admin')
-              ? 'bg-amber-500/20 font-semibold text-amber-100 ring-1 ring-amber-500/40'
-              : 'text-[var(--color-muted)] hover:text-white',
-          )}
-        >
-          Admin
-        </Link>
-      )}
       {session ? (
         <div className="flex items-center gap-2 border-l border-[var(--color-border)] pl-2 md:gap-3 md:pl-3">
           <span className="hidden text-[var(--color-muted)] sm:inline">

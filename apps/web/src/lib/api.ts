@@ -493,6 +493,42 @@ export function fetchFeed(filter: 'recent' | 'discussed' | 'highlighted' = 'rece
   return apiFetch<{ filter: string; posts: FeedPost[] }>(`/feed?filter=${filter}`);
 }
 
+export type UnifiedFeedCategory = 'all' | 'founder' | 'trading' | 'community' | 'market';
+
+export interface UnifiedFeedItem {
+  id: string;
+  tier: 1 | 2 | 3;
+  category: 'founder' | 'trading' | 'community' | 'market';
+  eventType: string;
+  headline: string;
+  detail?: string;
+  at: string;
+  link?: string;
+  emoji?: string;
+  tradePostId?: string;
+  projectSlug?: string;
+  projectTicker?: string;
+  founderSlug?: string;
+  amountUsd?: number;
+}
+
+export interface PlatformPulseItem {
+  id: string;
+  emoji: string;
+  headline: string;
+  detail?: string;
+  link?: string;
+  tier: 1 | 2 | 3;
+}
+
+export function fetchUnifiedFeed(category: UnifiedFeedCategory = 'all') {
+  return apiFetch<{
+    category: UnifiedFeedCategory;
+    items: UnifiedFeedItem[];
+    pulse: PlatformPulseItem[];
+  }>(`/feed/unified?category=${category}`);
+}
+
 export function fetchFeedComments(feedPostId: string) {
   return apiFetch<{
     feedPostId: string;

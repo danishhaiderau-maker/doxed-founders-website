@@ -17,6 +17,7 @@ import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import { parseDexScreenerUrl } from '../dexscreener/dexscreener.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from '../feed/feed.service';
+import { HotBuyService } from '../feed/hot-buy.service';
 import { PointsService } from '../points/points.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
@@ -29,6 +30,7 @@ export class PaperTradingService {
     private readonly prisma: PrismaService,
     private readonly dexscreener: DexscreenerService,
     private readonly feedService: FeedService,
+    private readonly hotBuy: HotBuyService,
     private readonly analytics: AnalyticsService,
     private readonly points: PointsService,
     private readonly socialSignals: SocialSignalsService,
@@ -654,6 +656,10 @@ export class PaperTradingService {
 
     if (feedPost.commentCount > 0) {
       await this.feedService.refreshHighlights();
+    }
+
+    if (dto.side === PaperTradeSide.BUY) {
+      this.hotBuy.checkAfterBuy(project.id).catch(() => undefined);
     }
 
     await this.analytics.track(

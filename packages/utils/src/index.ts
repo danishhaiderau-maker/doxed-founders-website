@@ -57,3 +57,4 @@ export * from './scout-markets';
 export * from './founder-brain';
 export * from './openhands';
 export * from './cursor-cloud';
+export * from './unified-feed';

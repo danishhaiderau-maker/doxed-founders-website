@@ -16,19 +16,28 @@ export default function NotificationsPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const [items, setItems] = useState<AppNotification[]>([]);
+  const [category, setCategory] = useState<string>('all');
   const [error, setError] = useState<string | null>(null);
 
   const token = session?.accessToken;
 
+  const CATEGORIES = [
+    { id: 'all', label: 'All' },
+    { id: 'following', label: 'Following' },
+    { id: 'projects', label: 'Projects' },
+    { id: 'market', label: 'Market' },
+    { id: 'platform', label: 'Platform' },
+  ] as const;
+
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      setItems(await fetchNotifications(token));
+      setItems(await fetchNotifications(token, category === 'all' ? undefined : category));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load notifications');
     }
-  }, [token]);
+  }, [token, category]);
 
   useEffect(() => {
     if (status === 'loading') return;
@@ -37,7 +46,7 @@ export default function NotificationsPage() {
       return;
     }
     load();
-  }, [status, load, router]);
+  }, [status, load, router, category]);
 
   async function handleRead(id: string) {
     if (!token) return;
@@ -59,16 +68,32 @@ export default function NotificationsPage() {
             <Link href="/" className="text-xs text-[var(--color-muted)] hover:text-white">
               ← Home
             </Link>
-            <h1 className="text-xl font-bold">Notifications</h1>
+            <h1 className="text-xl font-bold">Alerts</h1>
           </div>
           <SiteNav />
         </div>
       </header>
 
       <main className="mx-auto max-w-4xl px-6 py-8">
+        <div className="mb-4 flex flex-wrap gap-2">
+          {CATEGORIES.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setCategory(c.id)}
+              className={`rounded-full px-3 py-1 text-sm ${
+                category === c.id
+                  ? 'bg-[var(--color-accent)] text-white'
+                  : 'border border-[var(--color-border)] text-[var(--color-muted)]'
+              }`}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
         <div className="mb-6 flex items-center justify-between gap-4">
           <p className="text-sm text-[var(--color-muted)]">
-            Founder updates, points earned, and platform alerts.
+            Hot buys, Scout votes, founder updates, and platform signals.
           </p>
           {items.some((n) => !n.readAt) && (
             <button
