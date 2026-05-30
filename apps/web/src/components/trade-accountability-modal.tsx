@@ -7,6 +7,8 @@ import {
   formatTokenPrice,
   formatUsd,
   riskScoreColor,
+  RESTRICTED_CASH_THRESHOLD_USD,
+  STARTING_CASH_USD,
 } from '@dcf/utils';
 
 type TradeAccountabilityModalProps = {
@@ -198,7 +200,7 @@ export function TradeAccountabilityModal({
             <Checkbox
               checked={c5}
               onChange={setC5}
-              label={`I understand the account reset policy (${formatUsd(resetFeeUsd, 0)} fee if I go bust).`}
+              label={`I understand the account reset policy (${formatUsd(resetFeeUsd, 0)} USDC fee if cash falls below ${formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} with or without open positions).`}
             />
           </div>
 
@@ -296,9 +298,10 @@ export function TradeAccountabilityModal({
             <p className="text-sm font-semibold text-amber-200">Account Risk Notice</p>
             <p className="mt-1.5 text-xs leading-relaxed text-amber-100/80">
               Current balance: {formatUsd(cashBalance)} · After trade: ~{formatUsd(Math.max(0, balanceAfter))}.
-              If your account goes bust (near $0 with no positions), you may need to pay a{' '}
-              {formatUsd(resetFeeUsd, 0)} reset fee for fresh $10,000 paper cash. This encourages
-              responsible risk management.
+              If your account goes bust (cash near {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} with or
+              without open positions), you may need to pay a {formatUsd(resetFeeUsd, 0)} USDC reset fee for
+              fresh {formatUsd(STARTING_CASH_USD, 0)} paper cash. This encourages responsible risk
+              management.
             </p>
           </div>
         </div>

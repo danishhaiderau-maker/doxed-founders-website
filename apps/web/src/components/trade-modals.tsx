@@ -7,6 +7,7 @@ import {
   createCryptoTopUpIntent,
   type CryptoTopUpIntent,
 } from '@/lib/api';
+import { formatUsd, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD } from '@dcf/utils';
 
 interface ModalShellProps {
   open: boolean;
@@ -147,12 +148,15 @@ export function BustPenaltyModal({
       <div className="text-3xl">💀</div>
       <h2 className="mt-3 text-lg font-bold">You went bust</h2>
       <p className="mt-3 text-sm leading-relaxed text-[var(--color-muted)]">
-        Cash below $1,000. Pay the restart penalty to restore $10,000 paper cash and keep trading.
+        Cash below {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions). Pay the
+        restart penalty to restore {formatUsd(STARTING_CASH_USD, 0)} paper cash and keep trading.
       </p>
       <div className="mt-4 rounded-lg border border-red-500/30 bg-red-950/30 px-4 py-3 text-center">
         <p className="text-xs uppercase tracking-widest text-red-300">Restart penalty</p>
-        <p className="mt-1 text-2xl font-bold text-white">{formatUsd(resetFeeUsd)}</p>
-        <p className="mt-1 text-xs text-[var(--color-muted)]">→ fresh $10,000 paper cash</p>
+        <p className="mt-1 text-2xl font-bold text-white">{formatUsd(resetFeeUsd, 0)}</p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          → fresh {formatUsd(STARTING_CASH_USD, 0)} paper cash
+        </p>
       </div>
 
       {mode === 'choose' && (
@@ -172,7 +176,7 @@ export function BustPenaltyModal({
                 disabled={busy}
                 className="w-full rounded-lg bg-violet-600 py-2.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
               >
-                {cryptoLoading ? 'Preparing…' : `Pay ${formatUsd(resetFeeUsd)} USDC on Solana`}
+                {cryptoLoading ? 'Preparing…' : `Pay ${formatUsd(resetFeeUsd, 0)} USDC on Solana`}
               </button>
             )}
             <button
@@ -184,8 +188,8 @@ export function BustPenaltyModal({
               {loading
                 ? 'Processing…'
                 : stripeEnabled
-                  ? `Pay ${formatUsd(resetFeeUsd)} via Stripe`
-                  : `Simulate ${formatUsd(resetFeeUsd)} & restart`}
+                  ? `Pay ${formatUsd(resetFeeUsd, 0)} via Stripe`
+                  : `Simulate ${formatUsd(resetFeeUsd, 0)} & restart`}
             </button>
             <button
               type="button"
@@ -264,12 +268,4 @@ export function BustPenaltyModal({
       )}
     </ModalShell>
   );
-}
-
-function formatUsd(value: number) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  }).format(value);
 }
