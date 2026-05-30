@@ -9,7 +9,8 @@ import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio } from '@/components/share-portfolio';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
-import { fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
+import { FollowTraderButton } from '@/components/follow-trader-button';
+import { fetchAccountFollowing, fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
 
 type PublicPosition = PublicPortfolio['positions'][number];
 
@@ -21,6 +22,9 @@ export default function PublicPortfolioPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [intelPosition, setIntelPosition] = useState<CoinIntelData | null>(null);
+  const [following, setFollowing] = useState(false);
+
+  const isSelf = session?.user?.id === userId;
 
   const load = useCallback(async () => {
     if (!userId) return;
@@ -39,6 +43,13 @@ export default function PublicPortfolioPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!session?.accessToken || !userId || isSelf) return;
+    fetchAccountFollowing(session.accessToken)
+      .then((rows) => setFollowing(rows.some((r) => r.userId === userId)))
+      .catch(() => setFollowing(false));
+  }, [session?.accessToken, userId, isSelf]);
 
   function openIntel(pos: PublicPosition) {
     setIntelPosition({
@@ -90,8 +101,21 @@ export default function PublicPortfolioPage() {
         {portfolio && (
           <>
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
-              <p className="text-sm text-[var(--color-muted)]">Trader</p>
-              <h2 className="mt-1 text-2xl font-bold">{portfolio.displayName}</h2>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm text-[var(--color-muted)]">Trader</p>
+                  <h2 className="mt-1 text-2xl font-bold">{portfolio.displayName}</h2>
+                </div>
+                {!isSelf && session?.accessToken && (
+                  <FollowTraderButton
+                    userId={portfolio.userId}
+                    token={session.accessToken}
+                    initiallyFollowing={following}
+                    size="md"
+                    onChange={setFollowing}
+                  />
+                )}
+              </div>
               <div className="mt-3">
                 <ReputationBadge
                   points={portfolio.reputationPoints}

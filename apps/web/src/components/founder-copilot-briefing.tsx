@@ -1,7 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { copilotResume, fetchCopilotMemory, fetchCopilotStandup, ProjectMemory } from '@/lib/api';
+import { copilotResume, fetchCopilotMemory, fetchCopilotStandup, fetchDeviceMemorySync, pushDeviceMemorySync, ProjectMemory } from '@/lib/api';
+import {
+  isOnline,
+  loadLocalMemory,
+  memoryFromProject,
+  mergeMemory,
+  saveLocalMemory,
+} from '@/lib/founder-os-local-memory';
 
 type FounderCopilotBriefingProps = {
   accessToken: string;
@@ -25,11 +32,82 @@ export function FounderCopilotBriefing({
         fetchCopilotMemory(accessToken),
         fetchCopilotStandup(accessToken),
       ]);
-      setMemory(mem);
+
+      const mode = mem.memoryStorageMode ?? 'PLATFORM';
+      let display = mem;
+
+      if (mode === 'LOCAL_DEVICE' || mode === 'LOCAL_SYNC') {
+        const localPayload = memoryFromProject({
+          projectName: mem.project?.name,
+          currentGoal: mem.currentGoal,
+          tasksFile: {
+            version: 1,
+            updatedAt: new Date().toISOString(),
+            currentGoal: mem.currentGoal,
+            tasks: mem.openTasks.map((t) => ({
+              id: t.id,
+              title: t.title,
+              status: t.status,
+              kind: t.kind,
+              done: t.done,
+            })),
+          },
+        });
+        saveLocalMemory(localPayload);
+
+        if (mode === 'LOCAL_SYNC' && isOnline()) {
+          try {
+            const remote = await fetchDeviceMemorySync(accessToken);
+            const merged = mergeMemory(localPayload, remote.payload);
+            if (merged && merged.currentGoal !== mem.currentGoal) {
+              display = { ...mem, currentGoal: merged.currentGoal };
+            }
+            if (merged) {
+              await pushDeviceMemorySync(merged, accessToken);
+            }
+          } catch {
+            /* offline or relay disabled */
+          }
+        }
+      }
+
+      setMemory(display);
       setStandup(stand.standup);
     } catch {
-      setMemory(null);
-      setStandup(null);
+      const local = loadLocalMemory();
+      if (local) {
+        setMemory({
+          welcomeMessage: 'Local memory loaded',
+          project: null,
+          currentGoal: local.currentGoal,
+          progressPercent: 0,
+          launchReadiness: 0,
+          buildStreakDays: 0,
+          lastActivityAt: null,
+          lastActivityLabel: 'Local device',
+          lastCommit: null,
+          repoFullName: null,
+          currentBranch: null,
+          openTasks: (local.tasksFile?.tasks ?? []).map((t) => ({
+            id: t.id,
+            title: t.title,
+            kind: t.kind,
+            status: t.status,
+            done: t.done,
+          })),
+          suggestedNextStep: local.tasksFile?.tasks[0]?.title ?? local.currentGoal,
+          deployments: [],
+          raiseStatus: null,
+          community: { followers: 0, featureRequests: 0 },
+          defaultAiProvider: 'RULE_BASED',
+          memoryStorageMode: 'LOCAL_DEVICE',
+          cursorCopy: local.currentGoal,
+        });
+        setStandup(null);
+      } else {
+        setMemory(null);
+        setStandup(null);
+      }
     }
   }, [accessToken]);
 
@@ -79,7 +157,16 @@ export function FounderCopilotBriefing({
     <div className="space-y-4">
       <section className="rounded-2xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/40 to-zinc-950 p-5 sm:p-6">
         <p className="text-lg font-semibold text-white">{memory.welcomeMessage}</p>
-        <p className="mt-1 text-xs text-emerald-300/80">Founder Copilot · persistent project memory</p>
+        <p className="mt-1 text-xs text-emerald-300/80">
+          Founder Copilot ·{' '}
+          {memory.memoryStorageMode === 'LOCAL_DEVICE'
+            ? 'local device memory'
+            : memory.memoryStorageMode === 'LOCAL_SYNC'
+              ? 'local + cloud sync'
+              : memory.memoryStorageMode === 'GITHUB'
+                ? 'GitHub repo memory'
+                : 'cloud memory'}
+        </p>
 
         <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div>

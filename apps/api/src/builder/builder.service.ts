@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { AiProvider, Prisma } from '@prisma/client';
+import { AiProvider, MemoryStorageMode, Prisma } from '@prisma/client';
 import {
   AI_PROVIDERS,
   QUICK_BUILD_AI_SYSTEM,
@@ -44,6 +44,7 @@ export class BuilderService {
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
       autoPublishOnEvent: settings.autoPublishOnEvent,
       currentGoalFocus: settings.currentGoalFocus,
+      memoryStorageMode: settings.memoryStorageMode,
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       providers: AI_PROVIDERS.map((p) => ({
@@ -69,6 +70,7 @@ export class BuilderService {
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
       currentGoalFocus?: string;
+      memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC';
     },
   ) {
     if (input.defaultProvider) {
@@ -101,6 +103,7 @@ export class BuilderService {
         autoCreateGitHubIssues: input.autoCreateGitHubIssues ?? false,
         autoPublishOnEvent: input.autoPublishOnEvent ?? false,
         currentGoalFocus: input.currentGoalFocus,
+        memoryStorageMode: input.memoryStorageMode ?? MemoryStorageMode.PLATFORM,
       },
       update: {
         ...(input.defaultProvider !== undefined ? { defaultProvider: input.defaultProvider } : {}),
@@ -112,6 +115,9 @@ export class BuilderService {
           ? { autoPublishOnEvent: input.autoPublishOnEvent }
           : {}),
         ...(input.currentGoalFocus !== undefined ? { currentGoalFocus: input.currentGoalFocus } : {}),
+        ...(input.memoryStorageMode !== undefined
+          ? { memoryStorageMode: input.memoryStorageMode as MemoryStorageMode }
+          : {}),
       },
     });
 

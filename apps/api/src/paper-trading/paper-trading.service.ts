@@ -736,11 +736,40 @@ export class PaperTradingService {
 
     ranked.sort((a, b) => b.totalValue - a.totalValue);
 
+    void this.syncLeaderboardEntries(ranked.slice(0, 100));
+
     return ranked.slice(0, limit).map((entry, index) => ({
       rank: index + 1,
       ...entry,
       period: LeaderboardPeriod.ALL_TIME,
     }));
+  }
+
+  private async syncLeaderboardEntries(
+    ranked: Array<{ userId: string; totalValue: number; pnl: number; roi: number }>,
+  ) {
+    await Promise.all(
+      ranked.map((entry, index) =>
+        this.prisma.leaderboardEntry.upsert({
+          where: {
+            userId_period: { userId: entry.userId, period: LeaderboardPeriod.ALL_TIME },
+          },
+          create: {
+            userId: entry.userId,
+            period: LeaderboardPeriod.ALL_TIME,
+            rank: index + 1,
+            pnl: entry.pnl,
+            roi: entry.roi,
+          },
+          update: {
+            rank: index + 1,
+            pnl: entry.pnl,
+            roi: entry.roi,
+            computedAt: new Date(),
+          },
+        }),
+      ),
+    );
   }
 
   async getBustedTraders(limit = 30) {

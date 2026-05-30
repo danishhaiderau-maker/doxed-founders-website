@@ -30,6 +30,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { UserXPostingService } from '../x-social/user-x-posting.service';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
 import { EventsService } from '../events/events.service';
+import { FounderOsMemoryService } from '../github/founder-os-memory.service';
 
 @Injectable()
 export class FounderOsService {
@@ -40,6 +41,7 @@ export class FounderOsService {
     private readonly userX: UserXPostingService,
     private readonly integrations: FounderOsIntegrationService,
     private readonly events: EventsService,
+    private readonly memory: FounderOsMemoryService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -219,7 +221,15 @@ export class FounderOsService {
     }
 
     await this.upsertConnectedApp(userId, 'github', true);
+
+    void this.memory.bootstrapRepoMemory(userId, normalized).catch(() => undefined);
+    void this.memory.syncProjectMemoryToRepo(userId, normalized).catch(() => undefined);
+
     return { success: true, repoFullName: normalized };
+  }
+
+  async syncProjectMemory(userId: string) {
+    return this.memory.syncProjectMemoryToRepo(userId);
   }
 
   async syncGitHubCommits(userId: string) {

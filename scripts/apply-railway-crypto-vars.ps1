@@ -21,7 +21,7 @@ function Read-DotEnv($path) {
 }
 
 $envMap = Read-DotEnv $pasteFile
-$keys = @("SOLANA_RPC_URL", "PLATFORM_SOLANA_TREASURY")
+$keys = @("HELIUS_RPC_URL", "SOLANA_RPC_URL", "PLATFORM_SOLANA_TREASURY")
 
 Set-Location $root
 foreach ($key in $keys) {

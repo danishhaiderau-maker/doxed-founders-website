@@ -13,6 +13,8 @@ import {
   fetchBuilderSettings,
   updateBuilderSettings,
 } from '@/lib/api';
+import { MemoryStoragePanel } from '@/components/memory-storage-panel';
+import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
   accessToken: string;
@@ -159,6 +161,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
 
   return (
     <div className="space-y-8">
+      <MemoryStoragePanel
+        accessToken={accessToken}
+        currentMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
+        onModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
+      />
+
       <section className="rounded-2xl border border-violet-500/30 bg-violet-950/10 p-6">
         <h2 className="text-lg font-semibold text-white">Default builder</h2>
         <p className="mt-1 text-sm text-zinc-500">

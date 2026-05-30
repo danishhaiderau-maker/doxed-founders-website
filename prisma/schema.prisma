@@ -237,6 +237,13 @@ enum AiProvider {
   OPENCLAW
 }
 
+enum MemoryStorageMode {
+  PLATFORM
+  GITHUB
+  LOCAL_DEVICE
+  LOCAL_SYNC
+}
+
 enum FounderEventType {
   GITHUB_COMMIT
   GITHUB_PR_MERGED
@@ -339,6 +346,7 @@ model User {
   agentRuns            AgentRun[]
   agentFollows         AgentFollow[]
   builderSettings      FounderBuilderSettings?
+  projectMemorySync    ProjectMemoryDeviceSync?
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
 
@@ -813,6 +821,7 @@ model Notification {
   title     String
   body      String           @db.Text
   link      String?
+  metadata  Json?
   readAt    DateTime?
   createdAt DateTime         @default(now())
 
@@ -1325,8 +1334,20 @@ model FounderBuilderSettings {
   autoCreateGitHubIssues Boolean    @default(false)
   autoPublishOnEvent     Boolean    @default(false)
   currentGoalFocus       String?
+  memoryStorageMode      MemoryStorageMode @default(PLATFORM)
   createdAt              DateTime   @default(now())
   updatedAt              DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/** Lightweight cross-device relay for local-first project memory (not full AI chat logs). */
+model ProjectMemoryDeviceSync {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  payload     Json
+  deviceLabel String?
+  updatedAt   DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

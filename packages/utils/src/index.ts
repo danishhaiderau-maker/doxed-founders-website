@@ -52,6 +52,7 @@ export * from './build-queue';
 export * from './ai-providers';
 export * from './event-bus';
 export * from './project-memory';
+export * from './founder-os-memory-files';
 export * from './raise-room';
 export * from './scout-markets';
 export * from './founder-brain';

@@ -3,8 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 /** Solana treasury from DB (admin UI) or Railway env bootstrap. */
 export function solanaRpcUrl(): string {
   return (
-    process.env.SOLANA_RPC_URL?.trim() ||
     process.env.HELIUS_RPC_URL?.trim() ||
+    process.env.SOLANA_RPC_URL?.trim() ||
     'https://api.mainnet-beta.solana.com'
   );
 }

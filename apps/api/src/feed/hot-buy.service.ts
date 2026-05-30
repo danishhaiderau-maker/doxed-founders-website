@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { LeaderboardPeriod, NotificationType, PaperTradeSide } from '@prisma/client';
-import { formatUsd } from '@dcf/utils';
+import { formatPublicAccountLabel, formatUsd, type NotificationBuyerMeta } from '@dcf/utils';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -8,6 +8,7 @@ const HOT_BUY_THRESHOLD = 0.02;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const NOTIFY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const TOP_TRADER_RANK_LIMIT = 20;
 
 export type HotBuySnapshot = {
   projectId: string;
@@ -18,6 +19,7 @@ export type HotBuySnapshot = {
   activeTraderCount: number;
   pctOfActive: number;
   topTraderCount: number;
+  recentBuyers: NotificationBuyerMeta['buyers'];
 };
 
 @Injectable()
@@ -40,18 +42,29 @@ export class HotBuyService {
     });
     if (recent) return;
 
+    const buyerNames = (snapshot.recentBuyers ?? [])
+      .slice(0, 5)
+      .map((b) => b.displayName)
+      .join(', ');
     const pctLabel = `${Math.round(snapshot.pctOfActive * 100)}%`;
     const title = snapshot.topTraderCount >= 3 ? 'Top traders buying' : 'Hot buy';
     const body =
       snapshot.topTraderCount >= 3
-        ? `${snapshot.topTraderCount} top traders opened positions in ${snapshot.projectTicker} — ${snapshot.buyerCount} buyers in 24h.`
-        : `${snapshot.buyerCount} traders bought ${snapshot.projectTicker} in 24h (${pctLabel} of active traders).`;
+        ? `${snapshot.topTraderCount} top traders opened ${snapshot.projectTicker} — ${buyerNames}${snapshot.recentBuyers!.length > 5 ? ' + more' : ''}.`
+        : `${snapshot.buyerCount} traders bought ${snapshot.projectTicker} (${pctLabel} of active) — ${buyerNames}${snapshot.recentBuyers!.length > 5 ? ' + more' : ''}.`;
 
-    await this.notifications.notifyAllUsers({
+    const metadata: NotificationBuyerMeta = {
+      projectSlug: snapshot.projectSlug,
+      projectTicker: snapshot.projectTicker,
+      buyers: snapshot.recentBuyers,
+    };
+
+    await this.notifications.notifyMarketAlert({
       type: NotificationType.TRENDING_BUYS,
       title: `🔥 ${title}: ${snapshot.projectTicker}`,
       body,
-      link: `/feed?category=market`,
+      link: `/project/${snapshot.projectSlug}`,
+      metadata,
     });
   }
 
@@ -93,10 +106,9 @@ export class HotBuyService {
     });
     if (!project) return null;
 
-    const topTraderCount = await this.countTopTradersBuying(
-      projectId,
-      buyers.map((b) => b.userId),
-    );
+    const topTraderIds = await this.getTopTraderUserIds();
+    const topTraderCount = buyers.filter((b) => topTraderIds.has(b.userId)).length;
+    const recentBuyers = await this.loadRecentBuyers(projectId, windowStart);
 
     return {
       projectId: project.id,
@@ -107,7 +119,72 @@ export class HotBuyService {
       activeTraderCount: activeCount,
       pctOfActive: buyers.length / Math.max(activeCount, 1),
       topTraderCount,
+      recentBuyers,
     };
+  }
+
+  private async loadRecentBuyers(
+    projectId: string,
+    since: Date,
+  ): Promise<NotificationBuyerMeta['buyers']> {
+    const trades = await this.prisma.paperTrade.findMany({
+      where: { projectId, side: PaperTradeSide.BUY, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+      include: {
+        user: { select: { id: true, name: true, email: true, twitterHandle: true } },
+      },
+    });
+
+    const seen = new Set<string>();
+    const buyers: NonNullable<NotificationBuyerMeta['buyers']> = [];
+
+    for (const trade of trades) {
+      if (seen.has(trade.userId)) continue;
+      seen.add(trade.userId);
+      buyers.push({
+        userId: trade.userId,
+        displayName: formatPublicAccountLabel(trade.user.name, trade.user.email),
+        amountUsd: Number(trade.totalUsd),
+        twitterHandle: trade.user.twitterHandle,
+      });
+      if (buyers.length >= 8) break;
+    }
+
+    return buyers;
+  }
+
+  private async getTopTraderUserIds(): Promise<Set<string>> {
+    const entries = await this.prisma.leaderboardEntry.findMany({
+      where: { period: LeaderboardPeriod.ALL_TIME, rank: { lte: TOP_TRADER_RANK_LIMIT } },
+      select: { userId: true },
+      take: TOP_TRADER_RANK_LIMIT,
+    });
+    if (entries.length > 0) {
+      return new Set(entries.map((e) => e.userId));
+    }
+
+    const portfolios = await this.prisma.paperPortfolio.findMany({
+      select: { id: true, userId: true, cashBalance: true },
+    });
+    const ranked = await Promise.all(
+      portfolios.map(async (p) => {
+        const positions = await this.prisma.paperPosition.findMany({
+          where: { portfolioId: p.id },
+          include: { project: { select: { id: true } } },
+        });
+        let positionsValue = 0;
+        for (const pos of positions) {
+          positionsValue += Number(pos.quantity) * Number(pos.avgBuyPrice);
+        }
+        return {
+          userId: p.userId,
+          totalValue: Number(p.cashBalance) + positionsValue,
+        };
+      }),
+    );
+    ranked.sort((a, b) => b.totalValue - a.totalValue);
+    return new Set(ranked.slice(0, TOP_TRADER_RANK_LIMIT).map((r) => r.userId));
   }
 
   private async countActiveTraders(): Promise<number> {
@@ -118,18 +195,6 @@ export class HotBuyService {
       distinct: ['userId'],
     });
     return Math.max(rows.length, 1);
-  }
-
-  private async countTopTradersBuying(projectId: string, buyerIds: string[]): Promise<number> {
-    if (buyerIds.length === 0) return 0;
-
-    const topEntries = await this.prisma.leaderboardEntry.findMany({
-      where: { period: LeaderboardPeriod.ALL_TIME, rank: { lte: 100 } },
-      select: { userId: true },
-      take: 100,
-    });
-    const topSet = new Set(topEntries.map((e) => e.userId));
-    return buyerIds.filter((id) => topSet.has(id)).length;
   }
 
   formatHotBuyHeadline(snapshot: HotBuySnapshot): string {

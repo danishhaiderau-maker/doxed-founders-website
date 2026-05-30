@@ -923,6 +923,7 @@ export interface AppNotification {
   title: string;
   body: string;
   link: string | null;
+  metadata?: Record<string, unknown> | null;
   readAt: string | null;
   createdAt: string;
 }
@@ -1522,6 +1523,14 @@ export function syncGitHubCommits(token: string) {
   }>('/founder-os/github/sync', { method: 'POST' }, token);
 }
 
+export function syncFounderOsMemory(token: string) {
+  return apiFetch<{ synced: boolean; repo?: string; reason?: string }>(
+    '/founder-os/memory/sync',
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function publishSuggestedUpdate(
   suggestionId: string,
   token: string,
@@ -2009,6 +2018,7 @@ export interface BuilderSettings {
   autoCreateGitHubIssues: boolean;
   autoPublishOnEvent: boolean;
   currentGoalFocus: string | null;
+  memoryStorageMode?: string;
   githubTokenConnected: boolean;
   openHandsBaseUrl: string | null;
   cursorAgentUrl: string | null;
@@ -2036,6 +2046,7 @@ export function updateBuilderSettings(
     autoCreateGitHubIssues?: boolean;
     autoPublishOnEvent?: boolean;
     currentGoalFocus?: string;
+    memoryStorageMode?: string;
   },
   token: string,
 ) {
@@ -2190,7 +2201,38 @@ export interface ProjectMemory {
   } | null;
   community: { followers: number; featureRequests: number };
   defaultAiProvider: string;
+  memoryStorageMode?: string;
   cursorCopy: string;
+  githubMemory?: {
+    repoFullName: string;
+    hasProjectContext: boolean;
+    hasRoadmap: boolean;
+    openTasksFromRepo: { id: string; title: string; status: string; kind: string; done: boolean }[];
+  } | null;
+  deviceSync?: {
+    updatedAt: string;
+    deviceLabel: string | null;
+    payload: import('@dcf/utils').DeviceMemoryPayload;
+  } | null;
+}
+
+export function fetchDeviceMemorySync(token: string) {
+  return apiFetch<{
+    updatedAt: string | null;
+    deviceLabel: string | null;
+    payload: import('@dcf/utils').DeviceMemoryPayload | null;
+  }>('/copilot/memory/device-sync', undefined, token);
+}
+
+export function pushDeviceMemorySync(
+  payload: import('@dcf/utils').DeviceMemoryPayload,
+  token: string,
+) {
+  return apiFetch<{ success: boolean; updatedAt: string }>(
+    '/copilot/memory/device-sync',
+    { method: 'POST', body: JSON.stringify(payload) },
+    token,
+  );
 }
 
 export function fetchCopilotMemory(token: string) {

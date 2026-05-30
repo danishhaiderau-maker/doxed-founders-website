@@ -77,6 +77,7 @@ export class NotificationsService {
     title: string;
     body: string;
     link?: string;
+    metadata?: Record<string, unknown>;
   }) {
     const users = await this.prisma.user.findMany({
       where: { banned: false },
@@ -92,10 +93,37 @@ export class NotificationsService {
         title: input.title,
         body: input.body,
         link: input.link,
+        metadata: input.metadata as Prisma.InputJsonValue | undefined,
       })),
     });
 
     return users.length;
+  }
+
+  /** Market alerts respect user notification prefs (hot buys, etc.). */
+  async notifyMarketAlert(input: {
+    type: NotificationType;
+    title: string;
+    body: string;
+    link?: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    const users = await this.prisma.user.findMany({
+      where: { banned: false },
+      select: { id: true, notificationPrefs: true },
+    });
+
+    let sent = 0;
+    for (const user of users) {
+      const prefs = mergeNotificationPreferences(
+        user.notificationPrefs as Parameters<typeof mergeNotificationPreferences>[0],
+      );
+      if (input.type === NotificationType.TRENDING_BUYS && !prefs.market.hotBuys) continue;
+
+      await this.notifyUser(user.id, input);
+      sent += 1;
+    }
+    return sent;
   }
 
   async notifyUser(
@@ -105,10 +133,18 @@ export class NotificationsService {
       title: string;
       body: string;
       link?: string;
+      metadata?: Record<string, unknown>;
     },
   ) {
     return this.prisma.notification.create({
-      data: { userId, ...input },
+      data: {
+        userId,
+        type: input.type,
+        title: input.title,
+        body: input.body,
+        link: input.link,
+        metadata: input.metadata as Prisma.InputJsonValue | undefined,
+      },
     });
   }
 
@@ -149,6 +185,12 @@ export class NotificationsService {
         title: `${label} opened conviction trade`,
         body: `Bought $${Math.round(input.amountUsd).toLocaleString()} of ${input.ticker}`,
         link,
+        metadata: {
+          traderUserId,
+          displayName: label,
+          ticker: input.ticker,
+          amountUsd: input.amountUsd,
+        },
       });
       sent += 1;
     }
