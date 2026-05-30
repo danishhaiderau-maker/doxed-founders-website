@@ -5,6 +5,7 @@ export type AiProviderKey =
   | 'OPENAI'
   | 'ANTHROPIC'
   | 'GEMINI'
+  | 'DEEPSEEK'
   | 'OPENHANDS'
   | 'CURSOR';
 
@@ -59,6 +60,15 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     defaultModel: 'gemini-2.0-flash',
     billTip: 'Remote LLM — your Gemini API key.',
     credentialProvider: 'gemini',
+  },
+  {
+    key: 'DEEPSEEK',
+    label: 'DeepSeek API',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    defaultModel: 'deepseek-chat',
+    billTip: 'Remote LLM — OpenAI-compatible DeepSeek key for specs and Founder Brain.',
+    credentialProvider: 'deepseek',
   },
   {
     key: 'OPENHANDS',

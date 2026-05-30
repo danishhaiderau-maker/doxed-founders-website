@@ -8,6 +8,7 @@ import { formatPercent, formatUsd } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio } from '@/components/share-portfolio';
+import { TraderRankShareButton } from '@/components/trader-rank-share-button';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import { fetchAccountFollowing, fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
@@ -106,15 +107,26 @@ export default function PublicPortfolioPage() {
                   <p className="text-sm text-[var(--color-muted)]">Trader</p>
                   <h2 className="mt-1 text-2xl font-bold">{portfolio.displayName}</h2>
                 </div>
-                {!isSelf && session?.accessToken && (
-                  <FollowTraderButton
+                <div className="flex flex-wrap items-center gap-2">
+                  <TraderRankShareButton
                     userId={portfolio.userId}
-                    token={session.accessToken}
-                    initiallyFollowing={following}
-                    size="md"
-                    onChange={setFollowing}
+                    displayName={portfolio.displayName}
+                    roi={portfolio.roi}
+                    totalValue={portfolio.totalValue}
+                    pnl={portfolio.pnl}
+                    isLoser={portfolio.pnl < 0}
+                    isBusted={portfolio.totalValue < 1000}
                   />
-                )}
+                  {!isSelf && session?.accessToken && (
+                    <FollowTraderButton
+                      userId={portfolio.userId}
+                      token={session.accessToken}
+                      initiallyFollowing={following}
+                      size="md"
+                      onChange={setFollowing}
+                    />
+                  )}
+                </div>
               </div>
               <div className="mt-3">
                 <ReputationBadge
@@ -143,6 +155,7 @@ export default function PublicPortfolioPage() {
               displayName={portfolio.displayName}
               roi={portfolio.roi}
               totalValue={portfolio.totalValue}
+              pnl={portfolio.pnl}
               accessToken={session?.accessToken}
               highlightPosition={
                 portfolio.positions.find((p) => p.convictionThesis) ?? portfolio.positions[0]
