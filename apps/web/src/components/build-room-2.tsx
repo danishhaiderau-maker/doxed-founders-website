@@ -5,14 +5,12 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   BuildQueueItem,
   BuildRoomData,
-  CommandBarIntent,
   dismissBuildQueueItem,
   fetchBuildRoom,
   publishGitHubIssues,
   updateBuildQueueItem,
 } from '@/lib/api';
-import { FounderCopilotBriefing } from '@/components/founder-copilot-briefing';
-import { FounderCopilotBar } from '@/components/founder-copilot-bar';
+import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderOsPanel } from '@/components/founder-os-panel';
 import { HandsFreeModal, shouldShowHandsFreeIntro } from '@/components/hands-free-modal';
 import { copilotHandsFree } from '@/lib/api';
@@ -26,12 +24,6 @@ const TABS: { id: BuildRoomTab; label: string }[] = [
   { id: 'commits', label: 'Commits' },
   { id: 'deployments', label: 'Deployments' },
   { id: 'prs', label: 'PRs' },
-];
-
-const COMMANDS: { intent: CommandBarIntent; label: string; placeholder: string }[] = [
-  { intent: 'roadmap', label: 'Create roadmap', placeholder: 'mobile app, Q2 launch…' },
-  { intent: 'release_notes', label: 'Release notes', placeholder: 'optional focus…' },
-  { intent: 'weekly_summary', label: 'Weekly summary', placeholder: 'optional theme…' },
 ];
 
 function ItemRow({
@@ -186,9 +178,9 @@ export function BuildRoom2({
         />
       )}
 
-      <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
+      <FounderCopilotChat accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_minmax(280px,360px)] xl:grid-cols-[1fr_minmax(300px,400px)]">
+      <div className="grid gap-6 lg:grid-cols-[1fr_minmax(260px,320px)]">
         <div className="min-w-0 space-y-6">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
@@ -348,17 +340,6 @@ export function BuildRoom2({
         </div>
 
         <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
-          <FounderCopilotBriefing
-            accessToken={accessToken}
-            variant="sidebar"
-            founderActive={founderActive}
-            commands={COMMANDS}
-            onMessage={onMessage}
-            onRefresh={() => {
-              load();
-              onRefresh?.();
-            }}
-          />
           <FounderOsPanel
             accessToken={accessToken}
             founderCredits={founderCredits}
