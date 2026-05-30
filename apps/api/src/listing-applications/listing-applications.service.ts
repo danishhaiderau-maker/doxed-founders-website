@@ -56,16 +56,25 @@ export class ListingApplicationsService {
       throw new BadRequestException('Explain why this project should be listed (whyList).');
     }
 
-    const doxxedStatus = dto.founderDoxxedStatus ?? 'DOXXED';
+    const doxxedStatus =
+      dto.founderDoxxedStatus ??
+      (dto.whyDoxxed?.toLowerCase().includes('building in public')
+        ? 'BUILDING_IN_PUBLIC'
+        : 'DOXXED');
     if (doxxedStatus === 'DOXXED' && !dto.whyDoxxed?.trim()) {
       throw new BadRequestException(
         'Explain why the founder is doxxed (whyDoxxed), or select "Building in public (not fully doxxed)" and add a scout highlight.',
       );
     }
     if (doxxedStatus === 'BUILDING_IN_PUBLIC' && !dto.scoutHighlightNote?.trim()) {
-      throw new BadRequestException(
-        'Add a scout highlight — e.g. building in public, podcast appearances, GitHub activity.',
-      );
+      const fromWhy = dto.whyDoxxed
+        ?.replace(/^\[Building in public[^\]]*\]\s*/i, '')
+        .trim();
+      if (!fromWhy || fromWhy.length < 20) {
+        throw new BadRequestException(
+          'Add a scout highlight — e.g. building in public, podcast appearances, GitHub activity.',
+        );
+      }
     }
 
     const activeUsers = await this.prisma.user.count({
@@ -99,7 +108,11 @@ export class ListingApplicationsService {
         whyList: dto.whyList.trim(),
         whyDoxxed: dto.whyDoxxed?.trim() ?? null,
         founderDoxxedStatus: doxxedStatus,
-        scoutHighlightNote: dto.scoutHighlightNote?.trim() ?? null,
+        scoutHighlightNote:
+          dto.scoutHighlightNote?.trim() ??
+          (doxxedStatus === 'BUILDING_IN_PUBLIC'
+            ? dto.whyDoxxed?.replace(/^\[Building in public[^\]]*\]\s*/i, '').trim() ?? null
+            : null),
         marketPreview: dto.marketPreview as Prisma.InputJsonValue | undefined,
         verificationScore: verification.score,
         verificationCriteria: verification.criteria,
