@@ -1,41 +1,67 @@
-# Railway deploy checklist (@dcf/api)
+# Railway deploy checklist
 
-If deployments show **FAILED** while the service stays on an old commit:
+## Which service to use
 
-## Root cause (typical)
+| Service | Use? | Notes |
+|---------|------|--------|
+| **doxed-founders-website** | ✅ Yes | Production API — `doxed-founders-website-production.up.railway.app` |
+| **@dcf/api** | ⚠️ Duplicate | Same repo; merge into above or delete |
+| **@dcf/web** | ❌ Delete | Web runs on **Vercel**. This service has no env vars and will always fail healthcheck |
 
-1. **Neon was bootstrapped with `db push`** — `prisma migrate deploy` fails on startup → API never listens → healthcheck fails.
-2. **JWT_SECRET** must be 32+ chars when `NODE_ENV=production` (see `apps/api/src/main.ts`).
+## Root cause of recent FAILED deploys
 
-## Fix (repo)
+### 1. `node_env=production` could not be found (bf47d62)
 
-- `railway.toml` sets `PRISMA_DB_PUSH=true` on start.
-- `scripts/start-api-prod.mjs` uses **db push on Railway** and continues even if push warns (schema already matches).
+Railway uses **Dockerfile** builder. A start command like:
 
-## Required Railway variables
+```
+NODE_ENV=production PRISMA_DB_PUSH=true node scripts/start-api-prod.mjs
+```
+
+is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as the binary.
+
+**Fix:** `railway.toml` uses `node scripts/start-api-prod.mjs` only. Set env vars in Railway **Variables** (or Dockerfile `ENV`).
+
+### 2. Healthcheck failure (older deploys)
+
+- Neon was bootstrapped with `db push` — `prisma migrate deploy` blocked startup → API never listened → healthcheck timed out.
+- **@dcf/web** had **0 variables** (no `DATABASE_URL`, no `JWT_SECRET`) → instant crash.
+- **JWT_SECRET** must be 32+ chars when `NODE_ENV=production`.
+
+**Fix:** `scripts/start-api-prod.mjs` auto-detects Railway (`RAILWAY_ENVIRONMENT`) and uses **db push**, continuing on schema-already-sync warnings.
+
+## Required Railway variables (doxed-founders-website only)
 
 | Variable | Notes |
 |----------|--------|
 | `DATABASE_URL` | Neon PostgreSQL connection string |
-| `JWT_SECRET` | 32+ chars (same as setup) |
-| `NODE_ENV` | `production` (set by start command) |
-| `CORS_ORIGINS` | `https://doxxedcrypto.digital` |
-| `CREDENTIALS_ENCRYPTION_KEY` | 32+ char hex for API keys |
+| `JWT_SECRET` | 32+ chars |
+| `NODE_ENV` | `production` |
+| `PRISMA_DB_PUSH` | `true` (safe on Neon; script also sets on Railway) |
+| `CORS_ORIGINS` | `https://doxxedcrypto.digital,https://www.doxxedcrypto.digital` |
+| `CREDENTIALS_ENCRYPTION_KEY` | 32+ char hex for stored API keys |
 
 ## Redeploy
 
-```bash
+```powershell
 railway login
-railway link
-railway up --detach
+railway link   # select doxed-founders-website service
+npm run fix:railway
 ```
 
-Or: Railway dashboard → @dcf/api → **Redeploy** latest `master`.
+Or dashboard → **doxed-founders-website** → **Redeploy** latest `master`.
+
+## Dashboard cleanup (recommended)
+
+1. **@dcf/web** → Settings → disconnect GitHub or delete service (web is on Vercel).
+2. **@dcf/api** → delete if duplicate of doxed-founders-website, or point only one service at the repo.
+3. Clear failed deploy history is optional; yellow warning counts are historical failures.
 
 ## Verify
 
 ```bash
-curl https://YOUR-API.up.railway.app/api/health
+curl https://doxed-founders-website-production.up.railway.app/api/health
+curl https://doxxedcrypto.digital/api/health
 ```
 
-Should return `"status":"ok"` and recent timestamp.
+Both should return `"status":"ok"` and `"database":"ok"`.

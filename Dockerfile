@@ -15,6 +15,7 @@ RUN npm ci \
   && npm run build --workspace=@dcf/api
 
 ENV NODE_ENV=production
+ENV PRISMA_DB_PUSH=true
 EXPOSE 4000
 
 CMD ["node", "scripts/start-api-prod.mjs"]

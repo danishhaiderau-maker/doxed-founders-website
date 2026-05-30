@@ -8,6 +8,11 @@ const apiDir = path.join(root, 'apps', 'api');
 const schema = process.env.PRISMA_SCHEMA ?? 'prisma/schema.prisma';
 const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID);
 
+process.env.NODE_ENV = process.env.NODE_ENV?.trim() || 'production';
+if (isRailway && process.env.PRISMA_DB_PUSH !== 'false') {
+  process.env.PRISMA_DB_PUSH = 'true';
+}
+
 function run(label, command, args, cwd = root, allowFail = false) {
   console.log(`\n[start-api-prod] ${label}`);
   const result = spawnSync(command, args, {
