@@ -170,6 +170,9 @@ export default function ProjectDetailPage() {
                   text={buildListingShareMessage({
                     projectName: project.name,
                     ticker: project.ticker,
+                    scoutHighlight: project.scoutHighlight,
+                    scoutThesis: project.listingScoutThesis ?? project.verificationDossier?.whyList,
+                    whyDoxxed: project.verificationDossier?.whyDoxxed,
                     summary: project.summary,
                   })}
                   url={buildSiteUrl(origin, `/project/${project.slug}`)}
