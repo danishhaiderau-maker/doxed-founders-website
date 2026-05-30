@@ -70,7 +70,7 @@ export class BuilderService {
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
       currentGoalFocus?: string;
-      memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC';
+      memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC' | 'FOUNDER_NODE';
     },
   ) {
     if (input.defaultProvider) {

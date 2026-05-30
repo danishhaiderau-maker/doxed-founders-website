@@ -1,0 +1,17 @@
+{
+  "name": "@dcf/founder-vault",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "lint": "echo 'no lint configured'"
+  },
+  "dependencies": {
+    "@dcf/utils": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

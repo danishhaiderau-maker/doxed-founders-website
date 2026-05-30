@@ -207,6 +207,28 @@ export class FounderCopilotService {
             openTasksFromRepo: githubMemory.openTasksFromRepo,
           }
         : null,
+      connectedNodes:
+        settings?.memoryStorageMode === 'FOUNDER_NODE'
+          ? (
+              await this.prisma.founderNode.findMany({
+                where: { userId },
+                orderBy: { lastSeenAt: 'desc' },
+              })
+            ).map((n) => ({
+              nodeId: n.nodeId,
+              label: n.label,
+              status:
+                n.lastSeenAt && Date.now() - n.lastSeenAt.getTime() < 180_000
+                  ? 'online'
+                  : 'offline',
+              lastSeenAt: n.lastSeenAt?.toISOString() ?? null,
+              ramGb: n.ramGb,
+              storageGb: n.storageGb,
+              storageFreeGb: n.storageFreeGb,
+              vaultHealthy: n.vaultHealthy,
+              platform: n.platform,
+            }))
+          : undefined,
     };
   }
 

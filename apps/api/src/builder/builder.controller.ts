@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
-import { AiProvider } from '@prisma/client';
+import { AiProvider, MemoryStorageMode } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { GitHubApiService } from '../github/github-api.service';
@@ -27,6 +27,7 @@ export class BuilderController {
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
       currentGoalFocus?: string;
+      memoryStorageMode?: MemoryStorageMode;
     },
   ) {
     return this.builder.updateSettings(user.id, body);

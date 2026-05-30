@@ -65,6 +65,12 @@ export const MEMORY_STORAGE_MODES = [
     description:
       'Saves on this device first (no extra storage cost). When online, syncs a small snapshot so other devices can resume.',
   },
+  {
+    key: 'FOUNDER_NODE' as const,
+    label: 'Founder Node (self-custody vault)',
+    description:
+      'Full project memory on your PC/Mac/Linux via Founder Node. Founder OS stores only metadata — your vault stays on your machine.',
+  },
 ] as const;
 
 export type MemoryStorageModeKey = (typeof MEMORY_STORAGE_MODES)[number]['key'];

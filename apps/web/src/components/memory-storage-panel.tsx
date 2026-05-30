@@ -8,6 +8,7 @@ import {
   syncFounderOsMemory,
   updateBuilderSettings,
 } from '@/lib/api';
+import { FounderNodePairingPanel } from '@/components/founder-node-pairing-panel';
 
 type Props = {
   accessToken: string;
@@ -40,6 +41,8 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
               ? 'Local + cloud sync enabled — online devices share a lightweight memory snapshot.'
               : mode === 'GITHUB'
                 ? 'GitHub repo memory selected — connect PAT and sync to write .github/founder-os/.'
+              : mode === 'FOUNDER_NODE'
+                ? 'Founder Node selected — pair your desktop vault below. Full memory stays on your machine.'
                 : 'Using Founder OS cloud memory.',
         );
         setConfirmLocal(false);
@@ -217,6 +220,10 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
           </>
         )}
       </div>
+
+      {currentMode === 'FOUNDER_NODE' && (
+        <FounderNodePairingPanel accessToken={accessToken} active={currentMode === 'FOUNDER_NODE'} />
+      )}
 
       {msg && <p className="mt-3 text-xs text-emerald-300">{msg}</p>}
       {err && <p className="mt-3 text-xs text-red-300">{err}</p>}
