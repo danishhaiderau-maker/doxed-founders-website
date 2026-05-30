@@ -1,5 +1,7 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from 'electron';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   defaultVaultRoot,
   ensureVault,
@@ -23,6 +25,21 @@ const SYNC_INTERVAL_MS = 60_000;
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
+
+function loadAppIcon() {
+  const candidates = [
+    path.join(process.resourcesPath, 'icon.png'),
+    path.join(__dirname, '../build/icon.png'),
+    path.join(__dirname, '../../build/icon.png'),
+  ];
+  for (const iconPath of candidates) {
+    if (fs.existsSync(iconPath)) {
+      const img = nativeImage.createFromPath(iconPath);
+      if (!img.isEmpty()) return img;
+    }
+  }
+  return nativeImage.createEmpty();
+}
 
 function startSyncLoop(vaultRoot: string) {
   if (syncTimer) return;
@@ -53,11 +70,13 @@ function openPairWindow(): void {
     return;
   }
 
+  const icon = loadAppIcon();
   pairWindow = new BrowserWindow({
     width: 440,
     height: 520,
     title: 'Pair Founder Node',
     autoHideMenuBar: true,
+    icon: icon.isEmpty() ? undefined : icon,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -154,8 +173,8 @@ app.whenReady().then(() => {
   const nodeId = loadOrCreateNodeId(vaultRoot);
   ensureVault(vaultRoot, nodeId);
 
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
+  const icon = loadAppIcon();
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
   tray.setToolTip('Founder Node');
   tray.setContextMenu(buildTrayMenu(vaultRoot));
   tray.on('click', () => tray?.popUpContextMenu());

@@ -20,6 +20,7 @@ doxedcryptofounder/
   apps/
     web/          # Next.js frontend
     api/          # NestJS backend
+    founder-node/ # Electron desktop vault (see apps/founder-node/README.md)
   packages/
     ui/           # Shared UI components
     types/        # Shared TypeScript types
@@ -118,7 +119,8 @@ Railway uses `railway.toml`. Vercel uses `apps/web/vercel.json`.
 | `npm run db:migrate` | Run Prisma migrations |
 | `npm run db:seed` | Seed chains, categories, founders & projects |
 | `npm run db:verify` | Verify Phase 2 seed data |
-| `npm run db:studio` | Open Prisma Studio |
+| `npm run dev:founder-node` | Start Founder Node desktop app (dev) |
+| `npm run pack:founder-node` | Build Founder Node installer (.exe / .dmg) |
 
 ## Supported Chains
 
@@ -138,6 +140,11 @@ Ethereum, Solana, Polygon, Arbitrum, Optimism, Base, Avalanche, BNB Chain
 - [x] **Phase 11** — Listing applications → live projects
 - [x] **Phase 8** — Watchlist + basic analytics events
 - [ ] **Phase 12** — Production deploy (Neon + Railway + Vercel — config in repo)
+- [x] **Founder Node Phase 2** — One-click `.exe` / `.dmg` installers ([setup guide](apps/founder-node/README.md))
+
+## Founder Node
+
+Desktop self-custody vault for project memory. **Installers:** [GitHub Releases](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) · **Setup:** [doxxedcrypto.digital/founder-node](https://doxxedcrypto.digital/founder-node) · **Docs:** [apps/founder-node/README.md](apps/founder-node/README.md)
 
 ## License
 

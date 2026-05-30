@@ -2,6 +2,8 @@
 
 import Link from 'next/link';
 import { SiteNav } from '@/components/site-nav';
+import { FounderNodeDownloads } from '@/components/founder-node-downloads';
+import { FounderNodeSetupGuide } from '@/components/founder-node-setup-guide';
 
 export default function FounderNodePage() {
   return (
@@ -33,39 +35,56 @@ export default function FounderNodePage() {
         </section>
 
         <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
-          <h2 className="font-semibold">How to run it (Phase 1 — developer setup)</h2>
-          <ol className="mt-4 list-decimal space-y-3 pl-5 text-sm text-zinc-300">
-            <li>Clone the repo and install dependencies: <code className="rounded bg-zinc-900 px-1.5 py-0.5">npm install</code></li>
-            <li>Start the Founder Node app: <code className="rounded bg-zinc-900 px-1.5 py-0.5">npm run dev:founder-node</code></li>
+          <h2 className="font-semibold">Install (recommended)</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Download the installer for your platform, open the app from the system tray, and pair once
+            with Founder OS.
+          </p>
+          <div className="mt-5">
+            <FounderNodeDownloads />
+          </div>
+          <ol className="mt-6 list-decimal space-y-3 pl-5 text-sm text-zinc-300">
+            <li>Install and launch Founder Node — it runs in your system tray</li>
             <li>
               In Founder OS, open{' '}
               <Link href="/settings/builder" className="text-cyan-300 hover:underline">
                 Builder settings
               </Link>{' '}
-              → Memory storage → choose <strong className="text-white">Founder Node</strong> → pair with the code shown in the tray app
+              → Memory storage → choose <strong className="text-white">Founder Node</strong> → copy the pairing code
             </li>
-            <li>Your vault lives at <code className="rounded bg-zinc-900 px-1.5 py-0.5">~/FounderVault/</code> on your PC</li>
+            <li>Right-click the tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code</li>
+            <li>Your vault lives at <code className="rounded bg-zinc-900 px-1.5 py-0.5">~/FounderVault/</code> on your machine</li>
           </ol>
-          <p className="mt-4 text-xs text-zinc-500">
-            Packaged installer (one-click download) is Phase 2. For now, founders with GitHub access run the node from source.
-          </p>
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
               href="/settings/builder"
-              className="rounded-lg bg-cyan-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-cyan-500"
-            >
-              Pair Founder Node →
-            </Link>
-            <a
-              href="https://github.com/danishhaiderau-maker/doxed-founders-website"
-              target="_blank"
-              rel="noopener noreferrer"
               className="rounded-lg border border-zinc-600 px-5 py-2.5 text-sm text-zinc-200 hover:border-zinc-400"
             >
-              GitHub repo ↗
-            </a>
+              Pair in Founder OS →
+            </Link>
           </div>
         </section>
+
+        <FounderNodeSetupGuide />
+
+        <details className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-6">
+          <summary className="cursor-pointer font-semibold text-zinc-200">
+            Advanced — run from source (developers)
+          </summary>
+          <ol className="mt-4 list-decimal space-y-3 pl-5 text-sm text-zinc-400">
+            <li>Clone the repo and install dependencies: <code className="rounded bg-zinc-900 px-1.5 py-0.5">npm install</code></li>
+            <li>Start the Founder Node app: <code className="rounded bg-zinc-900 px-1.5 py-0.5">npm run dev:founder-node</code></li>
+            <li>Pair using the same Builder settings flow as above</li>
+          </ol>
+          <a
+            href="https://github.com/danishhaiderau-maker/doxed-founders-website"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-4 inline-block text-sm text-cyan-300 hover:underline"
+          >
+            GitHub repo ↗
+          </a>
+        </details>
 
         <section className="rounded-xl border border-zinc-700 bg-zinc-950/50 p-6 text-sm text-zinc-400">
           <h2 className="font-semibold text-white">Local storage vs cloud</h2>
