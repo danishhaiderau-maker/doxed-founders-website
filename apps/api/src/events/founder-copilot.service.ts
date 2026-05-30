@@ -478,9 +478,22 @@ export class FounderCopilotService {
       payload: { intent: 'ask' },
     });
 
+    let answer = ruleBased;
+    let answerProvider: string = 'RULE_BASED';
+    let llmErrors: string[] | undefined;
+
+    if (aiResult.ok) {
+      answer = aiResult.text;
+      answerProvider = aiResult.provider;
+    } else if (aiResult.llmErrors.length > 0) {
+      llmErrors = aiResult.llmErrors;
+      answer = `${ruleBased}\n\n---\n⚠️ LLM unavailable (${aiResult.llmErrors[0]}). Using project memory above — reconnect your API key in Builder settings if this persists.`;
+    }
+
     return {
-      answer: aiResult?.text ?? ruleBased,
-      answerProvider: aiResult?.provider ?? 'RULE_BASED',
+      answer,
+      answerProvider,
+      llmErrors,
       summary,
       stats: {
         commits: commitCount,
@@ -550,29 +563,29 @@ export class FounderCopilotService {
     recentCommits: { sha: string; message: string }[];
     prompt: string;
   }) {
-    const workingOn =
-      /what am i working|what are you working|where did i leave|currently working|left off|working on/i.test(
+    const wantsProjectContext =
+      /what|working|tell me|listen|github|commit|task|goal|leave|resume|project|build|ship|mvp|status|progress|connected|explain|week|launch|investor|changed|remain|risk|timeline|brain|copilot|cursor|vercel|left off|was working|working at|working on/i.test(
         input.prompt,
       );
 
-    if (workingOn) {
+    if (wantsProjectContext || input.recentCommits.length > 0 || input.memory.openTasks.length > 0) {
       const commitLines =
         input.recentCommits.length > 0
           ? input.recentCommits
-              .slice(0, 4)
+              .slice(0, 6)
               .map((c) => `• ${c.message}`)
               .join('\n')
-          : '• No recent commits synced — connect GitHub in Builder settings.';
+          : '• No recent commits synced — connect GitHub in Builder settings and tap Sync commits.';
 
       const repoTasks =
         input.githubMemory?.openTasksFromRepo?.length
           ? input.githubMemory.openTasksFromRepo.map((t) => `• ${t.title}`).join('\n')
           : input.memory.openTasks.length > 0
             ? input.memory.openTasks.map((t) => `• ${t.title}`).join('\n')
-            : '• No open tasks in queue — use Quick Build or voice to add one.';
+            : '• No open tasks in queue — add one in Founder Copilot chat.';
 
       return [
-        `You're building **${input.memory.project?.name ?? 'your project'}** (${input.memory.progressPercent}% progress).`,
+        `You're building **${input.memory.project?.name ?? 'your project'}** (${input.memory.progressPercent}% progress · launch readiness ${input.memory.launchReadiness}%).`,
         '',
         `**Current goal:** ${input.memory.currentGoal}`,
         '',
@@ -584,9 +597,12 @@ export class FounderCopilotService {
         '',
         `**Pick up here:** ${input.memory.suggestedNextStep}`,
         input.memory.repoFullName
-          ? `\nRepo: ${input.memory.repoFullName} — Founder OS memory lives in .founder-os/`
-          : '',
-      ].join('\n');
+          ? `\nRepo: ${input.memory.repoFullName}`
+          : '\nConnect GitHub owner/repo in the stack panel to sync commits.',
+        input.memory.lastCommit ? `\nLast commit: ${input.memory.lastCommit}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
     }
 
     if (input.githubMemory?.currentGoalFromRepo) {

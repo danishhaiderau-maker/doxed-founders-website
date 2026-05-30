@@ -10,6 +10,7 @@ import {
   publishGitHubIssues,
   updateBuildQueueItem,
 } from '@/lib/api';
+import { FounderCopilotBriefing } from '@/components/founder-copilot-briefing';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderOsPanel } from '@/components/founder-os-panel';
 import { HandsFreeModal, shouldShowHandsFreeIntro } from '@/components/hands-free-modal';
@@ -178,10 +179,20 @@ export function BuildRoom2({
         />
       )}
 
-      <FounderCopilotChat accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
+      <FounderCopilotBriefing
+        accessToken={accessToken}
+        variant="full"
+        founderActive={founderActive}
+        onMessage={onMessage}
+        onRefresh={() => {
+          load();
+          onRefresh?.();
+        }}
+      />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_minmax(260px,320px)]">
+      <div className="grid gap-6 xl:grid-cols-[1fr_minmax(260px,300px)]">
         <div className="min-w-0 space-y-6">
+      <FounderCopilotChat accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
               <p className="text-[10px] uppercase text-zinc-500">Ideas</p>
@@ -341,6 +352,7 @@ export function BuildRoom2({
 
         <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
           <FounderOsPanel
+            variant="stackOnly"
             accessToken={accessToken}
             founderCredits={founderCredits}
             communityRewardPool={communityRewardPool}
