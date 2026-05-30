@@ -199,6 +199,16 @@ function ListYourProjectPageInner() {
 
   function cleanListingPayload(data: ListingFormData): ListingFormData {
     const out: ListingFormData = { ...data };
+
+    if (out.founderDoxxedStatus === 'BUILDING_IN_PUBLIC') {
+      const note = out.scoutHighlightNote?.trim() ?? '';
+      out.whyDoxxed = `[Building in public — not fully doxxed]\n${note}`;
+    }
+
+    // Strip until Railway API deploys 523ea71+ (old API rejects unknown DTO fields).
+    delete out.founderDoxxedStatus;
+    delete out.scoutHighlightNote;
+
     for (const key of Object.keys(out) as (keyof ListingFormData)[]) {
       const value = out[key];
       if (value === '' || value === null || value === undefined) {

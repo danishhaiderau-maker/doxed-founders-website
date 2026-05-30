@@ -66,6 +66,7 @@ export class ProjectsService {
               ticker: true,
               founderDoxxedStatus: true,
               scoutHighlightNote: true,
+              whyDoxxed: true,
             },
           })
         : [];
@@ -76,13 +77,40 @@ export class ProjectsService {
 
     return projects.map((p) => {
       const listing = listingByTicker.get(p.ticker);
+      const scout = this.scoutMetaFromListing(listing);
       return {
         ...this.mapProjectSummary(p),
-        scoutHighlight: listing?.scoutHighlightNote ?? null,
-        founderDoxxedStatus:
-          (listing?.founderDoxxedStatus as 'DOXXED' | 'BUILDING_IN_PUBLIC' | undefined) ?? null,
+        scoutHighlight: scout.scoutHighlight,
+        founderDoxxedStatus: scout.founderDoxxedStatus,
       };
     });
+  }
+
+  private scoutMetaFromListing(
+    listing?: {
+      scoutHighlightNote?: string | null;
+      founderDoxxedStatus?: string | null;
+      whyDoxxed?: string | null;
+    } | null,
+  ) {
+    if (!listing) return { scoutHighlight: null, founderDoxxedStatus: null };
+    if (listing.scoutHighlightNote) {
+      return {
+        scoutHighlight: listing.scoutHighlightNote,
+        founderDoxxedStatus:
+          (listing.founderDoxxedStatus as 'DOXXED' | 'BUILDING_IN_PUBLIC' | null) ??
+          'BUILDING_IN_PUBLIC',
+      };
+    }
+    const why = listing.whyDoxxed ?? '';
+    if (/building in public/i.test(why)) {
+      const note = why.replace(/^\[Building in public[^\]]*\]\s*/i, '').trim();
+      return {
+        scoutHighlight: note || why,
+        founderDoxxedStatus: 'BUILDING_IN_PUBLIC' as const,
+      };
+    }
+    return { scoutHighlight: null, founderDoxxedStatus: null };
   }
 
   async getPlatformStats() {
