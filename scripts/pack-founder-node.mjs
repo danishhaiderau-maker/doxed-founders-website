@@ -30,6 +30,7 @@ function run(cmd, cmdArgs, opts = {}) {
 run('node', ['scripts/generate-founder-node-icon.mjs']);
 run('npm', ['run', 'build:utils']);
 run('npm', ['run', 'build', '--workspace=@dcf/founder-node']);
+run('node', ['scripts/prepare-founder-node-pack.mjs']);
 
 const platformArgs = [];
 if (args.includes('--all')) {
