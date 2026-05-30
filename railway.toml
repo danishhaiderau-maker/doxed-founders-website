@@ -1,9 +1,19 @@
 [build]
 builder = "RAILPACK"
 buildCommand = "npm ci && npm run build:utils && npx prisma generate --schema=prisma/schema.prisma && npm run build --workspace=@dcf/api"
+watchPatterns = [
+  "apps/api/**",
+  "packages/**",
+  "prisma/**",
+  "scripts/start-api-prod.mjs",
+  "railway.toml",
+  "package.json",
+  "package-lock.json",
+]
 
 [deploy]
-startCommand = "node scripts/start-api-prod.mjs"
+startCommand = "NODE_ENV=production PRISMA_DB_PUSH=true node scripts/start-api-prod.mjs"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
+numReplicas = 1

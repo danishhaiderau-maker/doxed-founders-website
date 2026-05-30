@@ -114,7 +114,7 @@ export default function FeedPage() {
 
       <main className="mx-auto grid w-full max-w-[90rem] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_minmax(260px,320px)] lg:px-10">
         <div>
-          {pulse.length > 0 && (
+          {pulse.length > 0 ? (
             <section className="mb-6 rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-zinc-950 p-4">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-300">
                 Platform pulse
@@ -150,6 +150,15 @@ export default function FeedPage() {
                   </li>
                 ))}
               </ul>
+            </section>
+          ) : (
+            <section className="mb-6 rounded-xl border border-dashed border-zinc-700 bg-zinc-900/30 p-4 text-sm text-zinc-500">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+                Platform pulse
+              </h2>
+              <p className="mt-2">
+                Live when traders buy, founders ship, and scout votes open — updates from the unified feed API.
+              </p>
             </section>
           )}
 
