@@ -46,6 +46,7 @@
     "asar": true,
     "npmRebuild": false,
     "nodeGypRebuild": false,
+    "electronVersion": "35.7.5",
     "artifactName": "Founder-Node-${version}-${os}-${arch}.${ext}",
     "win": {
       "target": [
