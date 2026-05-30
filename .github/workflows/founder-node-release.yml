@@ -66,8 +66,6 @@ jobs:
           path: |
             apps/founder-node/release/*.exe
             apps/founder-node/release/*.dmg
-            apps/founder-node/release/*.blockmap
-            apps/founder-node/release/latest*.yml
           if-no-files-found: error
 
   publish:
