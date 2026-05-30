@@ -77,7 +77,7 @@ export class WatchlistService {
       metadata: { slug: project.slug },
     });
 
-    await this.points.award(userId, POINTS.WATCHLIST_ADD);
+    await this.points.award(userId, POINTS.WATCHLIST_ADD, 'WATCHLIST_ADD');
 
     return { saved: true, slug: project.slug };
   }

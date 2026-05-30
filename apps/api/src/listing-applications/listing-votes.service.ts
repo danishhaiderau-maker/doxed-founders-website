@@ -127,7 +127,7 @@ export class ListingVotesService {
       throw new ConflictException('You already voted on this listing');
     }
 
-    await this.points.award(userId, POINTS.LISTING_VOTE);
+    await this.points.award(userId, POINTS.LISTING_VOTE, 'LISTING_VOTE');
 
     const updated = await this.findOneForVoting(applicationId);
     if (updated.tally.passed) {

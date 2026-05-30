@@ -444,7 +444,7 @@ export class FounderOsService {
         });
         buildPostId = post.id;
         await this.updateBuildStreak(founder.id);
-        await this.points.award(userId, POINTS.FOUNDER_BUILD_POST);
+        await this.points.award(userId, POINTS.FOUNDER_BUILD_POST, 'FOUNDER_BUILD_POST');
         results.buildFeed = { ok: true, buildPostId: post.id };
       } catch (err) {
         results.buildFeed = {
@@ -472,7 +472,7 @@ export class FounderOsService {
           },
         });
         communityThreadId = thread.id;
-        await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST);
+        await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST, 'FOUNDER_COMMUNITY_POST');
         results.community = { ok: true, threadId: thread.id };
       } catch (err) {
         results.community = {

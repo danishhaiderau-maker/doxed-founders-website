@@ -26,6 +26,7 @@ import { BuildQueueModule } from './build-queue/build-queue.module';
 import { BuilderModule } from './builder/builder.module';
 import { EventsModule } from './events/events.module';
 import { XSocialModule } from './x-social/x-social.module';
+import { AccountModule } from './account/account.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { XSocialModule } from './x-social/x-social.module';
     BuilderModule,
     EventsModule,
     XSocialModule,
+    AccountModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

@@ -96,7 +96,7 @@ export class ListingApplicationsService {
     });
 
     if (submitterUserId) {
-      await this.points.award(submitterUserId, POINTS.LISTING_SUBMIT);
+      await this.points.award(submitterUserId, POINTS.LISTING_SUBMIT, 'LISTING_SUBMIT');
     }
 
     return application;
@@ -179,7 +179,7 @@ export class ListingApplicationsService {
       });
 
       if (application.userId) {
-        await this.points.award(application.userId, POINTS.LISTING_SCOUT_APPROVED);
+        await this.points.award(application.userId, POINTS.LISTING_SCOUT_APPROVED, 'LISTING_SCOUT_APPROVED');
       }
 
       return {

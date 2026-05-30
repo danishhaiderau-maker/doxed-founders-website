@@ -47,7 +47,7 @@ export class AuthService {
       },
     });
 
-    await this.points.award(user.id, POINTS.REGISTER);
+    await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
 
     return await this.buildAuthResponse(user);
   }
@@ -223,7 +223,7 @@ export class AuthService {
       },
     });
 
-    await this.points.award(user.id, POINTS.REGISTER);
+    await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
 
     return await this.buildAuthResponse(user);
   }

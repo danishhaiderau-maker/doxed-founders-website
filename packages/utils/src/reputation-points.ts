@@ -216,6 +216,21 @@ export function pointsToNextLevel(points: number): {
   };
 }
 
+const ACTION_LABELS: Record<string, string> = Object.fromEntries(
+  POINT_ACTIONS.map((a) => [a.key, a.label]),
+);
+
+/** Human-readable label for a point action key (supports composite keys like RAISE_ALLOCATE:abc). */
+export function pointActionLabel(actionKey: string): string {
+  const base = actionKey.split(':')[0] ?? actionKey;
+  if (ACTION_LABELS[base]) return ACTION_LABELS[base];
+  if (base === 'HELPFUL') return 'Helpful reply marked by founder';
+  if (base === 'BOUNTY') return 'Founder bounty awarded';
+  if (base === 'EARLY_SCOUT') return 'Early scout badge';
+  if (base === 'SCOUT_STAKE') return 'Scout market stake';
+  return base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function extractTwitterHandle(url: string | null | undefined): string | null {
   if (!url?.trim()) return null;
   const match = url.trim().match(/(?:twitter\.com|x\.com)\/([A-Za-z0-9_]+)/i);
