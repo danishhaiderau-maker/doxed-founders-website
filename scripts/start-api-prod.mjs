@@ -28,7 +28,25 @@ const hasMigrations =
   fs.readdirSync(migrationsDir).some((entry) => !entry.startsWith('.'));
 
 if (hasMigrations) {
-  run('Prisma migrate deploy', 'npx', ['prisma', 'migrate', 'deploy', '--schema', schema]);
+  console.log('\n[start-api-prod] Prisma migrate deploy');
+  const migrate = spawnSync('npx', ['prisma', 'migrate', 'deploy', '--schema', schema], {
+    cwd: root,
+    stdio: 'inherit',
+    shell: true,
+  });
+  if (migrate.status !== 0) {
+    console.warn(
+      '[start-api-prod] migrate deploy failed (common on Neon db-push baselines). Falling back to db push…',
+    );
+    run('Prisma db push (fallback)', 'npx', [
+      'prisma',
+      'db',
+      'push',
+      '--schema',
+      schema,
+      '--skip-generate',
+    ]);
+  }
 } else if (process.env.PRISMA_DB_PUSH === 'true') {
   run('Prisma db push', 'npx', ['prisma', 'db', 'push', '--schema', schema]);
 } else {
