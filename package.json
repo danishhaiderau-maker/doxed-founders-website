@@ -8,7 +8,9 @@
   ],
   "scripts": {
     "dev": "npm run build:utils && turbo run dev",
-    "build:utils": "npm run build --workspace=@dcf/utils",
+    "build:utils": "npm run build --workspace=@dcf/utils && npm run build --workspace=@dcf/founder-vault",
+    "dev:founder-node": "npm run start --workspace=@dcf/founder-node",
+    "build:founder-vault": "npm run build --workspace=@dcf/founder-vault",
     "dev:web": "turbo run dev --filter=@dcf/web",
     "dev:api": "turbo run dev --filter=@dcf/api",
     "dev:ensure": "powershell -ExecutionPolicy Bypass -File scripts/ensure-dev.ps1",

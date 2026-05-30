@@ -25,6 +25,6 @@ import { FounderMetricsService } from './founder-metrics.service';
     FounderCopilotService,
     FounderMetricsService,
   ],
-  exports: [EventsService, FounderMetricsService],
+  exports: [EventsService, FounderMetricsService, FounderCopilotService],
 })
 export class EventsModule {}

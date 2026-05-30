@@ -2215,6 +2215,17 @@ export interface ProjectMemory {
     deviceLabel: string | null;
     payload: import('@dcf/utils').DeviceMemoryPayload;
   } | null;
+  connectedNodes?: Array<{
+    nodeId: string;
+    label: string;
+    status: 'online' | 'offline';
+    lastSeenAt: string | null;
+    ramGb: number | null;
+    storageGb: number | null;
+    storageFreeGb: number | null;
+    vaultHealthy: boolean;
+    platform: string | null;
+  }>;
 }
 
 export function fetchDeviceMemorySync(token: string) {
@@ -2234,6 +2245,36 @@ export function pushDeviceMemorySync(
     { method: 'POST', body: JSON.stringify(payload) },
     token,
   );
+}
+
+export interface FounderNodeStatusRow {
+  id: string;
+  nodeId: string;
+  label: string;
+  status: 'online' | 'offline';
+  lastSeenAt: string | null;
+  ramGb: number | null;
+  storageGb: number | null;
+  storageFreeGb: number | null;
+  vaultHealthy: boolean;
+  platform: string | null;
+  appVersion: string | null;
+}
+
+export function createFounderNodePairingCode(token: string) {
+  return apiFetch<{ code: string; expiresAt: string }>(
+    '/founder-node/pairing-code',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function fetchFounderNodeStatus(token: string) {
+  return apiFetch<{ nodes: FounderNodeStatusRow[] }>('/founder-node/status', undefined, token);
+}
+
+export function revokeFounderNode(nodeId: string, token: string) {
+  return apiFetch<{ success: boolean }>(`/founder-node/${nodeId}`, { method: 'DELETE' }, token);
 }
 
 export function fetchCopilotMemory(token: string) {

@@ -242,6 +242,7 @@ enum MemoryStorageMode {
   GITHUB
   LOCAL_DEVICE
   LOCAL_SYNC
+  FOUNDER_NODE
 }
 
 enum FounderEventType {
@@ -347,6 +348,8 @@ model User {
   agentFollows         AgentFollow[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
+  founderNodes         FounderNode[]
+  founderNodePairings  FounderNodePairingCode[]
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
 
@@ -1350,6 +1353,44 @@ model ProjectMemoryDeviceSync {
   updatedAt   DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/** Paired Founder Node (desktop vault) — control plane metadata only. */
+model FounderNode {
+  id            String   @id @default(cuid())
+  userId        String
+  nodeId        String   @unique
+  label         String
+  secretHash    String   @db.Text
+  status        String   @default("offline")
+  lastSeenAt    DateTime?
+  ramGb         Int?
+  storageGb     Int?
+  storageFreeGb Int?
+  vaultHealthy  Boolean  @default(true)
+  platform      String?
+  appVersion    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/** Short-lived pairing code shown in Founder OS settings. */
+model FounderNodePairingCode {
+  id        String    @id @default(cuid())
+  userId    String
+  code      String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model FounderEvent {

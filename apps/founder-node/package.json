@@ -1,0 +1,22 @@
+{
+  "name": "@dcf/founder-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Founder Node — local vault + metadata sync for Founder OS",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron .",
+    "lint": "echo 'no lint configured'"
+  },
+  "dependencies": {
+    "@dcf/founder-vault": "*",
+    "@dcf/utils": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "electron": "^35.1.5",
+    "typescript": "^5.8.3"
+  }
+}
