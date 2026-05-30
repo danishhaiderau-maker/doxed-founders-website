@@ -141,7 +141,7 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
               {losers.length === 0 && !error && (
                 <tr>
                   <td colSpan={5} className="px-4 py-8 text-center text-[var(--color-muted)]">
-                    No busted accounts yet.
+                    No losing traders yet — everyone is flat or up.
                   </td>
                 </tr>
               )}
@@ -152,6 +152,11 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                     <Link href={`/portfolio/${entry.userId}`} className="hover:text-emerald-400">
                       {entry.displayName}
                     </Link>
+                    {entry.isBusted && (
+                      <span className="ml-2 rounded bg-red-950/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-red-300">
+                        Busted
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3">{formatUsd(entry.totalValue, 0)}</td>
                   <td className="px-4 py-3 text-red-400">

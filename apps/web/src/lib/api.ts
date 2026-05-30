@@ -211,6 +211,7 @@ export interface BustedTraderEntry {
   totalValue: number;
   pnl: number;
   roi: number;
+  isBusted?: boolean;
 }
 
 function parseApiError(body: unknown, status: number): string {
