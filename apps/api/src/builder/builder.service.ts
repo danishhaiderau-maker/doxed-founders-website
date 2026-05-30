@@ -412,6 +412,8 @@ export class BuilderService {
           return await this.callAnthropic(apiKey, system, userPrompt, model);
         case AiProvider.GEMINI:
           return await this.callGemini(apiKey, system, userPrompt, model);
+        case AiProvider.DEEPSEEK:
+          return await this.callDeepSeek(apiKey, system, userPrompt, model);
         default:
           return null;
       }
@@ -509,6 +511,24 @@ export class BuilderService {
         if (!res.ok) throw new BadRequestException('Invalid Gemini API key');
         return { accountName: 'Google AI account' };
       }
+      case 'deepseek': {
+        const res = await fetch('https://api.deepseek.com/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (!res.ok) {
+          const ping = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'deepseek-chat',
+              messages: [{ role: 'user', content: 'ping' }],
+              max_tokens: 8,
+            }),
+          });
+          if (!ping.ok) throw new BadRequestException('Invalid DeepSeek API key');
+        }
+        return { accountName: 'DeepSeek account' };
+      }
       default:
         throw new BadRequestException(`Unknown AI provider: ${provider}`);
     }
@@ -570,5 +590,23 @@ export class BuilderService {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+  }
+
+  private async callDeepSeek(key: string, system: string, user: string, model?: string) {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model ?? 'deepseek-chat',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        temperature: 0.4,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content ?? null;
   }
 }

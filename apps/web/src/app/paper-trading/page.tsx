@@ -716,6 +716,7 @@ function PaperTradingPageContent() {
               )}
               roi={portfolio.roi}
               totalValue={portfolio.totalValue}
+              pnl={portfolio.pnl}
               highlightPosition={
                 portfolio.positions.find((p) => p.convictionThesis) ?? portfolio.positions[0]
               }

@@ -110,11 +110,14 @@ model User {
 }
 
 model OAuthAccount {
-  id         String   @id @default(cuid())
-  userId     String
-  provider   String
-  providerId String
-  createdAt  DateTime @default(now())
+  id                String   @id @default(cuid())
+  userId            String
+  provider          String
+  providerId        String
+  accessToken       String?
+  accessTokenSecret String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

@@ -12,6 +12,7 @@ import {
   LeaderboardEntry,
 } from '@/lib/api';
 import { FollowTraderButton } from '@/components/follow-trader-button';
+import { TraderRankShareButton } from '@/components/trader-rank-share-button';
 
 export type TraderRankTab = 'winners' | 'losers';
 
@@ -108,19 +109,30 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                     {formatPercent(entry.roi)}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <FollowTraderButton
-                      userId={entry.userId}
-                      token={token}
-                      initiallyFollowing={followingIds.has(entry.userId)}
-                      onChange={(f) => {
-                        setFollowingIds((prev) => {
-                          const next = new Set(prev);
-                          if (f) next.add(entry.userId);
-                          else next.delete(entry.userId);
-                          return next;
-                        });
-                      }}
-                    />
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <TraderRankShareButton
+                        compact
+                        userId={entry.userId}
+                        displayName={entry.displayName}
+                        roi={entry.roi}
+                        totalValue={entry.totalValue}
+                        pnl={entry.pnl}
+                        rank={entry.rank}
+                      />
+                      <FollowTraderButton
+                        userId={entry.userId}
+                        token={token}
+                        initiallyFollowing={followingIds.has(entry.userId)}
+                        onChange={(f) => {
+                          setFollowingIds((prev) => {
+                            const next = new Set(prev);
+                            if (f) next.add(entry.userId);
+                            else next.delete(entry.userId);
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -163,19 +175,32 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                     {formatUsd(entry.pnl, 0)} ({formatPercent(entry.roi)})
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <FollowTraderButton
-                      userId={entry.userId}
-                      token={token}
-                      initiallyFollowing={followingIds.has(entry.userId)}
-                      onChange={(f) => {
-                        setFollowingIds((prev) => {
-                          const next = new Set(prev);
-                          if (f) next.add(entry.userId);
-                          else next.delete(entry.userId);
-                          return next;
-                        });
-                      }}
-                    />
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <TraderRankShareButton
+                        compact
+                        userId={entry.userId}
+                        displayName={entry.displayName}
+                        roi={entry.roi}
+                        totalValue={entry.totalValue}
+                        pnl={entry.pnl}
+                        rank={entry.rank}
+                        isLoser
+                        isBusted={entry.isBusted}
+                      />
+                      <FollowTraderButton
+                        userId={entry.userId}
+                        token={token}
+                        initiallyFollowing={followingIds.has(entry.userId)}
+                        onChange={(f) => {
+                          setFollowingIds((prev) => {
+                            const next = new Set(prev);
+                            if (f) next.add(entry.userId);
+                            else next.delete(entry.userId);
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}

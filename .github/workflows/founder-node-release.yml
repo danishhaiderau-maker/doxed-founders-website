@@ -35,6 +35,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Founder Node workspace deps
+        run: npm install --workspace=@dcf/founder-node --include=dev
+
+      - name: Clean release output
+        shell: bash
+        run: node -e "require('fs').rmSync('apps/founder-node/release',{recursive:true,force:true})"
+
       - name: Generate app icons
         run: node scripts/generate-founder-node-icon.mjs
 
@@ -49,15 +56,26 @@ jobs:
 
       - name: Pack Founder Node (Windows)
         if: matrix.platform == 'win'
+        working-directory: apps/founder-node
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run pack:founder-node:win
+        run: npx electron-builder --win portable --x64
 
       - name: Pack Founder Node (macOS)
         if: matrix.platform == 'mac'
+        working-directory: apps/founder-node
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run pack:founder-node:mac
+        run: npx electron-builder --mac dmg --x64
+
+      - name: List release output
+        if: always()
+        shell: bash
+        run: |
+          echo "Release directory:"
+          ls -la apps/founder-node/release/ || true
+          echo "Recursive:"
+          find apps/founder-node/release -maxdepth 2 -type f 2>/dev/null || true
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -67,6 +85,15 @@ jobs:
             apps/founder-node/release/*.exe
             apps/founder-node/release/*.dmg
           if-no-files-found: error
+
+      - name: Upload pack debug logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: founder-node-debug-${{ matrix.platform }}
+          path: |
+            apps/founder-node/release/**
+          if-no-files-found: ignore
 
   publish:
     needs: build
@@ -87,6 +114,13 @@ jobs:
         with:
           name: founder-node-mac
           path: release/mac
+
+      - name: List release assets
+        run: |
+          echo "Windows:"
+          ls -la release/win/ 2>/dev/null || echo "(none)"
+          echo "macOS:"
+          ls -la release/mac/ 2>/dev/null || echo "(none)"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

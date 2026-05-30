@@ -268,7 +268,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             <button
               type="button"
               onClick={() => handleDisconnect('cursor')}
-              className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+              className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
             >
               Disconnect
             </button>
@@ -316,7 +316,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               <button
                 type="button"
                 onClick={() => handleDisconnect('openhands')}
-                className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+                className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
               >
                 Disconnect
               </button>
@@ -327,7 +327,15 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
         <h2 className="text-lg font-semibold text-white">LLM providers (specs & Founder Brain)</h2>
-        <p className="mt-1 text-sm text-zinc-500">Your API keys — encrypted at rest. Billed to your account.</p>
+        <p className="mt-1 text-sm text-zinc-500">
+          Your API keys — encrypted at rest. Billed to your account. Pick one as your{' '}
+          <strong className="font-medium text-zinc-300">default provider</strong> above — Cursor and
+          OpenHands are separate (they dispatch cloud agents, not chat completions).
+        </p>
+        <p className="mt-2 text-xs text-zinc-600">
+          Only DeepSeek connected? Set default to DeepSeek — specs and Founder Brain work without Cursor.
+          Only Cursor connected? Quick Build dispatches agents; use an LLM key above for AI-written specs.
+        </p>
         <div className="mt-4 space-y-4">
           {llmProviders.map((p) => (
             <div key={p.key} className="rounded-xl border border-zinc-800 p-4">
@@ -364,7 +372,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                   <button
                     type="button"
                     onClick={() => handleDisconnect(p.credentialProvider!)}
-                    className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+                    className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
                   >
                     Disconnect
                   </button>

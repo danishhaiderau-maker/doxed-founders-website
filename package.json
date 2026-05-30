@@ -21,7 +21,7 @@
     "dev:lan": "powershell -ExecutionPolicy Bypass -File scripts/dev-lan.ps1",
     "dev:tunnel": "powershell -ExecutionPolicy Bypass -File scripts/dev-tunnel.ps1",
     "build": "turbo run build",
-    "build:api": "npm run build:utils && node scripts/prisma-run.mjs generate && npm run build --workspace=@dcf/api",
+    "build:api": "npm run build:utils && npx prisma generate --schema prisma/schema.prisma && npm run build --workspace=@dcf/api",
     "start:api:prod": "node scripts/start-api-prod.mjs",
     "verify:prod": "powershell -ExecutionPolicy Bypass -File scripts/verify-prod-ready.ps1",
     "smoke:test": "node scripts/smoke-test.mjs",

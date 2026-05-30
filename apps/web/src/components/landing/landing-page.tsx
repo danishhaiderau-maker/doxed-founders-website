@@ -8,9 +8,8 @@ import {
   LandingHero,
   LandingLiveMetrics,
   LandingLiveActivity,
-  LandingThreePhases,
-  LandingProblemSolution,
-  LandingFounderOsWorkflow,
+  LandingFourPhases,
+  LandingEconomy,
   LandingTrustSecurity,
   LandingFinalCta,
 } from '@/components/landing/landing-sections';
@@ -51,10 +50,9 @@ export function LandingPage() {
 
       <LandingHero />
       <LandingLiveMetrics stats={platformStats} />
+      <LandingFourPhases />
+      <LandingEconomy />
       <LandingLiveActivity />
-      <LandingThreePhases />
-      <LandingProblemSolution />
-      <LandingFounderOsWorkflow />
 
       {spotlight.length > 0 && (
         <section className="border-y border-zinc-800/80 py-16">

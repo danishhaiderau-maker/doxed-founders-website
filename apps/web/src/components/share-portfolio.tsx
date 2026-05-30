@@ -1,8 +1,9 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { buildPortfolioShareUrl } from '@dcf/utils';
+import { buildPortfolioShareUrl, buildPortfolioShareMessage } from '@dcf/utils';
 import type { PositionShareInput } from '@dcf/utils';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import {
   buildPortfolioFlexShare,
   buildPositionFlexShare,
@@ -31,6 +32,7 @@ type SharePortfolioProps = {
   displayName: string;
   roi: number;
   totalValue: number;
+  pnl?: number;
   accessToken?: string;
   compact?: boolean;
   highlightPosition?: HighlightPosition;
@@ -41,11 +43,12 @@ export function SharePortfolio({
   displayName,
   roi,
   totalValue,
+  pnl,
   accessToken,
   compact = false,
   highlightPosition,
 }: SharePortfolioProps) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://doxxedcrypto.digital';
+  const origin = useShareOrigin();
 
   const flex = useMemo(() => {
     if (highlightPosition) {
@@ -83,12 +86,14 @@ export function SharePortfolio({
 
   const { openFlex, modal } = useShareFlex(flex);
   const shareUrl = buildPortfolioShareUrl(origin, userId);
+  const quickShareText = buildPortfolioShareMessage(displayName, roi, totalValue, pnl);
 
   if (compact) {
     return (
       <>
         {modal}
         <div className="flex flex-wrap gap-2">
+          <ShareOnXButton text={quickShareText} url={shareUrl} label="Share on X" />
           <button
             type="button"
             onClick={openFlex}
@@ -119,6 +124,7 @@ export function SharePortfolio({
             className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-xs text-zinc-300 outline-none"
           />
           <div className="flex shrink-0 gap-2">
+            <ShareOnXButton text={quickShareText} url={shareUrl} label="Share on X" />
             <CopyLinkButton url={shareUrl} />
             <button
               type="button"

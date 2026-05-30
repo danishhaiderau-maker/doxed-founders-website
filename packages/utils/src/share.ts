@@ -30,10 +30,39 @@ export function buildPortfolioShareMessage(
   displayName: string,
   roi: number,
   totalValue: number,
+  pnl?: number,
 ): string {
   const sign = roi >= 0 ? '+' : '';
   const emoji = roi >= 0 ? '🚀' : '📉';
-  return `${emoji} ${displayName} · ${sign}${roi.toFixed(1)}% paper ROI · ${formatUsd(totalValue)} on @DoxxedCrypto #ProofOfConviction`;
+  const label = roi >= 0 ? 'paper trader' : 'paper loss';
+  const pnlPart =
+    pnl != null && pnl !== 0
+      ? ` · ${pnl >= 0 ? '+' : '−'}${formatUsd(Math.abs(pnl), 0)} P&L`
+      : '';
+  return `${emoji} ${displayName} — ${sign}${roi.toFixed(1)}% ROI${pnlPart} · ${formatUsd(totalValue)} · ${label} on Doxxed Crypto #ProofOfConviction`;
+}
+
+export function buildTraderRankShareMessage(input: {
+  displayName: string;
+  roi: number;
+  totalValue: number;
+  pnl: number;
+  rank?: number;
+  isLoser?: boolean;
+  isBusted?: boolean;
+}): string {
+  const rankPart = input.rank != null ? `#${input.rank} ` : '';
+  const bustedPart = input.isBusted ? ' · BUSTED account' : '';
+  const base = buildPortfolioShareMessage(
+    input.displayName,
+    input.roi,
+    input.totalValue,
+    input.pnl,
+  );
+  if (input.isLoser) {
+    return `📉 ${rankPart}${input.displayName} — down ${formatUsd(Math.abs(input.pnl), 0)} (${input.roi.toFixed(1)}% ROI)${bustedPart} · See the paper portfolio on Doxxed Crypto`;
+  }
+  return `${rankPart}${base}`;
 }
 
 export type PositionShareInput = {
