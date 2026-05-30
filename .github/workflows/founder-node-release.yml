@@ -81,9 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: founder-node-${{ matrix.platform }}
-          path: |
-            apps/founder-node/release/*.exe
-            apps/founder-node/release/*.dmg
+          path: apps/founder-node/release/
           if-no-files-found: error
 
       - name: Upload pack debug logs on failure
@@ -132,5 +130,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
-            release/win/*
-            release/mac/*
+            release/win/**/*
+            release/mac/**/*
