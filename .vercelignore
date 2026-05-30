@@ -1,0 +1,13 @@
+# Founder Node desktop builds (not part of web deploy)
+apps/founder-node/release/
+apps/founder-node/build/
+
+# Local / debug artifacts
+.dev-pids/
+.selfhost-pids/
+*.log
+agent-restart-report*.txt
+debug-acf3ea.log
+prisma/*.db
+prisma/*.db-journal
+docker/data/
