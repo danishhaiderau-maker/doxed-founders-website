@@ -322,29 +322,29 @@ export function LandingEconomy() {
 
           <div className="rounded-2xl border border-violet-500/20 bg-violet-950/10 p-6">
             <h3 className="text-lg font-bold text-white">Tokenomics</h3>
-            <p className="mt-1 text-xs text-zinc-500">Long-term community alignment · 20% team</p>
+            <p className="mt-1 text-xs text-zinc-500">20% company · 80% community (10% airdrop + 70% over 10 years)</p>
             <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
               <div
                 className="relative mx-auto h-28 w-28 shrink-0 rounded-full sm:mx-0"
                 style={{
-                  background:
-                    'conic-gradient(#8b5cf6 0 288deg, #3b82f6 288deg 324deg, #10b981 324deg 360deg)',
+                  background: 'conic-gradient(#8b5cf6 0 72deg, #14b8a6 72deg 360deg)',
                 }}
+                aria-hidden
               >
                 <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-zinc-950 text-center">
-                  <span className="text-[10px] uppercase text-zinc-500">Team</span>
+                  <span className="text-[10px] uppercase tracking-wide text-zinc-500">Company</span>
                   <span className="text-sm font-bold text-white">20%</span>
                 </div>
               </div>
               <ul className="space-y-2 text-sm text-zinc-300">
                 <li>
-                  <span className="font-semibold text-violet-300">80%</span> Community
+                  <span className="font-semibold text-teal-300">80%</span> Community
                 </li>
                 <li className="pl-3 text-zinc-400">
-                  <span className="font-semibold text-blue-300">10%</span> airdropped at launch
+                  <span className="font-semibold text-blue-300">10%</span> Airdropped
                 </li>
                 <li className="pl-3 text-zinc-400">
-                  <span className="font-semibold text-emerald-300">70%</span> distributed over 10 years
+                  <span className="font-semibold text-emerald-300">70%</span> Distributed over 10 years
                 </li>
               </ul>
             </div>
