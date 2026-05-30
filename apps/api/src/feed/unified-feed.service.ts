@@ -438,6 +438,7 @@ export class UnifiedFeedService {
         link: `/project/${hb.projectSlug}`,
         projectSlug: hb.projectSlug,
         projectTicker: hb.projectTicker,
+        recentBuyerNames: (hb.recentBuyers ?? []).map((b) => b.displayName),
       });
     }
 

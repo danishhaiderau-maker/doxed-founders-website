@@ -63,7 +63,17 @@ export function ProjectCard({ project }: ProjectCardProps) {
                   Featured
                 </span>
               )}
+              {project.founderDoxxedStatus === 'BUILDING_IN_PUBLIC' && (
+                <span className="rounded bg-violet-950/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-violet-300">
+                  Building in public
+                </span>
+              )}
             </div>
+            {project.scoutHighlight && (
+              <p className="mt-1 line-clamp-2 text-xs text-violet-200/90">
+                ✦ {project.scoutHighlight}
+              </p>
+            )}
             {project.category && (
               <p className="mt-0.5 text-xs text-[var(--color-muted)]">
                 {project.category.name} · {project.chain.name}

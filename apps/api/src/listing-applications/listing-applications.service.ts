@@ -52,9 +52,19 @@ export class ListingApplicationsService {
       );
     }
 
-    if (!dto.whyList?.trim() || !dto.whyDoxxed?.trim()) {
+    if (!dto.whyList?.trim()) {
+      throw new BadRequestException('Explain why this project should be listed (whyList).');
+    }
+
+    const doxxedStatus = dto.founderDoxxedStatus ?? 'DOXXED';
+    if (doxxedStatus === 'DOXXED' && !dto.whyDoxxed?.trim()) {
       throw new BadRequestException(
-        'Explain why this project should be listed and why the founder is doxxed (whyList + whyDoxxed).',
+        'Explain why the founder is doxxed (whyDoxxed), or select "Building in public (not fully doxxed)" and add a scout highlight.',
+      );
+    }
+    if (doxxedStatus === 'BUILDING_IN_PUBLIC' && !dto.scoutHighlightNote?.trim()) {
+      throw new BadRequestException(
+        'Add a scout highlight — e.g. building in public, podcast appearances, GitHub activity.',
       );
     }
 
@@ -87,7 +97,9 @@ export class ListingApplicationsService {
         auditUrl: dto.auditUrl,
         summary: dto.summary,
         whyList: dto.whyList.trim(),
-        whyDoxxed: dto.whyDoxxed.trim(),
+        whyDoxxed: dto.whyDoxxed?.trim() ?? null,
+        founderDoxxedStatus: doxxedStatus,
+        scoutHighlightNote: dto.scoutHighlightNote?.trim() ?? null,
         marketPreview: dto.marketPreview as Prisma.InputJsonValue | undefined,
         verificationScore: verification.score,
         verificationCriteria: verification.criteria,

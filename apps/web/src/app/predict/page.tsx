@@ -3,8 +3,9 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { formatUsd, PREDICTION_MARKET_HOURS, TOP_UP_FEE_USD, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD } from '@dcf/utils';
+import { formatUsd, PREDICTION_MARKET_HOURS, TOP_UP_FEE_USD, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD, buildSiteUrl, buildPredictionShareMessage } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import { heatBadgeClass } from '@/components/engagement-flash-layer';
 import {
   createPredictionMarket,
@@ -17,6 +18,7 @@ import {
 
 export default function PredictPage() {
   const { data: session } = useSession();
+  const origin = useShareOrigin();
   const [markets, setMarkets] = useState<PredictionMarketItem[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [amounts, setAmounts] = useState<Record<string, string>>({});
@@ -207,6 +209,16 @@ export default function PredictPage() {
                       {m.hoursLeft != null && m.hoursLeft > 0 && ` · ${m.hoursLeft}h left`}
                       {m.hoursLeft === 0 && ' · closing soon'}
                     </span>
+                    <ShareOnXButton
+                      text={buildPredictionShareMessage({
+                        projectName: m.project.name,
+                        ticker: m.project.ticker,
+                        question: m.question,
+                        poolUsd: m.totalPoolUsd ?? m.yesPoolUsd + m.noPoolUsd,
+                      })}
+                      url={buildSiteUrl(origin, '/predict')}
+                      label="Share on X"
+                    />
                   </div>
                   <p className="mt-2 font-medium text-white">{m.question}</p>
                   <div className="mt-3 flex flex-wrap gap-4 text-sm">

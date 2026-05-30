@@ -17,6 +17,7 @@ export type UnifiedFeedItem = {
   projectTicker?: string;
   founderSlug?: string;
   amountUsd?: number;
+  recentBuyerNames?: string[];
 };
 
 export type PlatformPulseItem = {

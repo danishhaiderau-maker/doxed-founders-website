@@ -3,8 +3,9 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { extractPoolAddressFromDexUrl } from '@dcf/utils';
+import { extractPoolAddressFromDexUrl, buildSiteUrl, buildListingShareMessage } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import { FounderBadges } from '@/components/founder-badges';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ProjectMetricsGrid } from '@/components/project-card';
@@ -19,6 +20,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const origin = useShareOrigin();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -158,6 +160,22 @@ export default function ProjectDetailPage() {
                   Paper trade
                 </Link>
                 <WatchlistButton slug={project.slug} />
+                <Link
+                  href={`/list-your-project?edit=${encodeURIComponent(project.slug)}`}
+                  className="rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:bg-violet-950/30"
+                >
+                  Update listing
+                </Link>
+                <ShareOnXButton
+                  text={buildListingShareMessage({
+                    projectName: project.name,
+                    ticker: project.ticker,
+                    summary: project.summary,
+                  })}
+                  url={buildSiteUrl(origin, `/project/${project.slug}`)}
+                  label="Share on X"
+                  className="px-4 py-2"
+                />
               </div>
             </section>
 

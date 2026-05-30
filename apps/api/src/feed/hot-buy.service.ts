@@ -42,16 +42,17 @@ export class HotBuyService {
     });
     if (recent) return;
 
-    const buyerNames = (snapshot.recentBuyers ?? [])
-      .slice(0, 5)
-      .map((b) => b.displayName)
-      .join(', ');
+    const buyerNames = (snapshot.recentBuyers ?? []).map((b) => b.displayName);
     const pctLabel = `${Math.round(snapshot.pctOfActive * 100)}%`;
     const title = snapshot.topTraderCount >= 3 ? 'Top traders buying' : 'Hot buy';
+    const headline = this.formatHotBuyHeadline(snapshot);
+    const detail = this.formatHotBuyDetail(snapshot);
     const body =
       snapshot.topTraderCount >= 3
-        ? `${snapshot.topTraderCount} top traders opened ${snapshot.projectTicker} — ${buyerNames}${snapshot.recentBuyers!.length > 5 ? ' + more' : ''}.`
-        : `${snapshot.buyerCount} traders bought ${snapshot.projectTicker} (${pctLabel} of active) — ${buyerNames}${snapshot.recentBuyers!.length > 5 ? ' + more' : ''}.`;
+        ? `${headline} — ${detail}.`
+        : buyerNames.length > 0
+          ? `${headline} (${pctLabel} of active) — ${buyerNames.slice(0, 5).join(', ')}${buyerNames.length > 5 ? ' + more' : ''}.`
+          : `${headline} (${pctLabel} of active).`;
 
     const metadata: NotificationBuyerMeta = {
       projectSlug: snapshot.projectSlug,
@@ -203,8 +204,21 @@ export class HotBuyService {
   }
 
   formatHotBuyHeadline(snapshot: HotBuySnapshot): string {
+    const names = (snapshot.recentBuyers ?? []).map((b) => b.displayName);
     if (snapshot.topTraderCount >= 3) {
-      return `${snapshot.topTraderCount} top traders bought ${snapshot.projectTicker}`;
+      const named = names.slice(0, 3).join(', ');
+      return named
+        ? `${named} + top traders bought ${snapshot.projectTicker}`
+        : `${snapshot.topTraderCount} top traders bought ${snapshot.projectTicker}`;
+    }
+    if (names.length === 1) {
+      return `${names[0]} bought ${snapshot.projectTicker}`;
+    }
+    if (names.length > 1) {
+      return `${names.slice(0, 3).join(', ')} bought ${snapshot.projectTicker}`;
+    }
+    if (snapshot.buyerCount === 1) {
+      return `1 trader bought ${snapshot.projectTicker}`;
     }
     return `${snapshot.buyerCount} traders bought ${snapshot.projectTicker}`;
   }
@@ -213,6 +227,11 @@ export class HotBuyService {
     const pct = Math.round(snapshot.pctOfActive * 100);
     const avgPct = 2;
     const above = pct > avgPct ? `+${pct - avgPct}%` : `${pct}%`;
-    return `${formatUsd(snapshot.buyerCount * 100, 0)}+ paper activity · ${above} of active traders in 24h`;
+    const names = (snapshot.recentBuyers ?? []).map((b) => b.displayName);
+    const who =
+      names.length > 0
+        ? names.slice(0, 4).join(', ')
+        : `${snapshot.buyerCount} trader${snapshot.buyerCount === 1 ? '' : 's'}`;
+    return `${who} · ${formatUsd(snapshot.buyerCount * 100, 0)}+ paper · ${above} of active in 24h`;
   }
 }

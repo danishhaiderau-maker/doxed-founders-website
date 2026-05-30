@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ProjectSource } from '@prisma/client';
+import { Prisma, ProjectSource, ListingStatus } from '@prisma/client';
 import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -56,7 +56,33 @@ export class ProjectsService {
       orderBy: [{ featured: 'desc' }, { name: 'asc' }],
     });
 
-    return projects.map((p) => this.mapProjectSummary(p));
+    const tickers = [...new Set(projects.map((p) => p.ticker))];
+    const listings =
+      tickers.length > 0
+        ? await this.prisma.listingApplication.findMany({
+            where: { ticker: { in: tickers }, status: ListingStatus.APPROVED },
+            orderBy: { reviewedAt: 'desc' },
+            select: {
+              ticker: true,
+              founderDoxxedStatus: true,
+              scoutHighlightNote: true,
+            },
+          })
+        : [];
+    const listingByTicker = new Map<string, (typeof listings)[0]>();
+    for (const row of listings) {
+      if (!listingByTicker.has(row.ticker)) listingByTicker.set(row.ticker, row);
+    }
+
+    return projects.map((p) => {
+      const listing = listingByTicker.get(p.ticker);
+      return {
+        ...this.mapProjectSummary(p),
+        scoutHighlight: listing?.scoutHighlightNote ?? null,
+        founderDoxxedStatus:
+          (listing?.founderDoxxedStatus as 'DOXXED' | 'BUILDING_IN_PUBLIC' | undefined) ?? null,
+      };
+    });
   }
 
   async getPlatformStats() {

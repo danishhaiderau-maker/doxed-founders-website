@@ -746,6 +746,8 @@ model ListingApplication {
   verificationCriteria Json?
   whyList             String?       @db.Text
   whyDoxxed           String?       @db.Text
+  founderDoxxedStatus String?       @default("DOXXED")
+  scoutHighlightNote  String?       @db.Text
   votingOpensAt       DateTime?
   votingClosesAt      DateTime?
   requiredVoters      Int           @default(5)

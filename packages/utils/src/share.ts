@@ -96,6 +96,59 @@ export function buildTwitterIntentUrl(text: string, url?: string): string {
   return `https://twitter.com/intent/tweet?${params.toString()}`;
 }
 
+export function buildSiteUrl(origin: string, path: string): string {
+  const base = origin.replace(/\/$/, '');
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+export function buildListingShareMessage(input: {
+  projectName: string;
+  ticker: string;
+  summary?: string | null;
+}): string {
+  const tag = input.summary?.trim()
+    ? input.summary.trim().slice(0, 100)
+    : `${input.projectName} (${input.ticker}) just went live on Doxxed Crypto`;
+  return `🚀 New listing: ${input.projectName} ($${input.ticker})\n${tag}\nPredict · paper trade · scout the founder 👇\n#Crypto #FounderOS @DoxxedCrypto`;
+}
+
+export function buildPredictionShareMessage(input: {
+  projectName: string;
+  ticker: string;
+  question: string;
+  poolUsd?: number;
+}): string {
+  const pool =
+    input.poolUsd != null && input.poolUsd > 0
+      ? ` · Pool ${formatUsd(input.poolUsd, 0)} paper $`
+      : '';
+  const q = input.question.trim().slice(0, 140);
+  return `🔮 Prediction market open: ${input.projectName} ($${input.ticker})${pool}\n"${q}"\nStake YES/NO with paper $ on Doxxed Crypto 👇\n#Crypto #Predict @DoxxedCrypto`;
+}
+
+export function buildFeedShareMessage(input: {
+  headline: string;
+  detail?: string | null;
+}): string {
+  const detail = input.detail?.trim() ? `\n${input.detail.trim().slice(0, 120)}` : '';
+  return `${input.headline}${detail}\nLive on Doxxed Crypto 👇\n#Crypto #FounderOS @DoxxedCrypto`;
+}
+
+export function buildHotBuyShareMessage(input: {
+  ticker: string;
+  buyerNames: string[];
+  projectName?: string;
+}): string {
+  const names =
+    input.buyerNames.length === 0
+      ? 'Traders'
+      : input.buyerNames.length <= 3
+        ? input.buyerNames.join(', ')
+        : `${input.buyerNames.slice(0, 2).join(', ')} +${input.buyerNames.length - 2} more`;
+  const label = input.projectName ? `${input.projectName} ($${input.ticker})` : `$${input.ticker}`;
+  return `🔥 ${names} paper-traded ${label} on Doxxed Crypto\nSee who bought · follow top traders · stake predictions 👇\n#ProofOfConviction @DoxxedCrypto`;
+}
+
 export function shareImageFilename(pnlOrRoi: number): string {
   const side = pnlOrRoi >= 0 ? 'pump' : 'dump';
   return `dcf-${side}-flex.png`;
