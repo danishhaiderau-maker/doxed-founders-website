@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { slugify, formatPublicAccountLabel, POINTS, STARTING_CASH_USD, RESTRICTED_CASH_THRESHOLD_USD, TOP_UP_FEE_USD } from '@dcf/utils';
+import { isSolanaTopUpConfigured, resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import {
   AnalyticsEventType,
   LeaderboardPeriod,
@@ -775,13 +776,8 @@ export class PaperTradingService {
 
   async getResetInfo() {
     const stripeEnabled = Boolean(process.env.STRIPE_SECRET_KEY?.trim());
-    const treasury = await this.prisma.platformTreasury.findUnique({
-      where: { id: 'default' },
-    });
-    const cryptoEnabled = Boolean(
-      process.env.SOLANA_RPC_URL?.trim() &&
-        treasury?.solanaTreasuryAddress?.trim(),
-    );
+    const treasuryAddress = await resolveSolanaTreasuryAddress(this.prisma);
+    const cryptoEnabled = isSolanaTopUpConfigured(treasuryAddress);
 
     return {
       available: true,
@@ -789,7 +785,7 @@ export class PaperTradingService {
       restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       stripeEnabled,
       cryptoEnabled,
-      treasuryAddress: treasury?.solanaTreasuryAddress ?? null,
+      treasuryAddress,
       message: cryptoEnabled
         ? `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} USDC/SOL on-chain or via Stripe to restore $10,000 virtual cash.`
         : stripeEnabled
