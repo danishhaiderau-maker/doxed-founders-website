@@ -388,37 +388,84 @@ export class BuilderService {
     system: string,
     userPrompt: string,
   ): Promise<string | null> {
+    const result = await this.tryCopilotChatCompletion(userId, system, userPrompt);
+    return result?.text ?? null;
+  }
+
+  /**
+   * Chat completion for Founder Copilot — uses default LLM when set, otherwise any
+   * connected API key (DeepSeek, OpenAI, etc.) even if default is Cursor/OpenHands.
+   */
+  async tryCopilotChatCompletion(
+    userId: string,
+    system: string,
+    userPrompt: string,
+  ): Promise<{ text: string; provider: AiProvider } | null> {
     const settings = await this.ensureSettings(userId);
-    if (isRemoteAgentProvider(settings.defaultProvider)) {
-      return null;
+    const connected = await this.listConnectedProviders(userId);
+    const order: AiProvider[] = [];
+
+    if (
+      settings.defaultProvider !== AiProvider.RULE_BASED &&
+      !isRemoteAgentProvider(settings.defaultProvider)
+    ) {
+      order.push(settings.defaultProvider);
     }
 
-    const cfg = aiProviderConfig(settings.defaultProvider);
-    if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') return null;
+    for (const key of [
+      AiProvider.DEEPSEEK,
+      AiProvider.OPENAI,
+      AiProvider.ANTHROPIC,
+      AiProvider.GEMINI,
+    ]) {
+      if (!order.includes(key)) order.push(key);
+    }
 
-    const cred = await this.prisma.integrationCredential.findUnique({
-      where: { userId_provider: { userId, provider: cfg.credentialProvider } },
-    });
-    const apiKey = this.crypto.decrypt(cred?.token);
-    if (!apiKey) return null;
+    for (const provider of order) {
+      const cfg = aiProviderConfig(provider);
+      if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') continue;
+      if (!connected.has(cfg.credentialProvider)) continue;
 
-    const model = settings.preferredModel ?? cfg.defaultModel ?? undefined;
+      const cred = await this.prisma.integrationCredential.findUnique({
+        where: { userId_provider: { userId, provider: cfg.credentialProvider } },
+      });
+      const apiKey = this.crypto.decrypt(cred?.token);
+      if (!apiKey) continue;
 
-    try {
-      switch (settings.defaultProvider) {
-        case AiProvider.OPENAI:
-          return await this.callOpenAi(apiKey, system, userPrompt, model);
-        case AiProvider.ANTHROPIC:
-          return await this.callAnthropic(apiKey, system, userPrompt, model);
-        case AiProvider.GEMINI:
-          return await this.callGemini(apiKey, system, userPrompt, model);
-        case AiProvider.DEEPSEEK:
-          return await this.callDeepSeek(apiKey, system, userPrompt, model);
-        default:
-          return null;
+      const model =
+        provider === settings.defaultProvider
+          ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+          : cfg.defaultModel ?? undefined;
+
+      try {
+        const text = await this.completionWithProvider(provider, apiKey, system, userPrompt, model);
+        if (text?.trim()) return { text: text.trim(), provider };
+      } catch {
+        continue;
       }
-    } catch {
-      return null;
+    }
+
+    return null;
+  }
+
+  private async completionWithProvider(
+    provider: AiProvider,
+    apiKey: string,
+    system: string,
+    userPrompt: string,
+    model?: string,
+  ): Promise<string | null> {
+    switch (provider) {
+      case AiProvider.OPENAI:
+        return this.callOpenAi(apiKey, system, userPrompt, model);
+      case AiProvider.ANTHROPIC:
+        return this.callAnthropic(apiKey, system, userPrompt, model);
+      case AiProvider.GEMINI:
+        return this.callGemini(apiKey, system, userPrompt, model);
+      case AiProvider.DEEPSEEK:
+        return this.callDeepSeek(apiKey, system, userPrompt, model);
+      default:
+        return null;
     }
   }
 

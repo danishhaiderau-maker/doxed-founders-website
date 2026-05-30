@@ -2218,7 +2218,7 @@ export function fetchEventActivity(token: string) {
 }
 
 export function copilotAsk(prompt: string, token: string) {
-  return apiFetch<{ answer: string; stats: Record<string, number> }>(
+  return apiFetch<{ answer: string; answerProvider?: string; stats: Record<string, number> }>(
     '/copilot/ask',
     { method: 'POST', body: JSON.stringify({ prompt }) },
     token,

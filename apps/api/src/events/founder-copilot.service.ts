@@ -452,9 +452,12 @@ export class FounderCopilotService {
       summaryBody: summary.body,
     });
 
-    const aiAnswer = await this.builder.tryAiCompletion(
+    const systemPrompt =
+      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown.';
+
+    const aiResult = await this.builder.tryCopilotChatCompletion(
       userId,
-      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step.',
+      systemPrompt,
       `${prompt}\n\n---\n${contextBlock}`,
     );
 
@@ -476,7 +479,8 @@ export class FounderCopilotService {
     });
 
     return {
-      answer: aiAnswer ?? ruleBased,
+      answer: aiResult?.text ?? ruleBased,
+      answerProvider: aiResult?.provider ?? 'RULE_BASED',
       summary,
       stats: {
         commits: commitCount,
