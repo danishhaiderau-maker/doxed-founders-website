@@ -1,6 +1,9 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { getIntegrationConnectGuide } from '@dcf/utils';
+import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
 import {
   connectGitHubRepo,
   connectIntegration,
@@ -50,6 +53,7 @@ export function FounderOsPanel({
   const [buildTitle, setBuildTitle] = useState('');
   const [buildPrompt, setBuildPrompt] = useState('');
   const [connectProvider, setConnectProvider] = useState<IntegrationProviderConfig | null>(null);
+  const [guideProvider, setGuideProvider] = useState<{ key: string; label: string } | null>(null);
   const [connectFields, setConnectFields] = useState<Record<string, string>>({});
   const [publishDest, setPublishDest] = useState({ buildFeed: true, x: true, community: true });
   const [msg, setMsg] = useState<string | null>(null);
@@ -269,6 +273,13 @@ export function FounderOsPanel({
                 + {p.label}
               </button>
             ))}
+          <button
+            type="button"
+            onClick={() => setGuideProvider({ key: 'cursor', label: 'Founder Copilot (Cursor)' })}
+            className="rounded-lg border border-violet-500/30 px-3 py-1.5 text-xs text-violet-300"
+          >
+            ? Cursor vs Neon
+          </button>
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <input
@@ -277,6 +288,13 @@ export function FounderOsPanel({
             placeholder="GitHub owner/repo"
             className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
           />
+          <button
+            type="button"
+            onClick={() => setGuideProvider({ key: 'github', label: 'GitHub' })}
+            className="rounded-lg border border-zinc-600 px-3 py-2 text-xs text-zinc-400 hover:text-white"
+          >
+            How to connect
+          </button>
           <button
             type="button"
             onClick={handleConnectGitHub}
@@ -404,8 +422,19 @@ export function FounderOsPanel({
       )}
 
       {connectProvider && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-5">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-900 p-5">
+            {getIntegrationConnectGuide(connectProvider.key) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setGuideProvider({ key: connectProvider.key, label: connectProvider.label });
+                }}
+                className="mb-3 text-xs text-violet-300 hover:underline"
+              >
+                View step-by-step instructions →
+              </button>
+            )}
             <p className="font-semibold text-white">Connect {connectProvider.label}</p>
             <p className="mt-1 text-xs text-zinc-500">{connectProvider.billTip}</p>
             {connectProvider.fields.map((f) => (
@@ -418,7 +447,7 @@ export function FounderOsPanel({
                 className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
               />
             ))}
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={handleConnectProvider}
@@ -433,9 +462,25 @@ export function FounderOsPanel({
               >
                 Cancel
               </button>
+              {connectProvider.key === 'cursor' && (
+                <Link
+                  href="/settings/builder"
+                  className="rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200"
+                >
+                  Cursor API key →
+                </Link>
+              )}
             </div>
           </div>
         </div>
+      )}
+
+      {guideProvider && getIntegrationConnectGuide(guideProvider.key) && (
+        <IntegrationConnectGuidePanel
+          providerLabel={guideProvider.label}
+          guide={getIntegrationConnectGuide(guideProvider.key)!}
+          onClose={() => setGuideProvider(null)}
+        />
       )}
 
       {projectId && (

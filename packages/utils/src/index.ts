@@ -46,6 +46,7 @@ export * from './conviction-share';
 export * from './publish-everywhere';
 export * from './cursor-build-room';
 export * from './integration-providers';
+export * from './integration-connect-guide';
 export * from './security-score';
 export * from './founder-agents';
 export * from './build-queue';
