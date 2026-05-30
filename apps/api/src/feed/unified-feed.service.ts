@@ -15,6 +15,7 @@ import {
 import { formatUsd } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from './feed.service';
+import { FeedShareService } from './feed-share.service';
 import { HotBuyService } from './hot-buy.service';
 
 @Injectable()
@@ -23,6 +24,7 @@ export class UnifiedFeedService {
     private readonly prisma: PrismaService,
     private readonly feed: FeedService,
     private readonly hotBuy: HotBuyService,
+    private readonly feedShare: FeedShareService,
   ) {}
 
   async getPulse(): Promise<PlatformPulseItem[]> {
@@ -426,6 +428,7 @@ export class UnifiedFeedService {
     const hotBuys = await this.hotBuy.listHotBuys(8);
     for (const hb of hotBuys) {
       const eventType = hb.topTraderCount >= 3 ? 'top_trader_buy' : 'hot_buy';
+      const shareCtx = await this.feedShare.loadProjectShareContext(hb.projectId);
       items.push({
         id: `market-hot-${hb.projectId}`,
         tier: 1,
@@ -439,6 +442,21 @@ export class UnifiedFeedService {
         projectSlug: hb.projectSlug,
         projectTicker: hb.projectTicker,
         recentBuyerNames: (hb.recentBuyers ?? []).map((b) => b.displayName),
+        shareContext: shareCtx
+          ? {
+              projectName: shareCtx.projectName,
+              pctOfActive: hb.pctOfActive,
+              detailLine: this.hotBuy.formatHotBuyDetail(hb),
+              scoutHighlight: shareCtx.scoutHighlight,
+              scoutThesis: shareCtx.scoutThesis,
+              summary: shareCtx.summary,
+              communitySnippets: shareCtx.communitySnippets,
+            }
+          : {
+              projectName: hb.projectName,
+              pctOfActive: hb.pctOfActive,
+              detailLine: this.hotBuy.formatHotBuyDetail(hb),
+            },
       });
     }
 

@@ -128,7 +128,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
         : defaultProvider.replace('_', ' ');
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 via-zinc-950/80 to-zinc-950 p-5 shadow-lg shadow-violet-950/20">
+    <section className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 via-zinc-950/80 to-zinc-950 p-5 shadow-lg shadow-violet-950/20 md:p-6 lg:p-8">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-widest text-violet-300">
@@ -169,13 +169,13 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
         ))}
       </div>
 
-      <div className="mt-4 rounded-xl border border-zinc-800 bg-black/40 p-3">
+      <div className="mt-4 rounded-xl border border-zinc-800 bg-black/40 p-3 md:p-4">
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          rows={3}
+          rows={4}
           placeholder="Ask Founder Copilot anything… e.g. What am I working on? Finish the landing page."
-          className="w-full resize-none bg-transparent text-sm text-white placeholder:text-zinc-600 outline-none"
+          className="w-full resize-y min-h-[5rem] bg-transparent text-sm md:text-base text-white placeholder:text-zinc-600 outline-none"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/80 pt-2">
           <div className="flex flex-wrap gap-1.5">
@@ -244,9 +244,9 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       )}
 
       {lastAnswer && (
-        <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-3">
-          <p className="text-[10px] uppercase text-zinc-600">Copilot</p>
-          <pre className="mt-1 max-h-40 overflow-auto text-xs text-zinc-300 whitespace-pre-wrap">
+        <div className="mt-5 rounded-xl border border-violet-500/20 bg-zinc-900/60 p-4 md:p-5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-400">Copilot</p>
+          <pre className="mt-2 min-h-[12rem] max-h-[28rem] overflow-auto text-sm leading-relaxed text-zinc-200 whitespace-pre-wrap md:min-h-[16rem] md:text-base">
             {lastAnswer}
           </pre>
         </div>

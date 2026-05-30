@@ -74,6 +74,7 @@ export function ShareFlexModal({
   const [postedUrl, setPostedUrl] = useState<string | null>(null);
   const [xStatus, setXStatus] = useState<{
     canPostInstantly: boolean;
+    tokenExpired?: boolean;
     twitterHandle: string | null;
     message: string;
   } | null>(null);
@@ -169,7 +170,7 @@ export function ShareFlexModal({
         onClick={onClose}
       />
       <div
-        className={`relative max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border p-5 shadow-2xl ${
+        className={`relative max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-2xl border p-5 shadow-2xl sm:max-w-xl md:max-w-2xl md:p-6 ${
           win ? 'border-emerald-500/40 bg-[#0a120f]' : 'border-red-500/40 bg-[#120a0a]'
         }`}
       >
@@ -290,7 +291,9 @@ export function ShareFlexModal({
             className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
               canInstant
                 ? 'border-emerald-500/30 bg-emerald-950/20 text-emerald-100'
-                : 'border-amber-500/30 bg-amber-950/20 text-amber-100'
+                : xStatus.tokenExpired
+                  ? 'border-red-500/40 bg-red-950/30 text-red-200'
+                  : 'border-amber-500/30 bg-amber-950/20 text-amber-100'
             }`}
           >
             {canInstant ? (
@@ -301,9 +304,9 @@ export function ShareFlexModal({
               <>
                 {xStatus.message}{' '}
                 <Link href="/login" className="font-medium underline hover:text-white">
-                  Sign in with X
-                </Link>{' '}
-                to enable Post Instantly.
+                  {xStatus.tokenExpired ? 'Sign out & sign in with X again' : 'Sign in with X'}
+                </Link>
+                {!xStatus.tokenExpired && ' to enable Post Instantly.'}
               </>
             )}
           </div>

@@ -361,10 +361,27 @@ export class FounderCopilotService {
 
   async ask(userId: string, prompt: string) {
     const memory = await this.getProjectMemory(userId);
+
+    if (memory.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional sync */
+      }
+    }
+
+    const refreshedMemory = memory.repoFullName
+      ? await this.getProjectMemory(userId)
+      : memory;
+
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: {
-        projects: { where: { approved: true }, take: 1 },
+        projects: {
+          where: { approved: true },
+          take: 1,
+          include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
+        },
         buildPosts: { orderBy: { publishedAt: 'desc' }, take: 5 },
       },
     });
@@ -373,7 +390,8 @@ export class FounderCopilotService {
     const project = founder.projects[0];
     const weekAgo = new Date(Date.now() - 7 * 86400000);
 
-    const [commitCount, deployCount, followerCount, featureRequests] = await Promise.all([
+    const [commitCount, deployCount, followerCount, featureRequests, recentCommits, openIdeas] =
+      await Promise.all([
       this.prisma.founderEvent.count({
         where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: weekAgo } },
       }),
@@ -388,7 +406,23 @@ export class FounderCopilotService {
             where: { projectId: project.id, channel: 'FEATURE_REQUESTS' },
           })
         : Promise.resolve(0),
+      refreshedMemory.repoFullName
+        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 8)
+        : Promise.resolve([]),
+      this.prisma.buildQueueItem.findMany({
+        where: {
+          founderId: founder.id,
+          kind: 'IDEA',
+          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        take: 5,
+      }),
     ]);
+
+    const githubMemory = refreshedMemory.repoFullName
+      ? await this.memory.readRepoMemory(userId, refreshedMemory.repoFullName)
+      : null;
 
     const readiness = project
       ? await this.metrics.refreshLaunchReadiness(project.id)
@@ -406,11 +440,27 @@ export class FounderCopilotService {
       recentHeadlines: founder.buildPosts.map((p) => p.headline),
     });
 
+    const contextBlock = this.buildCopilotContextBlock({
+      memory: refreshedMemory,
+      githubMemory,
+      recentCommits,
+      openIdeas,
+      project,
+      summaryBody: summary.body,
+    });
+
     const aiAnswer = await this.builder.tryAiCompletion(
       userId,
-      'You are Founder Copilot — persistent project memory for crypto founders. Answer from context; never ask what they are building.',
-      `${prompt}\n\nProject memory:\nGoal: ${memory.currentGoal}\nProgress: ${memory.progressPercent}%\nLast commit: ${memory.lastCommit ?? 'none'}\nSuggested next: ${memory.suggestedNextStep}\nOpen tasks: ${memory.openTasks.map((t) => t.title).join(', ') || 'none'}\n\nWeekly summary:\n${summary.body}`,
+      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step.',
+      `${prompt}\n\n---\n${contextBlock}`,
     );
+
+    const ruleBased = this.buildRuleBasedCopilotAnswer({
+      memory: refreshedMemory,
+      githubMemory,
+      recentCommits,
+      prompt,
+    });
 
     await this.events.emit({
       founderId: founder.id,
@@ -423,7 +473,7 @@ export class FounderCopilotService {
     });
 
     return {
-      answer: aiAnswer ?? summary.body,
+      answer: aiAnswer ?? ruleBased,
       summary,
       stats: {
         commits: commitCount,
@@ -434,6 +484,116 @@ export class FounderCopilotService {
         buildStreak: founder.buildStreakDays,
       },
     };
+  }
+
+  private buildCopilotContextBlock(input: {
+    memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>;
+    githubMemory: Awaited<ReturnType<FounderOsMemoryService['readRepoMemory']>>;
+    recentCommits: { sha: string; message: string; date: string }[];
+    openIdeas: { title: string; description: string | null }[];
+    project: { name: string; roadmapItems: { title: string; status: RoadmapStatus }[] } | undefined;
+    summaryBody: string;
+  }) {
+    const lines: string[] = [
+      `Project: ${input.memory.project?.name ?? 'Not linked'}`,
+      `Repo: ${input.memory.repoFullName ?? 'none'}`,
+      `Current goal: ${input.memory.currentGoal}`,
+      `Progress: ${input.memory.progressPercent}% · Launch readiness ${input.memory.launchReadiness}%`,
+      `Suggested next: ${input.memory.suggestedNextStep}`,
+      `Open tasks: ${input.memory.openTasks.map((t) => t.title).join('; ') || 'none'}`,
+      `Last commit: ${input.memory.lastCommit ?? 'none'}`,
+    ];
+
+    if (input.recentCommits.length > 0) {
+      lines.push(
+        'Recent commits:',
+        ...input.recentCommits.slice(0, 6).map((c) => `- ${c.sha.slice(0, 7)} ${c.message}`),
+      );
+    }
+
+    if (input.githubMemory?.projectContext) {
+      lines.push('GitHub project-context.md (excerpt):', input.githubMemory.projectContext.slice(0, 1200));
+    }
+    if (input.githubMemory?.roadmap) {
+      lines.push('GitHub roadmap.md (excerpt):', input.githubMemory.roadmap.slice(0, 800));
+    }
+    if (input.githubMemory?.openTasksFromRepo?.length) {
+      lines.push(
+        'Repo tasks.json open items:',
+        input.githubMemory.openTasksFromRepo.map((t) => `- ${t.title}`).join('\n'),
+      );
+    }
+
+    if (input.openIdeas.length > 0) {
+      lines.push('Ideas queue:', ...input.openIdeas.map((i) => `- ${i.title}`));
+    }
+
+    const inProgressRoadmap = input.project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS);
+    if (inProgressRoadmap) {
+      lines.push(`Roadmap in progress: ${inProgressRoadmap.title}`);
+    }
+
+    lines.push('', 'Weekly summary:', input.summaryBody);
+    return lines.join('\n');
+  }
+
+  private buildRuleBasedCopilotAnswer(input: {
+    memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>;
+    githubMemory: Awaited<ReturnType<FounderOsMemoryService['readRepoMemory']>>;
+    recentCommits: { sha: string; message: string }[];
+    prompt: string;
+  }) {
+    const workingOn =
+      /what am i working|what are you working|where did i leave|currently working|left off|working on/i.test(
+        input.prompt,
+      );
+
+    if (workingOn) {
+      const commitLines =
+        input.recentCommits.length > 0
+          ? input.recentCommits
+              .slice(0, 4)
+              .map((c) => `• ${c.message}`)
+              .join('\n')
+          : '• No recent commits synced — connect GitHub in Builder settings.';
+
+      const repoTasks =
+        input.githubMemory?.openTasksFromRepo?.length
+          ? input.githubMemory.openTasksFromRepo.map((t) => `• ${t.title}`).join('\n')
+          : input.memory.openTasks.length > 0
+            ? input.memory.openTasks.map((t) => `• ${t.title}`).join('\n')
+            : '• No open tasks in queue — use Quick Build or voice to add one.';
+
+      return [
+        `You're building **${input.memory.project?.name ?? 'your project'}** (${input.memory.progressPercent}% progress).`,
+        '',
+        `**Current goal:** ${input.memory.currentGoal}`,
+        '',
+        '**Recent GitHub commits:**',
+        commitLines,
+        '',
+        '**Open tasks:**',
+        repoTasks,
+        '',
+        `**Pick up here:** ${input.memory.suggestedNextStep}`,
+        input.memory.repoFullName
+          ? `\nRepo: ${input.memory.repoFullName} — Founder OS memory lives in .founder-os/`
+          : '',
+      ].join('\n');
+    }
+
+    if (input.githubMemory?.currentGoalFromRepo) {
+      return `Goal from your repo: ${input.githubMemory.currentGoalFromRepo}\n\nNext: ${input.memory.suggestedNextStep}\n\n${input.memory.lastCommit ? `Last commit: ${input.memory.lastCommit}` : 'Sync GitHub to pull latest commits.'}`;
+    }
+
+    return [
+      input.memory.currentGoal,
+      '',
+      input.memory.suggestedNextStep,
+      input.memory.lastCommit ? `Last commit: ${input.memory.lastCommit}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   async handsFree(userId: string, prompt: string) {

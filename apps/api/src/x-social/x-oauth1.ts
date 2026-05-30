@@ -52,6 +52,29 @@ export function buildOAuth1Header(
   return `OAuth ${authHeader}`;
 }
 
+/** Live check — returns false when user revoked access or tokens expired. */
+export async function verifyOAuth1Credentials(
+  creds: OAuth1Credentials,
+): Promise<{ ok: boolean; username?: string; expired?: boolean }> {
+  const url = 'https://api.twitter.com/2/users/me';
+  const authorization = buildOAuth1Header('GET', url, creds);
+  try {
+    const res = await fetch(`${url}?user.fields=username`, {
+      headers: { Authorization: authorization },
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { data?: { username?: string } };
+      return { ok: true, username: data.data?.username };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, expired: true };
+    }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export function readOAuth1Credentials():
   | { ok: true; creds: OAuth1Credentials; brandHandle: string }
   | { ok: false; reason: string } {

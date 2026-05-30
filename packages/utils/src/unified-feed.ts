@@ -18,6 +18,15 @@ export type UnifiedFeedItem = {
   founderSlug?: string;
   amountUsd?: number;
   recentBuyerNames?: string[];
+  shareContext?: {
+    projectName?: string;
+    pctOfActive?: number;
+    detailLine?: string;
+    scoutHighlight?: string | null;
+    scoutThesis?: string | null;
+    summary?: string | null;
+    communitySnippets?: string[];
+  };
 };
 
 export type PlatformPulseItem = {

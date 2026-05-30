@@ -50,7 +50,10 @@ export function LandingHero() {
             </h1>
             <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-400">
               Where founders ship in public, traders prove conviction with Ddollar paper capital, and{' '}
-              <strong className="font-medium text-zinc-200">80% of the network belongs to the community</strong>.
+              <strong className="font-medium text-zinc-200">
+                80% of tokens belong to the community
+              </strong>{' '}
+              (10% airdropped at launch, 70% vested over 10 years) — 20% team.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link
@@ -295,7 +298,7 @@ export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
 export function LandingEconomy() {
   return (
     <section className="border-b border-zinc-800/80 py-16 md:py-20">
-      <div className="mx-auto max-w-6xl px-6">
+      <div className="mx-auto w-full max-w-[90rem] px-4 sm:px-6 lg:px-10">
         <p className="text-center text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
           Economy & tokenomics
         </p>
@@ -319,16 +322,17 @@ export function LandingEconomy() {
 
           <div className="rounded-2xl border border-violet-500/20 bg-violet-950/10 p-6">
             <h3 className="text-lg font-bold text-white">Tokenomics</h3>
-            <div className="mt-4 flex items-center gap-4">
+            <p className="mt-1 text-xs text-zinc-500">Long-term community alignment · 20% team</p>
+            <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
               <div
-                className="relative h-28 w-28 shrink-0 rounded-full"
+                className="relative mx-auto h-28 w-28 shrink-0 rounded-full sm:mx-0"
                 style={{
                   background:
                     'conic-gradient(#8b5cf6 0 288deg, #3b82f6 288deg 324deg, #10b981 324deg 360deg)',
                 }}
               >
                 <div className="absolute inset-3 flex flex-col items-center justify-center rounded-full bg-zinc-950 text-center">
-                  <span className="text-[10px] uppercase text-zinc-500">Company</span>
+                  <span className="text-[10px] uppercase text-zinc-500">Team</span>
                   <span className="text-sm font-bold text-white">20%</span>
                 </div>
               </div>
@@ -336,11 +340,11 @@ export function LandingEconomy() {
                 <li>
                   <span className="font-semibold text-violet-300">80%</span> Community
                 </li>
-                <li>
-                  <span className="font-semibold text-blue-300">10%</span> Airdropped
+                <li className="pl-3 text-zinc-400">
+                  <span className="font-semibold text-blue-300">10%</span> airdropped at launch
                 </li>
-                <li>
-                  <span className="font-semibold text-emerald-300">10%</span> Distributed over 10 years
+                <li className="pl-3 text-zinc-400">
+                  <span className="font-semibold text-emerald-300">70%</span> distributed over 10 years
                 </li>
               </ul>
             </div>

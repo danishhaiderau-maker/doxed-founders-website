@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { buildOAuth1Header } from '../x-social/x-oauth1';
+import { buildOAuth1Header, verifyOAuth1Credentials } from '../x-social/x-oauth1';
 import { uploadTweetImage } from '../x-social/x-media-upload.util';
 import { XShareMediaService } from '../x-social/x-share-media.service';
 
@@ -25,16 +25,33 @@ export class ConvictionShareService {
       where: { userId, provider: 'twitter' },
       include: { user: { select: { twitterHandle: true } } },
     });
-    const canPostInstantly = Boolean(account?.accessToken && account?.accessTokenSecret);
+    const hasTokens = Boolean(account?.accessToken && account?.accessTokenSecret);
+    let canPostInstantly = false;
+    let tokenExpired = false;
+
+    if (hasTokens && process.env.TWITTER_API_KEY && process.env.TWITTER_API_SECRET) {
+      const check = await verifyOAuth1Credentials({
+        consumerKey: process.env.TWITTER_API_KEY.trim(),
+        consumerSecret: process.env.TWITTER_API_SECRET.trim(),
+        accessToken: account!.accessToken!,
+        accessTokenSecret: account!.accessTokenSecret!,
+      });
+      canPostInstantly = check.ok;
+      tokenExpired = Boolean(check.expired);
+    }
+
     return {
       connected: Boolean(account),
       canPostInstantly,
+      tokenExpired,
       twitterHandle: account?.user.twitterHandle ?? null,
       message: canPostInstantly
         ? 'Post Proof of Conviction to your X in one tap.'
-        : account
-          ? 'Reconnect with X to enable one-click posting.'
-          : 'Connect X at sign-in to post instantly — no download or paste.',
+        : tokenExpired
+          ? 'Your X token expired — sign out and sign in with X again to post instantly.'
+          : account
+            ? 'Reconnect with X to enable one-click posting.'
+            : 'Connect X at sign-in to post instantly — no download or paste.',
     };
   }
 

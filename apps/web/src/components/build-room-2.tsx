@@ -9,7 +9,6 @@ import {
   dismissBuildQueueItem,
   fetchBuildRoom,
   publishGitHubIssues,
-  runCommandBar,
   updateBuildQueueItem,
 } from '@/lib/api';
 import { FounderCopilotBriefing } from '@/components/founder-copilot-briefing';
@@ -110,9 +109,6 @@ export function BuildRoom2({
 }: BuildRoom2Props) {
   const [tab, setTab] = useState<BuildRoomTab>('ideas');
   const [room, setRoom] = useState<BuildRoomData | null>(null);
-  const [cmdIntent, setCmdIntent] = useState<CommandBarIntent>('roadmap');
-  const [cmdPrompt, setCmdPrompt] = useState('');
-  const [cmdBusy, setCmdBusy] = useState(false);
   const [publishBusy, setPublishBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showHandsFree, setShowHandsFree] = useState(false);
@@ -141,25 +137,6 @@ export function BuildRoom2({
   async function handleDismiss(id: string) {
     await dismissBuildQueueItem(id, accessToken);
     load();
-  }
-
-  async function handleCommand() {
-    if (!founderActive) {
-      onMessage?.('Activate your founder profile first');
-      return;
-    }
-    setCmdBusy(true);
-    try {
-      const result = await runCommandBar(cmdIntent, cmdPrompt.trim() || undefined, accessToken);
-      onMessage?.(`${result.result.title} (${result.creditsSpent} credits)`);
-      setCmdPrompt('');
-      load();
-      onRefresh?.();
-    } catch (err) {
-      onMessage?.(err instanceof Error ? err.message : 'Command failed');
-    } finally {
-      setCmdBusy(false);
-    }
   }
 
   async function handlePublishIssues() {
@@ -209,11 +186,11 @@ export function BuildRoom2({
         />
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_380px] 2xl:grid-cols-[1fr_420px]">
-        <div className="space-y-6 min-w-0">
-          <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
+      <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
 
-          <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+      <div className="grid gap-6 lg:grid-cols-[1fr_minmax(280px,360px)] xl:grid-cols-[1fr_minmax(300px,400px)]">
+        <div className="min-w-0 space-y-6">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
               <p className="text-[10px] uppercase text-zinc-500">Ideas</p>
               <p className="text-xl font-bold text-white">{stats?.ideas ?? 0}</p>
@@ -231,52 +208,6 @@ export function BuildRoom2({
               <p className="text-xl font-bold text-white">{stats?.commits ?? 0}</p>
             </div>
           </div>
-
-          <FounderCopilotBriefing
-            accessToken={accessToken}
-            onMessage={onMessage}
-            onRefresh={() => {
-              load();
-              onRefresh?.();
-            }}
-          />
-
-      <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-4">
-        <p className="text-sm font-semibold text-cyan-200">Quick Command Bar</p>
-        <p className="mt-1 text-xs text-zinc-500">Roadmap · release notes · weekly summary (10 credits)</p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {COMMANDS.map((c) => (
-            <button
-              key={c.intent}
-              type="button"
-              onClick={() => setCmdIntent(c.intent)}
-              className={`rounded-lg px-3 py-1.5 text-xs ${
-                cmdIntent === c.intent
-                  ? 'bg-cyan-600 text-white'
-                  : 'border border-zinc-700 text-zinc-400'
-              }`}
-            >
-              {c.label}
-            </button>
-          ))}
-        </div>
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <input
-            value={cmdPrompt}
-            onChange={(e) => setCmdPrompt(e.target.value)}
-            placeholder={COMMANDS.find((c) => c.intent === cmdIntent)?.placeholder}
-            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-          />
-          <button
-            type="button"
-            disabled={cmdBusy}
-            onClick={handleCommand}
-            className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            Run
-          </button>
-        </div>
-      </div>
 
       {!room?.cursorConnected && room?.cursorCopy && (
         <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-4">
@@ -416,7 +347,18 @@ export function BuildRoom2({
       </div>
         </div>
 
-        <aside className="space-y-4 xl:sticky xl:top-24 xl:self-start">
+        <aside className="space-y-4 lg:sticky lg:top-24 lg:self-start">
+          <FounderCopilotBriefing
+            accessToken={accessToken}
+            variant="sidebar"
+            founderActive={founderActive}
+            commands={COMMANDS}
+            onMessage={onMessage}
+            onRefresh={() => {
+              load();
+              onRefresh?.();
+            }}
+          />
           <FounderOsPanel
             accessToken={accessToken}
             founderCredits={founderCredits}

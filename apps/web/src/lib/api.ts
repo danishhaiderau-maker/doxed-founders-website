@@ -514,6 +514,15 @@ export interface UnifiedFeedItem {
   founderSlug?: string;
   amountUsd?: number;
   recentBuyerNames?: string[];
+  shareContext?: {
+    projectName?: string;
+    pctOfActive?: number;
+    detailLine?: string;
+    scoutHighlight?: string | null;
+    scoutThesis?: string | null;
+    summary?: string | null;
+    communitySnippets?: string[];
+  };
 }
 
 export interface PlatformPulseItem {
@@ -1409,6 +1418,7 @@ export function createBuildPost(
 export interface XConnectionStatus {
   connected: boolean;
   canPostInstantly: boolean;
+  tokenExpired?: boolean;
   twitterHandle: string | null;
   message: string;
 }
@@ -1423,6 +1433,22 @@ export function postProofOfConvictionToX(
 ) {
   return apiFetch<{ ok: true; tweetId: string; tweetUrl: string }>(
     '/conviction-share/post-to-x',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function enrichHotBuyShare(
+  input: {
+    projectSlug: string;
+    buyerNames?: string[];
+    pctOfActive?: number;
+    detailLine?: string;
+  },
+  token: string,
+) {
+  return apiFetch<{ text: string; source: 'template' | 'ai' }>(
+    '/feed/enrich-hot-buy-share',
     { method: 'POST', body: JSON.stringify(input) },
     token,
   );

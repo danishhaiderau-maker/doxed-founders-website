@@ -227,21 +227,76 @@ export function buildFeedShareMessage(input: {
   return `${input.headline}${detail}\nLive on Doxxed Crypto 👇\n#Crypto #FounderOS @DoxxedCrypto`;
 }
 
+function paraphraseShareSnippet(text: string, maxLen = 72): string {
+  const flat = text
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!flat) return '';
+  if (flat.length <= maxLen) return flat;
+  const cut = flat.slice(0, maxLen - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
+export function pickHotBuyThesis(input: {
+  scoutHighlight?: string | null;
+  scoutThesis?: string | null;
+  summary?: string | null;
+  projectName?: string;
+}): string {
+  if (input.scoutHighlight?.trim()) {
+    return paraphraseShareSnippet(input.scoutHighlight, 90);
+  }
+  if (input.scoutThesis?.trim()) {
+    return paraphraseShareSnippet(input.scoutThesis, 90);
+  }
+  if (input.summary?.trim() && input.summary.trim().length >= 24) {
+    return paraphraseShareSnippet(input.summary, 90);
+  }
+  return '';
+}
+
 export function buildHotBuyShareMessage(input: {
   ticker: string;
   buyerNames: string[];
   projectName?: string;
+  pctOfActive?: number;
+  detailLine?: string;
+  scoutHighlight?: string | null;
+  scoutThesis?: string | null;
+  summary?: string | null;
+  communitySnippets?: string[];
 }): string {
   const names =
     input.buyerNames.length === 0
       ? 'Traders'
-      : input.buyerNames.length <= 3
+      : input.buyerNames.length <= 2
         ? input.buyerNames.join(', ')
         : `${input.buyerNames.slice(0, 2).join(', ')} +${input.buyerNames.length - 2} more`;
   const label = input.projectName
     ? formatShareProjectLine(input.projectName, input.ticker)
     : formatShareCashtag(input.ticker);
-  return `🔥 ${names} paper-traded ${label} on Doxxed Crypto\nSee who bought · follow top traders · stake predictions 👇\n#ProofOfConviction @DoxxedCrypto`;
+  const pct =
+    input.pctOfActive != null && input.pctOfActive > 0
+      ? ` · ${Math.round(input.pctOfActive * 100)}% of active in 24h`
+      : '';
+  const detail = input.detailLine?.trim() ? `\n${input.detailLine.trim()}` : '';
+  const thesis = pickHotBuyThesis(input);
+  const thesisLine = thesis ? `\nThesis: ${thesis}` : '';
+  const snippets = (input.communitySnippets ?? [])
+    .map((s) => paraphraseShareSnippet(s, 64))
+    .filter(Boolean)
+    .slice(0, 2);
+  const communityLine =
+    snippets.length > 0 ? `\nTraders say: ${snippets.join(' · ')}` : '';
+  const body = `🔥 ${names} bought ${label}${pct}${detail}${thesisLine}${communityLine}`;
+  const maxBody = 240;
+  const trimmed =
+    body.length <= maxBody
+      ? body
+      : `${body.slice(0, maxBody - 1).replace(/\s+\S*$/, '')}…`;
+  return `${trimmed}\nLive on Doxxed Crypto 👇\n#Crypto #FounderOS #ProofOfConviction @DoxxedCrypto`;
 }
 
 export function shareImageFilename(pnlOrRoi: number): string {
