@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ListingStatus, ScoutMarketStatus, SimulatedRaiseStatus } from '@prisma/client';
+import { ListingStatus, ScoutMarketStatus, SimulatedRaiseStatus, ProjectSource } from '@prisma/client';
 import {
   PlatformPulseItem,
   UnifiedFeedCategory,
@@ -236,9 +236,13 @@ export class UnifiedFeedService {
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 30_000);
     const flashes: EngagementFlash[] = [];
 
-    const [listings, markets, comments, stakes] = await Promise.all([
+    const [listings, markets, comments, stakes, paperBuys] = await Promise.all([
       this.prisma.project.findMany({
-        where: { approved: true, createdAt: { gte: sinceDate } },
+        where: {
+          approved: true,
+          source: ProjectSource.CURATED,
+          createdAt: { gte: sinceDate },
+        },
         orderBy: { createdAt: 'desc' },
         take: 3,
         select: { id: true, name: true, ticker: true, slug: true, createdAt: true },
@@ -262,6 +266,15 @@ export class UnifiedFeedService {
         where: { type: 'PREDICTION_STAKE', createdAt: { gte: sinceDate } },
         orderBy: { createdAt: 'desc' },
         take: 5,
+      }),
+      this.prisma.paperTrade.findMany({
+        where: { side: 'BUY', createdAt: { gte: sinceDate } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          user: { select: { name: true, email: true } },
+          project: { select: { ticker: true, slug: true, source: true, founderId: true } },
+        },
       }),
     ]);
 
@@ -304,6 +317,18 @@ export class UnifiedFeedService {
         message: `Someone just staked on a prediction — jump in before the window closes`,
         link: '/predict',
         at: s.createdAt.toISOString(),
+      });
+    }
+
+    for (const buy of paperBuys) {
+      if (buy.project.source !== ProjectSource.DYNAMIC || buy.project.founderId) continue;
+      const name = buy.user.name ?? buy.user.email.split('@')[0];
+      flashes.push({
+        id: `flash-buy-${buy.id}`,
+        emoji: '📈',
+        message: `${name} paper-bought ${buy.project.ticker} — not a verified listing yet`,
+        link: '/paper-trading',
+        at: buy.createdAt.toISOString(),
       });
     }
 
@@ -427,7 +452,11 @@ export class UnifiedFeedService {
 
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const newListings = await this.prisma.project.findMany({
-      where: { approved: true, createdAt: { gte: weekAgo } },
+      where: {
+        approved: true,
+        source: ProjectSource.CURATED,
+        createdAt: { gte: weekAgo },
+      },
       orderBy: { createdAt: 'desc' },
       take: 5,
       select: { slug: true, name: true, ticker: true, createdAt: true },

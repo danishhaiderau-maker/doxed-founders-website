@@ -9,6 +9,7 @@ import {
   LeaderboardPeriod,
   PaperTradeSide,
   Prisma,
+  ProjectLifecycleStage,
   ProjectSource,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -820,6 +821,10 @@ export class PaperTradingService {
         chainId: chain.id,
       },
     });
+    const liveFromPreview =
+      preview.marketPreview.priceUsd != null &&
+      Number(preview.marketPreview.priceUsd) > 0;
+
     if (existingByContract) {
       return this.prisma.project.update({
         where: { id: existingByContract.id },
@@ -827,6 +832,10 @@ export class PaperTradingService {
           dexscreenerUrl: preview.dexscreenerUrl,
           trackingActive: true,
           logoUrl: preview.logoUrl ?? existingByContract.logoUrl,
+          lastTradeAt: new Date(),
+          ...(liveFromPreview
+            ? { isLiveToken: true, lifecycleStage: ProjectLifecycleStage.LIVE_TRADING }
+            : {}),
         },
       });
     }
@@ -853,6 +862,8 @@ export class PaperTradingService {
         approved: true,
         trackingActive: true,
         lastTradeAt: new Date(),
+        isLiveToken: liveFromPreview,
+        lifecycleStage: liveFromPreview ? ProjectLifecycleStage.LIVE_TRADING : ProjectLifecycleStage.IDEA,
         metrics: {
           create: {
             priceUsd: preview.marketPreview.priceUsd

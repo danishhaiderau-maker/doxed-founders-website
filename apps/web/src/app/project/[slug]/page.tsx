@@ -91,8 +91,21 @@ export default function ProjectDetailPage() {
                     )}
                   </div>
                   <p className="mt-1 text-sm text-[var(--color-muted)]">
-                    {project.category?.name} · {project.chain.name}
+                    {project.category?.name ?? 'Token'} · {project.chain.name}
+                    {project.listingKind === 'verified' && ' · Verified listing'}
+                    {project.listingKind === 'founder_os' && ' · Founder OS'}
+                    {project.listingKind === 'paper_track' && ' · Paper track (not listed)'}
                   </p>
+                  {project.listingKind === 'paper_track' && (
+                    <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-sm text-amber-100">
+                      Someone paper-traded this DexScreener token — it is not a verified Doxxed listing.
+                      {' '}
+                      <Link href="/list-your-project" className="font-medium text-amber-200 underline">
+                        Submit a listing
+                      </Link>{' '}
+                      with founder proof for admin approval.
+                    </p>
+                  )}
                   {project.summary && (
                     <p className="mt-3 max-w-2xl text-[var(--color-muted)]">{project.summary}</p>
                   )}
@@ -388,10 +401,12 @@ export default function ProjectDetailPage() {
 
             <section>
               <h3 className="mb-2 text-sm font-semibold uppercase tracking-widest text-emerald-400/90">
-                Project room
+                {project.listingKind === 'paper_track' ? 'Paper trading desk' : 'Project room'}
               </h3>
               <p className="mb-4 text-sm text-[var(--color-muted)]">
-                Videos, build logs, roadmap, demand testing, and simulated raise — all in one place.
+                {project.listingKind === 'paper_track'
+                  ? 'Live market data and paper trades — founder tools unlock after verified listing.'
+                  : 'Videos, build logs, roadmap, demand testing, and simulated raise — all in one place.'}
               </p>
               <ProjectRoomPanel slug={slug} />
             </section>

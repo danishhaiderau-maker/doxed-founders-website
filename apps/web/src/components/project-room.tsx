@@ -116,11 +116,24 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
   }
 
   const channelThreads = room.communityThreads.filter((t) => t.channel === communityChannel);
+  const isPaperTrack = room.listingKind === 'paper_track';
 
   return (
     <div className="mt-8 space-y-6">
-      <ProjectLifecycleBar currentStage={room.lifecycleStage} />
+      {isPaperTrack && (
+        <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 px-4 py-3 text-sm text-amber-100">
+          Paper-traded on DexScreener — not a verified Doxxed listing. Someone bought this token on the
+          platform; use{' '}
+          <Link href="/list-your-project" className="font-medium text-amber-200 underline">
+            List project
+          </Link>{' '}
+          to submit founder proof and get admin approval.
+        </div>
+      )}
 
+      {!isPaperTrack && <ProjectLifecycleBar currentStage={room.lifecycleStage} />}
+
+      {!isPaperTrack && (
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
           ['Stage', stageLabel(room.lifecycleStage)],
@@ -136,7 +149,22 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
           </div>
         ))}
       </div>
+      )}
 
+      {isPaperTrack && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-4 py-3">
+            <p className="text-[10px] uppercase text-zinc-500">Market status</p>
+            <p className="mt-1 font-semibold text-emerald-300">Live trading (DexScreener)</p>
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-4 py-3">
+            <p className="text-[10px] uppercase text-zinc-500">Listing type</p>
+            <p className="mt-1 font-semibold text-amber-200">Paper track only</p>
+          </div>
+        </div>
+      )}
+
+      {!isPaperTrack && (
       <div className="grid gap-6 lg:grid-cols-2">
         <StartupGenomePanel genome={room.genome} />
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
@@ -154,9 +182,10 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
           )}
         </div>
       </div>
+      )}
 
       <div className="flex flex-wrap gap-2 border-b border-zinc-800 pb-3">
-        {TABS.map((t) => (
+        {(isPaperTrack ? (['Overview', 'Trade'] as const) : TABS).map((t) => (
           <button
             key={t}
             type="button"

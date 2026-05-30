@@ -2,7 +2,9 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import {
   POINTS,
@@ -17,12 +19,19 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CastListingVoteDto } from './dto/listing-vote.dto';
 
 @Injectable()
-export class ListingVotesService {
+export class ListingVotesService implements OnModuleInit {
+  private readonly logger = new Logger(ListingVotesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  onModuleInit() {
+    void this.expireClosedVoting();
+    setInterval(() => void this.expireClosedVoting(), 15 * 60 * 1000);
+  }
 
   async getVotingStats() {
     const activeUsers = await this.prisma.user.count({
@@ -160,13 +169,13 @@ export class ListingVotesService {
     const now = new Date();
     const expired = await this.prisma.listingApplication.findMany({
       where: {
-        status: ListingStatus.COMMUNITY_VOTING,
+        status: { in: [ListingStatus.COMMUNITY_VOTING, ListingStatus.PENDING] },
         votingClosesAt: { lt: now },
       },
       include: { votes: true },
     });
 
-    let movedToInbox = 0;
+    let expiredCount = 0;
     for (const app of expired) {
       const tally = tallyListingVotes(
         app.votes.map((v) => ({ vote: v.vote })),
@@ -177,25 +186,20 @@ export class ListingVotesService {
       await this.prisma.listingApplication.update({
         where: { id: app.id },
         data: {
-          status: ListingStatus.PENDING,
+          status: ListingStatus.REJECTED,
           reviewNotes: tally.passed
-            ? 'Community vote passed — ready for admin review.'
-            : `48h voting ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}%) — admin decision required.`,
+            ? 'Voting passed but admin did not approve before the 48h window closed.'
+            : `48h voting ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}%) — not listed.`,
         },
       });
-      movedToInbox += 1;
+      expiredCount += 1;
     }
 
-    if (movedToInbox > 0) {
-      await this.notifications.notifyAllUsers({
-        type: 'LISTING_VOTING',
-        title: 'Scout listings ready for admin review',
-        body: `${movedToInbox} listing(s) finished the 48-hour vote window and are in the admin queue.`,
-        link: '/scout-votes',
-      });
+    if (expiredCount > 0) {
+      this.logger.log(`Expired ${expiredCount} listing vote window(s) without admin approval`);
     }
 
-    return { expired: expired.length, movedToInbox };
+    return { expired: expired.length, expiredCount };
   }
 
   static votingWindowEnd(from = new Date()) {

@@ -725,6 +725,8 @@ export interface ProjectSummary {
   dexscreenerUrl: string | null;
   featured: boolean;
   source: string;
+  listingKind?: 'verified' | 'founder_os' | 'paper_track';
+  isVerifiedListing?: boolean;
   lifecycleStage?: string;
   launchReadiness?: number;
   bubbleScore?: number;
@@ -1042,6 +1044,8 @@ export interface ProjectRoom {
   chain: { slug: string; name: string };
   category: { slug: string; name: string } | null;
   lifecycleStage: string;
+  listingKind?: 'verified' | 'founder_os' | 'paper_track';
+  isVerifiedListing?: boolean;
   launchReadiness: number;
   plannedLaunchDate: string | null;
   launchRequestedAt: string | null;
