@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { copilotHandsFree } from '@/lib/api';
+import { useVoiceInput } from '@/hooks/use-voice-input';
 
 type QuickBuildBarProps = {
   accessToken: string;
@@ -9,26 +10,6 @@ type QuickBuildBarProps = {
   onCaptured?: () => void;
   onMessage?: (msg: string) => void;
 };
-
-type SpeechRecognitionCtor = new () => {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((ev: { results: { [index: number]: { [index: number]: { transcript: string } } } }) => void) | null;
-  onerror: ((ev: { error: string }) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-function getSpeechRecognition(): SpeechRecognitionCtor | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as Window & {
-    SpeechRecognition?: SpeechRecognitionCtor;
-    webkitSpeechRecognition?: SpeechRecognitionCtor;
-  };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
-}
 
 export function QuickBuildBar({
   accessToken,
@@ -38,16 +19,14 @@ export function QuickBuildBar({
 }: QuickBuildBarProps) {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [listening, setListening] = useState(false);
   const [busy, setBusy] = useState(false);
-  const recognitionRef = useRef<InstanceType<NonNullable<ReturnType<typeof getSpeechRecognition>>> | null>(null);
 
-  const stopVoice = useCallback(() => {
-    recognitionRef.current?.stop();
-    setListening(false);
+  const onTranscript = useCallback((text: string) => {
+    setPrompt(text);
+    setOpen(true);
   }, []);
 
-  useEffect(() => () => stopVoice(), [stopVoice]);
+  const { listening, supported, toggle, stop } = useVoiceInput(onTranscript);
 
   async function handleSubmit() {
     if (!founderActive) {
@@ -55,10 +34,10 @@ export function QuickBuildBar({
       return;
     }
     if (!prompt.trim() || busy) return;
+    stop();
     setBusy(true);
     try {
-      const text = listening ? `[voice] ${prompt.trim()}` : prompt.trim();
-      const result = await copilotHandsFree(text, accessToken);
+      const result = await copilotHandsFree(prompt.trim(), accessToken);
       onMessage?.(result.answer);
       setPrompt('');
       setOpen(false);
@@ -70,38 +49,17 @@ export function QuickBuildBar({
     }
   }
 
-  function toggleVoice() {
+  function handleVoiceToggle() {
     if (!founderActive) {
       onMessage?.('Activate your founder profile first');
       return;
     }
-    const Ctor = getSpeechRecognition();
-    if (!Ctor) {
+    if (!supported) {
       onMessage?.('Voice input is not supported in this browser — type your idea instead');
       return;
     }
-    if (listening) {
-      stopVoice();
-      return;
-    }
-    const rec = new Ctor();
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.lang = 'en-US';
-    rec.onresult = (ev) => {
-      const results = ev.results as unknown as { length: number; [index: number]: { [index: number]: { transcript: string } } };
-      const text = Array.from({ length: results.length })
-        .map((_, i) => results[i]?.[0]?.transcript ?? '')
-        .join(' ')
-        .trim();
-      if (text) setPrompt(text);
-    };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
-    recognitionRef.current = rec;
-    setListening(true);
     setOpen(true);
-    rec.start();
+    toggle(prompt);
   }
 
   return (
@@ -118,17 +76,20 @@ export function QuickBuildBar({
       )}
 
       <div
-        className={`fixed inset-x-0 bottom-0 z-50 border-t border-emerald-500/30 bg-zinc-950/95 p-4 backdrop-blur md:bottom-4 md:inset-x-auto md:right-6 md:max-w-md md:rounded-2xl md:border ${
-          open ? 'block' : 'hidden md:block'
+        className={`fixed inset-x-0 bottom-0 z-50 border-t border-emerald-500/30 bg-zinc-950/95 p-4 backdrop-blur lg:inset-x-auto lg:right-8 lg:bottom-8 lg:max-w-xl lg:rounded-2xl lg:border ${
+          open ? 'block' : 'hidden lg:block'
         }`}
       >
-        <div className="mx-auto flex max-w-6xl flex-col gap-2 md:mx-0">
+        <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">Quick Build</p>
             <button
               type="button"
-              onClick={() => setOpen(false)}
-              className="text-xs text-zinc-500 hover:text-white md:hidden"
+              onClick={() => {
+                stop();
+                setOpen(false);
+              }}
+              className="text-xs text-zinc-500 hover:text-white lg:hidden"
             >
               Close
             </button>
@@ -146,15 +107,15 @@ export function QuickBuildBar({
             />
             <button
               type="button"
-              onClick={toggleVoice}
+              onClick={handleVoiceToggle}
               className={`shrink-0 rounded-xl border px-3 py-2 text-sm ${
                 listening
-                  ? 'border-red-500/50 bg-red-950/40 text-red-200 animate-pulse'
+                  ? 'border-red-500/50 bg-red-950/40 text-red-200'
                   : 'border-zinc-600 text-zinc-300 hover:border-violet-500/50'
               }`}
-              title="Founder voice mode"
+              title={listening ? 'Stop recording' : 'Voice input — stays open while you talk'}
             >
-              {listening ? '●' : '🎤'}
+              {listening ? '⏹' : '🎤'}
             </button>
             <button
               type="button"
@@ -165,6 +126,9 @@ export function QuickBuildBar({
               {busy ? '…' : 'Queue'}
             </button>
           </div>
+          {listening && (
+            <p className="text-[10px] text-red-300/90">Listening… tap ⏹ when finished</p>
+          )}
         </div>
       </div>
     </>

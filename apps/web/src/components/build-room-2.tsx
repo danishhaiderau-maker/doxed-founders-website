@@ -209,7 +209,7 @@ export function BuildRoom2({
         />
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_340px]">
+      <div className="grid gap-6 xl:grid-cols-[1fr_380px] 2xl:grid-cols-[1fr_420px]">
         <div className="space-y-6 min-w-0">
           <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
 

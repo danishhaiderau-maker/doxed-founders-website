@@ -24,85 +24,95 @@ function activityIcon(kind: PlatformActivityItem['kind']) {
 }
 
 export function LandingHero() {
-  const features = [
-    { icon: '🔨', label: 'Build in Public' },
-    { icon: '📈', label: 'Validate Demand' },
-    { icon: '⭐', label: 'Earn Reputation' },
-    { icon: '🌐', label: 'Own the Network' },
-  ];
-
   return (
     <section className="relative overflow-hidden border-b border-zinc-800/80">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_50%_-10%,rgba(139,92,246,0.18),transparent)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_50%_40%_at_80%_20%,rgba(59,130,246,0.08),transparent)]" />
-      <div className="relative mx-auto grid max-w-6xl gap-12 px-6 py-16 md:grid-cols-2 md:py-24">
-        <div>
-          <p className="inline-flex items-center gap-2 rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-violet-300">
-            Community-owned platform
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_90%_60%_at_30%_-10%,rgba(139,92,246,0.2),transparent)]" />
+      <div className="relative mx-auto w-full max-w-[90rem] px-4 py-14 sm:px-6 lg:px-10 lg:py-20">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+          <p className="inline-flex items-center gap-2 rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300">
+            The operating system for crypto startups
           </p>
-          <h1 className="mt-6 text-4xl font-bold leading-[1.08] tracking-tight text-white md:text-5xl lg:text-6xl">
-            Build in public. Validate demand.{' '}
-            <span className="bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-400 bg-clip-text text-transparent">
-              Launch with trust.
-            </span>
-          </h1>
-          <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-400">
-            The operating system for crypto startups — where founders ship in public, traders prove
-            conviction with paper capital, and{' '}
-            <strong className="font-medium text-zinc-200">80% of the network belongs to the community</strong>.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Link
-              href="/founder-den"
-              className="rounded-xl bg-violet-600 px-6 py-3.5 text-sm font-semibold text-white transition hover:bg-violet-500"
-            >
-              Open Founder OS →
-            </Link>
-            <Link
-              href="/discover"
-              className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-6 py-3.5 text-sm font-semibold text-white transition hover:border-violet-500/50"
-            >
-              Discover projects
-            </Link>
-          </div>
-          <div className="mt-8 flex flex-wrap gap-4 border-t border-zinc-800/80 pt-6">
-            {features.map((f) => (
-              <span
-                key={f.label}
-                className="inline-flex items-center gap-2 text-xs font-medium text-zinc-400"
-              >
-                <span aria-hidden>{f.icon}</span>
-                {f.label}
-              </span>
-            ))}
-          </div>
+          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-950/30 px-3 py-1 text-[11px] font-medium text-emerald-300">
+            👥 80% community owned
+          </span>
         </div>
 
-        <div className="relative flex items-center justify-center">
-          <div className="relative w-full max-w-md">
-            <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-violet-600/20 via-blue-600/10 to-emerald-600/20 blur-3xl" />
-            <div className="relative rounded-2xl border border-zinc-700/80 bg-zinc-900/60 p-8 backdrop-blur-sm">
-              <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-600 text-3xl font-bold text-white shadow-lg shadow-violet-900/40">
-                E
-              </div>
-              <div className="mt-8 grid grid-cols-2 gap-3 text-sm">
-                {[
-                  { step: 'BUILD', color: 'text-emerald-400', border: 'border-emerald-500/30' },
-                  { step: 'VALIDATE', color: 'text-blue-400', border: 'border-blue-500/30' },
-                  { step: 'RAISE', color: 'text-pink-400', border: 'border-pink-500/30' },
-                  { step: 'LAUNCH', color: 'text-amber-400', border: 'border-amber-500/30' },
-                ].map((s) => (
-                  <div
-                    key={s.step}
-                    className={`rounded-xl border ${s.border} bg-zinc-950/50 px-3 py-2.5 text-center font-semibold ${s.color}`}
+        <div className="grid gap-10 lg:grid-cols-2 lg:gap-12">
+          <div>
+            <h1 className="text-4xl font-bold leading-[1.08] tracking-tight md:text-5xl xl:text-6xl">
+              <span className="text-white">Build in public.</span>
+              <br />
+              <span className="text-sky-300">Validate demand.</span>
+              <br />
+              <span className="bg-gradient-to-r from-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
+                Launch with trust.
+              </span>
+            </h1>
+            <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-400">
+              Where founders ship in public, traders prove conviction with Ddollar paper capital, and{' '}
+              <strong className="font-medium text-zinc-200">80% of the network belongs to the community</strong>.
+            </p>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <Link
+                href="/founder-den"
+                className="rounded-xl bg-violet-600 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 hover:bg-violet-500"
+              >
+                Open Founder OS →
+              </Link>
+              <Link
+                href="/list-your-project"
+                className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-7 py-3.5 text-sm font-semibold text-white hover:border-violet-500/50"
+              >
+                List your project
+              </Link>
+            </div>
+            <div className="mt-8 flex items-center gap-3">
+              <div className="flex -space-x-2">
+                {['DN', 'CF', 'JT', 'BK'].map((initials) => (
+                  <span
+                    key={initials}
+                    className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-zinc-950 bg-gradient-to-br from-violet-500 to-indigo-600 text-[10px] font-bold text-white"
                   >
-                    {s.step}
-                  </div>
+                    {initials}
+                  </span>
                 ))}
               </div>
-              <p className="mt-4 text-center text-xs text-zinc-500">
-                GitHub → validate → raise → launch — one founder workflow
+              <p className="text-sm text-zinc-500">
+                Join founders, traders, scouts & supporters building together.
               </p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-950/30 via-zinc-950/80 to-zinc-950 p-6 shadow-[0_0_80px_rgba(16,185,129,0.08)] lg:p-8">
+            <p className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-300">
+              <span aria-hidden>🛡</span> Privacy-first · trending for a reason
+            </p>
+            <h2 className="mt-4 text-xl font-bold text-white md:text-2xl">
+              Private data stays private. Public proof stays public.
+            </h2>
+            <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+              Self-custody for founder data — cloud memory, GitHub files, browser-local, or a{' '}
+              <strong className="text-zinc-300">Founder Node vault</strong> on your PC. We only relay
+              tiny metadata so you can resume on any device.
+            </p>
+            <Link
+              href="/founder-node"
+              className="mt-5 inline-block rounded-xl border border-emerald-500/40 px-5 py-2.5 text-sm font-semibold text-emerald-200 hover:bg-emerald-950/40"
+            >
+              Set up Founder Node →
+            </Link>
+            <div className="mt-6 grid gap-2 sm:grid-cols-2">
+              {[
+                ['✅ Your vault on your disk', '❌ Not 20GB on our servers'],
+                ['✅ Metadata sync only', '❌ Not full AI chat logs'],
+                ['✅ Verified human, not doxxed', '❌ Not passport images public'],
+                ['✅ GitHub & build proof', '❌ Not wallet seed phrases'],
+              ].map(([yes, no]) => (
+                <div key={yes} className="rounded-lg border border-zinc-800/80 bg-black/30 p-3 text-xs">
+                  <p className="text-emerald-300">{yes}</p>
+                  <p className="mt-1 text-zinc-600">{no}</p>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -232,21 +242,21 @@ function formatStatNumber(value: number) {
 export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
   const items = stats
     ? [
-        { label: 'Verified founders', value: formatStatNumber(stats.verifiedFounders) },
-        { label: 'Active projects', value: formatStatNumber(stats.activeProjects) },
-        { label: 'Ddollar in ecosystem', value: formatUsd(stats.simulatedCapital, 0) },
-        { label: 'Community members', value: formatStatNumber(stats.communityMembers) },
+        { label: 'Verified founders', value: formatStatNumber(stats.verifiedFounders), icon: '🛡' },
+        { label: 'Active projects', value: formatStatNumber(stats.activeProjects), icon: '📦' },
+        { label: 'Ddollar in ecosystem', value: formatUsd(stats.simulatedCapital, 0), icon: '💵' },
+        { label: 'Community members', value: formatStatNumber(stats.communityMembers), icon: '👥' },
       ]
     : [
-        { label: 'Verified founders', value: '—' },
-        { label: 'Active projects', value: '—' },
-        { label: 'Ddollar in ecosystem', value: '—' },
-        { label: 'Community members', value: '—' },
+        { label: 'Verified founders', value: '—', icon: '🛡' },
+        { label: 'Active projects', value: '—', icon: '📦' },
+        { label: 'Ddollar in ecosystem', value: '—', icon: '💵' },
+        { label: 'Community members', value: '—', icon: '👥' },
       ];
 
   return (
     <section className="border-b border-zinc-800/80 bg-zinc-950/60">
-      <div className="mx-auto max-w-6xl px-6 py-10">
+      <div className="mx-auto w-full max-w-[90rem] px-4 py-10 sm:px-6 lg:px-10">
         <div className="flex flex-wrap items-center justify-center gap-3">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
             Platform pulse
@@ -263,15 +273,18 @@ export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
               className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-5 py-4 text-center"
             >
               <p className="text-2xl font-bold text-white">{item.value}</p>
-              <p className="mt-1 text-xs uppercase tracking-widest text-zinc-500">{item.label}</p>
+              <p className="mt-1 flex items-center justify-center gap-1 text-xs uppercase tracking-widest text-zinc-500">
+                <span aria-hidden>{item.icon}</span>
+                {item.label}
+              </p>
             </div>
           ))}
         </div>
         {stats && (stats.totalTrades > 0 || stats.paperTraders > 0) && (
           <p className="mt-4 text-center text-sm text-zinc-500">
             {stats.paperTraders.toLocaleString()} paper traders ·{' '}
-            {stats.totalTrades.toLocaleString()} simulated trades · each trader starts with $10,000
-            virtual cash
+            {stats.totalTrades.toLocaleString()} simulated trades · each trader starts with 10,000
+            Ddollar virtual cash
           </p>
         )}
       </div>
