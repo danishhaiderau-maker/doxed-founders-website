@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProjectSource } from '@prisma/client';
-import { formatUsd } from '@dcf/utils';
+import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
 
@@ -198,6 +198,21 @@ export class ProjectsService {
       throw new NotFoundException('Project not found');
     }
 
+    const marketCap = project.metrics?.marketCap ? Number(project.metrics.marketCap) : null;
+    const listingKind = resolveProjectListingKind({
+      source: project.source,
+      founderId: project.founderId,
+    });
+    const effectiveStage = resolveEffectiveLifecycleStage({
+      source: project.source,
+      founderId: project.founderId,
+      lifecycleStage: project.lifecycleStage,
+      isLiveToken: project.isLiveToken,
+      dexscreenerUrl: project.dexscreenerUrl,
+      contractAddress: project.contractAddress,
+      marketCap,
+    });
+
     const listing = await this.prisma.listingApplication.findFirst({
       where: {
         status: 'APPROVED',
@@ -224,6 +239,13 @@ export class ProjectsService {
 
     return {
       ...this.mapProjectDetail(project),
+      lifecycleStage: effectiveStage,
+      listingKind,
+      isVerifiedListing: listingKind === 'verified',
+      isLiveToken:
+        project.isLiveToken ||
+        effectiveStage === 'LIVE_TRADING' ||
+        effectiveStage === 'TOKEN_LAUNCH',
       verificationDossier: listing
         ? {
             founderName: listing.founderName,

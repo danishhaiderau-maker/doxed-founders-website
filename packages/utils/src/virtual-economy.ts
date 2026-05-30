@@ -134,6 +134,40 @@ export function inferProjectLifecycleStage(input: {
   return input.lifecycleStage;
 }
 
+/** verified = scout/admin listing · founder_os = Founder OS · paper_track = DexScreener paper trade only */
+export type ProjectListingKind = 'verified' | 'founder_os' | 'paper_track';
+
+export function resolveProjectListingKind(input: {
+  source: string;
+  founderId?: string | null;
+}): ProjectListingKind {
+  if (input.source === 'CURATED') return 'verified';
+  if (input.founderId) return 'founder_os';
+  return 'paper_track';
+}
+
+export function resolveEffectiveLifecycleStage(input: {
+  source: string;
+  founderId?: string | null;
+  lifecycleStage: string;
+  isLiveToken: boolean;
+  dexscreenerUrl?: string | null;
+  contractAddress?: string | null;
+  marketCap?: number | null;
+}): string {
+  const inferred = inferProjectLifecycleStage({
+    lifecycleStage: input.lifecycleStage,
+    isLiveToken: input.isLiveToken,
+    dexscreenerUrl: input.dexscreenerUrl,
+    contractAddress: input.contractAddress,
+    marketCap: input.marketCap,
+  });
+  const kind = resolveProjectListingKind({ source: input.source, founderId: input.founderId });
+  if (kind === 'verified' && inferred === 'IDEA') return 'LAUNCH_READY';
+  if (kind === 'founder_os') return inferred === 'LIVE_TRADING' ? inferred : input.lifecycleStage;
+  return inferred;
+}
+
 export function formatStageBucketLabel(bucket: StageBucket): string {
   return getStageBucketMeta(bucket).label;
 }

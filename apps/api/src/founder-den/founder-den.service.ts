@@ -22,6 +22,8 @@ import {
   TOP_UP_FEE_USD,
   slugify,
   inferProjectLifecycleStage,
+  resolveProjectListingKind,
+  resolveEffectiveLifecycleStage,
   getStageBucket,
   computeJourneyProgress,
   POINTS,
@@ -195,6 +197,35 @@ export class FounderDenService {
 
     if (!project) throw new NotFoundException('Project not found');
 
+    const marketCap = project.metrics?.marketCap ? Number(project.metrics.marketCap) : null;
+    const listingKind = resolveProjectListingKind({
+      source: project.source,
+      founderId: project.founderId,
+    });
+    const effectiveStage = resolveEffectiveLifecycleStage({
+      source: project.source,
+      founderId: project.founderId,
+      lifecycleStage: project.lifecycleStage,
+      isLiveToken: project.isLiveToken,
+      dexscreenerUrl: project.dexscreenerUrl,
+      contractAddress: project.contractAddress,
+      marketCap,
+    });
+
+    if (
+      effectiveStage !== project.lifecycleStage ||
+      ((effectiveStage === 'LIVE_TRADING' || effectiveStage === 'TOKEN_LAUNCH') && !project.isLiveToken)
+    ) {
+      await this.prisma.project.update({
+        where: { id: project.id },
+        data: {
+          lifecycleStage: effectiveStage as ProjectLifecycleStage,
+          isLiveToken:
+            effectiveStage === 'LIVE_TRADING' || effectiveStage === 'TOKEN_LAUNCH',
+        },
+      });
+    }
+
     const activeRaise = project.simulatedRaises.find((r) => r.status === SimulatedRaiseStatus.ACTIVE);
     const totalAllocated = activeRaise
       ? activeRaise.allocations.reduce((s, a) => s + Number(a.amountUsd), 0)
@@ -249,11 +280,16 @@ export class FounderDenService {
       dexscreenerUrl: project.dexscreenerUrl,
       chain: project.chain,
       category: project.category,
-      lifecycleStage: project.lifecycleStage,
+      lifecycleStage: effectiveStage,
+      listingKind,
+      isVerifiedListing: listingKind === 'verified',
       launchReadiness,
       plannedLaunchDate: project.plannedLaunchDate,
       launchRequestedAt: project.launchRequestedAt,
-      isLiveToken: project.isLiveToken,
+      isLiveToken:
+        project.isLiveToken ||
+        effectiveStage === 'LIVE_TRADING' ||
+        effectiveStage === 'TOKEN_LAUNCH',
       launchPriceUsd: project.launchPriceUsd ? Number(project.launchPriceUsd) : null,
       followerCount: project._count.followers,
       isFollowing,
@@ -998,7 +1034,13 @@ export class FounderDenService {
 
   async getDiscover(filter?: string, stageBucket?: string) {
     const projects = await this.prisma.project.findMany({
-      where: { approved: true, founderId: { not: null } },
+      where: {
+        approved: true,
+        OR: [
+          { source: ProjectSource.CURATED, founderId: { not: null } },
+          { source: ProjectSource.DYNAMIC, founderId: { not: null } },
+        ],
+      },
       include: {
         chain: { select: { slug: true, name: true } },
         category: { select: { slug: true, name: true } },
@@ -1035,10 +1077,19 @@ export class FounderDenService {
           contractAddress: p.contractAddress,
           marketCap,
         });
-        const effectiveStage =
-          p.source === ProjectSource.CURATED && effectiveStageRaw === 'IDEA'
-            ? 'LAUNCH_READY'
-            : effectiveStageRaw;
+        const listingKind = resolveProjectListingKind({
+          source: p.source,
+          founderId: p.founderId,
+        });
+        const effectiveStage = resolveEffectiveLifecycleStage({
+          source: p.source,
+          founderId: p.founderId,
+          lifecycleStage: p.lifecycleStage,
+          isLiveToken: p.isLiveToken,
+          dexscreenerUrl: p.dexscreenerUrl,
+          contractAddress: p.contractAddress,
+          marketCap,
+        });
 
         if (
           effectiveStage !== p.lifecycleStage &&
@@ -1103,6 +1154,7 @@ export class FounderDenService {
           lastUpdateHeadline: latestPost?.headline ?? null,
           isLiveToken: p.isLiveToken || effectiveStage === 'LIVE_TRADING',
           source: p.source,
+          listingKind,
           createdAt: p.createdAt,
         };
       }),
@@ -1112,7 +1164,9 @@ export class FounderDenService {
     if (stageBucket) {
       filtered = mapped.filter((p) => p.stageBucket === stageBucket);
       if (stageBucket === 'IDEA_STAGE') {
-        filtered = filtered.filter((p) => p.source === ProjectSource.DYNAMIC);
+        filtered = filtered.filter(
+          (p) => p.listingKind === 'founder_os' && p.stageBucket === 'IDEA_STAGE',
+        );
       }
     }
 

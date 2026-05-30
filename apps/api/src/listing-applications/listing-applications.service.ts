@@ -168,6 +168,12 @@ export class ListingApplicationsService {
     });
 
     if (dto.status === 'APPROVED') {
+      if (application.votingClosesAt && application.votingClosesAt.getTime() <= Date.now()) {
+        throw new BadRequestException(
+          'Voting window has closed without admin approval — this listing cannot be published. Traders can still paper-trade the token.',
+        );
+      }
+
       const published = await this.publish.publishApprovedApplication(merged);
 
       const updated = await this.prisma.listingApplication.update({
