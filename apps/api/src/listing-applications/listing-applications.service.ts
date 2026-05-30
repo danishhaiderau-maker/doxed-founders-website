@@ -107,12 +107,6 @@ export class ListingApplicationsService {
         summary: dto.summary,
         whyList: dto.whyList.trim(),
         whyDoxxed: dto.whyDoxxed?.trim() ?? null,
-        founderDoxxedStatus: doxxedStatus,
-        scoutHighlightNote:
-          dto.scoutHighlightNote?.trim() ??
-          (doxxedStatus === 'BUILDING_IN_PUBLIC'
-            ? dto.whyDoxxed?.replace(/^\[Building in public[^\]]*\]\s*/i, '').trim() ?? null
-            : null),
         marketPreview: dto.marketPreview as Prisma.InputJsonValue | undefined,
         verificationScore: verification.score,
         verificationCriteria: verification.criteria,

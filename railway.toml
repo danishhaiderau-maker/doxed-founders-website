@@ -5,5 +5,5 @@ buildCommand = "npm ci && npm run build:utils && npx prisma generate --schema=pr
 [deploy]
 startCommand = "node scripts/start-api-prod.mjs"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

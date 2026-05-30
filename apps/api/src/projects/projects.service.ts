@@ -64,8 +64,7 @@ export class ProjectsService {
             orderBy: { reviewedAt: 'desc' },
             select: {
               ticker: true,
-              founderDoxxedStatus: true,
-              scoutHighlightNote: true,
+              whyList: true,
               whyDoxxed: true,
             },
           })
@@ -90,6 +89,7 @@ export class ProjectsService {
     listing?: {
       scoutHighlightNote?: string | null;
       founderDoxxedStatus?: string | null;
+      whyList?: string | null;
       whyDoxxed?: string | null;
     } | null,
   ) {
@@ -109,6 +109,9 @@ export class ProjectsService {
         scoutHighlight: note || why,
         founderDoxxedStatus: 'BUILDING_IN_PUBLIC' as const,
       };
+    }
+    if (listing.whyList?.trim()) {
+      return { scoutHighlight: listing.whyList.trim(), founderDoxxedStatus: null };
     }
     return { scoutHighlight: null, founderDoxxedStatus: null };
   }
