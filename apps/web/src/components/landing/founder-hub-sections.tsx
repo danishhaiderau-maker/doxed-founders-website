@@ -56,7 +56,7 @@ export function LatestFounderVideos({ limit = 8 }: { limit?: number }) {
             <h2 className="mt-2 text-2xl font-bold text-white">Latest founder videos</h2>
             <p className="mt-2 text-sm text-zinc-500">Hear founders explain their ideas — verified presence, not paperwork.</p>
           </div>
-          <Link href="/build-feed" className="text-sm text-emerald-400 hover:underline">
+          <Link href="/feed" className="text-sm text-emerald-400 hover:underline">
             Build feed →
           </Link>
         </div>

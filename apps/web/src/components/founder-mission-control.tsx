@@ -259,8 +259,8 @@ export function FounderMissionControl({
         <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-semibold text-white">Founder feed</h3>
-            <Link href="/build-feed" className="text-xs text-blue-400 hover:underline">
-              Build feed →
+            <Link href="/feed" className="text-xs text-blue-400 hover:underline">
+              Feed →
             </Link>
           </div>
           <p className="mt-1 text-xs text-zinc-500">Your published updates</p>

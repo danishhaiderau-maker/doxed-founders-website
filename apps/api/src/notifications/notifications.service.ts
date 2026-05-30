@@ -4,6 +4,27 @@ import { PrismaService } from '../prisma/prisma.service';
 
 function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | undefined {
   switch (category) {
+    case 'following':
+      return {
+        type: { in: [NotificationType.FOUNDER_UPDATES, NotificationType.TRADER_WIN, NotificationType.TRADER_LOSS] },
+      };
+    case 'projects':
+      return { type: NotificationType.FOUNDER_UPDATES };
+    case 'market':
+      return {
+        type: { in: [NotificationType.TRENDING_BUYS, NotificationType.TRADER_WIN, NotificationType.TRADER_LOSS] },
+      };
+    case 'platform':
+      return {
+        type: {
+          in: [
+            NotificationType.LISTING_VOTING,
+            NotificationType.LISTING_APPROVED,
+            NotificationType.SYSTEM,
+            NotificationType.FOUNDER_EVENT,
+          ],
+        },
+      };
     case 'build':
       return { type: NotificationType.BUILD_QUEUE };
     case 'agents':

@@ -175,8 +175,8 @@ export function LandingLiveActivity() {
             </p>
             <h2 className="mt-1 text-lg font-semibold text-white">Real activity — not vanity metrics</h2>
           </div>
-          <Link href="/build-feed" className="text-sm text-blue-400 hover:underline">
-            Build feed →
+          <Link href="/feed" className="text-sm text-blue-400 hover:underline">
+            Feed →
           </Link>
         </div>
         {loading ? (
@@ -352,7 +352,7 @@ export function LandingFounderOsWorkflow() {
             Open Founder OS
           </Link>
           <Link
-            href="/build-feed"
+            href="/feed"
             className="rounded-xl border border-zinc-700 px-6 py-3 text-sm text-zinc-300 hover:text-white"
           >
             See build feed

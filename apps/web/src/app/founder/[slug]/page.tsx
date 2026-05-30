@@ -167,7 +167,7 @@ export default function FounderDetailPage() {
               <section>
                 <div className="mb-4 flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">Build log</h3>
-                  <Link href="/build-feed" className="text-xs text-emerald-400 hover:underline">
+                  <Link href="/feed" className="text-xs text-emerald-400 hover:underline">
                     Full feed →
                   </Link>
                 </div>
