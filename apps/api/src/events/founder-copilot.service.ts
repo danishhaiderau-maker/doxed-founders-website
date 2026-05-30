@@ -14,11 +14,14 @@ import {
   computeProjectProgress,
   detectHandsFreeAction,
   formatRelativeTime,
+  FOUNDER_OS_MEMORY_DIR,
+  type DeviceMemoryPayload,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
 import { BuilderService } from '../builder/builder.service';
 import { GitHubApiService } from '../github/github-api.service';
+import { FounderOsMemoryService } from '../github/founder-os-memory.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from './events.service';
 import { FounderMetricsService } from './founder-metrics.service';
@@ -31,6 +34,7 @@ export class FounderCopilotService {
     private readonly metrics: FounderMetricsService,
     private readonly builder: BuilderService,
     private readonly github: GitHubApiService,
+    private readonly memory: FounderOsMemoryService,
     @Inject(forwardRef(() => BuildQueueService))
     private readonly buildQueue: BuildQueueService,
     @Inject(forwardRef(() => FounderOsService))
@@ -129,12 +133,25 @@ export class FounderCopilotService {
         })
       : 0;
 
+    const githubMemory = repo ? await this.memory.readRepoMemory(userId, repo) : null;
+    const goalFromGithub = githubMemory?.currentGoalFromRepo?.trim();
+    const effectiveGoal = goalFromGithub || currentGoal;
+
     const cursorCopy = buildResumeCursorPrompt({
       projectName: project?.name ?? founder.name,
-      currentGoal,
+      currentGoal: effectiveGoal,
       suggestedNext,
       openTasks: tasks.map((t) => t.title),
       lastCommit: lastCommit ?? undefined,
+    });
+
+    const memoryPrefix = repo
+      ? `Read ${FOUNDER_OS_MEMORY_DIR}/project-context.md, roadmap.md, and tasks.json in this repo first.\n\n`
+      : '';
+    const cursorCopyWithRepo = `${memoryPrefix}${cursorCopy}`;
+
+    const deviceSyncRow = await this.prisma.projectMemoryDeviceSync.findUnique({
+      where: { userId },
     });
 
     return {
@@ -142,7 +159,7 @@ export class FounderCopilotService {
       project: project
         ? { id: project.id, name: project.name, slug: project.slug, lifecycleStage: project.lifecycleStage }
         : null,
-      currentGoal,
+      currentGoal: effectiveGoal,
       progressPercent,
       launchReadiness: readiness.score,
       buildStreakDays: founder.buildStreakDays,
@@ -173,7 +190,23 @@ export class FounderCopilotService {
         featureRequests,
       },
       defaultAiProvider: settings?.defaultProvider ?? 'RULE_BASED',
-      cursorCopy,
+      memoryStorageMode: settings?.memoryStorageMode ?? 'PLATFORM',
+      cursorCopy: cursorCopyWithRepo,
+      deviceSync: deviceSyncRow
+        ? {
+            updatedAt: deviceSyncRow.updatedAt.toISOString(),
+            deviceLabel: deviceSyncRow.deviceLabel,
+            payload: deviceSyncRow.payload,
+          }
+        : null,
+      githubMemory: githubMemory
+        ? {
+            repoFullName: githubMemory.repoFullName,
+            hasProjectContext: Boolean(githubMemory.projectContext),
+            hasRoadmap: Boolean(githubMemory.roadmap),
+            openTasksFromRepo: githubMemory.openTasksFromRepo,
+          }
+        : null,
     };
   }
 
@@ -252,10 +285,13 @@ export class FounderCopilotService {
       | null = null;
 
     if (settings?.defaultProvider === 'CURSOR') {
+      const githubPrefix = memory.repoFullName
+        ? `Read ${FOUNDER_OS_MEMORY_DIR}/ in repo ${memory.repoFullName} first.\n\n`
+        : '';
       try {
         cursorCloudDispatch = await this.builder.dispatchCursorBuildTask(userId, {
           spec: memory.currentGoal,
-          cursorPrompt: prompt,
+          cursorPrompt: `${githubPrefix}${prompt}`,
           repository: memory.repoFullName ?? undefined,
         });
         message =
@@ -468,5 +504,52 @@ export class FounderCopilotService {
         };
       }
     }
+  }
+
+  async getDeviceMemorySync(userId: string) {
+    const row = await this.prisma.projectMemoryDeviceSync.findUnique({ where: { userId } });
+    if (!row) return { payload: null, updatedAt: null, deviceLabel: null };
+    return {
+      updatedAt: row.updatedAt.toISOString(),
+      deviceLabel: row.deviceLabel,
+      payload: row.payload as DeviceMemoryPayload,
+    };
+  }
+
+  async saveDeviceMemorySync(userId: string, payload: DeviceMemoryPayload) {
+    if (payload.version !== 1 || !payload.currentGoal?.trim()) {
+      throw new BadRequestException('Invalid memory payload');
+    }
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    if (settings?.memoryStorageMode === 'LOCAL_DEVICE') {
+      throw new BadRequestException(
+        'Cloud relay is off in "This device only" mode. Enable Local + cloud sync to resume on other devices.',
+      );
+    }
+
+    const row = await this.prisma.projectMemoryDeviceSync.upsert({
+      where: { userId },
+      create: {
+        userId,
+        payload,
+        deviceLabel: payload.deviceLabel ?? null,
+      },
+      update: {
+        payload,
+        deviceLabel: payload.deviceLabel ?? null,
+      },
+    });
+
+    await this.prisma.founderBuilderSettings.upsert({
+      where: { userId },
+      create: { userId, currentGoalFocus: payload.currentGoal.trim() },
+      update: { currentGoalFocus: payload.currentGoal.trim() },
+    });
+
+    return {
+      success: true,
+      updatedAt: row.updatedAt.toISOString(),
+    };
   }
 }

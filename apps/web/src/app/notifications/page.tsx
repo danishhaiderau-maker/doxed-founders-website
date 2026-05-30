@@ -4,13 +4,24 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import type { NotificationBuyerMeta } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
+import { NotificationBuyersPanel } from '@/components/notification-buyers-panel';
+import { FollowTraderButton } from '@/components/follow-trader-button';
 import {
   AppNotification,
+  fetchAccountFollowing,
   fetchNotifications,
   markAllNotificationsRead,
   markNotificationRead,
 } from '@/lib/api';
+
+function parseBuyerMeta(raw: unknown): NotificationBuyerMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const m = raw as NotificationBuyerMeta;
+  if (!m.buyers && !m.projectTicker) return null;
+  return m;
+}
 
 export default function NotificationsPage() {
   const { data: session, status } = useSession();
@@ -18,6 +29,7 @@ export default function NotificationsPage() {
   const [items, setItems] = useState<AppNotification[]>([]);
   const [category, setCategory] = useState<string>('all');
   const [error, setError] = useState<string | null>(null);
+  const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
 
   const token = session?.accessToken;
 
@@ -32,7 +44,12 @@ export default function NotificationsPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      setItems(await fetchNotifications(token, category === 'all' ? undefined : category));
+      const [notes, following] = await Promise.all([
+        fetchNotifications(token, category === 'all' ? undefined : category),
+        fetchAccountFollowing(token),
+      ]);
+      setItems(notes);
+      setFollowingIds(new Set(following.map((f) => f.userId)));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load notifications');
@@ -47,6 +64,15 @@ export default function NotificationsPage() {
     }
     load();
   }, [status, load, router, category]);
+
+  function handleFollowChange(userId: string, following: boolean) {
+    setFollowingIds((prev) => {
+      const next = new Set(prev);
+      if (following) next.add(userId);
+      else next.delete(userId);
+      return next;
+    });
+  }
 
   async function handleRead(id: string) {
     if (!token) return;
@@ -91,19 +117,34 @@ export default function NotificationsPage() {
             </button>
           ))}
         </div>
-        <div className="mb-6 flex items-center justify-between gap-4">
+
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-[var(--color-muted)]">
-            Hot buys, Scout votes, founder updates, and platform signals.
+            See who bought, follow traders, and track hot markets.
           </p>
-          {items.some((n) => !n.readAt) && (
-            <button
-              type="button"
-              onClick={handleReadAll}
-              className="text-sm text-[var(--color-accent)] hover:underline"
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/leaderboard"
+              className="rounded-full border border-emerald-500/40 bg-emerald-950/30 px-3 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-950/50"
             >
-              Mark all read
-            </button>
-          )}
+              Top traders
+            </Link>
+            <Link
+              href="/leaderboard?tab=losers"
+              className="rounded-full border border-red-500/40 bg-red-950/30 px-3 py-1 text-xs font-medium text-red-300 hover:bg-red-950/50"
+            >
+              Top losers
+            </Link>
+            {items.some((n) => !n.readAt) && (
+              <button
+                type="button"
+                onClick={handleReadAll}
+                className="text-sm text-[var(--color-accent)] hover:underline"
+              >
+                Mark all read
+              </button>
+            )}
+          </div>
         </div>
 
         {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}
@@ -115,54 +156,84 @@ export default function NotificationsPage() {
           {items.map((n) => {
             const isWin = n.type === 'TRADER_WIN';
             const isLoss = n.type === 'TRADER_LOSS';
+            const isHotBuy = n.type === 'TRENDING_BUYS';
             const isBuild = n.type === 'BUILD_QUEUE';
             const isAgent = n.type === 'AGENT_RESULT';
-            const accent =
-              isBuild
+            const buyerMeta = parseBuyerMeta(n.metadata);
+            const traderMeta = n.metadata as { traderUserId?: string; displayName?: string } | null;
+
+            const accent = isHotBuy
+              ? 'border-amber-500/40 bg-amber-950/20'
+              : isBuild
                 ? 'border-violet-500/40 bg-violet-950/20'
                 : isAgent
                   ? 'border-purple-500/40 bg-purple-950/20'
                   : isWin
-                ? 'border-emerald-500/40 bg-emerald-950/20'
-                : isLoss
-                  ? 'border-red-500/40 bg-red-950/20'
-                  : n.readAt
-                    ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
-                    : 'border-emerald-500/30 bg-[var(--color-card)]';
+                    ? 'border-emerald-500/40 bg-emerald-950/20'
+                    : isLoss
+                      ? 'border-red-500/40 bg-red-950/20'
+                      : n.readAt
+                        ? 'border-[var(--color-border)] bg-[var(--color-card)]/50 opacity-80'
+                        : 'border-emerald-500/30 bg-[var(--color-card)]';
+
             return (
-            <article
-              key={n.id}
-              className={`rounded-xl border p-4 ${accent}`}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <h2 className="font-semibold">{n.title}</h2>
-                  <p className="mt-1 text-sm text-[var(--color-muted)]">{n.body}</p>
-                  <p className="mt-2 text-xs text-[var(--color-muted)]">
-                    {new Date(n.createdAt).toLocaleString()}
-                  </p>
+              <article key={n.id} className={`rounded-xl border p-4 ${accent}`}>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <h2 className="font-semibold">{n.title}</h2>
+                    <p className="mt-1 text-sm text-[var(--color-muted)]">{n.body}</p>
+
+                    {buyerMeta && (
+                      <NotificationBuyersPanel
+                        metadata={buyerMeta}
+                        token={token}
+                        followingIds={followingIds}
+                        onFollowChange={handleFollowChange}
+                      />
+                    )}
+
+                    {traderMeta?.traderUserId && !buyerMeta && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Link
+                          href={`/portfolio/${traderMeta.traderUserId}`}
+                          className="text-sm font-medium text-emerald-400 hover:underline"
+                        >
+                          {traderMeta.displayName ?? 'View trader'}
+                        </Link>
+                        <FollowTraderButton
+                          userId={traderMeta.traderUserId}
+                          token={token}
+                          initiallyFollowing={followingIds.has(traderMeta.traderUserId)}
+                          onChange={(f) => handleFollowChange(traderMeta.traderUserId!, f)}
+                        />
+                      </div>
+                    )}
+
+                    <p className="mt-2 text-xs text-[var(--color-muted)]">
+                      {new Date(n.createdAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    {n.link && (
+                      <Link
+                        href={n.link}
+                        className="rounded-lg bg-[var(--color-accent)]/90 px-3 py-1.5 text-xs font-medium text-white"
+                      >
+                        Open
+                      </Link>
+                    )}
+                    {!n.readAt && (
+                      <button
+                        type="button"
+                        onClick={() => handleRead(n.id)}
+                        className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white"
+                      >
+                        Mark read
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  {n.link && (
-                    <Link
-                      href={n.link}
-                      className="rounded-lg bg-[var(--color-accent)]/90 px-3 py-1.5 text-xs font-medium text-white"
-                    >
-                      Open
-                    </Link>
-                  )}
-                  {!n.readAt && (
-                    <button
-                      type="button"
-                      onClick={() => handleRead(n.id)}
-                      className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white"
-                    >
-                      Mark read
-                    </button>
-                  )}
-                </div>
-              </div>
-            </article>
+              </article>
             );
           })}
         </div>

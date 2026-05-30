@@ -119,6 +119,60 @@ export class GitHubApiService {
     return { number: issue.number, url: issue.html_url, title: issue.title };
   }
 
+  async getRepoFile(userId: string, repo: string, path: string): Promise<string | null> {
+    const token = await this.getToken(userId);
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encoded}`, {
+      headers: this.headers(token),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: string; encoding?: string };
+    if (!data.content || data.encoding !== 'base64') return null;
+    return Buffer.from(data.content, 'base64').toString('utf8');
+  }
+
+  async upsertRepoFile(
+    userId: string,
+    repo: string,
+    path: string,
+    content: string,
+    message: string,
+  ): Promise<{ created: boolean; sha?: string }> {
+    const token = await this.getToken(userId);
+    if (!token) {
+      throw new BadRequestException('Connect a GitHub personal access token in Builder settings to sync memory files');
+    }
+
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    const existingRes = await fetch(`https://api.github.com/repos/${repo}/contents/${encoded}`, {
+      headers: this.headers(token),
+    });
+    let sha: string | undefined;
+    if (existingRes.ok) {
+      const existing = (await existingRes.json()) as { sha?: string };
+      sha = existing.sha;
+    }
+
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encoded}`, {
+      method: 'PUT',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        content: Buffer.from(content, 'utf8').toString('base64'),
+        ...(sha ? { sha } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not write ${path} to GitHub`);
+    }
+
+    const payload = (await res.json()) as { content?: { sha?: string } };
+    return { created: !sha, sha: payload.content?.sha };
+  }
+
   private headers(token: string | null): Record<string, string> {
     const h: Record<string, string> = {
       Accept: 'application/vnd.github+json',

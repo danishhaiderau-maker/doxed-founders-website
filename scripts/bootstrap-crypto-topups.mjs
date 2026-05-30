@@ -43,6 +43,7 @@ function argValue(flag) {
 
 loadEnvFile(path.join(getVaultDir(), '.env.neon'));
 loadEnvFile(path.join(getVaultDir(), '.env'));
+loadEnvFile(path.join(getVaultDir(), '.env.x.secrets'));
 loadEnvFile(path.join(root, '.env'));
 
 const treasuryArg =
@@ -51,8 +52,8 @@ const treasuryArg =
   process.env.PLATFORM_SOLANA_TREASURY?.trim();
 
 const rpcUrl =
-  process.env.SOLANA_RPC_URL?.trim() ||
   process.env.HELIUS_RPC_URL?.trim() ||
+  process.env.SOLANA_RPC_URL?.trim() ||
   'https://api.mainnet-beta.solana.com';
 
 if (!process.env.DATABASE_URL?.startsWith('postgres')) {
@@ -111,7 +112,9 @@ try {
   console.log('Admin Solana wallets:', adminWallets.length ? adminWallets.map((w) => w.address).join(', ') : '(none)');
 
   const railwayPaste = [
-    `SOLANA_RPC_URL=${rpcUrl}`,
+    process.env.HELIUS_RPC_URL?.trim()
+      ? `HELIUS_RPC_URL=${process.env.HELIUS_RPC_URL.trim()}`
+      : `SOLANA_RPC_URL=${rpcUrl}`,
     finalTreasury ? `PLATFORM_SOLANA_TREASURY=${finalTreasury}` : null,
   ]
     .filter(Boolean)

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
+import type { DeviceMemoryPayload } from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { EventsService } from './events.service';
@@ -44,5 +45,15 @@ export class EventsController {
   @Post('copilot/hands-free')
   handsFree(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
     return this.copilot.handsFree(user.id, body.prompt);
+  }
+
+  @Get('copilot/memory/device-sync')
+  deviceMemoryGet(@CurrentUser() user: AuthUser) {
+    return this.copilot.getDeviceMemorySync(user.id);
+  }
+
+  @Post('copilot/memory/device-sync')
+  deviceMemorySave(@CurrentUser() user: AuthUser, @Body() body: DeviceMemoryPayload) {
+    return this.copilot.saveDeviceMemorySync(user.id, body);
   }
 }

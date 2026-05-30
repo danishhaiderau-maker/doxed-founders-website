@@ -458,6 +458,26 @@ function PaperTradingPageContent() {
             {guestPortfolioNotice}
           </div>
         )}
+        <div className="lg:col-span-5 flex flex-wrap gap-2">
+          <Link
+            href="/leaderboard"
+            className="rounded-full border border-emerald-500/40 bg-emerald-950/25 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950/40"
+          >
+            Top traders → follow winners
+          </Link>
+          <Link
+            href="/leaderboard?tab=losers"
+            className="rounded-full border border-red-500/40 bg-red-950/25 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/40"
+          >
+            Top losers → learn from busts
+          </Link>
+          <Link
+            href="/notifications"
+            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white"
+          >
+            Trade alerts
+          </Link>
+        </div>
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
             <h2 className="font-semibold">Trade any token</h2>

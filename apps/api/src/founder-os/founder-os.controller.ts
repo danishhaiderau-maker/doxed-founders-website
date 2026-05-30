@@ -28,6 +28,11 @@ export class FounderOsController {
     return this.founderOs.syncGitHubCommits(user.id);
   }
 
+  @Post('memory/sync')
+  syncMemory(@CurrentUser() user: AuthUser) {
+    return this.founderOs.syncProjectMemory(user.id);
+  }
+
   @Post('integrations/connect')
   connectIntegration(
     @CurrentUser() user: AuthUser,

@@ -21,7 +21,8 @@ const PRIMARY_NAV = [
 
 const MORE_NAV = [
   { href: '/watchlist', label: 'Watchlist', auth: true },
-  { href: '/leaderboard', label: 'Leaderboard' },
+  { href: '/leaderboard', label: 'Top traders' },
+  { href: '/leaderboard?tab=losers', label: 'Top losers' },
 ] as const;
 
 const PROFILE_LINKS = [
