@@ -80,6 +80,11 @@ async function run() {
     return res.status === 401;
   });
 
+  await runCheck('prediction-markets', async () => {
+    const { res, body } = await fetchJson('/api/prediction-markets');
+    return res.ok && Array.isArray(body);
+  });
+
   await runCheck('reset-info', async () => {
     const { res, body } = await fetchJson('/api/paper-trading/reset-info');
     return res.ok && typeof body?.resetFeeUsd === 'number' && body.resetFeeUsd > 0;

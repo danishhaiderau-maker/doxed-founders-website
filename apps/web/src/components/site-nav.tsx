@@ -41,6 +41,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/scout-votes') return pathname.startsWith('/scout-votes');
+  if (href === '/predict') return pathname.startsWith('/predict');
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
   if (href.startsWith('/account')) return pathname.startsWith('/account');
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -263,6 +264,17 @@ function SiteNavInner() {
         </Link>
       )}
 
+      <Link
+        href="/predict"
+        className={cn(
+          'rounded-lg px-4 py-2 font-medium text-white transition',
+          pathname.startsWith('/predict')
+            ? 'bg-indigo-500 ring-2 ring-indigo-300/50'
+            : 'bg-indigo-600 hover:bg-indigo-500',
+        )}
+      >
+        Predict
+      </Link>
       <Link
         href="/scout-votes"
         className={cn(

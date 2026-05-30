@@ -44,6 +44,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from '../events/events.service';
 import { BuilderService } from '../builder/builder.service';
+import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 import { NotificationType, ScoutMarketStatus } from '@prisma/client';
 
 const founderRoomInclude = {
@@ -91,6 +92,7 @@ export class FounderDenService {
     private readonly founderOs: FounderOsService,
     private readonly events: EventsService,
     private readonly builder: BuilderService,
+    private readonly predictionMarkets: PredictionMarketsService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -1666,54 +1668,7 @@ export class FounderDenService {
   }
 
   async listScoutMarkets(slug: string, viewerUserId?: string) {
-    const project = await this.prisma.project.findUnique({
-      where: { slug },
-      include: { founder: true },
-    });
-    if (!project) throw new NotFoundException('Project not found');
-
-    let markets = await this.prisma.scoutMarket.findMany({
-      where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
-      orderBy: { createdAt: 'asc' },
-      include: { positions: true },
-    });
-
-    if (markets.length === 0 && project.founder) {
-      await this.prisma.scoutMarket.createMany({
-        data: DEFAULT_SCOUT_QUESTIONS.map((question) => ({
-          projectId: project.id,
-          question,
-        })),
-      });
-      markets = await this.prisma.scoutMarket.findMany({
-        where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
-        orderBy: { createdAt: 'asc' },
-        include: { positions: true },
-      });
-    }
-
-    return markets.map((m) => {
-      const yesPool = Number(m.yesPoolUsd);
-      const noPool = Number(m.noPoolUsd);
-      const viewerPosition = viewerUserId
-        ? m.positions.find((p) => p.userId === viewerUserId)
-        : undefined;
-      return {
-        id: m.id,
-        question: m.question,
-        status: m.status,
-        yesPoolUsd: yesPool,
-        noPoolUsd: noPool,
-        conviction: computeScoutConviction(yesPool, noPool),
-        participantCount: m.positions.filter((p) => Number(p.amountUsd) > 0).length,
-        viewerPosition: viewerPosition
-          ? {
-              side: viewerPosition.side,
-              amountUsd: Number(viewerPosition.amountUsd),
-            }
-          : null,
-      };
-    });
+    return this.predictionMarkets.listForProject(slug, viewerUserId);
   }
 
   async stakeScoutMarket(
@@ -1722,109 +1677,7 @@ export class FounderDenService {
     side: 'YES' | 'NO',
     amountUsd: number,
   ) {
-    if (amountUsd < 10) throw new BadRequestException('Minimum scout stake is $10');
-    if (side !== 'YES' && side !== 'NO') throw new BadRequestException('Side must be YES or NO');
-
-    const market = await this.prisma.scoutMarket.findUnique({
-      where: { id: marketId },
-      include: { project: { include: { founder: true } }, positions: true },
-    });
-    if (!market || market.status !== ScoutMarketStatus.OPEN) {
-      throw new BadRequestException('Scout market is not open');
-    }
-
-    const portfolio = await this.prisma.paperPortfolio.findUnique({ where: { userId } });
-    if (!portfolio) throw new BadRequestException('Start a paper trading session first');
-
-    const cash = Number(portfolio.cashBalance);
-    if (cash < RESTRICTED_CASH_THRESHOLD_USD) {
-      throw new BadRequestException(
-        `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to stake.`,
-      );
-    }
-
-    const existing = market.positions.find((p) => p.userId === userId);
-    const existingAmt = existing ? Number(existing.amountUsd) : 0;
-    const delta = amountUsd - existingAmt;
-
-    if (delta > cash) {
-      throw new BadRequestException('Insufficient virtual cash for scout stake');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.scoutMarketPosition.upsert({
-        where: { marketId_userId: { marketId, userId } },
-        create: {
-          marketId,
-          userId,
-          side,
-          amountUsd: new Prisma.Decimal(amountUsd),
-        },
-        update: {
-          side,
-          amountUsd: new Prisma.Decimal(amountUsd),
-        },
-      });
-
-      const prevSide = existing?.side;
-      const prevAmt = existingAmt;
-      let yesDelta = 0;
-      let noDelta = 0;
-
-      if (prevSide === 'YES') yesDelta -= prevAmt;
-      if (prevSide === 'NO') noDelta -= prevAmt;
-      if (side === 'YES') yesDelta += amountUsd;
-      if (side === 'NO') noDelta += amountUsd;
-
-      await tx.scoutMarket.update({
-        where: { id: marketId },
-        data: {
-          yesPoolUsd: { increment: yesDelta },
-          noPoolUsd: { increment: noDelta },
-        },
-      });
-
-      if (delta !== 0) {
-        await tx.paperPortfolio.update({
-          where: { userId },
-          data: { cashBalance: { increment: -delta } },
-        });
-        await tx.virtualEconomyEvent.create({
-          data: {
-            userId,
-            type: delta > 0 ? 'SCOUT_STAKE' : 'SCOUT_UNSTAKE',
-            amountUsd: new Prisma.Decimal(Math.abs(delta)),
-            note: `Scout market ${marketId}`,
-          },
-        });
-      }
-    });
-
-    if (market.project.founder) {
-      await this.events.emit({
-        founderId: market.project.founder.id,
-        projectId: market.projectId,
-        userId,
-        type: FounderEventType.SCOUT_MARKET_STAKE,
-        source: 'scout-markets',
-        title: `Scout stake: ${side} on "${market.question.slice(0, 60)}"`,
-        payload: { marketId, side, amountUsd },
-      });
-    }
-
-    await this.syncUserProgressTier(userId);
-    await this.points.awardOnce(userId, `SCOUT_STAKE:${marketId}`, POINTS.PROJECT_FOLLOW);
-
-    const updated = await this.prisma.scoutMarket.findUnique({ where: { id: marketId } });
-    const yesPool = Number(updated?.yesPoolUsd ?? 0);
-    const noPool = Number(updated?.noPoolUsd ?? 0);
-
-    return {
-      success: true,
-      conviction: computeScoutConviction(yesPool, noPool),
-      yesPoolUsd: yesPool,
-      noPoolUsd: noPool,
-    };
+    return this.predictionMarkets.stake(userId, marketId, side, amountUsd);
   }
 
   async askFounderBrain(slug: string, question: string) {

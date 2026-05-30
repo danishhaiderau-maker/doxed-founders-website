@@ -2116,23 +2116,62 @@ export interface ScoutMarketItem {
   id: string;
   question: string;
   status: string;
+  source?: string;
   yesPoolUsd: number;
   noPoolUsd: number;
+  totalPoolUsd?: number;
   conviction: number;
   participantCount: number;
+  resolvesAt?: string | null;
+  hoursLeft?: number | null;
+  outcome?: boolean | null;
+  project: { slug: string; name: string; ticker: string; logoUrl: string | null };
+  creatorName?: string | null;
   viewerPosition: { side: string; amountUsd: number } | null;
+}
+
+export type PredictionMarketItem = ScoutMarketItem;
+
+export function fetchPredictionMarkets(token?: string) {
+  return apiFetch<PredictionMarketItem[]>('/prediction-markets', undefined, token);
 }
 
 export function fetchScoutMarkets(slug: string, token?: string) {
   return apiFetch<ScoutMarketItem[]>(`/founder-den/projects/${slug}/scout-markets`, undefined, token);
 }
 
-export function stakeScoutMarket(marketId: string, side: 'YES' | 'NO', amountUsd: number, token: string) {
-  return apiFetch<{ success: boolean; conviction: number; yesPoolUsd: number; noPoolUsd: number }>(
-    `/founder-den/scout-markets/${marketId}/stake`,
+export function createPredictionMarket(
+  body: { projectSlug: string; question: string },
+  token: string,
+) {
+  return apiFetch<PredictionMarketItem>(
+    '/prediction-markets',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function stakePredictionMarket(
+  marketId: string,
+  side: 'YES' | 'NO',
+  amountUsd: number,
+  token: string,
+) {
+  return apiFetch<{
+    success: boolean;
+    conviction: number;
+    yesPoolUsd: number;
+    noPoolUsd: number;
+    totalPoolUsd: number;
+  }>(
+    `/prediction-markets/${marketId}/stake`,
     { method: 'POST', body: JSON.stringify({ side, amountUsd }) },
     token,
   );
+}
+
+export function stakeScoutMarket(marketId: string, side: 'YES' | 'NO', amountUsd: number, token: string) {
+  return stakePredictionMarket(marketId, side, amountUsd, token);
 }
 
 export function askFounderBrain(slug: string, question: string) {
