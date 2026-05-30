@@ -15,14 +15,13 @@ const PRIMARY_NAV = [
   { href: '/feed', label: 'Feed' },
   { href: '/founder-den', label: 'Founder OS', auth: true },
   { href: '/paper-trading', label: 'Trading Alpha' },
+  { href: '/leaderboard', label: 'Rankings' },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/agents', label: 'Agents' },
 ] as const;
 
 const MORE_NAV = [
   { href: '/watchlist', label: 'Watchlist', auth: true },
-  { href: '/leaderboard', label: 'Top traders' },
-  { href: '/leaderboard?tab=losers', label: 'Top losers' },
 ] as const;
 
 const PROFILE_LINKS = [
@@ -39,6 +38,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/discover') return pathname === '/discover';
   if (href === '/feed') return pathname === '/feed' || pathname === '/build-feed';
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
+  if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agents') return pathname.startsWith('/agents');
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');

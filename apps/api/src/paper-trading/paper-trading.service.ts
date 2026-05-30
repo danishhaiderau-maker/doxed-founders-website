@@ -777,10 +777,9 @@ export class PaperTradingService {
       include: { user: true },
     });
 
-    const busted = await Promise.all(
+    const ranked = await Promise.all(
       portfolios.map(async (portfolio) => {
         const snapshot = await this.getPortfolio(portfolio.userId);
-        if (!snapshot.isBusted) return null;
         return {
           userId: portfolio.userId,
           displayName: formatPublicAccountLabel(
@@ -791,16 +790,16 @@ export class PaperTradingService {
           totalValue: snapshot.totalValue,
           pnl: snapshot.pnl,
           roi: snapshot.roi,
-          bustedAt: portfolio.updatedAt,
+          isBusted: snapshot.isBusted,
         };
       }),
     );
 
-    return busted
-      .filter(Boolean)
-      .sort((a, b) => (a!.totalValue ?? 0) - (b!.totalValue ?? 0))
+    return ranked
+      .filter((entry) => entry.pnl < 0 || entry.isBusted)
+      .sort((a, b) => a.pnl - b.pnl)
       .slice(0, limit)
-      .map((entry, index) => ({ rank: index + 1, ...entry! }));
+      .map((entry, index) => ({ rank: index + 1, ...entry }));
   }
 
   async getResetInfo() {
