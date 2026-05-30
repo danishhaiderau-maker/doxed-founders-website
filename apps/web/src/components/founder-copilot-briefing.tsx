@@ -1,7 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { copilotResume, fetchCopilotMemory, fetchCopilotStandup, fetchDeviceMemorySync, pushDeviceMemorySync, ProjectMemory } from '@/lib/api';
+import {
+  CommandBarIntent,
+  copilotResume,
+  fetchCopilotMemory,
+  fetchCopilotStandup,
+  fetchDeviceMemorySync,
+  pushDeviceMemorySync,
+  ProjectMemory,
+  runCommandBar,
+  updateBuilderSettings,
+} from '@/lib/api';
 import {
   isOnline,
   loadLocalMemory,
@@ -10,21 +20,35 @@ import {
   saveLocalMemory,
 } from '@/lib/founder-os-local-memory';
 
+type CommandDef = { intent: CommandBarIntent; label: string; placeholder: string };
+
 type FounderCopilotBriefingProps = {
   accessToken: string;
+  variant?: 'full' | 'sidebar';
+  founderActive?: boolean;
   onMessage?: (msg: string) => void;
   onRefresh?: () => void;
+  commands?: CommandDef[];
 };
 
 export function FounderCopilotBriefing({
   accessToken,
+  variant = 'full',
+  founderActive = true,
   onMessage,
   onRefresh,
+  commands,
 }: FounderCopilotBriefingProps) {
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [standup, setStandup] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [goalDraft, setGoalDraft] = useState('');
+  const [savingGoal, setSavingGoal] = useState(false);
+  const [cmdIntent, setCmdIntent] = useState<CommandBarIntent>('roadmap');
+  const [cmdPrompt, setCmdPrompt] = useState('');
+  const [cmdBusy, setCmdBusy] = useState(false);
+  const isSidebar = variant === 'sidebar';
 
   const load = useCallback(async () => {
     try {
@@ -72,6 +96,7 @@ export function FounderCopilotBriefing({
       }
 
       setMemory(display);
+      setGoalDraft(display.currentGoal);
       setStandup(stand.standup);
     } catch {
       const local = loadLocalMemory();
@@ -115,6 +140,41 @@ export function FounderCopilotBriefing({
     load();
   }, [load]);
 
+  async function saveGoal() {
+    const next = goalDraft.trim();
+    if (!next || !memory) return;
+    setSavingGoal(true);
+    try {
+      await updateBuilderSettings({ currentGoalFocus: next }, accessToken);
+      setMemory({ ...memory, currentGoal: next });
+      onMessage?.('Goal updated');
+      onRefresh?.();
+    } catch (err) {
+      onMessage?.(err instanceof Error ? err.message : 'Could not save goal');
+    } finally {
+      setSavingGoal(false);
+    }
+  }
+
+  async function handleCommand() {
+    if (!founderActive) {
+      onMessage?.('Activate your founder profile first');
+      return;
+    }
+    setCmdBusy(true);
+    try {
+      const result = await runCommandBar(cmdIntent, cmdPrompt.trim() || undefined, accessToken);
+      onMessage?.(`${result.result.title} (${result.creditsSpent} credits)`);
+      setCmdPrompt('');
+      load();
+      onRefresh?.();
+    } catch (err) {
+      onMessage?.(err instanceof Error ? err.message : 'Command failed');
+    } finally {
+      setCmdBusy(false);
+    }
+  }
+
   async function handleResume() {
     setBusy(true);
     try {
@@ -147,7 +207,7 @@ export function FounderCopilotBriefing({
 
   if (!memory) {
     return (
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 text-sm text-zinc-500">
+      <div className={`rounded-2xl border border-zinc-800 bg-zinc-900/40 text-sm text-zinc-500 ${isSidebar ? 'p-4' : 'p-6'}`}>
         Loading project memory…
       </div>
     );
@@ -155,27 +215,55 @@ export function FounderCopilotBriefing({
 
   return (
     <div className="space-y-4">
-      <section className="rounded-2xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/40 to-zinc-950 p-5 sm:p-6">
-        <p className="text-lg font-semibold text-white">{memory.welcomeMessage}</p>
-        <p className="mt-1 text-xs text-emerald-300/80">
-          Founder Copilot ·{' '}
+      <section
+        className={`rounded-2xl border border-emerald-500/35 bg-gradient-to-br from-emerald-950/40 to-zinc-950 ${
+          isSidebar ? 'p-4' : 'p-5 sm:p-6'
+        }`}
+      >
+        {!isSidebar && (
+          <p className="text-lg font-semibold text-white">{memory.welcomeMessage}</p>
+        )}
+        {isSidebar && (
+          <p className="text-sm font-semibold text-white">Project scope</p>
+        )}
+        <p className={`text-emerald-300/80 ${isSidebar ? 'mt-0.5 text-[10px]' : 'mt-1 text-xs'}`}>
           {memory.memoryStorageMode === 'LOCAL_DEVICE'
-            ? 'local device memory'
+            ? 'Local device memory'
             : memory.memoryStorageMode === 'LOCAL_SYNC'
-              ? 'local + cloud sync'
+              ? 'Local + cloud sync'
               : memory.memoryStorageMode === 'GITHUB'
                 ? 'GitHub repo memory'
-                : 'cloud memory'}
+                : 'Cloud memory'}
+          {memory.repoFullName ? ` · ${memory.repoFullName}` : ''}
         </p>
 
-        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className={`mt-4 grid gap-3 ${isSidebar ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-3'}`}>
           <div>
             <p className="text-[10px] uppercase tracking-wider text-zinc-500">Project</p>
             <p className="mt-0.5 font-semibold text-white">{memory.project?.name ?? 'Activate founder profile'}</p>
           </div>
-          <div>
+          <div className="sm:col-span-2">
             <p className="text-[10px] uppercase tracking-wider text-zinc-500">Current goal</p>
-            <p className="mt-0.5 font-medium text-violet-200 line-clamp-2">{memory.currentGoal}</p>
+            {isSidebar ? (
+              <div className="mt-1 flex flex-col gap-2">
+                <textarea
+                  value={goalDraft}
+                  onChange={(e) => setGoalDraft(e.target.value)}
+                  rows={2}
+                  className="w-full rounded-lg border border-zinc-700 bg-black/40 px-2 py-1.5 text-xs text-violet-100 outline-none focus:border-violet-500/50"
+                />
+                <button
+                  type="button"
+                  disabled={savingGoal || goalDraft.trim() === memory.currentGoal}
+                  onClick={saveGoal}
+                  className="self-start rounded-lg bg-violet-600 px-3 py-1 text-[10px] font-semibold text-white disabled:opacity-50"
+                >
+                  {savingGoal ? 'Saving…' : 'Save goal'}
+                </button>
+              </div>
+            ) : (
+              <p className="mt-0.5 font-medium text-violet-200 line-clamp-2">{memory.currentGoal}</p>
+            )}
           </div>
           <div>
             <p className="text-[10px] uppercase tracking-wider text-zinc-500">Progress</p>
@@ -191,55 +279,69 @@ export function FounderCopilotBriefing({
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-          <div className="rounded-lg bg-black/30 px-3 py-2">
-            <p className="text-[10px] uppercase text-zinc-600">Last activity</p>
-            <p className="text-zinc-300">{memory.lastActivityLabel}</p>
-          </div>
-          <div className="rounded-lg bg-black/30 px-3 py-2">
-            <p className="text-[10px] uppercase text-zinc-600">Last commit</p>
-            <p className="truncate text-zinc-300">{memory.lastCommit ?? 'Connect GitHub to sync'}</p>
-          </div>
-        </div>
+        {!isSidebar && (
+          <>
+            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <div className="rounded-lg bg-black/30 px-3 py-2">
+                <p className="text-[10px] uppercase text-zinc-600">Last activity</p>
+                <p className="text-zinc-300">{memory.lastActivityLabel}</p>
+              </div>
+              <div className="rounded-lg bg-black/30 px-3 py-2">
+                <p className="text-[10px] uppercase text-zinc-600">Last commit</p>
+                <p className="truncate text-zinc-300">{memory.lastCommit ?? 'Connect GitHub to sync'}</p>
+              </div>
+            </div>
 
-        {memory.openTasks.length > 0 && (
-          <div className="mt-4">
-            <p className="text-[10px] uppercase text-zinc-500">Remaining</p>
-            <ul className="mt-2 space-y-1">
-              {memory.openTasks.map((t) => (
-                <li key={t.id} className="flex items-start gap-2 text-sm text-zinc-300">
-                  <span className="text-zinc-600">□</span>
-                  {t.title}
-                </li>
-              ))}
-            </ul>
-          </div>
+            {memory.openTasks.length > 0 && (
+              <div className="mt-4">
+                <p className="text-[10px] uppercase text-zinc-500">Remaining</p>
+                <ul className="mt-2 space-y-1">
+                  {memory.openTasks.map((t) => (
+                    <li key={t.id} className="flex items-start gap-2 text-sm text-zinc-300">
+                      <span className="text-zinc-600">□</span>
+                      {t.title}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
         )}
 
-        <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2">
+        {isSidebar && memory.lastCommit && (
+          <p className="mt-3 truncate text-[11px] text-zinc-500">
+            Last commit: <span className="text-zinc-400">{memory.lastCommit}</span>
+          </p>
+        )}
+
+        <div className={`rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2 ${isSidebar ? 'mt-3' : 'mt-4'}`}>
           <p className="text-[10px] uppercase text-amber-400/80">Suggested next step</p>
           <p className="mt-0.5 text-sm font-medium text-amber-100">{memory.suggestedNextStep}</p>
         </div>
 
-        <div className="mt-5 flex flex-wrap gap-2">
+        <div className={`flex flex-wrap gap-2 ${isSidebar ? 'mt-3' : 'mt-5'}`}>
           <button
             type="button"
             disabled={busy}
             onClick={handleResume}
-            className="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+            className={`rounded-xl bg-emerald-600 font-semibold text-white disabled:opacity-50 ${
+              isSidebar ? 'w-full px-3 py-2 text-xs' : 'px-5 py-2.5 text-sm'
+            }`}
           >
             {busy ? 'Loading…' : 'Continue where I left off'}
           </button>
-          <button
-            type="button"
-            onClick={copyCursor}
-            className="rounded-xl border border-indigo-500/40 px-4 py-2.5 text-sm text-indigo-200"
-          >
-            {copied ? 'Copied!' : 'Copy for builder'}
-          </button>
+          {!isSidebar && (
+            <button
+              type="button"
+              onClick={copyCursor}
+              className="rounded-xl border border-indigo-500/40 px-4 py-2.5 text-sm text-indigo-200"
+            >
+              {copied ? 'Copied!' : 'Copy for builder'}
+            </button>
+          )}
         </div>
 
-        {(memory.deployments.length > 0 || memory.raiseStatus) && (
+        {(memory.deployments.length > 0 || memory.raiseStatus) && !isSidebar && (
           <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
             {memory.deployments.map((d) => (
               <span
@@ -259,7 +361,46 @@ export function FounderCopilotBriefing({
         )}
       </section>
 
-      {standup && (
+      {commands && commands.length > 0 && (
+        <section className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-4">
+          <p className="text-xs font-semibold text-cyan-200">Quick commands</p>
+          <p className="mt-0.5 text-[10px] text-zinc-500">Roadmap · release notes · weekly summary</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {commands.map((c) => (
+              <button
+                key={c.intent}
+                type="button"
+                onClick={() => setCmdIntent(c.intent)}
+                className={`rounded-lg px-2.5 py-1 text-[10px] ${
+                  cmdIntent === c.intent
+                    ? 'bg-cyan-600 text-white'
+                    : 'border border-zinc-700 text-zinc-400'
+                }`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 flex flex-col gap-2">
+            <input
+              value={cmdPrompt}
+              onChange={(e) => setCmdPrompt(e.target.value)}
+              placeholder={commands.find((c) => c.intent === cmdIntent)?.placeholder}
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs"
+            />
+            <button
+              type="button"
+              disabled={cmdBusy}
+              onClick={handleCommand}
+              className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {cmdBusy ? 'Running…' : 'Run from GitHub context'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {standup && !isSidebar && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
           <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Daily standup</p>
           <pre className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{standup}</pre>

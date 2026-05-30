@@ -99,7 +99,7 @@ export default function FeedPage() {
     <div className="min-h-screen bg-[#050508]">
       <PushNotificationPrompt />
       <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[#050508]/95 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 md:px-6">
+        <div className="mx-auto flex w-full max-w-[90rem] items-center justify-between px-4 py-4 sm:px-6 lg:px-10">
           <div>
             <Link href="/" className="text-xs uppercase tracking-widest text-[var(--color-muted)]">
               Doxxed crypto
@@ -111,7 +111,7 @@ export default function FeedPage() {
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 md:grid-cols-[1fr_300px] md:px-6">
+      <main className="mx-auto grid w-full max-w-[90rem] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_minmax(260px,320px)] lg:px-10">
         <div>
           {pulse.length > 0 && (
             <section className="mb-6 rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-zinc-950 p-4">
@@ -339,11 +339,19 @@ export default function FeedPage() {
 
 function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string }) {
   const shareUrl = item.link ? buildSiteUrl(origin, item.link) : buildSiteUrl(origin, '/feed');
+  const ctx = item.shareContext;
   const shareText =
     item.eventType === 'hot_buy' || item.eventType === 'top_trader_buy'
       ? buildHotBuyShareMessage({
           ticker: item.projectTicker ?? 'TOKEN',
           buyerNames: item.recentBuyerNames ?? [],
+          projectName: ctx?.projectName ?? item.projectSlug,
+          pctOfActive: ctx?.pctOfActive,
+          detailLine: ctx?.detailLine ?? item.detail,
+          scoutHighlight: ctx?.scoutHighlight,
+          scoutThesis: ctx?.scoutThesis,
+          summary: ctx?.summary,
+          communitySnippets: ctx?.communitySnippets,
         })
       : item.eventType === 'listing_live'
         ? buildListingShareMessage({
