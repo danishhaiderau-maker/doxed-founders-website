@@ -1,13 +1,18 @@
 {
   "name": "@dcf/founder-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Founder Node — local vault + metadata sync for Founder OS",
+  "author": "Doxxed Crypto",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
+    "prestart": "node ../../scripts/generate-founder-node-icon.mjs",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
+    "pack": "electron-builder",
+    "pack:win": "electron-builder --win",
+    "pack:mac": "electron-builder --mac",
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
@@ -16,7 +21,63 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
-    "electron": "^35.1.5",
+    "electron": "35.1.5",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.8.3"
+  },
+  "build": {
+    "appId": "digital.doxxedcrypto.founder-node",
+    "productName": "Founder Node",
+    "copyright": "Copyright © Doxxed Crypto",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "artifactName": "Founder-Node-${version}-${os}-${arch}.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Founder Node ${version}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Founder Node"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "danishhaiderau-maker",
+      "repo": "doxed-founders-website"
+    }
   }
 }
