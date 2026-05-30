@@ -5,8 +5,10 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import type { NotificationBuyerMeta } from '@dcf/utils';
+import { buildSiteUrl, buildFeedShareMessage, buildHotBuyShareMessage, buildListingShareMessage } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { NotificationBuyersPanel } from '@/components/notification-buyers-panel';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import {
   AppNotification,
@@ -26,6 +28,7 @@ function parseBuyerMeta(raw: unknown): NotificationBuyerMeta | null {
 export default function NotificationsPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const origin = useShareOrigin();
   const [items, setItems] = useState<AppNotification[]>([]);
   const [category, setCategory] = useState<string>('all');
   const [error, setError] = useState<string | null>(null);
@@ -161,6 +164,23 @@ export default function NotificationsPage() {
             const isAgent = n.type === 'AGENT_RESULT';
             const buyerMeta = parseBuyerMeta(n.metadata);
             const traderMeta = n.metadata as { traderUserId?: string; displayName?: string } | null;
+            const displayBody =
+              buyerMeta?.buyers?.length && isHotBuy
+                ? `${buyerMeta.buyers.map((b) => b.displayName).slice(0, 5).join(', ')} paper-traded $${buyerMeta.projectTicker ?? 'token'}`
+                : n.body;
+            const shareUrl = n.link ? buildSiteUrl(origin, n.link) : buildSiteUrl(origin, '/notifications');
+            const shareText = isHotBuy && buyerMeta?.buyers?.length
+              ? buildHotBuyShareMessage({
+                  ticker: buyerMeta.projectTicker ?? 'TOKEN',
+                  buyerNames: buyerMeta.buyers.map((b) => b.displayName),
+                })
+              : n.title.toLowerCase().includes('listing')
+                ? buildListingShareMessage({
+                    projectName: n.title.replace(/^.*?:\s*/, ''),
+                    ticker: buyerMeta?.projectTicker ?? '',
+                    summary: n.body,
+                  })
+                : buildFeedShareMessage({ headline: n.title, detail: n.body });
 
             const accent = isHotBuy
               ? 'border-amber-500/40 bg-amber-950/20'
@@ -181,7 +201,7 @@ export default function NotificationsPage() {
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <h2 className="font-semibold">{n.title}</h2>
-                    <p className="mt-1 text-sm text-[var(--color-muted)]">{n.body}</p>
+                    <p className="mt-1 text-sm text-[var(--color-muted)]">{displayBody}</p>
 
                     {buyerMeta && (
                       <NotificationBuyersPanel
@@ -213,7 +233,8 @@ export default function NotificationsPage() {
                       {new Date(n.createdAt).toLocaleString()}
                     </p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    <ShareOnXButton text={shareText} url={shareUrl} label="Share on X" />
                     {n.link && (
                       <Link
                         href={n.link}

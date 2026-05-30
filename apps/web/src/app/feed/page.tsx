@@ -7,7 +7,15 @@ import { SiteNav, getActiveUserId } from '@/components/site-nav';
 import { PushNotificationPrompt } from '@/components/push-notification-prompt';
 import { LinkifiedText } from '@/components/linkified-text';
 import { pushEngagementFlash } from '@/components/engagement-flash-layer';
-import { formatUsd } from '@dcf/utils';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
+import {
+  formatUsd,
+  buildSiteUrl,
+  buildFeedShareMessage,
+  buildListingShareMessage,
+  buildPredictionShareMessage,
+  buildHotBuyShareMessage,
+} from '@dcf/utils';
 import {
   FeedComment,
   FeedPost,
@@ -48,6 +56,7 @@ function tierBorder(tier: number) {
 
 export default function FeedPage() {
   const { data: session } = useSession();
+  const origin = useShareOrigin();
   const [category, setCategory] = useState<UnifiedFeedCategory>('all');
   const [items, setItems] = useState<UnifiedFeedItem[]>([]);
   const [pulse, setPulse] = useState<PlatformPulseItem[]>([]);
@@ -111,11 +120,11 @@ export default function FeedPage() {
               </h2>
               <ul className="mt-3 space-y-2">
                 {pulse.map((p) => (
-                  <li key={p.id}>
+                  <li key={p.id} className="flex items-start justify-between gap-2">
                     {p.link ? (
                       <Link
                         href={p.link}
-                        className="flex gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-black/30"
+                        className="flex min-w-0 flex-1 gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-black/30"
                       >
                         <span>{p.emoji}</span>
                         <span>
@@ -126,11 +135,17 @@ export default function FeedPage() {
                         </span>
                       </Link>
                     ) : (
-                      <div className="flex gap-2 px-2 py-1.5 text-sm">
+                      <div className="flex min-w-0 flex-1 gap-2 px-2 py-1.5 text-sm">
                         <span>{p.emoji}</span>
                         <span className="font-medium text-white">{p.headline}</span>
                       </div>
                     )}
+                    <ShareOnXButton
+                      text={buildFeedShareMessage({ headline: p.headline, detail: p.detail })}
+                      url={p.link ? buildSiteUrl(origin, p.link) : buildSiteUrl(origin, '/feed')}
+                      label="Share"
+                      className="shrink-0"
+                    />
                   </li>
                 ))}
               </ul>
@@ -149,10 +164,10 @@ export default function FeedPage() {
               </div>
               <ul className="mt-3 space-y-2">
                 {scoutListings.map((s) => (
-                  <li key={s.id}>
+                  <li key={s.id} className="flex items-start justify-between gap-2">
                     <Link
                       href="/scout-votes"
-                      className="block rounded-lg border border-sky-500/20 bg-black/20 px-3 py-2.5 transition hover:border-sky-500/40"
+                      className="block min-w-0 flex-1 rounded-lg border border-sky-500/20 bg-black/20 px-3 py-2.5 transition hover:border-sky-500/40"
                     >
                       <p className="font-medium text-white">
                         {s.projectName} ({s.ticker})
@@ -162,6 +177,16 @@ export default function FeedPage() {
                         {s.whyList ? ` · ${s.whyList}` : ''}
                       </p>
                     </Link>
+                    <ShareOnXButton
+                      text={buildListingShareMessage({
+                        projectName: s.projectName,
+                        ticker: s.ticker,
+                        summary: s.whyList,
+                      })}
+                      url={buildSiteUrl(origin, '/scout-votes')}
+                      label="Share"
+                      className="shrink-0 mt-2"
+                    />
                   </li>
                 ))}
               </ul>
@@ -180,10 +205,10 @@ export default function FeedPage() {
               </div>
               <ul className="mt-3 space-y-2">
                 {hotQuestions.map((q) => (
-                  <li key={q.id}>
+                  <li key={q.id} className="flex items-start justify-between gap-2">
                     <Link
                       href="/predict"
-                      className="block rounded-lg border border-indigo-500/25 bg-black/20 px-3 py-2.5 transition hover:border-indigo-400/50"
+                      className="block min-w-0 flex-1 rounded-lg border border-indigo-500/25 bg-black/20 px-3 py-2.5 transition hover:border-indigo-400/50"
                     >
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-medium uppercase text-indigo-300">
@@ -208,6 +233,17 @@ export default function FeedPage() {
                       </div>
                       <p className="mt-1 text-sm text-white">{q.question}</p>
                     </Link>
+                    <ShareOnXButton
+                      text={buildPredictionShareMessage({
+                        projectName: q.projectName,
+                        ticker: q.projectTicker,
+                        question: q.question,
+                        poolUsd: q.totalPoolUsd,
+                      })}
+                      url={buildSiteUrl(origin, '/predict')}
+                      label="Share"
+                      className="shrink-0 mt-2"
+                    />
                   </li>
                 ))}
               </ul>
@@ -258,7 +294,7 @@ export default function FeedPage() {
                   onRefresh={() => load(category)}
                 />
               ) : (
-                <ActivityCard key={item.id} item={item} />
+                <ActivityCard key={item.id} item={item} origin={origin} />
               ),
             )}
           </div>
@@ -301,36 +337,55 @@ export default function FeedPage() {
   );
 }
 
-function ActivityCard({ item }: { item: UnifiedFeedItem }) {
-  const inner = (
+function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string }) {
+  const shareUrl = item.link ? buildSiteUrl(origin, item.link) : buildSiteUrl(origin, '/feed');
+  const shareText =
+    item.eventType === 'hot_buy' || item.eventType === 'top_trader_buy'
+      ? buildHotBuyShareMessage({
+          ticker: item.projectTicker ?? 'TOKEN',
+          buyerNames: item.recentBuyerNames ?? [],
+        })
+      : item.eventType === 'listing_live'
+        ? buildListingShareMessage({
+            projectName: item.headline.replace(/^New listing:\s*/, '').split(' (')[0] ?? item.headline,
+            ticker: item.projectTicker ?? '',
+            summary: item.detail,
+          })
+        : buildFeedShareMessage({ headline: item.headline, detail: item.detail });
+
+  const content = (
+    <>
+      <span className="text-lg">{item.emoji ?? '•'}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
+          <span className="rounded bg-zinc-800 px-1.5 py-0.5 uppercase tracking-wide">
+            {item.category}
+          </span>
+          <span>{timeAgo(item.at)}</span>
+          {item.tier === 1 && (
+            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">Priority</span>
+          )}
+        </div>
+        <p className="mt-1 font-semibold text-white">{item.headline}</p>
+        {item.detail && <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>}
+      </div>
+    </>
+  );
+
+  return (
     <article className={`rounded-xl border p-4 ${tierBorder(item.tier)}`}>
       <div className="flex items-start gap-3">
-        <span className="text-lg">{item.emoji ?? '•'}</span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
-            <span className="rounded bg-zinc-800 px-1.5 py-0.5 uppercase tracking-wide">
-              {item.category}
-            </span>
-            <span>{timeAgo(item.at)}</span>
-            {item.tier === 1 && (
-              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">Priority</span>
-            )}
-          </div>
-          <p className="mt-1 font-semibold text-white">{item.headline}</p>
-          {item.detail && <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>}
-        </div>
+        {item.link ? (
+          <Link href={item.link} className="flex min-w-0 flex-1 items-start gap-3 transition hover:opacity-95">
+            {content}
+          </Link>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-start gap-3">{content}</div>
+        )}
+        <ShareOnXButton text={shareText} url={shareUrl} label="Share" className="shrink-0" />
       </div>
     </article>
   );
-
-  if (item.link) {
-    return (
-      <Link href={item.link} className="block transition hover:opacity-95">
-        {inner}
-      </Link>
-    );
-  }
-  return inner;
 }
 
 function TradeFeedCard({

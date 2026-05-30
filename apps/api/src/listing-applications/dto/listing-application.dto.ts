@@ -154,6 +154,17 @@ export class CreateListingApplicationDto {
   @MaxLength(2000)
   whyDoxxed?: string;
 
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsIn(['DOXXED', 'BUILDING_IN_PUBLIC'])
+  founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  scoutHighlightNote?: string;
+
   @IsOptional()
   marketPreview?: Record<string, unknown>;
 }

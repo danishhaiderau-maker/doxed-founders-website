@@ -47,6 +47,8 @@ export interface ListingFormData {
   summary?: string;
   whyList?: string;
   whyDoxxed?: string;
+  founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+  scoutHighlightNote?: string;
   marketPreview?: DexScreenerPreview['marketPreview'];
 }
 
@@ -511,6 +513,7 @@ export interface UnifiedFeedItem {
   projectTicker?: string;
   founderSlug?: string;
   amountUsd?: number;
+  recentBuyerNames?: string[];
 }
 
 export interface PlatformPulseItem {
@@ -745,6 +748,8 @@ export interface ProjectSummary {
     verifications: string[];
   } | null;
   metrics: ProjectMetrics | null;
+  scoutHighlight?: string | null;
+  founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC' | null;
 }
 
 export interface ProjectDetail extends ProjectSummary {

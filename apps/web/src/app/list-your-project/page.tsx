@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useMemo, useState, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { FounderVerificationChecklist } from '@/components/founder-verification-checklist';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
@@ -12,6 +13,7 @@ import {
   previewContract,
   previewDexScreener,
   submitListingApplication,
+  fetchProject,
 } from '@/lib/api';
 import { scoreFounderVerification } from '@dcf/utils';
 
@@ -47,10 +49,14 @@ const emptyForm: ListingFormData = {
   summary: '',
   whyList: '',
   whyDoxxed: '',
+  founderDoxxedStatus: 'DOXXED',
+  scoutHighlightNote: '',
 };
 
-export default function ListYourProjectPage() {
+function ListYourProjectPageInner() {
   const { data: session } = useSession();
+  const searchParams = useSearchParams();
+  const editSlug = searchParams.get('edit');
   const [dexUrl, setDexUrl] = useState('');
   const [contractInput, setContractInput] = useState('');
   const [contractChain, setContractChain] = useState<string>('SOLANA');
@@ -67,6 +73,36 @@ export default function ListYourProjectPage() {
     () => extractPoolAddressFromDexUrl(form.dexscreenerUrl ?? dexUrl),
     [form.dexscreenerUrl, dexUrl],
   );
+
+  useEffect(() => {
+    if (!editSlug) return;
+    fetchProject(editSlug)
+      .then((p) => {
+        setForm((prev) => ({
+          ...prev,
+          projectName: p.name,
+          ticker: p.ticker,
+          websiteUrl: p.websiteUrl ?? '',
+          docsUrl: p.docsUrl ?? '',
+          contractAddress: p.contractAddress ?? '',
+          chainSlug: p.chain.slug,
+          dexscreenerUrl: p.dexscreenerUrl ?? '',
+          logoUrl: p.logoUrl ?? '',
+          summary: p.summary ?? '',
+          founderName: p.verificationDossier?.founderName ?? '',
+          founderLinkedIn: p.verificationDossier?.founderLinkedIn ?? '',
+          founderTwitter: p.verificationDossier?.founderTwitter ?? '',
+          founderGithub: p.verificationDossier?.founderGithub ?? '',
+          founderVideoUrl: p.verificationDossier?.founderVideoUrl ?? '',
+          founderInterviewUrl: p.verificationDossier?.founderInterviewUrl ?? '',
+          companyDetails: p.verificationDossier?.companyDetails ?? '',
+          whyList: p.verificationDossier?.whyList ?? '',
+          whyDoxxed: p.verificationDossier?.whyDoxxed ?? '',
+        }));
+        if (p.dexscreenerUrl) setDexUrl(p.dexscreenerUrl);
+      })
+      .catch(() => {});
+  }, [editSlug]);
 
   async function handleAutoFill() {
     setError(null);
@@ -132,10 +168,16 @@ export default function ListYourProjectPage() {
       return;
     }
 
-    if (!form.whyList?.trim() || !form.whyDoxxed?.trim()) {
-      setError(
-        'Explain why this project should be listed and why the founder is doxxed. This goes on the public scout vote board.',
-      );
+    if (!form.whyList?.trim()) {
+      setError('Explain why this project should be listed. This goes on the public scout vote board.');
+      return;
+    }
+    if (form.founderDoxxedStatus !== 'BUILDING_IN_PUBLIC' && !form.whyDoxxed?.trim()) {
+      setError('Explain why the founder is doxxed, or select "Building in public" and add a scout highlight.');
+      return;
+    }
+    if (form.founderDoxxedStatus === 'BUILDING_IN_PUBLIC' && !form.scoutHighlightNote?.trim()) {
+      setError('Add a scout highlight for non-doxxed founders building in public.');
       return;
     }
 
@@ -373,14 +415,54 @@ export default function ListYourProjectPage() {
               required
               placeholder="Product, traction, why the community should care…"
             />
-            <Field
-              label="Why is the founder doxxed / verified?"
-              value={form.whyDoxxed ?? ''}
-              onChange={(v) => updateField('whyDoxxed', v)}
-              multiline
-              required
-              placeholder="Video link, interview, LinkedIn, public identity proof you found…"
-            />
+            <div className="mt-4 space-y-3 rounded-lg border border-violet-500/25 bg-violet-950/10 p-4">
+              <p className="text-sm font-medium text-violet-100">Founder verification status</p>
+              <label className="flex cursor-pointer items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="doxxedStatus"
+                  checked={form.founderDoxxedStatus !== 'BUILDING_IN_PUBLIC'}
+                  onChange={() => updateField('founderDoxxedStatus', 'DOXXED')}
+                  className="mt-1"
+                />
+                <span>
+                  <strong className="text-white">Doxxed / verified founder</strong>
+                  <span className="block text-xs text-zinc-500">Public video, interview, LinkedIn, or identity proof</span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="doxxedStatus"
+                  checked={form.founderDoxxedStatus === 'BUILDING_IN_PUBLIC'}
+                  onChange={() => updateField('founderDoxxedStatus', 'BUILDING_IN_PUBLIC')}
+                  className="mt-1"
+                />
+                <span>
+                  <strong className="text-white">Not fully doxxed — building in public</strong>
+                  <span className="block text-xs text-zinc-500">Highlight GitHub, podcasts, X activity instead</span>
+                </span>
+              </label>
+            </div>
+            {form.founderDoxxedStatus === 'BUILDING_IN_PUBLIC' ? (
+              <Field
+                label="Scout highlight (shown on project cards)"
+                value={form.scoutHighlightNote ?? ''}
+                onChange={(v) => updateField('scoutHighlightNote', v)}
+                multiline
+                required
+                placeholder="e.g. Shipping weekly on GitHub, active on X Spaces, podcast guest on…"
+              />
+            ) : (
+              <Field
+                label="Why is the founder doxxed / verified?"
+                value={form.whyDoxxed ?? ''}
+                onChange={(v) => updateField('whyDoxxed', v)}
+                multiline
+                required
+                placeholder="Video link, interview, LinkedIn, public identity proof you found…"
+              />
+            )}
           </Section>
 
           <p className="text-xs text-[var(--color-muted)]">
@@ -463,5 +545,13 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-[var(--color-muted)]">{label}</p>
       <p className="font-medium">{value}</p>
     </div>
+  );
+}
+
+export default function ListYourProjectPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#050508] p-8 text-[var(--color-muted)]">Loading…</div>}>
+      <ListYourProjectPageInner />
+    </Suspense>
   );
 }
