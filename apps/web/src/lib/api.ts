@@ -1,5 +1,5 @@
 import { apiUrl, describeApiTarget } from './api-base';
-import type { SecurityScoreResult } from '@dcf/utils';
+import type { GamifiedRole, NotificationPreferenceGroups, SecurityScoreResult } from '@dcf/utils';
 
 export interface DexScreenerPreview {
   dexscreenerUrl: string;
@@ -1614,6 +1614,94 @@ export function walletVerify(
 
 export function disconnectWallet(token: string, chain = 'SOLANA') {
   return apiFetch(`/security/wallet/${chain}`, { method: 'DELETE' }, token);
+}
+
+// ─── Account hub ─────────────────────────────────────────────────────────────
+
+export interface AccountOverview {
+  userId: string;
+  username: string;
+  email: string;
+  avatarUrl: string | null;
+  joinedAt: string;
+  platformRole: string;
+  gamifiedRole: GamifiedRole;
+  isAdmin: boolean;
+  adminBanner: string | null;
+  authMethods: { provider: string; label: string; connected: boolean }[];
+  reputation: ReputationMe;
+  builderStatus: {
+    isFounder: boolean;
+    badge: string | null;
+    presenceLevel: string | null;
+    founderSlug: string | null;
+  };
+  followingCount: number;
+  followersCount: number;
+}
+
+export interface AccountPointLedgerEntry {
+  id: string;
+  amount: number;
+  actionKey: string;
+  label: string;
+  createdAt: string;
+}
+
+export interface AccountActivityItem {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  link: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface AccountFollowingEntry {
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  reputationPoints: number;
+  contributorLevel: number;
+  founderSlug: string | null;
+  followedAt: string;
+}
+
+export function fetchAccountOverview(token: string) {
+  return apiFetch<AccountOverview>('/account/overview', undefined, token);
+}
+
+export function fetchAccountPointLedger(token: string, limit = 50) {
+  return apiFetch<AccountPointLedgerEntry[]>(`/account/point-ledger?limit=${limit}`, undefined, token);
+}
+
+export function fetchAccountActivity(token: string, limit = 40) {
+  return apiFetch<AccountActivityItem[]>(`/account/activity?limit=${limit}`, undefined, token);
+}
+
+export function fetchNotificationPreferences(token: string) {
+  return apiFetch<NotificationPreferenceGroups>('/account/notification-preferences', undefined, token);
+}
+
+export function updateNotificationPreferences(prefs: Partial<NotificationPreferenceGroups>, token: string) {
+  return apiFetch<NotificationPreferenceGroups>(
+    '/account/notification-preferences',
+    { method: 'PUT', body: JSON.stringify(prefs) },
+    token,
+  );
+}
+
+export function fetchAccountFollowing(token: string) {
+  return apiFetch<AccountFollowingEntry[]>('/account/following', undefined, token);
+}
+
+export function followUser(userId: string, token: string) {
+  return apiFetch<{ following: boolean }>(`/account/follow/${userId}`, { method: 'POST' }, token);
+}
+
+export function unfollowUser(userId: string, token: string) {
+  return apiFetch<{ following: boolean }>(`/account/follow/${userId}`, { method: 'DELETE' }, token);
 }
 
 // ─── Agents ──────────────────────────────────────────────────────────────────

@@ -277,6 +277,7 @@ model User {
   reputationPoints Int    @default(0)
   contributorLevel Int    @default(1)
   progressTier     UserProgressTier @default(EXPLORER)
+  notificationPrefs Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -300,6 +301,9 @@ model User {
   founderApplications  FounderApplication[]
   economyEvents        VirtualEconomyEvent[]
   reputationAwards     ReputationAward[]
+  pointLedger          PointLedger[]
+  following            UserFollow[] @relation("UserFollowing")
+  followers            UserFollow[] @relation("UserFollowers")
   engagementLotteryWins EngagementLotteryWinner[]
   helpfulMarksGiven    HelpfulMark[] @relation("HelpfulMarker")
   helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
@@ -1088,6 +1092,33 @@ model ReputationAward {
 
   @@unique([userId, actionKey])
   @@index([actionKey])
+}
+
+model PointLedger {
+  id        String   @id @default(cuid())
+  userId    String
+  amount    Int
+  actionKey String
+  label     String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model UserFollow {
+  id          String   @id @default(cuid())
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  follower  User @relation("UserFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("UserFollowers", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
 }
 
 model EngagementLotteryDraw {

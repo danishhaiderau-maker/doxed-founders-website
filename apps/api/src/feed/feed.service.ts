@@ -178,7 +178,7 @@ export class FeedService {
 
     await this.refreshHighlights();
 
-    await this.points.award(dto.userId, POINTS.FEED_COMMENT);
+    await this.points.award(dto.userId, POINTS.FEED_COMMENT, 'FEED_COMMENT');
 
     return {
       id: comment.id,

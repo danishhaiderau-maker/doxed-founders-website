@@ -4,11 +4,9 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
 import { useEffect, useRef, useState, Suspense } from 'react';
-import { cn } from '@dcf/utils';
-import { fetchUnreadNotificationCount } from '@/lib/api';
-import { AccountLabel } from '@/components/account-welcome';
-
-const SESSION_KEY = 'dcf-paper-user-id';
+import { cn, resolveGamifiedRole } from '@dcf/utils';
+import { fetchUnreadNotificationCount, fetchAccountOverview, AccountOverview } from '@/lib/api';
+import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 
 const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
@@ -20,10 +18,19 @@ const PRIMARY_NAV = [
   { href: '/agents', label: 'Agents' },
 ] as const;
 
-const SECONDARY_NAV = [
+const MORE_NAV = [
   { href: '/watchlist', label: 'Watchlist', auth: true },
-  { href: '/reputation', label: 'Points' },
   { href: '/leaderboard', label: 'Leaderboard' },
+] as const;
+
+const PROFILE_LINKS = [
+  { href: '/account', label: 'Overview' },
+  { href: '/account?tab=security', label: 'Security' },
+  { href: '/account?tab=notifications', label: 'Notification Settings' },
+  { href: '/account?tab=connected', label: 'Connected Accounts' },
+  { href: '/account?tab=points', label: 'Points & Rewards' },
+  { href: '/account?tab=reputation', label: 'Reputation' },
+  { href: '/account?tab=activity', label: 'Activity History' },
 ] as const;
 
 function navActive(pathname: string, href: string) {
@@ -34,6 +41,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
+  if (href.startsWith('/account')) return pathname.startsWith('/account');
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
@@ -51,11 +59,15 @@ function SiteNavInner() {
   const isAdmin = session?.user?.role === 'ADMIN';
   const [unread, setUnread] = useState(0);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [accountPreview, setAccountPreview] = useState<AccountOverview | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
+  const profileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!session?.accessToken) {
       setUnread(0);
+      setAccountPreview(null);
       return;
     }
     const refresh = () => {
@@ -69,21 +81,35 @@ function SiteNavInner() {
   }, [session?.accessToken]);
 
   useEffect(() => {
+    if (!session?.accessToken) return;
+    fetchAccountOverview(session.accessToken)
+      .then(setAccountPreview)
+      .catch(() => setAccountPreview(null));
+  }, [session?.accessToken]);
+
+  useEffect(() => {
     function onDocClick(e: MouseEvent) {
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
         setMoreOpen(false);
+      }
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false);
       }
     }
     document.addEventListener('click', onDocClick);
     return () => document.removeEventListener('click', onDocClick);
   }, []);
 
-  const secondaryVisible = SECONDARY_NAV.filter(
-    (item) => !('auth' in item && item.auth && !session),
-  );
+  const moreVisible = MORE_NAV.filter((item) => !('auth' in item && item.auth && !session));
   const moreActive =
-    secondaryVisible.some((item) => navActive(pathname, item.href)) ||
+    moreVisible.some((item) => navActive(pathname, item.href)) ||
     (isAdmin && pathname.startsWith('/admin'));
+
+  const profileActive = pathname.startsWith('/account') || pathname.startsWith('/settings');
+
+  const fallbackRole = resolveGamifiedRole({
+    platformRole: session?.user?.role,
+  });
 
   return (
     <nav className="flex flex-wrap items-center gap-2 text-sm md:gap-2.5">
@@ -115,9 +141,8 @@ function SiteNavInner() {
               ? 'bg-emerald-500/20 font-semibold text-emerald-100 ring-1 ring-emerald-500/40'
               : 'text-[var(--color-muted)] hover:bg-white/5 hover:text-white',
           )}
-          title="Alerts"
         >
-          Alerts
+          Notifications
           {unread > 0 && (
             <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
               {unread > 9 ? '9+' : unread}
@@ -141,7 +166,7 @@ function SiteNavInner() {
         </button>
         {moreOpen && (
           <div className="absolute right-0 top-full z-50 mt-1 min-w-[168px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
-            {secondaryVisible.map((item) => (
+            {moreVisible.map((item) => (
               <Link
                 key={item.href}
                 href={item.href}
@@ -171,50 +196,62 @@ function SiteNavInner() {
       </div>
 
       {session ? (
-        <div className="flex items-center gap-2 border-l border-[var(--color-border)] pl-2 md:gap-3 md:pl-3">
-          <span className="hidden text-[var(--color-muted)] sm:inline">
-            <AccountLabel name={session.user?.name} email={session.user?.email} />
-          </span>
-          <Link
-            href="/settings/builder"
-            className={cn(
-              'hidden rounded-lg px-2.5 py-1 text-xs sm:inline',
-              pathname.startsWith('/settings/builder')
-                ? 'bg-violet-500/25 font-semibold text-violet-100 ring-1 ring-violet-500/40'
-                : 'border border-violet-500/30 text-violet-200',
-            )}
-          >
-            Builder
-          </Link>
-          <Link
-            href="/settings/security"
-            className={cn(
-              'hidden rounded-lg px-2.5 py-1 text-xs sm:inline',
-              pathname.startsWith('/settings')
-                ? 'bg-emerald-500/25 font-semibold text-emerald-100 ring-1 ring-emerald-500/40'
-                : 'border border-emerald-500/30 text-emerald-200',
-            )}
-          >
-            Security
-          </Link>
-          <Link
-            href={`/portfolio/${session.user?.id}`}
-            className={cn(
-              'hidden rounded-lg px-2.5 py-1 text-xs sm:inline',
-              pathname.startsWith('/portfolio')
-                ? 'bg-amber-500/25 font-semibold text-amber-100 ring-1 ring-amber-500/40'
-                : 'border border-amber-500/30 text-amber-200',
-            )}
-          >
-            Profile
-          </Link>
+        <div className="relative border-l border-[var(--color-border)] pl-2 md:pl-3" ref={profileRef}>
           <button
             type="button"
-            onClick={() => signOut({ callbackUrl: '/' })}
-            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[var(--color-muted)] hover:text-white"
+            onClick={() => setProfileOpen((o) => !o)}
+            className={cn(
+              'flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition',
+              profileActive || profileOpen
+                ? 'bg-zinc-800 font-semibold text-white ring-1 ring-zinc-600'
+                : 'text-[var(--color-muted)] hover:bg-white/5 hover:text-white',
+            )}
           >
-            Sign out
+            <span className="hidden max-w-[120px] truncate sm:inline">
+              {accountPreview?.username ?? session.user?.name ?? session.user?.email}
+            </span>
+            <GamifiedRoleBadge
+              role={accountPreview?.gamifiedRole ?? fallbackRole}
+              className="hidden sm:inline-flex"
+            />
+            <span className="sm:hidden">Profile</span>
           </button>
+          {profileOpen && (
+            <div className="absolute right-0 top-full z-50 mt-1 min-w-[220px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
+              {accountPreview && (
+                <div className="border-b border-zinc-800 px-3 py-2">
+                  <p className="truncate text-sm font-medium text-white">{accountPreview.username}</p>
+                  <div className="mt-1">
+                    <GamifiedRoleBadge role={accountPreview.gamifiedRole} />
+                  </div>
+                </div>
+              )}
+              {PROFILE_LINKS.map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => setProfileOpen(false)}
+                  className="block px-3 py-2 text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-white"
+                >
+                  {item.label}
+                </Link>
+              ))}
+              <Link
+                href={`/portfolio/${session.user?.id}`}
+                onClick={() => setProfileOpen(false)}
+                className="block px-3 py-2 text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Trading Portfolio
+              </Link>
+              <button
+                type="button"
+                onClick={() => signOut({ callbackUrl: '/' })}
+                className="block w-full px-3 py-2 text-left text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-white"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <Link
@@ -224,6 +261,7 @@ function SiteNavInner() {
           Sign in
         </Link>
       )}
+
       <Link
         href="/list-your-project"
         className="rounded-lg bg-[var(--color-accent)] px-4 py-2 font-medium text-white hover:bg-[var(--color-accent-hover)]"
@@ -234,16 +272,18 @@ function SiteNavInner() {
   );
 }
 
-export function getActiveUserId(sessionUserId?: string | null): string | null {
-  if (sessionUserId) return sessionUserId;
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem(SESSION_KEY);
-}
-
 export function SiteBrand({ className }: { className?: string }) {
   return (
     <Link href="/" className={cn('font-semibold tracking-tight text-white hover:text-[var(--color-accent)]', className)}>
       Doxxed crypto
     </Link>
   );
+}
+
+const SESSION_KEY = 'dcf-paper-user-id';
+
+export function getActiveUserId(sessionUserId?: string | null): string | null {
+  if (sessionUserId) return sessionUserId;
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(SESSION_KEY);
 }

@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { contributorLevelFromPoints } from '@dcf/utils';
+import { contributorLevelFromPoints, pointActionLabel } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class PointsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async award(userId: string, amount: number) {
+  async award(userId: string, amount: number, actionKey?: string) {
     if (amount <= 0) return;
 
     const user = await this.prisma.user.update({
@@ -20,6 +20,17 @@ export class PointsService {
       where: { id: userId },
       data: { contributorLevel: level },
     });
+
+    if (actionKey) {
+      await this.prisma.pointLedger.create({
+        data: {
+          userId,
+          amount,
+          actionKey: actionKey.split(':')[0] ?? actionKey,
+          label: pointActionLabel(actionKey),
+        },
+      });
+    }
   }
 
   /** Idempotent award — returns true if points were granted, false if already awarded. */
@@ -36,7 +47,7 @@ export class PointsService {
       throw err;
     }
 
-    await this.award(userId, amount);
+    await this.award(userId, amount, actionKey);
     return true;
   }
 }

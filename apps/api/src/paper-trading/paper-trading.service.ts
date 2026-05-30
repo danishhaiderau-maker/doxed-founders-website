@@ -19,6 +19,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from '../feed/feed.service';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PointsService } from '../points/points.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 
@@ -33,6 +34,7 @@ export class PaperTradingService {
     private readonly hotBuy: HotBuyService,
     private readonly analytics: AnalyticsService,
     private readonly points: PointsService,
+    private readonly notifications: NotificationsService,
     private readonly socialSignals: SocialSignalsService,
   ) {}
 
@@ -679,7 +681,15 @@ export class PaperTradingService {
 
     await this.cleanupInactiveTracking();
 
-    await this.points.award(dto.userId, POINTS.PAPER_TRADE);
+    await this.points.award(dto.userId, POINTS.PAPER_TRADE, 'PAPER_TRADE');
+
+    if (dto.side === PaperTradeSide.BUY) {
+      void this.notifications.notifyFollowersOfTraderBuy(dto.userId, {
+        ticker: project.ticker,
+        amountUsd,
+        projectSlug: project.slug,
+      });
+    }
 
     if (dto.side === PaperTradeSide.BUY) {
       void this.socialSignals.onPaperBuy(project.id);

@@ -382,7 +382,7 @@ export class FounderDenService {
 
     const streak = await this.updateBuildStreak(founder.id);
     await this.syncPresenceLevel(founder.id);
-    await this.points.award(userId, POINTS.FOUNDER_BUILD_POST);
+    await this.points.award(userId, POINTS.FOUNDER_BUILD_POST, 'FOUNDER_BUILD_POST');
 
     return { ...post, buildStreakDays: streak };
   }
@@ -414,7 +414,7 @@ export class FounderDenService {
     });
 
     await this.syncPresenceLevel(founder.id);
-    await this.points.award(userId, POINTS.FOUNDER_VIDEO);
+    await this.points.award(userId, POINTS.FOUNDER_VIDEO, 'FOUNDER_VIDEO');
     return video;
   }
 
@@ -945,7 +945,7 @@ export class FounderDenService {
 
     await this.syncUserProgressTier(userId);
     if (isFounder) {
-      await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST);
+      await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST, 'FOUNDER_COMMUNITY_POST');
     }
     return thread;
   }

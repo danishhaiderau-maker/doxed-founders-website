@@ -58,3 +58,5 @@ export * from './founder-brain';
 export * from './openhands';
 export * from './cursor-cloud';
 export * from './unified-feed';
+export * from './gamified-roles';
+export * from './notification-preferences';
