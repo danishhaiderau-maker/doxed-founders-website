@@ -237,7 +237,7 @@ export function FounderCopilotBriefing({
           {memory.repoFullName ? ` · ${memory.repoFullName}` : ''}
         </p>
 
-        <div className={`mt-4 grid gap-3 ${isSidebar ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-3'}`}>
+        <div className={`mt-4 grid gap-3 ${isSidebar ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-4'}`}>
           <div>
             <p className="text-[10px] uppercase tracking-wider text-zinc-500">Project</p>
             <p className="mt-0.5 font-semibold text-white">{memory.project?.name ?? 'Activate founder profile'}</p>
@@ -276,6 +276,14 @@ export function FounderCopilotBriefing({
               </div>
               <span className="text-sm font-bold text-emerald-300">{memory.progressPercent}%</span>
             </div>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-zinc-500">Launch readiness</p>
+            <p className="mt-1 text-2xl font-bold text-sky-300">
+              {memory.launchReadiness}
+              <span className="text-sm font-normal text-zinc-500">/100</span>
+            </p>
+            <p className="text-[10px] text-zinc-600">GitHub · video · community · demand · roadmap</p>
           </div>
         </div>
 
