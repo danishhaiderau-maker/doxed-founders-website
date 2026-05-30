@@ -14,6 +14,11 @@ export class FeedController {
     private readonly unifiedFeed: UnifiedFeedService,
   ) {}
 
+  @Get('flashes')
+  flashes(@Query('since') since?: string) {
+    return this.unifiedFeed.getEngagementFlashes(since);
+  }
+
   @Get('unified')
   unified(@Query('category') category?: 'all' | 'founder' | 'trading' | 'community' | 'market') {
     return this.unifiedFeed.getUnifiedFeed(category ?? 'all');

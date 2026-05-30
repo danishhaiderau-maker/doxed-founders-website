@@ -13,6 +13,13 @@ export class PredictionMarketsController {
 
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
+  @Get('hot')
+  listHot(@CurrentUser() user?: AuthUser) {
+    return this.markets.listHot(user?.id);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get()
   listGlobal(@CurrentUser() user?: AuthUser) {
     return this.markets.listGlobal(user?.id);

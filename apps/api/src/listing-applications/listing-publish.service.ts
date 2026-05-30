@@ -11,6 +11,7 @@ import {
   ChainSlug,
   ListingApplication,
   Prisma,
+  ProjectLifecycleStage,
   ProjectSource,
   VerificationType,
 } from '@prisma/client';
@@ -144,6 +145,8 @@ export class ListingPublishService {
     categoryId: string | undefined,
     founderId: string | undefined,
   ): Omit<Prisma.ProjectUncheckedCreateInput, 'slug'> {
+    const { lifecycleStage, isLiveToken } = this.resolveListingLifecycle(application);
+
     return {
       name: application.projectName,
       ticker: application.ticker.toUpperCase(),
@@ -162,7 +165,33 @@ export class ListingPublishService {
       approved: true,
       featured: false,
       trackingActive: true,
+      lifecycleStage,
+      isLiveToken,
     };
+  }
+
+  /** Scout-approved listings are never "idea stage" — only Founder OS (DYNAMIC) projects use IDEA. */
+  private resolveListingLifecycle(application: ListingApplication): {
+    lifecycleStage: ProjectLifecycleStage;
+    isLiveToken: boolean;
+  } {
+    const preview =
+      application.marketPreview && typeof application.marketPreview === 'object'
+        ? (application.marketPreview as MarketPreview)
+        : null;
+    const hasContract = Boolean(application.contractAddress?.trim());
+    const hasDex = Boolean(application.dexscreenerUrl?.trim());
+    const hasMarket =
+      preview?.marketCap != null && preview.marketCap > 0 ||
+      preview?.priceUsd != null && Number(preview.priceUsd) > 0;
+
+    if (hasContract && (hasDex || hasMarket)) {
+      return { lifecycleStage: ProjectLifecycleStage.LIVE_TRADING, isLiveToken: true };
+    }
+    if (hasContract) {
+      return { lifecycleStage: ProjectLifecycleStage.TOKEN_LAUNCH, isLiveToken: true };
+    }
+    return { lifecycleStage: ProjectLifecycleStage.LAUNCH_READY, isLiveToken: false };
   }
 
   private async upsertFounder(

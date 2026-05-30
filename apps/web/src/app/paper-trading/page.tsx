@@ -63,6 +63,7 @@ function PaperTradingPageContent() {
   const [resetInfo, setResetInfo] = useState<{
     message: string;
     stripeEnabled: boolean;
+    cryptoEnabled?: boolean;
   } | null>(null);
   const [activeChartUrl, setActiveChartUrl] = useState<string | null>(null);
   const [guestPortfolioNotice, setGuestPortfolioNotice] = useState<string | null>(null);
@@ -132,7 +133,11 @@ function PaperTradingPageContent() {
   useEffect(() => {
     fetchResetInfo()
       .then((info) =>
-        setResetInfo({ message: info.message, stripeEnabled: info.stripeEnabled }),
+        setResetInfo({
+          message: info.message,
+          stripeEnabled: info.stripeEnabled,
+          cryptoEnabled: info.cryptoEnabled,
+        }),
       )
       .catch(() => {});
   }, []);
@@ -746,12 +751,20 @@ function PaperTradingPageContent() {
         open={showBustModal}
         resetFeeUsd={portfolio?.resetFeeUsd ?? 25}
         stripeEnabled={resetInfo?.stripeEnabled ?? false}
+        cryptoEnabled={resetInfo?.cryptoEnabled ?? false}
+        accessToken={session?.accessToken}
         loading={resetLoading}
         onClose={() => {
           setShowBustModal(false);
           setBustDismissed(true);
         }}
         onPayReset={handlePayReset}
+        onCryptoSuccess={async (message) => {
+          setShowBustModal(false);
+          setBustDismissed(true);
+          if (userId) await refreshPortfolio(userId);
+          setGuestPortfolioNotice(message);
+        }}
       />
     </main>
   );

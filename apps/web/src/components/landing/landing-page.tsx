@@ -6,6 +6,7 @@ import { ProjectCard } from '@/components/project-card';
 import { ProjectSpotlight } from '@/components/landing/project-spotlight';
 import {
   LandingHero,
+  LandingLiveMetrics,
   LandingLiveActivity,
   LandingThreePhases,
   LandingProblemSolution,
@@ -15,7 +16,9 @@ import {
 } from '@/components/landing/landing-sections';
 import {
   fetchFeaturedProjects,
+  fetchPlatformStats,
   fetchSpotlightProjects,
+  PlatformStats,
   ProjectSummary,
   SpotlightProject,
 } from '@/lib/api';
@@ -24,10 +27,12 @@ import { useEffect, useState } from 'react';
 export function LandingPage() {
   const [featured, setFeatured] = useState<ProjectSummary[]>([]);
   const [spotlight, setSpotlight] = useState<SpotlightProject[]>([]);
+  const [platformStats, setPlatformStats] = useState<PlatformStats | null>(null);
 
   useEffect(() => {
     fetchFeaturedProjects().then(setFeatured).catch(() => setFeatured([]));
     fetchSpotlightProjects().then(setSpotlight).catch(() => setSpotlight([]));
+    fetchPlatformStats().then(setPlatformStats).catch(() => setPlatformStats(null));
   }, []);
 
   return (
@@ -45,6 +50,7 @@ export function LandingPage() {
       </header>
 
       <LandingHero />
+      <LandingLiveMetrics stats={platformStats} />
       <LandingLiveActivity />
       <LandingThreePhases />
       <LandingProblemSolution />

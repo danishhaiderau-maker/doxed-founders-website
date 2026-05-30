@@ -53,7 +53,7 @@ export class SecurityService {
   ) {}
 
   async getSecurityProfile(userId: string) {
-    const [user, totp, passkeys, recoveryCount, wallet] = await Promise.all([
+    const [user, totp, passkeys, recoveryCount, wallets] = await Promise.all([
       this.prisma.user.findUnique({
         where: { id: userId },
         select: { email: true, passwordHash: true },
@@ -74,19 +74,25 @@ export class SecurityService {
       this.prisma.recoveryCode.count({
         where: { userId, usedAt: null },
       }),
-      this.prisma.walletConnection.findFirst({
-        where: { userId, chain: 'SOLANA' },
+      this.prisma.walletConnection.findMany({
+        where: { userId, chain: { in: ['SOLANA', 'ETHEREUM'] } },
       }),
     ]);
 
     if (!user) throw new UnauthorizedException('User not found');
 
+    const solanaWallet = wallets.find((w) => w.chain === 'SOLANA') ?? null;
+    const evmWallet = wallets.find((w) => w.chain === 'ETHEREUM') ?? null;
+
     const score = computeSecurityScore({
-      walletConnected: Boolean(wallet),
+      walletConnected: Boolean(solanaWallet || evmWallet),
       passkeyEnabled: passkeys.length > 0,
       totpEnabled: Boolean(totp?.enabled),
       recoveryCodesActive: recoveryCount > 0,
     });
+
+    const mapWallet = (w: typeof solanaWallet) =>
+      w ? { chain: w.chain, address: w.address, verifiedAt: w.verifiedAt } : null;
 
     return {
       email: user.email,
@@ -95,9 +101,9 @@ export class SecurityService {
       totpPendingSetup: Boolean(totp && !totp.enabled),
       passkeys,
       recoveryCodesRemaining: recoveryCount,
-      wallet: wallet
-        ? { chain: wallet.chain, address: wallet.address, verifiedAt: wallet.verifiedAt }
-        : null,
+      wallet: mapWallet(solanaWallet),
+      solanaWallet: mapWallet(solanaWallet),
+      evmWallet: mapWallet(evmWallet),
       securityScore: score,
     };
   }

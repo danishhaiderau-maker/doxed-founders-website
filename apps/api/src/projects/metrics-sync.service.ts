@@ -1,16 +1,25 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { ChainSlug, Prisma, ProjectLifecycleStage } from '@prisma/client';
 import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import { PrismaService } from '../prisma/prisma.service';
 
-const STALE_MS = 15 * 60 * 1000;
-const SYNC_INTERVAL_MS = 15 * 60 * 1000;
+const STALE_MS = 2 * 60 * 1000;
+const SYNC_INTERVAL_MS = 2 * 60 * 1000;
 const REQUEST_GAP_MS = 350;
+const PAGE_SYNC_COOLDOWN_MS = 60 * 1000;
+
+type ProjectSyncRow = {
+  id: string;
+  dexscreenerUrl: string | null;
+  contractAddress: string | null;
+  chain: { slug: ChainSlug } | null;
+};
 
 @Injectable()
 export class MetricsSyncService implements OnModuleInit {
   private readonly logger = new Logger(MetricsSyncService.name);
   private syncing = false;
+  private readonly lastPageSyncBySlug = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -47,13 +56,25 @@ export class MetricsSyncService implements OnModuleInit {
       where: {
         approved: true,
         trackingActive: true,
-        dexscreenerUrl: { not: null },
         OR: [
-          { metrics: { is: null } },
-          { metrics: { updatedAt: { lt: cutoff } } },
+          { dexscreenerUrl: { not: null } },
+          { contractAddress: { not: null } },
+        ],
+        AND: [
+          {
+            OR: [
+              { metrics: { is: null } },
+              { metrics: { updatedAt: { lt: cutoff } } },
+            ],
+          },
         ],
       },
-      select: { id: true, dexscreenerUrl: true },
+      select: {
+        id: true,
+        dexscreenerUrl: true,
+        contractAddress: true,
+        chain: { select: { slug: true } },
+      },
     });
 
     let updated = 0;
@@ -61,7 +82,7 @@ export class MetricsSyncService implements OnModuleInit {
 
     for (const project of projects) {
       try {
-        const ok = await this.syncProject(project.id, project.dexscreenerUrl!);
+        const ok = await this.syncProjectRecord(project);
         if (ok) updated += 1;
       } catch {
         failed += 1;
@@ -72,20 +93,43 @@ export class MetricsSyncService implements OnModuleInit {
     return { attempted: projects.length, updated, failed };
   }
 
-  async syncBySlugIfStale(slug: string) {
+  /** Refresh metrics when a project page is opened (rate-limited per slug). */
+  async syncBySlug(slug: string, force = false) {
     const project = await this.prisma.project.findFirst({
       where: {
         slug,
         approved: true,
-        dexscreenerUrl: { not: null },
+        OR: [
+          { dexscreenerUrl: { not: null } },
+          { contractAddress: { not: null } },
+        ],
       },
-      include: { metrics: true },
+      include: { metrics: true, chain: { select: { slug: true } } },
     });
 
-    if (!project?.dexscreenerUrl) return false;
-    if (!this.isStale(project.metrics?.updatedAt)) return false;
+    if (!project) return false;
 
-    return this.syncProject(project.id, project.dexscreenerUrl);
+    if (force) {
+      const last = this.lastPageSyncBySlug.get(slug) ?? 0;
+      if (Date.now() - last < PAGE_SYNC_COOLDOWN_MS) {
+        return false;
+      }
+      this.lastPageSyncBySlug.set(slug, Date.now());
+    } else if (!this.isStale(project.metrics?.updatedAt)) {
+      return false;
+    }
+
+    return this.syncProjectRecord({
+      id: project.id,
+      dexscreenerUrl: project.dexscreenerUrl,
+      contractAddress: project.contractAddress,
+      chain: project.chain,
+    });
+  }
+
+  /** @deprecated use syncBySlug */
+  async syncBySlugIfStale(slug: string) {
+    return this.syncBySlug(slug, false);
   }
 
   private isStale(updatedAt?: Date | null) {
@@ -93,13 +137,11 @@ export class MetricsSyncService implements OnModuleInit {
     return updatedAt.getTime() < Date.now() - STALE_MS;
   }
 
-  private async syncProject(
-    projectId: string,
-    dexscreenerUrl: string,
-  ): Promise<boolean> {
-    const preview = await this.dexscreener.previewFromUrl(dexscreenerUrl);
-    const mp = preview.marketPreview;
+  private async syncProjectRecord(project: ProjectSyncRow): Promise<boolean> {
+    const preview = await this.resolvePreview(project);
+    if (!preview) return false;
 
+    const mp = preview.marketPreview;
     if (
       mp.priceUsd == null &&
       mp.marketCap == null &&
@@ -112,7 +154,7 @@ export class MetricsSyncService implements OnModuleInit {
       mp.priceUsd != null ? new Prisma.Decimal(mp.priceUsd) : undefined;
 
     await this.prisma.projectMetrics.upsert({
-      where: { projectId },
+      where: { projectId: project.id },
       update: {
         priceUsd,
         marketCap:
@@ -130,7 +172,7 @@ export class MetricsSyncService implements OnModuleInit {
             : undefined,
       },
       create: {
-        projectId,
+        projectId: project.id,
         priceUsd: priceUsd ?? new Prisma.Decimal(0),
         marketCap:
           mp.marketCap != null ? new Prisma.Decimal(mp.marketCap) : undefined,
@@ -148,7 +190,46 @@ export class MetricsSyncService implements OnModuleInit {
       },
     });
 
+    const liquidity = mp.liquidityUsd ?? 0;
+    const hasLiveMarket =
+      mp.priceUsd != null && Number(mp.priceUsd) > 0 && liquidity > 0;
+
+    await this.prisma.project.update({
+      where: { id: project.id },
+      data: {
+        dexscreenerUrl: preview.dexscreenerUrl,
+        contractAddress: preview.contractAddress ?? project.contractAddress ?? undefined,
+        ...(hasLiveMarket
+          ? {
+              isLiveToken: true,
+              lifecycleStage: ProjectLifecycleStage.LIVE_TRADING,
+            }
+          : {}),
+      },
+    });
+
     return true;
+  }
+
+  private async resolvePreview(project: ProjectSyncRow) {
+    if (project.contractAddress && project.chain?.slug) {
+      try {
+        return await this.dexscreener.previewFromContract(
+          project.chain.slug,
+          project.contractAddress,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Contract metrics lookup failed for ${project.id}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    if (project.dexscreenerUrl) {
+      return this.dexscreener.previewFromUrl(project.dexscreenerUrl);
+    }
+
+    return null;
   }
 
   private sleep(ms: number) {

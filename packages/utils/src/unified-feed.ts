@@ -28,12 +28,36 @@ export type PlatformPulseItem = {
   tier: UnifiedFeedTier;
 };
 
+export type HotPredictionItem = {
+  id: string;
+  question: string;
+  projectName: string;
+  projectSlug: string;
+  projectTicker: string;
+  totalPoolUsd: number;
+  participantCount: number;
+  conviction: number;
+  heatLabel: 'Blazing' | 'Heating up' | null;
+  hoursLeft: number | null;
+};
+
+export type EngagementFlash = {
+  id: string;
+  emoji: string;
+  message: string;
+  link?: string;
+  at: string;
+};
+
 const TIER1 = new Set([
   'scout_vote_opened',
+  'hot_prediction',
+  'prediction_staked',
   'raise_opened',
   'token_launch',
   'hot_buy',
   'top_trader_buy',
+  'listing_live',
 ]);
 
 const TIER2 = new Set([

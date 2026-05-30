@@ -18,22 +18,22 @@ import {
   walletChallenge,
   walletVerify,
 } from '@/lib/api';
+import { WalletPickerModal } from '@/components/settings/wallet-picker-modal';
+import {
+  discoverEvmWallets,
+  disconnectEvmWallet,
+  disconnectSolanaWallet,
+  EVM_PAYMENT_CHAINS,
+  EvmWalletOption,
+  listSolanaWallets,
+  SolanaWalletOption,
+} from '@/lib/wallet-providers';
 
-type SolanaProvider = {
-  connect(): Promise<{ publicKey: { toString(): string } }>;
-  signMessage(message: Uint8Array, display?: string): Promise<{ signature: Uint8Array }>;
-  publicKey?: { toString(): string };
-  isConnected?: boolean;
-};
-
-function getSolanaProvider(): SolanaProvider | null {
-  if (typeof window === 'undefined') return null;
-  return window.phantom?.solana ?? window.solflare ?? window.backpack ?? null;
-}
+type SolanaProvider = SolanaWalletOption['provider'];
 
 declare global {
   interface Window {
-    phantom?: { solana?: SolanaProvider };
+    phantom?: { solana?: SolanaProvider & { isPhantom?: boolean } };
     solflare?: SolanaProvider;
     backpack?: SolanaProvider;
   }
@@ -47,6 +47,14 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
   const [totpCode, setTotpCode] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '' });
+  const [solanaPickerOpen, setSolanaPickerOpen] = useState(false);
+  const [evmPickerOpen, setEvmPickerOpen] = useState(false);
+  const [solanaWallets, setSolanaWallets] = useState<SolanaWalletOption[]>([]);
+  const [evmWallets, setEvmWallets] = useState<EvmWalletOption[]>([]);
+  const [walletBusy, setWalletBusy] = useState(false);
+
+  const solanaWallet = profile?.solanaWallet ?? profile?.wallet ?? null;
+  const evmWallet = profile?.evmWallet ?? null;
 
   const load = useCallback(async () => {
     try {
@@ -59,6 +67,96 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
   useEffect(() => {
     load();
   }, [load]);
+
+  async function openSolanaPicker() {
+    setErr(null);
+    setSolanaWallets(listSolanaWallets());
+    setSolanaPickerOpen(true);
+  }
+
+  async function openEvmPicker() {
+    setErr(null);
+    const wallets = await discoverEvmWallets();
+    setEvmWallets(wallets);
+    setEvmPickerOpen(true);
+  }
+
+  async function connectSolanaWallet(option: SolanaWalletOption) {
+    setSolanaPickerOpen(false);
+    setWalletBusy(true);
+    setErr(null);
+    try {
+      const { challengeToken, message } = await walletChallenge(accessToken);
+      const conn = await option.provider.connect();
+      const address = conn.publicKey.toString();
+      const encoded = new TextEncoder().encode(message);
+      const { signature } = await option.provider.signMessage(encoded, 'utf8');
+      await walletVerify(
+        challengeToken,
+        address,
+        bs58.encode(signature),
+        message,
+        accessToken,
+        'SOLANA',
+      );
+      setMsg(`${option.name} linked — this is your default Solana payout & top-up address`);
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Solana wallet connect failed');
+    } finally {
+      setWalletBusy(false);
+    }
+  }
+
+  async function connectEvmWallet(option: EvmWalletOption) {
+    setEvmPickerOpen(false);
+    setWalletBusy(true);
+    setErr(null);
+    try {
+      const { challengeToken, message } = await walletChallenge(accessToken);
+      const accounts = (await option.provider.request({ method: 'eth_requestAccounts' })) as string[];
+      const address = accounts[0];
+      const signature = (await option.provider.request({
+        method: 'personal_sign',
+        params: [message, address],
+      })) as string;
+      await walletVerify(challengeToken, address, signature, message, accessToken, 'ETHEREUM');
+      setMsg(
+        `${option.name} linked — default EVM payout address. Platform payments use Base or BNB Chain only (not Ethereum mainnet).`,
+      );
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'EVM wallet connect failed');
+    } finally {
+      setWalletBusy(false);
+    }
+  }
+
+  async function changeSolanaWallet() {
+    const currentId = solanaWallet ? 'linked' : null;
+    if (currentId && solanaWallet) {
+      for (const w of listSolanaWallets()) {
+        try {
+          await disconnectSolanaWallet(w.provider);
+        } catch {
+          // ignore
+        }
+      }
+      await disconnectWallet(accessToken, 'SOLANA');
+    }
+    await openSolanaPicker();
+  }
+
+  async function changeEvmWallet() {
+    if (evmWallet) {
+      const wallets = await discoverEvmWallets();
+      for (const w of wallets) {
+        await disconnectEvmWallet(w.provider);
+      }
+      await disconnectWallet(accessToken, 'ETHEREUM');
+    }
+    await openEvmPicker();
+  }
 
   if (!profile) {
     return <p className="text-sm text-zinc-500">Loading security profile…</p>;
@@ -309,94 +407,90 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
         <h2 className="font-semibold text-white">Solana wallet (sign-only)</h2>
         <p className="mt-1 text-xs text-zinc-500">
-          Phantom, Backpack, or Solflare. We never store seed phrases or private keys.
+          Choose Phantom, Backpack, or Solflare. Used for on-chain top-ups and Solana payouts. We never store seed
+          phrases.
         </p>
-        {profile.wallet ? (
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <code className="break-all text-xs text-emerald-300">{profile.wallet.address}</code>
+        {solanaWallet ? (
+          <div className="mt-4 space-y-3">
+            <code className="block break-all rounded-lg bg-zinc-950 px-3 py-2 text-xs text-emerald-300">
+              {solanaWallet.address}
+            </code>
+            <p className="text-xs text-zinc-500">
+              Default address for Solana USDC top-ups and platform payouts on Solana.
+            </p>
             <button
               type="button"
-              onClick={async () => {
-                await disconnectWallet(accessToken);
-                setMsg('Wallet disconnected');
-                load();
-              }}
-              className="text-xs text-red-400 hover:underline"
+              disabled={walletBusy}
+              onClick={changeSolanaWallet}
+              className="rounded-lg border border-purple-500/40 px-4 py-2 text-sm text-purple-200 hover:bg-purple-950/30 disabled:opacity-50"
             >
-              Disconnect
+              Change wallet
             </button>
           </div>
         ) : (
           <button
             type="button"
-            onClick={async () => {
-              setErr(null);
-              const provider = getSolanaProvider();
-              if (!provider) {
-                setErr('Install Phantom, Backpack, or Solflare');
-                return;
-              }
-              try {
-                const { challengeToken, message } = await walletChallenge(accessToken);
-                const conn = await provider.connect();
-                const address = conn.publicKey.toString();
-                const encoded = new TextEncoder().encode(message);
-                const { signature } = await provider.signMessage(encoded, 'utf8');
-                await walletVerify(
-                  challengeToken,
-                  address,
-                  bs58.encode(signature),
-                  message,
-                  accessToken,
-                  'SOLANA',
-                );
-                setMsg('Wallet verified and linked');
-                load();
-              } catch (e) {
-                setErr(e instanceof Error ? e.message : 'Wallet connect failed');
-              }
-            }}
-            className="mt-4 rounded-lg bg-purple-600 px-4 py-2 text-sm text-white"
+            disabled={walletBusy}
+            onClick={openSolanaPicker}
+            className="mt-4 rounded-lg bg-purple-600 px-4 py-2 text-sm text-white disabled:opacity-50"
           >
-            Connect wallet
+            Connect Solana wallet
           </button>
         )}
       </section>
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="font-semibold text-white">EVM wallet (MetaMask / Rabby)</h2>
+        <h2 className="font-semibold text-white">EVM wallet (MetaMask · Coinbase · Rabby)</h2>
         <p className="mt-1 text-xs text-zinc-500">
-          Sign-message only — used for Raise Room participant export and token distribution. Non-custodial.
+          Pick your EVM wallet — we skip Phantom here so it does not hijack Ethereum signing. Used for Raise Room
+          exports and EVM payouts on {EVM_PAYMENT_CHAINS.map((c) => c.name).join(' or ')}. Ethereum mainnet is not used
+          for platform payments (gas).
         </p>
-        <button
-          type="button"
-          onClick={async () => {
-            setErr(null);
-            const eth = (window as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
-            if (!eth) {
-              setErr('Install MetaMask or Rabby');
-              return;
-            }
-            try {
-              const { challengeToken, message } = await walletChallenge(accessToken);
-              const accounts = (await eth.request({ method: 'eth_requestAccounts' })) as string[];
-              const address = accounts[0];
-              const signature = (await eth.request({
-                method: 'personal_sign',
-                params: [message, address],
-              })) as string;
-              await walletVerify(challengeToken, address, signature, message, accessToken, 'ETHEREUM');
-              setMsg('EVM wallet verified — linked for ICO distribution');
-              load();
-            } catch (e) {
-              setErr(e instanceof Error ? e.message : 'EVM wallet connect failed');
-            }
-          }}
-          className="mt-4 rounded-lg bg-orange-600 px-4 py-2 text-sm text-white"
-        >
-          Connect MetaMask
-        </button>
+        {evmWallet ? (
+          <div className="mt-4 space-y-3">
+            <code className="block break-all rounded-lg bg-zinc-950 px-3 py-2 text-xs text-orange-200">
+              {evmWallet.address}
+            </code>
+            <p className="text-xs text-zinc-500">
+              Default EVM payout address. Change wallet to receive funds on a new address.
+            </p>
+            <button
+              type="button"
+              disabled={walletBusy}
+              onClick={changeEvmWallet}
+              className="rounded-lg border border-orange-500/40 px-4 py-2 text-sm text-orange-200 hover:bg-orange-950/30 disabled:opacity-50"
+            >
+              Change wallet
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={walletBusy}
+            onClick={openEvmPicker}
+            className="mt-4 rounded-lg bg-orange-600 px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            Connect EVM wallet
+          </button>
+        )}
       </section>
+
+      {solanaPickerOpen && (
+        <WalletPickerModal
+          title="Choose Solana wallet"
+          wallets={solanaWallets}
+          onPick={(w) => connectSolanaWallet(w as SolanaWalletOption)}
+          onClose={() => setSolanaPickerOpen(false)}
+        />
+      )}
+      {evmPickerOpen && (
+        <WalletPickerModal
+          title="Choose EVM wallet"
+          wallets={evmWallets}
+          onPick={(w) => connectEvmWallet(w as EvmWalletOption)}
+          onClose={() => setEvmPickerOpen(false)}
+        />
+      )}
     </div>
   );
 }

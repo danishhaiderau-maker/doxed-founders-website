@@ -2,6 +2,11 @@
 export const STARTING_CASH_USD = 10_000;
 export const RESTRICTED_CASH_THRESHOLD_USD = 1_000;
 export const TOP_UP_FEE_USD = 25;
+export const TOP_UP_INTENT_TTL_MS = 30 * 60 * 1000;
+
+/** Solana mainnet USDC mint (SPL). */
+export const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+export const SOLANA_USDC_DECIMALS = 6;
 
 export function isCashRestricted(cashBalance: number): boolean {
   return cashBalance < RESTRICTED_CASH_THRESHOLD_USD;

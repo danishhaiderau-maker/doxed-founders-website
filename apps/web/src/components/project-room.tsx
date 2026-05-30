@@ -185,7 +185,7 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
               </div>
             </div>
           )}
-          {room.isLiveToken && room.metrics && <ProjectMetricsGrid metrics={room.metrics} />}
+          {room.metrics?.priceUsd != null && <ProjectMetricsGrid metrics={room.metrics} />}
           {room.summary && <p className="text-zinc-400">{room.summary}</p>}
           {poolAddress && (
             <GeckoTerminalChart chainSlug={room.chain.slug} poolAddress={poolAddress} dexscreenerUrl={room.dexscreenerUrl ?? undefined} />
