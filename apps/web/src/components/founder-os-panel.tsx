@@ -35,6 +35,8 @@ type FounderOsPanelProps = {
   onRefresh?: () => void;
   /** When false, actions require activating a founder profile first. */
   founderActive?: boolean;
+  /** stackOnly hides copilot actions, bounties, and publish blocks — stack + GitHub only */
+  variant?: 'full' | 'stackOnly';
 };
 
 export function FounderOsPanel({
@@ -44,6 +46,7 @@ export function FounderOsPanel({
   projectId,
   onRefresh,
   founderActive = true,
+  variant = 'full',
 }: FounderOsPanelProps) {
   const [data, setData] = useState<FounderOsDashboard | null>(null);
   const [repoInput, setRepoInput] = useState('');
@@ -199,9 +202,11 @@ export function FounderOsPanel({
 
   const apps = data?.connectedApps ?? [];
   const providers = data?.integrationProviders ?? [];
+  const stackOnly = variant === 'stackOnly';
 
   return (
     <div className="space-y-6">
+      {!stackOnly && (
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-4">
           <p className="text-[10px] uppercase text-violet-300">Founder Credits</p>
@@ -225,6 +230,7 @@ export function FounderOsPanel({
           <p className="mt-1 text-xs text-zinc-500">One dashboard — fewer tools to pay for</p>
         </div>
       </div>
+      )}
 
       {msg && <p className="text-sm text-emerald-300">{msg}</p>}
 
@@ -312,6 +318,8 @@ export function FounderOsPanel({
         </div>
       </div>
 
+      {!stackOnly && (
+      <>
       <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
         <p className="text-sm font-semibold text-indigo-200">Founder Copilot · What would you like to do?</p>
         <p className="mt-1 text-xs text-zinc-500">
@@ -421,6 +429,9 @@ export function FounderOsPanel({
         </div>
       )}
 
+      </>
+      )}
+
       {connectProvider && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
           <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-900 p-5">
@@ -483,7 +494,7 @@ export function FounderOsPanel({
         />
       )}
 
-      {projectId && (
+      {projectId && !stackOnly && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
           <p className="text-sm font-semibold text-white">Post a bounty</p>
           <p className="mt-1 text-xs text-zinc-500">Need design, dev, research? Pay in Founder Credits.</p>

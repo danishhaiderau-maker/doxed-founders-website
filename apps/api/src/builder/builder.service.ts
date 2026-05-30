@@ -389,7 +389,7 @@ export class BuilderService {
     userPrompt: string,
   ): Promise<string | null> {
     const result = await this.tryCopilotChatCompletion(userId, system, userPrompt);
-    return result?.text ?? null;
+    return result.ok ? result.text : null;
   }
 
   /**
@@ -400,9 +400,12 @@ export class BuilderService {
     userId: string,
     system: string,
     userPrompt: string,
-  ): Promise<{ text: string; provider: AiProvider } | null> {
+  ): Promise<
+    | { ok: true; text: string; provider: AiProvider }
+    | { ok: false; llmErrors: string[] }
+  > {
     const settings = await this.ensureSettings(userId);
-    const connected = await this.listConnectedProviders(userId);
+    const usable = await this.listUsableLlmCredentialProviders(userId);
     const order: AiProvider[] = [];
 
     if (
@@ -421,10 +424,12 @@ export class BuilderService {
       if (!order.includes(key)) order.push(key);
     }
 
+    const llmErrors: string[] = [];
+
     for (const provider of order) {
       const cfg = aiProviderConfig(provider);
       if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') continue;
-      if (!connected.has(cfg.credentialProvider)) continue;
+      if (!usable.has(cfg.credentialProvider)) continue;
 
       const cred = await this.prisma.integrationCredential.findUnique({
         where: { userId_provider: { userId, provider: cfg.credentialProvider } },
@@ -439,13 +444,16 @@ export class BuilderService {
 
       try {
         const text = await this.completionWithProvider(provider, apiKey, system, userPrompt, model);
-        if (text?.trim()) return { text: text.trim(), provider };
-      } catch {
-        continue;
+        if (text?.trim()) return { ok: true, text: text.trim(), provider };
+        llmErrors.push(`${provider}: empty response`);
+      } catch (err) {
+        llmErrors.push(
+          `${provider}: ${err instanceof Error ? err.message : 'request failed'}`,
+        );
       }
     }
 
-    return null;
+    return llmErrors.length > 0 ? { ok: false, llmErrors } : { ok: false, llmErrors: ['No LLM API key configured'] };
   }
 
   private async completionWithProvider(
@@ -523,6 +531,22 @@ export class BuilderService {
       select: { provider: true },
     });
     return new Set(creds.map((c) => c.provider));
+  }
+
+  /** LLM keys with a stored token (verified optional — chat should still attempt). */
+  private async listUsableLlmCredentialProviders(userId: string) {
+    const creds = await this.prisma.integrationCredential.findMany({
+      where: {
+        userId,
+        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek'] },
+      },
+      select: { provider: true, token: true },
+    });
+    const out = new Set<string>();
+    for (const c of creds) {
+      if (this.crypto.decrypt(c.token)) out.add(c.provider);
+    }
+    return out;
   }
 
   private async verifyAiKey(provider: string, key: string): Promise<{ accountName: string }> {
@@ -652,7 +676,10 @@ export class BuilderService {
         temperature: 0.4,
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     return data.choices?.[0]?.message?.content ?? null;
   }

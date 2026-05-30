@@ -2218,11 +2218,12 @@ export function fetchEventActivity(token: string) {
 }
 
 export function copilotAsk(prompt: string, token: string) {
-  return apiFetch<{ answer: string; answerProvider?: string; stats: Record<string, number> }>(
-    '/copilot/ask',
-    { method: 'POST', body: JSON.stringify({ prompt }) },
-    token,
-  );
+  return apiFetch<{
+    answer: string;
+    answerProvider?: string;
+    llmErrors?: string[];
+    stats: Record<string, number>;
+  }>('/copilot/ask', { method: 'POST', body: JSON.stringify({ prompt }) }, token);
 }
 
 export function copilotHandsFree(prompt: string, token: string) {

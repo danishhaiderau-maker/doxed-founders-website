@@ -44,6 +44,13 @@ type FounderCopilotChatProps = {
   onResult?: (answer: string) => void;
 };
 
+const ASK_CHIPS = [
+  'What am I working on right now?',
+  'What changed this week?',
+  'What should I ship today?',
+  'Explain this project to investors.',
+];
+
 export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -203,11 +210,22 @@ export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChat
 
       <div ref={scrollRef} className="flex min-h-[320px] max-h-[min(58vh,520px)] flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
         {messages.length === 0 && !busy && (
-          <div className="mx-auto max-w-md text-center text-sm text-zinc-500">
-            <p>Ask anything about your repo, tasks, or next step.</p>
-            <p className="mt-2 text-xs">
-              Examples: &quot;What am I working on?&quot; · &quot;Summarize last commits&quot; · &quot;What should I ship today?&quot;
+          <div className="mx-auto w-full max-w-lg space-y-3">
+            <p className="text-center text-sm text-zinc-500">
+              Ask Founder Brain — answers use GitHub, tasks, roadmap, and build feed context.
             </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {ASK_CHIPS.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => sendMessage(chip)}
+                  className="rounded-full border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-[11px] text-zinc-300 hover:border-violet-500/50 hover:text-white"
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m) => (
