@@ -49,6 +49,11 @@ if (args.includes('--all')) {
 
 run('npx', ['electron-builder', ...platformArgs], {
   cwd: path.join(root, 'apps/founder-node'),
+  env: {
+    ...process.env,
+    CSC_IDENTITY_AUTO_DISCOVERY: 'false',
+    npm_config_workspace: '@dcf/founder-node',
+  },
 });
 
 console.log('\nInstallers written to apps/founder-node/release/');

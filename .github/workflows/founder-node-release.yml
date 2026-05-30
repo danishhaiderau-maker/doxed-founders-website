@@ -47,10 +47,17 @@ jobs:
       - name: Prepare packaging layout
         run: node scripts/prepare-founder-node-pack.mjs
 
-      - name: Pack Founder Node (${{ matrix.platform }})
+      - name: Pack Founder Node (Windows)
+        if: matrix.platform == 'win'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: node scripts/pack-founder-node.mjs --${{ matrix.platform }}
+        run: npm run pack:founder-node:win
+
+      - name: Pack Founder Node (macOS)
+        if: matrix.platform == 'mac'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run pack:founder-node:mac
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
