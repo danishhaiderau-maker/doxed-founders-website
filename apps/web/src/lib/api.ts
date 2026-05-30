@@ -752,6 +752,12 @@ export interface ProjectDetail extends ProjectSummary {
   docsUrl: string | null;
   whitepaperUrl: string | null;
   contractAddress: string | null;
+  recentPaperBuyers?: Array<{
+    userId: string;
+    displayName: string;
+    amountUsd: number;
+    twitterHandle?: string | null;
+  }>;
   socials: {
     twitterUrl: string | null;
     discordUrl: string | null;

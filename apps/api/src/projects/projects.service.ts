@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProjectSource } from '@prisma/client';
 import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
+import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
 
@@ -31,6 +32,7 @@ export class ProjectsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly metricsSync: MetricsSyncService,
+    private readonly hotBuy: HotBuyService,
   ) {}
 
   async findAll(params?: { featured?: boolean; category?: string }) {
@@ -237,10 +239,13 @@ export class ProjectsService {
       },
     });
 
+    const recentPaperBuyers = await this.hotBuy.getRecentBuyersForProject(project.id);
+
     return {
       ...this.mapProjectDetail(project),
       lifecycleStage: effectiveStage,
       listingKind,
+      recentPaperBuyers,
       isVerifiedListing: listingKind === 'verified',
       isLiveToken:
         project.isLiveToken ||

@@ -9,6 +9,7 @@ import { FounderBadges } from '@/components/founder-badges';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ProjectMetricsGrid } from '@/components/project-card';
 import { ProjectRoomPanel } from '@/components/project-room';
+import { ProjectRecentBuyersPanel } from '@/components/project-recent-buyers';
 import { WatchlistButton } from '@/components/watchlist-button';
 import { fetchProject, ProjectDetail } from '@/lib/api';
 
@@ -96,16 +97,23 @@ export default function ProjectDetailPage() {
                     {project.listingKind === 'founder_os' && ' · Founder OS'}
                     {project.listingKind === 'paper_track' && ' · Paper track (not listed)'}
                   </p>
-                  {project.listingKind === 'paper_track' && (
-                    <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-sm text-amber-100">
-                      Someone paper-traded this DexScreener token — it is not a verified Doxxed listing.
-                      {' '}
-                      <Link href="/list-your-project" className="font-medium text-amber-200 underline">
-                        Submit a listing
-                      </Link>{' '}
-                      with founder proof for admin approval.
-                    </p>
-                  )}
+                  {project.listingKind === 'paper_track' &&
+                    (project.recentPaperBuyers?.length ? (
+                      <ProjectRecentBuyersPanel
+                        ticker={project.ticker}
+                        slug={project.slug}
+                        dexscreenerUrl={project.dexscreenerUrl}
+                        buyers={project.recentPaperBuyers}
+                      />
+                    ) : (
+                      <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-sm text-amber-100">
+                        Paper-traded via DexScreener — not a verified Doxxed listing yet.{' '}
+                        <Link href="/list-your-project" className="font-medium text-amber-200 underline">
+                          Submit a listing
+                        </Link>{' '}
+                        with founder proof for admin approval.
+                      </p>
+                    ))}
                   {project.summary && (
                     <p className="mt-3 max-w-2xl text-[var(--color-muted)]">{project.summary}</p>
                   )}
