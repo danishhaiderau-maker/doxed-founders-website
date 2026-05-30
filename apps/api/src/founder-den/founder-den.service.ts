@@ -42,6 +42,7 @@ import {
   FounderBrainContext,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
@@ -1678,7 +1679,7 @@ export class FounderDenService {
   }
 
   async getPlatformEconomy() {
-    const treasury = await this.prisma.platformTreasury.findUnique({ where: { id: 'default' } });
+    const solanaTreasury = await resolveSolanaTreasuryAddress(this.prisma);
     const burned = await this.prisma.virtualEconomyEvent.aggregate({
       where: { type: 'PAPER_BURN' },
       _sum: { amountUsd: true },
@@ -1691,8 +1692,9 @@ export class FounderDenService {
       restrictedCashThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       totalPaperBurned: Number(burned._sum.amountUsd ?? 0),
       treasury: {
-        solana: treasury?.solanaTreasuryAddress ?? null,
-        evm: treasury?.evmTreasuryAddress ?? null,
+        solana: solanaTreasury,
+        evm: (await this.prisma.platformTreasury.findUnique({ where: { id: 'default' } }))
+          ?.evmTreasuryAddress ?? null,
       },
       paperDollarSinks: [
         'Raise Room allocations (1% burned on commit)',

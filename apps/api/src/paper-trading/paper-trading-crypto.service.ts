@@ -11,6 +11,11 @@ import {
   TOP_UP_INTENT_TTL_MS,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  isSolanaTopUpConfigured,
+  resolveSolanaTreasuryAddress,
+  solanaRpcUrl,
+} from '../payments/platform-treasury';
 import { verifySolanaTopUpPayment } from '../payments/solana-tx-verify';
 import { PaperTradingService } from './paper-trading.service';
 
@@ -23,15 +28,13 @@ export class PaperTradingCryptoService {
     private readonly paperTrading: PaperTradingService,
   ) {}
 
-  isEnabled(): boolean {
-    return Boolean(
-      process.env.SOLANA_RPC_URL?.trim() &&
-        this.getRpcUrl(),
-    );
+  async isEnabled(): Promise<boolean> {
+    const treasuryAddress = await resolveSolanaTreasuryAddress(this.prisma);
+    return isSolanaTopUpConfigured(treasuryAddress);
   }
 
   async createIntent(userId: string, asset: TopUpPaymentAsset = TopUpPaymentAsset.USDC) {
-    if (!this.isEnabled()) {
+    if (!(await this.isEnabled())) {
       throw new BadRequestException(
         'On-chain top-up is not configured. Set SOLANA_RPC_URL and admin treasury address.',
       );
@@ -39,14 +42,12 @@ export class PaperTradingCryptoService {
 
     await this.paperTrading.assertRestrictedForTopUp(userId);
 
-    const [treasury, wallet] = await Promise.all([
-      this.prisma.platformTreasury.findUnique({ where: { id: 'default' } }),
+    const [treasuryAddress, wallet] = await Promise.all([
+      resolveSolanaTreasuryAddress(this.prisma),
       this.prisma.walletConnection.findFirst({
         where: { userId, chain: 'SOLANA' },
       }),
     ]);
-
-    const treasuryAddress = treasury?.solanaTreasuryAddress?.trim();
     if (!treasuryAddress) {
       throw new BadRequestException(
         'Platform Solana treasury is not configured. Contact admin.',
@@ -189,10 +190,6 @@ export class PaperTradingCryptoService {
   }
 
   private getRpcUrl(): string {
-    return (
-      process.env.SOLANA_RPC_URL?.trim() ||
-      process.env.HELIUS_RPC_URL?.trim() ||
-      'https://api.mainnet-beta.solana.com'
-    );
+    return solanaRpcUrl();
   }
 }
