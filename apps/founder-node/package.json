@@ -33,9 +33,14 @@
       "output": "release",
       "buildResources": "build"
     },
+    "nodeModulesPaths": [
+      "../../node_modules",
+      "node_modules"
+    ],
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/@dcf/**/*"
     ],
     "extraResources": [
       {
