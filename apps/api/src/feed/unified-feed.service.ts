@@ -1,11 +1,16 @@
 import { Injectable } from '@nestjs/common';
-import { ScoutMarketStatus, SimulatedRaiseStatus } from '@prisma/client';
+import { ListingStatus, ScoutMarketStatus, SimulatedRaiseStatus } from '@prisma/client';
 import {
   PlatformPulseItem,
   UnifiedFeedCategory,
   UnifiedFeedItem,
   sortUnifiedFeedItems,
   unifiedFeedTier,
+  computePredictionHeatScore,
+  predictionHeatLabel,
+  sortPredictionMarketsByHeat,
+  HotPredictionItem,
+  EngagementFlash,
 } from '@dcf/utils';
 import { formatUsd } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -38,17 +43,26 @@ export class UnifiedFeedService {
 
     const scoutVotes = await this.prisma.scoutMarket.findMany({
       where: { status: ScoutMarketStatus.OPEN },
-      orderBy: { createdAt: 'desc' },
-      take: 2,
-      include: { project: { select: { slug: true, name: true, ticker: true } } },
+      include: { project: { select: { slug: true, name: true, ticker: true } }, positions: true },
+      take: 20,
     });
-    for (const vote of scoutVotes) {
+    const hotSorted = sortPredictionMarketsByHeat(
+      scoutVotes.map((vote) => ({
+        vote,
+        totalPoolUsd: Number(vote.yesPoolUsd) + Number(vote.noPoolUsd),
+        participantCount: vote.positions.filter((p) => Number(p.amountUsd) > 0).length,
+        createdAt: vote.createdAt.toISOString(),
+      })),
+    ).slice(0, 2);
+    for (const row of hotSorted) {
+      const vote = row.vote;
+      const pool = row.totalPoolUsd;
       items.push({
-        id: `pulse-scout-${vote.id}`,
-        emoji: '🗳️',
-        headline: `${vote.project.name} entered Scout Vote`,
+        id: `pulse-predict-${vote.id}`,
+        emoji: pool >= 100 ? '🔥' : '🔮',
+        headline: `${vote.project.name}: hot prediction`,
         detail: vote.question.slice(0, 80),
-        link: `/scout-votes`,
+        link: `/predict`,
         tier: 1,
       });
     }
@@ -136,7 +150,166 @@ export class UnifiedFeedService {
     }
 
     const sorted = sortUnifiedFeedItems(items).slice(0, limit);
-    return { category, items: sorted, pulse: await this.getPulse() };
+    const [hotQuestions, scoutListings] = await Promise.all([
+      this.getHotQuestions(8),
+      this.getOpenScoutListings(6),
+    ]);
+    return {
+      category,
+      items: sorted,
+      pulse: await this.getPulse(),
+      hotQuestions,
+      scoutListings,
+    };
+  }
+
+  async getHotQuestions(limit = 8): Promise<HotPredictionItem[]> {
+    const markets = await this.prisma.scoutMarket.findMany({
+      where: { status: ScoutMarketStatus.OPEN },
+      include: {
+        project: { select: { slug: true, name: true, ticker: true } },
+        positions: true,
+      },
+      take: 40,
+    });
+
+    const mapped = markets.map((m) => {
+      const yesPool = Number(m.yesPoolUsd);
+      const noPool = Number(m.noPoolUsd);
+      const totalPoolUsd = yesPool + noPool;
+      const participantCount = m.positions.filter((p) => Number(p.amountUsd) > 0).length;
+      const hoursLeft =
+        m.resolvesAt != null
+          ? Math.max(0, Math.ceil((m.resolvesAt.getTime() - Date.now()) / 3_600_000))
+          : null;
+      return {
+        id: m.id,
+        question: m.question,
+        projectName: m.project.name,
+        projectSlug: m.project.slug,
+        projectTicker: m.project.ticker,
+        totalPoolUsd,
+        participantCount,
+        conviction: totalPoolUsd > 0 ? Math.round((yesPool / totalPoolUsd) * 100) : 50,
+        heatLabel: predictionHeatLabel(totalPoolUsd, participantCount),
+        hoursLeft,
+        heatScore: computePredictionHeatScore(totalPoolUsd, participantCount),
+        createdAt: m.createdAt.toISOString(),
+      };
+    });
+
+    return sortPredictionMarketsByHeat(mapped)
+      .slice(0, limit)
+      .map(({ heatScore: _heatScore, createdAt: _createdAt, ...rest }) => rest);
+  }
+
+  async getOpenScoutListings(limit = 6) {
+    const now = new Date();
+    const apps = await this.prisma.listingApplication.findMany({
+      where: {
+        status: ListingStatus.COMMUNITY_VOTING,
+        OR: [{ votingClosesAt: null }, { votingClosesAt: { gt: now } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        projectName: true,
+        ticker: true,
+        whyList: true,
+        createdAt: true,
+        _count: { select: { votes: true } },
+      },
+    });
+
+    return apps.map((a) => ({
+      id: a.id,
+      projectName: a.projectName,
+      ticker: a.ticker,
+      whyList: a.whyList?.slice(0, 120) ?? null,
+      voteCount: a._count.votes,
+      at: a.createdAt.toISOString(),
+    }));
+  }
+
+  async getEngagementFlashes(since?: string): Promise<EngagementFlash[]> {
+    const sinceDate = since ? new Date(since) : new Date(Date.now() - 30_000);
+    const flashes: EngagementFlash[] = [];
+
+    const [listings, markets, comments, stakes] = await Promise.all([
+      this.prisma.project.findMany({
+        where: { approved: true, createdAt: { gte: sinceDate } },
+        orderBy: { createdAt: 'desc' },
+        take: 3,
+        select: { id: true, name: true, ticker: true, slug: true, createdAt: true },
+      }),
+      this.prisma.scoutMarket.findMany({
+        where: { status: ScoutMarketStatus.OPEN, createdAt: { gte: sinceDate } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: { project: { select: { ticker: true } } },
+      }),
+      this.prisma.feedComment.findMany({
+        where: { createdAt: { gte: sinceDate } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        include: {
+          user: { select: { name: true, email: true } },
+          feedPost: { include: { project: { select: { ticker: true } } } },
+        },
+      }),
+      this.prisma.virtualEconomyEvent.findMany({
+        where: { type: 'PREDICTION_STAKE', createdAt: { gte: sinceDate } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    for (const p of listings) {
+      flashes.push({
+        id: `flash-listing-${p.id}`,
+        emoji: '🚀',
+        message: `${p.name} (${p.ticker}) just went live on Doxxed Crypto`,
+        link: `/project/${p.slug}`,
+        at: p.createdAt.toISOString(),
+      });
+    }
+
+    for (const m of markets) {
+      flashes.push({
+        id: `flash-market-${m.id}`,
+        emoji: '🔮',
+        message: `New prediction open for ${m.project.ticker} — stake on /predict`,
+        link: '/predict',
+        at: m.createdAt.toISOString(),
+      });
+    }
+
+    for (const c of comments) {
+      const name = c.user.name ?? c.user.email.split('@')[0];
+      const ticker = c.feedPost?.project?.ticker ?? 'a trade';
+      flashes.push({
+        id: `flash-comment-${c.id}`,
+        emoji: '💬',
+        message: `${name} commented on ${ticker}`,
+        link: '/feed',
+        at: c.createdAt.toISOString(),
+      });
+    }
+
+    for (const s of stakes) {
+      flashes.push({
+        id: `flash-stake-${s.id}`,
+        emoji: '⚡',
+        message: `Someone just staked on a prediction — jump in before the window closes`,
+        link: '/predict',
+        at: s.createdAt.toISOString(),
+      });
+    }
+
+    return flashes
+      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+      .slice(0, 5);
   }
 
   private async loadFounderEvents(): Promise<UnifiedFeedItem[]> {
@@ -245,23 +418,65 @@ export class UnifiedFeedService {
 
     const scoutVotes = await this.prisma.scoutMarket.findMany({
       where: { status: ScoutMarketStatus.OPEN },
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-      include: { project: { select: { slug: true, name: true, ticker: true } } },
+      include: {
+        project: { select: { slug: true, name: true, ticker: true } },
+        positions: true,
+      },
+      take: 20,
     });
-    for (const vote of scoutVotes) {
+
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const newListings = await this.prisma.project.findMany({
+      where: { approved: true, createdAt: { gte: weekAgo } },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { slug: true, name: true, ticker: true, createdAt: true },
+    });
+    for (const listing of newListings) {
       items.push({
-        id: `market-scout-${vote.id}`,
-        tier: unifiedFeedTier('scout_vote_opened'),
+        id: `market-listing-${listing.slug}`,
+        tier: unifiedFeedTier('listing_live'),
         category: 'market',
-        eventType: 'scout_vote_opened',
-        emoji: '🗳️',
-        headline: `Scout Vote opened: ${vote.project.name}`,
+        eventType: 'listing_live',
+        emoji: '🚀',
+        headline: `New listing: ${listing.name} (${listing.ticker})`,
+        detail: 'Verified founder project is now live — predict, trade, follow',
+        at: listing.createdAt.toISOString(),
+        link: `/project/${listing.slug}`,
+        projectSlug: listing.slug,
+        projectTicker: listing.ticker,
+      });
+    }
+
+    const hotPredictions = sortPredictionMarketsByHeat(
+      scoutVotes.map((vote) => ({
+        vote,
+        totalPoolUsd: Number(vote.yesPoolUsd) + Number(vote.noPoolUsd),
+        participantCount: vote.positions.filter((p) => Number(p.amountUsd) > 0).length,
+        createdAt: vote.createdAt.toISOString(),
+      })),
+    );
+
+    for (const row of hotPredictions) {
+      const vote = row.vote;
+      const pool = row.totalPoolUsd;
+      const label = predictionHeatLabel(pool, row.participantCount);
+      const eventType = pool > 0 ? 'prediction_staked' : 'hot_prediction';
+      items.push({
+        id: `market-predict-${vote.id}`,
+        tier: unifiedFeedTier(label ? 'hot_prediction' : eventType),
+        category: 'market',
+        eventType: label ? 'hot_prediction' : eventType,
+        emoji: label === 'Blazing' ? '🔥' : '🔮',
+        headline: label
+          ? `${label}: ${vote.project.ticker}`
+          : `Predict: ${vote.project.name}`,
         detail: vote.question.slice(0, 100),
-        at: vote.createdAt.toISOString(),
-        link: '/scout-votes',
+        at: vote.updatedAt.toISOString(),
+        link: `/predict`,
         projectSlug: vote.project.slug,
         projectTicker: vote.project.ticker,
+        amountUsd: pool,
       });
     }
 

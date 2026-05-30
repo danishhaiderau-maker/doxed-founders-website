@@ -261,6 +261,18 @@ enum FounderEventStatus {
   FAILED
 }
 
+enum TopUpPaymentStatus {
+  PENDING
+  CONFIRMED
+  EXPIRED
+  FAILED
+}
+
+enum TopUpPaymentAsset {
+  USDC
+  SOL
+}
+
 // ─── Users & Auth ────────────────────────────────────────────────────────────
 
 model User {
@@ -328,6 +340,7 @@ model User {
   agentFollows         AgentFollow[]
   builderSettings      FounderBuilderSettings?
   founderEvents        FounderEvent[]
+  topUpPayments        TopUpPayment[]
 
   @@index([email])
   @@index([role])
@@ -962,6 +975,26 @@ model PlatformTreasury {
   evmTreasuryAddress    String?
   updatedByUserId       String?
   updatedAt             DateTime @updatedAt
+}
+
+model TopUpPayment {
+  id              String              @id @default(cuid())
+  userId          String
+  reference       String              @unique
+  asset           TopUpPaymentAsset   @default(USDC)
+  amountUsd       Decimal             @db.Decimal(16, 2)
+  treasuryAddress String
+  payerAddress    String?
+  txSignature     String?             @unique
+  status          TopUpPaymentStatus  @default(PENDING)
+  expiresAt       DateTime
+  confirmedAt     DateTime?
+  createdAt       DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([expiresAt])
 }
 
 enum ScoutMarketStatus {

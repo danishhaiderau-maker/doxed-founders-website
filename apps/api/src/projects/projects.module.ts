@@ -8,6 +8,6 @@ import { ProjectsService } from './projects.service';
   imports: [DexscreenerModule],
   controllers: [ProjectsController, FoundersController],
   providers: [ProjectsService, MetricsSyncService],
-  exports: [ProjectsService],
+  exports: [ProjectsService, MetricsSyncService],
 })
 export class ProjectsModule {}

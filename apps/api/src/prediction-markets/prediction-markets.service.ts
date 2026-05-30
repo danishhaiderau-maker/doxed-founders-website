@@ -8,11 +8,15 @@ import {
   computeScoutConviction,
   formatPublicAccountLabel,
   generatePredictionQuestions,
+  computePredictionHeatScore,
+  predictionHeatLabel,
+  sortPredictionMarketsByHeat,
   PREDICTION_MARKET_HOURS,
   PREDICTION_MARKET_MIN_STAKE_USD,
   predictionMarketOutcome,
   RESTRICTED_CASH_THRESHOLD_USD,
   TOP_UP_FEE_USD,
+  STARTING_CASH_USD,
 } from '@dcf/utils';
 import {
   FounderEventType,
@@ -46,6 +50,8 @@ export type PredictionMarketView = {
   };
   creatorName: string | null;
   viewerPosition: { side: string; amountUsd: number } | null;
+  heatScore: number;
+  heatLabel: 'Blazing' | 'Heating up' | null;
 };
 
 @Injectable()
@@ -75,6 +81,8 @@ export class PredictionMarketsService {
   ): PredictionMarketView {
     const yesPool = Number(m.yesPoolUsd);
     const noPool = Number(m.noPoolUsd);
+    const totalPoolUsd = yesPool + noPool;
+    const participantCount = m.positions.filter((p) => Number(p.amountUsd) > 0).length;
     const viewerPosition = viewerUserId
       ? m.positions.find((p) => p.userId === viewerUserId)
       : undefined;
@@ -90,9 +98,9 @@ export class PredictionMarketsService {
       source: m.source,
       yesPoolUsd: yesPool,
       noPoolUsd: noPool,
-      totalPoolUsd: yesPool + noPool,
+      totalPoolUsd,
       conviction: computeScoutConviction(yesPool, noPool),
-      participantCount: m.positions.filter((p) => Number(p.amountUsd) > 0).length,
+      participantCount,
       resolvesAt: m.resolvesAt?.toISOString() ?? null,
       hoursLeft,
       outcome: m.outcome,
@@ -103,7 +111,25 @@ export class PredictionMarketsService {
       viewerPosition: viewerPosition
         ? { side: viewerPosition.side, amountUsd: Number(viewerPosition.amountUsd) }
         : null,
+      heatScore: computePredictionHeatScore(totalPoolUsd, participantCount),
+      heatLabel: predictionHeatLabel(totalPoolUsd, participantCount),
     };
+  }
+
+  private async notifyNewPredictions(projectId: string, count: number) {
+    if (count <= 0) return;
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { name: true, ticker: true, slug: true },
+    });
+    if (!project) return;
+
+    await this.notifications.notifyAllUsers({
+      type: NotificationType.SYSTEM,
+      title: `New predictions: ${project.ticker}`,
+      body: `${count} AI question${count === 1 ? '' : 's'} just opened — stake paper dollars on /predict`,
+      link: '/predict',
+    });
   }
 
   async settleExpiredMarkets() {
@@ -186,7 +212,19 @@ export class PredictionMarketsService {
       });
     }
 
+    const openLeft = await this.prisma.scoutMarket.count({
+      where: { projectId: market.projectId, status: ScoutMarketStatus.OPEN },
+    });
+    if (openLeft === 0) {
+      await this.seedMarketsForProject(market.projectId, { isNewListing: false });
+    }
+
     return { settled: true, outcome: yesWins, winners: winners.length, totalPool: total };
+  }
+
+  async listHot(viewerUserId?: string, limit = 8) {
+    const markets = await this.listGlobal(viewerUserId, 60);
+    return sortPredictionMarketsByHeat(markets).slice(0, limit);
   }
 
   async seedMarketsForProject(projectId: string, options?: { isNewListing?: boolean }) {
@@ -204,6 +242,13 @@ export class PredictionMarketsService {
     });
     if (!project) return 0;
 
+    const priorQuestions = await this.prisma.scoutMarket.findMany({
+      where: { projectId },
+      select: { question: true },
+    });
+    const seen = new Set(priorQuestions.map((q) => q.question.trim()));
+
+    const isLive = project.isLiveToken;
     const questions = generatePredictionQuestions({
       projectName: project.name,
       ticker: project.ticker,
@@ -216,8 +261,11 @@ export class PredictionMarketsService {
         ? Number(project.metrics.liquidity)
         : null,
       volume24h: project.metrics?.volume24h ? Number(project.metrics.volume24h) : null,
-      isNewListing: options?.isNewListing ?? true,
-    });
+      isNewListing: (options?.isNewListing ?? false) && !isLive,
+      isLiveToken: isLive,
+    }).filter((q) => !seen.has(q));
+
+    if (questions.length === 0) return existing;
 
     const resolvesAt = new Date(Date.now() + PREDICTION_MARKET_HOURS * 3_600_000);
 
@@ -230,7 +278,9 @@ export class PredictionMarketsService {
       })),
     });
 
-    return questions.length;
+    await this.notifyNewPredictions(projectId, questions.length);
+
+    return existing + questions.length;
   }
 
   async listGlobal(viewerUserId?: string, limit = 40) {
@@ -253,7 +303,7 @@ export class PredictionMarketsService {
     const markets = await this.prisma.scoutMarket.findMany({
       where: { status: ScoutMarketStatus.OPEN },
       orderBy: [{ resolvesAt: 'asc' }, { createdAt: 'desc' }],
-      take: limit,
+      take: limit * 2,
       include: {
         project: { select: { slug: true, name: true, ticker: true, logoUrl: true } },
         creator: { select: { name: true, email: true } },
@@ -261,7 +311,8 @@ export class PredictionMarketsService {
       },
     });
 
-    return markets.map((m) => this.mapMarket(m, viewerUserId));
+    const mapped = markets.map((m) => this.mapMarket(m, viewerUserId));
+    return sortPredictionMarketsByHeat(mapped).slice(0, limit);
   }
 
   async listForProject(slug: string, viewerUserId?: string) {
@@ -293,7 +344,9 @@ export class PredictionMarketsService {
       });
     }
 
-    return markets.map((m) => this.mapMarket(m, viewerUserId));
+    return sortPredictionMarketsByHeat(
+      markets.map((m) => this.mapMarket(m, viewerUserId)),
+    );
   }
 
   async createMarket(userId: string, input: { projectSlug: string; question: string }) {
@@ -327,6 +380,8 @@ export class PredictionMarketsService {
       },
     });
 
+    await this.notifyNewPredictions(project.id, 1);
+
     return this.mapMarket(market, userId);
   }
 
@@ -357,7 +412,7 @@ export class PredictionMarketsService {
     const cash = Number(portfolio.cashBalance);
     if (cash < RESTRICTED_CASH_THRESHOLD_USD) {
       throw new BadRequestException(
-        `Paper cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} real money to get $15,000 paper dollars and keep playing.`,
+        `Paper cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} real money to get $${STARTING_CASH_USD.toLocaleString()} paper dollars and keep playing.`,
       );
     }
 
@@ -438,10 +493,12 @@ export class PredictionMarketsService {
 
     return {
       success: true,
+      marketId,
       conviction: computeScoutConviction(yesPool, noPool),
       yesPoolUsd: yesPool,
       noPoolUsd: noPool,
       totalPoolUsd: yesPool + noPool,
+      heatLabel: predictionHeatLabel(yesPool + noPool, market.positions.length + (existing ? 0 : 1)),
     };
   }
 }

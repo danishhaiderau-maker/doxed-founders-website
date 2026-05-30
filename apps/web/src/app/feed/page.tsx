@@ -6,6 +6,7 @@ import { useSession } from 'next-auth/react';
 import { SiteNav, getActiveUserId } from '@/components/site-nav';
 import { PushNotificationPrompt } from '@/components/push-notification-prompt';
 import { LinkifiedText } from '@/components/linkified-text';
+import { pushEngagementFlash } from '@/components/engagement-flash-layer';
 import { formatUsd } from '@dcf/utils';
 import {
   FeedComment,
@@ -13,6 +14,8 @@ import {
   UnifiedFeedCategory,
   UnifiedFeedItem,
   PlatformPulseItem,
+  HotPredictionItem,
+  ScoutListingFeedItem,
   fetchFeed,
   fetchFeedComments,
   fetchUnifiedFeed,
@@ -48,6 +51,8 @@ export default function FeedPage() {
   const [category, setCategory] = useState<UnifiedFeedCategory>('all');
   const [items, setItems] = useState<UnifiedFeedItem[]>([]);
   const [pulse, setPulse] = useState<PlatformPulseItem[]>([]);
+  const [hotQuestions, setHotQuestions] = useState<HotPredictionItem[]>([]);
+  const [scoutListings, setScoutListings] = useState<ScoutListingFeedItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [tradePosts, setTradePosts] = useState<Record<string, FeedPost>>({});
@@ -57,6 +62,8 @@ export default function FeedPage() {
       const data = await fetchUnifiedFeed(cat);
       setItems(data.items);
       setPulse(data.pulse);
+      setHotQuestions(data.hotQuestions ?? []);
+      setScoutListings(data.scoutListings ?? []);
       setError(null);
 
       const tradeIds = data.items.filter((i) => i.tradePostId).map((i) => i.tradePostId!);
@@ -130,6 +137,83 @@ export default function FeedPage() {
             </section>
           )}
 
+          {scoutListings.length > 0 && (
+            <section className="mb-6 rounded-xl border border-sky-500/25 bg-sky-950/10 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-sky-300">
+                  Scout votes — validate listings
+                </h2>
+                <Link href="/scout-votes" className="text-xs text-sky-400 hover:underline">
+                  Vote now →
+                </Link>
+              </div>
+              <ul className="mt-3 space-y-2">
+                {scoutListings.map((s) => (
+                  <li key={s.id}>
+                    <Link
+                      href="/scout-votes"
+                      className="block rounded-lg border border-sky-500/20 bg-black/20 px-3 py-2.5 transition hover:border-sky-500/40"
+                    >
+                      <p className="font-medium text-white">
+                        {s.projectName} ({s.ticker})
+                      </p>
+                      <p className="mt-0.5 text-xs text-zinc-500">
+                        {s.voteCount} scout vote{s.voteCount === 1 ? '' : 's'}
+                        {s.whyList ? ` · ${s.whyList}` : ''}
+                      </p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {hotQuestions.length > 0 && (
+            <section className="mb-6 rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-indigo-300">
+                  Blazing predictions — stake paper $
+                </h2>
+                <Link href="/predict" className="text-xs text-indigo-400 hover:underline">
+                  All markets →
+                </Link>
+              </div>
+              <ul className="mt-3 space-y-2">
+                {hotQuestions.map((q) => (
+                  <li key={q.id}>
+                    <Link
+                      href="/predict"
+                      className="block rounded-lg border border-indigo-500/25 bg-black/20 px-3 py-2.5 transition hover:border-indigo-400/50"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-medium uppercase text-indigo-300">
+                          {q.projectTicker}
+                        </span>
+                        {q.heatLabel && (
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                              q.heatLabel === 'Blazing'
+                                ? 'bg-orange-500/25 text-orange-200'
+                                : 'bg-violet-500/20 text-violet-200'
+                            }`}
+                          >
+                            {q.heatLabel}
+                          </span>
+                        )}
+                        {q.totalPoolUsd > 0 && (
+                          <span className="text-xs text-emerald-400">
+                            Pool {formatUsd(q.totalPoolUsd, 0)}
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 text-sm text-white">{q.question}</p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           <div className="mb-4 flex flex-wrap gap-2">
             {CATEGORIES.map((c) => (
               <button
@@ -188,7 +272,8 @@ export default function FeedPage() {
                 <li>Founder builds, deploys, and raise room signals</li>
                 <li>Trader positions and conviction posts</li>
                 <li>Hot buys when ≥2% of active traders align</li>
-                <li>Scout votes and community follows</li>
+                <li>Blazing predictions — stake YES/NO on AI questions</li>
+                <li>Scout votes to validate new listings</li>
               </ul>
               <Link
                 href="/paper-trading"
@@ -197,6 +282,12 @@ export default function FeedPage() {
                 Trading Alpha terminal
               </Link>
             </div>
+            <Link
+              href="/predict"
+              className="block rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-4 text-sm text-indigo-200 hover:border-indigo-500/50"
+            >
+              Predict the future → stake YES/NO on AI questions
+            </Link>
             <Link
               href="/scout-votes"
               className="block rounded-xl border border-violet-500/30 bg-violet-950/20 p-4 text-sm text-violet-200 hover:border-violet-500/50"
@@ -282,6 +373,11 @@ function TradeFeedCard({
       const c = await postFeedComment(post.id, userId, reply.trim());
       setComments((prev) => [...prev, c]);
       setReply('');
+      pushEngagementFlash({
+        emoji: '💬',
+        message: 'Comment posted — earn points for research on /predict',
+        link: '/predict',
+      });
       onRefresh();
     } finally {
       setLoading(false);

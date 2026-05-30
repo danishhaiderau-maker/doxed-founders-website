@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import type { PlatformActivityItem } from '@/lib/api';
+import { formatUsd } from '@dcf/utils';
+import type { PlatformActivityItem, PlatformStats } from '@/lib/api';
 import { fetchPlatformActivity } from '@/lib/api';
 
 function activityTimeAgo(iso: string) {
@@ -154,6 +155,56 @@ export function LandingThreePhases() {
   );
 }
 
+function formatStatNumber(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1000)}K`;
+  return value.toLocaleString();
+}
+
+export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
+  const items = stats
+    ? [
+        { label: 'Verified founders', value: formatStatNumber(stats.verifiedFounders) },
+        { label: 'Active projects', value: formatStatNumber(stats.activeProjects) },
+        { label: 'Paper $ in ecosystem', value: formatUsd(stats.simulatedCapital, 0) },
+        { label: 'Community members', value: formatStatNumber(stats.communityMembers) },
+      ]
+    : [
+        { label: 'Verified founders', value: '—' },
+        { label: 'Active projects', value: '—' },
+        { label: 'Paper $ in ecosystem', value: '—' },
+        { label: 'Community members', value: '—' },
+      ];
+
+  return (
+    <section className="border-b border-zinc-800/80 bg-zinc-950/60">
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <p className="text-center text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+          Platform pulse
+        </p>
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {items.map((item) => (
+            <div
+              key={item.label}
+              className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-5 py-4 text-center"
+            >
+              <p className="text-2xl font-bold text-white">{item.value}</p>
+              <p className="mt-1 text-xs uppercase tracking-widest text-zinc-500">{item.label}</p>
+            </div>
+          ))}
+        </div>
+        {stats && (stats.totalTrades > 0 || stats.paperTraders > 0) && (
+          <p className="mt-4 text-center text-sm text-zinc-500">
+            {stats.paperTraders.toLocaleString()} paper traders ·{' '}
+            {stats.totalTrades.toLocaleString()} simulated trades · each trader starts with $10,000
+            virtual cash
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function LandingLiveActivity() {
   const [items, setItems] = useState<PlatformActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -231,12 +282,6 @@ export function LandingLiveActivity() {
       </div>
     </section>
   );
-}
-
-/** @deprecated use LandingLiveActivity */
-export function LandingLiveMetrics({ stats }: { stats: { verifiedFounders: number } | null }) {
-  void stats;
-  return <LandingLiveActivity />;
 }
 
 const FAILURES = [

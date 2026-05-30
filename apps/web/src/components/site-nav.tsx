@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, Suspense } from 'react';
 import { cn, resolveGamifiedRole } from '@dcf/utils';
 import { fetchUnreadNotificationCount, fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
+import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 
 const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
@@ -49,9 +50,12 @@ function navActive(pathname: string, href: string) {
 
 export function SiteNav() {
   return (
-    <Suspense fallback={<nav className="h-9 w-48 animate-pulse rounded-lg bg-zinc-800/50" />}>
-      <SiteNavInner />
-    </Suspense>
+    <>
+      <Suspense fallback={<nav className="h-9 w-48 animate-pulse rounded-lg bg-zinc-800/50" />}>
+        <SiteNavInner />
+      </Suspense>
+      <EngagementFlashLayer />
+    </>
   );
 }
 
@@ -182,16 +186,28 @@ function SiteNavInner() {
               </Link>
             ))}
             {isAdmin && (
-              <Link
-                href="/admin/applications"
-                onClick={() => setMoreOpen(false)}
-                className={cn(
-                  'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
-                  pathname.startsWith('/admin') ? 'text-amber-200' : 'text-zinc-400',
-                )}
-              >
-                Admin
-              </Link>
+              <>
+                <Link
+                  href="/admin/applications"
+                  onClick={() => setMoreOpen(false)}
+                  className={cn(
+                    'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
+                    pathname.startsWith('/admin/applications') ? 'text-amber-200' : 'text-zinc-400',
+                  )}
+                >
+                  Listing inbox
+                </Link>
+                <Link
+                  href="/admin/platform"
+                  onClick={() => setMoreOpen(false)}
+                  className={cn(
+                    'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
+                    pathname.startsWith('/admin/platform') ? 'text-amber-200' : 'text-zinc-400',
+                  )}
+                >
+                  Treasury & top-ups
+                </Link>
+              </>
             )}
           </div>
         )}

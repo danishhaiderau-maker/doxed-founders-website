@@ -186,6 +186,11 @@ export class FounderDenController {
     return this.founderDen.updatePlatformTreasury(user.id, body);
   }
 
+  @Get('platform/top-ups')
+  listTopUps(@CurrentUser() user: AuthUser, @Query('limit') limit?: string) {
+    return this.founderDen.listTopUpPayments(user.id, limit ? Number(limit) : 50);
+  }
+
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
   @Get('projects/:slug/scout-markets')

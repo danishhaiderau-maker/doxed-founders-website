@@ -4,8 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { computeVotingThreshold, POINTS, scoreFounderVerification } from '@dcf/utils';
-import { ListingStatus, Prisma } from '@prisma/client';
+import { ListingStatus, NotificationType, Prisma } from '@prisma/client';
 import { PointsService } from '../points/points.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateListingApplicationDto,
@@ -28,6 +29,7 @@ export class ListingApplicationsService {
     private readonly points: PointsService,
     private readonly votes: ListingVotesService,
     private readonly predictionMarkets: PredictionMarketsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private computeVerification(dto: CreateListingApplicationDto) {
@@ -186,6 +188,13 @@ export class ListingApplicationsService {
 
       await this.predictionMarkets.seedMarketsForProject(published.projectId, {
         isNewListing: true,
+      });
+
+      await this.notifications.notifyAllUsers({
+        type: NotificationType.LISTING_APPROVED,
+        title: `New listing: ${published.projectName}`,
+        body: `${published.projectName} (${merged.ticker}) is live — predict, paper trade, and scout the founder.`,
+        link: `/project/${published.projectSlug}`,
       });
 
       return {

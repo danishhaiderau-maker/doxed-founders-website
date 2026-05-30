@@ -3,6 +3,7 @@ import {
   Prisma,
   SimulatedRaiseStatus,
   ProjectLifecycleStage,
+  ProjectSource,
   UserProgressTier,
   FounderApplicationStatus,
   BountyStatus,
@@ -45,6 +46,7 @@ import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from '../events/events.service';
 import { BuilderService } from '../builder/builder.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
+import { MetricsSyncService } from '../projects/metrics-sync.service';
 import { NotificationType, ScoutMarketStatus } from '@prisma/client';
 
 const founderRoomInclude = {
@@ -93,6 +95,7 @@ export class FounderDenService {
     private readonly events: EventsService,
     private readonly builder: BuilderService,
     private readonly predictionMarkets: PredictionMarketsService,
+    private readonly metricsSync: MetricsSyncService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -150,6 +153,8 @@ export class FounderDenService {
   }
 
   async getProjectRoom(slug: string, viewerUserId?: string) {
+    await this.metricsSync.syncBySlug(slug, true);
+
     const project = await this.prisma.project.findFirst({
       where: { slug, approved: true },
       include: {
@@ -1023,13 +1028,17 @@ export class FounderDenService {
     const mapped = await Promise.all(
       projects.map(async (p) => {
         const marketCap = p.metrics?.marketCap ? Number(p.metrics.marketCap) : null;
-        const effectiveStage = inferProjectLifecycleStage({
+        const effectiveStageRaw = inferProjectLifecycleStage({
           lifecycleStage: p.lifecycleStage,
           isLiveToken: p.isLiveToken,
           dexscreenerUrl: p.dexscreenerUrl,
           contractAddress: p.contractAddress,
           marketCap,
         });
+        const effectiveStage =
+          p.source === ProjectSource.CURATED && effectiveStageRaw === 'IDEA'
+            ? 'LAUNCH_READY'
+            : effectiveStageRaw;
 
         if (
           effectiveStage !== p.lifecycleStage &&
@@ -1093,6 +1102,7 @@ export class FounderDenService {
           lastUpdateAt: latestPost?.publishedAt ?? p.updatedAt,
           lastUpdateHeadline: latestPost?.headline ?? null,
           isLiveToken: p.isLiveToken || effectiveStage === 'LIVE_TRADING',
+          source: p.source,
           createdAt: p.createdAt,
         };
       }),
@@ -1101,6 +1111,9 @@ export class FounderDenService {
     let filtered = mapped;
     if (stageBucket) {
       filtered = mapped.filter((p) => p.stageBucket === stageBucket);
+      if (stageBucket === 'IDEA_STAGE') {
+        filtered = filtered.filter((p) => p.source === ProjectSource.DYNAMIC);
+      }
     }
 
     const sorted = [...filtered].sort((a, b) => {
@@ -1665,6 +1678,38 @@ export class FounderDenService {
     });
 
     return { success: true, treasury };
+  }
+
+  async listTopUpPayments(adminUserId: string, limit = 50) {
+    const user = await this.prisma.user.findUnique({ where: { id: adminUserId } });
+    if (user?.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Admin account required');
+    }
+
+    const take = Math.min(Math.max(limit, 1), 100);
+    const payments = await this.prisma.topUpPayment.findMany({
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+
+    return payments.map((p) => ({
+      id: p.id,
+      reference: p.reference,
+      userId: p.userId,
+      userEmail: p.user.email,
+      userName: p.user.name,
+      asset: p.asset,
+      amountUsd: Number(p.amountUsd),
+      treasuryAddress: p.treasuryAddress,
+      payerAddress: p.payerAddress,
+      txSignature: p.txSignature,
+      status: p.status,
+      confirmedAt: p.confirmedAt?.toISOString() ?? null,
+      createdAt: p.createdAt.toISOString(),
+    }));
   }
 
   async listScoutMarkets(slug: string, viewerUserId?: string) {

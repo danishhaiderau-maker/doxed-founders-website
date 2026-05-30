@@ -76,3 +76,18 @@ export class ResetPortfolioDto {
   @IsString()
   userId!: string;
 }
+
+export class CreateCryptoTopUpDto {
+  @IsOptional()
+  @IsIn(['USDC', 'SOL'])
+  asset?: 'USDC' | 'SOL';
+}
+
+export class ConfirmCryptoTopUpDto {
+  @IsString()
+  paymentId!: string;
+
+  @IsString()
+  @MinLength(32)
+  txSignature!: string;
+}

@@ -181,7 +181,7 @@ export class ProjectsService {
   }
 
   async findBySlug(slug: string) {
-    await this.metricsSync.syncBySlugIfStale(slug);
+    await this.metricsSync.syncBySlug(slug, true);
 
     const project = await this.prisma.project.findFirst({
       where: {

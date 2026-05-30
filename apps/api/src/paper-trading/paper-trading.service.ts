@@ -285,10 +285,10 @@ export class PaperTradingService {
     };
   }
 
-  async resetPortfolio(userId: string, source: 'dev' | 'stripe' = 'dev') {
+  async resetPortfolio(userId: string, source: 'dev' | 'stripe' | 'crypto' = 'dev') {
     if (source === 'dev' && process.env.STRIPE_SECRET_KEY?.trim()) {
       throw new BadRequestException(
-        'Payment required. Use Stripe checkout to restart your portfolio.',
+        'Payment required. Use Stripe checkout or on-chain USDC to restart your portfolio.',
       );
     }
 
@@ -336,7 +336,9 @@ export class PaperTradingService {
       message:
         source === 'stripe'
           ? 'Payment received. Virtual cash restored to $10,000 — trade and allocate again.'
-          : 'Top-up complete (dev mode). Virtual cash restored to $10,000.',
+          : source === 'crypto'
+            ? 'On-chain payment confirmed. Virtual cash restored to $10,000 — trade and allocate again.'
+            : 'Top-up complete (dev mode). Virtual cash restored to $10,000.',
       cashBalance: STARTING_CASH,
     };
   }
@@ -770,16 +772,28 @@ export class PaperTradingService {
       .map((entry, index) => ({ rank: index + 1, ...entry! }));
   }
 
-  getResetInfo() {
+  async getResetInfo() {
     const stripeEnabled = Boolean(process.env.STRIPE_SECRET_KEY?.trim());
+    const treasury = await this.prisma.platformTreasury.findUnique({
+      where: { id: 'default' },
+    });
+    const cryptoEnabled = Boolean(
+      process.env.SOLANA_RPC_URL?.trim() &&
+        treasury?.solanaTreasuryAddress?.trim(),
+    );
+
     return {
       available: true,
       resetFeeUsd: TOP_UP_FEE_USD,
       restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       stripeEnabled,
-      message: stripeEnabled
-        ? `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} via Stripe to restore $10,000 virtual cash.`
-        : `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} to restore $10,000 virtual cash (dev mode simulates payment).`,
+      cryptoEnabled,
+      treasuryAddress: treasury?.solanaTreasuryAddress ?? null,
+      message: cryptoEnabled
+        ? `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} USDC/SOL on-chain or via Stripe to restore $10,000 virtual cash.`
+        : stripeEnabled
+          ? `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} via Stripe to restore $10,000 virtual cash.`
+          : `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Pay $${TOP_UP_FEE_USD} to restore $10,000 virtual cash (dev mode simulates payment).`,
     };
   }
 

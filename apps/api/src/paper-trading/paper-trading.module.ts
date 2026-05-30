@@ -5,12 +5,14 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { XSocialModule } from '../x-social/x-social.module';
 import { PaperTradingController } from './paper-trading.controller';
+import { PaperTradingPaymentsController } from './paper-trading-payments.controller';
+import { PaperTradingCryptoService } from './paper-trading-crypto.service';
 import { PaperTradingStripeService } from './paper-trading-stripe.service';
 import { PaperTradingService } from './paper-trading.service';
 
 @Module({
   imports: [DexscreenerModule, FeedModule, PointsModule, XSocialModule, NotificationsModule],
-  controllers: [PaperTradingController],
-  providers: [PaperTradingService, PaperTradingStripeService],
+  controllers: [PaperTradingController, PaperTradingPaymentsController],
+  providers: [PaperTradingService, PaperTradingStripeService, PaperTradingCryptoService],
 })
 export class PaperTradingModule {}

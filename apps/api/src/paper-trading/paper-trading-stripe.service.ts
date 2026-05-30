@@ -4,9 +4,10 @@ import {
   Logger,
 } from '@nestjs/common';
 import Stripe from 'stripe';
+import { TOP_UP_FEE_USD } from '@dcf/utils';
 import { PaperTradingService } from './paper-trading.service';
 
-const RESET_FEE_CENTS = 5000;
+const RESET_FEE_CENTS = TOP_UP_FEE_USD * 100;
 
 @Injectable()
 export class PaperTradingStripeService {

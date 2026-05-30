@@ -521,12 +521,49 @@ export interface PlatformPulseItem {
   tier: 1 | 2 | 3;
 }
 
+export interface HotPredictionItem {
+  id: string;
+  question: string;
+  projectName: string;
+  projectSlug: string;
+  projectTicker: string;
+  totalPoolUsd: number;
+  participantCount: number;
+  conviction: number;
+  heatLabel: 'Blazing' | 'Heating up' | null;
+  hoursLeft: number | null;
+}
+
+export interface ScoutListingFeedItem {
+  id: string;
+  projectName: string;
+  ticker: string;
+  whyList: string | null;
+  voteCount: number;
+  at: string;
+}
+
+export interface EngagementFlash {
+  id: string;
+  emoji: string;
+  message: string;
+  link?: string;
+  at: string;
+}
+
 export function fetchUnifiedFeed(category: UnifiedFeedCategory = 'all') {
   return apiFetch<{
     category: UnifiedFeedCategory;
     items: UnifiedFeedItem[];
     pulse: PlatformPulseItem[];
+    hotQuestions: HotPredictionItem[];
+    scoutListings: ScoutListingFeedItem[];
   }>(`/feed/unified?category=${category}`);
+}
+
+export function fetchEngagementFlashes(since?: string) {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+  return apiFetch<EngagementFlash[]>(`/feed/flashes${qs}`);
 }
 
 export function fetchFeedComments(feedPostId: string) {
@@ -605,9 +642,47 @@ export function fetchResetInfo() {
   return apiFetch<{
     available: boolean;
     resetFeeUsd: number;
+    restrictedThresholdUsd?: number;
     stripeEnabled: boolean;
+    cryptoEnabled?: boolean;
+    treasuryAddress?: string | null;
     message: string;
   }>('/paper-trading/reset-info');
+}
+
+export interface CryptoTopUpIntent {
+  paymentId: string;
+  reference: string;
+  asset: 'USDC' | 'SOL';
+  amountUsd: number;
+  treasuryAddress: string;
+  payerAddress: string;
+  memo: string;
+  expiresAt: string;
+  instructions: string;
+}
+
+export function createCryptoTopUpIntent(token: string, asset: 'USDC' | 'SOL' = 'USDC') {
+  return apiFetch<CryptoTopUpIntent>(
+    '/paper-trading/crypto/intent',
+    { method: 'POST', body: JSON.stringify({ asset }) },
+    token,
+  );
+}
+
+export function confirmCryptoTopUp(paymentId: string, txSignature: string, token: string) {
+  return apiFetch<{
+    success: boolean;
+    message: string;
+    cashBalance: number;
+    reference?: string;
+    txSignature?: string;
+    payerAddress?: string;
+  }>(
+    '/paper-trading/crypto/confirm',
+    { method: 'POST', body: JSON.stringify({ paymentId, txSignature }) },
+    token,
+  );
 }
 
 export function createResetCheckout(userId: string) {
@@ -1234,6 +1309,37 @@ export function fetchPlatformEconomy() {
   return apiFetch<PlatformEconomy>('/founder-den/platform/economy');
 }
 
+export function updatePlatformTreasury(
+  body: { solanaTreasuryAddress?: string; evmTreasuryAddress?: string },
+  token: string,
+) {
+  return apiFetch<{ success: boolean; treasury: { solanaTreasuryAddress: string | null; evmTreasuryAddress: string | null } }>(
+    '/founder-den/platform/treasury',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export interface TopUpPaymentRecord {
+  id: string;
+  reference: string;
+  userId: string;
+  userEmail: string;
+  userName: string | null;
+  asset: string;
+  amountUsd: number;
+  treasuryAddress: string;
+  payerAddress: string | null;
+  txSignature: string | null;
+  status: string;
+  confirmedAt: string | null;
+  createdAt: string;
+}
+
+export function fetchTopUpPayments(token: string, limit = 50) {
+  return apiFetch<TopUpPaymentRecord[]>(`/founder-den/platform/top-ups?limit=${limit}`, undefined, token);
+}
+
 export function exportRaiseParticipants(raiseId: string, token: string) {
   return apiFetch<{
     projectName: string;
@@ -1505,7 +1611,10 @@ export interface SecurityProfile {
     lastUsedAt: string | null;
   }[];
   recoveryCodesRemaining: number;
+  /** @deprecated use solanaWallet */
   wallet: { chain: string; address: string; verifiedAt: string } | null;
+  solanaWallet: { chain: string; address: string; verifiedAt: string } | null;
+  evmWallet: { chain: string; address: string; verifiedAt: string } | null;
   securityScore: SecurityScoreResult;
 }
 
@@ -2128,6 +2237,8 @@ export interface ScoutMarketItem {
   project: { slug: string; name: string; ticker: string; logoUrl: string | null };
   creatorName?: string | null;
   viewerPosition: { side: string; amountUsd: number } | null;
+  heatScore?: number;
+  heatLabel?: 'Blazing' | 'Heating up' | null;
 }
 
 export type PredictionMarketItem = ScoutMarketItem;
@@ -2163,6 +2274,7 @@ export function stakePredictionMarket(
     yesPoolUsd: number;
     noPoolUsd: number;
     totalPoolUsd: number;
+    heatLabel?: 'Blazing' | 'Heating up' | null;
   }>(
     `/prediction-markets/${marketId}/stake`,
     { method: 'POST', body: JSON.stringify({ side, amountUsd }) },

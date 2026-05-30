@@ -3,8 +3,9 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { formatUsd, PREDICTION_MARKET_HOURS, TOP_UP_FEE_USD, RESTRICTED_CASH_THRESHOLD_USD } from '@dcf/utils';
+import { formatUsd, PREDICTION_MARKET_HOURS, TOP_UP_FEE_USD, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
+import { heatBadgeClass } from '@/components/engagement-flash-layer';
 import {
   createPredictionMarket,
   fetchPredictionMarkets,
@@ -108,10 +109,13 @@ export default function PredictPage() {
             <li>Stake virtual cash from your paper trading portfolio (min $10)</li>
             <li>
               Below ${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Top up for ${TOP_UP_FEE_USD} real →
-              $15,000 paper — or earn points via comments &amp; research
+              ${STARTING_CASH_USD.toLocaleString()} paper — or earn points via comments &amp; research
             </li>
             <li>When the window closes, the side with more stake wins and splits the full pool fairly</li>
-            <li>New listings get AI questions from DexScreener data — price, mcap, founder, product</li>
+            <li>
+              New listings get rule-based AI questions from DexScreener metrics (price, mcap, founder, product).
+              When a 48h window closes, fresh questions open automatically.
+            </li>
           </ul>
           <Link href="/paper-trading" className="mt-3 inline-block text-emerald-400 hover:underline">
             Open paper trading desk →
@@ -161,7 +165,10 @@ export default function PredictPage() {
         )}
 
         <section>
-          <h2 className="font-semibold text-white">Live markets</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-semibold text-white">Live markets</h2>
+            <p className="text-xs text-zinc-500">Sorted by heat — stake to push a question to the top</p>
+          </div>
           {loading ? (
             <p className="mt-4 text-sm text-zinc-500">Loading markets…</p>
           ) : markets.length === 0 ? (
@@ -171,15 +178,30 @@ export default function PredictPage() {
               {markets.map((m) => (
                 <article
                   key={m.id}
-                  className="rounded-xl border border-indigo-500/25 bg-indigo-950/10 p-5"
+                  className={`rounded-xl border p-5 ${
+                    m.heatLabel === 'Blazing'
+                      ? 'border-orange-500/40 bg-orange-950/15'
+                      : m.heatLabel === 'Heating up'
+                        ? 'border-violet-500/30 bg-violet-950/10'
+                        : 'border-indigo-500/25 bg-indigo-950/10'
+                  }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
-                    <Link
-                      href={`/project/${m.project.slug}`}
-                      className="text-xs font-medium uppercase tracking-wide text-indigo-300 hover:underline"
-                    >
-                      {m.project.name} ({m.project.ticker})
-                    </Link>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        href={`/project/${m.project.slug}`}
+                        className="text-xs font-medium uppercase tracking-wide text-indigo-300 hover:underline"
+                      >
+                        {m.project.name} ({m.project.ticker})
+                      </Link>
+                      {m.heatLabel && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${heatBadgeClass(m.heatLabel)}`}
+                        >
+                          {m.heatLabel}
+                        </span>
+                      )}
+                    </div>
                     <span className="text-xs text-zinc-500">
                       {m.source === 'AI' ? '🤖 AI question' : m.source === 'USER' ? '👤 Community' : 'Default'}
                       {m.hoursLeft != null && m.hoursLeft > 0 && ` · ${m.hoursLeft}h left`}
