@@ -181,7 +181,7 @@ export function FounderMissionControl({
               }
               sub={buildRoom?.repoFullName ?? undefined}
             />
-            <StatCell label="Demand" value={formatUsd(demand, 0)} sub="Raise Room · paper $" />
+            <StatCell label="Demand" value={formatUsd(demand, 0)} sub="Raise Room · Ddollar" />
             <StatCell label="Followers" value={String(followers)} />
           </div>
 

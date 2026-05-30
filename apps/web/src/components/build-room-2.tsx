@@ -209,47 +209,37 @@ export function BuildRoom2({
         />
       )}
 
-      <FounderCopilotBriefing
-        accessToken={accessToken}
-        onMessage={onMessage}
-        onRefresh={() => {
-          load();
-          onRefresh?.();
-        }}
-      />
+      <div className="grid gap-6 xl:grid-cols-[1fr_340px]">
+        <div className="space-y-6 min-w-0">
+          <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
 
-      <FounderCopilotBar accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
+          <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+            <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
+              <p className="text-[10px] uppercase text-zinc-500">Ideas</p>
+              <p className="text-xl font-bold text-white">{stats?.ideas ?? 0}</p>
+            </div>
+            <div className="rounded-xl border border-sky-500/30 bg-sky-950/20 p-3">
+              <p className="text-[10px] uppercase text-zinc-500">Open tasks</p>
+              <p className="text-xl font-bold text-white">{stats?.tasks ?? 0}</p>
+            </div>
+            <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3">
+              <p className="text-[10px] uppercase text-zinc-500">Issues</p>
+              <p className="text-xl font-bold text-white">{stats?.issues ?? 0}</p>
+            </div>
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-3">
+              <p className="text-[10px] uppercase text-zinc-500">Commits</p>
+              <p className="text-xl font-bold text-white">{stats?.commits ?? 0}</p>
+            </div>
+          </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-zinc-500">
-          Provider: <span className="text-violet-300">{room?.defaultAiProvider ?? 'RULE_BASED'}</span>
-          {room?.githubTokenConnected && (
-            <span className="ml-2 text-emerald-400">· GitHub token connected</span>
-          )}
-        </p>
-        <Link href="/settings/builder" className="text-xs text-emerald-400 hover:underline">
-          Builder settings →
-        </Link>
-      </div>
-
-      <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
-        <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
-          <p className="text-[10px] uppercase text-zinc-500">Ideas</p>
-          <p className="text-xl font-bold text-white">{stats?.ideas ?? 0}</p>
-        </div>
-        <div className="rounded-xl border border-sky-500/30 bg-sky-950/20 p-3">
-          <p className="text-[10px] uppercase text-zinc-500">Open tasks</p>
-          <p className="text-xl font-bold text-white">{stats?.tasks ?? 0}</p>
-        </div>
-        <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3">
-          <p className="text-[10px] uppercase text-zinc-500">Issues</p>
-          <p className="text-xl font-bold text-white">{stats?.issues ?? 0}</p>
-        </div>
-        <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-3">
-          <p className="text-[10px] uppercase text-zinc-500">Commits</p>
-          <p className="text-xl font-bold text-white">{stats?.commits ?? 0}</p>
-        </div>
-      </div>
+          <FounderCopilotBriefing
+            accessToken={accessToken}
+            onMessage={onMessage}
+            onRefresh={() => {
+              load();
+              onRefresh?.();
+            }}
+          />
 
       <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-4">
         <p className="text-sm font-semibold text-cyan-200">Quick Command Bar</p>
@@ -424,18 +414,22 @@ export function BuildRoom2({
           </ul>
         )}
       </div>
+        </div>
 
-      <FounderOsPanel
-        accessToken={accessToken}
-        founderCredits={founderCredits}
-        communityRewardPool={communityRewardPool}
-        projectId={projectId}
-        onRefresh={() => {
-          load();
-          onRefresh?.();
-        }}
-        founderActive={founderActive}
-      />
+        <aside className="space-y-4 xl:sticky xl:top-24 xl:self-start">
+          <FounderOsPanel
+            accessToken={accessToken}
+            founderCredits={founderCredits}
+            communityRewardPool={communityRewardPool}
+            projectId={projectId}
+            onRefresh={() => {
+              load();
+              onRefresh?.();
+            }}
+            founderActive={founderActive}
+          />
+        </aside>
+      </div>
     </div>
   );
 }

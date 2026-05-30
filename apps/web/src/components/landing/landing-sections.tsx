@@ -234,13 +234,13 @@ export function LandingLiveMetrics({ stats }: { stats: PlatformStats | null }) {
     ? [
         { label: 'Verified founders', value: formatStatNumber(stats.verifiedFounders) },
         { label: 'Active projects', value: formatStatNumber(stats.activeProjects) },
-        { label: 'Paper $ in ecosystem', value: formatUsd(stats.simulatedCapital, 0) },
+        { label: 'Ddollar in ecosystem', value: formatUsd(stats.simulatedCapital, 0) },
         { label: 'Community members', value: formatStatNumber(stats.communityMembers) },
       ]
     : [
         { label: 'Verified founders', value: '—' },
         { label: 'Active projects', value: '—' },
-        { label: 'Paper $ in ecosystem', value: '—' },
+        { label: 'Ddollar in ecosystem', value: '—' },
         { label: 'Community members', value: '—' },
       ];
 
