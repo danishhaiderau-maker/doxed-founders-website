@@ -29,9 +29,9 @@ export function LandingHero() {
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(59,130,246,0.12),transparent)]" />
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,transparent,rgba(5,5,8,0.85))]" />
       <div className="relative mx-auto max-w-6xl px-6 py-20 md:py-28">
-        <p className="inline-flex items-center gap-2 rounded-full border border-blue-500/25 bg-blue-950/30 px-3 py-1 text-xs font-medium uppercase tracking-widest text-blue-300">
-          <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
-          Founder OS
+        <p className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-950/30 px-3 py-1 text-xs font-medium uppercase tracking-widest text-cyan-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+          Private by design
         </p>
         <h1 className="mt-6 max-w-3xl text-4xl font-bold leading-[1.1] tracking-tight text-white md:text-6xl">
           Build in public.
@@ -40,9 +40,16 @@ export function LandingHero() {
           <br />
           Launch with trust.
         </h1>
-        <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-400">
-          The operating system for crypto-native startups — ship on GitHub, prove execution publicly,
-          and show real demand before you raise.
+        <p className="mt-6 max-w-2xl text-lg leading-relaxed text-zinc-400">
+          Privacy is the new trust signal — founders shouldn&apos;t have to upload their entire brain
+          to someone else&apos;s cloud. Founder OS coordinates GitHub, agents, and community; your
+          project memory, roadmaps, and AI context can stay on{' '}
+          <strong className="font-medium text-zinc-200">your machine</strong> with Founder Node.
+          We only relay tiny metadata so you can resume on any device — never your full vault.
+        </p>
+        <p className="mt-4 max-w-2xl text-sm leading-relaxed text-zinc-500">
+          Your AI. Your memory. Your storage. Your project. Self-custody for founder data — the same
+          instinct that made wallets mainstream, now for how you build.
         </p>
         <div className="mt-10 flex flex-wrap gap-3">
           <Link
@@ -57,6 +64,12 @@ export function LandingHero() {
           >
             Discover projects
           </Link>
+          <Link
+            href="/settings/builder"
+            className="rounded-xl border border-cyan-600/40 bg-cyan-950/25 px-6 py-3.5 text-sm font-semibold text-cyan-200 transition hover:border-cyan-500/60"
+          >
+            Founder Node — keep it private
+          </Link>
         </div>
       </div>
     </section>
@@ -69,7 +82,7 @@ const THREE_PHASES = [
     title: 'Build',
     color: 'blue',
     summary: 'Connect GitHub. Ship in public. Publish everywhere in one click.',
-    bullets: ['GitHub → translate → build feed', 'Founder Copilot & agents', 'Stack hub: Vercel, Railway, Neon'],
+    bullets: ['GitHub → translate → build feed', 'Founder Copilot & agents', 'Founder Node private vault'],
     href: '/founder-den',
     cta: 'Start building',
   },
@@ -463,22 +476,34 @@ export function LandingTrustSecurity() {
       <div className="mx-auto max-w-6xl px-6">
         <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
-              Privacy-first verification
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-400">
+              Privacy-first · trending for a reason
             </p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight text-white">
-              Trust without oversharing
+              Private data stays private. Public proof stays public.
             </h2>
             <p className="mt-4 text-zinc-400">
-              Doxxing carries real security risk. We verify founders — we do not expose sensitive
-              documents publicly. Verified transparency, not a data leak.
+              Crypto founders already self-custody keys — project context should work the same way.
+              Choose cloud memory, GitHub files, browser-local, or a{' '}
+              <strong className="font-medium text-zinc-300">Founder Node vault</strong> on your PC.
+              Founder OS orchestrates; you decide what leaves your machine.
             </p>
+            <p className="mt-3 text-sm text-zinc-500">
+              Verified founders without leaking KYC. Agent history without a platform reading every
+              prompt. Transparency you choose — not a data grab dressed as &ldquo;AI features.&rdquo;
+            </p>
+            <Link
+              href="/settings/builder"
+              className="mt-6 inline-block text-sm font-medium text-cyan-400 hover:underline"
+            >
+              Set up Founder Node →
+            </Link>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {[
-              ['✅ Verified identity', '❌ Not home address'],
-              ['✅ Verified human', '❌ Not passport image'],
-              ['✅ Public founder profile', '❌ Not private KYC docs'],
+              ['✅ Your vault on your disk', '❌ Not 20GB on our servers'],
+              ['✅ Metadata sync only', '❌ Not full AI chat logs'],
+              ['✅ Verified human, not doxxed', '❌ Not passport images public'],
               ['✅ GitHub & build proof', '❌ Not wallet seed phrases'],
             ].map(([yes, no]) => (
               <div
@@ -670,10 +695,11 @@ export function LandingFinalCta() {
     <section className="border-t border-zinc-800/80 py-24">
       <div className="mx-auto max-w-3xl px-6 text-center">
         <h2 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
-          Build. Validate. Launch.
+          Build. Validate. Launch — on your terms.
         </h2>
         <p className="mt-4 text-zinc-400">
-          Prove execution publicly. Show real demand. Launch with a reputation graph — not anonymous hype.
+          Prove execution publicly. Show real demand. Keep sensitive project memory private with
+          Founder Node — Founder OS coordinates everything, you keep ownership.
         </p>
         <div className="mt-10 flex flex-wrap justify-center gap-3">
           <Link
