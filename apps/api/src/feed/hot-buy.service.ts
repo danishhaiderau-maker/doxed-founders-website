@@ -197,6 +197,11 @@ export class HotBuyService {
     return Math.max(rows.length, 1);
   }
 
+  async getRecentBuyersForProject(projectId: string, days = 30) {
+    const since = new Date(Date.now() - days * 86400000);
+    return this.loadRecentBuyers(projectId, since);
+  }
+
   formatHotBuyHeadline(snapshot: HotBuySnapshot): string {
     if (snapshot.topTraderCount >= 3) {
       return `${snapshot.topTraderCount} top traders bought ${snapshot.projectTicker}`;

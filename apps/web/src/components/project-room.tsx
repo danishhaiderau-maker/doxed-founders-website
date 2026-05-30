@@ -122,12 +122,16 @@ export function ProjectRoomPanel({ slug }: { slug: string }) {
     <div className="mt-8 space-y-6">
       {isPaperTrack && (
         <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 px-4 py-3 text-sm text-amber-100">
-          Paper-traded on DexScreener — not a verified Doxxed listing. Someone bought this token on the
-          platform; use{' '}
+          Paper-traded on DexScreener — not a verified Doxxed listing. See project header for who
+          bought and{' '}
+          <Link href="/leaderboard" className="font-medium text-emerald-300 underline">
+            trader rankings
+          </Link>
+          .{' '}
           <Link href="/list-your-project" className="font-medium text-amber-200 underline">
             List project
           </Link>{' '}
-          to submit founder proof and get admin approval.
+          to submit founder proof.
         </div>
       )}
 
