@@ -2,12 +2,15 @@
 # Replace placeholders after deploy.
 
 # ─── RAILWAY (API service → Variables) ───
+# Use service: doxed-founders-website (NOT @dcf/web — web is on Vercel)
 DATABASE_URL=YOUR_NEON_DATABASE_URL
 JWT_SECRET=YOUR_JWT_SECRET
 PRISMA_DB_PUSH=true
 PRISMA_SCHEMA=prisma/schema.prisma
 NODE_ENV=production
-CORS_ORIGINS=YOUR_VERCEL_URL
+CORS_ORIGINS=https://doxxedcrypto.digital,https://www.doxxedcrypto.digital
+# Start command (set in railway.toml): node scripts/start-api-prod.mjs
+# Do NOT use: NODE_ENV=production node ... (breaks Dockerfile deploy)
 
 # ─── VERCEL (Project → Settings → Environment Variables) ───
 NEXT_PUBLIC_API_URL=YOUR_RAILWAY_URL
