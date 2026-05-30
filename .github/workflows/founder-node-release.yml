@@ -50,7 +50,7 @@ jobs:
       - name: Pack Founder Node (${{ matrix.platform }})
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --project apps/founder-node --${{ matrix.platform }}
+        run: node scripts/pack-founder-node.mjs --${{ matrix.platform }}
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
