@@ -139,7 +139,7 @@ Ethereum, Solana, Polygon, Arbitrum, Optimism, Base, Avalanche, BNB Chain
 - [x] **Phase 10** — Trending feed spotlight + leaderboard
 - [x] **Phase 11** — Listing applications → live projects
 - [x] **Phase 8** — Watchlist + basic analytics events
-- [ ] **Phase 12** — Production deploy (Neon + Railway + Vercel — config in repo)
+- [x] **Phase 12** — Production deploy live on [Neon](https://neon.tech) + Railway API + [Vercel](https://doxxedcrypto.digital) (see Production deploy above)
 - [x] **Founder Node Phase 2** — One-click `.exe` / `.dmg` installers ([setup guide](apps/founder-node/README.md))
 
 ## Founder Node

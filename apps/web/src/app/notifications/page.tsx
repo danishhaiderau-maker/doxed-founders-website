@@ -5,7 +5,7 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import type { NotificationBuyerMeta } from '@dcf/utils';
-import { buildSiteUrl, buildFeedShareMessage, buildHotBuyShareMessage, buildListingShareMessage } from '@dcf/utils';
+import { buildSiteUrl, buildFeedShareMessage, buildHotBuyShareMessage, buildGrowthHotBuyTweet, buildListingShareMessage } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { NotificationBuyersPanel } from '@/components/notification-buyers-panel';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
@@ -169,11 +169,22 @@ export default function NotificationsPage() {
                 ? `${buyerMeta.buyers.map((b) => b.displayName).slice(0, 5).join(', ')} paper-traded $${buyerMeta.projectTicker ?? 'token'}`
                 : n.body;
             const shareUrl = n.link ? buildSiteUrl(origin, n.link) : buildSiteUrl(origin, '/notifications');
+            const projectSlugMatch = n.link?.match(/\/project\/([^/?#]+)/);
+            const projectSlug = buyerMeta?.projectSlug ?? projectSlugMatch?.[1];
             const shareText = isHotBuy && buyerMeta?.buyers?.length
-              ? buildHotBuyShareMessage({
-                  ticker: buyerMeta.projectTicker ?? 'TOKEN',
-                  buyerNames: buyerMeta.buyers.map((b) => b.displayName),
-                })
+              ? projectSlug
+                ? buildGrowthHotBuyTweet({
+                    ticker: buyerMeta.projectTicker ?? 'TOKEN',
+                    projectName: buyerMeta.projectName ?? buyerMeta.projectTicker ?? 'Token',
+                    projectSlug,
+                    buyerNames: buyerMeta.buyers.map((b) => b.displayName),
+                    origin,
+                    scoutThesis: buyerMeta.scoutThesis ?? undefined,
+                  })
+                : buildHotBuyShareMessage({
+                    ticker: buyerMeta.projectTicker ?? 'TOKEN',
+                    buyerNames: buyerMeta.buyers.map((b) => b.displayName),
+                  })
               : n.title.toLowerCase().includes('listing')
                 ? buildListingShareMessage({
                     projectName: n.title.replace(/^.*?:\s*/, '').trim(),

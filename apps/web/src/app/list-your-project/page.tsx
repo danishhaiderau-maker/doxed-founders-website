@@ -13,6 +13,7 @@ import {
   previewContract,
   previewDexScreener,
   submitListingApplication,
+  updateListingScoutFields,
   fetchProject,
 } from '@/lib/api';
 import { scoreFounderVerification } from '@dcf/utils';
@@ -68,6 +69,8 @@ function ListYourProjectPageInner() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successId, setSuccessId] = useState<string | null>(null);
+  const [scoutSaved, setScoutSaved] = useState(false);
+  const [scoutSaving, setScoutSaving] = useState(false);
 
   const poolAddress = useMemo(
     () => extractPoolAddressFromDexUrl(form.dexscreenerUrl ?? dexUrl),
@@ -205,10 +208,7 @@ function ListYourProjectPageInner() {
       out.whyDoxxed = `[Building in public — not fully doxxed]\n${note}`;
     }
 
-    // Strip until Railway API deploys 523ea71+ (old API rejects unknown DTO fields).
-    delete out.founderDoxxedStatus;
-    delete out.scoutHighlightNote;
-
+    // Persist scout fields — API now accepts founderDoxxedStatus and scoutHighlightNote.
     for (const key of Object.keys(out) as (keyof ListingFormData)[]) {
       const value = out[key];
       if (value === '' || value === null || value === undefined) {
@@ -220,6 +220,31 @@ function ListYourProjectPageInner() {
 
   function updateField(key: keyof ListingFormData, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function handleScoutUpdate(e: FormEvent) {
+    e.preventDefault();
+    if (!successId || !session?.accessToken) return;
+    setScoutSaving(true);
+    setScoutSaved(false);
+    setError(null);
+    try {
+      const payload: Parameters<typeof updateListingScoutFields>[1] = {
+        whyList: form.whyList?.trim() || undefined,
+        founderDoxxedStatus: form.founderDoxxedStatus,
+      };
+      if (form.founderDoxxedStatus === 'BUILDING_IN_PUBLIC') {
+        payload.scoutHighlightNote = form.scoutHighlightNote?.trim() || undefined;
+      } else {
+        payload.whyDoxxed = form.whyDoxxed?.trim() || undefined;
+      }
+      await updateListingScoutFields(successId, payload, session.accessToken);
+      setScoutSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save scout edits');
+    } finally {
+      setScoutSaving(false);
+    }
   }
 
   if (successId) {
@@ -235,6 +260,48 @@ function ListYourProjectPageInner() {
             Traders can vote and comment; admin can fast-track approve anytime, or review after 48h.
             {session ? ' You earned +50 scout submit points.' : ' Sign in next time to earn scout points.'}
           </p>
+          {session?.accessToken && (
+            <form onSubmit={handleScoutUpdate} className="mt-8 space-y-4 rounded-xl border border-violet-500/25 bg-violet-950/10 p-5 text-left">
+              <p className="text-sm font-medium text-violet-100">Edit scout thesis during voting</p>
+              <Field
+                label="Why should this project be listed?"
+                value={form.whyList ?? ''}
+                onChange={(v) => updateField('whyList', v)}
+                multiline
+                required
+              />
+              {form.founderDoxxedStatus === 'BUILDING_IN_PUBLIC' ? (
+                <Field
+                  label="Scout highlight"
+                  value={form.scoutHighlightNote ?? ''}
+                  onChange={(v) => updateField('scoutHighlightNote', v)}
+                  multiline
+                  required
+                />
+              ) : (
+                <Field
+                  label="Why is the founder doxxed / verified?"
+                  value={form.whyDoxxed ?? ''}
+                  onChange={(v) => updateField('whyDoxxed', v)}
+                  multiline
+                  required
+                />
+              )}
+              {error && (
+                <p className="text-sm text-red-300">{error}</p>
+              )}
+              {scoutSaved && (
+                <p className="text-sm text-emerald-300">Scout fields updated on the vote board.</p>
+              )}
+              <button
+                type="submit"
+                disabled={scoutSaving}
+                className="w-full rounded-lg border border-violet-500/50 px-4 py-2.5 text-sm font-medium text-violet-100 hover:bg-violet-950/30 disabled:opacity-50"
+              >
+                {scoutSaving ? 'Saving…' : 'Save scout edits'}
+              </button>
+            </form>
+          )}
           <Link
             href="/scout-votes"
             className="mt-6 inline-block rounded-lg border border-emerald-500/50 px-6 py-3 text-sm font-medium text-emerald-200"

@@ -299,6 +299,73 @@ export function buildHotBuyShareMessage(input: {
   return `${trimmed}\nLive on Doxxed Crypto 👇\n#Crypto #FounderOS #ProofOfConviction @DoxxedCrypto`;
 }
 
+export type GrowthHotBuyShareInput = {
+  ticker: string;
+  projectName: string;
+  projectSlug: string;
+  buyerNames: string[];
+  origin: string;
+  pctOfActive?: number;
+  detailLine?: string;
+  scoutHighlight?: string | null;
+  scoutThesis?: string | null;
+  summary?: string | null;
+  communitySnippets?: string[];
+};
+
+/** SAID-style growth thread — named buyers, thesis, multi-link story for X composer. */
+export function buildGrowthHotBuyThread(input: GrowthHotBuyShareInput): string {
+  const base = input.origin.replace(/\/$/, '');
+  const names =
+    input.buyerNames.length === 0
+      ? 'Traders'
+      : input.buyerNames.length <= 3
+        ? input.buyerNames.join(', ')
+        : `${input.buyerNames.slice(0, 2).join(', ')} +${input.buyerNames.length - 2} more`;
+  const thesis = pickHotBuyThesis(input);
+  const pct =
+    input.pctOfActive != null && input.pctOfActive > 0
+      ? `${Math.round(input.pctOfActive * 100)}% of active traders in 24h`
+      : null;
+
+  const lines = [
+    '🔥 Hot paper buy on Doxxed Crypto',
+    '',
+    `${names} bought $${input.ticker.toUpperCase()} (${input.projectName})`,
+  ];
+  if (pct) lines.push(pct);
+  if (input.detailLine?.trim()) lines.push(input.detailLine.trim());
+  if (thesis) {
+    lines.push('', 'Scout thesis:', `"${thesis}"`);
+  }
+  const snippets = (input.communitySnippets ?? [])
+    .map((s) => paraphraseShareSnippet(s, 80))
+    .filter(Boolean)
+    .slice(0, 2);
+  if (snippets.length > 0) {
+    lines.push('', 'Traders say:', snippets.map((s) => `• ${s}`).join('\n'));
+  }
+  lines.push(
+    '',
+    'Explore:',
+    `${base}/project/${input.projectSlug}`,
+    `${base}/leaderboard`,
+    `${base}/founder-node`,
+    '',
+    '#Crypto #FounderOS #ProofOfConviction @DoxxedCrypto',
+  );
+  return lines.join('\n');
+}
+
+/** Single-tweet growth post (≤280) with project URL for intent. */
+export function buildGrowthHotBuyTweet(input: GrowthHotBuyShareInput): string {
+  const thread = buildGrowthHotBuyThread(input);
+  const firstBlock = thread.split('\n\nExplore:')[0]?.trim() ?? thread;
+  const withLinks = `${firstBlock}\n\nSee who bought · leaderboard · founder vault 👇\n#ProofOfConviction @DoxxedCrypto`;
+  if (withLinks.length <= 280) return withLinks;
+  return buildHotBuyShareMessage(input);
+}
+
 export function shareImageFilename(pnlOrRoi: number): string {
   const side = pnlOrRoi >= 0 ? 'pump' : 'dump';
   return `dcf-${side}-flex.png`;

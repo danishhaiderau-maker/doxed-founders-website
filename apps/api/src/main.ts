@@ -3,6 +3,16 @@ import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
+  if (process.env.NODE_ENV === 'production') {
+    const secret = process.env.JWT_SECRET?.trim();
+    if (!secret || secret.length < 32 || secret === 'dev-secret-change-in-production') {
+      console.error(
+        'FATAL: Set a strong JWT_SECRET (32+ chars) in production. Refusing to start.',
+      );
+      process.exit(1);
+    }
+  }
+
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
   app.setGlobalPrefix('api');

@@ -10,6 +10,7 @@ import { FounderBadges } from '@/components/founder-badges';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
 import { ProjectMetricsGrid } from '@/components/project-card';
 import { ProjectRoomPanel } from '@/components/project-room';
+import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { ProjectRecentBuyersPanel } from '@/components/project-recent-buyers';
 import { WatchlistButton } from '@/components/watchlist-button';
 import { fetchProject, ProjectDetail } from '@/lib/api';
@@ -119,6 +120,12 @@ export default function ProjectDetailPage() {
                   {project.summary && (
                     <p className="mt-3 max-w-2xl text-[var(--color-muted)]">{project.summary}</p>
                   )}
+                  {(project.scoutHighlight || project.listingScoutThesis) && (
+                    <p className="mt-2 max-w-2xl rounded-lg border border-violet-500/25 bg-violet-950/15 px-3 py-2 text-sm text-violet-100">
+                      <span className="font-medium text-violet-300">Scout thesis: </span>
+                      {project.scoutHighlight ?? project.listingScoutThesis}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -180,6 +187,10 @@ export default function ProjectDetailPage() {
                   className="px-4 py-2"
                 />
               </div>
+            </section>
+
+            <section id="founder-brain" className="scroll-mt-24">
+              <FounderBrainPanel slug={slug} projectName={project.name} />
             </section>
 
             <section>

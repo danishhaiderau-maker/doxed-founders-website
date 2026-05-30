@@ -107,6 +107,12 @@ export class ListingApplicationsService {
         summary: dto.summary,
         whyList: dto.whyList.trim(),
         whyDoxxed: dto.whyDoxxed?.trim() ?? null,
+        founderDoxxedStatus: doxxedStatus,
+        scoutHighlightNote:
+          dto.scoutHighlightNote?.trim() ||
+          (doxxedStatus === 'BUILDING_IN_PUBLIC'
+            ? dto.whyDoxxed?.replace(/^\[Building in public[^\]]*\]\s*/i, '').trim() || null
+            : null),
         marketPreview: dto.marketPreview as Prisma.InputJsonValue | undefined,
         verificationScore: verification.score,
         verificationCriteria: verification.criteria,
@@ -123,6 +129,36 @@ export class ListingApplicationsService {
     }
 
     return application;
+  }
+
+  async updateScoutFields(
+    id: string,
+    userId: string,
+    input: {
+      scoutHighlightNote?: string;
+      whyList?: string;
+      whyDoxxed?: string;
+      founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+    },
+  ) {
+    const application = await this.prisma.listingApplication.findUnique({ where: { id } });
+    if (!application) throw new NotFoundException('Listing application not found');
+    if (application.userId !== userId) {
+      throw new BadRequestException('Only the submitter can edit this listing');
+    }
+    if (application.status !== ListingStatus.COMMUNITY_VOTING) {
+      throw new BadRequestException('Scout fields can only be edited while community voting is open');
+    }
+
+    return this.prisma.listingApplication.update({
+      where: { id },
+      data: {
+        scoutHighlightNote: input.scoutHighlightNote?.trim() ?? undefined,
+        whyList: input.whyList?.trim() ?? undefined,
+        whyDoxxed: input.whyDoxxed?.trim() ?? undefined,
+        founderDoxxedStatus: input.founderDoxxedStatus ?? undefined,
+      },
+    });
   }
 
   async findPending() {

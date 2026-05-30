@@ -3,8 +3,8 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { formatUsd, TOP_UP_FEE_USD, STARTING_CASH_USD } from '@dcf/utils';
-import type { PlatformActivityItem, PlatformStats } from '@/lib/api';
-import { fetchPlatformActivity } from '@/lib/api';
+import type { LeaderboardEntry, PlatformActivityItem, PlatformStats } from '@/lib/api';
+import { fetchLeaderboard, fetchPlatformActivity } from '@/lib/api';
 
 function activityTimeAgo(iso: string) {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
@@ -373,6 +373,77 @@ export function LandingEconomy() {
   );
 }
 
+export function LandingGrowthHub() {
+  const [leaders, setLeaders] = useState<LeaderboardEntry[]>([]);
+
+  useEffect(() => {
+    fetchLeaderboard()
+      .then((rows) => setLeaders(rows.slice(0, 3)))
+      .catch(() => setLeaders([]));
+  }, []);
+
+  return (
+    <section className="border-b border-zinc-800/80 bg-gradient-to-b from-zinc-950/80 to-transparent">
+      <div className="mx-auto w-full max-w-[90rem] px-4 py-10 sm:px-6 lg:px-10">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+          Live on Doxxed Crypto
+        </p>
+        <h2 className="mt-1 text-xl font-bold text-white">Rankings · Founder Node · Scout highlights</h2>
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <Link
+            href="/founder-node"
+            className="rounded-2xl border border-emerald-500/30 bg-emerald-950/20 p-5 transition hover:border-emerald-400/50"
+          >
+            <p className="text-2xl" aria-hidden>
+              🖥
+            </p>
+            <h3 className="mt-2 font-semibold text-emerald-200">Founder Node</h3>
+            <p className="mt-1 text-sm text-zinc-400">
+              Self-custody vault on your PC — project memory stays local. One-click sync with Founder OS.
+            </p>
+            <span className="mt-3 inline-block text-sm font-medium text-emerald-300">Download →</span>
+          </Link>
+          <Link
+            href="/leaderboard"
+            className="rounded-2xl border border-amber-500/30 bg-amber-950/15 p-5 transition hover:border-amber-400/50"
+          >
+            <p className="text-2xl" aria-hidden>
+              🏆
+            </p>
+            <h3 className="mt-2 font-semibold text-amber-200">Paper trader rankings</h3>
+            {leaders.length > 0 ? (
+              <ul className="mt-2 space-y-1 text-sm text-zinc-400">
+                {leaders.map((e) => (
+                  <li key={e.userId}>
+                    #{e.rank} {e.displayName} · {e.roi >= 0 ? '+' : ''}
+                    {e.roi.toFixed(1)}%
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-sm text-zinc-400">See who&apos;s proving conviction with paper capital.</p>
+            )}
+            <span className="mt-3 inline-block text-sm font-medium text-amber-300">Leaderboard →</span>
+          </Link>
+          <Link
+            href="/scout-votes"
+            className="rounded-2xl border border-violet-500/30 bg-violet-950/15 p-5 transition hover:border-violet-400/50"
+          >
+            <p className="text-2xl" aria-hidden>
+              🔭
+            </p>
+            <h3 className="mt-2 font-semibold text-violet-200">Scout highlights</h3>
+            <p className="mt-1 text-sm text-zinc-400">
+              Community validates listings before launch — thesis, founder proof, and building-in-public notes.
+            </p>
+            <span className="mt-3 inline-block text-sm font-medium text-violet-300">Scout votes →</span>
+          </Link>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function LandingLiveActivity() {
   const [items, setItems] = useState<PlatformActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -386,7 +457,7 @@ export function LandingLiveActivity() {
 
   return (
     <section className="border-b border-zinc-800/80 bg-zinc-950/40">
-      <div className="mx-auto max-w-6xl px-6 py-10">
+      <div className="mx-auto w-full max-w-[90rem] px-4 py-10 sm:px-6 lg:px-10">
         <div className="flex items-end justify-between gap-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-zinc-500">

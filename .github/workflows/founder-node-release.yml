@@ -71,10 +71,11 @@ jobs:
       - name: Verify installer exists
         shell: bash
         run: |
-          shopt -s nullglob
-          files=(apps/founder-node/release/*.exe apps/founder-node/release/*.dmg)
+          shopt -s globstar nullglob
+          files=(apps/founder-node/release/**/*.exe apps/founder-node/release/**/*.dmg apps/founder-node/release/*.exe apps/founder-node/release/*.dmg)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No .exe or .dmg produced"
+            find apps/founder-node/release -type f 2>/dev/null || true
             exit 1
           fi
           ls -la "${files[@]}"

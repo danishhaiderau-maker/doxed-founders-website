@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards, BadRequestException } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { AdminGuard } from '../auth/guards';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
@@ -90,6 +90,24 @@ export class ListingApplicationsController {
   @Patch(':id/review')
   review(@Param('id') id: string, @Body() dto: ReviewListingApplicationDto) {
     return this.listingService.review(id, dto);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Patch(':id/scout')
+  updateScout(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      scoutHighlightNote?: string;
+      whyList?: string;
+      whyDoxxed?: string;
+      founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+    },
+  ) {
+    if (!user?.id) throw new BadRequestException('Sign in to edit your listing');
+    return this.listingService.updateScoutFields(id, user.id, body);
   }
 
   @Public()

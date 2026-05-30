@@ -6,7 +6,7 @@ import {
   type FounderNodePairRequest,
   type FounderNodePairResponse,
 } from '@dcf/founder-vault';
-import type { DeviceMemoryPayload } from '@dcf/utils';
+import type { DeviceMemoryMetadataPayload } from '@dcf/utils';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -56,7 +56,7 @@ export async function syncVaultMetadata(
   apiBaseUrl: string,
   nodeId: string,
   nodeToken: string,
-  payload: DeviceMemoryPayload,
+  payload: DeviceMemoryMetadataPayload,
 ): Promise<void> {
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/sync'), {
     method: 'POST',

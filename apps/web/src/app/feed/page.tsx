@@ -15,6 +15,7 @@ import {
   buildListingShareMessage,
   buildPredictionShareMessage,
   buildHotBuyShareMessage,
+  buildGrowthHotBuyTweet,
 } from '@dcf/utils';
 import {
   FeedComment,
@@ -342,17 +343,31 @@ function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string 
   const ctx = item.shareContext;
   const shareText =
     item.eventType === 'hot_buy' || item.eventType === 'top_trader_buy'
-      ? buildHotBuyShareMessage({
-          ticker: item.projectTicker ?? 'TOKEN',
-          buyerNames: item.recentBuyerNames ?? [],
-          projectName: ctx?.projectName ?? item.projectSlug,
-          pctOfActive: ctx?.pctOfActive,
-          detailLine: ctx?.detailLine ?? item.detail,
-          scoutHighlight: ctx?.scoutHighlight,
-          scoutThesis: ctx?.scoutThesis,
-          summary: ctx?.summary,
-          communitySnippets: ctx?.communitySnippets,
-        })
+      ? item.projectSlug
+        ? buildGrowthHotBuyTweet({
+            ticker: item.projectTicker ?? 'TOKEN',
+            projectName: ctx?.projectName ?? item.projectTicker ?? 'Token',
+            projectSlug: item.projectSlug,
+            buyerNames: item.recentBuyerNames ?? [],
+            origin,
+            pctOfActive: ctx?.pctOfActive,
+            detailLine: ctx?.detailLine ?? item.detail,
+            scoutHighlight: ctx?.scoutHighlight,
+            scoutThesis: ctx?.scoutThesis,
+            summary: ctx?.summary,
+            communitySnippets: ctx?.communitySnippets,
+          })
+        : buildHotBuyShareMessage({
+            ticker: item.projectTicker ?? 'TOKEN',
+            buyerNames: item.recentBuyerNames ?? [],
+            projectName: ctx?.projectName ?? item.projectSlug,
+            pctOfActive: ctx?.pctOfActive,
+            detailLine: ctx?.detailLine ?? item.detail,
+            scoutHighlight: ctx?.scoutHighlight,
+            scoutThesis: ctx?.scoutThesis,
+            summary: ctx?.summary,
+            communitySnippets: ctx?.communitySnippets,
+          })
       : item.eventType === 'listing_live'
         ? buildListingShareMessage({
             projectName:

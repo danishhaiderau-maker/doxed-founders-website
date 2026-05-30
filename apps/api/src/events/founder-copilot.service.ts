@@ -15,7 +15,10 @@ import {
   detectHandsFreeAction,
   formatRelativeTime,
   FOUNDER_OS_MEMORY_DIR,
+  stripDeviceMemoryToMetadata,
+  isMetadataOnlyPayload,
   type DeviceMemoryPayload,
+  type DeviceMemoryMetadataPayload,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
@@ -698,7 +701,10 @@ export class FounderCopilotService {
     };
   }
 
-  async saveDeviceMemorySync(userId: string, payload: DeviceMemoryPayload) {
+  async saveDeviceMemorySync(
+    userId: string,
+    payload: DeviceMemoryPayload | DeviceMemoryMetadataPayload,
+  ) {
     if (payload.version !== 1 || !payload.currentGoal?.trim()) {
       throw new BadRequestException('Invalid memory payload');
     }
@@ -710,16 +716,23 @@ export class FounderCopilotService {
       );
     }
 
+    const relayPayload: DeviceMemoryPayload | DeviceMemoryMetadataPayload =
+      settings?.memoryStorageMode === 'FOUNDER_NODE' || isMetadataOnlyPayload(payload)
+        ? isMetadataOnlyPayload(payload)
+          ? payload
+          : stripDeviceMemoryToMetadata(payload as DeviceMemoryPayload)
+        : (payload as DeviceMemoryPayload);
+
     const row = await this.prisma.projectMemoryDeviceSync.upsert({
       where: { userId },
       create: {
         userId,
-        payload,
-        deviceLabel: payload.deviceLabel ?? null,
+        payload: relayPayload,
+        deviceLabel: relayPayload.deviceLabel ?? null,
       },
       update: {
-        payload,
-        deviceLabel: payload.deviceLabel ?? null,
+        payload: relayPayload,
+        deviceLabel: relayPayload.deviceLabel ?? null,
       },
     });
 
