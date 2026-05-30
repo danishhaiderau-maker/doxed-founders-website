@@ -8,6 +8,7 @@ import {
   LandingHero,
   LandingLiveMetrics,
   LandingLiveActivity,
+  LandingGrowthHub,
   LandingEconomy,
   LandingFinalCta,
 } from '@/components/landing/landing-sections';
@@ -75,6 +76,7 @@ export function LandingPage() {
       )}
 
       <LandingEconomy />
+      <LandingGrowthHub />
       <LandingLiveActivity />
 
       {featured.length > 0 && (

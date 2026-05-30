@@ -1,4 +1,5 @@
-import type { DeviceMemoryPayload } from '@dcf/utils';
+import type { DeviceMemoryPayload, DeviceMemoryMetadataPayload } from '@dcf/utils';
+import { stripDeviceMemoryToMetadata } from '@dcf/utils';
 import type { FounderVaultMeta, FounderVaultSnapshot } from './schema.js';
 import { emptyTasksFile, parseTasksJson } from './schema.js';
 
@@ -34,6 +35,30 @@ export function buildVaultSnapshot(input: {
     vaultHealthy: input.vaultHealthy ?? true,
     tasksRemaining: openTasks.length,
   };
+}
+
+/** Metadata-only payload for cloud relay — no plaintext vault contents. */
+export function buildVaultMetadataSyncPayload(
+  snapshot: FounderVaultSnapshot,
+  encryptedVaultBlob?: string,
+): DeviceMemoryMetadataPayload {
+  const base = stripDeviceMemoryToMetadata(snapshot);
+  if (encryptedVaultBlob) {
+    return { ...base, encryptedVaultBlob };
+  }
+  return base;
+}
+
+export function buildVaultEncryptedBlob(
+  snapshot: FounderVaultSnapshot,
+  encrypt: (json: string) => string,
+): DeviceMemoryMetadataPayload {
+  const sensitive = JSON.stringify({
+    projectContext: snapshot.projectContext,
+    roadmap: snapshot.roadmap,
+    tasksFile: snapshot.tasksFile,
+  });
+  return buildVaultMetadataSyncPayload(snapshot, encrypt(sensitive));
 }
 
 function extractGoalFromContext(markdown?: string): string | null {

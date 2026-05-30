@@ -275,6 +275,22 @@ export function submitListingApplication(data: ListingFormData, token?: string) 
   );
 }
 
+export function updateListingScoutFields(
+  id: string,
+  data: {
+    scoutHighlightNote?: string;
+    whyList?: string;
+    whyDoxxed?: string;
+    founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+  },
+  token: string,
+) {
+  return apiFetch(`/listing-applications/${id}/scout`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  }, token);
+}
+
 export function fetchVotingStats() {
   return apiFetch<ScoutListing['platformVoting']>('/listing-applications/voting/stats');
 }

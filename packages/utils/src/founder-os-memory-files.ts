@@ -24,6 +24,8 @@ export type FounderOsTasksFile = {
 export type NotificationBuyerMeta = {
   projectSlug?: string;
   projectTicker?: string;
+  projectName?: string;
+  scoutThesis?: string | null;
   buyers?: Array<{
     userId: string;
     displayName: string;
@@ -41,7 +43,46 @@ export type DeviceMemoryPayload = {
   roadmap?: string;
   tasksFile?: FounderOsTasksFile;
   deviceLabel?: string;
+  /** When true, server stores metadata only (Founder Node / zero-knowledge relay). */
+  metadataOnly?: boolean;
+  /** AES-256-GCM encrypted vault blob — server cannot decrypt. */
+  encryptedVaultBlob?: string;
 };
+
+/** Minimal cross-device relay — no full markdown or task bodies. */
+export type DeviceMemoryMetadataPayload = {
+  version: 1;
+  updatedAt: string;
+  projectName?: string;
+  currentGoal: string;
+  deviceLabel?: string;
+  tasksRemaining: number;
+  metadataOnly: true;
+  encryptedVaultBlob?: string;
+};
+
+export function stripDeviceMemoryToMetadata(
+  payload: DeviceMemoryPayload,
+): DeviceMemoryMetadataPayload {
+  const tasksRemaining =
+    payload.tasksFile?.tasks.filter((t) => !t.done).length ?? 0;
+  return {
+    version: 1,
+    updatedAt: payload.updatedAt,
+    projectName: payload.projectName,
+    currentGoal: payload.currentGoal.trim(),
+    deviceLabel: payload.deviceLabel,
+    tasksRemaining,
+    metadataOnly: true,
+    encryptedVaultBlob: payload.encryptedVaultBlob,
+  };
+}
+
+export function isMetadataOnlyPayload(
+  payload: DeviceMemoryPayload | DeviceMemoryMetadataPayload,
+): payload is DeviceMemoryMetadataPayload {
+  return 'metadataOnly' in payload && payload.metadataOnly === true;
+}
 
 export const MEMORY_STORAGE_MODES = [
   {

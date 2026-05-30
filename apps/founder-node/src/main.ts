@@ -17,7 +17,7 @@ import {
   sendHeartbeat,
   syncVaultMetadata,
 } from './sync-client';
-import { FOUNDER_NODE_APP_VERSION } from '@dcf/founder-vault';
+import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encryptVaultJson } from '@dcf/founder-vault';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SYNC_INTERVAL_MS = 60_000;
@@ -53,6 +53,10 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
 
   const snapshot = buildSnapshotFromVault(vaultRoot, config.label);
   const disk = vaultDiskStats(vaultRoot);
+  const vaultKey = deriveVaultKey(config.nodeToken, config.nodeId);
+  const metadataPayload = buildVaultEncryptedBlob(snapshot, (json) =>
+    encryptVaultJson(json, vaultKey),
+  );
 
   await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
     ...defaultHeartbeat(config.label, vaultRoot),
@@ -61,7 +65,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     storageFreeGb: disk.storageFreeGb,
   });
 
-  await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, snapshot);
+  await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
 }
 
 function openPairWindow(): void {

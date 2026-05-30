@@ -12,6 +12,7 @@ import { SecuritySettingsPanel } from '@/components/settings/security-settings-p
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { GamifiedRoleBadge, BuilderStatusBadge } from '@/components/account/gamified-role-badge';
 import { NotificationSettingsPanel } from '@/components/account/notification-settings-panel';
+import { TopUpPanel } from '@/components/account/topup-panel';
 import {
   AccountActivityItem,
   AccountFollowingEntry,
@@ -32,10 +33,12 @@ export type AccountTab =
   | 'connected'
   | 'points'
   | 'reputation'
-  | 'activity';
+  | 'activity'
+  | 'topup';
 
 const TABS: { id: AccountTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
+  { id: 'topup', label: 'Top up' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'connected', label: 'Connected Accounts' },
@@ -415,6 +418,12 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
             <Link href="/leaderboard" className="text-sm text-emerald-400 hover:underline">
               View public leaderboard →
             </Link>
+          </section>
+        )}
+
+        {tab === 'topup' && token && (
+          <section>
+            <TopUpPanel accessToken={token} />
           </section>
         )}
 

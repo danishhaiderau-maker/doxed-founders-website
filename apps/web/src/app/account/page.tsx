@@ -7,6 +7,7 @@ import { AccountHub, type AccountTab } from '@/components/account/account-hub';
 
 const VALID_TABS = new Set<AccountTab>([
   'overview',
+  'topup',
   'security',
   'notifications',
   'connected',
