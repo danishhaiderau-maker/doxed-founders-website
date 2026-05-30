@@ -63,11 +63,17 @@ export function ScoutMarketsPanel({ slug, accessToken, onMessage }: ScoutMarkets
   return (
     <div className="space-y-4">
       <p className="text-xs text-zinc-500">
-        MetaDAO-inspired conviction markets — stake paper dollars on YES/NO. Pools are public; minimum $10.
+        Paper-money YES/NO markets — winners split the pool after 48h.{' '}
+        <a href="/predict" className="text-indigo-400 hover:underline">
+          All markets →
+        </a>
       </p>
       {markets.map((m) => (
         <div key={m.id} className="rounded-xl border border-indigo-500/30 bg-indigo-950/10 p-5">
           <p className="font-medium text-white">{m.question}</p>
+          {m.hoursLeft != null && m.hoursLeft > 0 && (
+            <p className="mt-1 text-xs text-zinc-500">{m.hoursLeft}h remaining</p>
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
             <span className="text-emerald-300">{m.conviction}% YES</span>
             <span className="text-zinc-500">

@@ -27,6 +27,7 @@ import { BuilderModule } from './builder/builder.module';
 import { EventsModule } from './events/events.module';
 import { XSocialModule } from './x-social/x-social.module';
 import { AccountModule } from './account/account.module';
+import { PredictionMarketsModule } from './prediction-markets/prediction-markets.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { AccountModule } from './account/account.module';
     EventsModule,
     XSocialModule,
     AccountModule,
+    PredictionMarketsModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

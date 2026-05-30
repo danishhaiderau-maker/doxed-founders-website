@@ -309,6 +309,7 @@ model User {
   helpfulMarksReceived HelpfulMark[] @relation("HelpfulRecipient")
   userBadges           UserBadge[]
   scoutMarketPositions ScoutMarketPosition[]
+  predictionMarketsCreated ScoutMarket[] @relation("PredictionMarketCreator")
   githubConnection     GitHubConnection?
   connectedApps           ConnectedAppStatus[]
   integrationCredentials  IntegrationCredential[]
@@ -970,22 +971,26 @@ enum ScoutMarketStatus {
 }
 
 model ScoutMarket {
-  id         String            @id @default(cuid())
-  projectId  String
-  question   String
-  status     ScoutMarketStatus @default(OPEN)
-  yesPoolUsd Decimal           @default(0) @db.Decimal(16, 2)
-  noPoolUsd  Decimal           @default(0) @db.Decimal(16, 2)
-  outcome    Boolean?
-  resolvesAt DateTime?
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  id              String            @id @default(cuid())
+  projectId       String
+  question        String
+  status          ScoutMarketStatus @default(OPEN)
+  source          String            @default("DEFAULT")
+  createdByUserId String?
+  yesPoolUsd      Decimal           @default(0) @db.Decimal(16, 2)
+  noPoolUsd       Decimal           @default(0) @db.Decimal(16, 2)
+  outcome         Boolean?
+  resolvesAt      DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
   project   Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator   User?                  @relation("PredictionMarketCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   positions ScoutMarketPosition[]
 
   @@index([projectId])
   @@index([status])
+  @@index([resolvesAt])
 }
 
 model ScoutMarketPosition {

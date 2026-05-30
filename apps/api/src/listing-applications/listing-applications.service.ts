@@ -18,6 +18,7 @@ import {
   toPrismaAdminUpdates,
 } from './listing-application-review.util';
 import { ListingVotesService } from './listing-votes.service';
+import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 
 @Injectable()
 export class ListingApplicationsService {
@@ -26,6 +27,7 @@ export class ListingApplicationsService {
     private readonly publish: ListingPublishService,
     private readonly points: PointsService,
     private readonly votes: ListingVotesService,
+    private readonly predictionMarkets: PredictionMarketsService,
   ) {}
 
   private computeVerification(dto: CreateListingApplicationDto) {
@@ -181,6 +183,10 @@ export class ListingApplicationsService {
       if (application.userId) {
         await this.points.award(application.userId, POINTS.LISTING_SCOUT_APPROVED, 'LISTING_SCOUT_APPROVED');
       }
+
+      await this.predictionMarkets.seedMarketsForProject(published.projectId, {
+        isNewListing: true,
+      });
 
       return {
         application: updated,
