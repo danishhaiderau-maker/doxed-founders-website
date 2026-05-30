@@ -17,8 +17,10 @@ jobs:
         include:
           - os: windows-latest
             platform: win
+            pack_cmd: npx electron-builder --win portable --x64 --publish never
           - os: macos-latest
             platform: mac
+            pack_cmd: npx electron-builder --mac dmg --arm64 --publish never
 
     runs-on: ${{ matrix.os }}
 
@@ -34,9 +36,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Install Founder Node workspace deps
-        run: npm install --workspace=@dcf/founder-node --include=dev
 
       - name: Clean release output
         shell: bash
@@ -54,19 +53,12 @@ jobs:
       - name: Prepare packaging layout
         run: node scripts/prepare-founder-node-pack.mjs
 
-      - name: Pack Founder Node (Windows)
-        if: matrix.platform == 'win'
+      - name: Pack Founder Node
         working-directory: apps/founder-node
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --win portable --x64
-
-      - name: Pack Founder Node (macOS)
-        if: matrix.platform == 'mac'
-        working-directory: apps/founder-node
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --mac dmg --x64
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ${{ matrix.pack_cmd }}
 
       - name: List release output
         if: always()
@@ -74,14 +66,26 @@ jobs:
         run: |
           echo "Release directory:"
           ls -la apps/founder-node/release/ || true
-          echo "Recursive:"
-          find apps/founder-node/release -maxdepth 2 -type f 2>/dev/null || true
+          find apps/founder-node/release -maxdepth 1 -type f 2>/dev/null || true
+
+      - name: Verify installer exists
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(apps/founder-node/release/*.exe apps/founder-node/release/*.dmg)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .exe or .dmg produced"
+            exit 1
+          fi
+          ls -la "${files[@]}"
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: founder-node-${{ matrix.platform }}
-          path: apps/founder-node/release/
+          path: |
+            apps/founder-node/release/*.exe
+            apps/founder-node/release/*.dmg
           if-no-files-found: error
 
       - name: Upload pack debug logs on failure
@@ -89,8 +93,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: founder-node-debug-${{ matrix.platform }}
-          path: |
-            apps/founder-node/release/**
+          path: apps/founder-node/release/**
           if-no-files-found: ignore
 
   publish:
@@ -115,10 +118,8 @@ jobs:
 
       - name: List release assets
         run: |
-          echo "Windows:"
-          ls -la release/win/ 2>/dev/null || echo "(none)"
-          echo "macOS:"
-          ls -la release/mac/ 2>/dev/null || echo "(none)"
+          echo "Windows:" && ls -la release/win/ 2>/dev/null || echo "(none)"
+          echo "macOS:" && ls -la release/mac/ 2>/dev/null || echo "(none)"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -130,5 +131,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
-            release/win/**/*
-            release/mac/**/*
+            release/win/*.exe
+            release/win/*.dmg
+            release/mac/*.exe
+            release/mac/*.dmg

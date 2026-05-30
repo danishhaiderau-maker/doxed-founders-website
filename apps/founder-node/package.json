@@ -60,7 +60,7 @@
       "signAndEditExecutable": false
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [{"target": "dmg", "arch": ["arm64", "x64"]}],
       "icon": "build/icon.png",
       "category": "public.app-category.productivity",
       "hardenedRuntime": false,

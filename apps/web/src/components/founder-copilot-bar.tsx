@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   copilotAsk,
   dispatchCursorCloudBuild,
@@ -11,26 +11,7 @@ import {
   fetchEventActivity,
   ProjectMemory,
 } from '@/lib/api';
-
-type SpeechRecognitionCtor = new () => {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((ev: { results: { [index: number]: { [index: number]: { transcript: string } } } }) => void) | null;
-  onerror: ((ev: { error: string }) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-function getSpeechRecognition(): SpeechRecognitionCtor | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as Window & {
-    SpeechRecognition?: SpeechRecognitionCtor;
-    webkitSpeechRecognition?: SpeechRecognitionCtor;
-  };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
-}
+import { useVoiceInput } from '@/hooks/use-voice-input';
 
 const QUICK_ACTIONS = [
   { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?' },
@@ -47,14 +28,18 @@ type FounderCopilotBarProps = {
 export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarProps) {
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
-  const [listening, setListening] = useState(false);
   const [feed, setFeed] = useState<EventActivityFeed | null>(null);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [lastAnswer, setLastAnswer] = useState<string | null>(null);
   const [defaultProvider, setDefaultProvider] = useState('RULE_BASED');
   const [cursorConnected, setCursorConnected] = useState(false);
   const [llmConnected, setLlmConnected] = useState(false);
-  const recognitionRef = useRef<InstanceType<NonNullable<ReturnType<typeof getSpeechRecognition>>> | null>(null);
+
+  const onTranscript = useCallback((text: string) => {
+    setPrompt(text);
+  }, []);
+
+  const { listening, supported, toggle, stop } = useVoiceInput(onTranscript);
 
   const load = useCallback(async () => {
     try {
@@ -82,11 +67,10 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     load();
   }, [load]);
 
-  useEffect(() => () => recognitionRef.current?.stop(), []);
-
   async function handleAsk(text?: string) {
     const q = (text ?? prompt).trim();
     if (!q || busy) return;
+    stop();
     setBusy(true);
     try {
       const result = await copilotAsk(q, accessToken);
@@ -127,30 +111,12 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     }
   }
 
-  function toggleVoice() {
-    const Ctor = getSpeechRecognition();
-    if (!Ctor) {
+  function handleVoiceToggle() {
+    if (!supported) {
       onResult?.('Voice not supported in this browser — type instead');
       return;
     }
-    if (listening) {
-      recognitionRef.current?.stop();
-      setListening(false);
-      return;
-    }
-    const rec = new Ctor();
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.lang = 'en-US';
-    rec.onresult = (ev) => {
-      const t = ev.results[0]?.[0]?.transcript ?? '';
-      setPrompt((p) => (p ? `${p} ${t}` : t));
-    };
-    rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
-    recognitionRef.current = rec;
-    rec.start();
-    setListening(true);
+    toggle(prompt);
   }
 
   const stats = feed?.weekStats;
@@ -215,16 +181,19 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
           <div className="flex flex-wrap gap-1.5">
             <button
               type="button"
-              onClick={toggleVoice}
-              title="Voice input"
+              onClick={handleVoiceToggle}
+              title={listening ? 'Stop recording' : 'Voice — stays open while you talk'}
               className={`rounded-lg px-2.5 py-1.5 text-sm ${
                 listening
-                  ? 'bg-red-600/80 text-white animate-pulse'
+                  ? 'bg-red-600/80 text-white'
                   : 'border border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-white'
               }`}
             >
-              🎤
+              {listening ? '⏹' : '🎤'}
             </button>
+            {listening && (
+              <span className="self-center text-[10px] text-red-300">Listening…</span>
+            )}
             {cursorConnected && (
               <span className="rounded-lg border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-300">
                 Cursor agent ready
