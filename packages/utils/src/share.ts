@@ -101,15 +101,78 @@ export function buildSiteUrl(origin: string, path: string): string {
   return `${base}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
+/** X cashtag — always `$TICKER` with a leading space in prose, never `($TICKER)`. */
+export function formatShareCashtag(ticker: string): string {
+  const sym = ticker.replace(/^\$/, '').trim().toUpperCase();
+  return sym ? `$${sym}` : '';
+}
+
+export function formatShareProjectLine(projectName: string, ticker: string): string {
+  const tag = formatShareCashtag(ticker);
+  return tag ? `${projectName} ${tag}` : projectName;
+}
+
+function collapseShareText(text: string, maxLen = 200): string {
+  const flat = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/^[\s•·\->]+/, '').trim())
+    .filter(Boolean)
+    .join(' · ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (flat.length <= maxLen) return flat;
+  const cut = flat.slice(0, maxLen - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > 80 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
+function isGenericListingSummary(summary: string): boolean {
+  const s = summary.toLowerCase();
+  return s.includes('listed via dexscreener') || s.includes('on solana. listed') || s.length < 24;
+}
+
+export function pickListingShareBlurb(input: {
+  scoutHighlight?: string | null;
+  scoutThesis?: string | null;
+  whyDoxxed?: string | null;
+  summary?: string | null;
+  projectName?: string;
+}): string {
+  if (input.scoutHighlight?.trim()) {
+    return collapseShareText(input.scoutHighlight);
+  }
+  if (input.scoutThesis?.trim()) {
+    return collapseShareText(input.scoutThesis);
+  }
+  const why = input.whyDoxxed?.trim() ?? '';
+  if (/building in public/i.test(why)) {
+    const note = why.replace(/^\[Building in public[^\]]*\]\s*/i, '').trim();
+    if (note.length >= 20) return collapseShareText(note);
+  }
+  if (input.summary?.trim() && !isGenericListingSummary(input.summary)) {
+    return collapseShareText(input.summary);
+  }
+  return `${input.projectName ?? 'This project'} is live — predict, paper trade, scout the founder`;
+}
+
 export function buildListingShareMessage(input: {
   projectName: string;
   ticker: string;
+  scoutHighlight?: string | null;
+  scoutThesis?: string | null;
+  whyDoxxed?: string | null;
   summary?: string | null;
 }): string {
-  const tag = input.summary?.trim()
-    ? input.summary.trim().slice(0, 100)
-    : `${input.projectName} (${input.ticker}) just went live on Doxxed Crypto`;
-  return `🚀 New listing: ${input.projectName} ($${input.ticker})\n${tag}\nPredict · paper trade · scout the founder 👇\n#Crypto #FounderOS @DoxxedCrypto`;
+  const line = formatShareProjectLine(input.projectName, input.ticker);
+  const blurb = pickListingShareBlurb({
+    scoutHighlight: input.scoutHighlight,
+    scoutThesis: input.scoutThesis,
+    whyDoxxed: input.whyDoxxed,
+    summary: input.summary,
+    projectName: input.projectName,
+  });
+  return `🚀 New listing: ${line}\n${blurb}\nPredict · paper trade · scout the founder 👇\n#Crypto #FounderOS @DoxxedCrypto`;
 }
 
 export function buildPredictionShareMessage(input: {
@@ -122,8 +185,9 @@ export function buildPredictionShareMessage(input: {
     input.poolUsd != null && input.poolUsd > 0
       ? ` · Pool ${formatUsd(input.poolUsd, 0)} paper $`
       : '';
+  const line = formatShareProjectLine(input.projectName, input.ticker);
   const q = input.question.trim().slice(0, 140);
-  return `🔮 Prediction market open: ${input.projectName} ($${input.ticker})${pool}\n"${q}"\nStake YES/NO with paper $ on Doxxed Crypto 👇\n#Crypto #Predict @DoxxedCrypto`;
+  return `🔮 Prediction market open: ${line}${pool}\n"${q}"\nStake YES/NO with paper $ on Doxxed Crypto 👇\n#Crypto #Predict @DoxxedCrypto`;
 }
 
 export function buildFeedShareMessage(input: {
@@ -145,7 +209,9 @@ export function buildHotBuyShareMessage(input: {
       : input.buyerNames.length <= 3
         ? input.buyerNames.join(', ')
         : `${input.buyerNames.slice(0, 2).join(', ')} +${input.buyerNames.length - 2} more`;
-  const label = input.projectName ? `${input.projectName} ($${input.ticker})` : `$${input.ticker}`;
+  const label = input.projectName
+    ? formatShareProjectLine(input.projectName, input.ticker)
+    : formatShareCashtag(input.ticker);
   return `🔥 ${names} paper-traded ${label} on Doxxed Crypto\nSee who bought · follow top traders · stake predictions 👇\n#ProofOfConviction @DoxxedCrypto`;
 }
 

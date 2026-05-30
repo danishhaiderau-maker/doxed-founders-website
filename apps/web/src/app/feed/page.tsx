@@ -181,7 +181,7 @@ export default function FeedPage() {
                       text={buildListingShareMessage({
                         projectName: s.projectName,
                         ticker: s.ticker,
-                        summary: s.whyList,
+                        scoutThesis: s.whyList,
                       })}
                       url={buildSiteUrl(origin, '/scout-votes')}
                       label="Share"
@@ -347,9 +347,11 @@ function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string 
         })
       : item.eventType === 'listing_live'
         ? buildListingShareMessage({
-            projectName: item.headline.replace(/^New listing:\s*/, '').split(' (')[0] ?? item.headline,
+            projectName:
+              item.headline.replace(/^New listing:\s*/, '').replace(/\s*\([^)]*\)\s*$/, '').trim() ||
+              item.headline,
             ticker: item.projectTicker ?? '',
-            summary: item.detail,
+            scoutThesis: item.detail,
           })
         : buildFeedShareMessage({ headline: item.headline, detail: item.detail });
 

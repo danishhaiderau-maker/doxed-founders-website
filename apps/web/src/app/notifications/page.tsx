@@ -176,9 +176,9 @@ export default function NotificationsPage() {
                 })
               : n.title.toLowerCase().includes('listing')
                 ? buildListingShareMessage({
-                    projectName: n.title.replace(/^.*?:\s*/, ''),
+                    projectName: n.title.replace(/^.*?:\s*/, '').trim(),
                     ticker: buyerMeta?.projectTicker ?? '',
-                    summary: n.body,
+                    scoutThesis: n.body,
                   })
                 : buildFeedShareMessage({ headline: n.title, detail: n.body });
 

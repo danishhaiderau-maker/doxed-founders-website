@@ -750,6 +750,7 @@ export interface ProjectSummary {
   metrics: ProjectMetrics | null;
   scoutHighlight?: string | null;
   founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC' | null;
+  listingScoutThesis?: string | null;
 }
 
 export interface ProjectDetail extends ProjectSummary {

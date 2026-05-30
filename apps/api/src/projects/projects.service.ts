@@ -271,7 +271,7 @@ export class ProjectsService {
 
     const listing = await this.prisma.listingApplication.findFirst({
       where: {
-        status: 'APPROVED',
+        status: ListingStatus.APPROVED,
         ticker: project.ticker,
       },
       orderBy: { reviewedAt: 'desc' },
@@ -293,13 +293,26 @@ export class ProjectsService {
       },
     });
 
+    const scoutSubmission = await this.prisma.listingApplication.findFirst({
+      where: { ticker: project.ticker },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        whyList: true,
+        whyDoxxed: true,
+      },
+    });
+
     const recentPaperBuyers = await this.hotBuy.getRecentBuyersForProject(project.id);
+    const scout = this.scoutMetaFromListing(scoutSubmission ?? listing);
 
     return {
       ...this.mapProjectDetail(project),
       lifecycleStage: effectiveStage,
       listingKind,
       recentPaperBuyers,
+      scoutHighlight: scout.scoutHighlight,
+      founderDoxxedStatus: scout.founderDoxxedStatus,
+      listingScoutThesis: scoutSubmission?.whyList ?? listing?.whyList ?? null,
       isVerifiedListing: listingKind === 'verified',
       isLiveToken:
         project.isLiveToken ||
