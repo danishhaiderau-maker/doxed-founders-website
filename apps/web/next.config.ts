@@ -24,7 +24,13 @@ if (tunnelHost) {
   allowedDevOrigins.push(tunnelHost);
 }
 
-const apiProxyTarget = (process.env.API_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '');
+const apiProxyTarget = (
+  process.env.API_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  (process.env.NODE_ENV === 'production'
+    ? 'https://doxed-founders-website-production.up.railway.app'
+    : 'http://127.0.0.1:4000')
+).replace(/\/$/, '');
 
 function isLocalApiTarget(target: string) {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(target);
@@ -45,7 +51,7 @@ const nextConfig: NextConfig = {
     const useProxy =
       process.env.NODE_ENV === 'development'
         ? isLocalApiTarget(apiProxyTarget)
-        : Boolean(process.env.API_URL?.trim() && !isLocalApiTarget(apiProxyTarget));
+        : !isLocalApiTarget(apiProxyTarget);
 
     return useProxy ? apiRewrites : [];
   },

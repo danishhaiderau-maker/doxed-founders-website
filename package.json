@@ -50,6 +50,7 @@
     "backfill:hot-buy-notifications": "node scripts/backfill-hot-buy-notifications.mjs",
     "apply:railway-crypto": "powershell -ExecutionPolicy Bypass -File scripts/apply-railway-crypto-vars.ps1",
     "fix:railway": "powershell -ExecutionPolicy Bypass -File scripts/fix-railway-production.ps1",
+    "sync:production": "node scripts/sync-production-cloud.mjs",
     "setup:x-api": "powershell -ExecutionPolicy Bypass -File scripts/setup-x-api.ps1",
     "db:verify": "tsx scripts/verify-seed.mjs",
     "setup": "powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1",
