@@ -7,6 +7,7 @@ watchPatterns = [
   "prisma/**",
   "scripts/start-api-prod.mjs",
   "railway.toml",
+  "tsconfig.base.json",
   "package.json",
   "package-lock.json",
 ]
