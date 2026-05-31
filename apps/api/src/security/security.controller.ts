@@ -4,6 +4,8 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import {
   ChangePasswordDto,
+  PasskeyLoginOptionsDto,
+  PasskeyRegisterVerifyDto,
   PasskeyVerifyDto,
   RenamePasskeyDto,
   Verify2FaLoginDto,
@@ -52,22 +54,19 @@ export class SecurityController {
   }
 
   @Post('passkey/register-verify')
-  passkeyRegisterVerify(
-    @CurrentUser() user: AuthUser,
-    @Body() body: { registerToken: string; response: Record<string, unknown>; label?: string },
-  ) {
+  passkeyRegisterVerify(@CurrentUser() user: AuthUser, @Body() dto: PasskeyRegisterVerifyDto) {
     return this.security.passkeyRegisterVerify(
       user.id,
-      body.registerToken,
-      body.response as never,
-      body.label,
+      dto.registerToken,
+      dto.response as never,
+      dto.label,
     );
   }
 
   @Public()
   @Post('passkey/login-options')
-  passkeyLoginOptions(@Body() body: { pendingToken: string }) {
-    return this.security.passkeyLoginOptions(body.pendingToken);
+  passkeyLoginOptions(@Body() dto: PasskeyLoginOptionsDto) {
+    return this.security.passkeyLoginOptions(dto.pendingToken);
   }
 
   @Public()
