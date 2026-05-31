@@ -447,6 +447,8 @@ export class UnifiedFeedService {
         at: typeof post.createdAt === 'string' ? post.createdAt : new Date(post.createdAt).toISOString(),
         link: `/portfolio/${post.trader.id}`,
         tradePostId: post.id,
+        tradeSide: post.side,
+        traderName: post.trader.name,
         projectSlug: post.project.slug,
         projectTicker: post.project.ticker,
         amountUsd: post.amountUsd,

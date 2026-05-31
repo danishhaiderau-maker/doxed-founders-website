@@ -15,6 +15,8 @@ export type UnifiedFeedItem = {
   pinned?: boolean;
   sourceUrl?: string;
   tradePostId?: string;
+  tradeSide?: 'BUY' | 'SELL';
+  traderName?: string;
   projectSlug?: string;
   projectTicker?: string;
   founderSlug?: string;
@@ -80,6 +82,8 @@ const TIER2 = new Set([
   'deployment',
   'demand_allocated',
   'conviction_posted',
+  'position_opened',
+  'position_closed',
 ]);
 
 export function unifiedFeedTier(eventType: string): UnifiedFeedTier {

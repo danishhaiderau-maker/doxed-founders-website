@@ -75,10 +75,12 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
     setLoading(true);
     setError(null);
     try {
+      const trimmedRecovery = recoveryCode.trim();
+      const trimmedTotp = totpCode.trim();
       const data = await verify2FaLogin(
         pendingToken,
-        totpCode || undefined,
-        recoveryCode || undefined,
+        trimmedRecovery ? undefined : trimmedTotp || undefined,
+        trimmedRecovery || undefined,
       );
       if (!data.accessToken) {
         setError('Verification failed');
@@ -87,7 +89,16 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
       }
       await finishLogin(data.accessToken);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Verification failed');
+      const msg = err instanceof Error ? err.message : 'Verification failed';
+      if (msg.includes('Challenge expired or invalid')) {
+        setError('Session expired — click ← Back, sign in again, then enter your code within 5 minutes.');
+      } else if (msg.includes('Invalid recovery code')) {
+        setError(
+          'That recovery code was already used or is from an old list. Open vault/.env.admin-security for the latest codes, then ← Back and sign in again.',
+        );
+      } else {
+        setError(msg);
+      }
       setLoading(false);
     }
   }
@@ -199,6 +210,9 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
                   placeholder="XXXX-XXXX-XXXX-XXXX"
                   className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-4 py-2.5 text-sm"
                 />
+                <span className="mt-1 block text-xs text-[var(--color-muted)]">
+                  One-time use only. Leave authenticator blank when using a recovery code.
+                </span>
               </label>
             )}
             {methods.includes('passkey') && (

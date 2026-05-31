@@ -31,7 +31,7 @@ function AccountPageInner() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Account</h1>
             <p className="text-sm text-zinc-500">
-              Overview · Security · Notifications · Points · Reputation
+              Overview · Security · Notifications · DDollar · Reputation
             </p>
           </div>
           <SiteNav />

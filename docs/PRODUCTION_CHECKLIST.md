@@ -31,6 +31,7 @@ npm run db:push:neon
 | Symptom | Fix |
 |---------|-----|
 | TOTP → "Authenticator unavailable" or 500 | `npm run fix:admin-2fa` then use new TOTP from vault |
+| "Invalid email or password" for admin | Password is **not** the old default — use `ADMIN_PASSWORD` from `vault/.env.x.secrets`, then 2FA |
 | Locked out | Recovery code from `vault/.env.admin-security` (one-time each) |
 | Passkey fails | `npm run apply:railway-webauthn` — WEBAUTHN_ORIGIN must match `doxxedcrypto.digital` |
 
@@ -40,7 +41,8 @@ npm run db:push:neon
 |---------|-----|
 | Bearer 401 on sync | Regenerate token in X Developer Portal → update `vault/.env.x.secrets` |
 | No pinned feed items | `npm run finish:x-production` then `npm run run:first-x-sync` |
-| Cron not running | GitHub secrets `API_URL` + `ADMIN_SYNC_JWT`; workflow `x-social-daily.yml` |
+| Cron not running | GitHub secrets `API_URL` + `ADMIN_SYNC_JWT` on **doxed-founders-website** (not audit repo) |
+| Cron emails from **doxed-founders-audit** | Audit export has no `scripts/` — delete `x-social-daily.yml` + `engagement-lottery-daily.yml` from audit repo; crons live on website repo only |
 
 ## 5. Privacy stack verification
 

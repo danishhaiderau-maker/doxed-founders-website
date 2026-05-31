@@ -68,9 +68,17 @@ const SECRET_PATTERNS = [
   /eyJhbGciOiJIUzI1NiIsIn[^"'\s]{50,}/,
 ];
 
+/** Cron workflows need scripts/ — excluded from code-only audit bundle. Run them on doxed-founders-website. */
+const SKIP_AUDIT_WORKFLOWS = new Set([
+  'x-social-daily.yml',
+  'engagement-lottery-daily.yml',
+]);
+
 function shouldSkipFile(name, relPath) {
   if (SKIP_FILE_PATTERNS.some((re) => re.test(name))) return true;
-  if (/apps\/web\/vercel\.json$/.test(relPath.replace(/\\/g, '/'))) return true;
+  const norm = relPath.replace(/\\/g, '/');
+  if (norm.startsWith('.github/workflows/') && SKIP_AUDIT_WORKFLOWS.has(name)) return true;
+  if (/apps\/web\/vercel\.json$/.test(norm)) return true;
   if (/schema\.sqlite\.prisma$/.test(name)) return true;
   return false;
 }
@@ -132,6 +140,10 @@ Phases in this export:
 
 Public audit repo: github.com/danishhaiderau-maker/doxed-founders-audit
 Main app repo: github.com/danishhaiderau-maker/doxed-founders-website
+
+Scheduled GitHub Actions (X daily sync, engagement lottery) are NOT exported here.
+They belong on doxed-founders-website only — that repo includes scripts/ and GitHub secrets
+(API_URL, ADMIN_SYNC_JWT). Delete any *-daily.yml workflows left in the audit repo.
 
 Do NOT ask the user to paste .env files. Flag env var NAMES only.
 `;

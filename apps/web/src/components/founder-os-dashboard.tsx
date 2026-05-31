@@ -269,6 +269,7 @@ export function FounderOsDashboardLayout({
               Open Founder Node →
             </Link>
           </div>
+          <FounderInboxPanel accessToken={accessToken} compact />
         </aside>
 
         {/* Center */}
@@ -349,10 +350,6 @@ export function FounderOsDashboardLayout({
                 )}
               </ul>
             </section>
-          </div>
-
-          <div className="mt-6">
-            <FounderInboxPanel accessToken={accessToken} />
           </div>
             </>
           ) : (
