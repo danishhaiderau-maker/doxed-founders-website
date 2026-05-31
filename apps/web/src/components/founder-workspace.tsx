@@ -116,84 +116,10 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     onLaunchRaise,
   } = props;
 
-  const showDashboardChrome = tab === 'activity' && session && hasFounder;
+  const useDashboardShell = Boolean(session && hasFounder);
 
-  return (
-    <div className="space-y-6">
-      {!showDashboardChrome && (
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-white">Founder OS</h2>
-          <p className="text-sm text-zinc-500">Mission control · build · validate · launch</p>
-        </div>
-        {session && (
-          <Link
-            href="/settings/security"
-            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
-          >
-            Security settings →
-          </Link>
-        )}
-      </div>
-      )}
-
-      {tab !== 'activity' && (
-        <FounderJourneyProgress
-          currentStage={currentStage}
-          label={hasFounder ? 'Project stage' : 'The founder journey — start anywhere'}
-        />
-      )}
-
-      {!(tab === 'activity' && session && hasFounder) && (
-        <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => onTabChange(t.id)}
-              className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
-                tab === t.id
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-      )}
-
-      {!session && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          <Link href="/login?callbackUrl=/founder-den" className="font-semibold underline">
-            Sign in
-          </Link>{' '}
-          to save your workspace and run simulated raises.
-        </div>
-      )}
-
-      {session && !hasFounder && tab !== 'activity' && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          Activate your founder profile in Settings to unlock GitHub,
-          Founder Copilot, and integrations.
-        </div>
-      )}
-
-      {tab === 'activity' && (
-        <FounderMissionControl
-          session={session}
-          hasFounder={hasFounder}
-          dashboard={dashboard}
-          room={room}
-          activeTab={tab}
-          onTabChange={onTabChange}
-          onRefresh={onRefresh}
-          onMessage={onWorkspaceMessage}
-        />
-      )}
-
-      {tab !== 'activity' && (
-        <>
+  const tabPanels = (
+    <>
       {tab === 'tasks' && session && (
         <OsSection title="Build queue tasks" subtitle="Quick Build · agents · command bar · bounties" disabled={!hasFounder}>
           <p className="text-sm text-zinc-400">
@@ -434,8 +360,85 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           )}
         </div>
       )}
-        </>
+    </>
+  );
+
+  return (
+    <div className={useDashboardShell ? '' : 'space-y-6'}>
+      {!useDashboardShell && (
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-white">Founder OS</h2>
+          <p className="text-sm text-zinc-500">Mission control · build · validate · launch</p>
+        </div>
+        {session && (
+          <Link
+            href="/settings/security"
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
+          >
+            Security settings →
+          </Link>
+        )}
+      </div>
       )}
+
+      {!useDashboardShell && tab !== 'activity' && (
+        <FounderJourneyProgress
+          currentStage={currentStage}
+          label={hasFounder ? 'Project stage' : 'The founder journey — start anywhere'}
+        />
+      )}
+
+      {!useDashboardShell && (
+        <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onTabChange(t.id)}
+              className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
+                tab === t.id
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      {!session && !useDashboardShell && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
+          <Link href="/login?callbackUrl=/founder-den" className="font-semibold underline">
+            Sign in
+          </Link>{' '}
+          to save your workspace and run simulated raises.
+        </div>
+      )}
+
+      {session && !hasFounder && !useDashboardShell && tab !== 'activity' && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
+          Activate your founder profile in Settings to unlock GitHub,
+          Founder Copilot, and integrations.
+        </div>
+      )}
+
+      {(useDashboardShell || tab === 'activity') && (
+        <FounderMissionControl
+          session={session}
+          hasFounder={hasFounder}
+          dashboard={dashboard}
+          room={room}
+          activeTab={tab}
+          onTabChange={onTabChange}
+          onRefresh={onRefresh}
+          onMessage={onWorkspaceMessage}
+          tabContent={useDashboardShell && tab !== 'activity' ? tabPanels : undefined}
+        />
+      )}
+
+      {!useDashboardShell && tab !== 'activity' && tabPanels}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { appendPlatformXShareFooter } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildOAuth1Header } from './x-oauth1';
 
@@ -49,7 +50,7 @@ export class UserXPostingService {
     const url = 'https://api.twitter.com/2/tweets';
     const authorization = buildOAuth1Header('POST', url, creds);
     const body: { text: string; media?: { media_ids: string[] } } = {
-      text: text.slice(0, 280),
+      text: appendPlatformXShareFooter(text).slice(0, 280),
     };
     if (mediaIds?.length) body.media = { media_ids: mediaIds };
 

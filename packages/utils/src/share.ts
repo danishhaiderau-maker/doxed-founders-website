@@ -117,8 +117,28 @@ export function buildPositionShareMessage(input: PositionShareInput): string {
   return lines.join('\n');
 }
 
+export const PLATFORM_X_SHARE_FOOTER = [
+  '',
+  'Built for shrimps, not whales.',
+  '',
+  '🎁 10,000 DDollar free at signup',
+  '📈 Trade any token for free',
+  '🏆 Build a following through skill',
+  '',
+  'No scams. No pump & dumps. No extractors.',
+  '',
+  'Back real builders. Bring back HODL.',
+].join('\n');
+
+export function appendPlatformXShareFooter(text: string): string {
+  const base = text.trimEnd();
+  if (base.includes('Built for shrimps, not whales')) return base;
+  return `${base}\n\n${PLATFORM_X_SHARE_FOOTER}`;
+}
+
 export function buildTwitterIntentUrl(text: string, url?: string): string {
-  const params = new URLSearchParams({ text });
+  const fullText = appendPlatformXShareFooter(text);
+  const params = new URLSearchParams({ text: fullText });
   if (url) {
     params.set('url', url);
   }

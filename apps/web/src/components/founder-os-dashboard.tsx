@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   formatRelativeTime,
   formatUsd,
@@ -43,6 +43,7 @@ const DEV_LINKS: { label: string; tab: WorkspaceTab; hint: string }[] = [
 ];
 
 const QUICK_CARDS = [
+  { label: 'Most pressing issue', prompt: 'What is the most pressing issue?', icon: '⚡' },
   { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?', icon: '▶' },
   { label: 'Finish MVP', prompt: 'What is left to finish the MVP?', icon: '🚀' },
   { label: 'Create tokenomics', prompt: 'Create tokenomics draft for community allocation.', icon: '📊' },
@@ -59,6 +60,8 @@ export type FounderOsDashboardProps = {
   onTabChange: (tab: WorkspaceTab) => void;
   onRefresh: () => void;
   onMessage?: (msg: string) => void;
+  /** When set, replaces Mission Control center (Copilot + quick cards) for sidebar tabs. */
+  tabContent?: ReactNode;
 };
 
 function stageLabel(key: string) {
@@ -143,6 +146,7 @@ export function FounderOsDashboardLayout({
   onTabChange,
   onRefresh,
   onMessage,
+  tabContent,
 }: FounderOsDashboardProps) {
   const [buildRoom, setBuildRoom] = useState<BuildRoomData | null>(null);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
@@ -198,6 +202,7 @@ export function FounderOsDashboardLayout({
   }, [osData, buildRoom]);
 
   const nodeOnline = memory?.connectedNodes?.some((n) => n.status === 'online');
+  const showMissionCenter = activeTab === 'activity' && !tabContent;
 
   return (
     <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-0 overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
@@ -268,6 +273,8 @@ export function FounderOsDashboardLayout({
 
         {/* Center */}
         <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+          {showMissionCenter ? (
+            <>
           <header className="mb-6">
             <h1 className="text-2xl font-bold text-white sm:text-3xl">
               {timeGreeting()}, {greetingName(memory)}{' '}
@@ -347,6 +354,14 @@ export function FounderOsDashboardLayout({
           <div className="mt-6">
             <FounderInboxPanel accessToken={accessToken} />
           </div>
+            </>
+          ) : (
+            tabContent ?? (
+              <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-6 text-center text-sm text-zinc-500">
+                Select a section from the sidebar.
+              </div>
+            )
+          )}
         </main>
 
         {/* Right sidebar */}

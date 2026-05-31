@@ -443,6 +443,39 @@ export class FounderCopilotService {
       recentHeadlines: founder.buildPosts.map((p) => p.headline),
     });
 
+    if (this.isPriorityCopilotPrompt(prompt)) {
+      const priorityAnswer = this.buildRuleBasedCopilotAnswer({
+        memory: refreshedMemory,
+        githubMemory,
+        recentCommits,
+        prompt,
+      });
+
+      await this.events.emit({
+        founderId: founder.id,
+        projectId: project?.id,
+        userId,
+        type: FounderEventType.COPILOT_COMMAND,
+        source: 'copilot',
+        title: prompt.slice(0, 80),
+        payload: { intent: 'ask', mode: 'priority' },
+      });
+
+      return {
+        answer: priorityAnswer,
+        answerProvider: 'RULE_BASED',
+        summary,
+        stats: {
+          commits: commitCount,
+          deploys: deployCount,
+          followers: followerCount,
+          featureRequests,
+          launchReadiness: readiness.score,
+          buildStreak: founder.buildStreakDays,
+        },
+      };
+    }
+
     const contextBlock = this.buildCopilotContextBlock({
       memory: refreshedMemory,
       githubMemory,
@@ -459,14 +492,6 @@ export class FounderCopilotService {
       userId,
       systemPrompt,
       `${prompt}\n\n---\n${contextBlock}`,
-    );
-
-    const builderSettings = await this.builder.getSettings(userId);
-    const cursorConnected = builderSettings.providers.some(
-      (p) => p.key === 'CURSOR' && p.connected,
-    );
-    const hasChatLlm = builderSettings.providers.some(
-      (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
     );
 
     const ruleBased = this.buildRuleBasedCopilotAnswer({
@@ -495,12 +520,8 @@ export class FounderCopilotService {
       answerProvider = aiResult.provider;
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
-      if (builderSettings.defaultProvider === 'CURSOR' && cursorConnected && !hasChatLlm) {
-        answerProvider = 'CURSOR';
-        answer = `${ruleBased}\n\n---\n✓ **Cursor is connected** — use **Run on Cursor** to implement on \`${refreshedMemory.repoFullName ?? 'your repo'}\`. For instant AI chat replies, add **DeepSeek** or **OpenAI** in Builder settings (optional; works alongside Cursor).`;
-      } else {
-        answer = `${ruleBased}\n\n---\n⚠️ LLM unavailable (${aiResult.llmErrors[0]}). Using project memory above — reconnect your API key in Builder settings if this persists.`;
-      }
+      answer = ruleBased;
+      answerProvider = 'RULE_BASED';
     }
 
     return {
@@ -570,33 +591,36 @@ export class FounderCopilotService {
     return lines.join('\n');
   }
 
+  private isPriorityCopilotPrompt(prompt: string) {
+    return /pressing|priority|urgent|should i work|focus on|most important|what'?s going on/i.test(
+      prompt,
+    );
+  }
+
   private buildRuleBasedCopilotAnswer(input: {
     memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>;
     githubMemory: Awaited<ReturnType<FounderOsMemoryService['readRepoMemory']>>;
     recentCommits: { sha: string; message: string }[];
     prompt: string;
   }) {
-    const asksPriority = /pressing|priority|urgent|should i work|focus on|most important|what'?s going on/i.test(
-      input.prompt,
-    );
-
-    if (asksPriority) {
+    if (this.isPriorityCopilotPrompt(input.prompt)) {
       const topTask =
         input.githubMemory?.openTasksFromRepo?.[0]?.title ??
         input.memory.openTasks[0]?.title ??
-        input.memory.suggestedNextStep;
+        input.memory.suggestedNextStep ??
+        'Define your next MVP milestone in Tasks or GitHub tasks.json';
       return [
-        `**Most pressing issue:** ${topTask}`,
+        `Most pressing issue: ${topTask}`,
         '',
-        `You're at **${input.memory.progressPercent}%** progress with launch readiness **${input.memory.launchReadiness}/100**.`,
+        `Progress: ${input.memory.progressPercent}% · Launch readiness ${input.memory.launchReadiness}/100`,
         '',
-        `**Current goal:** ${input.memory.currentGoal}`,
+        `Current goal: ${input.memory.currentGoal}`,
         '',
         input.memory.lastCommit
-          ? `**Latest commit:** ${input.memory.lastCommit}`
-          : '**GitHub:** Connect and tap **Sync commits** in the stack panel to pull recent work.',
+          ? `Latest commit: ${input.memory.lastCommit}`
+          : 'GitHub: connect repo in Builder settings and sync commits to pull recent work.',
         '',
-        `**Recommended focus today:** ${input.memory.suggestedNextStep}`,
+        `Recommended focus today: ${input.memory.suggestedNextStep}`,
         input.memory.repoFullName ? `\nRepo: ${input.memory.repoFullName}` : '',
       ]
         .filter(Boolean)
@@ -625,17 +649,17 @@ export class FounderCopilotService {
             : '• No open tasks in queue — add one in Founder Copilot chat.';
 
       return [
-        `You're building **${input.memory.project?.name ?? 'your project'}** (${input.memory.progressPercent}% progress · launch readiness ${input.memory.launchReadiness}%).`,
+        `You're building ${input.memory.project?.name ?? 'your project'} (${input.memory.progressPercent}% progress · launch readiness ${input.memory.launchReadiness}%).`,
         '',
-        `**Current goal:** ${input.memory.currentGoal}`,
+        `Current goal: ${input.memory.currentGoal}`,
         '',
-        '**Recent GitHub commits:**',
+        'Recent GitHub commits:',
         commitLines,
         '',
-        '**Open tasks:**',
+        'Open tasks:',
         repoTasks,
         '',
-        `**Pick up here:** ${input.memory.suggestedNextStep}`,
+        `Pick up here: ${input.memory.suggestedNextStep}`,
         input.memory.repoFullName
           ? `\nRepo: ${input.memory.repoFullName}`
           : '\nConnect GitHub owner/repo in the stack panel to sync commits.',
