@@ -88,31 +88,96 @@ export const MEMORY_STORAGE_MODES = [
   {
     key: 'PLATFORM' as const,
     label: 'Cloud (Founder OS)',
-    description: 'Memory lives in Founder OS database. Works on every device when signed in.',
+    description:
+      'Build-in-public memory on Founder OS — goals, tasks, GitHub sync. Best for multi-device without a local vault.',
   },
   {
     key: 'GITHUB' as const,
     label: 'GitHub repo files',
-    description: 'Syncs to .github/founder-os/ in your repo. You own the files; portable forever.',
+    description:
+      'You own the files in .github/founder-os/. Portable forever — no vendor lock-in on memory format.',
   },
   {
     key: 'LOCAL_DEVICE' as const,
-    label: 'This device only',
-    description: 'Free — stored in this browser only. Lost if you clear data or switch devices.',
+    label: 'This browser only',
+    description:
+      'Memory stays in this browser. Nothing on our servers — but lost if you clear data or switch devices.',
   },
   {
     key: 'LOCAL_SYNC' as const,
-    label: 'Local + cloud sync (recommended mobile)',
+    label: 'Local + encrypted relay',
     description:
-      'Saves on this device first (no extra storage cost). When online, syncs a small snapshot so other devices can resume.',
+      'Local-first with a lightweight cloud snapshot so you can resume on another device. Full markdown stays local.',
   },
   {
     key: 'FOUNDER_NODE' as const,
-    label: 'Founder Node (self-custody vault)',
+    label: 'Founder Vault (Founder Node) — recommended',
     description:
-      'Full project memory on your PC/Mac/Linux via Founder Node. Founder OS stores only metadata — your vault stays on your machine.',
+      'Full company memory on your machine. Founder OS stores metadata only — vault contents are encrypted before relay.',
   },
 ] as const;
+
+export type VaultRelaySummary = {
+  mode: MemoryStorageModeKey;
+  hasEncryptedBlob: boolean;
+  tasksRemaining: number;
+  currentGoal: string | null;
+  lastSyncedAt: string | null;
+  deviceLabel: string | null;
+  nodeOnline: boolean;
+  nodeLabel: string | null;
+  vaultHealthy: boolean;
+};
+
+/** Summarize vault relay state for UI and Copilot — server never decrypts encryptedVaultBlob. */
+export function extractVaultRelaySummary(input: {
+  memoryStorageMode?: MemoryStorageModeKey | string;
+  deviceSync?: {
+    updatedAt: string;
+    deviceLabel: string | null;
+    payload: DeviceMemoryPayload | DeviceMemoryMetadataPayload;
+  } | null;
+  connectedNodes?: Array<{ status: string; label: string; vaultHealthy?: boolean }>;
+}): VaultRelaySummary | null {
+  const mode = input.memoryStorageMode;
+  if (mode !== 'FOUNDER_NODE' && mode !== 'LOCAL_SYNC') return null;
+
+  const payload = input.deviceSync?.payload;
+  let tasksRemaining = 0;
+  let currentGoal: string | null = null;
+  let hasEncryptedBlob = false;
+  let deviceLabel = input.deviceSync?.deviceLabel ?? null;
+
+  if (payload) {
+    if (isMetadataOnlyPayload(payload)) {
+      tasksRemaining = payload.tasksRemaining;
+      currentGoal = payload.currentGoal?.trim() || null;
+      hasEncryptedBlob = Boolean(payload.encryptedVaultBlob);
+      deviceLabel = deviceLabel ?? payload.deviceLabel ?? null;
+    } else {
+      const meta = stripDeviceMemoryToMetadata(payload);
+      tasksRemaining = meta.tasksRemaining;
+      currentGoal = meta.currentGoal?.trim() || null;
+      hasEncryptedBlob = Boolean(payload.encryptedVaultBlob);
+      deviceLabel = deviceLabel ?? payload.deviceLabel ?? null;
+    }
+  }
+
+  const nodes = input.connectedNodes ?? [];
+  const online = nodes.find((n) => n.status === 'online');
+
+  return {
+    mode: mode as MemoryStorageModeKey,
+    hasEncryptedBlob,
+    tasksRemaining,
+    currentGoal,
+    lastSyncedAt: input.deviceSync?.updatedAt ?? null,
+    deviceLabel,
+    nodeOnline: Boolean(online),
+    nodeLabel: online?.label ?? nodes[0]?.label ?? null,
+    vaultHealthy: nodes.length === 0 ? true : nodes.every((n) => n.vaultHealthy !== false),
+  };
+}
 
 export type MemoryStorageModeKey = (typeof MEMORY_STORAGE_MODES)[number]['key'];
 

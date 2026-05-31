@@ -1,7 +1,11 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { buildPortfolioShareUrl, buildPortfolioShareMessage } from '@dcf/utils';
+import {
+  buildPortfolioShareUrl,
+  buildPortfolioShareMessage,
+  buildPositionXShareText,
+} from '@dcf/utils';
 import type { PositionShareInput } from '@dcf/utils';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import {
@@ -86,7 +90,32 @@ export function SharePortfolio({
 
   const { openFlex, modal } = useShareFlex(flex);
   const shareUrl = buildPortfolioShareUrl(origin, userId);
-  const quickShareText = buildPortfolioShareMessage(displayName, roi, totalValue, pnl);
+
+  const quickShareText = useMemo(() => {
+    if (highlightPosition) {
+      const pos = highlightPosition;
+      return buildPositionXShareText({
+        userId,
+        origin,
+        displayName,
+        ticker: pos.ticker,
+        projectName: pos.name,
+        investedUsd: (pos.quantity ?? 0) * (pos.avgBuyPrice ?? 0),
+        pnlUsd: pos.pnl,
+        pnlPercent: pos.pnlPercent,
+        entryPrice: pos.avgBuyPrice,
+        currentPrice: pos.priceUsd,
+        thesis: pos.convictionThesis,
+        catalyst: pos.convictionCatalyst,
+        targetPrice: pos.convictionTargetUsd,
+        timeHorizon: pos.convictionTimeHorizon,
+        recordedAt: pos.convictionRecordedAt,
+        positionOpenedAt: pos.positionOpenedAt,
+        portfolioRoi: roi,
+      });
+    }
+    return buildPortfolioShareMessage(displayName, roi, totalValue, pnl);
+  }, [displayName, roi, totalValue, pnl, userId, origin, highlightPosition]);
 
   if (compact) {
     return (
@@ -152,11 +181,17 @@ type SharePositionProps = PositionShareInput & {
 
 export function SharePosition(props: SharePositionProps) {
   const { userId, projectId, pnlPercent, accessToken } = props;
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://doxxedcrypto.digital';
+  const origin = useShareOrigin();
 
   const flex = useMemo(
     () => buildPositionFlexShare({ ...props, userId, origin, projectId, accessToken }),
     [props, userId, origin, projectId, accessToken],
+  );
+
+  const shareUrl = buildPortfolioShareUrl(origin, userId);
+  const xShareText = useMemo(
+    () => buildPositionXShareText({ ...props, userId, origin }),
+    [props, userId, origin],
   );
 
   const { openFlex, modal } = useShareFlex(flex);
@@ -165,15 +200,27 @@ export function SharePosition(props: SharePositionProps) {
   return (
     <>
       {modal}
-      <button
-        type="button"
-        onClick={openFlex}
-        className={`rounded-md px-3 py-1.5 text-xs font-medium text-white ${
-          win ? 'bg-emerald-600/90 hover:bg-emerald-600' : 'bg-red-600/90 hover:bg-red-600'
-        }`}
-      >
-        📜 Share
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <ShareOnXButton
+          text={xShareText}
+          url={shareUrl}
+          label="Share on X"
+          stopPropagation
+          className="rounded-md border border-sky-500/40 bg-sky-950/30 px-2 py-1.5 text-[11px] text-sky-200"
+        />
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            openFlex();
+          }}
+          className={`rounded-md px-3 py-1.5 text-xs font-medium text-white ${
+            win ? 'bg-emerald-600/90 hover:bg-emerald-600' : 'bg-red-600/90 hover:bg-red-600'
+          }`}
+        >
+          📜 Share
+        </button>
+      </div>
     </>
   );
 }

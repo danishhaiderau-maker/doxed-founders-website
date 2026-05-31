@@ -17,6 +17,7 @@ import {
   FOUNDER_OS_MEMORY_DIR,
   stripDeviceMemoryToMetadata,
   isMetadataOnlyPayload,
+  extractVaultRelaySummary,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
 } from '@dcf/utils';
@@ -138,7 +139,53 @@ export class FounderCopilotService {
 
     const githubMemory = repo ? await this.memory.readRepoMemory(userId, repo) : null;
     const goalFromGithub = githubMemory?.currentGoalFromRepo?.trim();
-    const effectiveGoal = goalFromGithub || currentGoal;
+
+    const deviceSyncRow = await this.prisma.projectMemoryDeviceSync.findUnique({
+      where: { userId },
+    });
+
+    const connectedNodes =
+      settings?.memoryStorageMode === 'FOUNDER_NODE'
+        ? (
+            await this.prisma.founderNode.findMany({
+              where: { userId },
+              orderBy: { lastSeenAt: 'desc' },
+            })
+          ).map((n) => ({
+            nodeId: n.nodeId,
+            label: n.label,
+            status:
+              n.lastSeenAt && Date.now() - n.lastSeenAt.getTime() < 180_000
+                ? 'online'
+                : 'offline',
+            lastSeenAt: n.lastSeenAt?.toISOString() ?? null,
+            ramGb: n.ramGb,
+            storageGb: n.storageGb,
+            storageFreeGb: n.storageFreeGb,
+            vaultHealthy: n.vaultHealthy,
+            platform: n.platform,
+          }))
+        : undefined;
+
+    const vaultRelay = extractVaultRelaySummary({
+      memoryStorageMode: settings?.memoryStorageMode ?? 'PLATFORM',
+      deviceSync: deviceSyncRow
+        ? {
+            updatedAt: deviceSyncRow.updatedAt.toISOString(),
+            deviceLabel: deviceSyncRow.deviceLabel,
+            payload: deviceSyncRow.payload as DeviceMemoryPayload | DeviceMemoryMetadataPayload,
+          }
+        : null,
+      connectedNodes,
+    });
+
+    const goalFromVault = vaultRelay?.currentGoal?.trim();
+    const effectiveGoal =
+      settings?.memoryStorageMode === 'FOUNDER_NODE' && goalFromVault
+        ? goalFromVault
+        : settings?.memoryStorageMode === 'LOCAL_SYNC' && goalFromVault
+          ? goalFromVault
+          : goalFromGithub || currentGoal;
 
     const cursorCopy = buildResumeCursorPrompt({
       projectName: project?.name ?? founder.name,
@@ -153,9 +200,10 @@ export class FounderCopilotService {
       : '';
     const cursorCopyWithRepo = `${memoryPrefix}${cursorCopy}`;
 
-    const deviceSyncRow = await this.prisma.projectMemoryDeviceSync.findUnique({
-      where: { userId },
-    });
+    const deviceSyncPayload = deviceSyncRow?.payload as
+      | DeviceMemoryPayload
+      | DeviceMemoryMetadataPayload
+      | undefined;
 
     return {
       welcomeMessage: `Welcome back${founder.user?.name ? `, ${founder.user.name.split(' ')[0]}` : ''}.`,
@@ -199,9 +247,10 @@ export class FounderCopilotService {
         ? {
             updatedAt: deviceSyncRow.updatedAt.toISOString(),
             deviceLabel: deviceSyncRow.deviceLabel,
-            payload: deviceSyncRow.payload,
+            payload: deviceSyncPayload!,
           }
         : null,
+      vaultRelay,
       githubMemory: githubMemory
         ? {
             repoFullName: githubMemory.repoFullName,
@@ -210,28 +259,7 @@ export class FounderCopilotService {
             openTasksFromRepo: githubMemory.openTasksFromRepo,
           }
         : null,
-      connectedNodes:
-        settings?.memoryStorageMode === 'FOUNDER_NODE'
-          ? (
-              await this.prisma.founderNode.findMany({
-                where: { userId },
-                orderBy: { lastSeenAt: 'desc' },
-              })
-            ).map((n) => ({
-              nodeId: n.nodeId,
-              label: n.label,
-              status:
-                n.lastSeenAt && Date.now() - n.lastSeenAt.getTime() < 180_000
-                  ? 'online'
-                  : 'offline',
-              lastSeenAt: n.lastSeenAt?.toISOString() ?? null,
-              ramGb: n.ramGb,
-              storageGb: n.storageGb,
-              storageFreeGb: n.storageFreeGb,
-              vaultHealthy: n.vaultHealthy,
-              platform: n.platform,
-            }))
-          : undefined,
+      connectedNodes,
     };
   }
 
@@ -582,6 +610,11 @@ export class FounderCopilotService {
       lines.push('Ideas queue:', ...input.openIdeas.map((i) => `- ${i.title}`));
     }
 
+    const vaultLines = this.buildVaultContextLines(input.memory);
+    if (vaultLines.length > 0) {
+      lines.push(...vaultLines);
+    }
+
     const inProgressRoadmap = input.project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS);
     if (inProgressRoadmap) {
       lines.push(`Roadmap in progress: ${inProgressRoadmap.title}`);
@@ -589,6 +622,48 @@ export class FounderCopilotService {
 
     lines.push('', 'Weekly summary:', input.summaryBody);
     return lines.join('\n');
+  }
+
+  private buildVaultContextLines(
+    memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>,
+  ): string[] {
+    const relay = memory.vaultRelay;
+    if (!relay) return [];
+
+    const lines: string[] = ['Founder Vault (privacy mode):'];
+
+    if (relay.mode === 'FOUNDER_NODE') {
+      lines.push(
+        `- Storage: Founder Vault on founder machine (${relay.nodeLabel ?? 'Founder Node'})`,
+        `- Node status: ${relay.nodeOnline ? 'online' : 'offline — open Founder Node to refresh vault context'}`,
+        `- Vault health: ${relay.vaultHealthy ? 'healthy' : 'check local vault files'}`,
+      );
+    } else {
+      lines.push('- Storage: local-first with encrypted cloud relay');
+    }
+
+    if (relay.lastSyncedAt) {
+      lines.push(`- Last vault sync: ${relay.lastSyncedAt}`);
+    }
+    if (relay.deviceLabel) {
+      lines.push(`- Sync device: ${relay.deviceLabel}`);
+    }
+    if (relay.tasksRemaining > 0) {
+      lines.push(`- Open tasks in vault: ${relay.tasksRemaining} (full task bodies stay on founder device)`);
+    }
+    if (relay.hasEncryptedBlob) {
+      lines.push(
+        '- Encrypted vault blob relayed — server cannot read private notes, roadmap markdown, or task bodies',
+      );
+    } else if (relay.mode === 'FOUNDER_NODE') {
+      lines.push('- No encrypted snapshot yet — pair Founder Node and wait for sync (~60s)');
+    }
+
+    lines.push(
+      'When answering: prefer vault current goal and task count. Do not invent private doc contents.',
+    );
+
+    return lines;
   }
 
   private isPriorityCopilotPrompt(prompt: string) {
@@ -644,14 +719,24 @@ export class FounderCopilotService {
       const repoTasks =
         input.githubMemory?.openTasksFromRepo?.length
           ? input.githubMemory.openTasksFromRepo.map((t) => `• ${t.title}`).join('\n')
-          : input.memory.openTasks.length > 0
-            ? input.memory.openTasks.map((t) => `• ${t.title}`).join('\n')
-            : '• No open tasks in queue — add one in Founder Copilot chat.';
+          : input.memory.vaultRelay?.tasksRemaining
+            ? `• ${input.memory.vaultRelay.tasksRemaining} task(s) in Founder Vault (details on your machine)`
+            : input.memory.openTasks.length > 0
+              ? input.memory.openTasks.map((t) => `• ${t.title}`).join('\n')
+              : '• No open tasks in queue — add one in Founder Copilot chat.';
+
+      const vaultNote =
+        input.memory.memoryStorageMode === 'FOUNDER_NODE'
+          ? input.memory.vaultRelay?.nodeOnline
+            ? `Founder Vault: synced from ${input.memory.vaultRelay.nodeLabel ?? 'Founder Node'}${input.memory.vaultRelay.hasEncryptedBlob ? ' · encrypted relay active' : ''}.`
+            : 'Founder Vault: Founder Node offline — open your desktop node to refresh private memory.'
+          : null;
 
       return [
         `You're building ${input.memory.project?.name ?? 'your project'} (${input.memory.progressPercent}% progress · launch readiness ${input.memory.launchReadiness}%).`,
         '',
         `Current goal: ${input.memory.currentGoal}`,
+        vaultNote ? `\n${vaultNote}` : '',
         '',
         'Recent GitHub commits:',
         commitLines,

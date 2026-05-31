@@ -38,6 +38,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/discover') return pathname === '/discover';
   if (href === '/feed') return pathname === '/feed' || pathname === '/build-feed';
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
+  if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agents') return pathname.startsWith('/agents');
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
@@ -117,6 +118,8 @@ function SiteNavInner() {
   const fallbackRole = resolveGamifiedRole({
     platformRole: session?.user?.role,
   });
+
+  const portfolioUserId = getActiveUserId(session?.user?.id);
 
   return (
     <nav className="flex flex-wrap items-center gap-2 text-sm md:gap-2.5">
@@ -309,6 +312,19 @@ function SiteNavInner() {
       >
         List project
       </Link>
+      {portfolioUserId && (
+        <Link
+          href={`/portfolio/${portfolioUserId}`}
+          className={cn(
+            'rounded-lg border border-emerald-500/45 bg-emerald-950/30 px-4 py-2 font-medium text-emerald-100 transition hover:border-emerald-400/70 hover:bg-emerald-950/50',
+            navActive(pathname, `/portfolio/${portfolioUserId}`)
+              ? 'ring-2 ring-emerald-400/50'
+              : '',
+          )}
+        >
+          Portfolio
+        </Link>
+      )}
       <Link
         href="/founder-node"
         className="rounded-lg border border-cyan-500/50 bg-cyan-950/30 px-4 py-2 font-medium text-cyan-100 hover:border-cyan-400/70 hover:bg-cyan-950/50"

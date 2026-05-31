@@ -2360,6 +2360,7 @@ export interface ProjectMemory {
     deviceLabel: string | null;
     payload: import('@dcf/utils').DeviceMemoryPayload;
   } | null;
+  vaultRelay?: import('@dcf/utils').VaultRelaySummary | null;
   connectedNodes?: Array<{
     nodeId: string;
     label: string;

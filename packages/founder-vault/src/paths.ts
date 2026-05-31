@@ -9,6 +9,8 @@ export const FOUNDER_VAULT_FILES = {
   tasks: 'tasks.json',
   decisions: 'decisions.md',
   buildHistory: 'build-history.jsonl',
+  /** Private founder notes — never synced as plaintext to cloud. */
+  privateNotes: 'private-notes.md',
 } as const;
 
 export type FounderVaultFileKey = keyof typeof FOUNDER_VAULT_FILES;

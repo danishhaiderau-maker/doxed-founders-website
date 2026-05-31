@@ -7,7 +7,7 @@ import { useSession } from 'next-auth/react';
 import { formatPercent, formatUsd } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
-import { SharePortfolio } from '@/components/share-portfolio';
+import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
 import { TraderRankShareButton } from '@/components/trader-rank-share-button';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { FollowTraderButton } from '@/components/follow-trader-button';
@@ -172,37 +172,66 @@ export default function PublicPortfolioPage() {
                   {portfolio.positions.map((pos) => (
                     <li
                       key={`${pos.ticker}-${pos.projectId ?? pos.name}`}
-                      className="flex cursor-pointer items-center justify-between rounded-lg bg-[var(--color-background)] p-3 text-sm transition hover:ring-1 hover:ring-[var(--color-accent)]/40"
-                      onClick={() => openIntel(pos)}
-                      onKeyDown={(e) => e.key === 'Enter' && openIntel(pos)}
-                      role="button"
-                      tabIndex={0}
+                      className="rounded-lg bg-[var(--color-background)] p-3 text-sm transition hover:ring-1 hover:ring-[var(--color-accent)]/40"
                     >
-                      <div className="flex items-center gap-3">
-                        {pos.logoUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={pos.logoUrl} alt="" className="h-8 w-8 rounded-full" />
-                        ) : (
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-border)] text-xs font-bold">
-                            {pos.ticker.slice(0, 2)}
+                      <div
+                        className="flex cursor-pointer items-center justify-between"
+                        onClick={() => openIntel(pos)}
+                        onKeyDown={(e) => e.key === 'Enter' && openIntel(pos)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <div className="flex items-center gap-3">
+                          {pos.logoUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={pos.logoUrl} alt="" className="h-8 w-8 rounded-full" />
+                          ) : (
+                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-border)] text-xs font-bold">
+                              {pos.ticker.slice(0, 2)}
+                            </div>
+                          )}
+                          <div>
+                            <p className="font-medium">{pos.ticker}</p>
+                            <p className="text-xs text-[var(--color-muted)]">{pos.name}</p>
                           </div>
-                        )}
-                        <div>
-                          <p className="font-medium">{pos.ticker}</p>
-                          <p className="text-xs text-[var(--color-muted)]">{pos.name}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-medium">{formatUsd(pos.marketValue)}</p>
+                          <p
+                            className={`text-xs ${
+                              pos.pnl >= 0
+                                ? 'text-[var(--color-success)]'
+                                : 'text-[var(--color-danger)]'
+                            }`}
+                          >
+                            {formatUsd(pos.pnl)} ({formatPercent(pos.pnlPercent)})
+                          </p>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <p className="font-medium">{formatUsd(pos.marketValue)}</p>
-                        <p
-                          className={`text-xs ${
-                            pos.pnl >= 0
-                              ? 'text-[var(--color-success)]'
-                              : 'text-[var(--color-danger)]'
-                          }`}
-                        >
-                          {formatUsd(pos.pnl)} ({formatPercent(pos.pnlPercent)})
-                        </p>
+                      <div
+                        className="mt-3 flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-3"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <SharePosition
+                          userId={portfolio.userId}
+                          projectId={pos.projectId ?? ''}
+                          accessToken={session?.accessToken}
+                          displayName={portfolio.displayName}
+                          ticker={pos.ticker}
+                          projectName={pos.name}
+                          investedUsd={(pos.quantity ?? 0) * (pos.avgBuyPrice ?? 0)}
+                          pnlUsd={pos.pnl}
+                          pnlPercent={pos.pnlPercent}
+                          entryPrice={pos.avgBuyPrice}
+                          currentPrice={pos.priceUsd}
+                          thesis={pos.convictionThesis}
+                          catalyst={pos.convictionCatalyst}
+                          targetPrice={pos.convictionTargetUsd}
+                          timeHorizon={pos.convictionTimeHorizon}
+                          recordedAt={pos.convictionRecordedAt}
+                          positionOpenedAt={pos.positionOpenedAt}
+                          portfolioRoi={portfolio.roi}
+                        />
                       </div>
                     </li>
                   ))}

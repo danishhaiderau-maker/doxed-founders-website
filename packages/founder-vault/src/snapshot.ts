@@ -8,6 +8,8 @@ export function buildVaultSnapshot(input: {
   projectContext?: string;
   roadmap?: string;
   tasksRaw?: string;
+  decisions?: string;
+  privateNotes?: string;
   vaultHealthy?: boolean;
   deviceLabel?: string;
 }): FounderVaultSnapshot {
@@ -53,10 +55,16 @@ export function buildVaultEncryptedBlob(
   snapshot: FounderVaultSnapshot,
   encrypt: (json: string) => string,
 ): DeviceMemoryMetadataPayload {
+  const extended = snapshot as FounderVaultSnapshot & {
+    decisions?: string;
+    privateNotes?: string;
+  };
   const sensitive = JSON.stringify({
     projectContext: snapshot.projectContext,
     roadmap: snapshot.roadmap,
     tasksFile: snapshot.tasksFile,
+    decisions: extended.decisions,
+    privateNotes: extended.privateNotes,
   });
   return buildVaultMetadataSyncPayload(snapshot, encrypt(sensitive));
 }
@@ -90,4 +98,37 @@ export function defaultRoadmap(): string {
     '- [ ] Ship beta',
     '',
   ].join('\n');
+}
+
+export function defaultPrivateNotes(): string {
+  return [
+    '# Private notes',
+    '',
+    '> Stored only in your Founder Vault on this machine. Encrypted before any cloud relay.',
+    '',
+    '## Investor conversations',
+    '',
+    '_Add notes here — not visible to Founder OS servers._',
+    '',
+    '## Product roadmap (confidential)',
+    '',
+    '',
+  ].join('\n');
+}
+
+export function defaultDecisionsLog(): string {
+  return [
+    '# Decisions log',
+    '',
+    '> Key product and technical decisions. Synced encrypted when Founder Node relays to cloud.',
+    '',
+  ].join('\n');
+}
+
+export function defaultBuildHistoryLine(): string {
+  return JSON.stringify({
+    at: new Date().toISOString(),
+    event: 'vault_initialized',
+    note: 'Founder Vault created',
+  });
 }

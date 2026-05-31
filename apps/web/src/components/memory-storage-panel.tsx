@@ -1,7 +1,12 @@
 'use client';
 
-import { useCallback, useState } from 'react';
-import { MEMORY_STORAGE_MODES, type MemoryStorageModeKey } from '@dcf/utils';
+import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
+import {
+  MEMORY_STORAGE_MODES,
+  extractVaultRelaySummary,
+  type MemoryStorageModeKey,
+} from '@dcf/utils';
 import {
   fetchDeviceMemorySync,
   pushDeviceMemorySync,
@@ -9,6 +14,7 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { FounderNodePairingPanel } from '@/components/founder-node-pairing-panel';
+import { FounderVaultStatusBanner } from '@/components/founder-vault-status-banner';
 
 type Props = {
   accessToken: string;
@@ -21,15 +27,60 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [confirmLocal, setConfirmLocal] = useState(false);
+  const [confirmLeaveVault, setConfirmLeaveVault] = useState(false);
+  const [pendingMode, setPendingMode] = useState<MemoryStorageModeKey | null>(null);
+  const [vaultRelay, setVaultRelay] = useState<ReturnType<typeof extractVaultRelaySummary>>(null);
+
+  const loadVaultRelay = useCallback(async () => {
+    try {
+      const remote = await fetchDeviceMemorySync(accessToken);
+      setVaultRelay(
+        extractVaultRelaySummary({
+          memoryStorageMode: currentMode,
+          deviceSync: remote.payload
+            ? {
+                updatedAt: remote.updatedAt ?? new Date().toISOString(),
+                deviceLabel: remote.deviceLabel,
+                payload: remote.payload,
+              }
+            : null,
+        }),
+      );
+    } catch {
+      setVaultRelay(null);
+    }
+  }, [accessToken, currentMode]);
+
+  useEffect(() => {
+    if (currentMode === 'FOUNDER_NODE' || currentMode === 'LOCAL_SYNC') {
+      loadVaultRelay();
+    } else {
+      setVaultRelay(null);
+    }
+  }, [currentMode, loadVaultRelay]);
 
   const saveMode = useCallback(
-    async (mode: MemoryStorageModeKey) => {
+    async (mode: MemoryStorageModeKey, skipConfirm = false) => {
       setErr(null);
       setMsg(null);
-      if (mode === 'LOCAL_DEVICE' && !confirmLocal) {
+
+      if (mode === 'LOCAL_DEVICE' && !confirmLocal && !skipConfirm) {
         setConfirmLocal(true);
+        setPendingMode(mode);
         return;
       }
+
+      if (
+        currentMode === 'FOUNDER_NODE' &&
+        mode !== 'FOUNDER_NODE' &&
+        !confirmLeaveVault &&
+        !skipConfirm
+      ) {
+        setConfirmLeaveVault(true);
+        setPendingMode(mode);
+        return;
+      }
+
       setBusy('mode');
       try {
         await updateBuilderSettings({ memoryStorageMode: mode }, accessToken);
@@ -38,21 +89,26 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
           mode === 'LOCAL_DEVICE'
             ? 'Saved on this device only — data will not sync to other devices.'
             : mode === 'LOCAL_SYNC'
-              ? 'Local + cloud sync enabled — online devices share a lightweight memory snapshot.'
+              ? 'Local + encrypted relay enabled — metadata syncs when online.'
               : mode === 'GITHUB'
                 ? 'GitHub repo memory selected — connect PAT and sync to write .github/founder-os/.'
-              : mode === 'FOUNDER_NODE'
-                ? 'Founder Node selected — pair your desktop vault below. Full memory stays on your machine.'
-                : 'Using Founder OS cloud memory.',
+                : mode === 'FOUNDER_NODE'
+                  ? 'Founder Vault enabled — pair Founder Node below. Full memory stays on your machine.'
+                  : 'Using Founder OS cloud memory.',
         );
         setConfirmLocal(false);
+        setConfirmLeaveVault(false);
+        setPendingMode(null);
+        if (mode === 'FOUNDER_NODE' || mode === 'LOCAL_SYNC') {
+          await loadVaultRelay();
+        }
       } catch (e) {
         setErr(e instanceof Error ? e.message : 'Could not save mode');
       } finally {
         setBusy(null);
       }
     },
-    [accessToken, confirmLocal, onModeChange],
+    [accessToken, confirmLocal, confirmLeaveVault, currentMode, loadVaultRelay, onModeChange],
   );
 
   async function syncGithub() {
@@ -115,11 +171,23 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
 
   return (
     <section className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5">
-      <h3 className="font-semibold text-violet-100">Project memory storage</h3>
+      <h3 className="font-semibold text-violet-100">Founder Vault — memory storage</h3>
       <p className="mt-1 text-xs text-violet-200/70">
-        Choose where Founder Copilot keeps goals, tasks, and resume context. Local modes save platform
-        cost — sync when online to use any device.
+        Choose where goals, tasks, and private notes live. Founder Vault (Founder Node) keeps full
+        company memory on your machine — we only relay encrypted metadata.
       </p>
+      <p className="mt-2 text-[10px] text-violet-300/60">
+        Tagline: own your memory · own your agents · own your company intelligence.{' '}
+        <Link href="/founder-node" className="underline hover:text-violet-200">
+          Install Founder Node →
+        </Link>
+      </p>
+
+      {(currentMode === 'FOUNDER_NODE' || currentMode === 'LOCAL_SYNC') && (
+        <div className="mt-4">
+          <FounderVaultStatusBanner relay={vaultRelay} memoryStorageMode={currentMode} />
+        </div>
+      )}
 
       <div className="mt-4 space-y-2">
         {MEMORY_STORAGE_MODES.map((mode) => (
@@ -147,7 +215,36 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
         ))}
       </div>
 
-      {confirmLocal && currentMode !== 'LOCAL_DEVICE' && (
+      {confirmLeaveVault && pendingMode && (
+        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-950/25 p-3 text-xs text-amber-100">
+          <p className="font-semibold">Leave Founder Vault mode?</p>
+          <p className="mt-2 text-amber-100/90">
+            Your vault files stay on your machine in ~/FounderVault/. Switching modes changes where
+            Copilot reads memory — we will not delete your local vault.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => pendingMode && saveMode(pendingMode, true)}
+              className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-medium text-white"
+            >
+              Switch to {MEMORY_STORAGE_MODES.find((m) => m.key === pendingMode)?.label}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmLeaveVault(false);
+                setPendingMode(null);
+              }}
+              className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400"
+            >
+              Keep Founder Vault
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmLocal && pendingMode === 'LOCAL_DEVICE' && (
         <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-950/25 p-3 text-xs text-amber-100">
           <p className="font-semibold">Before you choose “This device only”</p>
           <ul className="mt-2 list-inside list-disc space-y-1 text-amber-100/90">
@@ -162,7 +259,7 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => saveMode('LOCAL_DEVICE')}
+              onClick={() => saveMode('LOCAL_DEVICE', true)}
               className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-medium text-white"
             >
               Yes, this device only
@@ -171,7 +268,8 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
               type="button"
               onClick={() => {
                 setConfirmLocal(false);
-                saveMode('LOCAL_SYNC');
+                setPendingMode(null);
+                saveMode('LOCAL_SYNC', true);
               }}
               className="rounded-lg border border-emerald-500/50 px-3 py-1.5 text-xs text-emerald-300"
             >
@@ -179,7 +277,10 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
             </button>
             <button
               type="button"
-              onClick={() => setConfirmLocal(false)}
+              onClick={() => {
+                setConfirmLocal(false);
+                setPendingMode(null);
+              }}
               className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400"
             >
               Cancel
@@ -222,7 +323,17 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
       </div>
 
       {currentMode === 'FOUNDER_NODE' && (
-        <FounderNodePairingPanel accessToken={accessToken} active={currentMode === 'FOUNDER_NODE'} />
+        <>
+          <div className="mt-4 rounded-lg border border-zinc-700 bg-black/20 p-3 text-[10px] text-zinc-400">
+            <p className="font-medium text-zinc-300">Vault files on your machine</p>
+            <p className="mt-1">
+              ~/FounderVault/project-context.md · roadmap.md · tasks.json · decisions.md ·
+              private-notes.md
+            </p>
+            <p className="mt-1">Edit locally — Founder Node syncs encrypted snapshots every ~60s.</p>
+          </div>
+          <FounderNodePairingPanel accessToken={accessToken} active={currentMode === 'FOUNDER_NODE'} />
+        </>
       )}
 
       {msg && <p className="mt-3 text-xs text-emerald-300">{msg}</p>}

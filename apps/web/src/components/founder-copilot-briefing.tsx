@@ -19,6 +19,7 @@ import {
   mergeMemory,
   saveLocalMemory,
 } from '@/lib/founder-os-local-memory';
+import { FounderVaultStatusBanner } from '@/components/founder-vault-status-banner';
 
 type CommandDef = { intent: CommandBarIntent; label: string; placeholder: string };
 
@@ -94,6 +95,8 @@ export function FounderCopilotBriefing({
             /* offline or relay disabled */
           }
         }
+      } else if (mode === 'FOUNDER_NODE' && mem.vaultRelay?.currentGoal) {
+        display = { ...mem, currentGoal: mem.vaultRelay.currentGoal };
       }
 
       setMemory(display);
@@ -231,15 +234,28 @@ export function FounderCopilotBriefing({
           <p className="text-sm font-semibold text-white">Project scope</p>
         )}
         <p className={`text-emerald-300/80 ${isSidebar ? 'mt-0.5 text-[10px]' : 'mt-1 text-xs'}`}>
-          {memory.memoryStorageMode === 'LOCAL_DEVICE'
-            ? 'Local device memory'
-            : memory.memoryStorageMode === 'LOCAL_SYNC'
-              ? 'Local + cloud sync'
-              : memory.memoryStorageMode === 'GITHUB'
-                ? 'GitHub repo memory'
-                : 'Cloud memory'}
+          {memory.memoryStorageMode === 'FOUNDER_NODE'
+            ? 'Founder Vault · self-custody memory'
+            : memory.memoryStorageMode === 'LOCAL_DEVICE'
+              ? 'Local device memory'
+              : memory.memoryStorageMode === 'LOCAL_SYNC'
+                ? 'Local + encrypted relay'
+                : memory.memoryStorageMode === 'GITHUB'
+                  ? 'GitHub repo memory'
+                  : 'Cloud memory'}
           {memory.repoFullName ? ` · ${memory.repoFullName}` : ''}
         </p>
+
+        {(memory.memoryStorageMode === 'FOUNDER_NODE' ||
+          memory.memoryStorageMode === 'LOCAL_SYNC') && (
+          <div className="mt-3">
+            <FounderVaultStatusBanner
+              relay={memory.vaultRelay}
+              memoryStorageMode={memory.memoryStorageMode}
+              compact={isSidebar || isCompact}
+            />
+          </div>
+        )}
 
         <div className={`mt-4 grid gap-3 ${isSidebar ? 'grid-cols-1' : 'sm:grid-cols-2 lg:grid-cols-4'}`}>
           <div>

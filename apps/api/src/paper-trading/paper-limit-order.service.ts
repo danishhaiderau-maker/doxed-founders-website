@@ -28,6 +28,7 @@ export class PaperLimitOrderService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    void this.processOpenOrders();
     setInterval(() => this.processOpenOrders(), POLL_MS);
   }
 
