@@ -10,6 +10,7 @@ import {
   copilotHandsFree,
   createFounderBounty,
   disconnectIntegration,
+  fetchCopilotMemory,
   fetchFounderOsDashboard,
   FounderOsDashboard,
   IntegrationProviderConfig,
@@ -60,10 +61,18 @@ export function FounderOsPanel({
   const [connectFields, setConnectFields] = useState<Record<string, string>>({});
   const [publishDest, setPublishDest] = useState({ buildFeed: true, x: true, community: true });
   const [msg, setMsg] = useState<string | null>(null);
+  const [linkedRepo, setLinkedRepo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setData(await fetchFounderOsDashboard(accessToken));
+      const [dash, memory] = await Promise.all([
+        fetchFounderOsDashboard(accessToken),
+        fetchCopilotMemory(accessToken).catch(() => null),
+      ]);
+      setData(dash);
+      const repo = memory?.repoFullName ?? null;
+      setLinkedRepo(repo);
+      if (repo) setRepoInput(repo);
     } catch {
       setData(null);
     }
@@ -203,6 +212,17 @@ export function FounderOsPanel({
   const apps = data?.connectedApps ?? [];
   const providers = data?.integrationProviders ?? [];
   const stackOnly = variant === 'stackOnly';
+  const githubApp = apps.find((a) => a.provider === 'github');
+  const githubConnected = Boolean(githubApp?.connected || linkedRepo);
+  const integrationGuides = [
+    { key: 'github', label: 'GitHub' },
+    { key: 'cursor', label: 'Cursor' },
+    { key: 'neon', label: 'Neon DB' },
+    { key: 'vercel', label: 'Vercel' },
+    { key: 'railway', label: 'Railway' },
+    { key: 'deepseek', label: 'DeepSeek chat' },
+    { key: 'openai', label: 'OpenAI chat' },
+  ];
 
   return (
     <div className="space-y-6">
@@ -279,19 +299,45 @@ export function FounderOsPanel({
                 + {p.label}
               </button>
             ))}
-          <button
-            type="button"
-            onClick={() => setGuideProvider({ key: 'cursor', label: 'Founder Copilot (Cursor)' })}
-            className="rounded-lg border border-violet-500/30 px-3 py-1.5 text-xs text-violet-300"
+          <Link
+            href="/settings/builder"
+            className="rounded-lg border border-violet-500/40 px-3 py-1.5 text-xs text-violet-300 hover:border-violet-400/60"
           >
-            ? Cursor vs Neon
-          </button>
+            LLM keys (DeepSeek · OpenAI · Claude · Gemini)
+          </Link>
         </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {integrationGuides.map((g) => (
+            <button
+              key={g.key}
+              type="button"
+              onClick={() => setGuideProvider(g)}
+              className="rounded-lg border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+            >
+              Guide: {g.label}
+            </button>
+          ))}
+        </div>
+        {githubConnected && linkedRepo && (
+          <div className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+            <span className="font-semibold text-emerald-300">GitHub connected</span>
+            <span className="mx-2 text-emerald-700">·</span>
+            <a
+              href={`https://github.com/${linkedRepo}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-emerald-200 underline hover:text-white"
+            >
+              {linkedRepo}
+            </a>
+            <span className="ml-2 text-emerald-600">— synced to Founder Copilot memory</span>
+          </div>
+        )}
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <input
             value={repoInput}
             onChange={(e) => setRepoInput(e.target.value)}
-            placeholder="GitHub owner/repo"
+            placeholder={githubConnected ? 'Update GitHub owner/repo' : 'GitHub owner/repo'}
             className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
           />
           <button
@@ -304,9 +350,13 @@ export function FounderOsPanel({
           <button
             type="button"
             onClick={handleConnectGitHub}
-            className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
+            className={`rounded-lg px-4 py-2 text-sm font-medium ${
+              githubConnected
+                ? 'border border-emerald-500/40 bg-emerald-950/30 text-emerald-100 hover:bg-emerald-950/50'
+                : 'bg-zinc-100 text-black'
+            }`}
           >
-            Connect GitHub
+            {githubConnected ? 'Update repo' : 'Connect GitHub'}
           </button>
           <button
             type="button"

@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { FounderOsDashboardLayout } from '@/components/founder-os-dashboard';
 import { FounderDashboard, ProjectRoom } from '@/lib/api';
 import type { WorkspaceTab } from '@/components/founder-workspace';
@@ -14,6 +15,7 @@ export type FounderMissionControlProps = {
   onTabChange: (tab: WorkspaceTab) => void;
   onRefresh: () => void;
   onMessage?: (msg: string) => void;
+  tabContent?: ReactNode;
 };
 
 export function FounderMissionControl({
@@ -25,6 +27,7 @@ export function FounderMissionControl({
   onTabChange,
   onRefresh,
   onMessage,
+  tabContent,
 }: FounderMissionControlProps) {
   if (!session) {
     return (
@@ -72,6 +75,7 @@ export function FounderMissionControl({
       onTabChange={onTabChange}
       onRefresh={onRefresh}
       onMessage={onMessage}
+      tabContent={tabContent}
     />
   );
 }

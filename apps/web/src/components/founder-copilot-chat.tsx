@@ -297,23 +297,9 @@ export function FounderCopilotChat({
 
       <div ref={scrollRef} className="flex min-h-[320px] max-h-[min(58vh,520px)] flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
         {messages.length === 0 && !busy && (
-          <div className="mx-auto w-full max-w-lg space-y-3">
-            <p className="text-center text-sm text-zinc-500">
-              Ask Founder Brain — answers use GitHub, tasks, roadmap, and build feed context.
-            </p>
-            <div className="flex flex-wrap justify-center gap-2">
-              {ASK_CHIPS.map((chip) => (
-                <button
-                  key={chip}
-                  type="button"
-                  onClick={() => sendMessage(chip)}
-                  className="rounded-full border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-[11px] text-zinc-300 hover:border-violet-500/50 hover:text-white"
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="mx-auto max-w-lg text-center text-sm text-zinc-500">
+            Ask Founder Brain — answers use GitHub, tasks, roadmap, and build feed context.
+          </p>
         )}
         {messages.map((m) => (
           <div
@@ -347,6 +333,20 @@ export function FounderCopilotChat({
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-500">
               Thinking…
             </div>
+          </div>
+        )}
+        {!busy && (
+          <div className="flex flex-wrap justify-center gap-2 border-t border-zinc-800/60 pt-3">
+            {ASK_CHIPS.map((chip) => (
+              <button
+                key={chip}
+                type="button"
+                onClick={() => sendMessage(chip)}
+                className="rounded-full border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-[11px] text-zinc-300 hover:border-violet-500/50 hover:text-white"
+              >
+                {chip}
+              </button>
+            ))}
           </div>
         )}
       </div>
