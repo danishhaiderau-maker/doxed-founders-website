@@ -7,7 +7,7 @@ import { BuildQueueController } from './build-queue.controller';
 import { BuildQueueService } from './build-queue.service';
 
 @Module({
-  imports: [NotificationsModule, GitHubModule, BuilderModule, forwardRef(() => EventsModule)],
+  imports: [NotificationsModule, GitHubModule, forwardRef(() => BuilderModule), forwardRef(() => EventsModule)],
   controllers: [BuildQueueController],
   providers: [BuildQueueService],
   exports: [BuildQueueService],
