@@ -152,6 +152,7 @@ function SiteNavInner() {
               </Link>
             );
           }
+          if (!('href' in item)) return null;
           const href = item.href;
           const active = navActive(pathname, href);
           return (
