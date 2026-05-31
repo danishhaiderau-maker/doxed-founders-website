@@ -4,12 +4,17 @@ import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Public } from '../auth/public.decorator';
 import {
+  CancelPaperLimitOrderDto,
+  ClosePaperPositionDto,
+  CreatePaperLimitOrderDto,
   CreatePaperSessionDto,
   PaperTradeDto,
   PreviewPaperTradeDto,
   MigrateGuestPortfolioDto,
   ResetPortfolioDto,
+  SwapPaperTokensDto,
 } from './dto/paper-trading.dto';
+import { PaperLimitOrderService } from './paper-limit-order.service';
 import { PaperTradingStripeService } from './paper-trading-stripe.service';
 import { PaperTradingService } from './paper-trading.service';
 
@@ -19,6 +24,7 @@ import { PaperTradingService } from './paper-trading.service';
 export class PaperTradingController {
   constructor(
     private readonly paperTrading: PaperTradingService,
+    private readonly limitOrders: PaperLimitOrderService,
     private readonly stripe: PaperTradingStripeService,
   ) {}
 
@@ -50,6 +56,42 @@ export class PaperTradingController {
   @Post('trade')
   trade(@Body() dto: PaperTradeDto) {
     return this.paperTrading.executeTrade(dto);
+  }
+
+  @Post('close')
+  close(@Body() dto: ClosePaperPositionDto) {
+    return this.paperTrading.closePosition(dto.userId, dto.projectId, {
+      comment: dto.comment,
+      sellPercent: dto.sellPercent,
+    });
+  }
+
+  @Post('swap')
+  swap(@Body() dto: SwapPaperTokensDto) {
+    return this.paperTrading.swapTokens(
+      dto.userId,
+      dto.fromProjectId,
+      dto.toDexscreenerUrl,
+      { comment: dto.comment },
+    );
+  }
+
+  @Get('limit-orders/:userId')
+  listLimitOrders(@Param('userId') userId: string) {
+    return this.limitOrders.list(userId);
+  }
+
+  @Post('limit-orders')
+  createLimitOrder(@Body() dto: CreatePaperLimitOrderDto) {
+    return this.limitOrders.create(dto);
+  }
+
+  @Post('limit-orders/:orderId/cancel')
+  cancelLimitOrder(
+    @Param('orderId') orderId: string,
+    @Body() dto: CancelPaperLimitOrderDto,
+  ) {
+    return this.limitOrders.cancel(dto.userId, orderId);
   }
 
   @Get('leaderboard')
