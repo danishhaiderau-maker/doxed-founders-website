@@ -4,17 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { AppNotification, fetchNotifications, markNotificationRead } from '@/lib/api';
 
-type InboxFilter = 'all' | 'build' | 'agents' | 'community' | 'funding';
-
-const FILTERS: { id: InboxFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'build', label: 'Build queue' },
-  { id: 'agents', label: 'Agent results' },
-  { id: 'community', label: 'Community' },
-  { id: 'funding', label: 'Funding' },
-];
-
 function inboxAccent(type: string, read: boolean) {
+  if (type === 'FOUNDER_EVENT') return 'border-violet-500/40 bg-violet-950/20';
   if (type === 'BUILD_QUEUE') return 'border-violet-500/40 bg-violet-950/20';
   if (type === 'AGENT_RESULT') return 'border-purple-500/40 bg-purple-950/20';
   if (type === 'TRADER_WIN') return 'border-emerald-500/40 bg-emerald-950/20';
@@ -25,31 +16,81 @@ function inboxAccent(type: string, read: boolean) {
 
 export type FounderInboxPanelProps = {
   accessToken: string;
+  /** Sidebar compact mode — last 10 copilot / platform alerts only */
+  compact?: boolean;
 };
 
-export function FounderInboxPanel({ accessToken }: FounderInboxPanelProps) {
-  const [filter, setFilter] = useState<InboxFilter>('all');
+export function FounderInboxPanel({ accessToken, compact = false }: FounderInboxPanelProps) {
   const [items, setItems] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setItems(await fetchNotifications(accessToken, filter === 'all' ? undefined : filter));
+      const notes = await fetchNotifications(accessToken, compact ? undefined : undefined);
+      setItems(compact ? notes.slice(0, 10) : notes.slice(0, 8));
     } catch {
       setItems([]);
     } finally {
       setLoading(false);
     }
-  }, [accessToken, filter]);
+  }, [accessToken, compact]);
 
   useEffect(() => {
     load();
-  }, [load]);
+    if (!compact) return undefined;
+    const interval = setInterval(load, 60_000);
+    return () => clearInterval(interval);
+  }, [load, compact]);
 
   async function handleRead(id: string) {
     await markNotificationRead(id, accessToken);
     load();
+  }
+
+  if (compact) {
+    return (
+      <div className="border-t border-zinc-800/60 px-2 py-3">
+        <div className="px-2">
+          <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-violet-400">Copilot alerts</p>
+          <p className="mt-0.5 text-[10px] text-zinc-600">Last 10 · from Founder OS</p>
+        </div>
+        <ul className="mt-2 max-h-[320px] space-y-1.5 overflow-y-auto px-1">
+          {loading && <li className="px-2 text-[11px] text-zinc-500">Loading…</li>}
+          {!loading && items.length === 0 && (
+            <li className="px-2 text-[11px] text-zinc-500">No alerts yet — ask Copilot something.</li>
+          )}
+          {items.map((n) => (
+            <li
+              key={n.id}
+              className={`rounded-lg border p-2 ${inboxAccent(n.type, Boolean(n.readAt))}`}
+            >
+              <p className="text-[11px] font-medium leading-snug text-white line-clamp-2">{n.title}</p>
+              <p className="mt-0.5 text-[10px] text-zinc-500 line-clamp-1">{n.body}</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {n.link && (
+                  <Link
+                    href={n.link}
+                    className="rounded bg-violet-600/90 px-1.5 py-0.5 text-[10px] font-medium text-white"
+                  >
+                    Open
+                  </Link>
+                )}
+                {!n.readAt && (
+                  <button
+                    type="button"
+                    onClick={() => handleRead(n.id)}
+                    className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500"
+                  >
+                    Read
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
   }
 
   return (
@@ -61,32 +102,14 @@ export function FounderInboxPanel({ accessToken }: FounderInboxPanelProps) {
             Build queue · agent results · community · funding signals
           </p>
         </div>
-        <Link href="/notifications" className="text-xs text-emerald-400 hover:underline">
-          View all →
-        </Link>
       </div>
-
-      <nav className="mt-4 flex flex-wrap gap-1">
-        {FILTERS.map((f) => (
-          <button
-            key={f.id}
-            type="button"
-            onClick={() => setFilter(f.id)}
-            className={`rounded-lg px-2.5 py-1 text-[11px] font-medium ${
-              filter === f.id ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-      </nav>
 
       <ul className="mt-4 space-y-2">
         {loading && <li className="text-sm text-zinc-500">Loading…</li>}
         {!loading && items.length === 0 && (
-          <li className="text-sm text-zinc-500">No notifications in this filter yet.</li>
+          <li className="text-sm text-zinc-500">No notifications yet.</li>
         )}
-        {items.slice(0, 8).map((n) => (
+        {items.map((n) => (
           <li
             key={n.id}
             className={`rounded-xl border p-3 ${inboxAccent(n.type, Boolean(n.readAt))}`}

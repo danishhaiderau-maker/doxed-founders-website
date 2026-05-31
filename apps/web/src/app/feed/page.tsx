@@ -348,6 +348,9 @@ export default function FeedPage() {
 }
 
 function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string }) {
+  const isTrading = item.category === 'trading';
+  const isBuy = item.tradeSide === 'BUY' || item.eventType === 'position_opened' || item.eventType === 'conviction_posted';
+  const isSell = item.tradeSide === 'SELL' || item.eventType === 'position_closed';
   const shareUrl = item.link ? buildSiteUrl(origin, item.link) : buildSiteUrl(origin, '/feed');
   const ctx = item.shareContext;
   const shareText =
@@ -395,6 +398,21 @@ function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string 
           <span className="rounded bg-zinc-800 px-1.5 py-0.5 uppercase tracking-wide">
             {item.category}
           </span>
+          {isTrading && (isBuy || isSell) && (
+            <span
+              className={`rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-orange-500/15 text-orange-400'
+              }`}
+            >
+              {isBuy ? 'BUY' : 'SELL'}
+            </span>
+          )}
+          {item.projectTicker && isTrading && (
+            <span className="font-semibold text-white">{item.projectTicker}</span>
+          )}
+          {item.amountUsd != null && isTrading && (
+            <span>{formatUsd(item.amountUsd, 0)} paper</span>
+          )}
           <span>{timeAgo(item.at)}</span>
           {item.pinned && (
             <span className="rounded bg-sky-500/20 px-1.5 py-0.5 font-semibold text-sky-200">Pinned · X</span>

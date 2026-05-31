@@ -39,7 +39,7 @@ const TABS: { id: AccountTab; label: string }[] = [
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'connected', label: 'Connected Accounts' },
-  { id: 'points', label: 'Points & Rewards' },
+  { id: 'points', label: 'DDollar earned' },
   { id: 'reputation', label: 'Reputation' },
   { id: 'activity', label: 'Activity History' },
 ];
@@ -233,7 +233,7 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
           <section className="space-y-6">
             <div className="grid gap-4 sm:grid-cols-2">
               <StatCard
-                label="Current points"
+                label="DDollar earned"
                 value={overview.reputation.reputationPoints.toLocaleString()}
               />
               <StatCard

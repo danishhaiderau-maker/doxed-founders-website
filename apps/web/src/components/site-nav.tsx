@@ -5,28 +5,31 @@ import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
 import { useEffect, useRef, useState, Suspense } from 'react';
 import { cn, resolveGamifiedRole } from '@dcf/utils';
-import { fetchUnreadNotificationCount, fetchAccountOverview, AccountOverview } from '@/lib/api';
+import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 
-const PRIMARY_NAV = [
-  { href: '/discover', label: 'Discover', tone: 'zinc' },
-  { href: '/projects', label: 'Projects', tone: 'zinc' },
-  { href: '/feed', label: 'Feed', tone: 'zinc' },
-  { href: '/founder-den', label: 'Founder OS', auth: true, tone: 'violet' },
-  { href: '/paper-trading', label: 'Trading Alpha', tone: 'amber' },
-  { href: '/leaderboard', label: 'Rankings', tone: 'zinc' },
-  { href: '/raise-room', label: 'Raise Room', tone: 'zinc' },
-  { href: '/agents', label: 'Agents', tone: 'zinc' },
+/** Row 1 — trading (amber family) */
+const TRADING_NAV = [
+  { href: '/discover', label: 'Discover' },
+  { href: '/feed', label: 'Feed' },
+  { href: '/paper-trading', label: 'Trading Alpha' },
+  { href: '/leaderboard', label: 'Rankings' },
+  { href: '/watchlist', label: 'Watchlist', auth: true },
+  { hrefKey: 'portfolio' as const, label: 'Portfolio', auth: true },
 ] as const;
 
-const CTA_NAV = [
-  {
-    href: '/predict',
-    label: 'Predict',
-    active: 'bg-indigo-500 ring-2 ring-indigo-300/50',
-    idle: 'bg-indigo-600 hover:bg-indigo-500',
-  },
+/** Row 2 — building (violet family) */
+const BUILDING_NAV = [
+  { href: '/founder-den', label: 'Founder OS', auth: true },
+  { href: '/founder-node', label: 'Founder Node' },
+  { href: '/agents', label: 'Agents' },
+  { href: '/raise-room', label: 'Raise Room' },
+  { href: '/settings/builder', label: 'AI Stack', auth: true },
+] as const;
+
+/** Row 3 — scout / list + profile */
+const ACTION_NAV = [
   {
     href: '/scout-votes',
     label: 'Scout vote',
@@ -39,18 +42,6 @@ const CTA_NAV = [
     active: 'bg-violet-500 ring-2 ring-violet-300/50',
     idle: 'bg-violet-600 hover:bg-violet-500',
   },
-  {
-    hrefKey: 'portfolio' as const,
-    label: 'Portfolio',
-    active: 'bg-emerald-500 ring-2 ring-emerald-300/50',
-    idle: 'bg-emerald-600 hover:bg-emerald-500',
-  },
-  {
-    href: '/founder-node',
-    label: 'Founder Node',
-    active: 'bg-cyan-500 ring-2 ring-cyan-300/50',
-    idle: 'bg-cyan-600 hover:bg-cyan-500',
-  },
 ] as const;
 
 const PROFILE_LINKS = [
@@ -58,7 +49,7 @@ const PROFILE_LINKS = [
   { href: '/account?tab=security', label: 'Security' },
   { href: '/account?tab=notifications', label: 'Notification Settings' },
   { href: '/account?tab=connected', label: 'Connected Accounts' },
-  { href: '/account?tab=points', label: 'Points & Rewards' },
+  { href: '/account?tab=points', label: 'DDollar earned' },
   { href: '/account?tab=reputation', label: 'Reputation' },
   { href: '/account?tab=activity', label: 'Activity History' },
 ] as const;
@@ -73,21 +64,24 @@ function navActive(pathname: string, href: string) {
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/scout-votes') return pathname.startsWith('/scout-votes');
-  if (href === '/predict') return pathname.startsWith('/predict');
-  if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
+  if (href === '/settings/builder') return pathname.startsWith('/settings/builder');
   if (href.startsWith('/account')) return pathname.startsWith('/account');
   if (href === '/founder-node') return pathname.startsWith('/founder-node');
   if (href === '/watchlist') return pathname.startsWith('/watchlist');
+  if (href === '/list-your-project') return pathname.startsWith('/list-your-project');
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-function primaryLinkClass(active: boolean, tone: string) {
-  if (active) {
-    return 'bg-white/10 font-semibold text-white ring-1 ring-white/25';
-  }
-  if (tone === 'violet') return 'text-violet-300/90 hover:bg-violet-500/15 hover:text-violet-100';
-  if (tone === 'amber') return 'text-amber-300/90 hover:bg-amber-500/15 hover:text-amber-100';
-  return 'text-[var(--color-muted)] hover:bg-white/5 hover:text-white';
+function tradingLinkClass(active: boolean) {
+  return active
+    ? 'bg-amber-500/25 font-semibold text-amber-50 ring-1 ring-amber-400/50'
+    : 'text-amber-200/75 hover:bg-amber-500/10 hover:text-amber-100';
+}
+
+function buildingLinkClass(active: boolean) {
+  return active
+    ? 'bg-violet-500/25 font-semibold text-violet-50 ring-1 ring-violet-400/50'
+    : 'text-violet-200/75 hover:bg-violet-500/10 hover:text-violet-100';
 }
 
 export function SiteNav() {
@@ -105,7 +99,6 @@ function SiteNavInner() {
   const pathname = usePathname();
   const { data: session } = useSession();
   const isAdmin = session?.user?.role === 'ADMIN';
-  const [unread, setUnread] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
   const [accountPreview, setAccountPreview] = useState<AccountOverview | null>(null);
   const profileRef = useRef<HTMLDivElement>(null);
@@ -115,22 +108,9 @@ function SiteNavInner() {
 
   useEffect(() => {
     if (!session?.accessToken) {
-      setUnread(0);
       setAccountPreview(null);
       return;
     }
-    const refresh = () => {
-      fetchUnreadNotificationCount(session.accessToken!)
-        .then((r) => setUnread(r.count))
-        .catch(() => setUnread(0));
-    };
-    refresh();
-    const interval = setInterval(refresh, 30_000);
-    return () => clearInterval(interval);
-  }, [session?.accessToken]);
-
-  useEffect(() => {
-    if (!session?.accessToken) return;
     fetchAccountOverview(session.accessToken)
       .then(setAccountPreview)
       .catch(() => setAccountPreview(null));
@@ -154,55 +134,72 @@ function SiteNavInner() {
 
   return (
     <nav className="flex max-w-full flex-col items-end gap-2 text-sm md:gap-2.5">
-      <div className="flex flex-wrap items-center justify-end gap-2 md:gap-2.5">
-        {PRIMARY_NAV.map((item) => {
+      {/* Row 1 — Trading */}
+      <div className="flex flex-wrap items-center justify-end gap-1.5 rounded-xl border border-amber-500/15 bg-amber-950/20 px-2 py-1.5 md:gap-2">
+        {TRADING_NAV.map((item) => {
+          if ('auth' in item && item.auth && !session) return null;
+          if ('hrefKey' in item && item.hrefKey === 'portfolio') {
+            if (!portfolioUserId) return null;
+            const href = `/portfolio/${portfolioUserId}`;
+            const active = navActive(pathname, href);
+            return (
+              <Link
+                key="portfolio"
+                href={href}
+                className={cn('rounded-lg px-2.5 py-1.5 transition', tradingLinkClass(active))}
+              >
+                {item.label}
+              </Link>
+            );
+          }
+          const href = item.href;
+          const active = navActive(pathname, href);
+          return (
+            <Link
+              key={href}
+              href={href}
+              className={cn('rounded-lg px-2.5 py-1.5 transition', tradingLinkClass(active))}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* Row 2 — Building */}
+      <div className="flex flex-wrap items-center justify-end gap-1.5 rounded-xl border border-violet-500/15 bg-violet-950/20 px-2 py-1.5 md:gap-2">
+        {BUILDING_NAV.map((item) => {
           if ('auth' in item && item.auth && !session) return null;
           const active = navActive(pathname, item.href);
           return (
             <Link
               key={item.href}
               href={item.href}
+              className={cn('rounded-lg px-2.5 py-1.5 transition', buildingLinkClass(active))}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* Row 3 — Scout / list + profile */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {ACTION_NAV.map((item) => {
+          const active = navActive(pathname, item.href);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
               className={cn(
-                'rounded-lg px-2.5 py-1.5 transition',
-                primaryLinkClass(active, item.tone),
+                'rounded-lg px-4 py-2 font-semibold text-white shadow-lg transition',
+                active ? item.active : item.idle,
               )}
             >
               {item.label}
             </Link>
           );
         })}
-
-        {session && (
-          <>
-            <Link
-              href="/watchlist"
-              className={cn(
-                'rounded-lg px-2.5 py-1.5 transition',
-                navActive(pathname, '/watchlist')
-                  ? 'bg-violet-500/25 font-semibold text-violet-50 ring-1 ring-violet-400/50'
-                  : 'text-violet-200/80 hover:bg-violet-500/15 hover:text-violet-100',
-              )}
-            >
-              Watchlist
-            </Link>
-            <Link
-              href="/notifications"
-              className={cn(
-                'relative rounded-lg px-2.5 py-1.5 transition',
-                pathname === '/notifications'
-                  ? 'bg-emerald-500/25 font-semibold text-emerald-50 ring-1 ring-emerald-400/50'
-                  : 'text-emerald-200/80 hover:bg-emerald-500/15 hover:text-emerald-100',
-              )}
-            >
-              Notifications
-              {unread > 0 && (
-                <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
-                  {unread > 9 ? '9+' : unread}
-                </span>
-              )}
-            </Link>
-          </>
-        )}
 
         {session ? (
           <div className="relative border-l border-[var(--color-border)] pl-2 md:pl-3" ref={profileRef}>
@@ -216,7 +213,7 @@ function SiteNavInner() {
                   : 'text-zinc-300 hover:bg-zinc-800 hover:text-white',
               )}
             >
-              <span className="hidden max-w-[120px] truncate sm:inline">
+              <span className="hidden max-w-[140px] truncate sm:inline">
                 {accountPreview?.username ?? session.user?.name ?? session.user?.email}
               </span>
               <GamifiedRoleBadge
@@ -263,15 +260,6 @@ function SiteNavInner() {
                     </Link>
                   </>
                 )}
-                {portfolioUserId && (
-                  <Link
-                    href={`/portfolio/${portfolioUserId}`}
-                    onClick={() => setProfileOpen(false)}
-                    className="block px-3 py-2 text-sm text-emerald-300 transition hover:bg-zinc-900 hover:text-emerald-200"
-                  >
-                    Trading Portfolio
-                  </Link>
-                )}
                 <button
                   type="button"
                   onClick={() => signOut({ callbackUrl: '/' })}
@@ -290,42 +278,6 @@ function SiteNavInner() {
             Sign in
           </Link>
         )}
-      </div>
-
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        {CTA_NAV.map((item) => {
-          if ('hrefKey' in item && item.hrefKey === 'portfolio') {
-            if (!portfolioUserId) return null;
-            const href = `/portfolio/${portfolioUserId}`;
-            const active = navActive(pathname, href);
-            return (
-              <Link
-                key="portfolio"
-                href={href}
-                className={cn(
-                  'rounded-lg px-4 py-2 font-semibold text-white shadow-lg transition',
-                  active ? item.active : item.idle,
-                )}
-              >
-                {item.label}
-              </Link>
-            );
-          }
-          const href = 'href' in item ? item.href : '/';
-          const active = navActive(pathname, href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={cn(
-                'rounded-lg px-4 py-2 font-semibold text-white shadow-lg transition',
-                active ? item.active : item.idle,
-              )}
-            >
-              {item.label}
-            </Link>
-          );
-        })}
       </div>
     </nav>
   );

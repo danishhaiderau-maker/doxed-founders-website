@@ -266,14 +266,21 @@ export class SecurityService {
   }
 
   async complete2FaLogin(pendingToken: string, totpCode?: string, recoveryCode?: string) {
-    const challenge = await this.consumePending(pendingToken, 'LOGIN_2FA');
-    if (totpCode) {
-      await this.verifyTotpCode(challenge.userId, totpCode);
-    } else if (recoveryCode) {
-      await this.useRecoveryCode(challenge.userId, recoveryCode);
-    } else {
-      throw new BadRequestException('Provide authenticator code or recovery code');
+    const challenge = await this.getPending(pendingToken, 'LOGIN_2FA');
+    const recovery = recoveryCode?.trim();
+    const totp = totpCode?.trim();
+    try {
+      if (recovery) {
+        await this.useRecoveryCode(challenge.userId, recovery);
+      } else if (totp) {
+        await this.verifyTotpCode(challenge.userId, totp);
+      } else {
+        throw new BadRequestException('Provide authenticator code or recovery code');
+      }
+    } catch (err) {
+      throw err;
     }
+    await this.prisma.authPendingChallenge.delete({ where: { id: challenge.id } });
     return this.auth.buildAuthResponseForUserId(challenge.userId);
   }
 
