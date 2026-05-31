@@ -35,11 +35,8 @@ export class PrismaService
   }
 
   async onModuleInit() {
-    const onRailway = Boolean(
-      process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID,
-    );
-    if (onRailway) {
-      // Do not block Nest bootstrap — Railway healthcheck hits /api/health/live first.
+    if (process.env.NODE_ENV === 'production') {
+      // Do not block Nest bootstrap — Railway hits /api/health/live before DB is ready.
       void this.connect();
       return;
     }

@@ -17,7 +17,7 @@ watchPatterns = [
 # Set NODE_ENV and PRISMA_DB_PUSH in Railway Variables (see docs/railway-deploy.md).
 startCommand = "node scripts/start-api-prod.mjs"
 healthcheckPath = "/api/health/live"
-healthcheckTimeout = 120
+healthcheckTimeout = 180
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
-# Redeploy trigger: 2026-05-31 — defer db push 25s so healthcheck passes before schema sync
+# Redeploy trigger: 2026-05-31 — production boot never blocks on prisma before listen
