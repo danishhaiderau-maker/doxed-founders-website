@@ -36,4 +36,10 @@ export class HealthController {
 
     return payload;
   }
+
+  /** Railway liveness — no DB; passes as soon as Nest is listening. */
+  @Get('live')
+  live() {
+    return { status: 'ok', timestamp: new Date().toISOString() };
+  }
 }
