@@ -108,33 +108,44 @@ Add token for automated cleanup:
   );
 
   const projects = data.projects?.edges?.map((e) => e.node) ?? [];
-  const target = projects.find((p) =>
+
+  if (projects.length === 0) {
+    throw new Error('No Railway projects found for this token');
+  }
+
+  const productionProject = projects.find((p) =>
     p.services?.edges?.some((s) => s.node.name === 'doxed-founders-website'),
   );
-
-  if (!target) {
-    throw new Error('Project with doxed-founders-website not found');
+  if (productionProject) {
+    console.log(`Production API: ${productionProject.name} / doxed-founders-website\n`);
   }
-
-  console.log(`Project: ${target.name}\n`);
 
   let deleted = 0;
-  for (const svcEdge of target.services?.edges ?? []) {
-    const svc = svcEdge.node;
-    if (PROTECTED.has(svc.name)) {
-      console.log(`  keep ${svc.name} (production API)`);
-      continue;
+  for (const project of projects) {
+    const dupes = (project.services?.edges ?? [])
+      .map((e) => e.node)
+      .filter((svc) => DELETE_NAMES.has(svc.name));
+
+    if (dupes.length === 0) continue;
+
+    console.log(`Project: ${project.name}`);
+    for (const svc of dupes) {
+      if (PROTECTED.has(svc.name)) {
+        console.log(`  keep ${svc.name} (production API)`);
+        continue;
+      }
+      console.log(`  deleting ${svc.name} (${svc.id})…`);
+      await deleteService(token, svc.id, svc.name);
+      deleted += 1;
     }
-    if (!DELETE_NAMES.has(svc.name)) {
-      console.log(`  skip ${svc.name} (not a known duplicate)`);
-      continue;
-    }
-    console.log(`  deleting ${svc.name} (${svc.id})…`);
-    await deleteService(token, svc.id, svc.name);
-    deleted += 1;
+    console.log('');
   }
 
-  console.log(`\nDone. Removed ${deleted} duplicate service(s).`);
+  if (deleted === 0) {
+    console.log('No duplicate services (@dcf/web, @dcf/api) found — already clean.');
+  } else {
+    console.log(`Done. Removed ${deleted} duplicate service(s).`);
+  }
   console.log('Verify: https://doxed-founders-website-production.up.railway.app/api/health');
 }
 
