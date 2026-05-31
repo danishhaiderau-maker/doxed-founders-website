@@ -39,6 +39,103 @@ export type WorkforceAgentOutput = {
   traderView: string;
 };
 
+export type WorkforceTool = 'build_queue' | 'github_issues' | 'cursor_agent' | 'community_draft' | 'raise_room';
+
+/** Phase 3 — which tools each hidden worker may execute at runtime. */
+export const WORKFORCE_PERMISSIONS: Record<string, WorkforceTool[]> = {
+  PRODUCT_MANAGER: ['build_queue', 'github_issues'],
+  RESEARCHER: ['build_queue', 'github_issues'],
+  BUILDER: ['build_queue', 'github_issues', 'cursor_agent'],
+  MARKETER: ['build_queue', 'community_draft'],
+  COMMUNITY_MANAGER: ['build_queue', 'community_draft'],
+  FUNDRAISING: ['build_queue', 'raise_room', 'github_issues'],
+  LAUNCH: ['build_queue', 'github_issues'],
+  CUSTOM: ['build_queue', 'github_issues'],
+};
+
+export type WorkforceRuntimeResult = {
+  toolsUsed: WorkforceTool[];
+  permissions: WorkforceTool[];
+  githubIssuesCreated: number;
+  githubRepo: string | null;
+  cursorDispatched: boolean;
+  cursorAgentUrl: string | null;
+  communityDraftSaved: boolean;
+  raiseRoomLinked: boolean;
+};
+
+export function emptyWorkforceRuntime(template: string): WorkforceRuntimeResult {
+  const permissions = WORKFORCE_PERMISSIONS[template] ?? WORKFORCE_PERMISSIONS.BUILDER;
+  return {
+    toolsUsed: ['build_queue'],
+    permissions,
+    githubIssuesCreated: 0,
+    githubRepo: null,
+    cursorDispatched: false,
+    cursorAgentUrl: null,
+    communityDraftSaved: false,
+    raiseRoomLinked: false,
+  };
+}
+
+export function formatWorkforceRuntimeSummary(runtime: WorkforceRuntimeResult): string {
+  const lines: string[] = ['**Runtime actions**'];
+  if (runtime.githubIssuesCreated > 0 && runtime.githubRepo) {
+    lines.push(`✓ Created ${runtime.githubIssuesCreated} GitHub issue(s) on \`${runtime.githubRepo}\``);
+  } else if (runtime.permissions.includes('github_issues')) {
+    lines.push('○ GitHub issues queued locally — connect repo + token to auto-publish');
+  }
+  if (runtime.cursorDispatched && runtime.cursorAgentUrl) {
+    lines.push(`✓ Cursor agent started — ${runtime.cursorAgentUrl}`);
+  } else if (runtime.permissions.includes('cursor_agent')) {
+    lines.push('○ Connect Cursor in Builder to auto-dispatch code tasks');
+  }
+  if (runtime.communityDraftSaved) {
+    lines.push('✓ Community update draft saved — review in Projects');
+  }
+  if (runtime.raiseRoomLinked) {
+    lines.push('✓ Raise Room checklist linked — open Raise Room to review');
+  }
+  if (lines.length === 1) {
+    lines.push('✓ Tasks queued in build queue');
+  }
+  return lines.join('\n');
+}
+
+export function formatAgentRunAnswer(
+  agentName: string,
+  template: string,
+  output: WorkforceAgentOutput,
+  answerProvider: 'RULE_BASED' | 'LLM',
+  runtime?: WorkforceRuntimeResult,
+): string {
+  const label = WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? agentName;
+  const intent: WorkforceIntent = { template, label, confidence: 'explicit' };
+  return formatOrchestratorCopilotAnswer(intent, output, answerProvider, runtime).replace(
+    'Routed to your',
+    `**${agentName}** ran as your`,
+  );
+}
+
+export function buildWorkforceGithubContext(input: {
+  repoFullName: string | null;
+  recentCommits?: { message: string }[];
+  openTasks?: string[];
+}): string {
+  if (!input.repoFullName) return '';
+  const lines = [`Connected repo: ${input.repoFullName}`];
+  if (input.recentCommits?.length) {
+    lines.push(
+      'Recent commits:',
+      ...input.recentCommits.slice(0, 5).map((c) => `- ${c.message.split('\n')[0].slice(0, 120)}`),
+    );
+  }
+  if (input.openTasks?.length) {
+    lines.push('Open tasks:', ...input.openTasks.slice(0, 5).map((t) => `- ${t}`));
+  }
+  return `\n\n---\nProject context:\n${lines.join('\n')}`;
+}
+
 /** Default Copilot prompts when a workforce template card is clicked. */
 export const WORKFORCE_COPILOT_PROMPTS: Record<string, string> = {
   PRODUCT_MANAGER:
@@ -349,20 +446,24 @@ export function formatOrchestratorCopilotAnswer(
   intent: WorkforceIntent,
   output: WorkforceAgentOutput,
   answerProvider: 'RULE_BASED' | 'LLM',
+  runtime?: WorkforceRuntimeResult,
 ): string {
   const providerNote =
     answerProvider === 'LLM' ? ' (via your connected LLM)' : ' (project memory + templates)';
   const taskLines = output.tasks.map((t, i) => `${i + 1}. ${t}`).join('\n');
   const planLines = output.buildPlan.map((s, i) => `${i + 1}. ${s}`).join('\n');
   const issueLines =
-    output.githubIssues.length > 0
+    output.githubIssues.length > 0 && !runtime?.githubIssuesCreated
       ? `\n\nGitHub issues queued:\n${output.githubIssues.map((i) => `• ${i}`).join('\n')}`
       : '';
 
-  return [
+  const parts = [
     `**${output.title}**`,
     '',
-    `Routed to your **${intent.label}** worker${providerNote}. Tasks are in your build queue — open Memory to review or sync to GitHub.`,
+    `Routed to your **${intent.label}** worker${providerNote}.`,
+    runtime
+      ? ''
+      : 'Tasks are in your build queue — open Memory to review or sync to GitHub.',
     '',
     output.summary,
     '',
@@ -372,9 +473,13 @@ export function formatOrchestratorCopilotAnswer(
     '**Build plan**',
     planLines,
     issueLines,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  ];
+
+  if (runtime) {
+    parts.push('', formatWorkforceRuntimeSummary(runtime));
+  }
+
+  return parts.filter(Boolean).join('\n');
 }
 
 export function buildWorkforceAgentSystemPrompt(templateKey: string, agentName: string, projectName: string): string {

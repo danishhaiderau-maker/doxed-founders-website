@@ -101,8 +101,18 @@ export default function AgentDetailClient({ slug }: { slug: string }) {
                     try {
                       const r = await runAgent(agent.id, prompt, session.accessToken!);
                       setOutput(r.output);
+                      const runtimeNote = r.runtime
+                        ? [
+                            r.runtime.githubIssuesCreated > 0
+                              ? `${r.runtime.githubIssuesCreated} GitHub issue(s)`
+                              : null,
+                            r.runtime.cursorDispatched ? 'Cursor started' : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : '';
                       setMsg(
-                        `Run complete (${r.creditsSpent} credits${r.answerProvider === 'LLM' ? ' · LLM' : ''})`,
+                        `Run complete (${r.creditsSpent} credits${r.answerProvider === 'LLM' ? ' · LLM' : ''}${runtimeNote ? ` · ${runtimeNote}` : ''})`,
                       );
                     } catch (e) {
                       setMsg(e instanceof Error ? e.message : 'Run failed');

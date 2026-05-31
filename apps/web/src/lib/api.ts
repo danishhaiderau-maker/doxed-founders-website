@@ -2065,6 +2065,14 @@ export function runAgent(agentId: string, prompt: string, token: string) {
     runId: string;
     creditsSpent: number;
     answerProvider?: 'RULE_BASED' | 'LLM';
+    formattedAnswer?: string;
+    runtime?: {
+      toolsUsed: string[];
+      githubIssuesCreated: number;
+      githubRepo: string | null;
+      cursorDispatched: boolean;
+      cursorAgentUrl: string | null;
+    };
     output: {
       title: string;
       summary: string;
@@ -2476,6 +2484,15 @@ export function copilotAsk(prompt: string, token: string, agentTemplate?: string
     llmErrors?: string[];
     routedAgent?: { template: string; label: string };
     orchestrator?: { title: string; tasks: string[]; taskCount: number };
+    runtime?: {
+      toolsUsed: string[];
+      githubIssuesCreated: number;
+      githubRepo: string | null;
+      cursorDispatched: boolean;
+      cursorAgentUrl: string | null;
+      communityDraftSaved?: boolean;
+      raiseRoomLinked?: boolean;
+    };
     stats: Record<string, number>;
   }>(
     '/copilot/ask',

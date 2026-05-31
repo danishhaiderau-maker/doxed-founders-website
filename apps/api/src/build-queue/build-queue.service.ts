@@ -19,8 +19,11 @@ import {
   CommandBarIntent,
   WORKFORCE_TEMPLATES,
   WorkforceAgentOutput,
+  WorkforceRuntimeResult,
   buildCursorCopyBlock,
   buildWorkforceAgentSystemPrompt,
+  buildWorkforceGithubContext,
+  emptyWorkforceRuntime,
   mergeWorkforceAgentWithLlm,
   processCommandBar,
   runWorkforceAgent,
@@ -550,24 +553,209 @@ export class BuildQueueService {
     const projectName = project?.name ?? founder.name;
     const label = WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template;
 
+    const repo = await this.github.resolveRepo(
+      userId,
+      founder.githubRepoFullName,
+      project?.githubRepoFullName,
+    );
+    const recentCommits = repo ? await this.github.listCommits(userId, repo, 5).catch(() => []) : [];
+    const openTasks = await this.prisma.buildQueueItem.findMany({
+      where: {
+        founderId: founder.id,
+        kind: BuildQueueItemKind.TASK,
+        status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+      },
+      take: 5,
+      orderBy: { updatedAt: 'desc' },
+    });
+
     let output = runWorkforceAgent(template, prompt, projectName);
     let answerProvider: 'RULE_BASED' | 'LLM' = 'RULE_BASED';
 
     const systemPrompt = buildWorkforceAgentSystemPrompt(template, label, projectName);
-    const llmText = await this.builder.tryAiCompletion(userId, systemPrompt, prompt);
+    const contextBlock = buildWorkforceGithubContext({
+      repoFullName: repo,
+      recentCommits,
+      openTasks: openTasks.map((t) => t.title),
+    });
+    const llmText = await this.builder.tryAiCompletion(
+      userId,
+      systemPrompt,
+      `${prompt}${contextBlock}`,
+    );
     if (llmText) {
       output = mergeWorkforceAgentWithLlm(output, llmText);
       answerProvider = 'LLM';
     }
 
-    await this.createFromOrchestratorOutput(userId, template, prompt, output);
+    const ideaId = await this.createFromOrchestratorOutput(userId, template, prompt, output);
+    const runtime = ideaId
+      ? await this.executeWorkforceRuntime(userId, template, ideaId, output)
+      : emptyWorkforceRuntime(template);
+
+    if (ideaId) {
+      await this.emitWorkforceComplete(userId, founder.id, project?.id, template, output, runtime, {
+        orchestrator: true,
+        ideaId,
+      });
+    }
 
     return {
       output,
       answerProvider,
       template,
       label,
+      runtime,
+      ideaId,
     };
+  }
+
+  async executeWorkforceRuntime(
+    userId: string,
+    template: string,
+    ideaId: string,
+    output: WorkforceAgentOutput,
+  ): Promise<WorkforceRuntimeResult> {
+    const runtime = emptyWorkforceRuntime(template);
+    const founder = await this.requireFounder(userId);
+    const project = founder.projects[0];
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    const idea = await this.prisma.buildQueueItem.findUnique({ where: { id: ideaId } });
+    if (!idea) return runtime;
+
+    const repo = await this.github.resolveRepo(
+      userId,
+      founder.githubRepoFullName,
+      project?.githubRepoFullName,
+    );
+
+    if (
+      runtime.permissions.includes('github_issues') &&
+      output.githubIssues.length > 0 &&
+      repo &&
+      (await this.github.hasToken(userId))
+    ) {
+      const issueItems = await this.prisma.buildQueueItem.findMany({
+        where: {
+          parentId: ideaId,
+          kind: BuildQueueItemKind.GITHUB_ISSUE,
+          githubIssueUrl: null,
+          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        },
+      });
+      if (issueItems.length > 0) {
+        runtime.githubIssuesCreated = await this.publishIssueRows(
+          userId,
+          founder.id,
+          issueItems,
+          output.summary,
+        );
+        if (runtime.githubIssuesCreated > 0) {
+          runtime.toolsUsed.push('github_issues');
+          runtime.githubRepo = repo;
+          await this.events.emit({
+            founderId: founder.id,
+            projectId: project?.id,
+            userId,
+            type: FounderEventType.GITHUB_ISSUE_CREATED,
+            source: 'copilot',
+            title: `Created ${runtime.githubIssuesCreated} GitHub issue(s)`,
+            payload: { created: runtime.githubIssuesCreated, repo, template, ideaId },
+          });
+        }
+      }
+    }
+
+    if (
+      runtime.permissions.includes('cursor_agent') &&
+      settings?.defaultProvider === 'CURSOR' &&
+      idea.cursorPrompt
+    ) {
+      try {
+        const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
+          spec: output.summary,
+          cursorPrompt: idea.cursorPrompt,
+          repository: repo ?? founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined,
+        });
+        runtime.cursorDispatched = true;
+        runtime.cursorAgentUrl = dispatch.agentUrl ?? null;
+        runtime.toolsUsed.push('cursor_agent');
+        await this.prisma.buildQueueItem.update({
+          where: { id: ideaId },
+          data: { status: BuildQueueStatus.IN_PROGRESS },
+        });
+        await this.events.emit({
+          founderId: founder.id,
+          projectId: project?.id,
+          userId,
+          type: FounderEventType.CURSOR_BUILD_SESSION,
+          source: 'cursor',
+          title: `Cursor agent started for ${labelFromTemplate(template)}`,
+          payload: { agentUrl: dispatch.agentUrl, ideaId, template },
+        });
+      } catch {
+        /* Cursor optional */
+      }
+    }
+
+    if (runtime.permissions.includes('community_draft') && output.summary.trim()) {
+      runtime.communityDraftSaved = true;
+      runtime.toolsUsed.push('community_draft');
+      await this.notifications.notifyUser(userId, {
+        type: NotificationType.BUILD_QUEUE,
+        title: `${labelFromTemplate(template)} draft ready`,
+        body: output.summary.slice(0, 180),
+        link: '/founder-den?tab=community',
+      });
+    }
+
+    if (runtime.permissions.includes('raise_room')) {
+      runtime.raiseRoomLinked = true;
+      runtime.toolsUsed.push('raise_room');
+    }
+
+    return runtime;
+  }
+
+  private async emitWorkforceComplete(
+    userId: string,
+    founderId: string,
+    projectId: string | undefined,
+    template: string,
+    output: WorkforceAgentOutput,
+    runtime: WorkforceRuntimeResult,
+    payload: Record<string, unknown>,
+    eventSource: 'copilot' | 'agent' = 'copilot',
+  ) {
+    await this.events.emit({
+      founderId,
+      projectId,
+      userId,
+      type: FounderEventType.AGENT_RUN_COMPLETE,
+      source: eventSource,
+      title: `${labelFromTemplate(template)}: ${output.title.slice(0, 80)}`,
+      payload: {
+        ...payload,
+        template,
+        taskCount: output.tasks.length,
+        githubIssuesCreated: runtime.githubIssuesCreated,
+        cursorDispatched: runtime.cursorDispatched,
+        toolsUsed: runtime.toolsUsed,
+      },
+    });
+
+    const actionParts = [`${output.tasks.length} tasks queued`];
+    if (runtime.githubIssuesCreated > 0) {
+      actionParts.push(`${runtime.githubIssuesCreated} GitHub issue(s) created`);
+    }
+    if (runtime.cursorDispatched) actionParts.push('Cursor agent started');
+
+    await this.notifications.notifyUser(userId, {
+      type: NotificationType.AGENT_RESULT,
+      title: `${labelFromTemplate(template)}: ${output.title.slice(0, 50)}`,
+      body: actionParts.join(' · '),
+      link: '/founder-den?tab=build',
+    });
   }
 
   async createFromOrchestratorOutput(
@@ -575,12 +763,12 @@ export class BuildQueueService {
     template: string,
     prompt: string,
     output: WorkforceAgentOutput,
-  ) {
+  ): Promise<string | null> {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: { projects: { take: 1 } },
     });
-    if (!founder) return;
+    if (!founder) return null;
 
     const project = founder.projects[0];
     const source = BuildQueueSource.AGENT;
@@ -640,22 +828,7 @@ export class BuildQueueService {
       ),
     ]);
 
-    await this.events.emit({
-      founderId: founder.id,
-      projectId: project?.id,
-      userId,
-      type: FounderEventType.AGENT_RUN_COMPLETE,
-      source: 'copilot',
-      title: `${labelFromTemplate(template)}: ${output.title.slice(0, 80)}`,
-      payload: { orchestrator: true, template, taskCount: output.tasks.length, ideaId: idea.id },
-    });
-
-    await this.notifications.notifyUser(userId, {
-      type: NotificationType.AGENT_RESULT,
-      title: `${labelFromTemplate(template)} queued ${output.tasks.length} tasks`,
-      body: output.summary.slice(0, 160),
-      link: '/founder-den?tab=build',
-    });
+    return idea.id;
   }
 
   async createFromAgentRun(
@@ -664,12 +837,12 @@ export class BuildQueueService {
     agent: { template: string; slug: string; project?: { name: string } | null; founder: { name: string } },
     prompt: string,
     output: ReturnType<typeof runWorkforceAgent>,
-  ) {
+  ): Promise<string | null> {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: { projects: { take: 1 } },
     });
-    if (!founder) return;
+    if (!founder) return null;
 
     const project = founder.projects[0];
     const source = BuildQueueSource.AGENT;
@@ -729,22 +902,25 @@ export class BuildQueueService {
       ),
     ]);
 
-    await this.events.emit({
-      founderId: founder.id,
-      projectId: project?.id,
-      userId,
-      type: FounderEventType.AGENT_RUN_COMPLETE,
-      source: 'agent',
-      title: output.title.slice(0, 120),
-      payload: { agentRunId, taskCount: output.tasks.length },
-    });
+    return idea.id;
+  }
 
-    await this.notifications.notifyUser(userId, {
-      type: NotificationType.AGENT_RESULT,
-      title: `Agent: ${output.title.slice(0, 60)}`,
-      body: `${output.tasks.length} tasks added to your build queue.`,
-      link: '/founder-den?tab=build',
-    });
+  async finalizeAgentRun(
+    userId: string,
+    template: string,
+    ideaId: string | null,
+    output: WorkforceAgentOutput,
+    meta: { agentSlug: string; agentRunId: string; marketplace: true },
+  ) {
+    if (!ideaId) return emptyWorkforceRuntime(template);
+    const runtime = await this.executeWorkforceRuntime(userId, template, ideaId, output);
+    const founder = await this.requireFounder(userId);
+    const project = founder.projects[0];
+    await this.emitWorkforceComplete(userId, founder.id, project?.id, template, output, runtime, {
+      ...meta,
+      ideaId,
+    }, 'agent');
+    return runtime;
   }
 
   async publishGitHubIssues(userId: string) {
