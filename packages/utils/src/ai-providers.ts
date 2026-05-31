@@ -1,4 +1,4 @@
-export type AiProviderConnectMode = 'none' | 'api_key' | 'remote_agent';
+export type AiProviderConnectMode = 'none' | 'api_key' | 'remote_agent' | 'founder_node';
 
 export type AiProviderKey =
   | 'RULE_BASED'
@@ -6,6 +6,8 @@ export type AiProviderKey =
   | 'ANTHROPIC'
   | 'GEMINI'
   | 'DEEPSEEK'
+  | 'OPENROUTER'
+  | 'OLLAMA_LOCAL'
   | 'OPENHANDS'
   | 'CURSOR';
 
@@ -22,6 +24,10 @@ export type AiProviderConfig = {
 
 export function isRemoteAgentProvider(key: string): boolean {
   return key === 'OPENHANDS' || key === 'CURSOR';
+}
+
+export function isFounderNodeAiProvider(key: string): boolean {
+  return key === 'OLLAMA_LOCAL';
 }
 
 export const AI_PROVIDERS: AiProviderConfig[] = [
@@ -69,6 +75,26 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     defaultModel: 'deepseek-chat',
     billTip: 'Remote LLM — OpenAI-compatible DeepSeek key for specs and Founder Brain.',
     credentialProvider: 'deepseek',
+  },
+  {
+    key: 'OPENROUTER',
+    label: 'OpenRouter (BYO models)',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    defaultModel: 'openrouter/auto',
+    billTip:
+      'One API key — route Copilot and Quick Build to Claude, GPT, Llama, DeepSeek, and more. Billed on your OpenRouter account.',
+    credentialProvider: 'openrouter',
+  },
+  {
+    key: 'OLLAMA_LOCAL',
+    label: 'Ollama (local via Founder Node)',
+    connectMode: 'founder_node',
+    needsApiKey: false,
+    defaultModel: 'llama3.2',
+    billTip:
+      'Runs on your desktop via Founder Node + Ollama. Prompts stay on your machine — zero cloud inference cost.',
+    credentialProvider: 'ollama',
   },
   {
     key: 'OPENHANDS',

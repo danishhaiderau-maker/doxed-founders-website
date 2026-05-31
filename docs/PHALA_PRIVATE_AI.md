@@ -17,12 +17,12 @@ Route **Founder Copilot** chat completions through Phala when a founder enables 
 
 Phala docs: https://docs.phala.com — use their hosted inference or deploy a model in a TEE.
 
-### Tier 2 — Founder Node + local vault (already started)
+### Tier 2 — Founder Node + local vault (Step 1 shipped)
 
-Founder Node tray app keeps `.env` and repo memory local. Phala complements this:
+Founder Node tray app keeps vault memory local. **Step 2 BYO AI** adds Ollama inference via the same node — see `docs/BYO_AI.md`.
 
-- **Local-only mode**: Node holds secrets; Copilot uses rule-based + GitHub sync (current).
-- **Hybrid mode**: Node encrypts a bundle; API forwards to Phala with attestation check before decrypting in TEE.
+- **Local-only mode**: Node holds secrets; Copilot uses Ollama or rule-based + GitHub sync.
+- **Hybrid mode** (Step 3): Node encrypts a bundle; API forwards to Phala with attestation check before decrypting in TEE.
 
 ### Tier 3 — TEE-attested agents
 

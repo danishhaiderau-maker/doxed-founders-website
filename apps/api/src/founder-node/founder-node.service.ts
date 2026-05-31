@@ -142,6 +142,9 @@ export class FounderNodeService {
         vaultHealthy: input.vaultHealthy,
         platform: input.platform,
         appVersion: input.appVersion,
+        ollamaEnabled: input.ollamaEnabled ?? false,
+        ollamaBaseUrl: input.ollamaBaseUrl ?? null,
+        ollamaModel: input.ollamaModel ?? null,
       },
     });
     return { success: true, status: 'online' as const };

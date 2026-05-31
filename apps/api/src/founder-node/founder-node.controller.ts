@@ -15,11 +15,15 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { FounderNodeGuard, type FounderNodeRequestUser } from './founder-node.guard';
+import { FounderNodeInferenceService } from './founder-node-inference.service';
 import { FounderNodeService } from './founder-node.service';
 
 @Controller('founder-node')
 export class FounderNodeController {
-  constructor(private readonly nodes: FounderNodeService) {}
+  constructor(
+    private readonly nodes: FounderNodeService,
+    private readonly inference: FounderNodeInferenceService,
+  ) {}
 
   @Post('pairing-code')
   createPairingCode(@CurrentUser() user: AuthUser) {
@@ -29,6 +33,11 @@ export class FounderNodeController {
   @Get('status')
   status(@CurrentUser() user: AuthUser) {
     return this.nodes.getStatus(user.id);
+  }
+
+  @Get('ollama-status')
+  ollamaStatus(@CurrentUser() user: AuthUser) {
+    return this.inference.getOllamaStatus(user.id);
   }
 
   @Delete(':nodeId')
@@ -70,5 +79,21 @@ export class FounderNodeController {
     @Body() body: DeviceMemoryPayload,
   ) {
     return this.nodes.syncFromNode(req.founderNode.userId, req.founderNode.nodeDbId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('inference/pending')
+  pendingInference(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.inference.claimPending(req.founderNode.nodeId);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('inference/:jobId/complete')
+  completeInference(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('jobId') jobId: string,
+    @Body() body: { result?: string; error?: string },
+  ) {
+    return this.inference.completeJob(req.founderNode.nodeId, jobId, body);
   }
 }

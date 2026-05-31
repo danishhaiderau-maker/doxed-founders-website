@@ -8,10 +8,12 @@ import {
   buildCursorCloudTaskMessage,
   buildOpenHandsTaskMessage,
   githubRepoToUrl,
+  isFounderNodeAiProvider,
   isRemoteAgentProvider,
   processQuickBuild,
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
+import { FounderNodeInferenceService } from '../founder-node/founder-node-inference.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CursorCredentialMeta,
@@ -29,6 +31,7 @@ export class BuilderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
+    private readonly founderNodeInference: FounderNodeInferenceService,
   ) {}
 
   async getSettings(userId: string) {
@@ -37,6 +40,7 @@ export class BuilderService {
 
     const openHandsMeta = await this.getOpenHandsMeta(userId);
     const cursorMeta = await this.getCursorMeta(userId);
+    const ollamaStatus = await this.founderNodeInference.getOllamaStatus(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -47,12 +51,15 @@ export class BuilderService {
       memoryStorageMode: settings.memoryStorageMode,
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
+      founderNodeAi: ollamaStatus,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected:
           p.connectMode === 'none'
             ? p.key === 'RULE_BASED'
-            : connected.has(p.credentialProvider!),
+            : p.connectMode === 'founder_node'
+              ? ollamaStatus.ollamaReady
+              : connected.has(p.credentialProvider!),
       })),
       githubTokenConnected: Boolean(
         await this.prisma.gitHubConnection.findFirst({
@@ -76,7 +83,14 @@ export class BuilderService {
     if (input.defaultProvider) {
       const cfg = aiProviderConfig(input.defaultProvider);
       if (!cfg) throw new BadRequestException('Unknown provider');
-      if (cfg.needsApiKey || cfg.connectMode === 'remote_agent') {
+      if (cfg.connectMode === 'founder_node') {
+        const ready = await this.founderNodeInference.isOllamaReady(userId);
+        if (!ready) {
+          throw new BadRequestException(
+            'Pair Founder Node with Ollama running locally, or connect a direct Ollama URL first',
+          );
+        }
+      } else if (cfg.needsApiKey || cfg.connectMode === 'remote_agent') {
         const cred = cfg.credentialProvider
           ? await this.prisma.integrationCredential.findUnique({
               where: { userId_provider: { userId, provider: cfg.credentialProvider } },
@@ -130,8 +144,8 @@ export class BuilderService {
 
   async connectAiProvider(userId: string, provider: string, apiKey: string) {
     const cfg = AI_PROVIDERS.find((p) => p.credentialProvider === provider);
-    if (!cfg?.needsApiKey || cfg.connectMode === 'remote_agent') {
-      throw new BadRequestException('Use OpenHands or Cursor connect for remote agents');
+    if (!cfg?.needsApiKey || cfg.connectMode === 'remote_agent' || cfg.connectMode === 'founder_node') {
+      throw new BadRequestException('Use OpenHands, Cursor, or Ollama connect for this provider');
     }
 
     const key = apiKey.trim();
@@ -169,6 +183,50 @@ export class BuilderService {
     });
 
     return { success: true, provider, accountName: verified.accountName };
+  }
+
+  async connectOllama(userId: string, baseUrl: string, model?: string) {
+    const url = baseUrl.trim().replace(/\/+$/, '');
+    if (!url) throw new BadRequestException('Ollama base URL required');
+
+    await this.verifyOllamaUrl(url);
+
+    await this.prisma.integrationCredential.upsert({
+      where: { userId_provider: { userId, provider: 'ollama' } },
+      create: {
+        userId,
+        provider: 'ollama',
+        token: this.crypto.encrypt('local'),
+        metadata: {
+          accountName: 'Ollama (direct URL)',
+          baseUrl: url,
+          model: model?.trim() || 'llama3.2',
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+      update: {
+        metadata: {
+          accountName: 'Ollama (direct URL)',
+          baseUrl: url,
+          model: model?.trim() || 'llama3.2',
+        } as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+    });
+
+    await this.prisma.connectedAppStatus.upsert({
+      where: { userId_provider: { userId, provider: 'ollama' } },
+      create: {
+        userId,
+        provider: 'ollama',
+        connected: true,
+        label: 'Ollama (local)',
+        metadata: { baseUrl: url } as Prisma.InputJsonValue,
+      },
+      update: { connected: true, metadata: { baseUrl: url } as Prisma.InputJsonValue },
+    });
+
+    return { success: true, accountName: 'Ollama (direct URL)', baseUrl: url };
   }
 
   async connectOpenHands(userId: string, baseUrl: string, apiKey: string) {
@@ -407,15 +465,35 @@ export class BuilderService {
     const settings = await this.ensureSettings(userId);
     const usable = await this.listUsableLlmCredentialProviders(userId);
     const order: AiProvider[] = [];
+    const llmErrors: string[] = [];
+
+    if (settings.defaultProvider === AiProvider.OLLAMA_LOCAL) {
+      const nodeResult = await this.founderNodeInference.runViaFounderNode(
+        userId,
+        system,
+        userPrompt,
+        settings.preferredModel,
+      );
+      if (nodeResult.ok) {
+        return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
+      }
+      llmErrors.push(...nodeResult.errors);
+
+      const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
+      if (direct.ok) return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      if (direct.error) llmErrors.push(direct.error);
+    }
 
     if (
       settings.defaultProvider !== AiProvider.RULE_BASED &&
-      !isRemoteAgentProvider(settings.defaultProvider)
+      !isRemoteAgentProvider(settings.defaultProvider) &&
+      !isFounderNodeAiProvider(settings.defaultProvider)
     ) {
       order.push(settings.defaultProvider);
     }
 
     for (const key of [
+      AiProvider.OPENROUTER,
       AiProvider.DEEPSEEK,
       AiProvider.OPENAI,
       AiProvider.ANTHROPIC,
@@ -423,8 +501,6 @@ export class BuilderService {
     ]) {
       if (!order.includes(key)) order.push(key);
     }
-
-    const llmErrors: string[] = [];
 
     for (const provider of order) {
       const cfg = aiProviderConfig(provider);
@@ -472,8 +548,40 @@ export class BuilderService {
         return this.callGemini(apiKey, system, userPrompt, model);
       case AiProvider.DEEPSEEK:
         return this.callDeepSeek(apiKey, system, userPrompt, model);
+      case AiProvider.OPENROUTER:
+        return this.callOpenRouter(apiKey, system, userPrompt, model);
       default:
         return null;
+    }
+  }
+
+  private async tryDirectOllama(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    preferredModel?: string | null,
+  ): Promise<{ ok: true; text: string } | { ok: false; error?: string }> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'ollama' } },
+    });
+    const meta = cred?.metadata as { baseUrl?: string; model?: string } | null;
+    const baseUrl = meta?.baseUrl?.trim();
+    if (!baseUrl) return { ok: false };
+
+    try {
+      const text = await this.callOllama(
+        baseUrl,
+        system,
+        userPrompt,
+        preferredModel?.trim() || meta?.model || 'llama3.2',
+      );
+      if (text?.trim()) return { ok: true, text: text.trim() };
+      return { ok: false, error: 'Ollama returned empty response' };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Direct Ollama request failed',
+      };
     }
   }
 
@@ -538,7 +646,7 @@ export class BuilderService {
     const creds = await this.prisma.integrationCredential.findMany({
       where: {
         userId,
-        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek'] },
+        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter'] },
       },
       select: { provider: true, token: true },
     });
@@ -600,9 +708,21 @@ export class BuilderService {
         }
         return { accountName: 'DeepSeek account' };
       }
+      case 'openrouter': {
+        const res = await fetch('https://openrouter.ai/api/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (!res.ok) throw new BadRequestException('Invalid OpenRouter API key');
+        return { accountName: 'OpenRouter account' };
+      }
       default:
         throw new BadRequestException(`Unknown AI provider: ${provider}`);
     }
+  }
+
+  private async verifyOllamaUrl(baseUrl: string): Promise<void> {
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new BadRequestException('Cannot reach Ollama at that URL — is it running?');
   }
 
   private async callOpenAi(key: string, system: string, user: string, model?: string) {
@@ -682,5 +802,53 @@ export class BuilderService {
     }
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     return data.choices?.[0]?.message?.content ?? null;
+  }
+
+  private async callOpenRouter(key: string, system: string, user: string, model?: string) {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://doxxedcrypto.digital',
+        'X-Title': 'Doxxed Founder OS',
+      },
+      body: JSON.stringify({
+        model: model ?? 'openrouter/auto',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        temperature: 0.4,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content ?? null;
+  }
+
+  private async callOllama(baseUrl: string, system: string, user: string, model: string) {
+    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Ollama HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
+    }
+    const data = (await res.json()) as { message?: { content?: string } };
+    return data.message?.content ?? null;
   }
 }

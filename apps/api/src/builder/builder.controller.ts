@@ -67,6 +67,14 @@ export class BuilderController {
     return this.builder.connectAiProvider(user.id, body.provider, body.apiKey);
   }
 
+  @Post('providers/ollama-connect')
+  connectOllama(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { baseUrl: string; model?: string },
+  ) {
+    return this.builder.connectOllama(user.id, body.baseUrl, body.model);
+  }
+
   @Post('providers/:provider/disconnect')
   disconnectProvider(@CurrentUser() user: AuthUser, @Param('provider') provider: string) {
     return this.builder.disconnectAiProvider(user.id, provider);
