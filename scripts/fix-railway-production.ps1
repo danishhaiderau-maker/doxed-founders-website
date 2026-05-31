@@ -34,10 +34,12 @@ function Read-DotEnv($path) {
 
 $neon = Read-DotEnv $neonFile
 $envMap = Read-DotEnv $selfHost
+$vercelCheck = Read-DotEnv (Join-Path $vaultRoot ".env.vercel.check")
 
 $dbUrl = $neon["DATABASE_URL"]
-if (-not $dbUrl -and $envMap["DATABASE_URL"]) { $dbUrl = $envMap["DATABASE_URL"] }
-$jwt = $envMap["JWT_SECRET"]
+if (-not $dbUrl -and $vercelCheck["DATABASE_URL"]) { $dbUrl = $vercelCheck["DATABASE_URL"] }
+$jwt = $vercelCheck["JWT_SECRET"]
+if (-not $jwt) { $jwt = $envMap["JWT_SECRET"] }
 $cors = $envMap["CORS_ORIGINS"]
 if (-not $cors) { $cors = "https://doxxedcrypto.digital,https://www.doxxedcrypto.digital,https://doxed-founders-website.vercel.app" }
 
