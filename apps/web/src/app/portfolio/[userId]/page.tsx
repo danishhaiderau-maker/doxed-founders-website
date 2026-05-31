@@ -79,7 +79,7 @@ export default function PublicPortfolioPage() {
   return (
     <main className="min-h-screen bg-[#050508]">
       <header className="border-b border-[var(--color-border)]">
-        <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-4 px-6 py-5">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-semibold">Paper Trading Portfolio</h1>
@@ -88,7 +88,7 @@ export default function PublicPortfolioPage() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
+      <div className="mx-auto max-w-6xl space-y-6 px-6 py-8">
         {loading && (
           <p className="text-sm text-[var(--color-muted)]">Loading portfolio…</p>
         )}

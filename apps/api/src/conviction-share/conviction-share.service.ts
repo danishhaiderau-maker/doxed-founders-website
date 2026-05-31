@@ -5,8 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { buildOAuth1Header, verifyOAuth1Credentials } from '../x-social/x-oauth1';
 import { uploadTweetImage } from '../x-social/x-media-upload.util';
+import { XPostingResolverService } from '../x-social/x-posting-resolver.service';
 import { XShareMediaService } from '../x-social/x-share-media.service';
 
 type PostResult = { ok: true; tweetId: string; tweetUrl: string } | { ok: false; reason: string };
@@ -18,41 +18,11 @@ export class ConvictionShareService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shareMedia: XShareMediaService,
+    private readonly xPosting: XPostingResolverService,
   ) {}
 
   async getXConnectionStatus(userId: string) {
-    const account = await this.prisma.oAuthAccount.findFirst({
-      where: { userId, provider: 'twitter' },
-      include: { user: { select: { twitterHandle: true } } },
-    });
-    const hasTokens = Boolean(account?.accessToken && account?.accessTokenSecret);
-    let canPostInstantly = false;
-    let tokenExpired = false;
-
-    if (hasTokens && process.env.TWITTER_API_KEY && process.env.TWITTER_API_SECRET) {
-      const check = await verifyOAuth1Credentials({
-        consumerKey: process.env.TWITTER_API_KEY.trim(),
-        consumerSecret: process.env.TWITTER_API_SECRET.trim(),
-        accessToken: account!.accessToken!,
-        accessTokenSecret: account!.accessTokenSecret!,
-      });
-      canPostInstantly = check.ok;
-      tokenExpired = Boolean(check.expired);
-    }
-
-    return {
-      connected: Boolean(account),
-      canPostInstantly,
-      tokenExpired,
-      twitterHandle: account?.user.twitterHandle ?? null,
-      message: canPostInstantly
-        ? 'Post Proof of Conviction to your X in one tap.'
-        : tokenExpired
-          ? 'Your X token expired — sign out and sign in with X again to post instantly.'
-          : account
-            ? 'Reconnect with X to enable one-click posting.'
-            : 'Connect X at sign-in to post instantly — no download or paste.',
-    };
+    return this.xPosting.getConnectionStatus(userId);
   }
 
   async postProofOfConviction(
@@ -62,29 +32,22 @@ export class ConvictionShareService {
     const account = await this.prisma.oAuthAccount.findFirst({
       where: { userId, provider: 'twitter' },
     });
-    if (!account?.accessToken || !account.accessTokenSecret) {
+    if (!account?.accessToken) {
       throw new BadRequestException(
-        'Connect your X account to post instantly. Sign out and sign in with X, or use Share via composer.',
+        'Connect your X account to post instantly. Use Open X composer or reconnect X.',
       );
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { twitterHandle: true },
+    const creds = this.xPosting.oauth1Credentials({
+      ...account,
+      user: { twitterHandle: null },
     });
-
-    const creds = {
-      consumerKey: process.env.TWITTER_API_KEY!.trim(),
-      consumerSecret: process.env.TWITTER_API_SECRET!.trim(),
-      accessToken: account.accessToken,
-      accessTokenSecret: account.accessTokenSecret,
-    };
 
     const side = input.pnlPercent >= 0 ? 'pump' : 'dump';
     const imageBuffer = this.shareMedia.pickImageBuffer(side);
     let mediaIds: string[] | undefined;
 
-    if (imageBuffer) {
+    if (imageBuffer && creds) {
       const uploaded = await uploadTweetImage(creds, imageBuffer, 'proof-of-conviction.png');
       if (uploaded.ok) {
         mediaIds = [uploaded.mediaId];
@@ -93,41 +56,15 @@ export class ConvictionShareService {
       }
     }
 
-    const url = 'https://api.twitter.com/2/tweets';
-    const authorization = buildOAuth1Header('POST', url, creds);
-    const body: { text: string; media?: { media_ids: string[] } } = {
-      text: input.text.slice(0, 280),
-    };
-    if (mediaIds?.length) body.media = { media_ids: mediaIds };
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: authorization,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errBody = await res.text();
-      this.logger.warn(`User tweet failed: ${res.status} ${errBody}`);
-      throw new BadRequestException(
-        'Could not post to X. Your token may have expired — sign out and sign in with X again.',
-      );
+    const result = await this.xPosting.postTweet(userId, input.text, mediaIds);
+    if (!result.ok) {
+      throw new BadRequestException(result.reason);
     }
 
-    const data = (await res.json()) as { data?: { id: string } };
-    const tweetId = data.data?.id;
-    if (!tweetId) {
-      throw new BadRequestException('X did not return a tweet id');
-    }
-
-    const handle = user?.twitterHandle?.replace(/^@/, '') ?? 'i';
     return {
       ok: true,
-      tweetId,
-      tweetUrl: `https://x.com/${handle}/status/${tweetId}`,
+      tweetId: result.tweetId,
+      tweetUrl: result.tweetUrl,
     };
   }
 

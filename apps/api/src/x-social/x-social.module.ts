@@ -5,12 +5,25 @@ import { SocialSignalsService } from './social-signals.service';
 import { XPostingService } from './x-posting.service';
 import { XShareMediaService } from './x-share-media.service';
 import { UserXPostingService } from './user-x-posting.service';
+import { XPostingResolverService } from './x-posting-resolver.service';
 import { XSocialController } from './x-social.controller';
 
 @Module({
   imports: [NotificationsModule, AuthModule],
   controllers: [XSocialController],
-  providers: [XPostingService, SocialSignalsService, XShareMediaService, UserXPostingService],
-  exports: [XPostingService, SocialSignalsService, XShareMediaService, UserXPostingService],
+  providers: [
+    XPostingService,
+    SocialSignalsService,
+    XShareMediaService,
+    UserXPostingService,
+    XPostingResolverService,
+  ],
+  exports: [
+    XPostingService,
+    SocialSignalsService,
+    XShareMediaService,
+    UserXPostingService,
+    XPostingResolverService,
+  ],
 })
 export class XSocialModule {}

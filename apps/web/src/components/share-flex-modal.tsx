@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { signIn } from 'next-auth/react';
 import {
   buildPortfolioShareUrl,
   buildProofOfConvictionMessage,
@@ -304,10 +305,20 @@ export function ShareFlexModal({
             ) : (
               <>
                 {xStatus.message}{' '}
-                <Link href="/login" className="font-medium underline hover:text-white">
-                  {xStatus.tokenExpired ? 'Sign out & sign in with X again' : 'Sign in with X'}
-                </Link>
-                {!xStatus.tokenExpired && ' to enable Post Instantly.'}
+                {xStatus.tokenExpired ? (
+                  <button
+                    type="button"
+                    onClick={() => signIn('twitter', { callbackUrl: window.location.href })}
+                    className="font-medium underline hover:text-white"
+                  >
+                    Reconnect X
+                  </button>
+                ) : (
+                  <Link href="/login" className="font-medium underline hover:text-white">
+                    Sign in with X
+                  </Link>
+                )}
+                {!canInstant && !xStatus.tokenExpired && ' to enable Post Instantly.'}
               </>
             )}
           </div>

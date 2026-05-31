@@ -64,6 +64,7 @@ function PaperTradingPageContent() {
   const [tradeTimeHorizon, setTradeTimeHorizon] = useState('');
   const [lastFeedPostId, setLastFeedPostId] = useState<string | null>(null);
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
+  const [tradeMode, setTradeMode] = useState<'MARKET' | 'LIMIT'>('MARKET');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resetInfo, setResetInfo] = useState<{
@@ -337,17 +338,23 @@ function PaperTradingPageContent() {
   }
 
   async function handleCreateLimitOrder() {
-    if (!userId || !limitProjectId || !limitTargetPrice.trim()) return;
+    if (!userId || !limitTargetPrice.trim()) return;
+    if (limitSide === 'SELL' && !limitProjectId) {
+      setError('Select a position for limit sell');
+      return;
+    }
     setError(null);
     setLoading(true);
     try {
-      const pos = portfolio?.positions.find((p) => p.projectId === limitProjectId);
+      const pos = limitProjectId
+        ? portfolio?.positions.find((p) => p.projectId === limitProjectId)
+        : undefined;
       await createPaperLimitOrder({
         userId,
         side: limitSide,
         trigger: limitSide === 'BUY' ? 'LTE' : limitTrigger,
         targetPriceUsd: Number(limitTargetPrice),
-        projectId: limitSide === 'SELL' ? limitProjectId : undefined,
+        projectId: limitSide === 'SELL' ? (limitProjectId ?? undefined) : undefined,
         amountUsd: limitSide === 'BUY' ? Number(amountUsd) : undefined,
         sellPercent: limitSide === 'SELL' ? 100 : undefined,
         dexscreenerUrl:
@@ -660,9 +667,12 @@ function PaperTradingPageContent() {
                 <div className="mt-4 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setSide('BUY')}
+                    onClick={() => {
+                      setTradeMode('MARKET');
+                      setSide('BUY');
+                    }}
                     className={`flex-1 rounded-lg py-2 text-sm font-medium ${
-                      side === 'BUY'
+                      tradeMode === 'MARKET' && side === 'BUY'
                         ? 'bg-[var(--color-success)] text-white'
                         : 'border border-[var(--color-border)] text-[var(--color-muted)]'
                     }`}
@@ -671,14 +681,34 @@ function PaperTradingPageContent() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSide('SELL')}
+                    onClick={() => {
+                      setTradeMode('MARKET');
+                      setSide('SELL');
+                    }}
                     className={`flex-1 rounded-lg py-2 text-sm font-medium ${
-                      side === 'SELL'
+                      tradeMode === 'MARKET' && side === 'SELL'
                         ? 'bg-[var(--color-danger)] text-white'
                         : 'border border-[var(--color-border)] text-[var(--color-muted)]'
                     }`}
                   >
                     Sell
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTradeMode('LIMIT');
+                      setLimitProjectId(portfolio?.positions[0]?.projectId ?? null);
+                      if (preview.marketPreview?.priceUsd) {
+                        setLimitTargetPrice(String(preview.marketPreview.priceUsd));
+                      }
+                    }}
+                    className={`flex-1 rounded-lg py-2 text-sm font-medium ${
+                      tradeMode === 'LIMIT'
+                        ? 'bg-amber-500 text-black'
+                        : 'border border-amber-500/40 text-amber-200'
+                    }`}
+                  >
+                    Limit
                   </button>
                 </div>
                 <label className="mt-4 block text-sm">
@@ -692,12 +722,12 @@ function PaperTradingPageContent() {
                     className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
                   />
                 </label>
-                {side === 'BUY' && (
+                {tradeMode === 'MARKET' && side === 'BUY' && (
                   <p className="mt-3 text-xs text-[var(--color-muted)]">
                     You&apos;ll confirm risks and optional thesis before buying.
                   </p>
                 )}
-                {side === 'SELL' && (
+                {tradeMode === 'MARKET' && side === 'SELL' && (
                   <label className="mt-4 block text-sm">
                     <span className="text-[var(--color-muted)]">
                       Why are you closing? (optional — shows on feed)
@@ -710,6 +740,114 @@ function PaperTradingPageContent() {
                       className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
                     />
                   </label>
+                )}
+                {tradeMode === 'LIMIT' && (
+                  <div className="mt-4 space-y-3 rounded-lg border border-amber-500/30 bg-amber-950/15 p-3">
+                    <p className="text-xs font-medium text-amber-100">Limit order — fills when price hits target</p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLimitSide('BUY');
+                          setLimitTrigger('LTE');
+                          setLimitProjectId(null);
+                        }}
+                        className={`flex-1 rounded-lg py-1.5 text-xs ${
+                          limitSide === 'BUY' ? 'bg-emerald-600 text-white' : 'border border-[var(--color-border)]'
+                        }`}
+                      >
+                        Limit buy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLimitSide('SELL');
+                          setLimitTrigger('GTE');
+                          setLimitProjectId(
+                            portfolio?.positions.find((p) => p.ticker === preview.ticker)?.projectId ??
+                              portfolio?.positions[0]?.projectId ??
+                              null,
+                          );
+                        }}
+                        className={`flex-1 rounded-lg py-1.5 text-xs ${
+                          limitSide === 'SELL' ? 'bg-red-600 text-white' : 'border border-[var(--color-border)]'
+                        }`}
+                      >
+                        Limit sell
+                      </button>
+                    </div>
+                    <label className="block text-xs">
+                      <span className="text-[var(--color-muted)]">Trigger</span>
+                      <select
+                        value={limitSide === 'BUY' ? 'LTE' : limitTrigger}
+                        onChange={(e) => setLimitTrigger(e.target.value as 'GTE' | 'LTE')}
+                        disabled={limitSide === 'BUY'}
+                        className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 disabled:opacity-70"
+                      >
+                        {limitSide === 'BUY' ? (
+                          <option value="LTE">Price ≤ target (buy the dip)</option>
+                        ) : (
+                          <>
+                            <option value="GTE">Price ≥ target (take profit)</option>
+                            <option value="LTE">Price ≤ target (stop loss)</option>
+                          </>
+                        )}
+                      </select>
+                    </label>
+                    <label className="block text-xs">
+                      <span className="text-[var(--color-muted)]">Target price (USD)</span>
+                      <input
+                        type="number"
+                        step="any"
+                        value={limitTargetPrice}
+                        onChange={(e) => setLimitTargetPrice(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                      />
+                    </label>
+                    {limitSide === 'SELL' && !limitProjectId && portfolio && portfolio.positions.length > 0 && (
+                      <label className="block text-xs">
+                        <span className="text-[var(--color-muted)]">Position to sell</span>
+                        <select
+                          value={limitProjectId ?? ''}
+                          onChange={(e) => setLimitProjectId(e.target.value || null)}
+                          className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                        >
+                          <option value="">Select position…</option>
+                          {portfolio.positions.map((p) => (
+                            <option key={p.projectId} value={p.projectId}>
+                              {p.ticker} · {formatUsd(p.marketValue)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    {limitSide === 'BUY' && (
+                      <p className="text-[10px] text-[var(--color-muted)]">
+                        Uses this token and the amount field above for buy size.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (limitSide === 'BUY') {
+                          setLimitProjectId(null);
+                        }
+                        if (!limitProjectId && limitSide === 'SELL') {
+                          setError('Select a position for limit sell');
+                          return;
+                        }
+                        void handleCreateLimitOrder();
+                      }}
+                      disabled={
+                        loading ||
+                        !limitTargetPrice.trim() ||
+                        (limitSide === 'SELL' && !limitProjectId)
+                      }
+                      className="w-full rounded-lg bg-amber-500 py-2 text-sm font-semibold text-black disabled:opacity-50"
+                    >
+                      Place limit {limitSide.toLowerCase()}
+                    </button>
+                  </div>
                 )}
                 {!preview.isDoxxedCurated && side === 'BUY' && (
                   <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
@@ -724,12 +862,16 @@ function PaperTradingPageContent() {
                 <button
                   type="button"
                   onClick={handleTradeClick}
-                  disabled={loading}
+                  disabled={loading || tradeMode === 'LIMIT'}
                   className={`mt-4 w-full rounded-lg py-2.5 text-sm font-medium text-white disabled:opacity-50 ${
                     side === 'SELL' ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-accent)]'
                   }`}
                 >
-                  {loading ? 'Processing…' : `${side === 'BUY' ? 'Buy' : 'Sell'} ${preview.ticker}`}
+                  {loading
+                    ? 'Processing…'
+                    : tradeMode === 'LIMIT'
+                      ? 'Use limit panel above'
+                      : `${side === 'BUY' ? 'Buy' : 'Sell'} ${preview.ticker}`}
                 </button>
               </div>
             )}
@@ -906,9 +1048,16 @@ function PaperTradingPageContent() {
             </div>
           )}
 
-          {limitOrders.length > 0 && (
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+            <div className="flex items-center justify-between gap-2">
               <h2 className="font-semibold">Limit orders</h2>
+              <span className="text-[10px] text-[var(--color-muted)]">Auto-fill ~60s</span>
+            </div>
+            {limitOrders.length === 0 ? (
+              <p className="mt-3 text-xs text-[var(--color-muted)]">
+                No open limits. Load a token → tap <strong className="text-amber-200">Limit</strong> to place buy/sell limits.
+              </p>
+            ) : (
               <ul className="mt-3 space-y-2 text-xs">
                 {limitOrders.map((order) => (
                   <li
@@ -931,10 +1080,10 @@ function PaperTradingPageContent() {
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
+            )}
+          </div>
 
-          {limitProjectId && (
+          {limitProjectId && tradeMode !== 'LIMIT' && (
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
               <div className="flex items-center justify-between">
                 <h2 className="font-semibold">Place limit order</h2>
