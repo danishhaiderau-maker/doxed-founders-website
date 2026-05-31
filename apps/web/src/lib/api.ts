@@ -2175,6 +2175,14 @@ export interface BuilderSettings {
     nodeLabel: string | null;
     directOllamaUrl: string | null;
   };
+  phalaPrivateAi?: {
+    ready: boolean;
+    userKeyConnected: boolean;
+    platformAvailable: boolean;
+    inferenceUrl: string;
+    model: string;
+    docsUrl: string;
+  };
   providers: {
     key: string;
     label: string;
@@ -2218,6 +2226,24 @@ export function connectOllamaDirect(baseUrl: string, model: string | undefined, 
   return apiFetch<{ success: boolean; accountName: string; baseUrl: string }>(
     '/builder/providers/ollama-connect',
     { method: 'POST', body: JSON.stringify({ baseUrl, model }) },
+    token,
+  );
+}
+
+export function connectPhalaDirect(
+  apiKey: string,
+  inferenceUrl: string | undefined,
+  model: string | undefined,
+  token: string,
+) {
+  return apiFetch<{
+    success: boolean;
+    accountName: string;
+    inferenceUrl: string;
+    model: string;
+  }>(
+    '/builder/providers/phala-connect',
+    { method: 'POST', body: JSON.stringify({ apiKey, inferenceUrl, model }) },
     token,
   );
 }

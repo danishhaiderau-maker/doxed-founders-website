@@ -20,9 +20,15 @@ type Props = {
   accessToken: string;
   currentMode: MemoryStorageModeKey;
   onModeChange: (mode: MemoryStorageModeKey) => void;
+  phalaPrivateAi?: {
+    ready: boolean;
+    userKeyConnected: boolean;
+    platformAvailable: boolean;
+    model: string;
+  } | null;
 };
 
-export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: Props) {
+export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, phalaPrivateAi }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -182,6 +188,15 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange }: P
           Install Founder Node →
         </Link>
       </p>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {phalaPrivateAi?.ready && (
+          <span className="rounded-full bg-fuchsia-500/20 px-2.5 py-1 text-[10px] font-semibold text-fuchsia-100">
+            Private AI (Phala TEE)
+            {phalaPrivateAi.model ? ` · ${phalaPrivateAi.model}` : ''}
+          </span>
+        )}
+      </div>
 
       {(currentMode === 'FOUNDER_NODE' || currentMode === 'LOCAL_SYNC') && (
         <div className="mt-4">

@@ -1,80 +1,74 @@
-# Phala private AI — integration options for Founder OS
+# Phala Private AI — Step 3 of the Privacy Stack
 
-Founders on doxxedcrypto.digital need AI that respects repo secrets, strategy, and token plans. Phala Cloud runs workloads in TEEs (Intel TDX / AMD SEV), which fits “private inference” better than sending prompts to a shared SaaS API.
+> **Confidential inference in a hardware TEE — not shared SaaS training.**
 
-## Integration tiers (recommended order)
+After Step 1 (Founder Vault) and Step 2 (BYO AI), founders can route **Founder Copilot** chat through Phala's TEE-backed inference API. Prompts use the same GitHub + tasks context as other LLM providers, but run on confidential hardware when Phala is selected.
 
-### Tier 1 — Private chat LLM (fastest win)
+## What shipped
 
-Route **Founder Copilot** chat completions through Phala when a founder enables “Private AI” in Builder settings.
-
-| Piece | Approach |
+| Piece | Location |
 |-------|----------|
-| API | Add `PHALA_API_KEY` + model endpoint in vault; new `PhalaProvider` in `BuilderService.tryCopilotChatCompletion` |
-| UI | Builder → “Private AI (Phala)” toggle + model picker |
-| Data | Same context block as today (GitHub memory, tasks) — sent to Phala endpoint, not OpenAI/DeepSeek |
-| Safety | No founder API keys in browser; platform or founder-billed Phala key server-side only |
+| `AiProvider.PHALA` | Prisma schema + `@dcf/utils` provider list |
+| Copilot routing | `BuilderService.tryCopilotChatCompletion` — Phala first when default, fallback in provider order |
+| Connect API | `POST /builder/providers/phala-connect` |
+| Builder UI | Settings → Builder → **Private AI — Phala TEE (Step 3)** |
+| Connected stack badge | Founder Vault memory panel when Phala is ready |
+| Platform credits | Optional `PHALA_API_KEY` on Railway — founders without a user key can still use Phala when enabled |
 
-Phala docs: https://docs.phala.com — use their hosted inference or deploy a model in a TEE.
+## Setup (founder BYOK)
 
-### Tier 2 — Founder Node + local vault (Step 1 shipped)
+1. Settings → Builder → **Private AI — Phala TEE**
+2. Paste your Phala / Redpill API key
+3. Optional: custom inference URL (default `https://api.redpill.ai/v1`) and model slug
+4. Set **Default provider** → **Private AI (Phala TEE)**
+5. Ask Copilot — answers show **Private AI (Phala TEE)** in the chat badge
 
-Founder Node tray app keeps vault memory local. **Step 2 BYO AI** adds Ollama inference via the same node — see `docs/BYO_AI.md`.
+Keys are encrypted at rest on the API. The browser never stores the key after save.
 
-- **Local-only mode**: Node holds secrets; Copilot uses Ollama or rule-based + GitHub sync.
-- **Hybrid mode** (Step 3): Node encrypts a bundle; API forwards to Phala with attestation check before decrypting in TEE.
+## Platform-billed inference (optional)
 
-### Tier 3 — TEE-attested agents
+Set on Railway (API service only):
 
-Long-running “Chief of Staff” agents (watch GitHub, draft updates, raise readiness) run as Phala workers:
+```env
+PHALA_API_KEY=...
+PHALA_INFERENCE_URL=https://api.redpill.ai/v1
+PHALA_MODEL=phala/deepseek-chat-v3-0324
+```
 
-1. Cron / webhook triggers worker with `founderId` + signed JWT.
-2. Worker reads repo memory from Neon (encrypted at rest) or Founder Node push.
-3. Outputs: inbox items, suggested build updates, X drafts — same event bus as today.
+When set, founders see **Platform Phala credits enabled** in Builder settings even without pasting their own key. User keys take precedence when connected.
 
-### Tier 4 — Community “Ask this project”
-
-Public project page Q&A uses a **redacted** context (no secrets). Optional Phala deployment per project for founders who pay for isolated inference.
-
-## Architecture sketch
+## Architecture
 
 ```text
 Founder Copilot (web)
        │
        ▼
-  @dcf/api  ──► Builder settings: defaultProvider = PHALA
+@dcf/api  ──► Builder settings: defaultProvider = PHALA
        │
        ├── Rule-based (pressing issue, standup) — no external call
-       ├── DeepSeek / OpenAI — founder BYOK
-       └── Phala TEE inference — platform or founder key
+       ├── DeepSeek / OpenAI / OpenRouter — founder BYOK (Step 2)
+       ├── Ollama — Founder Node (Step 2)
+       └── Phala TEE inference — user key or PHALA_API_KEY
                  │
                  ▼
            GitHub + tasks context (no raw .env)
 ```
 
-## Env vars (production)
-
-```env
-PHALA_API_KEY=...
-PHALA_INFERENCE_URL=https://...  # Phala Cloud endpoint
-PHALA_MODEL=deepseek-v3  # or model slug from Phala
-```
-
-## Privacy messaging for founders
+## Privacy messaging
 
 - **Cloud memory**: GitHub + tasks on Neon (encrypted DB).
 - **Private AI (Phala)**: Prompts processed in TEE; not used for public model training.
 - **Founder Node**: Secrets never leave the machine unless founder opts into hybrid sync.
 
-## Next implementation steps
+## Roadmap (Steps 4–5)
 
-1. Add `AiProvider.PHALA` + credential provider in Prisma/schema.
-2. Implement `completionWithProvider('PHALA', ...)` in `builder.service.ts`.
-3. Builder settings UI: Phala API key + “Use for Copilot chat” toggle.
-4. Document in Founder OS Connected stack: “Private AI (Phala)” badge when connected.
+4. **Founder Node v2** — vector DB, local agents, bidirectional sync
+5. **Attestation dashboard** — verify TEE workload + memory integrity (Phala receipt headers)
 
 ## References
 
 - Phala Cloud: https://phala.network
 - Phala docs: https://docs.phala.com
-- Founder Node vault: `/founder-node` in the web app
+- Confidential AI API: https://docs.phala.com/phala-cloud/confidential-ai/confidential-model/confidential-ai-api
+- Step 1: `docs/FOUNDER_VAULT.md`
+- Step 2: `docs/BYO_AI.md`

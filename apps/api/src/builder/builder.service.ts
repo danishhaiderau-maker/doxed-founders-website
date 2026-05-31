@@ -25,6 +25,14 @@ import {
   dispatchOpenHandsTask,
   verifyOpenHandsConnection,
 } from './openhands.client';
+import {
+  DEFAULT_PHALA_INFERENCE_URL,
+  DEFAULT_PHALA_MODEL,
+  type PhalaCredentialMeta,
+  callPhalaChat,
+  normalizePhalaBaseUrl,
+  verifyPhalaConnection,
+} from './phala.client';
 
 @Injectable()
 export class BuilderService {
@@ -41,6 +49,7 @@ export class BuilderService {
     const openHandsMeta = await this.getOpenHandsMeta(userId);
     const cursorMeta = await this.getCursorMeta(userId);
     const ollamaStatus = await this.founderNodeInference.getOllamaStatus(userId);
+    const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -52,14 +61,17 @@ export class BuilderService {
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       founderNodeAi: ollamaStatus,
+      phalaPrivateAi: phalaStatus,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
         connected:
           p.connectMode === 'none'
             ? p.key === 'RULE_BASED'
-            : p.connectMode === 'founder_node'
-              ? ollamaStatus.ollamaReady
-              : connected.has(p.credentialProvider!),
+            : p.key === 'PHALA'
+              ? phalaStatus.ready
+              : p.connectMode === 'founder_node'
+                ? ollamaStatus.ollamaReady
+                : connected.has(p.credentialProvider!),
       })),
       githubTokenConnected: Boolean(
         await this.prisma.gitHubConnection.findFirst({
@@ -88,6 +100,13 @@ export class BuilderService {
         if (!ready) {
           throw new BadRequestException(
             'Pair Founder Node with Ollama running locally, or connect a direct Ollama URL first',
+          );
+        }
+      } else if (input.defaultProvider === AiProvider.PHALA) {
+        const phala = await this.resolvePhalaCredentials(userId);
+        if (!phala) {
+          throw new BadRequestException(
+            'Connect Phala Private AI or enable platform Phala credits before setting as default',
           );
         }
       } else if (cfg.needsApiKey || cfg.connectMode === 'remote_agent') {
@@ -144,8 +163,13 @@ export class BuilderService {
 
   async connectAiProvider(userId: string, provider: string, apiKey: string) {
     const cfg = AI_PROVIDERS.find((p) => p.credentialProvider === provider);
-    if (!cfg?.needsApiKey || cfg.connectMode === 'remote_agent' || cfg.connectMode === 'founder_node') {
-      throw new BadRequestException('Use OpenHands, Cursor, or Ollama connect for this provider');
+    if (
+      !cfg?.needsApiKey ||
+      cfg.connectMode === 'remote_agent' ||
+      cfg.connectMode === 'founder_node' ||
+      provider === 'phala'
+    ) {
+      throw new BadRequestException('Use OpenHands, Cursor, Ollama, or Phala connect for this provider');
     }
 
     const key = apiKey.trim();
@@ -227,6 +251,64 @@ export class BuilderService {
     });
 
     return { success: true, accountName: 'Ollama (direct URL)', baseUrl: url };
+  }
+
+  async connectPhala(
+    userId: string,
+    apiKey: string,
+    inferenceUrl?: string,
+    model?: string,
+  ) {
+    const key = apiKey.trim();
+    if (!key) throw new BadRequestException('Phala API key required');
+
+    const normalizedUrl = normalizePhalaBaseUrl(
+      inferenceUrl?.trim() || process.env.PHALA_INFERENCE_URL || DEFAULT_PHALA_INFERENCE_URL,
+    );
+    const resolvedModel = model?.trim() || process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL;
+
+    const verified = await verifyPhalaConnection({ apiKey: key, inferenceUrl: normalizedUrl });
+    if (!verified.ok) throw new BadRequestException(verified.reason);
+
+    const encrypted = this.crypto.encrypt(key);
+    const metadata: PhalaCredentialMeta = {
+      accountName: 'Phala Private AI',
+      inferenceUrl: normalizedUrl,
+      model: resolvedModel,
+    };
+
+    await this.prisma.integrationCredential.upsert({
+      where: { userId_provider: { userId, provider: 'phala' } },
+      create: {
+        userId,
+        provider: 'phala',
+        token: encrypted,
+        metadata: metadata as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+      update: {
+        token: encrypted,
+        metadata: metadata as Prisma.InputJsonValue,
+        verifiedAt: new Date(),
+      },
+    });
+
+    await this.prisma.connectedAppStatus.upsert({
+      where: { userId_provider: { userId, provider: 'phala' } },
+      create: {
+        userId,
+        provider: 'phala',
+        connected: true,
+        label: 'Private AI (Phala)',
+        metadata: { inferenceUrl: normalizedUrl, model: resolvedModel } as Prisma.InputJsonValue,
+      },
+      update: {
+        connected: true,
+        metadata: { inferenceUrl: normalizedUrl, model: resolvedModel } as Prisma.InputJsonValue,
+      },
+    });
+
+    return { success: true, accountName: metadata.accountName, inferenceUrl: normalizedUrl, model: resolvedModel };
   }
 
   async connectOpenHands(userId: string, baseUrl: string, apiKey: string) {
@@ -484,6 +566,29 @@ export class BuilderService {
       if (direct.error) llmErrors.push(direct.error);
     }
 
+    if (settings.defaultProvider === AiProvider.PHALA) {
+      const phala = await this.resolvePhalaCredentials(userId);
+      if (phala) {
+        try {
+          const text = await callPhalaChat({
+            apiKey: phala.apiKey,
+            inferenceUrl: phala.inferenceUrl,
+            model: settings.preferredModel ?? phala.model,
+            system,
+            userPrompt,
+          });
+          if (text?.trim()) {
+            return { ok: true, text: text.trim(), provider: AiProvider.PHALA };
+          }
+          llmErrors.push('PHALA: empty response');
+        } catch (err) {
+          llmErrors.push(`PHALA: ${err instanceof Error ? err.message : 'request failed'}`);
+        }
+      } else {
+        llmErrors.push('PHALA: connect Phala Private AI or enable platform credits');
+      }
+    }
+
     if (
       settings.defaultProvider !== AiProvider.RULE_BASED &&
       !isRemoteAgentProvider(settings.defaultProvider) &&
@@ -493,6 +598,7 @@ export class BuilderService {
     }
 
     for (const key of [
+      AiProvider.PHALA,
       AiProvider.OPENROUTER,
       AiProvider.DEEPSEEK,
       AiProvider.OPENAI,
@@ -504,7 +610,30 @@ export class BuilderService {
 
     for (const provider of order) {
       const cfg = aiProviderConfig(provider);
-      if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') continue;
+      if (!cfg?.credentialProvider) continue;
+      if (provider === AiProvider.PHALA) {
+        const phala = await this.resolvePhalaCredentials(userId);
+        if (!phala) continue;
+        const model =
+          provider === settings.defaultProvider
+            ? settings.preferredModel ?? phala.model
+            : phala.model;
+        try {
+          const text = await callPhalaChat({
+            apiKey: phala.apiKey,
+            inferenceUrl: phala.inferenceUrl,
+            model,
+            system,
+            userPrompt,
+          });
+          if (text?.trim()) return { ok: true, text: text.trim(), provider };
+          llmErrors.push(`${provider}: empty response`);
+        } catch (err) {
+          llmErrors.push(`${provider}: ${err instanceof Error ? err.message : 'request failed'}`);
+        }
+        continue;
+      }
+      if (cfg.connectMode !== 'api_key') continue;
       if (!usable.has(cfg.credentialProvider)) continue;
 
       const cred = await this.prisma.integrationCredential.findUnique({
@@ -625,6 +754,61 @@ export class BuilderService {
     return (cred?.metadata as CursorCredentialMeta | null) ?? null;
   }
 
+  private async getPhalaMeta(userId: string): Promise<PhalaCredentialMeta | null> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'phala' } },
+    });
+    return (cred?.metadata as PhalaCredentialMeta | null) ?? null;
+  }
+
+  private platformPhalaAvailable(): boolean {
+    return Boolean(process.env.PHALA_API_KEY?.trim());
+  }
+
+  private async getPhalaPrivateAiStatus(userId: string) {
+    const meta = await this.getPhalaMeta(userId);
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'phala' } },
+      select: { token: true },
+    });
+    const userKey = Boolean(cred?.token && this.crypto.decrypt(cred.token));
+    const platformAvailable = this.platformPhalaAvailable();
+    return {
+      ready: userKey || platformAvailable,
+      userKeyConnected: userKey,
+      platformAvailable,
+      inferenceUrl:
+        meta?.inferenceUrl ||
+        normalizePhalaBaseUrl(process.env.PHALA_INFERENCE_URL || DEFAULT_PHALA_INFERENCE_URL),
+      model: meta?.model || process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL,
+      docsUrl: 'https://docs.phala.com/phala-cloud/confidential-ai/confidential-model/confidential-ai-api',
+    };
+  }
+
+  private async resolvePhalaCredentials(userId: string) {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'phala' } },
+    });
+    const userKey = this.crypto.decrypt(cred?.token);
+    const meta = (cred?.metadata as PhalaCredentialMeta | null) ?? null;
+    if (userKey) {
+      return {
+        apiKey: userKey,
+        inferenceUrl: meta?.inferenceUrl || normalizePhalaBaseUrl(process.env.PHALA_INFERENCE_URL),
+        model: meta?.model || process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL,
+        source: 'user' as const,
+      };
+    }
+    const platformKey = process.env.PHALA_API_KEY?.trim();
+    if (!platformKey) return null;
+    return {
+      apiKey: platformKey,
+      inferenceUrl: normalizePhalaBaseUrl(process.env.PHALA_INFERENCE_URL || DEFAULT_PHALA_INFERENCE_URL),
+      model: process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL,
+      source: 'platform' as const,
+    };
+  }
+
   private async ensureSettings(userId: string) {
     return this.prisma.founderBuilderSettings.upsert({
       where: { userId },
@@ -646,7 +830,7 @@ export class BuilderService {
     const creds = await this.prisma.integrationCredential.findMany({
       where: {
         userId,
-        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter'] },
+        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'] },
       },
       select: { provider: true, token: true },
     });
@@ -714,6 +898,11 @@ export class BuilderService {
         });
         if (!res.ok) throw new BadRequestException('Invalid OpenRouter API key');
         return { accountName: 'OpenRouter account' };
+      }
+      case 'phala': {
+        const verified = await verifyPhalaConnection({ apiKey: key });
+        if (!verified.ok) throw new BadRequestException(verified.reason);
+        return { accountName: 'Phala Private AI' };
       }
       default:
         throw new BadRequestException(`Unknown AI provider: ${provider}`);

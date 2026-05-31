@@ -8,6 +8,7 @@ import {
   connectCursorCloud,
   connectGitHubToken,
   connectOllamaDirect,
+  connectPhalaDirect,
   connectOpenHands,
   disconnectAiProvider,
   disconnectGitHubToken,
@@ -33,12 +34,17 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const [githubToken, setGithubToken] = useState('');
   const [ollamaUrl, setOllamaUrl] = useState('http://127.0.0.1:11434');
   const [ollamaModel, setOllamaModel] = useState('llama3.2');
+  const [phalaKey, setPhalaKey] = useState('');
+  const [phalaUrl, setPhalaUrl] = useState('https://api.redpill.ai/v1');
+  const [phalaModel, setPhalaModel] = useState('phala/deepseek-chat-v3-0324');
 
   const load = useCallback(async () => {
     try {
       const data = await fetchBuilderSettings(accessToken);
       setSettings(data);
       if (data.openHandsBaseUrl) setOpenhandsUrl(data.openHandsBaseUrl);
+      if (data.phalaPrivateAi?.inferenceUrl) setPhalaUrl(data.phalaPrivateAi.inferenceUrl);
+      if (data.phalaPrivateAi?.model) setPhalaModel(data.phalaPrivateAi.model);
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to load settings');
@@ -130,6 +136,30 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     }
   }
 
+  async function handleConnectPhala() {
+    if (!phalaKey.trim()) {
+      setErr('Phala API key required');
+      return;
+    }
+    setConnecting('phala');
+    setErr(null);
+    try {
+      const result = await connectPhalaDirect(
+        phalaKey.trim(),
+        phalaUrl.trim() || undefined,
+        phalaModel.trim() || undefined,
+        accessToken,
+      );
+      setMsg(`${result.accountName} connected — Copilot can use TEE inference at ${result.inferenceUrl}`);
+      setPhalaKey('');
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Phala connect failed');
+    } finally {
+      setConnecting(null);
+    }
+  }
+
   async function handleConnectOllamaDirect() {
     if (!ollamaUrl.trim()) {
       setErr('Ollama base URL required');
@@ -179,10 +209,14 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       p.key !== 'RULE_BASED' &&
       p.key !== 'OPENHANDS' &&
       p.key !== 'CURSOR' &&
-      p.key !== 'OLLAMA_LOCAL',
+      p.key !== 'OLLAMA_LOCAL' &&
+      p.key !== 'PHALA' &&
+      p.key !== 'OPENROUTER',
   );
   const openRouterProvider = settings.providers.find((p) => p.key === 'OPENROUTER');
   const ollamaLocalProvider = settings.providers.find((p) => p.key === 'OLLAMA_LOCAL');
+  const phalaProvider = settings.providers.find((p) => p.key === 'PHALA');
+  const phalaStatus = settings.phalaPrivateAi;
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
   const nodeAi = settings.founderNodeAi;
@@ -193,6 +227,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         accessToken={accessToken}
         currentMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
         onModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
+        phalaPrivateAi={phalaStatus}
       />
 
       <section className="rounded-2xl border border-emerald-500/35 bg-emerald-950/10 p-6">
@@ -314,6 +349,97 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-fuchsia-500/35 bg-fuchsia-950/10 p-6">
+        <h2 className="text-lg font-semibold text-white">Private AI — Phala TEE (Step 3)</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Confidential inference in a hardware TEE — OpenAI-compatible API. Your key or platform credits; prompts are
+          not used for public model training.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {phalaProvider?.connected && (
+            <span className="rounded-full bg-fuchsia-500/20 px-2.5 py-1 text-[10px] font-semibold text-fuchsia-100">
+              Private AI ready
+              {phalaStatus?.model ? ` · ${phalaStatus.model}` : ''}
+            </span>
+          )}
+          {phalaStatus?.platformAvailable && !phalaStatus.userKeyConnected && (
+            <span className="rounded-full bg-violet-500/20 px-2.5 py-1 text-[10px] font-semibold text-violet-100">
+              Platform Phala credits enabled
+            </span>
+          )}
+        </div>
+        <div className="mt-6 rounded-xl border border-fuchsia-500/30 bg-fuchsia-950/10 p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="font-medium text-white">Phala / Redpill API</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Connect your Phala Cloud key, or rely on platform credits when enabled on the API. Set{' '}
+                <strong className="font-medium text-zinc-300">Default provider</strong> to Private AI (Phala) after
+                connecting.
+              </p>
+            </div>
+            {phalaProvider?.connected && (
+              <span className="rounded-full bg-fuchsia-500/20 px-2 py-0.5 text-[10px] font-semibold text-fuchsia-200">
+                Connected
+              </span>
+            )}
+          </div>
+          <div className="mt-3 space-y-2">
+            <input
+              type="password"
+              value={phalaKey}
+              onChange={(e) => setPhalaKey(e.target.value)}
+              placeholder="Phala API key"
+              className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+            />
+            <input
+              type="url"
+              value={phalaUrl}
+              onChange={(e) => setPhalaUrl(e.target.value)}
+              placeholder="https://api.redpill.ai/v1"
+              className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+            />
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                value={phalaModel}
+                onChange={(e) => setPhalaModel(e.target.value)}
+                placeholder="phala/deepseek-chat-v3-0324"
+                className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+              />
+              <button
+                type="button"
+                disabled={connecting === 'phala'}
+                onClick={handleConnectPhala}
+                className="rounded-lg bg-fuchsia-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {phalaProvider?.connected ? 'Update connection' : 'Connect Phala'}
+              </button>
+              {phalaProvider?.connected && (
+                <button
+                  type="button"
+                  onClick={() => handleDisconnect('phala')}
+                  className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
+                >
+                  Disconnect
+                </button>
+              )}
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] text-zinc-600">
+            Docs:{' '}
+            <a
+              href="https://docs.phala.com/phala-cloud/confidential-ai/confidential-model/confidential-ai-api"
+              className="text-fuchsia-300 underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Phala Confidential AI API
+            </a>
+            . See also <code className="text-zinc-500">docs/PHALA_PRIVATE_AI.md</code>.
+          </p>
         </div>
       </section>
 

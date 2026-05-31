@@ -321,7 +321,9 @@ export function FounderCopilotChat({
                     ? 'Project memory'
                     : m.provider === 'CURSOR'
                       ? 'Cursor + memory'
-                      : m.provider.replace('_', ' ')}
+                      : m.provider === 'PHALA'
+                        ? 'Private AI (Phala TEE)'
+                        : m.provider.replace('_', ' ')}
                 </p>
               )}
               {m.content}
