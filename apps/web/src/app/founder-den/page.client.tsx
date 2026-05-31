@@ -23,6 +23,7 @@ const VALID_TABS: WorkspaceTab[] = [
   'agents',
   'build',
   'analytics',
+  'notifications',
 ];
 
 function parseTab(value: string | null): WorkspaceTab {
@@ -151,13 +152,9 @@ export default function FounderDenPageClient() {
 
   return (
     <main className="min-h-screen bg-[#050508]">
-      <header className="border-b border-zinc-800">
-        <div
-          className={`mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-10 ${
-            session?.accessToken && hasFounder ? 'py-3' : 'py-5'
-          }`}
-        >
-          {!(session?.accessToken && hasFounder) ? (
+      {!(session?.accessToken && hasFounder) && (
+        <header className="border-b border-zinc-800">
+          <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-5 sm:px-6 lg:px-10">
             <div>
               <SiteBrand className="text-sm" />
               <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
@@ -165,19 +162,16 @@ export default function FounderDenPageClient() {
                 Mission control · build in public · validate demand · launch with trust
               </p>
             </div>
-          ) : (
-            <div className="flex items-center gap-3">
-              <SiteBrand className="text-sm" />
-              <span className="hidden text-xs text-zinc-600 sm:inline">Founder OS · Mission control</span>
-            </div>
-          )}
-          <SiteNav />
-        </div>
-      </header>
+            <SiteNav />
+          </div>
+        </header>
+      )}
 
       <div
-        className={`mx-auto w-full max-w-[90rem] px-4 sm:px-6 lg:px-10 ${
-          session?.accessToken && hasFounder ? 'py-4' : 'space-y-6 py-8'
+        className={`mx-auto w-full ${
+          session?.accessToken && hasFounder
+            ? 'max-w-none px-2 py-2 sm:px-4 lg:px-6'
+            : 'max-w-[90rem] space-y-6 px-4 py-8 sm:px-6 lg:px-10'
         }`}
       >
         {message && (
