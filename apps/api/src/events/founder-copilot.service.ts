@@ -461,6 +461,14 @@ export class FounderCopilotService {
       `${prompt}\n\n---\n${contextBlock}`,
     );
 
+    const builderSettings = await this.builder.getSettings(userId);
+    const cursorConnected = builderSettings.providers.some(
+      (p) => p.key === 'CURSOR' && p.connected,
+    );
+    const hasChatLlm = builderSettings.providers.some(
+      (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
+    );
+
     const ruleBased = this.buildRuleBasedCopilotAnswer({
       memory: refreshedMemory,
       githubMemory,
@@ -487,7 +495,12 @@ export class FounderCopilotService {
       answerProvider = aiResult.provider;
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
-      answer = `${ruleBased}\n\n---\n⚠️ LLM unavailable (${aiResult.llmErrors[0]}). Using project memory above — reconnect your API key in Builder settings if this persists.`;
+      if (builderSettings.defaultProvider === 'CURSOR' && cursorConnected && !hasChatLlm) {
+        answerProvider = 'CURSOR';
+        answer = `${ruleBased}\n\n---\n✓ **Cursor is connected** — use **Run on Cursor** to implement on \`${refreshedMemory.repoFullName ?? 'your repo'}\`. For instant AI chat replies, add **DeepSeek** or **OpenAI** in Builder settings (optional; works alongside Cursor).`;
+      } else {
+        answer = `${ruleBased}\n\n---\n⚠️ LLM unavailable (${aiResult.llmErrors[0]}). Using project memory above — reconnect your API key in Builder settings if this persists.`;
+      }
     }
 
     return {
@@ -563,6 +576,33 @@ export class FounderCopilotService {
     recentCommits: { sha: string; message: string }[];
     prompt: string;
   }) {
+    const asksPriority = /pressing|priority|urgent|should i work|focus on|most important|what'?s going on/i.test(
+      input.prompt,
+    );
+
+    if (asksPriority) {
+      const topTask =
+        input.githubMemory?.openTasksFromRepo?.[0]?.title ??
+        input.memory.openTasks[0]?.title ??
+        input.memory.suggestedNextStep;
+      return [
+        `**Most pressing issue:** ${topTask}`,
+        '',
+        `You're at **${input.memory.progressPercent}%** progress with launch readiness **${input.memory.launchReadiness}/100**.`,
+        '',
+        `**Current goal:** ${input.memory.currentGoal}`,
+        '',
+        input.memory.lastCommit
+          ? `**Latest commit:** ${input.memory.lastCommit}`
+          : '**GitHub:** Connect and tap **Sync commits** in the stack panel to pull recent work.',
+        '',
+        `**Recommended focus today:** ${input.memory.suggestedNextStep}`,
+        input.memory.repoFullName ? `\nRepo: ${input.memory.repoFullName}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+
     const wantsProjectContext =
       /what|working|tell me|listen|github|commit|task|goal|leave|resume|project|build|ship|mvp|status|progress|connected|explain|week|launch|investor|changed|remain|risk|timeline|brain|copilot|cursor|vercel|left off|was working|working at|working on/i.test(
         input.prompt,

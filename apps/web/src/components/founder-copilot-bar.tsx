@@ -54,7 +54,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       setCursorConnected(builder.providers.some((p) => p.key === 'CURSOR' && p.connected));
       setLlmConnected(
         builder.providers.some(
-          (p) => p.needsApiKey && p.connected && p.key !== 'RULE_BASED',
+          (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
         ),
       );
     } catch {

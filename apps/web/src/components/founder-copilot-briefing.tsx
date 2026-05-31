@@ -24,7 +24,7 @@ type CommandDef = { intent: CommandBarIntent; label: string; placeholder: string
 
 type FounderCopilotBriefingProps = {
   accessToken: string;
-  variant?: 'full' | 'sidebar';
+  variant?: 'full' | 'sidebar' | 'compact';
   founderActive?: boolean;
   onMessage?: (msg: string) => void;
   onRefresh?: () => void;
@@ -49,6 +49,7 @@ export function FounderCopilotBriefing({
   const [cmdPrompt, setCmdPrompt] = useState('');
   const [cmdBusy, setCmdBusy] = useState(false);
   const isSidebar = variant === 'sidebar';
+  const isCompact = variant === 'compact';
 
   const load = useCallback(async () => {
     try {
@@ -220,8 +221,11 @@ export function FounderCopilotBriefing({
           isSidebar ? 'p-4' : 'p-5 sm:p-6'
         }`}
       >
-        {!isSidebar && (
+        {!isSidebar && !isCompact && (
           <p className="text-lg font-semibold text-white">{memory.welcomeMessage}</p>
+        )}
+        {isCompact && (
+          <p className="text-sm font-semibold text-white">Project memory &amp; progress</p>
         )}
         {isSidebar && (
           <p className="text-sm font-semibold text-white">Project scope</p>
@@ -287,7 +291,7 @@ export function FounderCopilotBriefing({
           </div>
         </div>
 
-        {!isSidebar && (
+        {!isSidebar && !isCompact && (
           <>
             <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
               <div className="rounded-lg bg-black/30 px-3 py-2">
