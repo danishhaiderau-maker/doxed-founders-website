@@ -46,6 +46,7 @@ type FounderCopilotChatProps = {
 };
 
 const ASK_CHIPS = [
+  'What is the most pressing issue?',
   'What am I working on right now?',
   'What changed this week?',
   'What should I ship today?',

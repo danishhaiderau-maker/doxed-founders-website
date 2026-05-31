@@ -61,7 +61,9 @@ async function main() {
   const projects = data.projects?.edges?.map((e) => e.node) ?? [];
   console.log(`Found ${projects.length} Railway project(s)\n`);
 
-  const apiServiceNames = new Set(['doxed-founders-website', '@dcf/api', 'dcf/api', 'api']);
+  /** Only redeploy the real production API — never @dcf/api or @dcf/web duplicates. */
+  const productionApiNames = new Set(['doxed-founders-website']);
+  const skipDuplicates = new Set(['@dcf/web', '@dcf/api', 'dcf/web', 'dcf/api']);
 
   for (const project of projects) {
     const env =
@@ -73,14 +75,14 @@ async function main() {
 
     for (const svcEdge of project.services?.edges ?? []) {
       const svc = svcEdge.node;
-      const isApi =
-        apiServiceNames.has(svc.name) ||
-        svc.name.includes('doxed-founders') ||
-        svc.name.includes('dcf/api') ||
-        svc.name === '@dcf/api';
+      if (skipDuplicates.has(svc.name)) {
+        console.log(`  skip ${svc.name} (duplicate — run npm run cleanup:railway to delete)`);
+        continue;
+      }
+      const isApi = productionApiNames.has(svc.name);
 
       if (!isApi) {
-        console.log(`  skip ${svc.name} (not API)`);
+        console.log(`  skip ${svc.name} (not production API)`);
         continue;
       }
 
