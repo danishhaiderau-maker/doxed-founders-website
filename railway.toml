@@ -20,4 +20,4 @@ healthcheckPath = "/api/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
-# Redeploy trigger: 2026-05-31 — Railway healthcheck: API boots before background db push
+# Redeploy trigger: 2026-05-31 — defer db push 25s so healthcheck passes before schema sync

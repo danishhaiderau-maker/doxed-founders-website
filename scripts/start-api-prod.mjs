@@ -106,8 +106,9 @@ if (!fs.existsSync(distMain)) {
 }
 
 if (isRailway) {
-  // Build phase already ran prisma generate — skip here so /api/health responds before db push finishes.
-  syncDatabaseBackground();
+  // Build phase already ran prisma generate — start API first; defer db push so Neon
+  // is not locked during Nest bootstrap (Railway healthcheck needs /api/health quickly).
+  setTimeout(() => syncDatabaseBackground(), 25_000);
 } else {
   run('Prisma generate', 'npx', ['prisma', 'generate', '--schema', schema]);
   syncDatabaseBlocking();
