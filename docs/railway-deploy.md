@@ -41,15 +41,29 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 | `CORS_ORIGINS` | `https://doxxedcrypto.digital,https://www.doxxedcrypto.digital` |
 | `CREDENTIALS_ENCRYPTION_KEY` | 32+ char hex for stored API keys |
 
-## Redeploy
+## Failed deploy badges (22 / 15 / etc.)
+
+Railway counts **every failed attempt** in history. They do **not** mean the site is down.
+
+- If the service shows **Online** (green) and `/api/health` returns OK, production is on the **last successful** deployment.
+- Failed deploys on **`@dcf/web`** are expected — delete that service (web is on Vercel).
+- After fixing `railway.toml` start command, trigger redeploy: push to `master` or run `npm run redeploy:railway` (needs `RAILWAY_TOKEN`).
+
+## Redeploy all API services
 
 ```powershell
+# Option A — GitHub webhook (automatic on push to master)
+git push origin master
+
+# Option B — Railway token (https://railway.app/account/tokens)
+$env:RAILWAY_TOKEN = "your-token"
+npm run redeploy:railway
+
+# Option C — CLI linked to doxed-founders-website
 railway login
-railway link   # select doxed-founders-website service
+railway link
 npm run fix:railway
 ```
-
-Or dashboard → **doxed-founders-website** → **Redeploy** latest `master`.
 
 ## Dashboard cleanup (recommended)
 
