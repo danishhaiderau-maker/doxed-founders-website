@@ -57,16 +57,16 @@ export function LandingHero() {
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link
-                href="/founder-den"
+                href="/list-your-project"
                 className="rounded-xl bg-violet-600 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 hover:bg-violet-500"
               >
-                Open Founder OS →
+                List your project
               </Link>
               <Link
-                href="/list-your-project"
+                href="/discover"
                 className="rounded-xl border border-zinc-600 bg-zinc-900/50 px-7 py-3.5 text-sm font-semibold text-white hover:border-violet-500/50"
               >
-                List your project
+                Discover startups
               </Link>
             </div>
             <div className="mt-8 flex items-center gap-3">
@@ -630,16 +630,16 @@ export function LandingFounderOsWorkflow() {
 
         <div className="mt-10 flex flex-wrap gap-3">
           <Link
-            href="/founder-den"
+            href="/feed"
             className="rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white hover:bg-indigo-500"
           >
-            Open Founder OS
+            See build feed
           </Link>
           <Link
-            href="/feed"
+            href="/list-your-project"
             className="rounded-xl border border-zinc-700 px-6 py-3 text-sm text-zinc-300 hover:text-white"
           >
-            See build feed
+            List your project
           </Link>
         </div>
       </div>
@@ -929,16 +929,16 @@ export function LandingFinalCta() {
         </p>
         <div className="mt-10 flex flex-wrap justify-center gap-3">
           <Link
-            href="/founder-den"
+            href="/list-your-project"
             className="rounded-xl bg-violet-600 px-8 py-3.5 font-semibold text-white hover:bg-violet-500"
           >
-            Open Founder OS →
+            List your project
           </Link>
           <Link
-            href="/list-your-project"
+            href="/paper-trading"
             className="rounded-xl border border-zinc-600 px-8 py-3.5 font-semibold text-white hover:border-violet-500/50"
           >
-            List your project
+            Start paper trading
           </Link>
         </div>
       </div>

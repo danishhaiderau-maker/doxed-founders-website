@@ -166,20 +166,18 @@ export default function FounderDenPageClient() {
 
   return (
     <main className="min-h-screen bg-[#050508]">
-      {!(session?.accessToken && hasFounder) && (
-        <header className="border-b border-zinc-800">
-          <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-5 sm:px-6 lg:px-10">
-            <div>
-              <SiteBrand className="text-sm" />
-              <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
-              <p className="text-sm text-zinc-500">
-                Mission control · build in public · validate demand · launch with trust
-              </p>
-            </div>
-            <SiteNav />
+      <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
+        <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5 lg:px-10">
+          <div>
+            <SiteBrand className="text-sm" />
+            <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
+            <p className="text-sm text-zinc-500">
+              Mission control · build in public · validate demand · launch with trust
+            </p>
           </div>
-        </header>
-      )}
+          <SiteNav />
+        </div>
+      </header>
 
       <div
         className={`mx-auto w-full ${
