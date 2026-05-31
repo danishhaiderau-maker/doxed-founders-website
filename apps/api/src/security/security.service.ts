@@ -33,13 +33,14 @@ const BCRYPT_ROUNDS = 12;
 const PENDING_TTL_MS = 5 * 60 * 1000;
 
 function webAuthnConfig() {
+  const corsOrigin = process.env.CORS_ORIGINS?.split(',')[0]?.trim();
   const origin =
-    process.env.WEBAUTHN_ORIGIN ??
-    process.env.NEXTAUTH_URL ??
-    process.env.PUBLIC_SITE_URL ??
-    'http://localhost:3000';
+    process.env.WEBAUTHN_ORIGIN?.trim() ||
+    process.env.PUBLIC_SITE_URL?.trim() ||
+    corsOrigin ||
+    (process.env.NEXTAUTH_URL ?? 'http://localhost:3000');
   const rpId =
-    process.env.WEBAUTHN_RP_ID ??
+    process.env.WEBAUTHN_RP_ID?.trim() ||
     new URL(origin).hostname.replace(/^www\./, '');
   const rpName = process.env.WEBAUTHN_RP_NAME ?? 'Doxxed Crypto Founder OS';
   return { origin, rpId, rpName };
@@ -178,8 +179,27 @@ export class SecurityService {
     return { ok: true };
   }
 
-  async generateRecoveryCodes(userId: string, totpCode: string) {
-    await this.verifyTotpCode(userId, totpCode);
+  async generateRecoveryCodes(userId: string, verificationCode?: string) {
+    const [totp, passkeyCount] = await Promise.all([
+      this.prisma.userTotp.findUnique({ where: { userId } }),
+      this.prisma.webAuthnCredential.count({ where: { userId } }),
+    ]);
+
+    if (totp?.enabled) {
+      if (!verificationCode?.trim()) {
+        throw new BadRequestException('Authenticator code required');
+      }
+      await this.verifyTotpCode(userId, verificationCode);
+    } else if (passkeyCount > 0) {
+      // Passkey-only accounts: session auth is enough to rotate backup codes.
+    } else {
+      throw new BadRequestException('Add a passkey or authenticator app before generating backup codes');
+    }
+
+    return this.createRecoveryCodes(userId);
+  }
+
+  private async createRecoveryCodes(userId: string) {
     await this.prisma.recoveryCode.deleteMany({ where: { userId } });
     const plainCodes: string[] = [];
     const rows: { userId: string; codeHash: string }[] = [];
@@ -314,7 +334,16 @@ export class SecurityService {
         label: label?.trim() || 'Passkey',
       },
     });
-    return { ok: true };
+
+    const remaining = await this.prisma.recoveryCode.count({
+      where: { userId, usedAt: null },
+    });
+    let recoveryCodes: string[] | undefined;
+    if (remaining === 0) {
+      recoveryCodes = (await this.createRecoveryCodes(userId)).codes;
+    }
+
+    return { ok: true, recoveryCodes };
   }
 
   async passkeyLoginOptions(pendingToken: string) {

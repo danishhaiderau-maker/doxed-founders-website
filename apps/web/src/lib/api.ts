@@ -1814,11 +1814,15 @@ export function disableTotp(code: string, token: string) {
   }, token);
 }
 
-export function generateRecoveryCodes(code: string, token: string) {
-  return apiFetch<{ codes: string[] }>('/security/recovery-codes', {
-    method: 'POST',
-    body: JSON.stringify({ code }),
-  }, token);
+export function generateRecoveryCodes(code: string | undefined, token: string) {
+  return apiFetch<{ codes: string[] }>(
+    '/security/recovery-codes',
+    {
+      method: 'POST',
+      body: JSON.stringify(code ? { code } : {}),
+    },
+    token,
+  );
 }
 
 export function passkeyRegisterOptions(token: string) {
@@ -1835,10 +1839,14 @@ export function passkeyRegisterVerify(
   token: string,
   label?: string,
 ) {
-  return apiFetch('/security/passkey/register-verify', {
-    method: 'POST',
-    body: JSON.stringify({ registerToken, response, label }),
-  }, token);
+  return apiFetch<{ ok: boolean; recoveryCodes?: string[] }>(
+    '/security/passkey/register-verify',
+    {
+      method: 'POST',
+      body: JSON.stringify({ registerToken, response, label }),
+    },
+    token,
+  );
 }
 
 export function passkeyLoginOptions(pendingToken: string) {

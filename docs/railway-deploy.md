@@ -56,6 +56,9 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 | `PRISMA_DB_PUSH` | `true` (safe on Neon; script also sets on Railway) |
 | `CORS_ORIGINS` | `https://doxxedcrypto.digital,https://www.doxxedcrypto.digital` |
 | `CREDENTIALS_ENCRYPTION_KEY` | 32+ char hex for stored API keys |
+| `WEBAUTHN_ORIGIN` | `https://doxxedcrypto.digital` — passkey registration origin |
+| `WEBAUTHN_RP_ID` | `doxxedcrypto.digital` — WebAuthn relying party ID |
+| `PUBLIC_SITE_URL` | `https://doxxedcrypto.digital` — fallback for WebAuthn + links |
 
 ## Failed deploy badges (22 / 15 / etc.)
 
