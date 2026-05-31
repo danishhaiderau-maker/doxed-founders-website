@@ -171,7 +171,7 @@ if (useTwitterOAuth1) {
       version: '2.0',
       authorization: {
         params: {
-          scope: 'users.read tweet.read offline.access',
+          scope: 'users.read tweet.read tweet.write offline.access',
         },
       },
       userinfo: {
