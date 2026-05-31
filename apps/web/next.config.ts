@@ -38,8 +38,9 @@ function isLocalApiTarget(target: string) {
 
 const apiRewrites = [
   {
-    // Keep /api/auth/* and admin listing review on Next.js; proxy everything else to Nest.
-    source: '/api/:path((?!auth(?:/|$)|listing-applications/[^/]+/review$).*)',
+    // Keep NextAuth OAuth routes + admin listing review on Next.js; proxy Nest /api/auth/login etc.
+    source:
+      '/api/:path((?!auth/(?:signin|signout|callback|session|csrf|providers|error)(?:/|$)|listing-applications/[^/]+/review$).*)',
     destination: `${apiProxyTarget}/api/:path*`,
   },
 ];
