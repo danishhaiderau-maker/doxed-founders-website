@@ -16,7 +16,7 @@ watchPatterns = [
 # Do NOT prefix env vars here — Dockerfile deploys treat "NODE_ENV=..." as the executable.
 # Set NODE_ENV and PRISMA_DB_PUSH in Railway Variables (see docs/railway-deploy.md).
 startCommand = "node scripts/start-api-prod.mjs"
-healthcheckPath = "/api/health"
+healthcheckPath = "/api/health/live"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
