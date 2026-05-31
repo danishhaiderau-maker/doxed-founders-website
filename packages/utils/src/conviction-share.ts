@@ -1,6 +1,8 @@
 import { formatTokenPrice } from './token-price';
 import {
   buildPortfolioShareUrl,
+  appendPlatformXShareFooter,
+  fitXShareTextWithFooter,
   type PositionShareInput,
   type ProofOfConvictionInput,
 } from './share';
@@ -77,7 +79,7 @@ export function buildProofOfConvictionThread(input: ProofOfConvictionInput): str
   }
 
   lines.push('', '#ProofOfConviction #PaperTrading');
-  return lines.join('\n');
+  return appendPlatformXShareFooter(lines.join('\n'));
 }
 
 /** Single-tweet instant post (≤280 chars) with story beats */
@@ -96,18 +98,7 @@ export function buildProofOfConvictionMessage(input: ProofOfConvictionInput): st
   }
   parts.push('#ProofOfConviction');
 
-  let text = parts.join('\n');
-  if (text.length > 280) {
-    text = [
-      `🚨 $${input.ticker} · ${formatPlPct(input.returnPct)}`,
-      `Entry ${formatTokenPrice(input.entryPrice)} → ${formatTokenPrice(input.currentPrice)}`,
-      input.proofUrl ?? '#ProofOfConviction',
-    ]
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, 280);
-  }
-  return text;
+  return fitXShareTextWithFooter(parts.join('\n'));
 }
 
 export type { ProofOfConvictionInput };

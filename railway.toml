@@ -16,7 +16,7 @@ watchPatterns = [
 # Set NODE_ENV and PRISMA_DB_PUSH in Railway Variables (see docs/railway-deploy.md).
 startCommand = "node scripts/start-api-prod.mjs"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 300
+healthcheckTimeout = 600
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
-# Redeploy trigger: 2026-05-31T03:30Z — copilot priority fix, Mission Control shell, share footer
+# Redeploy trigger: 2026-05-31 — Railway healthcheck: API boots before background db push

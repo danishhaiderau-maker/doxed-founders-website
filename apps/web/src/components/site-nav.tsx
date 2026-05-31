@@ -53,8 +53,6 @@ const CTA_NAV = [
   },
 ] as const;
 
-const MORE_NAV = [{ href: '/watchlist', label: 'Watchlist', auth: true }] as const;
-
 const PROFILE_LINKS = [
   { href: '/account', label: 'Overview' },
   { href: '/account?tab=security', label: 'Security' },
@@ -79,6 +77,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/projects') return pathname.startsWith('/project') || pathname === '/projects';
   if (href.startsWith('/account')) return pathname.startsWith('/account');
   if (href === '/founder-node') return pathname.startsWith('/founder-node');
+  if (href === '/watchlist') return pathname.startsWith('/watchlist');
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
@@ -107,10 +106,8 @@ function SiteNavInner() {
   const { data: session } = useSession();
   const isAdmin = session?.user?.role === 'ADMIN';
   const [unread, setUnread] = useState(0);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [accountPreview, setAccountPreview] = useState<AccountOverview | null>(null);
-  const moreRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
 
   const portfolioUserId =
@@ -141,9 +138,6 @@ function SiteNavInner() {
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
-      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
-        setMoreOpen(false);
-      }
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
         setProfileOpen(false);
       }
@@ -151,11 +145,6 @@ function SiteNavInner() {
     document.addEventListener('click', onDocClick);
     return () => document.removeEventListener('click', onDocClick);
   }, []);
-
-  const moreVisible = MORE_NAV.filter((item) => !('auth' in item && item.auth && !session));
-  const moreActive =
-    moreVisible.some((item) => navActive(pathname, item.href)) ||
-    (isAdmin && pathname.startsWith('/admin'));
 
   const profileActive = pathname.startsWith('/account') || pathname.startsWith('/settings');
 
@@ -184,79 +173,36 @@ function SiteNavInner() {
         })}
 
         {session && (
-          <Link
-            href="/notifications"
-            className={cn(
-              'relative rounded-lg px-2.5 py-1.5 transition',
-              pathname === '/notifications'
-                ? 'bg-emerald-500/25 font-semibold text-emerald-50 ring-1 ring-emerald-400/50'
-                : 'text-emerald-200/80 hover:bg-emerald-500/15 hover:text-emerald-100',
-            )}
-          >
-            Notifications
-            {unread > 0 && (
-              <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
-                {unread > 9 ? '9+' : unread}
-              </span>
-            )}
-          </Link>
-        )}
-
-        <div className="relative" ref={moreRef}>
-          <button
-            type="button"
-            onClick={() => setMoreOpen((o) => !o)}
-            className={cn(
-              'rounded-lg px-2.5 py-1.5 transition',
-              moreActive || moreOpen
-                ? 'bg-zinc-700 font-semibold text-white ring-1 ring-zinc-500'
-                : 'text-zinc-300 hover:bg-zinc-800 hover:text-white',
-            )}
-          >
-            More
-          </button>
-          {moreOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[168px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
-              {moreVisible.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setMoreOpen(false)}
-                  className={cn(
-                    'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
-                    navActive(pathname, item.href) ? 'text-white' : 'text-zinc-400',
-                  )}
-                >
-                  {item.label}
-                </Link>
-              ))}
-              {isAdmin && (
-                <>
-                  <Link
-                    href="/admin/applications"
-                    onClick={() => setMoreOpen(false)}
-                    className={cn(
-                      'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
-                      pathname.startsWith('/admin/applications') ? 'text-amber-200' : 'text-zinc-400',
-                    )}
-                  >
-                    Listing inbox
-                  </Link>
-                  <Link
-                    href="/admin/platform"
-                    onClick={() => setMoreOpen(false)}
-                    className={cn(
-                      'flex items-center justify-between px-3 py-2 text-sm transition hover:bg-zinc-900',
-                      pathname.startsWith('/admin/platform') ? 'text-amber-200' : 'text-zinc-400',
-                    )}
-                  >
-                    Treasury & top-ups
-                  </Link>
-                </>
+          <>
+            <Link
+              href="/watchlist"
+              className={cn(
+                'rounded-lg px-2.5 py-1.5 transition',
+                navActive(pathname, '/watchlist')
+                  ? 'bg-violet-500/25 font-semibold text-violet-50 ring-1 ring-violet-400/50'
+                  : 'text-violet-200/80 hover:bg-violet-500/15 hover:text-violet-100',
               )}
-            </div>
-          )}
-        </div>
+            >
+              Watchlist
+            </Link>
+            <Link
+              href="/notifications"
+              className={cn(
+                'relative rounded-lg px-2.5 py-1.5 transition',
+                pathname === '/notifications'
+                  ? 'bg-emerald-500/25 font-semibold text-emerald-50 ring-1 ring-emerald-400/50'
+                  : 'text-emerald-200/80 hover:bg-emerald-500/15 hover:text-emerald-100',
+              )}
+            >
+              Notifications
+              {unread > 0 && (
+                <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
+                  {unread > 9 ? '9+' : unread}
+                </span>
+              )}
+            </Link>
+          </>
+        )}
 
         {session ? (
           <div className="relative border-l border-[var(--color-border)] pl-2 md:pl-3" ref={profileRef}>
@@ -299,6 +245,24 @@ function SiteNavInner() {
                     {item.label}
                   </Link>
                 ))}
+                {isAdmin && (
+                  <>
+                    <Link
+                      href="/admin/applications"
+                      onClick={() => setProfileOpen(false)}
+                      className="block px-3 py-2 text-sm text-amber-300/90 transition hover:bg-zinc-900"
+                    >
+                      Listing inbox
+                    </Link>
+                    <Link
+                      href="/admin/platform"
+                      onClick={() => setProfileOpen(false)}
+                      className="block px-3 py-2 text-sm text-amber-300/90 transition hover:bg-zinc-900"
+                    >
+                      Treasury & top-ups
+                    </Link>
+                  </>
+                )}
                 {portfolioUserId && (
                   <Link
                     href={`/portfolio/${portfolioUserId}`}

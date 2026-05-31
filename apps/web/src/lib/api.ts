@@ -614,6 +614,8 @@ export interface UnifiedFeedItem {
   at: string;
   link?: string;
   emoji?: string;
+  pinned?: boolean;
+  sourceUrl?: string;
   tradePostId?: string;
   projectSlug?: string;
   projectTicker?: string;

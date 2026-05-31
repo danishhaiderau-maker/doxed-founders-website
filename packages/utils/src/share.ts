@@ -138,6 +138,27 @@ export function appendPlatformXShareFooter(text: string): string {
   return `${base}\n\n${PLATFORM_X_SHARE_FOOTER}`;
 }
 
+/** Keep marketing footer on single tweets — trim body if needed (280 char X limit). */
+export function fitXShareTextWithFooter(body: string, maxLen = 280): string {
+  const withFooter = appendPlatformXShareFooter(body);
+  if (withFooter.length <= maxLen) return withFooter;
+
+  const compactFooter = [
+    '',
+    'Built for shrimps, not whales.',
+    '🎁 10,000 DDollar free · 📈 Trade free · 🏆 Skill > hype',
+    'Back real builders. Bring back HODL.',
+  ].join('\n');
+
+  const trimmedBody = body.trim();
+  const room = maxLen - compactFooter.length - 1;
+  const clipped =
+    trimmedBody.length <= room
+      ? trimmedBody
+      : `${trimmedBody.slice(0, Math.max(32, room - 1)).replace(/\s+\S*$/, '')}…`;
+  return `${clipped}${compactFooter}`.slice(0, maxLen);
+}
+
 export function buildTwitterIntentUrl(text: string, url?: string): string {
   const fullText = appendPlatformXShareFooter(text);
   const params = new URLSearchParams({ text: fullText });

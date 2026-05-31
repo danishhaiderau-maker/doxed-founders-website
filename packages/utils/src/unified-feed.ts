@@ -12,6 +12,8 @@ export type UnifiedFeedItem = {
   at: string;
   link?: string;
   emoji?: string;
+  pinned?: boolean;
+  sourceUrl?: string;
   tradePostId?: string;
   projectSlug?: string;
   projectTicker?: string;
@@ -68,6 +70,7 @@ const TIER1 = new Set([
   'hot_buy',
   'top_trader_buy',
   'listing_live',
+  'founder_x_update',
 ]);
 
 const TIER2 = new Set([
@@ -87,6 +90,7 @@ export function unifiedFeedTier(eventType: string): UnifiedFeedTier {
 
 export function sortUnifiedFeedItems(items: UnifiedFeedItem[]): UnifiedFeedItem[] {
   return [...items].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
     if (a.tier !== b.tier) return a.tier - b.tier;
     return new Date(b.at).getTime() - new Date(a.at).getTime();
   });

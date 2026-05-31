@@ -341,7 +341,8 @@ export class UnifiedFeedService {
 
   private async loadFounderEvents(): Promise<UnifiedFeedItem[]> {
     const take = 25;
-    const [buildPosts, videos] = await Promise.all([
+    const now = new Date();
+    const [buildPosts, videos, pinnedUpdates] = await Promise.all([
       this.prisma.founderBuildPost.findMany({
         orderBy: { publishedAt: 'desc' },
         take,
@@ -355,6 +356,18 @@ export class UnifiedFeedService {
         take: 10,
         include: {
           founder: { select: { slug: true, name: true } },
+          project: { select: { slug: true, name: true, ticker: true } },
+        },
+      }),
+      this.prisma.founderUpdate.findMany({
+        where: {
+          pinned: true,
+          OR: [{ pinnedUntil: null }, { pinnedUntil: { gt: now } }],
+        },
+        orderBy: { publishedAt: 'desc' },
+        take: 12,
+        include: {
+          founder: { select: { slug: true, name: true, twitterUrl: true } },
           project: { select: { slug: true, name: true, ticker: true } },
         },
       }),
@@ -392,7 +405,26 @@ export class UnifiedFeedService {
       founderSlug: v.founder.slug,
     }));
 
-    return [...buildItems, ...videoItems];
+    const pinnedItems: UnifiedFeedItem[] = pinnedUpdates
+      .filter((u) => u.founder)
+      .map((u) => ({
+      id: `founder-x-${u.id}`,
+      tier: unifiedFeedTier('founder_x_update'),
+      category: 'founder' as const,
+      eventType: 'founder_x_update',
+      emoji: '📌',
+      headline: u.headline,
+      detail: `${u.founder!.name}${u.project ? ` · ${u.project.ticker}` : ''} · synced from X`,
+      at: u.publishedAt.toISOString(),
+      link: u.project ? `/project/${u.project.slug}` : `/founder/${u.founder!.slug}`,
+      projectSlug: u.project?.slug,
+      projectTicker: u.project?.ticker,
+      founderSlug: u.founder!.slug,
+      pinned: true,
+      sourceUrl: u.sourceUrl ?? undefined,
+    }));
+
+    return [...pinnedItems, ...buildItems, ...videoItems];
   }
 
   private async loadTradingEvents(): Promise<UnifiedFeedItem[]> {

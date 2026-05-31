@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,9 +28,17 @@ function run(label, command, args, cwd = root, allowFail = false) {
   return result.status === 0;
 }
 
-run('Prisma generate', 'npx', ['prisma', 'generate', '--schema', schema]);
+function runDbPush(label, allowFail = true) {
+  return run(
+    label,
+    'npx',
+    ['prisma', 'db', 'push', '--schema', schema, '--skip-generate'],
+    root,
+    allowFail,
+  );
+}
 
-function syncDatabase() {
+function syncDatabaseBlocking() {
   if (process.env.SKIP_DB_SYNC === 'true') {
     console.log('[start-api-prod] SKIP_DB_SYNC=true — skipping schema sync');
     return;
@@ -38,13 +46,7 @@ function syncDatabase() {
 
   if (isRailway || process.env.PRISMA_DB_PUSH === 'true') {
     console.log('[start-api-prod] Railway/PRISMA_DB_PUSH — using db push (Neon-safe)');
-    const ok = run(
-      'Prisma db push',
-      'npx',
-      ['prisma', 'db', 'push', '--schema', schema, '--skip-generate'],
-      root,
-      true,
-    );
+    const ok = runDbPush('Prisma db push');
     if (!ok) {
       console.warn(
         '[start-api-prod] db push reported issues — continuing (schema may already match Neon)',
@@ -68,13 +70,7 @@ function syncDatabase() {
     if (migrate.status === 0) return;
 
     console.warn('[start-api-prod] migrate deploy failed — falling back to db push…');
-    run(
-      'Prisma db push (fallback)',
-      'npx',
-      ['prisma', 'db', 'push', '--schema', schema, '--skip-generate'],
-      root,
-      true,
-    );
+    runDbPush('Prisma db push (fallback)');
     return;
   }
 
@@ -83,12 +79,38 @@ function syncDatabase() {
   );
 }
 
-syncDatabase();
+/** On Railway, listen for healthcheck first — db push runs in background after boot. */
+function syncDatabaseBackground() {
+  if (process.env.SKIP_DB_SYNC === 'true') return;
+
+  console.log('[start-api-prod] Background db push (Railway — healthcheck listens first)');
+  const child = spawn(
+    'npx',
+    ['prisma', 'db', 'push', '--schema', schema, '--skip-generate'],
+    {
+      cwd: root,
+      stdio: 'inherit',
+      shell: true,
+      env: { ...process.env, NODE_ENV: process.env.NODE_ENV ?? 'production' },
+    },
+  );
+  child.on('exit', (code) => {
+    console.log(`[start-api-prod] Background db push exited with code ${code ?? 'unknown'}`);
+  });
+}
 
 const distMain = path.join(apiDir, 'dist', 'main.js');
 if (!fs.existsSync(distMain)) {
   console.error(`[start-api-prod] Missing ${distMain} — run npm run build --workspace=@dcf/api first`);
   process.exit(1);
+}
+
+if (isRailway) {
+  // Build phase already ran prisma generate — skip here so /api/health responds before db push finishes.
+  syncDatabaseBackground();
+} else {
+  run('Prisma generate', 'npx', ['prisma', 'generate', '--schema', schema]);
+  syncDatabaseBlocking();
 }
 
 run('Start NestJS API', 'node', ['dist/main.js'], apiDir);
