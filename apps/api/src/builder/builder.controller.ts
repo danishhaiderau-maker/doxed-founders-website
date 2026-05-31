@@ -75,6 +75,14 @@ export class BuilderController {
     return this.builder.connectOllama(user.id, body.baseUrl, body.model);
   }
 
+  @Post('providers/phala-connect')
+  connectPhala(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { apiKey: string; inferenceUrl?: string; model?: string },
+  ) {
+    return this.builder.connectPhala(user.id, body.apiKey, body.inferenceUrl, body.model);
+  }
+
   @Post('providers/:provider/disconnect')
   disconnectProvider(@CurrentUser() user: AuthUser, @Param('provider') provider: string) {
     return this.builder.disconnectAiProvider(user.id, provider);

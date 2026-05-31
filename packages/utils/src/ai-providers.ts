@@ -8,6 +8,7 @@ export type AiProviderKey =
   | 'DEEPSEEK'
   | 'OPENROUTER'
   | 'OLLAMA_LOCAL'
+  | 'PHALA'
   | 'OPENHANDS'
   | 'CURSOR';
 
@@ -95,6 +96,17 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     billTip:
       'Runs on your desktop via Founder Node + Ollama. Prompts stay on your machine — zero cloud inference cost.',
     credentialProvider: 'ollama',
+  },
+  {
+    key: 'PHALA',
+    label: 'Private AI (Phala TEE)',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    needsBaseUrl: true,
+    defaultModel: 'phala/deepseek-chat-v3-0324',
+    billTip:
+      'Confidential inference in a hardware TEE — OpenAI-compatible API. Your key or platform credits; prompts are not used for public model training.',
+    credentialProvider: 'phala',
   },
   {
     key: 'OPENHANDS',
