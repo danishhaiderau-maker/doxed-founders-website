@@ -21,7 +21,8 @@ export type WorkspaceTab =
   | 'funding'
   | 'agents'
   | 'build'
-  | 'analytics';
+  | 'analytics'
+  | 'notifications';
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'activity', label: 'Mission control' },
@@ -434,7 +435,9 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           onTabChange={onTabChange}
           onRefresh={onRefresh}
           onMessage={onWorkspaceMessage}
-          tabContent={useDashboardShell && tab !== 'activity' ? tabPanels : undefined}
+          tabContent={
+            useDashboardShell && tab !== 'activity' && tab !== 'notifications' ? tabPanels : undefined
+          }
         />
       )}
 
