@@ -12,6 +12,7 @@ import {
   ProjectMemory,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
+import { AI_STACK_HREF, resolveAiStackAction } from '@/lib/copilot-ai-stack';
 
 const QUICK_ACTIONS = [
   { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?' },
@@ -32,7 +33,9 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [lastAnswer, setLastAnswer] = useState<string | null>(null);
   const [defaultProvider, setDefaultProvider] = useState('RULE_BASED');
-  const [cursorConnected, setCursorConnected] = useState(false);
+  const [providers, setProviders] = useState<
+    { key: string; label: string; connected: boolean; connectMode?: string }[]
+  >([]);
   const [llmConnected, setLlmConnected] = useState(false);
 
   const onTranscript = useCallback((text: string) => {
@@ -51,7 +54,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       setFeed(activity);
       setMemory(mem);
       setDefaultProvider(builder.defaultProvider);
-      setCursorConnected(builder.providers.some((p) => p.key === 'CURSOR' && p.connected));
+      setProviders(builder.providers);
       setLlmConnected(
         builder.providers.some(
           (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
@@ -104,7 +107,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       setPrompt('');
     } catch (err) {
       onResult?.(
-        err instanceof Error ? err.message : 'Cursor dispatch failed — connect API key in Builder settings',
+        err instanceof Error ? err.message : 'Cursor dispatch failed — connect Cursor in AI Stack',
       );
     } finally {
       setBusy(false);
@@ -120,12 +123,11 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   }
 
   const stats = feed?.weekStats;
+  const aiStackAction = resolveAiStackAction(providers, defaultProvider);
   const providerLabel =
-    defaultProvider === 'CURSOR'
-      ? 'Cursor Cloud Agents'
-      : defaultProvider === 'RULE_BASED'
-        ? 'Rule-based (local)'
-        : defaultProvider.replace('_', ' ');
+    aiStackAction.kind === 'connect'
+      ? 'Rule-based (local)'
+      : aiStackAction.label;
 
   return (
     <section className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 via-zinc-950/80 to-zinc-950 p-5 shadow-lg shadow-violet-950/20 md:p-6 lg:p-8">
@@ -142,8 +144,8 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
           <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-2.5 py-1 text-[10px] font-medium text-violet-200">
             {providerLabel}
           </span>
-          <Link href="/settings/builder" className="text-[10px] text-zinc-500 hover:text-violet-300">
-            Builder settings →
+          <Link href={AI_STACK_HREF} className="text-[10px] text-zinc-500 hover:text-violet-300">
+            AI Stack →
           </Link>
         </div>
       </div>
@@ -194,32 +196,46 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
             {listening && (
               <span className="self-center text-[10px] text-red-300">Listening…</span>
             )}
-            {cursorConnected && (
+            {aiStackAction.kind === 'cursor' && (
               <span className="rounded-lg border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-300">
-                Cursor agent ready
+                {aiStackAction.label} ready
               </span>
             )}
-            {llmConnected && defaultProvider !== 'CURSOR' && (
+            {aiStackAction.kind === 'connected' && (
               <span className="rounded-lg border border-sky-500/30 px-2 py-1 text-[10px] text-sky-300">
-                LLM specs enabled
+                {aiStackAction.label} connected
               </span>
             )}
-            {!cursorConnected && !llmConnected && (
+            {aiStackAction.kind === 'connect' && (
               <span className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] text-zinc-500">
-                Connect LLM or Cursor in Builder settings for smarter replies
+                Connect an LLM or Cursor in AI Stack
               </span>
             )}
           </div>
           <div className="flex gap-2">
-            {cursorConnected && defaultProvider === 'CURSOR' && (
+            {aiStackAction.kind === 'connect' ? (
+              <Link
+                href={AI_STACK_HREF}
+                className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-950/50"
+              >
+                Connect AI Stack
+              </Link>
+            ) : aiStackAction.kind === 'cursor' ? (
               <button
                 type="button"
                 disabled={busy || !prompt.trim()}
                 onClick={handleDispatchCursor}
                 className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-50"
               >
-                Run on Cursor
+                {aiStackAction.label}
               </button>
+            ) : (
+              <Link
+                href={AI_STACK_HREF}
+                className="rounded-lg border border-sky-500/30 bg-sky-950/20 px-3 py-1.5 text-xs font-medium text-sky-200"
+              >
+                {aiStackAction.label}
+              </Link>
             )}
             <button
               type="button"
@@ -236,8 +252,8 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       {defaultProvider === 'RULE_BASED' && !llmConnected && (
         <p className="mt-2 text-[11px] text-zinc-600">
           Quick Build uses rule-based specs locally. Connect DeepSeek or OpenAI in{' '}
-          <Link href="/settings/builder" className="text-violet-400 hover:underline">
-            Builder settings
+          <Link href={AI_STACK_HREF} className="text-violet-400 hover:underline">
+            AI Stack
           </Link>{' '}
           for AI-written specs — or Cursor for cloud agents on your repo.
         </p>

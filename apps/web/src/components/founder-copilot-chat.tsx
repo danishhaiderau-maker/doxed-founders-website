@@ -10,6 +10,7 @@ import {
   ProjectMemory,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
+import { AI_STACK_HREF, resolveAiStackAction, shortProviderName } from '@/lib/copilot-ai-stack';
 
 type ChatMessage = {
   id: string;
@@ -88,7 +89,9 @@ export function FounderCopilotChat({
   const [busy, setBusy] = useState(false);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [defaultProvider, setDefaultProvider] = useState('RULE_BASED');
-  const [cursorConnected, setCursorConnected] = useState(false);
+  const [providers, setProviders] = useState<
+    { key: string; label: string; connected: boolean; connectMode?: string }[]
+  >([]);
   const [llmConnected, setLlmConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -120,7 +123,7 @@ export function FounderCopilotChat({
       ]);
       setMemory(mem);
       setDefaultProvider(builder.defaultProvider);
-      setCursorConnected(builder.providers.some((p) => p.key === 'CURSOR' && p.connected));
+      setProviders(builder.providers);
       setLlmConnected(hasChatLlmProvider(builder.providers));
     } catch {
       setMemory(null);
@@ -182,7 +185,8 @@ export function FounderCopilotChat({
 
   async function runOnCursor() {
     const q = prompt.trim();
-    if (!q || busy || !cursorConnected) return;
+    const cursorReady = providers.some((p) => p.key === 'CURSOR' && p.connected);
+    if (!q || busy || !cursorReady) return;
     setBusy(true);
     setError(null);
     try {
@@ -219,11 +223,19 @@ export function FounderCopilotChat({
     sessionStorage.removeItem(STORAGE_KEY);
   }
 
+  const aiStackAction = resolveAiStackAction(providers, defaultProvider);
   const statusLabel = llmConnected
-    ? `Chat LLM · ${defaultProvider.replace('_', ' ')}`
-    : defaultProvider === 'CURSOR' && cursorConnected
-      ? 'Cursor agent connected · chat uses memory · Run on Cursor for code'
-      : 'Rule-based · add DeepSeek/OpenAI in Builder for AI chat';
+    ? `Chat · ${shortProviderName(
+        providers.find((p) => p.key === defaultProvider && p.connected) ?? {
+          key: defaultProvider,
+          label: defaultProvider,
+        },
+      )}`
+    : aiStackAction.kind === 'cursor'
+      ? `${aiStackAction.label} connected · dispatch code from prompt`
+      : aiStackAction.kind === 'connected'
+        ? `${aiStackAction.label} connected · AI Stack`
+        : 'Rule-based · connect an LLM in AI Stack';
 
   const isHero = variant === 'hero';
   const isEmbedded = variant === 'embedded';
@@ -272,7 +284,7 @@ export function FounderCopilotChat({
               <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
               <p className="truncate text-xs text-zinc-500">
                 {memory?.project?.name ?? 'Project'} ·{' '}
-                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Builder settings'}
+                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in AI Stack'}
               </p>
             </>
           )}
@@ -288,8 +300,8 @@ export function FounderCopilotChat({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-md bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400">{statusLabel}</span>
-          <Link href="/settings/builder" className="text-[10px] text-violet-400 hover:underline">
-            Settings
+          <Link href={AI_STACK_HREF} className="text-[10px] text-violet-400 hover:underline">
+            AI Stack
           </Link>
           {messages.length > 0 && (
             <button
@@ -407,15 +419,31 @@ export function FounderCopilotChat({
             {listening && <span className="text-[10px] text-red-300">Listening…</span>}
           </div>
           <div className="flex gap-2">
-            {cursorConnected && (
+            {aiStackAction.kind === 'connect' ? (
+              <Link
+                href={AI_STACK_HREF}
+                className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-950/50"
+              >
+                Connect AI Stack
+              </Link>
+            ) : aiStackAction.kind === 'cursor' ? (
               <button
                 type="button"
                 disabled={busy || !prompt.trim()}
                 onClick={runOnCursor}
                 className="rounded-lg border border-emerald-600/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
+                title={`Dispatch ${aiStackAction.label} cloud agent`}
               >
-                Run on Cursor
+                {aiStackAction.label}
               </button>
+            ) : (
+              <Link
+                href={AI_STACK_HREF}
+                className="rounded-lg border border-sky-500/30 bg-sky-950/20 px-3 py-1.5 text-xs font-medium text-sky-200 hover:bg-sky-950/40"
+                title="Connected in AI Stack"
+              >
+                {aiStackAction.label}
+              </Link>
             )}
             <button
               type="button"

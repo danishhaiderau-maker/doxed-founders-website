@@ -445,7 +445,7 @@ export class BuilderService {
       where: { userId_provider: { userId, provider: 'cursor' } },
     });
     if (!cred?.token) {
-      throw new BadRequestException('Connect Cursor in Settings → Builder first');
+      throw new BadRequestException('Connect Cursor in AI Stack first');
     }
 
     const meta = (cred.metadata as CursorCredentialMeta | null) ?? {};
