@@ -88,7 +88,7 @@ export function formatWorkforceRuntimeSummary(runtime: WorkforceRuntimeResult): 
   if (runtime.cursorDispatched && runtime.cursorAgentUrl) {
     lines.push(`✓ Cursor agent started — ${runtime.cursorAgentUrl}`);
   } else if (runtime.permissions.includes('cursor_agent')) {
-    lines.push('○ Connect Cursor in Builder to auto-dispatch code tasks');
+    lines.push('○ Connect Cursor in AI Stack to auto-dispatch code tasks');
   }
   if (runtime.communityDraftSaved) {
     lines.push('✓ Community update draft saved — review in Projects');
