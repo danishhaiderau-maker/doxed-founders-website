@@ -116,8 +116,11 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     onLaunchRaise,
   } = props;
 
+  const showDashboardChrome = tab === 'activity' && session && hasFounder;
+
   return (
     <div className="space-y-6">
+      {!showDashboardChrome && (
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-white">Founder OS</h2>
@@ -132,6 +135,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           </Link>
         )}
       </div>
+      )}
 
       {tab !== 'activity' && (
         <FounderJourneyProgress
@@ -140,22 +144,24 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
         />
       )}
 
-      <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onTabChange(t.id)}
-            className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
-              tab === t.id
-                ? 'bg-emerald-600 text-white'
-                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
+      {!(tab === 'activity' && session && hasFounder) && (
+        <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onTabChange(t.id)}
+              className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
+                tab === t.id
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      )}
 
       {!session && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
@@ -179,12 +185,15 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           hasFounder={hasFounder}
           dashboard={dashboard}
           room={room}
+          activeTab={tab}
           onTabChange={onTabChange}
           onRefresh={onRefresh}
           onMessage={onWorkspaceMessage}
         />
       )}
 
+      {tab !== 'activity' && (
+        <>
       {tab === 'tasks' && session && (
         <OsSection title="Build queue tasks" subtitle="Quick Build · agents · command bar · bounties" disabled={!hasFounder}>
           <p className="text-sm text-zinc-400">
@@ -424,6 +433,8 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
             </OsSection>
           )}
         </div>
+      )}
+        </>
       )}
     </div>
   );
