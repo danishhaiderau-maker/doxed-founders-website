@@ -40,10 +40,11 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 ### 2. Healthcheck failure (older deploys)
 
 - Neon was bootstrapped with `db push` — `prisma migrate deploy` blocked startup → API never listened → healthcheck timed out.
+- **Startup script ran blocking `prisma generate` + `db push` before Nest listened** when the Railway-only fast path did not trigger → healthcheck failed at ~90s while the old deploy stayed active.
 - **@dcf/web** had **0 variables** (no `DATABASE_URL`, no `JWT_SECRET`) → instant crash.
 - **JWT_SECRET** must be 32+ chars when `NODE_ENV=production`.
 
-**Fix:** `scripts/start-api-prod.mjs` auto-detects Railway (`RAILWAY_ENVIRONMENT`) and uses **db push**, continuing on schema-already-sync warnings.
+**Fix:** `scripts/start-api-prod.mjs` uses `NODE_ENV=production` to **start Nest immediately** and runs `db push` in the background after 15s. Healthcheck uses `/api/health/live` (no DB). Prisma `$connect` is non-blocking in production.
 
 ## Required Railway variables (doxed-founders-website only)
 
