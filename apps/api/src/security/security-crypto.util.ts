@@ -25,6 +25,15 @@ export function decryptSecret(payload: string): string {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
+/** Returns null when ciphertext was encrypted with a different JWT_SECRET. */
+export function tryDecryptSecret(payload: string): string | null {
+  try {
+    return decryptSecret(payload);
+  } catch {
+    return null;
+  }
+}
+
 export function hashToken(token: string): string {
   return scryptSync(token, 'dcf-auth-challenge', 32).toString('hex');
 }

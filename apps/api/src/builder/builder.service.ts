@@ -14,6 +14,8 @@ import {
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { FounderNodeInferenceService } from '../founder-node/founder-node-inference.service';
+import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
+import { AttestationService } from '../attestation/attestation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CursorCredentialMeta,
@@ -32,6 +34,7 @@ import {
   callPhalaChat,
   normalizePhalaBaseUrl,
   verifyPhalaConnection,
+  type PhalaChatResult,
 } from './phala.client';
 
 @Injectable()
@@ -40,6 +43,8 @@ export class BuilderService {
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
     private readonly founderNodeInference: FounderNodeInferenceService,
+    private readonly founderNodeSync: FounderNodeSyncService,
+    private readonly attestation: AttestationService,
   ) {}
 
   async getSettings(userId: string) {
@@ -50,6 +55,7 @@ export class BuilderService {
     const cursorMeta = await this.getCursorMeta(userId);
     const ollamaStatus = await this.founderNodeInference.getOllamaStatus(userId);
     const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
+    const founderNodeV2 = await this.founderNodeSync.getV2Status(userId);
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -61,6 +67,7 @@ export class BuilderService {
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       founderNodeAi: ollamaStatus,
+      founderNodeV2,
       phalaPrivateAi: phalaStatus,
       providers: AI_PROVIDERS.map((p) => ({
         ...p,
@@ -153,6 +160,10 @@ export class BuilderService {
           : {}),
       },
     });
+
+    if (input.currentGoalFocus !== undefined) {
+      await this.founderNodeSync.maybeEnqueueGoalPush(userId, input.currentGoalFocus);
+    }
 
     return this.getSettings(userId).then(() => ({
       defaultProvider: settings.defaultProvider,
@@ -570,15 +581,16 @@ export class BuilderService {
       const phala = await this.resolvePhalaCredentials(userId);
       if (phala) {
         try {
-          const text = await callPhalaChat({
+          const chat = await callPhalaChat({
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model: settings.preferredModel ?? phala.model,
             system,
             userPrompt,
           });
-          if (text?.trim()) {
-            return { ok: true, text: text.trim(), provider: AiProvider.PHALA };
+          if (chat?.text) {
+            await this.recordPhalaChat(userId, chat);
+            return { ok: true, text: chat.text, provider: AiProvider.PHALA };
           }
           llmErrors.push('PHALA: empty response');
         } catch (err) {
@@ -619,14 +631,17 @@ export class BuilderService {
             ? settings.preferredModel ?? phala.model
             : phala.model;
         try {
-          const text = await callPhalaChat({
+          const chat = await callPhalaChat({
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model,
             system,
             userPrompt,
           });
-          if (text?.trim()) return { ok: true, text: text.trim(), provider };
+          if (chat?.text) {
+            await this.recordPhalaChat(userId, chat);
+            return { ok: true, text: chat.text, provider };
+          }
           llmErrors.push(`${provider}: empty response`);
         } catch (err) {
           llmErrors.push(`${provider}: ${err instanceof Error ? err.message : 'request failed'}`);
@@ -783,6 +798,13 @@ export class BuilderService {
       model: meta?.model || process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL,
       docsUrl: 'https://docs.phala.com/phala-cloud/confidential-ai/confidential-model/confidential-ai-api',
     };
+  }
+
+  private async recordPhalaChat(userId: string, chat: PhalaChatResult) {
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    await this.attestation
+      .recordPhalaInference(userId, chat, settings?.memoryStorageMode)
+      .catch(() => undefined);
   }
 
   private async resolvePhalaCredentials(userId: string) {

@@ -16,6 +16,7 @@ import { Public } from '../auth/public.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { FounderNodeGuard, type FounderNodeRequestUser } from './founder-node.guard';
 import { FounderNodeInferenceService } from './founder-node-inference.service';
+import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
 
 @Controller('founder-node')
@@ -23,6 +24,7 @@ export class FounderNodeController {
   constructor(
     private readonly nodes: FounderNodeService,
     private readonly inference: FounderNodeInferenceService,
+    private readonly syncJobs: FounderNodeSyncService,
   ) {}
 
   @Post('pairing-code')
@@ -38,6 +40,40 @@ export class FounderNodeController {
   @Get('ollama-status')
   ollamaStatus(@CurrentUser() user: AuthUser) {
     return this.inference.getOllamaStatus(user.id);
+  }
+
+  @Get('v2-status')
+  v2Status(@CurrentUser() user: AuthUser) {
+    return this.syncJobs.getV2Status(user.id);
+  }
+
+  @Post('sync-jobs/push-goal')
+  pushGoal(@CurrentUser() user: AuthUser, @Body() body: { goal: string }) {
+    return this.syncJobs.enqueuePushGoal(user.id, body.goal);
+  }
+
+  @Post('sync-jobs/push-task')
+  pushTask(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { title: string; taskId?: string },
+  ) {
+    return this.syncJobs.enqueuePushTask(user.id, body.title, body.taskId);
+  }
+
+  @Post('sync-jobs/vault-search')
+  vaultSearch(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { query: string; topK?: number },
+  ) {
+    return this.syncJobs.searchVault(user.id, body.query, body.topK);
+  }
+
+  @Post('sync-jobs/run-agent')
+  runAgent(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { agent: string; goal?: string; query?: string },
+  ) {
+    return this.syncJobs.runAgent(user.id, body.agent, body);
   }
 
   @Delete(':nodeId')
@@ -95,5 +131,21 @@ export class FounderNodeController {
     @Body() body: { result?: string; error?: string },
   ) {
     return this.inference.completeJob(req.founderNode.nodeId, jobId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('sync-jobs/pending')
+  pendingSyncJob(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.syncJobs.claimPending(req.founderNode.nodeId);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('sync-jobs/:jobId/complete')
+  completeSyncJob(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('jobId') jobId: string,
+    @Body() body: { result?: Record<string, unknown>; error?: string },
+  ) {
+    return this.syncJobs.completeJob(req.founderNode.nodeId, jobId, body);
   }
 }

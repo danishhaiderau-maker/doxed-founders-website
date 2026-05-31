@@ -61,8 +61,8 @@ Founder Node (desktop)
 1. **Founder Vault** ✅
 2. **Bring Your Own AI** ✅ — OpenRouter, Ollama via Founder Node, BYOK routing
 3. **Private AI inference (Phala TEE)** ✅ — TEE Copilot routing, Builder connect, platform credits optional
-4. **Founder Node v2** — vector DB, local agents, bidirectional sync
-5. **Attestation dashboard** — verify TEE workload + memory integrity
+4. **Founder Node v2** ✅ — see `docs/FOUNDER_NODE_V2.md`
+5. **Attestation dashboard** ✅ — see `docs/ATTESTATION_DASHBOARD.md`
 
 See `docs/BYO_AI.md` for Step 2 setup.
 
@@ -73,4 +73,4 @@ See `docs/BYO_AI.md` for Step 2 setup.
 3. Generate pairing code → enter in tray app
 4. Edit files in `~/FounderVault/` — sync every ~60s
 
-See also: `docs/PHALA_PRIVATE_AI.md` for Step 3.
+See also: `docs/PHALA_PRIVATE_AI.md` for Step 3. Full stack index: `docs/PRIVACY_STACK.md`.

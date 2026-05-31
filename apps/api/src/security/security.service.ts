@@ -26,6 +26,7 @@ import {
   generateRecoveryCode,
   hashToken,
   randomToken,
+  tryDecryptSecret,
 } from './security-crypto.util';
 import { ChangePasswordDto } from './dto/security.dto';
 
@@ -168,7 +169,12 @@ export class SecurityService {
   async verifyTotpCode(userId: string, code: string) {
     const totp = await this.prisma.userTotp.findUnique({ where: { userId } });
     if (!totp?.enabled) throw new BadRequestException('2FA is not enabled');
-    const secret = decryptSecret(totp.secretEncrypted);
+    const secret = tryDecryptSecret(totp.secretEncrypted);
+    if (!secret) {
+      throw new UnauthorizedException(
+        'Authenticator unavailable — use a recovery code, or run npm run fix:admin-2fa to resync JWT_SECRET',
+      );
+    }
     const normalized = code.replace(/\s/g, '').toUpperCase();
     if (normalized.includes('-')) {
       return this.useRecoveryCode(userId, normalized);

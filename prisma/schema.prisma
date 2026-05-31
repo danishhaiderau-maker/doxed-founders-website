@@ -266,6 +266,21 @@ enum FounderNodeInferenceStatus {
   EXPIRED
 }
 
+enum FounderNodeSyncJobKind {
+  PUSH_GOAL
+  PUSH_TASK
+  VAULT_SEARCH
+  RUN_AGENT
+}
+
+enum FounderNodeSyncJobStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+  EXPIRED
+}
+
 enum MemoryStorageMode {
   PLATFORM
   GITHUB
@@ -381,6 +396,8 @@ model User {
   founderNodes              FounderNode[]
   founderNodePairings       FounderNodePairingCode[]
   founderNodeInferenceJobs  FounderNodeInferenceJob[]
+  founderNodeSyncJobs       FounderNodeSyncJob[]
+  privacyAttestationLogs    PrivacyAttestationLog[]
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
 
@@ -1431,12 +1448,61 @@ model FounderNode {
   ollamaEnabled Boolean  @default(false)
   ollamaBaseUrl String?
   ollamaModel   String?
+  vectorChunks     Int?
+  vectorIndexedAt  DateTime?
+  lastPullSyncAt   DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+/** Bidirectional sync job pulled by Founder Node (Step 4). */
+model FounderNodeSyncJob {
+  id          String                   @id @default(cuid())
+  userId      String
+  nodeId      String
+  kind        FounderNodeSyncJobKind
+  payload     Json
+  status      FounderNodeSyncJobStatus @default(PENDING)
+  result      Json?
+  error       String?
+  expiresAt   DateTime
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([nodeId, status])
+  @@index([expiresAt])
+}
+
+/** Privacy stack attestation receipts (Step 5 — Phala TEE + vault integrity). */
+model PrivacyAttestationLog {
+  id             String              @id @default(cuid())
+  userId         String
+  kind           String
+  status         String              @default("pending")
+  provider       String?
+  model          String?
+  requestId      String?
+  signingAddress String?
+  nonce          String?
+  verified       Boolean             @default(false)
+  verifiedAt     DateTime?
+  summary        String?
+  checks         Json?
+  reportSnapshot Json?
+  memoryMode     MemoryStorageMode?
+  createdAt      DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, kind])
 }
 
 /** Copilot LLM job executed on a paired Founder Node (Ollama). */
