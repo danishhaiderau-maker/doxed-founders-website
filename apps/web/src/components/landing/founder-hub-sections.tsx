@@ -140,14 +140,22 @@ export function FounderOsHubTeaser() {
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link
-            href={session ? '/founder-den' : '/login?callbackUrl=/founder-den'}
+            href="/feed"
             className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:bg-emerald-500"
           >
-            Open Founder OS
+            See build feed
           </Link>
           <Link href="/founders" className="rounded-xl border border-zinc-700 px-6 py-3 text-sm text-zinc-300 hover:text-white">
             Browse founders
           </Link>
+          {!session && (
+            <Link
+              href="/login?callbackUrl=/founder-den"
+              className="rounded-xl border border-emerald-500/40 px-6 py-3 text-sm text-emerald-200 hover:text-white"
+            >
+              Sign in
+            </Link>
+          )}
         </div>
       </div>
     </section>

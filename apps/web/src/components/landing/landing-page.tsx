@@ -39,27 +39,12 @@ export function LandingPage() {
       <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-10">
           <div>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-violet-400/90">
-              Founder OS
+            <SiteBrand className="text-sm" />
+            <p className="mt-1 text-sm text-zinc-500">
+              Build publicly · validate demand · launch with trust
             </p>
-            <SiteBrand />
-            <p className="mt-0.5 text-[11px] text-zinc-600">Doxxed Crypto</p>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <SiteNav />
-            <Link
-              href="/login"
-              className="hidden rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white sm:inline-block"
-            >
-              Login
-            </Link>
-            <Link
-              href="/founder-den"
-              className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500"
-            >
-              Open Founder OS →
-            </Link>
-          </div>
+          <SiteNav />
         </div>
       </header>
 

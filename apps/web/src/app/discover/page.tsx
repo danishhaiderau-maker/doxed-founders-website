@@ -29,8 +29,8 @@ export default function DiscoverPage() {
 
   return (
     <main className="min-h-screen bg-[#050508]">
-      <header className="border-b border-zinc-800">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-5">
+      <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
+        <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Discover startups</h1>
