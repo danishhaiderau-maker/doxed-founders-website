@@ -6,9 +6,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const apiDir = path.join(root, 'apps', 'api');
 const schema = process.env.PRISMA_SCHEMA ?? 'prisma/schema.prisma';
-const isProd = (process.env.NODE_ENV ?? '').trim() === 'production';
-
-process.env.NODE_ENV = isProd ? 'production' : (process.env.NODE_ENV?.trim() || 'production');
+process.env.NODE_ENV = process.env.NODE_ENV?.trim() || 'production';
+const isProd = process.env.NODE_ENV === 'production';
 if (isProd && process.env.PRISMA_DB_PUSH !== 'false') {
   process.env.PRISMA_DB_PUSH = 'true';
 }
