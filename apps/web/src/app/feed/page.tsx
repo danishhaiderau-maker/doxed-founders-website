@@ -396,12 +396,26 @@ function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string 
             {item.category}
           </span>
           <span>{timeAgo(item.at)}</span>
-          {item.tier === 1 && (
+          {item.pinned && (
+            <span className="rounded bg-sky-500/20 px-1.5 py-0.5 font-semibold text-sky-200">Pinned · X</span>
+          )}
+          {item.tier === 1 && !item.pinned && (
             <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">Priority</span>
           )}
         </div>
         <p className="mt-1 font-semibold text-white">{item.headline}</p>
         {item.detail && <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>}
+        {item.sourceUrl && (
+          <a
+            href={item.sourceUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-block text-xs text-sky-400 hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            View on X →
+          </a>
+        )}
       </div>
     </>
   );

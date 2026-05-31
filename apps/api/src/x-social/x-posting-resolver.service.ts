@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { appendPlatformXShareFooter } from '@dcf/utils';
+import { appendPlatformXShareFooter, fitXShareTextWithFooter } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildOAuth1Header, verifyOAuth1Credentials } from './x-oauth1';
 import {
@@ -81,7 +81,7 @@ export class XPostingResolverService {
       return { ok: false, reason: 'X not connected — sign in with X to enable posting.' };
     }
 
-    const payload = appendPlatformXShareFooter(text).slice(0, 280);
+    const payload = fitXShareTextWithFooter(text);
     const handle = account.user.twitterHandle?.replace(/^@/, '') ?? 'i';
 
     const oauth1 = await this.postOAuth1(account, payload, mediaIds);

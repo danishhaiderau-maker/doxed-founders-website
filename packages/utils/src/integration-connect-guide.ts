@@ -145,13 +145,26 @@ export const INTEGRATION_CONNECT_GUIDES: Record<string, IntegrationConnectGuide>
     ],
   },
   x: {
-    summary: 'Publish build updates to X in one click.',
-    whatItDoes: 'Uses Sign in with X (OAuth) — no manual API key in Stack hub.',
-    whatItDoesNot: 'Cannot post until you sign in with X at login/register.',
+    summary: 'Post Proof of Conviction and build updates to X in one click.',
+    whatItDoes:
+      'Uses Sign in with X (OAuth 2.0 with tweet.write). Enables Post Instantly on paper trades and publish-everywhere from Founder OS.',
+    whatItDoesNot: 'Does not auto-post without your action. Composer shares still work if OAuth expires.',
     steps: [
-      { title: '1. Sign in with X', body: 'Login or Register → Continue with X.' },
-      { title: '2. Publish', body: 'After syncing GitHub, use Publish everywhere on suggested updates.' },
+      {
+        title: '1. Sign in or reconnect with X',
+        body: 'Login/Register → Continue with X. If you see “token expired”, click Reconnect X on the share modal or Connected Accounts tab.',
+      },
+      {
+        title: '2. Proof of Conviction',
+        body: 'Paper Trading → Share → Post Instantly posts your thesis + P/L with platform marketing footer automatically.',
+      },
+      {
+        title: '3. Founder updates',
+        body: 'Connect GitHub in Stack hub → sync commits → Publish everywhere to cross-post build updates.',
+        link: { label: 'Connected Accounts', href: '/account?tab=connected' },
+      },
     ],
+    note: 'Reconnecting grants fresh OAuth scopes including tweet.write — required after X policy changes.',
   },
 };
 

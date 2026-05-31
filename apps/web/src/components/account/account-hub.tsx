@@ -12,18 +12,15 @@ import { SecuritySettingsPanel } from '@/components/settings/security-settings-p
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { GamifiedRoleBadge, BuilderStatusBadge } from '@/components/account/gamified-role-badge';
 import { NotificationSettingsPanel } from '@/components/account/notification-settings-panel';
+import { ConnectedAccountsPanel } from '@/components/account/connected-accounts-panel';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
   AccountActivityItem,
-  AccountFollowingEntry,
   AccountOverview,
   AccountPointLedgerEntry,
   fetchAccountActivity,
-  fetchAccountFollowing,
   fetchAccountOverview,
   fetchAccountPointLedger,
-  fetchFounderOsDashboard,
-  unfollowUser,
 } from '@/lib/api';
 
 export type AccountTab =
@@ -76,37 +73,20 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
   const [overview, setOverview] = useState<AccountOverview | null>(null);
   const [ledger, setLedger] = useState<AccountPointLedgerEntry[]>([]);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
-  const [following, setFollowing] = useState<AccountFollowingEntry[]>([]);
-  const [connectedApps, setConnectedApps] = useState<
-    { provider: string; label: string; connected: boolean; accountName?: string | null }[]
-  >([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!token) return;
     setError(null);
     try {
-      const [ov, lg, act, fol, dash] = await Promise.all([
+      const [ov, lg, act] = await Promise.all([
         fetchAccountOverview(token),
         fetchAccountPointLedger(token),
         fetchAccountActivity(token),
-        fetchAccountFollowing(token),
-        fetchFounderOsDashboard(token).catch(() => null),
       ]);
       setOverview(ov);
       setLedger(lg);
       setActivity(act);
-      setFollowing(fol);
-      if (dash?.connectedApps) {
-        setConnectedApps(
-          dash.connectedApps.map((a) => ({
-            provider: a.provider,
-            label: a.label,
-            connected: a.connected,
-            accountName: a.accountName,
-          })),
-        );
-      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
     }
@@ -247,66 +227,7 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
           <NotificationSettingsPanel accessToken={token} />
         )}
 
-        {tab === 'connected' && (
-          <section className="space-y-4">
-            <p className="text-sm text-zinc-400">
-              OAuth, GitHub, builder AI keys, and integrations.
-            </p>
-            <Link
-              href="/settings/builder"
-              className="inline-flex rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:bg-violet-500/10"
-            >
-              Builder settings (AI · GitHub · Cursor) →
-            </Link>
-            <ul className="space-y-2">
-              {connectedApps.length === 0 ? (
-                <li className="rounded-xl border border-zinc-800 p-4 text-sm text-zinc-500">
-                  No connected apps yet. Open Founder OS to connect GitHub and integrations.
-                </li>
-              ) : (
-                connectedApps.map((app) => (
-                  <li
-                    key={app.provider}
-                    className="flex items-center justify-between rounded-xl border border-zinc-800 px-4 py-3"
-                  >
-                    <span className="text-sm text-white">{app.label}</span>
-                    <span
-                      className={`text-xs ${app.connected ? 'text-emerald-400' : 'text-zinc-500'}`}
-                    >
-                      {app.connected
-                        ? app.accountName ?? 'Connected'
-                        : 'Not connected'}
-                    </span>
-                  </li>
-                ))
-              )}
-            </ul>
-            {following.length > 0 && (
-              <div className="mt-6">
-                <h3 className="font-semibold text-white">People you follow</h3>
-                <ul className="mt-3 space-y-2">
-                  {following.map((user) => (
-                    <li
-                      key={user.userId}
-                      className="flex items-center justify-between rounded-lg border border-zinc-800 px-3 py-2 text-sm"
-                    >
-                      <span className="text-zinc-200">{user.displayName}</span>
-                      <button
-                        type="button"
-                        className="text-xs text-zinc-500 hover:text-red-300"
-                        onClick={() =>
-                          unfollowUser(user.userId, token).then(() => load())
-                        }
-                      >
-                        Unfollow
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </section>
-        )}
+        {tab === 'connected' && token && <ConnectedAccountsPanel accessToken={token} />}
 
         {tab === 'points' && overview && (
           <section className="space-y-6">

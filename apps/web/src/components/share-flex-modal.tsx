@@ -7,6 +7,8 @@ import {
   buildPortfolioShareUrl,
   buildProofOfConvictionMessage,
   buildProofOfConvictionThread,
+  appendPlatformXShareFooter,
+  fitXShareTextWithFooter,
   buildTwitterIntentUrl,
   formatTokenPrice,
   pickShareImagePath,
@@ -418,11 +420,12 @@ export function buildPositionFlexShare(
     input.currentPrice ??
     (entryPrice != null ? entryPrice * (1 + input.pnlPercent / 100) : undefined);
 
+  const thread = buildProofOfConvictionThread(proof);
   return {
     pnlOrRoi: input.pnlPercent,
-    tweetText: buildProofOfConvictionThread(proof),
+    tweetText: thread,
     instantTweetText: buildProofOfConvictionMessage(proof),
-    threadPreview: buildProofOfConvictionThread(proof),
+    threadPreview: thread,
     shareUrl: buildPortfolioShareUrl(input.origin, input.userId),
     title: `$${input.ticker} · thesis ${input.pnlPercent >= 0 ? 'playing out' : 'update'}`,
     ticker: input.ticker,
@@ -451,7 +454,7 @@ export function buildPortfolioFlexShare(input: {
 }): ShareConvictionConfig {
   const proofUrl = buildPortfolioShareUrl(input.origin, input.userId);
   const sign = input.roi >= 0 ? '+' : '';
-  const threadPreview = [
+  const threadBody = [
     '🚨 Proof of Conviction · Portfolio',
     '',
     `${input.displayName}`,
@@ -465,11 +468,13 @@ export function buildPortfolioFlexShare(input: {
     '',
     '#ProofOfConviction',
   ].join('\n');
-  const tweetText = threadPreview;
+  const threadPreview = appendPlatformXShareFooter(threadBody);
   return {
     pnlOrRoi: input.roi,
-    tweetText,
-    instantTweetText: `🚨 Portfolio · ${sign}${input.roi.toFixed(1)}% paper ROI\n${proofUrl}\n#ProofOfConviction`,
+    tweetText: threadPreview,
+    instantTweetText: fitXShareTextWithFooter(
+      `🚨 Portfolio · ${sign}${input.roi.toFixed(1)}% paper ROI\n${proofUrl}\n#ProofOfConviction`,
+    ),
     threadPreview,
     shareUrl: proofUrl,
     title: 'Portfolio conviction',
