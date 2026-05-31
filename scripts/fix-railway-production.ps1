@@ -43,6 +43,11 @@ if (-not $jwt) { $jwt = $envMap["JWT_SECRET"] }
 $cors = $envMap["CORS_ORIGINS"]
 if (-not $cors) { $cors = "https://doxxedcrypto.digital,https://www.doxxedcrypto.digital,https://doxed-founders-website.vercel.app" }
 
+$webauthnOrigin = $envMap["WEBAUTHN_ORIGIN"]
+if (-not $webauthnOrigin) { $webauthnOrigin = "https://doxxedcrypto.digital" }
+$webauthnRpId = $envMap["WEBAUTHN_RP_ID"]
+if (-not $webauthnRpId) { $webauthnRpId = "doxxedcrypto.digital" }
+
 if (-not $dbUrl) {
   Write-Host "Missing DATABASE_URL in vault\.env.neon or .env.self-host" -ForegroundColor Red
   exit 1
@@ -61,7 +66,11 @@ $vars = @(
   "NODE_ENV=production",
   "PRISMA_DB_PUSH=true",
   "PRISMA_SCHEMA=prisma/schema.prisma",
-  "CORS_ORIGINS=$cors"
+  "CORS_ORIGINS=$cors",
+  "WEBAUTHN_ORIGIN=$webauthnOrigin",
+  "WEBAUTHN_RP_ID=$webauthnRpId",
+  "WEBAUTHN_RP_NAME=Doxxed Crypto Founder OS",
+  "PUBLIC_SITE_URL=https://doxxedcrypto.digital"
 )
 
 $credKey = $envMap["CREDENTIALS_ENCRYPTION_KEY"]

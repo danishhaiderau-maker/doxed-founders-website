@@ -332,8 +332,18 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
             try {
               const { options, registerToken } = await passkeyRegisterOptions(accessToken);
               const attestation = await startRegistration({ optionsJSON: options as never });
-              await passkeyRegisterVerify(registerToken, attestation as never, accessToken, 'Passkey');
-              setMsg('Passkey registered');
+              const result = await passkeyRegisterVerify(
+                registerToken,
+                attestation as never,
+                accessToken,
+                'Passkey',
+              );
+              if (result.recoveryCodes?.length) {
+                setRecoveryCodes(result.recoveryCodes);
+                setMsg('Passkey registered — save these backup codes now (shown once)');
+              } else {
+                setMsg('Passkey registered');
+              }
               load();
             } catch (e) {
               setErr(e instanceof Error ? e.message : 'Passkey registration failed');
@@ -373,7 +383,8 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
         <h2 className="font-semibold text-white">Backup recovery codes</h2>
         <p className="mt-1 text-xs text-zinc-500">
-          One-time codes if you lose your authenticator. Remaining: {profile.recoveryCodesRemaining}
+          One-time codes if you lose your passkey or authenticator. Remaining:{' '}
+          {profile.recoveryCodesRemaining}
         </p>
         {recoveryCodes && (
           <ul className="mt-3 grid gap-1 font-mono text-sm text-amber-200 sm:grid-cols-2">
@@ -382,13 +393,18 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
             ))}
           </ul>
         )}
-        {profile.totpEnabled && (
+        {(profile.totpEnabled || profile.passkeys.length > 0) && (
           <button
             type="button"
             onClick={async () => {
-              const code = prompt('Enter current authenticator code');
-              if (!code) return;
+              setErr(null);
               try {
+                let code: string | undefined;
+                if (profile.totpEnabled) {
+                  const entered = prompt('Enter current authenticator code');
+                  if (!entered) return;
+                  code = entered;
+                }
                 const r = await generateRecoveryCodes(code, accessToken);
                 setRecoveryCodes(r.codes);
                 setMsg('Save these codes somewhere safe — shown once');
@@ -401,6 +417,12 @@ export function SecuritySettingsPanel({ accessToken }: { accessToken: string }) 
           >
             Generate new backup codes
           </button>
+        )}
+        {!profile.totpEnabled && profile.passkeys.length === 0 && (
+          <p className="mt-3 text-xs text-zinc-500">
+            Add a passkey or authenticator app first — backup codes are created automatically when you
+            register your first passkey.
+          </p>
         )}
       </section>
 

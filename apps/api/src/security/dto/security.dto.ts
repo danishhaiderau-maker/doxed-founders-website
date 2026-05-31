@@ -78,6 +78,15 @@ export class PasskeyRegisterVerifyDto {
   label?: string;
 }
 
+export class GenerateRecoveryCodesDto {
+  /** Required when TOTP is enabled; optional when only passkeys protect the account. */
+  @IsOptional()
+  @IsString()
+  @MinLength(6)
+  @MaxLength(20)
+  code?: string;
+}
+
 export class RenamePasskeyDto {
   @IsString()
   credentialId!: string;

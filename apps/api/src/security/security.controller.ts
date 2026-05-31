@@ -4,6 +4,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import {
   ChangePasswordDto,
+  GenerateRecoveryCodesDto,
   PasskeyLoginOptionsDto,
   PasskeyRegisterVerifyDto,
   PasskeyVerifyDto,
@@ -44,7 +45,7 @@ export class SecurityController {
   }
 
   @Post('recovery-codes')
-  recoveryCodes(@CurrentUser() user: AuthUser, @Body() dto: VerifyTotpDto) {
+  recoveryCodes(@CurrentUser() user: AuthUser, @Body() dto: GenerateRecoveryCodesDto) {
     return this.security.generateRecoveryCodes(user.id, dto.code);
   }
 

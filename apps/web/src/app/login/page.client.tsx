@@ -176,7 +176,8 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
         ) : (
           <form onSubmit={handleVerify2Fa} className="mt-8 space-y-4">
             <p className="text-sm text-[var(--color-muted)]">
-              Two-factor authentication required for this account.
+              Two-factor authentication required. Use your authenticator app, a backup recovery code, or
+              passkey.
             </p>
             {methods.includes('totp') && (
               <label className="block text-sm">

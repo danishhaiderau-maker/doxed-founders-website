@@ -79,10 +79,14 @@ export class AuthService {
         },
       });
       const methods: string[] = [];
-      const totp = await this.prisma.userTotp.findUnique({ where: { userId: user.id } });
-      const passkeyCount = await this.prisma.webAuthnCredential.count({ where: { userId: user.id } });
+      const [totp, passkeyCount, recoveryCount] = await Promise.all([
+        this.prisma.userTotp.findUnique({ where: { userId: user.id } }),
+        this.prisma.webAuthnCredential.count({ where: { userId: user.id } }),
+        this.prisma.recoveryCode.count({ where: { userId: user.id, usedAt: null } }),
+      ]);
       if (totp?.enabled) methods.push('totp');
-      if (passkeyCount > 0) methods.push('passkey', 'recovery');
+      if (passkeyCount > 0) methods.push('passkey');
+      if (recoveryCount > 0) methods.push('recovery');
       return { requires2fa: true, pendingToken, methods };
     }
 
