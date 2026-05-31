@@ -2185,6 +2185,16 @@ export interface BuilderSettings {
     nodeLabel: string | null;
     directOllamaUrl: string | null;
   };
+  founderNodeV2?: {
+    paired: boolean;
+    online: boolean;
+    nodeLabel: string | null;
+    vectorChunks: number | null;
+    vectorIndexedAt: string | null;
+    lastPullSyncAt: string | null;
+    pendingJobs: number;
+    bidirectionalSync: boolean;
+  };
   phalaPrivateAi?: {
     ready: boolean;
     userKeyConnected: boolean;
@@ -2222,6 +2232,82 @@ export function updateBuilderSettings(
   token: string,
 ) {
   return apiFetch('/builder/settings', { method: 'PATCH', body: JSON.stringify(data) }, token);
+}
+
+export function searchFounderVault(query: string, token: string, topK = 5) {
+  return apiFetch<{ ok?: boolean; query?: string; hits?: Array<{ source: string; text: string; score: number }> }>(
+    '/founder-node/sync-jobs/vault-search',
+    { method: 'POST', body: JSON.stringify({ query, topK }) },
+    token,
+  );
+}
+
+export function runFounderNodeAgent(
+  agent: 'vault-index' | 'goal-align' | 'vault-summary',
+  token: string,
+  payload?: { goal?: string; query?: string },
+) {
+  return apiFetch<Record<string, unknown>>(
+    '/founder-node/sync-jobs/run-agent',
+    { method: 'POST', body: JSON.stringify({ agent, ...payload }) },
+    token,
+  );
+}
+
+export function pushGoalToFounderNode(goal: string, token: string) {
+  return apiFetch('/founder-node/sync-jobs/push-goal', {
+    method: 'POST',
+    body: JSON.stringify({ goal }),
+  }, token);
+}
+
+export function fetchAttestationDashboard(token: string) {
+  return apiFetch<{
+    memoryIntegrity: {
+      mode: string;
+      score: number;
+      status: 'healthy' | 'partial' | 'offline';
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+      lastVaultScanAt: string | null;
+    };
+    phalaTee: {
+      recentCount: number;
+      verifiedCount: number;
+      latest: {
+        id: string;
+        model: string | null;
+        requestId: string | null;
+        signingAddress: string | null;
+        verified: boolean;
+        status: string;
+        createdAt: string;
+        summary: string | null;
+      } | null;
+      docsUrl: string;
+    };
+    recent: Array<{
+      id: string;
+      kind: string;
+      model: string | null;
+      requestId: string | null;
+      verified: boolean;
+      status: string;
+      summary: string | null;
+      createdAt: string;
+    }>;
+  }>('/attestation/dashboard', undefined, token);
+}
+
+export function scanVaultIntegrity(token: string) {
+  return apiFetch('/attestation/vault-scan', { method: 'POST' }, token);
+}
+
+export function verifyPhalaAttestation(token: string, logId?: string) {
+  return apiFetch<{
+    verified: boolean;
+    summary: string | null;
+    checks?: Array<{ name: string; ok: boolean; detail?: string }>;
+  }>('/attestation/phala/verify', { method: 'POST', body: JSON.stringify({ logId }) }, token);
 }
 
 export function connectAiProvider(provider: string, apiKey: string, token: string) {

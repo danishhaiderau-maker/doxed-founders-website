@@ -29,6 +29,7 @@ import { XSocialModule } from './x-social/x-social.module';
 import { AccountModule } from './account/account.module';
 import { PredictionMarketsModule } from './prediction-markets/prediction-markets.module';
 import { FounderNodeModule } from './founder-node/founder-node.module';
+import { AttestationModule } from './attestation/attestation.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { FounderNodeModule } from './founder-node/founder-node.module';
     AccountModule,
     PredictionMarketsModule,
     FounderNodeModule,
+    AttestationModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

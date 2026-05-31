@@ -16,6 +16,8 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { MemoryStoragePanel } from '@/components/memory-storage-panel';
+import { FounderNodeV2Panel } from '@/components/settings/founder-node-v2-panel';
+import { AttestationDashboardPanel } from '@/components/settings/attestation-dashboard-panel';
 import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
@@ -229,6 +231,10 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         onModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
         phalaPrivateAi={phalaStatus}
       />
+
+      <FounderNodeV2Panel accessToken={accessToken} settings={settings} onRefresh={load} />
+
+      <AttestationDashboardPanel accessToken={accessToken} />
 
       <section className="rounded-2xl border border-emerald-500/35 bg-emerald-950/10 p-6">
         <h2 className="text-lg font-semibold text-white">Bring your own AI (Step 2)</h2>

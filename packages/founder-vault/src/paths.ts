@@ -11,6 +11,8 @@ export const FOUNDER_VAULT_FILES = {
   buildHistory: 'build-history.jsonl',
   /** Private founder notes — never synced as plaintext to cloud. */
   privateNotes: 'private-notes.md',
+  /** Local TF-IDF vector index (Step 4). */
+  vectorIndex: 'vector-index.json',
 } as const;
 
 export type FounderVaultFileKey = keyof typeof FOUNDER_VAULT_FILES;

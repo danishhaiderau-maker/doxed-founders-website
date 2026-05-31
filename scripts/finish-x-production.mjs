@@ -8,8 +8,14 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const secretsPath = join(root, '.env.x.secrets');
-const vercelProdPath = join(root, 'apps', '.env.vercel.prod');
+const vaultDir = join(root, '..', 'doxedcryptofounder-secrets', 'vault');
+const secretsPath = existsSync(join(root, '.env.x.secrets'))
+  ? join(root, '.env.x.secrets')
+  : join(vaultDir, '.env.x.secrets');
+const adminSecurityPath = join(vaultDir, '.env.admin-security');
+const vercelProdPath = existsSync(join(root, 'apps', '.env.vercel.prod'))
+  ? join(root, 'apps', '.env.vercel.prod')
+  : join(vaultDir, 'apps.env.vercel.prod');
 
 const RAILWAY_GQL = 'https://backboard.railway.com/graphql/v2';
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
@@ -125,14 +131,31 @@ async function setGitHubSecret(token, name, value) {
   });
 }
 
+function loadRecoveryCodes() {
+  const map = readDotEnv(adminSecurityPath);
+  return Object.keys(map)
+    .filter((k) => k.startsWith('ADMIN_RECOVERY_'))
+    .sort()
+    .map((k) => map[k]?.trim())
+    .filter(Boolean);
+}
+
 async function ensureAdminJwt(secrets, vercelEnv) {
   const apiUrl = secrets.API_URL || DEFAULT_API_URL;
   const email = secrets.ADMIN_EMAIL || 'admin@doxedcryptofounder.local';
   let password = secrets.ADMIN_PASSWORD?.trim();
+  const recoveryCodes = loadRecoveryCodes();
 
   if (password) {
-    const login = await tryLogin(apiUrl, email, password);
+    const login = await tryLogin(apiUrl, email, password, recoveryCodes);
     if (login) return login;
+  }
+
+  if (recoveryCodes.length > 0) {
+    console.warn(
+      'Admin login failed — fix ADMIN_PASSWORD in vault .env.x.secrets (password + recovery 2FA). Skipping auto password rotation.',
+    );
+    return null;
   }
 
   const dbUrl = secrets.DATABASE_URL || vercelEnv.DATABASE_URL;
@@ -166,18 +189,46 @@ async function ensureAdminJwt(secrets, vercelEnv) {
   console.log('Admin password rotated in production DB (stored in .env.x.secrets only)');
 
   secrets.ADMIN_PASSWORD = password;
-  return tryLogin(apiUrl, email, password);
+  return tryLogin(apiUrl, email, password, recoveryCodes);
 }
 
-async function tryLogin(apiUrl, email, password) {
-  const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  return data.accessToken || null;
+async function tryLogin(apiUrl, email, password, recoveryCodes = []) {
+  const base = apiUrl.replace(/\/$/, '');
+
+  async function passwordLogin() {
+    const res = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  }
+
+  let data = await passwordLogin();
+  if (!data) return null;
+  if (data.accessToken) return data.accessToken;
+
+  if (!data.requires2fa || !data.pendingToken) return null;
+
+  for (const recoveryCode of recoveryCodes) {
+    const verifyRes = await fetch(`${base}/api/auth/verify-2fa`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingToken: data.pendingToken, recoveryCode }),
+    });
+    if (verifyRes.ok) {
+      const verified = await verifyRes.json();
+      if (verified.accessToken) {
+        console.log('Admin JWT obtained via recovery code (TOTP unavailable until JWT_SECRET sync)');
+        return verified.accessToken;
+      }
+    }
+    data = await passwordLogin();
+    if (!data?.requires2fa || !data.pendingToken) return null;
+  }
+
+  return null;
 }
 
 function buildRailwayVars(secrets, adminJwt) {
@@ -198,7 +249,7 @@ function buildRailwayVars(secrets, adminJwt) {
 
 async function main() {
   if (!existsSync(secretsPath)) {
-    console.error('Missing .env.x.secrets — copy .env.x.secrets.example');
+    console.error(`Missing .env.x.secrets — copy .env.x.secrets.example to repo or ${vaultDir}`);
     process.exit(1);
   }
 

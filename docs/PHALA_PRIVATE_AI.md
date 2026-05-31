@@ -62,8 +62,8 @@ Founder Copilot (web)
 
 ## Roadmap (Steps 4–5)
 
-4. **Founder Node v2** — vector DB, local agents, bidirectional sync
-5. **Attestation dashboard** — verify TEE workload + memory integrity (Phala receipt headers)
+4. **Founder Node v2** ✅ — see `docs/FOUNDER_NODE_V2.md`
+5. **Attestation dashboard** ✅ — see `docs/ATTESTATION_DASHBOARD.md`
 
 ## References
 

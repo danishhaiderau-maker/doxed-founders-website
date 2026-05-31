@@ -19,16 +19,19 @@ import {
 } from './sync-client';
 import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
+import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
 import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encryptVaultJson } from '@dcf/founder-vault';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SYNC_INTERVAL_MS = 60_000;
 const INFERENCE_POLL_MS = 3_000;
+const SYNC_JOB_POLL_MS = 3_000;
 
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let inferenceTimer: ReturnType<typeof setInterval> | null = null;
+let syncJobTimer: ReturnType<typeof setInterval> | null = null;
 
 function loadAppIcon() {
   const candidates = [
@@ -51,6 +54,9 @@ function startSyncLoop(vaultRoot: string) {
   syncTimer = setInterval(() => runSyncCycle(vaultRoot).catch(console.error), SYNC_INTERVAL_MS);
   if (!inferenceTimer) {
     inferenceTimer = setInterval(() => runInferenceCycle(vaultRoot).catch(console.error), INFERENCE_POLL_MS);
+  }
+  if (!syncJobTimer) {
+    syncJobTimer = setInterval(() => runSyncJobCycle(vaultRoot).catch(console.error), SYNC_JOB_POLL_MS);
   }
 }
 
@@ -80,6 +86,12 @@ async function runInferenceCycle(vaultRoot: string): Promise<void> {
   await processPendingInference(config.apiBaseUrl, config.nodeId, config.nodeToken, ollama);
 }
 
+async function runSyncJobCycle(vaultRoot: string): Promise<void> {
+  const config = readNodeConfig(vaultRoot);
+  if (!config) return;
+  await processPendingSyncJobs(vaultRoot);
+}
+
 async function runSyncCycle(vaultRoot: string): Promise<void> {
   const config = readNodeConfig(vaultRoot);
   if (!config) return;
@@ -104,6 +116,12 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   });
 
   await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
+
+  try {
+    maybeRebuildVectorIndex(vaultRoot);
+  } catch (err) {
+    console.warn('Vector index rebuild skipped:', err);
+  }
 }
 
 function openPairWindow(): void {
