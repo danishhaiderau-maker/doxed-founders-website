@@ -179,9 +179,15 @@ export function BuildRoom2({
         />
       )}
 
+      <FounderCopilotChat
+        accessToken={accessToken}
+        variant="hero"
+        onResult={(a) => onMessage?.(a)}
+      />
+
       <FounderCopilotBriefing
         accessToken={accessToken}
-        variant="full"
+        variant="compact"
         founderActive={founderActive}
         onMessage={onMessage}
         onRefresh={() => {
@@ -192,7 +198,6 @@ export function BuildRoom2({
 
       <div className="grid gap-6 xl:grid-cols-[1fr_minmax(260px,300px)]">
         <div className="min-w-0 space-y-6">
-      <FounderCopilotChat accessToken={accessToken} onResult={(a) => onMessage?.(a)} />
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-3">
               <p className="text-[10px] uppercase text-zinc-500">Ideas</p>

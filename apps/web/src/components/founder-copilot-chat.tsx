@@ -42,6 +42,7 @@ function saveMessages(messages: ChatMessage[]) {
 type FounderCopilotChatProps = {
   accessToken: string;
   onResult?: (answer: string) => void;
+  variant?: 'default' | 'hero';
 };
 
 const ASK_CHIPS = [
@@ -51,7 +52,28 @@ const ASK_CHIPS = [
   'Explain this project to investors.',
 ];
 
-export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChatProps) {
+const QUICK_ACTIONS = [
+  { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?' },
+  { label: 'Finish MVP', prompt: 'What is left to finish the MVP?' },
+  { label: 'Create tokenomics', prompt: 'Create tokenomics draft for community allocation.' },
+  { label: 'Prepare Raise', prompt: 'Prepare launch roadmap for Raise Room.' },
+  { label: 'Weekly update', prompt: "Generate this week's update." },
+  { label: 'Launch readiness', prompt: 'Create launch readiness report.' },
+];
+
+function hasChatLlmProvider(
+  providers: { key: string; connectMode?: string; connected: boolean }[],
+) {
+  return providers.some(
+    (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
+  );
+}
+
+export function FounderCopilotChat({
+  accessToken,
+  onResult,
+  variant = 'default',
+}: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
@@ -89,9 +111,7 @@ export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChat
       setMemory(mem);
       setDefaultProvider(builder.defaultProvider);
       setCursorConnected(builder.providers.some((p) => p.key === 'CURSOR' && p.connected));
-      setLlmConnected(
-        builder.providers.some((p) => p.needsApiKey && p.connected && p.key !== 'RULE_BASED'),
-      );
+      setLlmConnected(hasChatLlmProvider(builder.providers));
     } catch {
       setMemory(null);
     }
@@ -177,19 +197,65 @@ export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChat
   }
 
   const statusLabel = llmConnected
-    ? `LLM connected${defaultProvider === 'CURSOR' ? ' · chat uses your API key' : ''}`
+    ? `Chat LLM · ${defaultProvider.replace('_', ' ')}`
     : defaultProvider === 'CURSOR' && cursorConnected
-      ? 'Cursor agent · use Run on Cursor for code tasks'
-      : 'Rule-based fallback · add API key in Builder settings';
+      ? 'Cursor agent connected · chat uses memory · Run on Cursor for code'
+      : 'Rule-based · add DeepSeek/OpenAI in Builder for AI chat';
+
+  const isHero = variant === 'hero';
 
   return (
-    <section className="flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#0d0d0f] shadow-xl">
+    <section
+      className={`flex flex-col overflow-hidden rounded-2xl border shadow-xl ${
+        isHero
+          ? 'border-violet-500/30 bg-gradient-to-b from-violet-950/25 to-[#0d0d0f]'
+          : 'border-zinc-800 bg-[#0d0d0f]'
+      }`}
+    >
+      {isHero && memory && (
+        <div className="border-b border-violet-500/20 px-5 py-5 sm:px-6">
+          <p className="text-xs font-semibold uppercase tracking-widest text-violet-300/80">
+            Founder Copilot
+          </p>
+          <h2 className="mt-2 text-xl font-semibold text-white sm:text-2xl">
+            {memory.welcomeMessage.split('\n')[0]}
+          </h2>
+          <p className="mt-1 text-sm text-zinc-400">
+            Your copilot uses project memory, GitHub, and tasks — connected to your stack.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {QUICK_ACTIONS.map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                disabled={busy}
+                onClick={() => sendMessage(a.prompt)}
+                className="rounded-xl border border-zinc-700/80 bg-zinc-900/50 px-3 py-2 text-[11px] font-medium text-zinc-200 transition hover:border-violet-500/50 hover:bg-violet-950/30 hover:text-white disabled:opacity-50 sm:text-xs"
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
         <div className="min-w-0">
-          <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
-          <p className="truncate text-xs text-zinc-500">
-            {memory?.project?.name ?? 'Project'} · {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Builder settings'}
-          </p>
+          {!isHero && (
+            <>
+              <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
+              <p className="truncate text-xs text-zinc-500">
+                {memory?.project?.name ?? 'Project'} ·{' '}
+                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Builder settings'}
+              </p>
+            </>
+          )}
+          {isHero && (
+            <p className="text-sm text-zinc-400">
+              {memory?.project?.name ?? 'Project'} · {memory?.progressPercent ?? 0}% · launch{' '}
+              {memory?.launchReadiness ?? 0}/100
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-md bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400">{statusLabel}</span>
@@ -244,7 +310,11 @@ export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChat
             >
               {m.role === 'assistant' && m.provider && (
                 <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-                  {m.provider === 'RULE_BASED' ? 'Rule-based' : m.provider.replace('_', ' ')}
+                  {m.provider === 'RULE_BASED'
+                    ? 'Project memory'
+                    : m.provider === 'CURSOR'
+                      ? 'Cursor + memory'
+                      : m.provider.replace('_', ' ')}
                 </p>
               )}
               {m.content}
@@ -272,7 +342,7 @@ export function FounderCopilotChat({ accessToken, onResult }: FounderCopilotChat
           onKeyDown={handleKeyDown}
           rows={3}
           disabled={busy}
-          placeholder="Message Founder Copilot… Enter to send, Shift+Enter for new line"
+          placeholder="Ask Founder Copilot anything… Enter to send, Shift+Enter for new line"
           className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-violet-500/50 disabled:opacity-60"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
