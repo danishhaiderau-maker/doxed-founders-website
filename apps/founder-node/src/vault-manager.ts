@@ -9,11 +9,14 @@ import {
   type FounderNodeConfig,
   type FounderVaultMeta,
   buildVaultSnapshot,
+  defaultPrivateNotes,
   defaultProjectContext,
   defaultRoadmap,
+  defaultBuildHistoryLine,
   emptyTasksFile,
   vaultFilePath,
 } from '@dcf/founder-vault';
+import { buildDecisionsMarkdown } from '@dcf/utils';
 
 export function defaultVaultRoot(): string {
   return path.join(os.homedir(), FOUNDER_VAULT_DIR_NAME);
@@ -57,6 +60,21 @@ export function ensureVault(vaultRoot: string, nodeId: string): void {
       'utf8',
     );
   }
+
+  const decisionsPath = vaultFilePath(vaultRoot, 'decisions');
+  if (!fs.existsSync(decisionsPath)) {
+    fs.writeFileSync(decisionsPath, buildDecisionsMarkdown(), 'utf8');
+  }
+
+  const privateNotesPath = vaultFilePath(vaultRoot, 'privateNotes');
+  if (!fs.existsSync(privateNotesPath)) {
+    fs.writeFileSync(privateNotesPath, defaultPrivateNotes(), 'utf8');
+  }
+
+  const buildHistoryPath = vaultFilePath(vaultRoot, 'buildHistory');
+  if (!fs.existsSync(buildHistoryPath)) {
+    fs.writeFileSync(buildHistoryPath, `${defaultBuildHistoryLine()}\n`, 'utf8');
+  }
 }
 
 export function loadOrCreateNodeId(vaultRoot: string): string {
@@ -99,12 +117,20 @@ export function buildSnapshotFromVault(vaultRoot: string, label: string) {
   const tasksRaw = fs.existsSync(vaultFilePath(vaultRoot, 'tasks'))
     ? fs.readFileSync(vaultFilePath(vaultRoot, 'tasks'), 'utf8')
     : undefined;
+  const decisions = fs.existsSync(vaultFilePath(vaultRoot, 'decisions'))
+    ? fs.readFileSync(vaultFilePath(vaultRoot, 'decisions'), 'utf8')
+    : undefined;
+  const privateNotes = fs.existsSync(vaultFilePath(vaultRoot, 'privateNotes'))
+    ? fs.readFileSync(vaultFilePath(vaultRoot, 'privateNotes'), 'utf8')
+    : undefined;
 
   return buildVaultSnapshot({
     meta,
     projectContext,
     roadmap,
     tasksRaw,
+    decisions,
+    privateNotes,
     vaultHealthy: true,
     deviceLabel: label,
   });

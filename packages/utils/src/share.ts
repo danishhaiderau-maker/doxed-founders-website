@@ -34,12 +34,12 @@ export function buildPortfolioShareMessage(
 ): string {
   const sign = roi >= 0 ? '+' : '';
   const emoji = roi >= 0 ? '🚀' : '📉';
-  const label = roi >= 0 ? 'paper trader' : 'paper loss';
+  const pnlSign = pnl != null && pnl >= 0 ? '+' : '−';
   const pnlPart =
-    pnl != null && pnl !== 0
-      ? ` · ${pnl >= 0 ? '+' : '−'}${formatUsd(Math.abs(pnl), 0)} P&L`
-      : '';
-  return `${emoji} ${displayName} — ${sign}${roi.toFixed(1)}% ROI${pnlPart} · ${formatUsd(totalValue)} · ${label} on Doxxed Crypto #ProofOfConviction`;
+    pnl != null
+      ? `\nP&L: ${pnlSign}${formatUsd(Math.abs(pnl), 0)} · ROI ${sign}${roi.toFixed(1)}%`
+      : `\nROI: ${sign}${roi.toFixed(1)}%`;
+  return `${emoji} ${displayName} — paper portfolio ${formatUsd(totalValue)}${pnlPart}\n#ProofOfConviction @DoxxedCrypto`;
 }
 
 export function buildTraderRankShareMessage(input: {
@@ -89,6 +89,8 @@ export type ProofOfConvictionInput = {
   entryPrice: number;
   currentPrice: number;
   returnPct: number;
+  pnlUsd?: number;
+  investedUsd?: number;
   thesis?: string | null;
   catalyst?: string | null;
   targetPrice?: number | null;

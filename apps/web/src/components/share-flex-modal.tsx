@@ -9,6 +9,7 @@ import {
   buildTwitterIntentUrl,
   formatTokenPrice,
   pickShareImagePath,
+  positionShareInputToProof,
   shareImageFilename,
 } from '@dcf/utils';
 import type { PositionShareInput, ProofOfConvictionInput } from '@dcf/utils';
@@ -389,26 +390,7 @@ function daysBetween(iso: string | null | undefined): number | undefined {
 function buildProofInput(
   input: PositionShareInput & { userId: string; origin: string; projectId?: string },
 ): ProofOfConvictionInput {
-  const entryPrice =
-    input.entryPrice ??
-    (input.currentPrice != null
-      ? input.currentPrice / (1 + input.pnlPercent / 100)
-      : 0);
-  const currentPrice =
-    input.currentPrice ?? entryPrice * (1 + input.pnlPercent / 100);
-
-  return {
-    ticker: input.ticker,
-    entryPrice,
-    currentPrice,
-    returnPct: input.pnlPercent,
-    thesis: input.thesis,
-    catalyst: input.catalyst,
-    targetPrice: input.targetPrice,
-    timeHorizon: input.timeHorizon,
-    recordedAt: input.recordedAt ?? input.positionOpenedAt,
-    proofUrl: buildPortfolioShareUrl(input.origin, input.userId),
-  };
+  return positionShareInputToProof(input);
 }
 
 export function buildPositionFlexShare(

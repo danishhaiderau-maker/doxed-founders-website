@@ -345,7 +345,7 @@ function PaperTradingPageContent() {
       await createPaperLimitOrder({
         userId,
         side: limitSide,
-        trigger: limitTrigger,
+        trigger: limitSide === 'BUY' ? 'LTE' : limitTrigger,
         targetPriceUsd: Number(limitTargetPrice),
         projectId: limitSide === 'SELL' ? limitProjectId : undefined,
         amountUsd: limitSide === 'BUY' ? Number(amountUsd) : undefined,
@@ -610,6 +610,14 @@ function PaperTradingPageContent() {
           >
             Trade alerts
           </Link>
+          {userId && (
+            <Link
+              href={`/portfolio/${userId}`}
+              className="rounded-full border border-emerald-500/40 bg-emerald-950/25 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950/40"
+            >
+              Public portfolio →
+            </Link>
+          )}
         </div>
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
@@ -941,7 +949,10 @@ function PaperTradingPageContent() {
               <div className="mt-3 flex gap-2">
                 <button
                   type="button"
-                  onClick={() => setLimitSide('SELL')}
+                  onClick={() => {
+                    setLimitSide('SELL');
+                    setLimitTrigger('GTE');
+                  }}
                   className={`flex-1 rounded-lg py-2 text-xs ${
                     limitSide === 'SELL' ? 'bg-[var(--color-danger)] text-white' : 'border border-[var(--color-border)]'
                   }`}
@@ -950,7 +961,10 @@ function PaperTradingPageContent() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setLimitSide('BUY')}
+                  onClick={() => {
+                    setLimitSide('BUY');
+                    setLimitTrigger('LTE');
+                  }}
                   className={`flex-1 rounded-lg py-2 text-xs ${
                     limitSide === 'BUY' ? 'bg-[var(--color-success)] text-white' : 'border border-[var(--color-border)]'
                   }`}
@@ -961,12 +975,19 @@ function PaperTradingPageContent() {
               <label className="mt-3 block text-xs">
                 <span className="text-[var(--color-muted)]">Trigger</span>
                 <select
-                  value={limitTrigger}
+                  value={limitSide === 'BUY' ? 'LTE' : limitTrigger}
                   onChange={(e) => setLimitTrigger(e.target.value as 'GTE' | 'LTE')}
-                  className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                  disabled={limitSide === 'BUY'}
+                  className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 disabled:opacity-70"
                 >
-                  <option value="GTE">Price ≥ target (take profit / sell high)</option>
-                  <option value="LTE">Price ≤ target (buy dip)</option>
+                  {limitSide === 'BUY' ? (
+                    <option value="LTE">Price ≤ target (buy the dip)</option>
+                  ) : (
+                    <>
+                      <option value="GTE">Price ≥ target (take profit)</option>
+                      <option value="LTE">Price ≤ target (stop loss)</option>
+                    </>
+                  )}
                 </select>
               </label>
               <label className="mt-3 block text-xs">
