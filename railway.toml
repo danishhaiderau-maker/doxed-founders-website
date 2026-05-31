@@ -19,4 +19,4 @@ healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
-# Redeploy trigger: 2026-05-31 — fixed startCommand (no inline NODE_ENV)
+# Redeploy trigger: 2026-05-31T01:30Z — sync master (copilot pressing-issue + docs)
