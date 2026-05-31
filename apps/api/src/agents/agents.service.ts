@@ -10,11 +10,14 @@ import {
   AGENT_RUN_CREDITS,
   WORKFORCE_TEMPLATES,
   agentRating,
+  buildWorkforceAgentSystemPrompt,
+  mergeWorkforceAgentWithLlm,
   runWorkforceAgent,
   slugify,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
+import { BuilderService } from '../builder/builder.service';
 
 function serializeAgent(agent: Prisma.FounderAgentGetPayload<{
   include: {
@@ -46,6 +49,7 @@ export class AgentsService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly buildQueue: BuildQueueService,
+    private readonly builder: BuilderService,
   ) {}
 
   async onModuleInit() {
@@ -228,6 +232,92 @@ export class AgentsService implements OnModuleInit {
     return { ok: true };
   }
 
+  async listRecentActivity(limit = 20) {
+    const take = Math.min(50, Math.max(1, limit));
+
+    const [runs, orchestratorEvents] = await Promise.all([
+      this.prisma.agentRun.findMany({
+        where: {
+          status: 'COMPLETED',
+          agent: { isPublic: true },
+        },
+        include: {
+          agent: {
+            include: {
+              founder: { select: { id: true, slug: true, name: true } },
+              project: { select: { id: true, slug: true, name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+      }),
+      this.prisma.founderEvent.findMany({
+        where: {
+          type: 'AGENT_RUN_COMPLETE',
+          source: 'copilot',
+        },
+        include: {
+          founder: { select: { id: true, slug: true, name: true } },
+          project: { select: { id: true, slug: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+      }),
+    ]);
+
+    const fromRuns = runs.map((run) => {
+      const output = run.output as {
+        title?: string;
+        summary?: string;
+      } | null;
+      return {
+        id: run.id,
+        source: 'marketplace' as const,
+        agentId: run.agentId,
+        agentName: run.agent.name,
+        agentSlug: run.agent.slug,
+        template: run.agent.template,
+        category: run.agent.category,
+        inputPrompt: run.inputPrompt,
+        outputTitle: output?.title ?? run.inputPrompt?.slice(0, 80) ?? 'Agent run',
+        outputSummary: output?.summary ?? null,
+        creditsSpent: run.creditsSpent,
+        createdAt: run.createdAt.toISOString(),
+        founder: run.agent.founder,
+        project: run.agent.project,
+      };
+    });
+
+    const fromOrchestrator = orchestratorEvents.map((event) => {
+      const payload = event.payload as { template?: string; taskCount?: number } | null;
+      const template = payload?.template ?? 'BUILDER';
+      const label =
+        WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template.replace(/_/g, ' ');
+      return {
+        id: event.id,
+        source: 'copilot' as const,
+        agentId: null,
+        agentName: `${label} (Copilot)`,
+        agentSlug: `copilot-${template.toLowerCase()}`,
+        template,
+        category: WORKFORCE_TEMPLATES.find((t) => t.key === template)?.category ?? 'BUILDER',
+        inputPrompt: null,
+        outputTitle: event.title,
+        outputSummary:
+          payload?.taskCount != null ? `${payload.taskCount} tasks queued in build queue` : null,
+        creditsSpent: 0,
+        createdAt: event.createdAt.toISOString(),
+        founder: event.founder,
+        project: event.project,
+      };
+    });
+
+    return [...fromRuns, ...fromOrchestrator]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, take);
+  }
+
   async runAgent(userId: string, agentId: string, prompt: string) {
     const agent = await this.prisma.founderAgent.findUnique({
       where: { id: agentId },
@@ -243,11 +333,16 @@ export class AgentsService implements OnModuleInit {
       throw new BadRequestException(`Need ${AGENT_RUN_CREDITS} Founder Credits`);
     }
 
-    const output = runWorkforceAgent(
-      agent.template,
-      prompt,
-      agent.project?.name ?? agent.founder.name,
-    );
+    const projectName = agent.project?.name ?? agent.founder.name;
+    let output = runWorkforceAgent(agent.template, prompt, projectName);
+    let answerProvider: 'RULE_BASED' | 'LLM' = 'RULE_BASED';
+
+    const systemPrompt = buildWorkforceAgentSystemPrompt(agent.template, agent.name, projectName);
+    const llmText = await this.builder.tryAiCompletion(userId, systemPrompt, prompt);
+    if (llmText) {
+      output = mergeWorkforceAgentWithLlm(output, llmText);
+      answerProvider = 'LLM';
+    }
 
     const updated = await this.prisma.founder.update({
       where: { id: founder.id },
@@ -287,7 +382,7 @@ export class AgentsService implements OnModuleInit {
 
     await this.buildQueue.createFromAgentRun(userId, run.id, agent, prompt, output);
 
-    return { runId: run.id, creditsSpent: AGENT_RUN_CREDITS, output };
+    return { runId: run.id, creditsSpent: AGENT_RUN_CREDITS, output, answerProvider };
   }
 
   async rateAgent(userId: string, agentId: string, rating: number) {

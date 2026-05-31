@@ -16,6 +16,9 @@ export type FounderMissionControlProps = {
   onRefresh: () => void;
   onMessage?: (msg: string) => void;
   tabContent?: ReactNode;
+  initialCopilotPrompt?: string | null;
+  onInitialCopilotPromptConsumed?: () => void;
+  activeAgentTemplate?: string | null;
 };
 
 export function FounderMissionControl({
@@ -28,6 +31,9 @@ export function FounderMissionControl({
   onRefresh,
   onMessage,
   tabContent,
+  initialCopilotPrompt,
+  onInitialCopilotPromptConsumed,
+  activeAgentTemplate,
 }: FounderMissionControlProps) {
   if (!session) {
     return (
@@ -76,6 +82,9 @@ export function FounderMissionControl({
       onRefresh={onRefresh}
       onMessage={onMessage}
       tabContent={tabContent}
+      initialCopilotPrompt={initialCopilotPrompt}
+      onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
+      activeAgentTemplate={activeAgentTemplate}
     />
   );
 }

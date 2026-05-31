@@ -5,6 +5,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { AGENT_CATEGORY_LABELS, AGENT_RUN_CREDITS, WORKFORCE_TEMPLATES } from '@dcf/utils';
 import { AgentCard } from '@/components/agent-card';
 import {
+  WorkforceTemplateCard,
+  workforceTemplateHref,
+} from '@/components/workforce-template-card';
+import {
   createAgent,
   fetchAgentHub,
   fetchMyAgents,
@@ -71,7 +75,7 @@ export function AgentsWorkspacePanel({
       {founderActive && (
         <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
           <h3 className="font-semibold text-white">Create public agent</h3>
-          <p className="mt-1 text-xs text-zinc-500">Runs cost {AGENT_RUN_CREDITS} credits · rule-based (no LLM bill)</p>
+          <p className="mt-1 text-xs text-zinc-500">Runs cost {AGENT_RUN_CREDITS} credits · LLM when Builder key connected</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <input
               value={name}
@@ -133,6 +137,23 @@ export function AgentsWorkspacePanel({
           </div>
         </section>
       )}
+
+      <section>
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">
+          Quick-start templates
+        </h3>
+        <p className="mt-1 text-xs text-zinc-600">Opens Founder Copilot with a workforce prompt</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {WORKFORCE_TEMPLATES.map((t) => (
+            <WorkforceTemplateCard
+              key={t.key}
+              template={t}
+              href={workforceTemplateHref(t.key, founderActive)}
+              compact
+            />
+          ))}
+        </div>
+      </section>
 
       <section>
         <h3 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">Agent store</h3>

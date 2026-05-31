@@ -12,6 +12,13 @@ export class AgentsController {
   constructor(private readonly agents: AgentsService) {}
 
   @Public()
+  @Get('activity/recent')
+  recentActivity(@Query('limit') limit?: string) {
+    const n = limit ? Number(limit) : 20;
+    return this.agents.listRecentActivity(Number.isFinite(n) ? n : 20);
+  }
+
+  @Public()
   @Get()
   list(@Query('category') category?: AgentCategory) {
     return this.agents.listPublic(category);

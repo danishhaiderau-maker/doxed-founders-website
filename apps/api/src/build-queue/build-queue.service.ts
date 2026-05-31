@@ -17,7 +17,11 @@ import {
 import {
   COMMAND_BAR_CREDITS,
   CommandBarIntent,
+  WORKFORCE_TEMPLATES,
+  WorkforceAgentOutput,
   buildCursorCopyBlock,
+  buildWorkforceAgentSystemPrompt,
+  mergeWorkforceAgentWithLlm,
   processCommandBar,
   runWorkforceAgent,
 } from '@dcf/utils';
@@ -26,6 +30,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from '../builder/builder.service';
 import { EventsService } from '../events/events.service';
+
+function labelFromTemplate(template: string) {
+  return WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template.replace(/_/g, ' ');
+}
 
 function serializeItem(item: {
   id: string;
@@ -534,6 +542,120 @@ export class BuildQueueService {
         githubIssues: issues.map((i) => ({ title: i.githubIssueTitle ?? i.title })),
       }),
     };
+  }
+
+  async runOrchestratedWorkforce(userId: string, template: string, prompt: string) {
+    const founder = await this.requireFounder(userId);
+    const project = founder.projects[0];
+    const projectName = project?.name ?? founder.name;
+    const label = WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template;
+
+    let output = runWorkforceAgent(template, prompt, projectName);
+    let answerProvider: 'RULE_BASED' | 'LLM' = 'RULE_BASED';
+
+    const systemPrompt = buildWorkforceAgentSystemPrompt(template, label, projectName);
+    const llmText = await this.builder.tryAiCompletion(userId, systemPrompt, prompt);
+    if (llmText) {
+      output = mergeWorkforceAgentWithLlm(output, llmText);
+      answerProvider = 'LLM';
+    }
+
+    await this.createFromOrchestratorOutput(userId, template, prompt, output);
+
+    return {
+      output,
+      answerProvider,
+      template,
+      label,
+    };
+  }
+
+  async createFromOrchestratorOutput(
+    userId: string,
+    template: string,
+    prompt: string,
+    output: WorkforceAgentOutput,
+  ) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { take: 1 } },
+    });
+    if (!founder) return;
+
+    const project = founder.projects[0];
+    const source = BuildQueueSource.AGENT;
+    const agentSlug = `copilot-${template.toLowerCase()}`;
+
+    const idea = await this.prisma.buildQueueItem.create({
+      data: {
+        founderId: founder.id,
+        projectId: project?.id,
+        kind: BuildQueueItemKind.IDEA,
+        status: BuildQueueStatus.SPECCED,
+        source,
+        title: output.title.slice(0, 120),
+        description: output.summary,
+        spec: [output.summary, '', ...output.buildPlan.map((b) => `- ${b}`)].join('\n'),
+        cursorPrompt: [
+          `Copilot → ${template} worker for ${project?.name ?? founder.name}:`,
+          prompt,
+          '',
+          ...output.tasks.map((t) => `- ${t}`),
+        ].join('\n'),
+        metadata: { orchestrator: true, template, agentSlug, copilot: true },
+      },
+    });
+
+    await Promise.all([
+      ...output.tasks.map((task, idx) =>
+        this.prisma.buildQueueItem.create({
+          data: {
+            founderId: founder.id,
+            projectId: project?.id,
+            parentId: idea.id,
+            kind: BuildQueueItemKind.TASK,
+            status: BuildQueueStatus.QUEUED,
+            source,
+            title: task.slice(0, 120),
+            sortOrder: idx,
+            metadata: { orchestrator: true, template },
+          },
+        }),
+      ),
+      ...output.githubIssues.map((issue, idx) =>
+        this.prisma.buildQueueItem.create({
+          data: {
+            founderId: founder.id,
+            projectId: project?.id,
+            parentId: idea.id,
+            kind: BuildQueueItemKind.GITHUB_ISSUE,
+            status: BuildQueueStatus.QUEUED,
+            source,
+            title: issue.slice(0, 120),
+            githubIssueTitle: issue,
+            sortOrder: 100 + idx,
+            metadata: { orchestrator: true, template },
+          },
+        }),
+      ),
+    ]);
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.AGENT_RUN_COMPLETE,
+      source: 'copilot',
+      title: `${labelFromTemplate(template)}: ${output.title.slice(0, 80)}`,
+      payload: { orchestrator: true, template, taskCount: output.tasks.length, ideaId: idea.id },
+    });
+
+    await this.notifications.notifyUser(userId, {
+      type: NotificationType.AGENT_RESULT,
+      title: `${labelFromTemplate(template)} queued ${output.tasks.length} tasks`,
+      body: output.summary.slice(0, 160),
+      link: '/founder-den?tab=build',
+    });
   }
 
   async createFromAgentRun(

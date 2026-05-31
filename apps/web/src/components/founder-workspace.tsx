@@ -93,6 +93,9 @@ export type FounderWorkspaceProps = {
   onSubmitApplication: () => void;
   onPostBuildUpdate: () => void;
   onLaunchRaise: () => void;
+  initialCopilotPrompt?: string | null;
+  onInitialCopilotPromptConsumed?: () => void;
+  activeAgentTemplate?: string | null;
 };
 
 export function FounderWorkspace(props: FounderWorkspaceProps) {
@@ -115,6 +118,9 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     onSubmitApplication,
     onPostBuildUpdate,
     onLaunchRaise,
+    initialCopilotPrompt,
+    onInitialCopilotPromptConsumed,
+    activeAgentTemplate,
   } = props;
 
   const useDashboardShell = Boolean(session && hasFounder);
@@ -438,6 +444,9 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
           tabContent={
             useDashboardShell && tab !== 'activity' && tab !== 'notifications' ? tabPanels : undefined
           }
+          initialCopilotPrompt={initialCopilotPrompt}
+          onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
+          activeAgentTemplate={activeAgentTemplate}
         />
       )}
 

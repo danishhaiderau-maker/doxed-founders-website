@@ -38,8 +38,8 @@ export class EventsController {
   }
 
   @Post('copilot/ask')
-  ask(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
-    return this.copilot.ask(user.id, body.prompt);
+  ask(@CurrentUser() user: AuthUser, @Body() body: { prompt: string; agentTemplate?: string }) {
+    return this.copilot.ask(user.id, body.prompt, { agentTemplate: body.agentTemplate });
   }
 
   @Post('copilot/hands-free')

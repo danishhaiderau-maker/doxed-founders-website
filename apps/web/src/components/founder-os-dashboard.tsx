@@ -12,6 +12,7 @@ import {
   LIFECYCLE_STAGES,
   STAGE_COLOR_CLASSES,
   WORKFORCE_TEMPLATES,
+  buildCopilotAgentDeepLink,
 } from '@dcf/utils';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderInboxPanel, useFounderUnreadCount } from '@/components/founder-inbox-panel';
@@ -65,6 +66,9 @@ export type FounderOsDashboardProps = {
   onRefresh: () => void;
   onMessage?: (msg: string) => void;
   tabContent?: ReactNode;
+  initialCopilotPrompt?: string | null;
+  onInitialCopilotPromptConsumed?: () => void;
+  activeAgentTemplate?: string | null;
 };
 
 function stageLabel(key: string) {
@@ -196,11 +200,14 @@ export function FounderOsDashboardLayout({
   onRefresh,
   onMessage,
   tabContent,
+  initialCopilotPrompt,
+  onInitialCopilotPromptConsumed,
+  activeAgentTemplate,
 }: FounderOsDashboardProps) {
   const [buildRoom, setBuildRoom] = useState<BuildRoomData | null>(null);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [osData, setOsData] = useState<FounderOsDashboard | null>(null);
-  const [quickPrompt, setQuickPrompt] = useState<string | null>(null);
+  const [quickPrompt, setQuickPrompt] = useState<string | null>(initialCopilotPrompt ?? null);
   const [chatKey, setChatKey] = useState(0);
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -229,6 +236,11 @@ export function FounderOsDashboardLayout({
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!initialCopilotPrompt?.trim()) return;
+    setQuickPrompt(initialCopilotPrompt);
+  }, [initialCopilotPrompt]);
 
   const stage = room?.lifecycleStage ?? dashboard?.currentStage ?? 'IDEA';
   const theme = getStageColorTheme(stage, room?.isLiveToken);
@@ -400,6 +412,15 @@ export function FounderOsDashboardLayout({
                 {timeGreeting()}, {greetingName(memory)}. What should we build today?
               </p>
 
+              {activeAgentTemplate && (
+                <p className="mb-3 rounded-lg border border-violet-500/30 bg-violet-950/25 px-3 py-2 text-xs text-violet-200">
+                  Workforce agent ·{' '}
+                  {WORKFORCE_TEMPLATES.find((t) => t.key === activeAgentTemplate)?.label ??
+                    activeAgentTemplate.replace(/_/g, ' ')}{' '}
+                  — Copilot will route this prompt
+                </p>
+              )}
+
               <div className="mb-4 flex flex-wrap gap-2">
                 {PROMPT_CHIPS.map((chip) => (
                   <button
@@ -418,7 +439,11 @@ export function FounderOsDashboardLayout({
                 accessToken={accessToken}
                 variant="embedded"
                 initialPrompt={quickPrompt}
-                onInitialPromptConsumed={() => setQuickPrompt(null)}
+                agentTemplate={activeAgentTemplate}
+                onInitialPromptConsumed={() => {
+                  setQuickPrompt(null);
+                  onInitialCopilotPromptConsumed?.();
+                }}
                 onResult={(a) => {
                   onMessage?.(a);
                   load();
@@ -465,17 +490,19 @@ export function FounderOsDashboardLayout({
                   </div>
                   <ul className="mt-3 space-y-2">
                     {WORKFORCE_TEMPLATES.slice(0, 5).map((agent) => (
-                      <li
-                        key={agent.key}
-                        className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800/60 px-3 py-2"
-                      >
-                        <div>
-                          <p className="text-xs font-medium text-zinc-200">{agent.label}</p>
-                          <p className="text-[10px] text-zinc-600">{agent.description}</p>
-                        </div>
-                        <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] text-zinc-400">
-                          {AGENT_CATEGORY_LABELS[agent.category] ?? agent.category}
-                        </span>
+                      <li key={agent.key}>
+                        <Link
+                          href={buildCopilotAgentDeepLink(agent.key, room?.name)}
+                          className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800/60 px-3 py-2 transition hover:border-violet-500/40 hover:bg-violet-950/20"
+                        >
+                          <div>
+                            <p className="text-xs font-medium text-zinc-200">{agent.label}</p>
+                            <p className="text-[10px] text-zinc-600">{agent.description}</p>
+                          </div>
+                          <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] text-zinc-400">
+                            {AGENT_CATEGORY_LABELS[agent.category] ?? agent.category}
+                          </span>
+                        </Link>
                       </li>
                     ))}
                   </ul>
