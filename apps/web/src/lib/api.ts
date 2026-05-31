@@ -2167,6 +2167,14 @@ export interface BuilderSettings {
   githubTokenConnected: boolean;
   openHandsBaseUrl: string | null;
   cursorAgentUrl: string | null;
+  founderNodeAi?: {
+    paired: boolean;
+    online: boolean;
+    ollamaReady: boolean;
+    ollamaModel: string | null;
+    nodeLabel: string | null;
+    directOllamaUrl: string | null;
+  };
   providers: {
     key: string;
     label: string;
@@ -2202,6 +2210,14 @@ export function connectAiProvider(provider: string, apiKey: string, token: strin
   return apiFetch<{ success: boolean; accountName: string }>(
     '/builder/providers/connect',
     { method: 'POST', body: JSON.stringify({ provider, apiKey }) },
+    token,
+  );
+}
+
+export function connectOllamaDirect(baseUrl: string, model: string | undefined, token: string) {
+  return apiFetch<{ success: boolean; accountName: string; baseUrl: string }>(
+    '/builder/providers/ollama-connect',
+    { method: 'POST', body: JSON.stringify({ baseUrl, model }) },
     token,
   );
 }

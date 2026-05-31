@@ -58,11 +58,13 @@ Founder Node (desktop)
 
 ## Roadmap (Steps 2–5)
 
-1. **Founder Vault** ← you are here
-2. **Bring Your Own AI** — OpenRouter, Ollama via Node, Phala private inference
+1. **Founder Vault** ✅
+2. **Bring Your Own AI** ✅ — OpenRouter, Ollama via Founder Node, BYOK routing
 3. **Private AI inference (Phala TEE)**
 4. **Founder Node v2** — vector DB, local agents, bidirectional sync
 5. **Attestation dashboard** — verify TEE workload + memory integrity
+
+See `docs/BYO_AI.md` for Step 2 setup.
 
 ## Setup
 

@@ -17,14 +17,18 @@ import {
   sendHeartbeat,
   syncVaultMetadata,
 } from './sync-client';
+import { defaultOllamaConfig, probeOllama } from './ollama-client';
+import { processPendingInference } from './inference-client';
 import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encryptVaultJson } from '@dcf/founder-vault';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SYNC_INTERVAL_MS = 60_000;
+const INFERENCE_POLL_MS = 3_000;
 
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
+let inferenceTimer: ReturnType<typeof setInterval> | null = null;
 
 function loadAppIcon() {
   const candidates = [
@@ -45,6 +49,35 @@ function startSyncLoop(vaultRoot: string) {
   if (syncTimer) return;
   runSyncCycle(vaultRoot).catch(console.error);
   syncTimer = setInterval(() => runSyncCycle(vaultRoot).catch(console.error), SYNC_INTERVAL_MS);
+  if (!inferenceTimer) {
+    inferenceTimer = setInterval(() => runInferenceCycle(vaultRoot).catch(console.error), INFERENCE_POLL_MS);
+  }
+}
+
+async function resolveOllamaConfig(vaultRoot: string) {
+  const config = readNodeConfig(vaultRoot);
+  if (!config) return null;
+  if (config.ollama?.enabled === false) return null;
+
+  const stored = config.ollama ?? defaultOllamaConfig();
+  const probed = await probeOllama(stored.baseUrl);
+  if (!probed) return null;
+
+  return {
+    enabled: true,
+    baseUrl: stored.baseUrl,
+    model: stored.model || probed.model,
+  };
+}
+
+async function runInferenceCycle(vaultRoot: string): Promise<void> {
+  const config = readNodeConfig(vaultRoot);
+  if (!config) return;
+
+  const ollama = await resolveOllamaConfig(vaultRoot);
+  if (!ollama) return;
+
+  await processPendingInference(config.apiBaseUrl, config.nodeId, config.nodeToken, ollama);
 }
 
 async function runSyncCycle(vaultRoot: string): Promise<void> {
@@ -58,11 +91,16 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     encryptVaultJson(json, vaultKey),
   );
 
+  const ollama = await resolveOllamaConfig(vaultRoot);
+
   await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
     ...defaultHeartbeat(config.label, vaultRoot),
     nodeId: config.nodeId,
     storageGb: disk.storageGb,
     storageFreeGb: disk.storageFreeGb,
+    ollamaEnabled: Boolean(ollama),
+    ollamaBaseUrl: ollama?.baseUrl,
+    ollamaModel: ollama?.model,
   });
 
   await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
@@ -211,6 +249,7 @@ app.whenReady().then(() => {
         nodeToken: result.nodeToken,
         label: input.label || `${os.hostname()} Founder Node`,
         pairedAt: new Date().toISOString(),
+        ollama: defaultOllamaConfig(),
       });
 
       tray?.setContextMenu(buildTrayMenu(vaultRoot));

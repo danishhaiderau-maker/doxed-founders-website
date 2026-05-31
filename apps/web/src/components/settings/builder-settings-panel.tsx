@@ -7,6 +7,7 @@ import {
   connectAiProvider,
   connectCursorCloud,
   connectGitHubToken,
+  connectOllamaDirect,
   connectOpenHands,
   disconnectAiProvider,
   disconnectGitHubToken,
@@ -30,6 +31,8 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const [openhandsKey, setOpenhandsKey] = useState('');
   const [cursorKey, setCursorKey] = useState('');
   const [githubToken, setGithubToken] = useState('');
+  const [ollamaUrl, setOllamaUrl] = useState('http://127.0.0.1:11434');
+  const [ollamaModel, setOllamaModel] = useState('llama3.2');
 
   const load = useCallback(async () => {
     try {
@@ -127,6 +130,24 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     }
   }
 
+  async function handleConnectOllamaDirect() {
+    if (!ollamaUrl.trim()) {
+      setErr('Ollama base URL required');
+      return;
+    }
+    setConnecting('ollama');
+    setErr(null);
+    try {
+      const result = await connectOllamaDirect(ollamaUrl.trim(), ollamaModel.trim() || undefined, accessToken);
+      setMsg(`${result.accountName} connected at ${result.baseUrl}`);
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Ollama connect failed');
+    } finally {
+      setConnecting(null);
+    }
+  }
+
   async function handleDisconnect(provider: string) {
     try {
       await disconnectAiProvider(provider, accessToken);
@@ -154,10 +175,17 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   }
 
   const llmProviders = settings.providers.filter(
-    (p) => p.key !== 'RULE_BASED' && p.key !== 'OPENHANDS' && p.key !== 'CURSOR',
+    (p) =>
+      p.key !== 'RULE_BASED' &&
+      p.key !== 'OPENHANDS' &&
+      p.key !== 'CURSOR' &&
+      p.key !== 'OLLAMA_LOCAL',
   );
+  const openRouterProvider = settings.providers.find((p) => p.key === 'OPENROUTER');
+  const ollamaLocalProvider = settings.providers.find((p) => p.key === 'OLLAMA_LOCAL');
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
+  const nodeAi = settings.founderNodeAi;
 
   return (
     <div className="space-y-8">
@@ -167,10 +195,132 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         onModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
       />
 
+      <section className="rounded-2xl border border-emerald-500/35 bg-emerald-950/10 p-6">
+        <h2 className="text-lg font-semibold text-white">Bring your own AI (Step 2)</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Pick who runs Copilot and Quick Build inference — your keys, your models, or local Ollama on your machine.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {openRouterProvider?.connected && (
+            <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-semibold text-emerald-200">
+              OpenRouter connected
+            </span>
+          )}
+          {ollamaLocalProvider?.connected && (
+            <span className="rounded-full bg-cyan-500/20 px-2.5 py-1 text-[10px] font-semibold text-cyan-100">
+              Ollama ready
+              {nodeAi?.ollamaModel ? ` · ${nodeAi.ollamaModel}` : ''}
+            </span>
+          )}
+          {nodeAi?.paired && !nodeAi.ollamaReady && (
+            <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100">
+              Founder Node paired — install Ollama locally
+            </span>
+          )}
+        </div>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="font-medium text-white">OpenRouter</p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  One API key — route to Claude, GPT, Llama, DeepSeek, and more. Billed on your OpenRouter account.
+                </p>
+              </div>
+              {openRouterProvider?.connected && (
+                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                  Connected
+                </span>
+              )}
+            </div>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                type="password"
+                value={apiKeyInput.openrouter ?? ''}
+                onChange={(e) => setApiKeyInput({ ...apiKeyInput, openrouter: e.target.value })}
+                placeholder="sk-or-…"
+                className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+              />
+              <button
+                type="button"
+                disabled={connecting === 'openrouter'}
+                onClick={() => handleConnectProvider('openrouter')}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {openRouterProvider?.connected ? 'Update key' : 'Connect OpenRouter'}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-600">
+              Get a key at{' '}
+              <a href="https://openrouter.ai/keys" className="text-emerald-400 underline" target="_blank" rel="noreferrer">
+                openrouter.ai/keys
+              </a>
+              . Set default provider to OpenRouter above after connecting.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="font-medium text-white">Ollama (local)</p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Prompts stay on your desktop. Pair{' '}
+                  <Link href="/founder-node" className="text-cyan-300 underline">
+                    Founder Node
+                  </Link>{' '}
+                  + run Ollama, or connect a direct URL for self-hosted setups.
+                </p>
+              </div>
+              {ollamaLocalProvider?.connected && (
+                <span className="rounded-full bg-cyan-500/20 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
+                  Ready
+                </span>
+              )}
+            </div>
+            {nodeAi && (
+              <p className="mt-2 text-xs text-zinc-400">
+                {nodeAi.paired
+                  ? nodeAi.online
+                    ? `Node online: ${nodeAi.nodeLabel ?? 'Founder Node'}${nodeAi.ollamaReady ? '' : ' — start Ollama locally'}`
+                    : 'Founder Node offline — open the tray app'
+                  : 'No Founder Node paired yet'}
+                {nodeAi.directOllamaUrl ? ` · Direct URL: ${nodeAi.directOllamaUrl}` : ''}
+              </p>
+            )}
+            <div className="mt-3 space-y-2">
+              <input
+                type="url"
+                value={ollamaUrl}
+                onChange={(e) => setOllamaUrl(e.target.value)}
+                placeholder="http://127.0.0.1:11434"
+                className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+              />
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  value={ollamaModel}
+                  onChange={(e) => setOllamaModel(e.target.value)}
+                  placeholder="llama3.2"
+                  className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  disabled={connecting === 'ollama'}
+                  onClick={handleConnectOllamaDirect}
+                  className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  Connect direct URL
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="rounded-2xl border border-violet-500/30 bg-violet-950/10 p-6">
         <h2 className="text-lg font-semibold text-white">Default builder</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Remote LLM for specs, or Cursor / OpenHands for full agent dispatch — no copy-paste desk tools.
+          Remote LLM for specs and Copilot chat, Cursor / OpenHands for agent dispatch, or Ollama local via Founder Node.
         </p>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <label className="block text-sm">
@@ -192,7 +342,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             <input
               defaultValue={settings.preferredModel ?? ''}
               onBlur={(e) => saveSettings({ preferredModel: e.target.value || undefined })}
-              placeholder="gpt-4o-mini, claude-3-5-haiku-latest…"
+              placeholder="gpt-4o-mini, openrouter/auto, llama3.2…"
               className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
             />
           </label>

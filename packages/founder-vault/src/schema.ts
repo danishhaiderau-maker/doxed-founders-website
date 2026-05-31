@@ -1,7 +1,7 @@
 import type { DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
 
 export const FOUNDER_VAULT_SCHEMA_VERSION = 1 as const;
-export const FOUNDER_NODE_APP_VERSION = '0.2.0';
+export const FOUNDER_NODE_APP_VERSION = '0.3.0';
 
 export type FounderVaultMeta = {
   version: typeof FOUNDER_VAULT_SCHEMA_VERSION;
@@ -19,6 +19,7 @@ export type FounderNodeConfig = {
   nodeToken: string;
   label: string;
   pairedAt: string;
+  ollama?: FounderNodeOllamaConfig;
 };
 
 export type FounderNodeHeartbeat = {
@@ -31,6 +32,15 @@ export type FounderNodeHeartbeat = {
   storageFreeGb?: number;
   vaultHealthy: boolean;
   vaultPath?: string;
+  ollamaEnabled?: boolean;
+  ollamaBaseUrl?: string;
+  ollamaModel?: string;
+};
+
+export type FounderNodeOllamaConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
 };
 
 export type FounderNodePairRequest = {
