@@ -9,8 +9,10 @@ import { AgentCategory, AgentWorkforceTemplate, Prisma } from '@prisma/client';
 import {
   AGENT_RUN_CREDITS,
   WORKFORCE_TEMPLATES,
+  WorkforceAgentOutput,
   agentRating,
   buildWorkforceAgentSystemPrompt,
+  formatAgentRunAnswer,
   mergeWorkforceAgentWithLlm,
   runWorkforceAgent,
   slugify,
@@ -290,10 +292,22 @@ export class AgentsService implements OnModuleInit {
     });
 
     const fromOrchestrator = orchestratorEvents.map((event) => {
-      const payload = event.payload as { template?: string; taskCount?: number } | null;
+      const payload = event.payload as {
+        template?: string;
+        taskCount?: number;
+        githubIssuesCreated?: number;
+        cursorDispatched?: boolean;
+        toolsUsed?: string[];
+      } | null;
       const template = payload?.template ?? 'BUILDER';
       const label =
         WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template.replace(/_/g, ' ');
+      const runtimeParts: string[] = [];
+      if (payload?.githubIssuesCreated) {
+        runtimeParts.push(`${payload.githubIssuesCreated} GitHub issue(s)`);
+      }
+      if (payload?.cursorDispatched) runtimeParts.push('Cursor started');
+      if (payload?.taskCount != null) runtimeParts.push(`${payload.taskCount} tasks`);
       return {
         id: event.id,
         source: 'copilot' as const,
@@ -304,8 +318,7 @@ export class AgentsService implements OnModuleInit {
         category: WORKFORCE_TEMPLATES.find((t) => t.key === template)?.category ?? 'BUILDER',
         inputPrompt: null,
         outputTitle: event.title,
-        outputSummary:
-          payload?.taskCount != null ? `${payload.taskCount} tasks queued in build queue` : null,
+        outputSummary: runtimeParts.length > 0 ? runtimeParts.join(' · ') : null,
         creditsSpent: 0,
         createdAt: event.createdAt.toISOString(),
         founder: event.founder,
@@ -380,9 +393,21 @@ export class AgentsService implements OnModuleInit {
       },
     });
 
-    await this.buildQueue.createFromAgentRun(userId, run.id, agent, prompt, output);
+    const ideaId = await this.buildQueue.createFromAgentRun(userId, run.id, agent, prompt, output);
+    const runtime = await this.buildQueue.finalizeAgentRun(userId, agent.template, ideaId, output, {
+      agentSlug: agent.slug,
+      agentRunId: run.id,
+      marketplace: true,
+    });
 
-    return { runId: run.id, creditsSpent: AGENT_RUN_CREDITS, output, answerProvider };
+    return {
+      runId: run.id,
+      creditsSpent: AGENT_RUN_CREDITS,
+      output,
+      answerProvider,
+      runtime,
+      formattedAnswer: formatAgentRunAnswer(agent.name, agent.template, output, answerProvider, runtime),
+    };
   }
 
   async rateAgent(userId: string, agentId: string, rating: number) {

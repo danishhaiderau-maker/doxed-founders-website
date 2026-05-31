@@ -83,9 +83,8 @@ export default function AgentsPageClient() {
             Your startup&apos;s AI workforce — one Copilot, many agents
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
-            Pick a workforce template below to open Founder Copilot with a ready-made prompt. Copilot
-            routes work to specialized agents — research, build, marketing, launch — and syncs tasks
-            to your build queue. Connect DeepSeek or OpenAI in Builder for LLM-powered runs.
+            Pick a workforce template below to open Founder Copilot with a ready-made prompt. Workers
+            now execute tools when connected — GitHub issues, Cursor agents, and build queue sync.
           </p>
           <div className="mt-5 flex flex-wrap gap-3">
             {signedIn ? (
@@ -139,7 +138,7 @@ export default function AgentsPageClient() {
               </p>
             </div>
             <p className="text-[10px] text-zinc-600">
-              Agent runs · {AGENT_RUN_CREDITS} credits · LLM when Builder key connected
+              Agent runs · {AGENT_RUN_CREDITS} credits · auto GitHub + Cursor when connected
             </p>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

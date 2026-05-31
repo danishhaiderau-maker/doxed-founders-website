@@ -17,6 +17,7 @@ type ChatMessage = {
   content: string;
   provider?: string;
   routedAgent?: string;
+  runtimeTools?: string[];
 };
 
 const STORAGE_KEY = 'dcf-copilot-chat-v1';
@@ -160,6 +161,7 @@ export function FounderCopilotChat({
           ? `WORKER:${result.routedAgent.label}`
           : result.answerProvider,
         routedAgent: result.routedAgent?.label,
+        runtimeTools: result.runtime?.toolsUsed,
       };
       setMessages((prev) => [...prev, assistantMsg]);
       onResult?.(result.answer);
@@ -324,7 +326,9 @@ export function FounderCopilotChat({
               {m.role === 'assistant' && m.provider && (
                 <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                   {m.routedAgent
-                    ? `${m.routedAgent} worker · tasks queued`
+                    ? `${m.routedAgent} worker · tasks queued${
+                        m.runtimeTools?.includes('github_issues') ? ' · GitHub' : ''
+                      }${m.runtimeTools?.includes('cursor_agent') ? ' · Cursor' : ''}`
                     : m.provider === 'RULE_BASED'
                       ? 'Project memory'
                       : m.provider === 'CURSOR'

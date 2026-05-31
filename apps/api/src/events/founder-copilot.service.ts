@@ -633,6 +633,7 @@ export class FounderCopilotService {
       intent,
       orchestrated.output,
       orchestrated.answerProvider,
+      orchestrated.runtime,
     );
 
     return {
@@ -644,6 +645,7 @@ export class FounderCopilotService {
         tasks: orchestrated.output.tasks,
         taskCount: orchestrated.output.tasks.length,
       },
+      runtime: orchestrated.runtime,
       stats: {
         commits: commitCount,
         deploys: deployCount,

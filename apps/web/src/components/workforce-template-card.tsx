@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { AGENT_CATEGORY_LABELS, buildCopilotAgentDeepLink } from '@dcf/utils';
+import { AGENT_CATEGORY_LABELS, buildCopilotAgentDeepLink, WORKFORCE_PERMISSIONS } from '@dcf/utils';
 
 type Template = {
   key: string;
@@ -34,6 +34,12 @@ export function WorkforceTemplateCard({
       </div>
       <p className={`mt-1 text-zinc-500 ${compact ? 'text-[11px] line-clamp-2' : 'text-xs'}`}>
         {template.description}
+      </p>
+      <p className="mt-2 text-[10px] text-zinc-600">
+        Tools:{' '}
+        {(WORKFORCE_PERMISSIONS[template.key] ?? WORKFORCE_PERMISSIONS.BUILDER)
+          .map((t) => t.replace(/_/g, ' '))
+          .join(' · ')}
       </p>
       <p className="mt-3 text-xs font-medium text-violet-300 group-hover:text-violet-200">
         Ask Copilot →
