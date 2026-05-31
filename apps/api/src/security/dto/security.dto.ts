@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsObject, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class ChangePasswordDto {
   @IsString()
@@ -56,7 +56,26 @@ export class PasskeyVerifyDto {
   @IsString()
   passkeyToken!: string;
 
+  @IsObject()
   response!: Record<string, unknown>;
+}
+
+export class PasskeyLoginOptionsDto {
+  @IsString()
+  pendingToken!: string;
+}
+
+export class PasskeyRegisterVerifyDto {
+  @IsString()
+  registerToken!: string;
+
+  @IsObject()
+  response!: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  label?: string;
 }
 
 export class RenamePasskeyDto {
