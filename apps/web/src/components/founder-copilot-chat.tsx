@@ -42,7 +42,9 @@ function saveMessages(messages: ChatMessage[]) {
 type FounderCopilotChatProps = {
   accessToken: string;
   onResult?: (answer: string) => void;
-  variant?: 'default' | 'hero';
+  variant?: 'default' | 'hero' | 'embedded';
+  initialPrompt?: string | null;
+  onInitialPromptConsumed?: () => void;
 };
 
 const ASK_CHIPS = [
@@ -74,6 +76,8 @@ export function FounderCopilotChat({
   accessToken,
   onResult,
   variant = 'default',
+  initialPrompt,
+  onInitialPromptConsumed,
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -85,6 +89,7 @@ export function FounderCopilotChat({
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const consumedPromptRef = useRef<string | null>(null);
 
   const onTranscript = useCallback((text: string) => {
     setPrompt(text);
@@ -121,6 +126,15 @@ export function FounderCopilotChat({
   useEffect(() => {
     loadMeta();
   }, [loadMeta]);
+
+  useEffect(() => {
+    if (!initialPrompt?.trim() || busy) return;
+    if (consumedPromptRef.current === initialPrompt) return;
+    consumedPromptRef.current = initialPrompt;
+    void sendMessage(initialPrompt);
+    onInitialPromptConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot quick action from dashboard
+  }, [initialPrompt, busy]);
 
   async function sendMessage(text: string) {
     const q = text.trim();
@@ -204,13 +218,16 @@ export function FounderCopilotChat({
       : 'Rule-based · add DeepSeek/OpenAI in Builder for AI chat';
 
   const isHero = variant === 'hero';
+  const isEmbedded = variant === 'embedded';
 
   return (
     <section
       className={`flex flex-col overflow-hidden rounded-2xl border shadow-xl ${
         isHero
           ? 'border-violet-500/30 bg-gradient-to-b from-violet-950/25 to-[#0d0d0f]'
-          : 'border-zinc-800 bg-[#0d0d0f]'
+          : isEmbedded
+            ? 'border-zinc-800/80 bg-[#0d0d0f]'
+            : 'border-zinc-800 bg-[#0d0d0f]'
       }`}
     >
       {isHero && memory && (
@@ -242,7 +259,7 @@ export function FounderCopilotChat({
 
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
         <div className="min-w-0">
-          {!isHero && (
+          {!isHero && !isEmbedded && (
             <>
               <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
               <p className="truncate text-xs text-zinc-500">
@@ -250,6 +267,9 @@ export function FounderCopilotChat({
                 {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Builder settings'}
               </p>
             </>
+          )}
+          {isEmbedded && (
+            <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
           )}
           {isHero && (
             <p className="text-sm text-zinc-400">
@@ -343,7 +363,11 @@ export function FounderCopilotChat({
           onKeyDown={handleKeyDown}
           rows={3}
           disabled={busy}
-          placeholder="Ask Founder Copilot anything… Enter to send, Shift+Enter for new line"
+          placeholder={
+            isEmbedded
+              ? 'Ask Founder Copilot anything…'
+              : 'Ask Founder Copilot anything… Enter to send, Shift+Enter for new line'
+          }
           className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-violet-500/50 disabled:opacity-60"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
