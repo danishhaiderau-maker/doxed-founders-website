@@ -617,6 +617,8 @@ export interface UnifiedFeedItem {
   pinned?: boolean;
   sourceUrl?: string;
   tradePostId?: string;
+  tradeSide?: 'BUY' | 'SELL';
+  traderName?: string;
   projectSlug?: string;
   projectTicker?: string;
   founderSlug?: string;
