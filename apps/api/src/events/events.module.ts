@@ -13,7 +13,7 @@ import { FounderMetricsService } from './founder-metrics.service';
 @Module({
   imports: [
     NotificationsModule,
-    BuilderModule,
+    forwardRef(() => BuilderModule),
     GitHubModule,
     forwardRef(() => BuildQueueModule),
     forwardRef(() => FounderOsModule),
