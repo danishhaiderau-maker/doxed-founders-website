@@ -13,6 +13,8 @@ import {
   buildWeeklySummary,
   computeProjectProgress,
   detectHandsFreeAction,
+  detectWorkforceIntent,
+  formatOrchestratorCopilotAnswer,
   formatRelativeTime,
   FOUNDER_OS_MEMORY_DIR,
   stripDeviceMemoryToMetadata,
@@ -390,7 +392,15 @@ export class FounderCopilotService {
     };
   }
 
-  async ask(userId: string, prompt: string) {
+  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null }) {
+    const text = prompt.trim();
+    if (!text) throw new BadRequestException('Prompt required');
+
+    const intent = detectWorkforceIntent(text, options?.agentTemplate);
+    if (intent) {
+      return this.askViaOrchestrator(userId, text, intent);
+    }
+
     const memory = await this.getProjectMemory(userId);
 
     if (memory.repoFullName) {
@@ -557,6 +567,83 @@ export class FounderCopilotService {
       answerProvider,
       llmErrors,
       summary,
+      stats: {
+        commits: commitCount,
+        deploys: deployCount,
+        followers: followerCount,
+        featureRequests,
+        launchReadiness: readiness.score,
+        buildStreak: founder.buildStreakDays,
+      },
+    };
+  }
+
+  private async askViaOrchestrator(
+    userId: string,
+    prompt: string,
+    intent: NonNullable<ReturnType<typeof detectWorkforceIntent>>,
+  ) {
+    const memory = await this.getProjectMemory(userId);
+    const orchestrated = await this.buildQueue.runOrchestratedWorkforce(
+      userId,
+      intent.template,
+      prompt,
+    );
+
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { where: { approved: true }, take: 1 } },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const project = founder.projects[0];
+    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    const [commitCount, deployCount, followerCount, featureRequests] = await Promise.all([
+      this.prisma.founderEvent.count({
+        where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: weekAgo } },
+      }),
+      this.prisma.founderEvent.count({
+        where: { founderId: founder.id, type: FounderEventType.DEPLOY_SUCCESS, createdAt: { gte: weekAgo } },
+      }),
+      project
+        ? this.prisma.projectFollow.count({ where: { projectId: project.id } })
+        : Promise.resolve(0),
+      project
+        ? this.prisma.communityThread.count({
+            where: { projectId: project.id, channel: 'FEATURE_REQUESTS' },
+          })
+        : Promise.resolve(0),
+    ]);
+
+    const readiness = project
+      ? await this.metrics.refreshLaunchReadiness(project.id)
+      : { score: memory.launchReadiness, previous: memory.launchReadiness };
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.COPILOT_COMMAND,
+      source: 'copilot',
+      title: prompt.slice(0, 80),
+      payload: { intent: 'orchestrate', template: intent.template, worker: intent.label },
+    });
+
+    const answer = formatOrchestratorCopilotAnswer(
+      intent,
+      orchestrated.output,
+      orchestrated.answerProvider,
+    );
+
+    return {
+      answer,
+      answerProvider: orchestrated.answerProvider,
+      routedAgent: { template: intent.template, label: intent.label },
+      orchestrator: {
+        title: orchestrated.output.title,
+        tasks: orchestrated.output.tasks,
+        taskCount: orchestrated.output.tasks.length,
+      },
       stats: {
         commits: commitCount,
         deploys: deployCount,
@@ -787,8 +874,21 @@ export class FounderCopilotService {
       }
       case 'community_update': {
         const result = await this.ask(userId, 'Create community update for this week');
-        const body = buildCommunityUpdateFromSummary(result.summary);
-        return { action, answer: body, summary: result.summary, stats: result.stats };
+        const summaryPayload =
+          'summary' in result && result.summary && typeof result.summary === 'object'
+            ? (result.summary as { title: string; body: string; traderView: string })
+            : {
+                title: 'Community update',
+                body: result.answer,
+                traderView: 'Founder Copilot generated this update from project activity.',
+              };
+        const body = buildCommunityUpdateFromSummary(summaryPayload);
+        return {
+          action,
+          answer: body,
+          summary: 'summary' in result ? result.summary : undefined,
+          stats: result.stats,
+        };
       }
       case 'publish_progress': {
         const pending = await this.prisma.suggestedBuildUpdate.findFirst({

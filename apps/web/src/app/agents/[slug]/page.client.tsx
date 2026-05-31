@@ -101,7 +101,9 @@ export default function AgentDetailClient({ slug }: { slug: string }) {
                     try {
                       const r = await runAgent(agent.id, prompt, session.accessToken!);
                       setOutput(r.output);
-                      setMsg(`Run complete (${r.creditsSpent} credits)`);
+                      setMsg(
+                        `Run complete (${r.creditsSpent} credits${r.answerProvider === 'LLM' ? ' · LLM' : ''})`,
+                      );
                     } catch (e) {
                       setMsg(e instanceof Error ? e.message : 'Run failed');
                     }

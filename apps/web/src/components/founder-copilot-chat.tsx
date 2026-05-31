@@ -16,6 +16,7 @@ type ChatMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
   provider?: string;
+  routedAgent?: string;
 };
 
 const STORAGE_KEY = 'dcf-copilot-chat-v1';
@@ -45,6 +46,7 @@ type FounderCopilotChatProps = {
   variant?: 'default' | 'hero' | 'embedded';
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;
+  agentTemplate?: string | null;
 };
 
 const ASK_CHIPS = [
@@ -78,6 +80,7 @@ export function FounderCopilotChat({
   variant = 'default',
   initialPrompt,
   onInitialPromptConsumed,
+  agentTemplate,
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -148,12 +151,15 @@ export function FounderCopilotChat({
     setPrompt('');
 
     try {
-      const result = await copilotAsk(q, accessToken);
+      const result = await copilotAsk(q, accessToken, agentTemplate);
       const assistantMsg: ChatMessage = {
         id: `a-${Date.now()}`,
         role: 'assistant',
         content: result.answer,
-        provider: result.answerProvider,
+        provider: result.routedAgent
+          ? `WORKER:${result.routedAgent.label}`
+          : result.answerProvider,
+        routedAgent: result.routedAgent?.label,
       };
       setMessages((prev) => [...prev, assistantMsg]);
       onResult?.(result.answer);
@@ -317,13 +323,17 @@ export function FounderCopilotChat({
             >
               {m.role === 'assistant' && m.provider && (
                 <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-                  {m.provider === 'RULE_BASED'
-                    ? 'Project memory'
-                    : m.provider === 'CURSOR'
-                      ? 'Cursor + memory'
-                      : m.provider === 'PHALA'
-                        ? 'Private AI (Phala TEE)'
-                        : m.provider.replace('_', ' ')}
+                  {m.routedAgent
+                    ? `${m.routedAgent} worker · tasks queued`
+                    : m.provider === 'RULE_BASED'
+                      ? 'Project memory'
+                      : m.provider === 'CURSOR'
+                        ? 'Cursor + memory'
+                        : m.provider === 'PHALA'
+                          ? 'Private AI (Phala TEE)'
+                          : m.provider.startsWith('WORKER:')
+                            ? `${m.provider.replace('WORKER:', '')} worker`
+                            : m.provider.replace('_', ' ')}
                 </p>
               )}
               {m.content}

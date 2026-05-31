@@ -2011,9 +2011,30 @@ export interface AgentHubResponse {
   categories: string[];
 }
 
+export interface AgentActivityItem {
+  id: string;
+  source: 'marketplace' | 'copilot';
+  agentId: string | null;
+  agentName: string;
+  agentSlug: string;
+  template: string;
+  category: string;
+  inputPrompt: string | null;
+  outputTitle: string;
+  outputSummary: string | null;
+  creditsSpent: number;
+  createdAt: string;
+  founder: { id: string; slug: string; name: string };
+  project: { id: string; slug: string; name: string } | null;
+}
+
 export function fetchAgentHub(category?: string) {
   const q = category ? `?category=${encodeURIComponent(category)}` : '';
   return apiFetch<AgentHubResponse>(`/agents${q}`);
+}
+
+export function fetchAgentActivityRecent(limit = 20) {
+  return apiFetch<AgentActivityItem[]>(`/agents/activity/recent?limit=${limit}`);
 }
 
 export function fetchAgent(slug: string, token?: string) {
@@ -2043,6 +2064,7 @@ export function runAgent(agentId: string, prompt: string, token: string) {
   return apiFetch<{
     runId: string;
     creditsSpent: number;
+    answerProvider?: 'RULE_BASED' | 'LLM';
     output: {
       title: string;
       summary: string;
@@ -2447,13 +2469,19 @@ export function fetchEventActivity(token: string) {
   return apiFetch<EventActivityFeed>('/events/activity', undefined, token);
 }
 
-export function copilotAsk(prompt: string, token: string) {
+export function copilotAsk(prompt: string, token: string, agentTemplate?: string | null) {
   return apiFetch<{
     answer: string;
     answerProvider?: string;
     llmErrors?: string[];
+    routedAgent?: { template: string; label: string };
+    orchestrator?: { title: string; tasks: string[]; taskCount: number };
     stats: Record<string, number>;
-  }>('/copilot/ask', { method: 'POST', body: JSON.stringify({ prompt }) }, token);
+  }>(
+    '/copilot/ask',
+    { method: 'POST', body: JSON.stringify({ prompt, agentTemplate: agentTemplate ?? undefined }) },
+    token,
+  );
 }
 
 export function copilotHandsFree(prompt: string, token: string) {
