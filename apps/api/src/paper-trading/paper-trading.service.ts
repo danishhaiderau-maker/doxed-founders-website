@@ -26,6 +26,7 @@ import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 
 const STARTING_CASH = STARTING_CASH_USD;
+const MIN_SELL_USD = 0.01;
 
 @Injectable()
 export class PaperTradingService {
@@ -95,6 +96,8 @@ export class PaperTradingService {
   }
 
   async getPortfolio(userId: string) {
+    await this.consolidateDuplicatePositions(userId);
+
     let portfolio = await this.prisma.paperPortfolio.findUnique({
       where: { userId },
       include: {
@@ -199,6 +202,402 @@ export class PaperTradingService {
       isRestricted: cashBalance < RESTRICTED_CASH_THRESHOLD_USD,
       restrictedThresholdUsd: RESTRICTED_CASH_THRESHOLD_USD,
       resetFeeUsd: TOP_UP_FEE_USD,
+      recentTrades: await this.getRecentTrades(userId),
+    };
+  }
+
+  async getRecentTrades(userId: string, limit = 10) {
+    const trades = await this.prisma.paperTrade.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: { project: { select: { ticker: true, name: true } } },
+    });
+    return trades.map((t) => ({
+      id: t.id,
+      side: t.side,
+      ticker: t.project.ticker,
+      projectName: t.project.name,
+      quantity: Number(t.quantity),
+      priceUsd: Number(t.priceUsd),
+      totalUsd: Number(t.totalUsd),
+      realizedPnlUsd: t.realizedPnlUsd != null ? Number(t.realizedPnlUsd) : null,
+      createdAt: t.createdAt.toISOString(),
+    }));
+  }
+
+  async getProjectLivePrice(projectId: string) {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: { metrics: true, chain: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const input = project.dexscreenerUrl ?? project.contractAddress;
+    if (input) {
+      try {
+        const preview = await this.previewTokenInput(input);
+        const price = Number(preview.marketPreview.priceUsd);
+        if (price > 0) return { priceUsd: price, preview };
+      } catch {
+        /* fall through */
+      }
+    }
+
+    const cached = Number(project.metrics?.priceUsd ?? 0);
+    return { priceUsd: cached, preview: null };
+  }
+
+  /** Merge multiple positions for the same ticker into one row (fixes duplicate dynamic listings). */
+  async consolidateDuplicatePositions(userId: string) {
+    const portfolio = await this.prisma.paperPortfolio.findUnique({
+      where: { userId },
+      include: {
+        positions: { include: { project: { select: { id: true, ticker: true } } } },
+      },
+    });
+    if (!portfolio || portfolio.positions.length < 2) return;
+
+    const groups = new Map<string, typeof portfolio.positions>();
+    for (const pos of portfolio.positions) {
+      const key = pos.project.ticker.toUpperCase();
+      const list = groups.get(key) ?? [];
+      list.push(pos);
+      groups.set(key, list);
+    }
+
+    for (const [, positions] of groups) {
+      if (positions.length < 2) continue;
+
+      positions.sort((a, b) => Number(b.quantity) - Number(a.quantity));
+      const primary = positions[0];
+      let totalQty = Number(primary.quantity);
+      let costSum = totalQty * Number(primary.avgBuyPrice);
+
+      for (const dup of positions.slice(1)) {
+        const q = Number(dup.quantity);
+        costSum += q * Number(dup.avgBuyPrice);
+        totalQty += q;
+        await this.prisma.paperPosition.delete({ where: { id: dup.id } });
+      }
+
+      const newAvg = totalQty > 0 ? costSum / totalQty : Number(primary.avgBuyPrice);
+      await this.prisma.paperPosition.update({
+        where: { id: primary.id },
+        data: {
+          quantity: new Prisma.Decimal(totalQty),
+          avgBuyPrice: new Prisma.Decimal(newAvg),
+        },
+      });
+    }
+  }
+
+  async closePosition(
+    userId: string,
+    projectId: string,
+    opts?: { comment?: string; sellPercent?: number },
+  ) {
+    const position = await this.prisma.paperPosition.findFirst({
+      where: { projectId, portfolio: { userId } },
+      include: { project: true, portfolio: true },
+    });
+    if (!position) throw new NotFoundException('Position not found');
+
+    const { priceUsd: price, preview: livePreview } = await this.getProjectLivePrice(projectId);
+    if (!price || price <= 0) {
+      throw new BadRequestException('Could not resolve live price to close position');
+    }
+
+    const held = Number(position.quantity);
+    const sellPercent = Math.min(100, Math.max(0.01, opts?.sellPercent ?? 100));
+    const sellQty = held * (sellPercent / 100);
+    let amountUsd = sellQty * price;
+    amountUsd = Math.round(amountUsd * 100) / 100;
+
+    if (sellQty <= 0) {
+      throw new BadRequestException('Nothing to sell');
+    }
+
+    const dexUrl = position.project.dexscreenerUrl ?? position.project.contractAddress;
+    if (!dexUrl) {
+      throw new BadRequestException('No DexScreener link for this token');
+    }
+
+    const avgBuy = Number(position.avgBuyPrice);
+    const realizedPnlUsd = Math.round((price - avgBuy) * sellQty * 100) / 100;
+
+    const result = await this.executeTradeInternal({
+      userId,
+      projectId: position.projectId,
+      dexscreenerUrl: dexUrl,
+      side: PaperTradeSide.SELL,
+      amountUsd: Math.max(amountUsd, MIN_SELL_USD),
+      quantityOverride: sellQty,
+      realizedPnlUsd,
+      comment: opts?.comment ?? (sellPercent >= 99 ? 'Closed position' : `Closed ${sellPercent}%`),
+      marketPreview: livePreview?.marketPreview,
+    });
+
+    if (Math.abs(realizedPnlUsd) >= MIN_SELL_USD) {
+      await this.prisma.virtualEconomyEvent.create({
+        data: {
+          userId,
+          type: 'REALIZED_PNL',
+          amountUsd: new Prisma.Decimal(realizedPnlUsd),
+          note: `${position.project.ticker} close · ${realizedPnlUsd >= 0 ? '+' : ''}$${realizedPnlUsd.toFixed(2)}`,
+        },
+      });
+    }
+
+    return {
+      ...result,
+      realizedPnlUsd,
+      proceedsUsd: result.amountUsd,
+      ticker: position.project.ticker,
+    };
+  }
+
+  async swapTokens(
+    userId: string,
+    fromProjectId: string,
+    toDexscreenerUrl: string,
+    opts?: { comment?: string },
+  ) {
+    const closed = await this.closePosition(userId, fromProjectId, {
+      comment: opts?.comment ?? 'Swap — sell leg',
+      sellPercent: 100,
+    });
+
+    const buyAmount = Math.floor(closed.proceedsUsd * 100) / 100;
+    if (buyAmount < 1) {
+      throw new BadRequestException('Proceeds too small to swap — position may be dust');
+    }
+
+    const bought = await this.executeTrade({
+      userId,
+      dexscreenerUrl: toDexscreenerUrl.trim(),
+      side: PaperTradeSide.BUY,
+      amountUsd: buyAmount,
+      comment: opts?.comment ? `${opts.comment} (swap buy)` : 'Swap — buy leg',
+    });
+
+    return { sell: closed, buy: bought };
+  }
+
+  private async executeTradeInternal(input: {
+    userId: string;
+    projectId?: string;
+    dexscreenerUrl: string;
+    side: PaperTradeSide;
+    amountUsd: number;
+    quantityOverride?: number;
+    realizedPnlUsd?: number;
+    comment?: string;
+    catalyst?: string;
+    targetUsd?: number;
+    timeHorizon?: string;
+    marketPreview?: {
+      priceUsd?: string;
+      marketCap?: number;
+      volume24h?: number;
+      liquidityUsd?: number;
+      priceChange24h?: number;
+    };
+  }) {
+    const preview = await this.previewTokenInput(input.dexscreenerUrl.trim());
+    const parsed = parseDexScreenerUrl(preview.dexscreenerUrl);
+    if (!parsed) throw new BadRequestException('Invalid DexScreener URL');
+
+    const price = Number(preview.marketPreview.priceUsd);
+    if (!price || price <= 0) {
+      throw new BadRequestException('Could not resolve live price from DexScreener');
+    }
+
+    const project = input.projectId
+      ? await this.prisma.project.findUniqueOrThrow({ where: { id: input.projectId } })
+      : await this.ensureDynamicProject(preview, parsed.address);
+
+    let amountUsd = input.amountUsd;
+    const quantity =
+      input.quantityOverride != null ? input.quantityOverride : amountUsd / price;
+
+    await this.ensurePortfolio(input.userId);
+    const portfolio = await this.prisma.paperPortfolio.findUnique({
+      where: { userId: input.userId },
+      include: { positions: true },
+    });
+    if (!portfolio) throw new NotFoundException('Paper portfolio not found');
+
+    if (input.side === PaperTradeSide.SELL) {
+      const existing = portfolio.positions.find((p) => p.projectId === project.id);
+      const held = existing ? Number(existing.quantity) : 0;
+      if (held <= 0) throw new BadRequestException('No tokens to sell');
+      if (quantity > held * 1.0001) {
+        throw new BadRequestException('Sell quantity exceeds holdings');
+      }
+      amountUsd = Math.round(quantity * price * 100) / 100;
+    }
+
+    if (input.side === PaperTradeSide.BUY) {
+      if (Number(portfolio.cashBalance) < RESTRICTED_CASH_THRESHOLD_USD) {
+        throw new BadRequestException(
+          `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to continue buying.`,
+        );
+      }
+      if (Number(portfolio.cashBalance) < amountUsd) {
+        throw new BadRequestException('Insufficient paper cash balance');
+      }
+    }
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const existingPosition = await tx.paperPosition.findUnique({
+        where: {
+          portfolioId_projectId: { portfolioId: portfolio.id, projectId: project.id },
+        },
+      });
+
+      let cashDelta = 0;
+      if (input.side === PaperTradeSide.BUY) {
+        cashDelta = -amountUsd;
+        const prevQty = existingPosition ? Number(existingPosition.quantity) : 0;
+        const prevAvg = existingPosition ? Number(existingPosition.avgBuyPrice) : 0;
+        const newQty = prevQty + quantity;
+        const newAvg = newQty > 0 ? (prevQty * prevAvg + amountUsd) / newQty : price;
+
+        const convictionFields =
+          input.comment?.trim() ||
+          input.catalyst?.trim() ||
+          input.targetUsd ||
+          input.timeHorizon?.trim()
+            ? {
+                convictionThesis: input.comment?.trim() || undefined,
+                convictionCatalyst: input.catalyst?.trim() || undefined,
+                convictionTargetUsd: input.targetUsd
+                  ? new Prisma.Decimal(input.targetUsd)
+                  : undefined,
+                convictionTimeHorizon: input.timeHorizon?.trim() || undefined,
+                convictionRecordedAt: new Date(),
+              }
+            : {};
+
+        await tx.paperPosition.upsert({
+          where: {
+            portfolioId_projectId: { portfolioId: portfolio.id, projectId: project.id },
+          },
+          create: {
+            portfolioId: portfolio.id,
+            projectId: project.id,
+            quantity: new Prisma.Decimal(newQty),
+            avgBuyPrice: new Prisma.Decimal(newAvg),
+            ...convictionFields,
+          },
+          update: {
+            quantity: new Prisma.Decimal(newQty),
+            avgBuyPrice: new Prisma.Decimal(newAvg),
+            ...convictionFields,
+          },
+        });
+      } else {
+        cashDelta = amountUsd;
+        const prevQty = Number(existingPosition!.quantity);
+        const newQty = prevQty - quantity;
+        if (newQty <= 0.00000001) {
+          await tx.paperPosition.delete({ where: { id: existingPosition!.id } });
+        } else {
+          await tx.paperPosition.update({
+            where: { id: existingPosition!.id },
+            data: { quantity: new Prisma.Decimal(newQty) },
+          });
+        }
+      }
+
+      const updatedPortfolio = await tx.paperPortfolio.update({
+        where: { id: portfolio.id },
+        data: { cashBalance: { increment: cashDelta } },
+      });
+
+      const trade = await tx.paperTrade.create({
+        data: {
+          userId: input.userId,
+          projectId: project.id,
+          side: input.side,
+          quantity: new Prisma.Decimal(quantity),
+          priceUsd: new Prisma.Decimal(price),
+          totalUsd: new Prisma.Decimal(amountUsd),
+          realizedPnlUsd:
+            input.realizedPnlUsd != null
+              ? new Prisma.Decimal(input.realizedPnlUsd)
+              : undefined,
+        },
+      });
+
+      const mp = input.marketPreview ?? preview.marketPreview;
+      await tx.project.update({
+        where: { id: project.id },
+        data: {
+          lastTradeAt: new Date(),
+          trackingActive: true,
+          metrics: {
+            upsert: {
+              create: {
+                priceUsd: new Prisma.Decimal(price),
+                marketCap: mp.marketCap ? new Prisma.Decimal(mp.marketCap) : undefined,
+                volume24h: mp.volume24h ? new Prisma.Decimal(mp.volume24h) : undefined,
+                liquidity: mp.liquidityUsd ? new Prisma.Decimal(mp.liquidityUsd) : undefined,
+                priceChange24h: mp.priceChange24h
+                  ? new Prisma.Decimal(mp.priceChange24h)
+                  : undefined,
+              },
+              update: {
+                priceUsd: new Prisma.Decimal(price),
+                marketCap: mp.marketCap ? new Prisma.Decimal(mp.marketCap) : undefined,
+                volume24h: mp.volume24h ? new Prisma.Decimal(mp.volume24h) : undefined,
+                liquidity: mp.liquidityUsd ? new Prisma.Decimal(mp.liquidityUsd) : undefined,
+                priceChange24h: mp.priceChange24h
+                  ? new Prisma.Decimal(mp.priceChange24h)
+                  : undefined,
+              },
+            },
+          },
+        },
+      });
+
+      return { updatedPortfolio, trade };
+    });
+
+    const feedPost = await this.feedService.createPostForTrade(
+      result.trade.id,
+      input.userId,
+      project.id,
+      input.comment,
+    );
+
+    await this.analytics.track(
+      input.side === PaperTradeSide.BUY
+        ? AnalyticsEventType.PAPER_TRADE_BUY
+        : AnalyticsEventType.PAPER_TRADE_SELL,
+      {
+        userId: input.userId,
+        projectId: project.id,
+        metadata: { ticker: project.ticker, amountUsd, priceUsd: price },
+      },
+    );
+
+    await this.points.award(input.userId, POINTS.PAPER_TRADE, 'PAPER_TRADE');
+    await this.cleanupInactiveTracking();
+
+    return {
+      success: true,
+      side: input.side,
+      projectId: project.id,
+      ticker: project.ticker,
+      quantity,
+      priceUsd: price,
+      amountUsd,
+      cashBalance: Number(result.updatedPortfolio.cashBalance),
+      feedPostId: feedPost.id,
+      feedPostCommentCount: feedPost.commentCount,
+      realizedPnlUsd: input.realizedPnlUsd ?? null,
     };
   }
 
@@ -488,6 +887,9 @@ export class PaperTradingService {
       throw new NotFoundException('Paper portfolio not found');
     }
 
+    let quantity = amountUsd / price;
+    let realizedPnlUsd: number | undefined;
+
     if (dto.side === PaperTradeSide.SELL) {
       const existing = portfolio.positions.find((p) => p.projectId === project.id);
       const held = existing ? Number(existing.quantity) : 0;
@@ -498,204 +900,55 @@ export class PaperTradingService {
       if (amountUsd > maxSellUsd) {
         amountUsd = Math.floor(maxSellUsd * 100) / 100;
       }
+      quantity = amountUsd / price;
+      if (quantity <= 0) {
+        throw new BadRequestException('Sell amount too small');
+      }
+      const avgBuy = existing ? Number(existing.avgBuyPrice) : 0;
+      realizedPnlUsd = Math.round((price - avgBuy) * quantity * 100) / 100;
     }
 
-    const quantity = amountUsd / price;
-
-    if (dto.side === PaperTradeSide.BUY) {
-      if (Number(portfolio.cashBalance) < RESTRICTED_CASH_THRESHOLD_USD) {
-        throw new BadRequestException(
-          `Cash below $${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}. Top up for $${TOP_UP_FEE_USD} to continue buying.`,
-        );
-      }
-      if (Number(portfolio.cashBalance) < amountUsd) {
-        throw new BadRequestException('Insufficient paper cash balance');
-      }
-    } else if (quantity <= 0) {
-      throw new BadRequestException('Sell amount too small');
-    }
-
-    const result = await this.prisma.$transaction(async (tx) => {
-      const existingPosition = await tx.paperPosition.findUnique({
-        where: {
-          portfolioId_projectId: {
-            portfolioId: portfolio.id,
-            projectId: project.id,
-          },
-        },
-      });
-
-      let cashDelta = 0;
-      if (dto.side === PaperTradeSide.BUY) {
-        cashDelta = -amountUsd;
-        const prevQty = existingPosition ? Number(existingPosition.quantity) : 0;
-        const prevAvg = existingPosition ? Number(existingPosition.avgBuyPrice) : 0;
-        const newQty = prevQty + quantity;
-        const newAvg =
-          newQty > 0 ? (prevQty * prevAvg + amountUsd) / newQty : price;
-
-        await tx.paperPosition.upsert({
-          where: {
-            portfolioId_projectId: {
-              portfolioId: portfolio.id,
-              projectId: project.id,
-            },
-          },
-          create: {
-            portfolioId: portfolio.id,
-            projectId: project.id,
-            quantity: new Prisma.Decimal(newQty),
-            avgBuyPrice: new Prisma.Decimal(newAvg),
-            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd || dto.timeHorizon?.trim()
-              ? {
-                  convictionThesis: dto.comment?.trim() || undefined,
-                  convictionCatalyst: dto.catalyst?.trim() || undefined,
-                  convictionTargetUsd: dto.targetUsd
-                    ? new Prisma.Decimal(dto.targetUsd)
-                    : undefined,
-                  convictionTimeHorizon: dto.timeHorizon?.trim() || undefined,
-                  convictionRecordedAt: new Date(),
-                }
-              : {}),
-          },
-          update: {
-            quantity: new Prisma.Decimal(newQty),
-            avgBuyPrice: new Prisma.Decimal(newAvg),
-            ...(dto.comment?.trim() || dto.catalyst?.trim() || dto.targetUsd || dto.timeHorizon?.trim()
-              ? {
-                  convictionThesis: dto.comment?.trim() || undefined,
-                  convictionCatalyst: dto.catalyst?.trim() || undefined,
-                  convictionTargetUsd: dto.targetUsd
-                    ? new Prisma.Decimal(dto.targetUsd)
-                    : undefined,
-                  convictionTimeHorizon: dto.timeHorizon?.trim() || undefined,
-                  convictionRecordedAt: new Date(),
-                }
-              : {}),
-          },
-        });
-      } else {
-        cashDelta = amountUsd;
-        const prevQty = Number(existingPosition!.quantity);
-        const newQty = prevQty - quantity;
-        if (newQty <= 0.00000001) {
-          await tx.paperPosition.delete({
-            where: { id: existingPosition!.id },
-          });
-        } else {
-          await tx.paperPosition.update({
-            where: { id: existingPosition!.id },
-            data: { quantity: new Prisma.Decimal(newQty) },
-          });
-        }
-      }
-
-      const updatedPortfolio = await tx.paperPortfolio.update({
-        where: { id: portfolio.id },
-        data: {
-          cashBalance: { increment: cashDelta },
-        },
-      });
-
-      const trade = await tx.paperTrade.create({
-        data: {
-          userId: dto.userId,
-          projectId: project.id,
-          side: dto.side,
-          quantity: new Prisma.Decimal(quantity),
-          priceUsd: new Prisma.Decimal(price),
-          totalUsd: new Prisma.Decimal(amountUsd),
-        },
-      });
-
-      await tx.project.update({
-        where: { id: project.id },
-        data: {
-          lastTradeAt: new Date(),
-          trackingActive: true,
-          metrics: {
-            upsert: {
-              create: {
-                priceUsd: new Prisma.Decimal(price),
-                marketCap: preview.marketPreview.marketCap
-                  ? new Prisma.Decimal(preview.marketPreview.marketCap)
-                  : undefined,
-                volume24h: preview.marketPreview.volume24h
-                  ? new Prisma.Decimal(preview.marketPreview.volume24h)
-                  : undefined,
-                liquidity: preview.marketPreview.liquidityUsd
-                  ? new Prisma.Decimal(preview.marketPreview.liquidityUsd)
-                  : undefined,
-                priceChange24h: preview.marketPreview.priceChange24h
-                  ? new Prisma.Decimal(preview.marketPreview.priceChange24h)
-                  : undefined,
-              },
-              update: {
-                priceUsd: new Prisma.Decimal(price),
-                marketCap: preview.marketPreview.marketCap
-                  ? new Prisma.Decimal(preview.marketPreview.marketCap)
-                  : undefined,
-                volume24h: preview.marketPreview.volume24h
-                  ? new Prisma.Decimal(preview.marketPreview.volume24h)
-                  : undefined,
-                liquidity: preview.marketPreview.liquidityUsd
-                  ? new Prisma.Decimal(preview.marketPreview.liquidityUsd)
-                  : undefined,
-                priceChange24h: preview.marketPreview.priceChange24h
-                  ? new Prisma.Decimal(preview.marketPreview.priceChange24h)
-                  : undefined,
-              },
-            },
-          },
-        },
-      });
-
-      return { updatedPortfolio, trade };
+    const result = await this.executeTradeInternal({
+      userId: dto.userId,
+      projectId: project.id,
+      dexscreenerUrl: dto.dexscreenerUrl.trim(),
+      side: dto.side,
+      amountUsd,
+      quantityOverride: quantity,
+      realizedPnlUsd,
+      comment: dto.comment,
+      catalyst: dto.catalyst,
+      targetUsd: dto.targetUsd,
+      timeHorizon: dto.timeHorizon,
+      marketPreview: preview.marketPreview,
     });
 
-    const feedPost = await this.feedService.createPostForTrade(
-      result.trade.id,
-      dto.userId,
-      project.id,
-      dto.comment,
-    );
+    if (
+      dto.side === PaperTradeSide.SELL &&
+      realizedPnlUsd != null &&
+      Math.abs(realizedPnlUsd) >= MIN_SELL_USD
+    ) {
+      await this.prisma.virtualEconomyEvent.create({
+        data: {
+          userId: dto.userId,
+          type: 'REALIZED_PNL',
+          amountUsd: new Prisma.Decimal(realizedPnlUsd),
+          note: `${project.ticker} sell · ${realizedPnlUsd >= 0 ? '+' : ''}$${realizedPnlUsd.toFixed(2)}`,
+        },
+      });
+    }
 
-    if (feedPost.commentCount > 0) {
+    if (result.feedPostCommentCount > 0) {
       await this.feedService.refreshHighlights();
     }
 
     if (dto.side === PaperTradeSide.BUY) {
       this.hotBuy.checkAfterBuy(project.id).catch(() => undefined);
-    }
-
-    await this.analytics.track(
-      dto.side === PaperTradeSide.BUY
-        ? AnalyticsEventType.PAPER_TRADE_BUY
-        : AnalyticsEventType.PAPER_TRADE_SELL,
-      {
-        userId: dto.userId,
-        projectId: project.id,
-        metadata: {
-          ticker: project.ticker,
-          amountUsd,
-          priceUsd: price,
-        },
-      },
-    );
-
-    await this.cleanupInactiveTracking();
-
-    await this.points.award(dto.userId, POINTS.PAPER_TRADE, 'PAPER_TRADE');
-
-    if (dto.side === PaperTradeSide.BUY) {
       void this.notifications.notifyFollowersOfTraderBuy(dto.userId, {
         ticker: project.ticker,
-        amountUsd,
+        amountUsd: result.amountUsd,
         projectSlug: project.slug,
       });
-    }
-
-    if (dto.side === PaperTradeSide.BUY) {
       void this.socialSignals.onPaperBuy(project.id);
     }
 
@@ -704,11 +957,12 @@ export class PaperTradingService {
       side: dto.side,
       projectId: project.id,
       ticker: project.ticker,
-      quantity,
-      priceUsd: price,
-      amountUsd,
-      cashBalance: Number(result.updatedPortfolio.cashBalance),
-      feedPostId: feedPost.id,
+      quantity: result.quantity,
+      priceUsd: result.priceUsd,
+      amountUsd: result.amountUsd,
+      cashBalance: result.cashBalance,
+      feedPostId: result.feedPostId,
+      realizedPnlUsd: result.realizedPnlUsd ?? null,
     };
   }
 

@@ -10,7 +10,11 @@ import {
   MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PaperTradeSide } from '@prisma/client';
+import {
+  PaperLimitOrderSide,
+  PaperLimitTrigger,
+  PaperTradeSide,
+} from '@prisma/client';
 
 export class CreatePaperSessionDto {
   @IsOptional()
@@ -90,4 +94,85 @@ export class ConfirmCryptoTopUpDto {
   @IsString()
   @MinLength(32)
   txSignature!: string;
+}
+
+export class ClosePaperPositionDto {
+  @IsString()
+  userId!: string;
+
+  @IsString()
+  projectId!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  comment?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  sellPercent?: number;
+}
+
+export class SwapPaperTokensDto {
+  @IsString()
+  userId!: string;
+
+  @IsString()
+  fromProjectId!: string;
+
+  @IsString()
+  @MinLength(10)
+  toDexscreenerUrl!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  comment?: string;
+}
+
+export class CreatePaperLimitOrderDto {
+  @IsString()
+  userId!: string;
+
+  @IsEnum(PaperLimitOrderSide)
+  side!: PaperLimitOrderSide;
+
+  @IsEnum(PaperLimitTrigger)
+  trigger!: PaperLimitTrigger;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.00000001)
+  targetPriceUsd!: number;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  @Max(100000)
+  amountUsd?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  sellPercent?: number;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(10)
+  dexscreenerUrl?: string;
+}
+
+export class CancelPaperLimitOrderDto {
+  @IsString()
+  userId!: string;
 }

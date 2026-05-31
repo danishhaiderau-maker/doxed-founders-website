@@ -13,16 +13,22 @@ import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
 import { formatUsd, formatPercent, formatPublicAccountLabel, formatTokenPrice, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD, TOP_UP_FEE_USD } from '@dcf/utils';
 import { AccountWelcome } from '@/components/account-welcome';
 import {
+  cancelPaperLimitOrder,
+  closePaperPosition,
+  createPaperLimitOrder,
   createPaperSession,
   createResetCheckout,
   DexScreenerPreview,
   executePaperTrade,
+  fetchPaperLimitOrders,
   fetchPaperPortfolio,
   fetchResetInfo,
-  PaperPortfolio,
   migrateGuestPortfolio,
+  PaperLimitOrder,
+  PaperPortfolio,
   previewPaperTrade,
   resetPaperPortfolio,
+  swapPaperTokens,
 } from '@/lib/api';
 
 const SESSION_KEY = 'dcf-paper-user-id';
@@ -74,6 +80,15 @@ function PaperTradingPageContent() {
   const [intelPosition, setIntelPosition] = useState<CoinIntelData | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
   const [bustDismissed, setBustDismissed] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [closingProjectId, setClosingProjectId] = useState<string | null>(null);
+  const [swapFrom, setSwapFrom] = useState<Position | null>(null);
+  const [swapTargetUrl, setSwapTargetUrl] = useState('');
+  const [limitOrders, setLimitOrders] = useState<PaperLimitOrder[]>([]);
+  const [limitTargetPrice, setLimitTargetPrice] = useState('');
+  const [limitSide, setLimitSide] = useState<'BUY' | 'SELL'>('SELL');
+  const [limitTrigger, setLimitTrigger] = useState<'GTE' | 'LTE'>('GTE');
+  const [limitProjectId, setLimitProjectId] = useState<string | null>(null);
 
   const chartUrl = activeChartUrl ?? preview?.dexscreenerUrl ?? null;
   const chartChain = preview?.chainSlug ?? portfolio?.positions[0]?.chainSlug ?? null;
@@ -82,7 +97,19 @@ function PaperTradingPageContent() {
   const refreshPortfolio = useCallback(async (id: string) => {
     const data = await fetchPaperPortfolio(id);
     setPortfolio(data);
+    try {
+      const orders = await fetchPaperLimitOrders(id);
+      setLimitOrders(orders);
+    } catch {
+      setLimitOrders([]);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   useEffect(() => {
     if (authStatus === 'loading') return;
@@ -258,6 +285,100 @@ function PaperTradingPageContent() {
     return comment || undefined;
   }
 
+  async function handleClosePosition(pos: Position, comment?: string) {
+    if (!userId) return;
+    setError(null);
+    setClosingProjectId(pos.projectId);
+    try {
+      const result = await closePaperPosition({
+        userId,
+        projectId: pos.projectId,
+        comment: comment?.trim() || undefined,
+      });
+      const pnlLabel =
+        result.realizedPnlUsd >= 0
+          ? `+${formatUsd(result.realizedPnlUsd)}`
+          : formatUsd(result.realizedPnlUsd);
+      setToast(
+        `Closed ${result.ticker} · proceeds ${formatUsd(result.proceedsUsd)} · realized P&L ${pnlLabel}`,
+      );
+      setLastFeedPostId(result.feedPostId);
+      if (intelPosition?.ticker === pos.ticker) setIntelPosition(null);
+      await refreshPortfolio(userId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not close position');
+    } finally {
+      setClosingProjectId(null);
+    }
+  }
+
+  async function handleSwap() {
+    if (!userId || !swapFrom || !swapTargetUrl.trim()) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const result = await swapPaperTokens({
+        userId,
+        fromProjectId: swapFrom.projectId,
+        toDexscreenerUrl: swapTargetUrl.trim(),
+        comment: `Swap ${swapFrom.ticker}`,
+      });
+      setToast(
+        `Swapped ${result.sell.ticker} → ${result.buy.ticker} · ${formatUsd(result.buy.amountUsd)} bought`,
+      );
+      setSwapFrom(null);
+      setSwapTargetUrl('');
+      await refreshPortfolio(userId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Swap failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCreateLimitOrder() {
+    if (!userId || !limitProjectId || !limitTargetPrice.trim()) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const pos = portfolio?.positions.find((p) => p.projectId === limitProjectId);
+      await createPaperLimitOrder({
+        userId,
+        side: limitSide,
+        trigger: limitTrigger,
+        targetPriceUsd: Number(limitTargetPrice),
+        projectId: limitSide === 'SELL' ? limitProjectId : undefined,
+        amountUsd: limitSide === 'BUY' ? Number(amountUsd) : undefined,
+        sellPercent: limitSide === 'SELL' ? 100 : undefined,
+        dexscreenerUrl:
+          limitSide === 'BUY'
+            ? dexUrl.trim() || pos?.dexscreenerUrl || undefined
+            : undefined,
+      });
+      setToast(`Limit ${limitSide} order placed @ ${formatTokenPrice(Number(limitTargetPrice))}`);
+      setLimitTargetPrice('');
+      await refreshPortfolio(userId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not place limit order');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCancelLimitOrder(orderId: string) {
+    if (!userId) return;
+    setLoading(true);
+    try {
+      await cancelPaperLimitOrder(userId, orderId);
+      await refreshPortfolio(userId);
+      setToast('Limit order cancelled');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not cancel order');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function executeTrade() {
     if (!userId || !preview) return;
     setError(null);
@@ -274,6 +395,13 @@ function PaperTradingPageContent() {
         timeHorizon: tradeTimeHorizon.trim() || undefined,
       });
       setLastFeedPostId(result.feedPostId);
+      if (side === 'SELL' && result.realizedPnlUsd != null) {
+        const pnlLabel =
+          result.realizedPnlUsd >= 0
+            ? `+${formatUsd(result.realizedPnlUsd)}`
+            : formatUsd(result.realizedPnlUsd);
+        setToast(`Sold ${result.ticker} · realized P&L ${pnlLabel}`);
+      }
       setTradeComment('');
       setTradeCatalyst('');
       setTradeTargetUsd('');
@@ -456,6 +584,11 @@ function PaperTradingPageContent() {
             }`}
           >
             {guestPortfolioNotice}
+          </div>
+        )}
+        {toast && (
+          <div className="lg:col-span-5 rounded-xl border border-emerald-500/40 bg-emerald-950/25 px-4 py-3 text-sm text-emerald-100">
+            {toast}
           </div>
         )}
         <div className="lg:col-span-5 flex flex-wrap gap-2">
@@ -641,6 +774,11 @@ function PaperTradingPageContent() {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <span className="font-medium">{pos.ticker}</span>
+                      {pos.marketValue < 1 && (
+                        <span className="ml-2 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200">
+                          dust
+                        </span>
+                      )}
                       <p className="text-xs text-[var(--color-muted)]">{pos.name}</p>
                     </div>
                     <span className="font-medium">{formatUsd(pos.marketValue)}</span>
@@ -686,11 +824,35 @@ function PaperTradingPageContent() {
                     )}
                     <button
                       type="button"
-                      onClick={() => openPosition(pos, 'SELL')}
-                      disabled={loading}
+                      onClick={() => handleClosePosition(pos)}
+                      disabled={loading || closingProjectId === pos.projectId}
                       className="rounded-md bg-[var(--color-danger)]/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-danger)] disabled:opacity-50"
                     >
-                      Close position
+                      {closingProjectId === pos.projectId ? 'Closing…' : 'Close position'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSwapFrom(pos);
+                        setSwapTargetUrl('');
+                      }}
+                      disabled={loading}
+                      className="rounded-md border border-[var(--color-accent)]/40 px-3 py-1.5 text-xs text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 disabled:opacity-50"
+                    >
+                      Swap
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLimitProjectId(pos.projectId);
+                        setLimitSide('SELL');
+                        setLimitTrigger('GTE');
+                        setLimitTargetPrice(String(pos.priceUsd));
+                      }}
+                      disabled={loading}
+                      className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white disabled:opacity-50"
+                    >
+                      Limit sell
                     </button>
                     <button
                       type="button"
@@ -705,6 +867,133 @@ function PaperTradingPageContent() {
               ))}
             </ul>
           </div>
+
+          {portfolio?.recentTrades && portfolio.recentTrades.length > 0 && (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+              <h2 className="font-semibold">Recent trades</h2>
+              <ul className="mt-3 space-y-2 text-xs">
+                {portfolio.recentTrades.map((trade) => (
+                  <li
+                    key={trade.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--color-background)] px-3 py-2"
+                  >
+                    <span>
+                      {trade.side} {trade.ticker} · {formatUsd(trade.totalUsd)}
+                    </span>
+                    {trade.realizedPnlUsd != null && (
+                      <span
+                        className={
+                          trade.realizedPnlUsd >= 0
+                            ? 'text-[var(--color-success)]'
+                            : 'text-[var(--color-danger)]'
+                        }
+                      >
+                        Realized {trade.realizedPnlUsd >= 0 ? '+' : ''}
+                        {formatUsd(trade.realizedPnlUsd)}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {limitOrders.length > 0 && (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+              <h2 className="font-semibold">Limit orders</h2>
+              <ul className="mt-3 space-y-2 text-xs">
+                {limitOrders.map((order) => (
+                  <li
+                    key={order.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--color-background)] px-3 py-2"
+                  >
+                    <span>
+                      {order.status} · {order.side} {order.ticker ?? 'token'} {order.trigger}{' '}
+                      {formatTokenPrice(order.targetPriceUsd)}
+                    </span>
+                    {order.status === 'OPEN' && (
+                      <button
+                        type="button"
+                        onClick={() => handleCancelLimitOrder(order.id)}
+                        className="text-red-300 hover:text-red-200"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {limitProjectId && (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold">Place limit order</h2>
+                <button
+                  type="button"
+                  onClick={() => setLimitProjectId(null)}
+                  className="text-xs text-[var(--color-muted)] hover:text-white"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLimitSide('SELL')}
+                  className={`flex-1 rounded-lg py-2 text-xs ${
+                    limitSide === 'SELL' ? 'bg-[var(--color-danger)] text-white' : 'border border-[var(--color-border)]'
+                  }`}
+                >
+                  Sell
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLimitSide('BUY')}
+                  className={`flex-1 rounded-lg py-2 text-xs ${
+                    limitSide === 'BUY' ? 'bg-[var(--color-success)] text-white' : 'border border-[var(--color-border)]'
+                  }`}
+                >
+                  Buy
+                </button>
+              </div>
+              <label className="mt-3 block text-xs">
+                <span className="text-[var(--color-muted)]">Trigger</span>
+                <select
+                  value={limitTrigger}
+                  onChange={(e) => setLimitTrigger(e.target.value as 'GTE' | 'LTE')}
+                  className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                >
+                  <option value="GTE">Price ≥ target (take profit / sell high)</option>
+                  <option value="LTE">Price ≤ target (buy dip)</option>
+                </select>
+              </label>
+              <label className="mt-3 block text-xs">
+                <span className="text-[var(--color-muted)]">Target price (USD)</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={limitTargetPrice}
+                  onChange={(e) => setLimitTargetPrice(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                />
+              </label>
+              {limitSide === 'BUY' && (
+                <p className="mt-2 text-[10px] text-[var(--color-muted)]">
+                  Uses loaded token URL and amount field above for buy size.
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleCreateLimitOrder}
+                disabled={loading || !limitTargetPrice.trim()}
+                className="mt-4 w-full rounded-lg bg-[var(--color-accent)] py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                Place limit order
+              </button>
+            </div>
+          )}
 
           {portfolio && userId && (
             <SharePortfolio
@@ -768,6 +1057,41 @@ function PaperTradingPageContent() {
 
       {intelPosition && (
         <CoinIntelligencePanel data={intelPosition} onClose={() => setIntelPosition(null)} />
+      )}
+
+      {swapFrom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
+            <h3 className="font-semibold">Swap {swapFrom.ticker}</h3>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Sell full position and buy another token in one flow.
+            </p>
+            <input
+              type="text"
+              value={swapTargetUrl}
+              onChange={(e) => setSwapTargetUrl(e.target.value)}
+              placeholder="Target DexScreener URL or contract"
+              className="mt-4 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-4 py-2.5 text-sm outline-none focus:border-[var(--color-accent)]"
+            />
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setSwapFrom(null)}
+                className="flex-1 rounded-lg border border-[var(--color-border)] py-2 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSwap}
+                disabled={loading || !swapTargetUrl.trim()}
+                className="flex-1 rounded-lg bg-[var(--color-accent)] py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {loading ? 'Swapping…' : 'Confirm swap'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <BustPenaltyModal

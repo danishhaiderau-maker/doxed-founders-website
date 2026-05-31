@@ -163,6 +163,7 @@ export interface PaperPortfolio {
   startingCash: number;
   isBusted?: boolean;
   resetFeeUsd?: number;
+  recentTrades?: PaperRecentTrade[];
   positions: {
     projectId: string;
     name: string;
@@ -192,6 +193,33 @@ export interface PaperPortfolio {
     convictionRecordedAt?: string | null;
     positionOpenedAt?: string | null;
   }[];
+}
+
+export interface PaperRecentTrade {
+  id: string;
+  side: 'BUY' | 'SELL';
+  ticker: string;
+  projectName: string;
+  quantity: number;
+  priceUsd: number;
+  totalUsd: number;
+  realizedPnlUsd: number | null;
+  createdAt: string;
+}
+
+export interface PaperLimitOrder {
+  id: string;
+  side: 'BUY' | 'SELL';
+  trigger: 'GTE' | 'LTE';
+  targetPriceUsd: number;
+  amountUsd: number | null;
+  sellPercent: number;
+  status: 'OPEN' | 'FILLED' | 'CANCELLED' | 'EXPIRED';
+  ticker: string | null;
+  projectName: string | null;
+  dexscreenerUrl: string | null;
+  filledAt: string | null;
+  createdAt: string;
 }
 
 export interface LeaderboardEntry {
@@ -471,9 +499,71 @@ export function executePaperTrade(input: {
     feedPostId: string;
     ticker: string;
     amountUsd: number;
+    realizedPnlUsd?: number | null;
   }>('/paper-trading/trade', {
     method: 'POST',
     body: JSON.stringify(input),
+  });
+}
+
+export function closePaperPosition(input: {
+  userId: string;
+  projectId: string;
+  comment?: string;
+  sellPercent?: number;
+}) {
+  return apiFetch<{
+    success: boolean;
+    ticker: string;
+    proceedsUsd: number;
+    realizedPnlUsd: number;
+    feedPostId: string;
+    cashBalance: number;
+  }>('/paper-trading/close', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function swapPaperTokens(input: {
+  userId: string;
+  fromProjectId: string;
+  toDexscreenerUrl: string;
+  comment?: string;
+}) {
+  return apiFetch<{
+    sell: { ticker: string; proceedsUsd: number; realizedPnlUsd: number };
+    buy: { ticker: string; amountUsd: number };
+  }>('/paper-trading/swap', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchPaperLimitOrders(userId: string) {
+  return apiFetch<PaperLimitOrder[]>(`/paper-trading/limit-orders/${userId}`);
+}
+
+export function createPaperLimitOrder(input: {
+  userId: string;
+  side: 'BUY' | 'SELL';
+  trigger: 'GTE' | 'LTE';
+  targetPriceUsd: number;
+  projectId?: string;
+  amountUsd?: number;
+  sellPercent?: number;
+  dexscreenerUrl?: string;
+}) {
+  return apiFetch<{ id: string; status: string }>('/paper-trading/limit-orders', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function cancelPaperLimitOrder(userId: string, orderId: string) {
+  return apiFetch<{ cancelled: boolean }>(`/paper-trading/limit-orders/${orderId}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ userId }),
   });
 }
 

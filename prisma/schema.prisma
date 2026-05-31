@@ -61,6 +61,23 @@ enum PaperTradeSide {
   SELL
 }
 
+enum PaperLimitOrderSide {
+  BUY
+  SELL
+}
+
+enum PaperLimitTrigger {
+  GTE
+  LTE
+}
+
+enum PaperLimitOrderStatus {
+  OPEN
+  FILLED
+  CANCELLED
+  EXPIRED
+}
+
 enum LeaderboardPeriod {
   DAILY
   WEEKLY
@@ -305,6 +322,7 @@ model User {
   watchlists           Watchlist[]
   paperPortfolio       PaperPortfolio?
   paperTrades          PaperTrade[]
+  paperLimitOrders     PaperLimitOrder[]
   feedPosts            FeedPost[]
   feedComments         FeedComment[]
   listingApplications  ListingApplication[]
@@ -496,6 +514,7 @@ model Project {
   documents     ProjectDocument[]
   watchlists    Watchlist[]
   paperTrades    PaperTrade[]
+  paperLimitOrders PaperLimitOrder[]
   paperPositions PaperPosition[]
   feedPosts      FeedPost[]
   featuredEntry  FeaturedProject?
@@ -645,14 +664,15 @@ model PaperPosition {
 }
 
 model PaperTrade {
-  id        String         @id @default(cuid())
-  userId    String
-  projectId String
-  side      PaperTradeSide
-  quantity  Decimal        @db.Decimal(24, 12)
-  priceUsd  Decimal        @db.Decimal(24, 12)
-  totalUsd  Decimal        @db.Decimal(16, 2)
-  createdAt DateTime       @default(now())
+  id             String         @id @default(cuid())
+  userId         String
+  projectId      String
+  side           PaperTradeSide
+  quantity       Decimal        @db.Decimal(24, 12)
+  priceUsd       Decimal        @db.Decimal(24, 12)
+  totalUsd       Decimal        @db.Decimal(16, 2)
+  realizedPnlUsd Decimal?       @db.Decimal(16, 2)
+  createdAt      DateTime       @default(now())
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -661,6 +681,29 @@ model PaperTrade {
   @@index([userId])
   @@index([projectId])
   @@index([createdAt])
+}
+
+model PaperLimitOrder {
+  id             String                @id @default(cuid())
+  userId         String
+  projectId      String?
+  side           PaperLimitOrderSide
+  trigger        PaperLimitTrigger
+  targetPriceUsd Decimal               @db.Decimal(24, 12)
+  amountUsd      Decimal?              @db.Decimal(16, 2)
+  sellPercent    Decimal               @default(100) @db.Decimal(5, 2)
+  dexscreenerUrl String?
+  status         PaperLimitOrderStatus @default(OPEN)
+  filledAt       DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([projectId])
 }
 
 // ─── Social Feed ───────────────────────────────────────────────────────────────
