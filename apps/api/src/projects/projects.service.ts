@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ProjectSource, ListingStatus } from '@prisma/client';
+import { FounderEventType, Prisma, ProjectSource, ListingStatus } from '@prisma/client';
 import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -123,7 +123,7 @@ export class ProjectsService {
       founderId: { not: null },
     } as const;
 
-    const [verifiedFounders, activeProjects, communityMembers, portfolioAgg, tradeCount] =
+    const [verifiedFounders, activeProjects, communityMembers, portfolioAgg, tradeCount, githubCommits, scoutVotes] =
       await Promise.all([
         this.prisma.founder.count({
           where: { projects: { some: curatedWhere } },
@@ -135,6 +135,8 @@ export class ProjectsService {
           _count: true,
         }),
         this.prisma.paperTrade.count(),
+        this.prisma.founderEvent.count({ where: { type: FounderEventType.GITHUB_COMMIT } }),
+        this.prisma.listingVote.count(),
       ]);
 
     const simulatedCapital =
@@ -149,6 +151,8 @@ export class ProjectsService {
       simulatedCapital: Math.round(simulatedCapital),
       paperTraders: portfolioAgg._count,
       totalTrades: tradeCount,
+      githubCommits,
+      scoutVotes,
     };
   }
 

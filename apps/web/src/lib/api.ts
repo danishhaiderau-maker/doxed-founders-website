@@ -955,6 +955,8 @@ export interface PlatformStats {
   simulatedCapital: number;
   paperTraders: number;
   totalTrades: number;
+  githubCommits: number;
+  scoutVotes: number;
 }
 
 export function fetchPlatformStats() {
