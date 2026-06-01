@@ -6,11 +6,12 @@ import { XSocialModule } from '../x-social/x-social.module';
 import { FounderOsController } from './founder-os.controller';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
 import { FounderOsService } from './founder-os.service';
+import { GithubAutoSyncService } from './github-auto-sync.service';
 
 @Module({
   imports: [NotificationsModule, XSocialModule, GitHubModule, forwardRef(() => EventsModule)],
   controllers: [FounderOsController],
-  providers: [FounderOsService, FounderOsIntegrationService],
-  exports: [FounderOsService],
+  providers: [FounderOsService, FounderOsIntegrationService, GithubAutoSyncService],
+  exports: [FounderOsService, GithubAutoSyncService],
 })
 export class FounderOsModule {}

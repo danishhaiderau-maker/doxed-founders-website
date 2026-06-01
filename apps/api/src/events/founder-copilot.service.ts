@@ -48,6 +48,8 @@ export class FounderCopilotService {
   ) {}
 
   async getProjectMemory(userId: string) {
+    void this.founderOs.autoSyncGitHubCommits(userId).catch(() => undefined);
+
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: {
