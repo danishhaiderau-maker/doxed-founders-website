@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { contributorLevelLabel } from '@dcf/utils';
+import { contributorLevelLabel, VALIDATION_LABELS } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
 import {
@@ -21,12 +21,20 @@ function daysLeft(iso: string | null) {
   return `${days}d left`;
 }
 
+const VALIDATION_OPTIONS = Object.entries(VALIDATION_LABELS) as [
+  keyof typeof VALIDATION_LABELS,
+  string,
+][];
+
 export default function ScoutVotesPage() {
   const { data: session } = useSession();
   const [listings, setListings] = useState<ScoutListing[]>([]);
   const [stats, setStats] = useState<Awaited<ReturnType<typeof fetchVotingStats>> | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [voteForm, setVoteForm] = useState({ vote: 'YES' as 'YES' | 'NO', whyList: '', whyDoxxed: '', comment: '' });
+  const [voteForm, setVoteForm] = useState({
+    validationCategory: 'LOOKS_LEGIT' as keyof typeof VALIDATION_LABELS,
+    comment: '',
+  });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -53,7 +61,7 @@ export default function ScoutVotesPage() {
     setError(null);
     try {
       await castScoutVote(id, voteForm, session.accessToken);
-      setVoteForm({ vote: 'YES', whyList: '', whyDoxxed: '', comment: '' });
+      setVoteForm({ validationCategory: 'LOOKS_LEGIT', comment: '' });
       setExpanded(null);
       await load();
     } catch (err) {
@@ -89,8 +97,8 @@ export default function ScoutVotesPage() {
               votes at <strong className="text-white">{stats.minYesPercent}%</strong> yes to reach admin.
               Window: {stats.votingWindowHours} hours. Formula: {stats.formula}
             </p>
-            <Link href="/reputation" className="mt-3 inline-block text-emerald-400 hover:underline">
-              Full points & vote math →
+            <Link href="/rules" className="mt-3 inline-block text-emerald-400 hover:underline">
+              Full rules & vote math →
             </Link>
           </div>
         )}
@@ -200,59 +208,44 @@ export default function ScoutVotesPage() {
 
                 {expanded === item.id && session?.accessToken && (
                   <form onSubmit={(e) => handleVote(e, item.id)} className="mt-6 space-y-3 border-t border-[var(--color-border)] pt-4">
-                    <div className="flex gap-3">
-                      {(['YES', 'NO'] as const).map((v) => (
+                    <p className="text-xs font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                      Pick a validation category
+                    </p>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {VALIDATION_OPTIONS.map(([key, label]) => (
                         <button
-                          key={v}
+                          key={key}
                           type="button"
-                          onClick={() => setVoteForm((f) => ({ ...f, vote: v }))}
-                          className={`rounded-lg px-4 py-2 text-sm font-semibold ${
-                            voteForm.vote === v
-                              ? v === 'YES'
-                                ? 'bg-emerald-500 text-black'
-                                : 'bg-red-500/80 text-white'
-                              : 'border border-[var(--color-border)]'
+                          onClick={() => setVoteForm((f) => ({ ...f, validationCategory: key }))}
+                          className={`rounded-lg border px-3 py-2 text-left text-xs ${
+                            voteForm.validationCategory === key
+                              ? 'border-emerald-500 bg-emerald-500/10 font-semibold text-emerald-200'
+                              : 'border-[var(--color-border)] hover:border-emerald-500/40'
                           }`}
                         >
-                          {v}
+                          {label}
                         </button>
                       ))}
                     </div>
-                    {voteForm.vote === 'YES' && (
-                      <>
-                        <textarea
-                          required
-                          minLength={20}
-                          placeholder="Why should this project be listed?"
-                          value={voteForm.whyList}
-                          onChange={(e) => setVoteForm((f) => ({ ...f, whyList: e.target.value }))}
-                          className="w-full rounded-lg border border-[var(--color-border)] bg-black/40 px-3 py-2 text-sm"
-                          rows={3}
-                        />
-                        <textarea
-                          required
-                          minLength={20}
-                          placeholder="Why do you believe the founder is doxxed?"
-                          value={voteForm.whyDoxxed}
-                          onChange={(e) => setVoteForm((f) => ({ ...f, whyDoxxed: e.target.value }))}
-                          className="w-full rounded-lg border border-[var(--color-border)] bg-black/40 px-3 py-2 text-sm"
-                          rows={3}
-                        />
-                      </>
-                    )}
                     <textarea
-                      placeholder="Optional comment"
+                      required={
+                        voteForm.validationCategory === 'LOOKS_LEGIT' ||
+                        voteForm.validationCategory === 'BUILDING_CONSISTENTLY' ||
+                        voteForm.validationCategory === 'COMMUNITY_EXISTS'
+                      }
+                      minLength={20}
+                      placeholder="Your validation review (20+ chars for positive signals)"
                       value={voteForm.comment}
                       onChange={(e) => setVoteForm((f) => ({ ...f, comment: e.target.value }))}
                       className="w-full rounded-lg border border-[var(--color-border)] bg-black/40 px-3 py-2 text-sm"
-                      rows={2}
+                      rows={3}
                     />
                     <button
                       type="submit"
                       disabled={busy}
                       className="rounded-lg bg-emerald-500 px-5 py-2 text-sm font-semibold text-black disabled:opacity-50"
                     >
-                      Submit vote (+15 pts)
+                      Submit validation (+{10} DDollar)
                     </button>
                   </form>
                 )}

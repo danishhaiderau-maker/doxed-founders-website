@@ -63,9 +63,9 @@ export class TrustCenterService implements OnModuleInit {
       this.prisma.project.count({
         where: { approved: true, createdAt: { gte: new Date(Date.now() - 14 * 86400000) } },
       }),
-      this.prisma.listingApplication.count({
+      this.prisma.projectInvestigation.count({
         where: {
-          status: ListingStatus.REJECTED,
+          status: InvestigationStatus.RESOLVED_DELIST,
           updatedAt: { gte: new Date(Date.now() - 14 * 86400000) },
         },
       }),

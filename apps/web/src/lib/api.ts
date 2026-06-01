@@ -428,10 +428,56 @@ export function fetchTrustRecentlyDelisted() {
       projectName: string;
       ticker: string;
       logoUrl: string | null;
-      reviewNotes: string | null;
-      updatedAt: string;
+      slug: string;
+      reason: string | null;
+      delistedAt: string;
     }>
   >('/trust-center/recently-delisted');
+}
+
+export interface TrustCommunityReview {
+  id: string;
+  vote: string;
+  validationCategory: string | null;
+  comment: string | null;
+  whyList: string | null;
+  whyDoxxed: string | null;
+  createdAt: string;
+  user: { id: string; name: string | null; contributorLevel: number };
+  application: {
+    id: string;
+    projectName: string;
+    ticker: string;
+    logoUrl: string | null;
+    status: string;
+  };
+}
+
+export function fetchTrustCommunityReviews() {
+  return apiFetch<TrustCommunityReview[]>('/trust-center/community-reviews');
+}
+
+export function fetchTrustInvestigationDetail(id: string) {
+  return apiFetch<TrustInvestigation & { reports: Array<{
+    id: string;
+    category: string;
+    comment: string | null;
+    evidenceUrl: string | null;
+    voteWeight: number;
+    createdAt: string;
+    user: { id: string; name: string | null; contributorLevel: number };
+  }> }>(`/trust-center/investigations/${id}`);
+}
+
+export function resolveTrustInvestigation(
+  id: string,
+  body: { decision: 'KEEP' | 'DELIST'; notes?: string },
+  token: string,
+) {
+  return apiFetch(`/trust-center/investigations/${id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, token);
 }
 
 export function fileProjectTrustReport(
@@ -1490,6 +1536,8 @@ export interface DiscoverProject {
     reputationScore: number;
     buildStreakDays: number;
   } | null;
+  communityValidated?: boolean;
+  listingKind?: 'verified' | 'founder_os' | 'paper_track';
 }
 
 export interface EcosystemPulse {
