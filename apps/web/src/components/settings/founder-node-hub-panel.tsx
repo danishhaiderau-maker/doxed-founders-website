@@ -86,7 +86,7 @@ export function FounderNodeHubPanel({
         <HubStep
           step={1}
           title="Download & install"
-          summary="Windows one-click installer — runs in your system tray. v0.4.0+ required for sync jobs."
+          summary="Windows installer with auto-update — runs in your system tray. v0.5.0+ recommended."
         >
           <FounderNodeDownloads showInstallGuide />
         </HubStep>

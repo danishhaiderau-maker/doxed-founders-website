@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
-const APP_VERSION = '0.4.0';
 
 type ReleaseAsset = {
   name: string;
@@ -16,17 +15,26 @@ type Props = {
   showInstallGuide?: boolean;
 };
 
+function parseVersionFromTag(tag?: string): string | null {
+  if (!tag) return null;
+  const match = /^founder-node-v(\d+\.\d+\.\d+)$/i.exec(tag);
+  return match?.[1] ?? null;
+}
+
 export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
   const [winUrl, setWinUrl] = useState<string | null>(null);
   const [macUrl, setMacUrl] = useState<string | null>(null);
+  const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
+    fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((release: { assets?: ReleaseAsset[] } | null) => {
+      .then((releases: Array<{ tag_name?: string; assets?: ReleaseAsset[] }> | null) => {
+        const release = releases?.find((r) => r.tag_name?.startsWith('founder-node-v'));
         const assets = release?.assets ?? [];
-        setWinUrl(assets.find((a) => /\.exe$/i.test(a.name))?.browser_download_url ?? null);
+        setReleaseVersion(parseVersionFromTag(release?.tag_name));
+        setWinUrl(assets.find((a) => /\.exe$/i.test(a.name) && !/blockmap/i.test(a.name))?.browser_download_url ?? null);
         setMacUrl(assets.find((a) => /\.dmg$/i.test(a.name))?.browser_download_url ?? null);
       })
       .catch(() => {})
@@ -35,6 +43,7 @@ export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
 
   const winHref = winUrl ?? RELEASES_PAGE;
   const macHref = macUrl ?? RELEASES_PAGE;
+  const versionLabel = releaseVersion ?? 'latest';
 
   return (
     <div className="space-y-4">
@@ -60,8 +69,8 @@ export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
         {loading
           ? 'Checking latest release…'
           : winUrl || macUrl
-            ? `Version ${APP_VERSION} — one-click install, no Node.js required.`
-            : `Installers for v${APP_VERSION} on GitHub releases. Until then use ${RELEASES_PAGE}.`}
+            ? `Version ${versionLabel} — installs to Windows Apps, auto-checks for updates every 6 hours.`
+            : `Installers on GitHub releases. Until then use ${RELEASES_PAGE}.`}
       </p>
 
       {showInstallGuide && (
@@ -69,20 +78,23 @@ export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
           <p className="text-sm font-medium text-cyan-100">Installation (recommended order)</p>
           <ol className="mt-3 list-decimal space-y-2 pl-5 text-xs text-zinc-300">
             <li>
-              Download <strong className="text-white">Founder-Node-{APP_VERSION}-win-x64.exe</strong> and run it —
-              allow through Windows Firewall if prompted.
+              Download <strong className="text-white">Founder-Node-{versionLabel}-win-x64.exe</strong> and run it —
+              it installs like a normal app (Settings → Apps). Allow through Windows Firewall if prompted.
             </li>
-            <li>Launch from the system tray (bottom-right). The app runs in the background.</li>
             <li>
-              In <strong className="text-white">Step 2 below</strong>, select <strong className="text-white">Founder Vault (Founder Node)</strong> and
-              click <strong className="text-white">Generate pairing code</strong>.
+              Launch from Start Menu or the system tray. Updates appear in the tray menu — no manual re-download needed.
+            </li>
+            <li>
+              In <strong className="text-white">Step 2 below</strong>, select{' '}
+              <strong className="text-white">Founder Vault (Founder Node)</strong> and click{' '}
+              <strong className="text-white">Generate pairing code</strong>.
             </li>
             <li>
               Right-click the tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code.
             </li>
             <li>
-              Complete <strong className="text-white">Step 4</strong> — click <strong className="text-white">Rebuild vector index</strong> once
-              (first run can take up to 2 minutes).
+              Complete <strong className="text-white">Step 4</strong> — click{' '}
+              <strong className="text-white">Rebuild vector index</strong> once (first run can take up to 2 minutes).
             </li>
             <li>
               Optional: install{' '}
@@ -93,7 +105,8 @@ export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
             </li>
           </ol>
           <p className="mt-3 text-[11px] text-zinc-500">
-            Vault files live at <code className="text-zinc-400">~/FounderVault/</code> on your machine — never uploaded in plain text.
+            Vault files live at <code className="text-zinc-400">~/FounderVault/</code> on your machine — never uploaded in
+            plain text. Old portable .exe files in Downloads are cleaned up automatically on startup.
           </p>
         </div>
       )}

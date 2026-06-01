@@ -17,7 +17,7 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            pack_cmd: npx electron-builder --win portable --x64 --publish never
+            pack_cmd: npx electron-builder --win nsis --x64 --publish never
           - os: macos-latest
             platform: mac
             pack_cmd: npx electron-builder --mac dmg --arm64 --publish never

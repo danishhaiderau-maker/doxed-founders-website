@@ -21,6 +21,15 @@ import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
 import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
 import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encryptVaultJson } from '@dcf/founder-vault';
+import { cleanupLegacyPortableInstallers } from './legacy-cleanup';
+import {
+  bindUpdateTray,
+  checkForUpdates,
+  downloadAndInstallUpdate,
+  getPendingUpdate,
+  setUpdateMenuRefresh,
+  startAutoUpdateChecks,
+} from './update-manager';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SYNC_INTERVAL_MS = 60_000;
@@ -209,12 +218,35 @@ function openPairWindow(): void {
 
 function buildTrayMenu(vaultRoot: string) {
   const config = readNodeConfig(vaultRoot);
-  return Menu.buildFromTemplate([
+  const pending = getPendingUpdate();
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: `Founder Node v${FOUNDER_NODE_APP_VERSION}`,
+      enabled: false,
+    },
     {
       label: config ? `Connected: ${config.label}` : 'Not paired',
       enabled: false,
     },
+  ];
+
+  if (pending) {
+    template.push({
+      label: `Install update v${pending.version}…`,
+      click: () => {
+        downloadAndInstallUpdate(pending).catch(console.error);
+      },
+    });
+  }
+
+  template.push(
     { type: 'separator' },
+    {
+      label: 'Check for updates…',
+      click: () => {
+        checkForUpdates({ silent: false }).catch(console.error);
+      },
+    },
     {
       label: 'Pair with Founder OS…',
       click: () => openPairWindow(),
@@ -230,10 +262,20 @@ function buildTrayMenu(vaultRoot: string) {
     { label: `Vault: ${vaultRoot}`, enabled: false },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() },
-  ]);
+  );
+
+  return Menu.buildFromTemplate(template);
+}
+
+function refreshTrayMenu(vaultRoot: string): void {
+  tray?.setContextMenu(buildTrayMenu(vaultRoot));
 }
 
 app.whenReady().then(() => {
+  if (app.isPackaged) {
+    cleanupLegacyPortableInstallers(FOUNDER_NODE_APP_VERSION);
+  }
+
   const backgroundKeeper = new BrowserWindow({ show: false });
   backgroundKeeper.hide();
 
@@ -243,8 +285,10 @@ app.whenReady().then(() => {
 
   const icon = loadAppIcon();
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
-  tray.setToolTip('Founder Node');
-  tray.setContextMenu(buildTrayMenu(vaultRoot));
+  tray.setToolTip(`Founder Node v${FOUNDER_NODE_APP_VERSION}`);
+  bindUpdateTray(tray);
+  setUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
+  refreshTrayMenu(vaultRoot);
   tray.on('click', () => tray?.popUpContextMenu());
 
   const config = readNodeConfig(vaultRoot);
@@ -253,6 +297,9 @@ app.whenReady().then(() => {
   } else {
     startSyncLoop(vaultRoot);
   }
+
+  startAutoUpdateChecks();
+  setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 
   ipcMain.handle(
     'pair',
@@ -278,7 +325,7 @@ app.whenReady().then(() => {
         ollama: defaultOllamaConfig(),
       });
 
-      tray?.setContextMenu(buildTrayMenu(vaultRoot));
+      refreshTrayMenu(vaultRoot);
       startSyncLoop(vaultRoot);
     },
   );
