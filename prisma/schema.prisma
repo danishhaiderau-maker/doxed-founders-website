@@ -409,6 +409,7 @@ model User {
   agentRuns            AgentRun[]
   agentFollows         AgentFollow[]
   tradingAgentFollows  TradingAgentFollow[]
+  tradingAgentInstances TradingAgentInstance[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
   founderNodes              FounderNode[]
@@ -1173,10 +1174,13 @@ model PlatformTreasury {
 
 /** Singleton platform ops — admin-editable copy and flags. */
 model PlatformSettings {
-  id                String   @id @default("default")
-  globalShareFooter String?  @db.Text
-  updatedByUserId   String?
-  updatedAt         DateTime @updatedAt
+  id                       String   @id @default("default")
+  globalShareFooter        String?  @db.Text
+  /** Admin showcase agent — never used for user instances */
+  showcaseExchangeProvider String   @default("bybit")
+  showcaseAiProvider       String   @default("deepseek")
+  updatedByUserId          String?
+  updatedAt                DateTime @updatedAt
 }
 
 model TopUpPayment {
@@ -1945,6 +1949,7 @@ model TradingAgent {
 
   activities TradingAgentActivity[]
   followers  TradingAgentFollow[]
+  instances  TradingAgentInstance[]
 
   @@index([kind])
   @@index([sortOrder])
@@ -1981,6 +1986,40 @@ model TradingAgentFollow {
 
   @@unique([agentId, userId])
   @@index([userId])
+}
+
+enum TradingAgentInstanceStatus {
+  PENDING
+  ACTIVE
+  PAUSED
+  ERROR
+}
+
+/** User-owned isolated agent runtime — separate from public showcase bot. */
+model TradingAgentInstance {
+  id                   String                     @id @default(cuid())
+  agentId              String
+  userId               String
+  exchangeProvider     String
+  credentialId         String?
+  status               TradingAgentInstanceStatus @default(PENDING)
+  aiProvidedByPlatform Boolean                    @default(true)
+  aiProvider           String?
+  lastError            String?
+  hiredAt              DateTime                   @default(now())
+  activatedAt          DateTime?
+  lastBilledAt         DateTime?
+  expiresAt            DateTime?
+  dashboardState       Json?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId])
+  @@index([userId])
+  @@index([status])
 }
 
 // ─── Account Security ──────────────────────────────────────────────────────────

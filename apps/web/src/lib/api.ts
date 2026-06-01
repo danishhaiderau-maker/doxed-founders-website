@@ -2481,6 +2481,7 @@ export interface TradingAgentSummary {
   followerCount: number;
   isExperimental: boolean;
   following?: boolean;
+  hired?: boolean;
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;
@@ -2526,8 +2527,8 @@ export function fetchTradingAgent(slug: string, token?: string) {
   return apiFetch<TradingAgentSummary>(`/trading-agents/${slug}`, {}, token);
 }
 
-export function fetchTradingAgentDashboard(slug: string) {
-  return apiFetch<TradingAgentDashboard>(`/trading-agents/${slug}/dashboard`);
+export function fetchTradingAgentDashboard(slug: string, token?: string) {
+  return apiFetch<TradingAgentDashboard>(`/trading-agents/${slug}/dashboard`, {}, token);
 }
 
 export function fetchTradingAgentActivity(slug: string, limit = 30) {
@@ -2542,6 +2543,74 @@ export function unfollowTradingAgent(agentId: string, token: string) {
   return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'DELETE' }, token);
 }
 
+export interface ExchangeProviderOption {
+  id: string;
+  label: string;
+  available: boolean;
+}
+
+export function fetchExchangeProviders() {
+  return apiFetch<ExchangeProviderOption[]>('/exchanges/providers');
+}
+
+export interface HireAgentResult {
+  instanceId: string;
+  agentSlug: string;
+  agentName: string;
+  status: string;
+  exchangeProvider: string;
+  exchangeLabel: string;
+  aiProvidedByPlatform: boolean;
+  aiProvider: string | null;
+  hiredAt: string;
+  activatedAt: string | null;
+  dashboardUrl: string;
+}
+
+export function hireTradingAgent(
+  agentId: string,
+  body: { exchangeProvider: string; apiKey: string; apiSecret: string; testnet?: boolean },
+  token: string,
+) {
+  return apiFetch<HireAgentResult>(`/trading-agents/${agentId}/hire`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, token);
+}
+
+export interface PrivateAgentDashboard {
+  kind: 'private';
+  agent: { id: string; slug: string; name: string; assetSymbol: string };
+  instance: {
+    id: string;
+    status: string;
+    exchangeProvider: string;
+    exchangeLabel: string;
+    aiProvidedByPlatform: boolean;
+    aiProvider: string | null;
+    aiLabel: string;
+    hiredAt: string;
+    activatedAt: string | null;
+    lastError: string | null;
+  };
+  exchange: {
+    connected: boolean;
+    provider?: string;
+    accountLabel?: string | null;
+    verifiedAt?: string | null;
+  };
+  runtime: {
+    connected: boolean;
+    message: string;
+    openPositions: number;
+    pnlPct: number;
+  };
+}
+
+export function fetchMyAgentDashboard(slug: string, token: string) {
+  return apiFetch<PrivateAgentDashboard>(`/trading-agents/${slug}/my-dashboard`, undefined, token);
+}
+
 export type PublicAgentStatus = 'online' | 'offline' | 'updating';
 
 export function fetchPublicAgentStatus() {
@@ -2553,6 +2622,22 @@ export function fetchGlobalShareFooter() {
 }
 
 export interface AdminControlOverview {
+  showcase?: {
+    exchangeProvider: string;
+    exchangeLabel: string;
+    aiProvider: string;
+    aiLabel: string;
+    note: string;
+  };
+  adapters?: {
+    exchangeStatus: string;
+    marketDataStatus: string;
+    aiStatus: string;
+    simulationStatus: string;
+    lastDecision: string;
+    lastAiOpinion: string;
+    lastMarketUpdate: string | null;
+  };
   agent: {
     name: string;
     slug: string;
@@ -2613,7 +2698,34 @@ export function resumeTradingAgent(token: string) {
   );
 }
 
-// ─── Build Queue (Phase 4) ───────────────────────────────────────────────────
+export function restartTradingAgent(token: string) {
+  return apiFetch<{ ok: boolean; error?: string; data?: unknown }>(
+    '/admin-control/agent/restart',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function resetShowcaseSimulation(token: string) {
+  return apiFetch<{ ok: boolean; message?: string }>(
+    '/admin-control/agent/reset-simulation',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function updateShowcaseConfig(
+  body: { exchangeProvider?: string; aiProvider?: string },
+  token: string,
+) {
+  return apiFetch<AdminControlOverview>(
+    '/admin-control/showcase-config',
+    { method: 'PATCH', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+// ─── Build Queue (Phase 4) ───────────────────────────────────────────────────────────────────
 
 export type BuildQueueItemKind = 'IDEA' | 'TASK' | 'GITHUB_ISSUE' | 'ROADMAP' | 'SPEC';
 export type BuildQueueStatus =

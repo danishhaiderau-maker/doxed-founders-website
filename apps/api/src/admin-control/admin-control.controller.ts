@@ -46,4 +46,25 @@ export class AdminControlController {
   resumeAgent() {
     return this.adminControl.resumeAgentTrading();
   }
+
+  @UseGuards(AdminGuard)
+  @Post('agent/restart')
+  restartAgent() {
+    return this.adminControl.restartAgentRuntime();
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('agent/reset-simulation')
+  resetSimulation() {
+    return this.adminControl.resetShowcaseSimulation();
+  }
+
+  @UseGuards(AdminGuard)
+  @Patch('showcase-config')
+  updateShowcase(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { exchangeProvider?: string; aiProvider?: string },
+  ) {
+    return this.adminControl.updateShowcaseConfig(user.id, body);
+  }
 }

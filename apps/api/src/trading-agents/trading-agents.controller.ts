@@ -1,14 +1,18 @@
-import { Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { TradingAgentKind } from '@prisma/client';
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
+import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsService } from './trading-agents.service';
 
 @Controller('trading-agents')
 export class TradingAgentsController {
-  constructor(private readonly tradingAgents: TradingAgentsService) {}
+  constructor(
+    private readonly tradingAgents: TradingAgentsService,
+    private readonly instances: TradingAgentInstancesService,
+  ) {}
 
   @Public()
   @Get()
@@ -36,9 +40,25 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':slug/dashboard')
-  dashboard(@Param('slug') slug: string) {
-    return this.tradingAgents.getDashboard(slug);
+  dashboard(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {
+    return this.tradingAgents.getPublicDashboard(slug, user?.id, user?.role);
+  }
+
+  @Get(':slug/my-dashboard')
+  myDashboard(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.instances.getMyDashboard(user.id, slug);
+  }
+
+  @Post(':id/hire')
+  hire(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body()
+    body: { exchangeProvider: string; apiKey: string; apiSecret: string; testnet?: boolean },
+  ) {
+    return this.instances.hireAgent(user.id, id, body);
   }
 
   @Public()

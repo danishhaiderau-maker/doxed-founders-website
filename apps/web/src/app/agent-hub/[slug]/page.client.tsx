@@ -29,6 +29,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof fetchTradingAgentDashboard>> | null>(null);
   const [activity, setActivity] = useState<Awaited<ReturnType<typeof fetchTradingAgentActivity>>>([]);
   const [following, setFollowing] = useState(false);
+  const [hired, setHired] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [viewMode, setViewMode] = useState<'mission' | 'research'>('research');
   const [publicStatus, setPublicStatus] = useState<{ status: PublicAgentStatus; label: string }>({
@@ -39,7 +40,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const load = useCallback(async () => {
     try {
       const [dash, act, meta, statusRes] = await Promise.all([
-        fetchTradingAgentDashboard(slug),
+        fetchTradingAgentDashboard(slug, session?.accessToken),
         fetchTradingAgentActivity(slug, 20),
         fetchTradingAgent(slug, session?.accessToken),
         fetchPublicAgentStatus(),
@@ -47,6 +48,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       setData(dash);
       setActivity(act);
       setFollowing(Boolean(meta.following));
+      setHired(Boolean(meta.hired));
       setPublicStatus(statusRes);
       setError(null);
     } catch (err) {
@@ -151,38 +153,72 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
               />
             </div>
 
+            <div className="mb-4 rounded-xl border border-violet-500/20 bg-violet-950/10 px-4 py-3 text-sm text-violet-100/90">
+              Public showcase — everyone can watch, nobody trades on the admin account.{' '}
+              {hired ? (
+                <Link href={`/agent-hub/${slug}/my-dashboard`} className="font-semibold text-violet-300 underline">
+                  Open your private dashboard →
+                </Link>
+              ) : session ? (
+                <Link href={`/agent-hub/${slug}/hire`} className="font-semibold text-violet-300 underline">
+                  Hire for isolated execution →
+                </Link>
+              ) : (
+                <Link href={`/login?callbackUrl=/agent-hub/${slug}/hire`} className="font-semibold text-violet-300 underline">
+                  Sign in to hire →
+                </Link>
+              )}
+            </div>
+
             <div className="mb-6 flex flex-wrap gap-2">
+              {hired ? (
+                <Link
+                  href={`/agent-hub/${slug}/my-dashboard`}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                >
+                  My private dashboard
+                </Link>
+              ) : (
+                <Link
+                  href={session ? `/agent-hub/${slug}/hire` : `/login?callbackUrl=/agent-hub/${slug}/hire`}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                >
+                  Hire agent · {data.agent.costDdollarDay.toLocaleString()} DDollar/day
+                </Link>
+              )}
               <button
                 type="button"
                 onClick={toggleFollow}
                 disabled={followBusy}
-                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-4 py-2 text-sm font-semibold text-violet-100 hover:bg-violet-900/40 disabled:opacity-50"
               >
-                {following ? 'Following' : `Follow Agent · ${data.agent.costDdollarDay.toLocaleString()} DDollar/day`}
+                {following ? 'Following alerts' : 'Follow for alerts'}
               </button>
               {shareFollowText && <ShareOnXButton text={shareFollowText} label="Share to X" />}
-              <div className="flex rounded-lg border border-zinc-800 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('research')}
-                  className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'research' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
-                >
-                  Research detail
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('mission')}
-                  className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'mission' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
-                >
-                  Mission control
-                </button>
-              </div>
+              {isAdmin && (
+                <div className="flex rounded-lg border border-zinc-800 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('research')}
+                    className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'research' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                  >
+                    Research detail
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('mission')}
+                    className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'mission' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                  >
+                    Mission control
+                  </button>
+                </div>
+              )}
               <span className="self-center text-xs text-zinc-600">
-                Rental: DDollar/day · alerts on open/close
+                Hire = your exchange + isolated runtime · Follow = alerts only
               </span>
             </div>
 
-            {viewMode === 'research' && data.rawBotState && data.botConnected ? (
+            {isAdmin && viewMode === 'research' && data.rawBotState && data.botConnected ? (
               <ResearchBotDetailDashboard
                 raw={data.rawBotState as Record<string, unknown>}
                 updatedAt={data.updatedAt}
@@ -207,10 +243,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
               />
             )}
 
-            {viewMode === 'research' && !data.rawBotState && (
+            {isAdmin && viewMode === 'research' && !data.rawBotState && (
               <p className="mt-4 text-sm text-zinc-400">
-                Research detail is unavailable while the agent is offline. Mission control shows demo activity until the
-                platform agent is back online.
+                Admin research detail requires live bot bridge. Mission control shows public showcase data.
               </p>
             )}
           </>
