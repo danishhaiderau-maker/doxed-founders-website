@@ -9,7 +9,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 const ONLINE_WINDOW_MS = 3 * 60 * 1000;
 const JOB_TTL_MS = 5 * 60 * 1000;
+const STALE_PROCESSING_MS = 90_000;
 const POLL_MS = 400;
+const DEFAULT_JOB_TIMEOUT_MS = 45_000;
+const BLOCKING_JOB_TIMEOUT_MS = 180_000;
 
 @Injectable()
 export class FounderNodeSyncService {
@@ -30,10 +33,14 @@ export class FounderNodeSyncService {
       },
     });
 
+    const activeNode = onlineNode ?? nodes[0] ?? null;
+
     return {
       paired: nodes.length > 0,
       online: Boolean(onlineNode),
+      nodeId: activeNode?.nodeId ?? null,
       nodeLabel: onlineNode?.label ?? nodes[0]?.label ?? null,
+      appVersion: onlineNode?.appVersion ?? nodes[0]?.appVersion ?? null,
       vectorChunks: onlineNode?.vectorChunks ?? nodes[0]?.vectorChunks ?? null,
       vectorIndexedAt:
         onlineNode?.vectorIndexedAt?.toISOString() ??
@@ -70,7 +77,7 @@ export class FounderNodeSyncService {
       query: trimmed,
       topK,
     });
-    const result = await this.waitForJob(job.id);
+    const result = await this.waitForJob(job.id, BLOCKING_JOB_TIMEOUT_MS);
     if (!result.ok) throw new BadRequestException(result.error);
     return result.result;
   }
@@ -80,7 +87,7 @@ export class FounderNodeSyncService {
       agent,
       ...payload,
     });
-    const result = await this.waitForJob(job.id);
+    const result = await this.waitForJob(job.id, BLOCKING_JOB_TIMEOUT_MS);
     if (!result.ok) throw new BadRequestException(result.error);
     return result.result;
   }
@@ -101,6 +108,27 @@ export class FounderNodeSyncService {
 
   async claimPending(nodeId: string) {
     const now = new Date();
+    const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS);
+
+    const stale = await this.prisma.founderNodeSyncJob.findFirst({
+      where: {
+        nodeId,
+        status: FounderNodeSyncJobStatus.PROCESSING,
+        updatedAt: { lt: staleBefore },
+        expiresAt: { gt: now },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (stale) {
+      await this.prisma.founderNodeSyncJob.update({
+        where: { id: stale.id },
+        data: {
+          status: FounderNodeSyncJobStatus.PENDING,
+          error: 'Reclaimed after stale processing — retrying',
+        },
+      });
+    }
+
     const job = await this.prisma.founderNodeSyncJob.findFirst({
       where: {
         nodeId,
@@ -113,7 +141,7 @@ export class FounderNodeSyncService {
 
     await this.prisma.founderNodeSyncJob.update({
       where: { id: job.id },
-      data: { status: FounderNodeSyncJobStatus.PROCESSING },
+      data: { status: FounderNodeSyncJobStatus.PROCESSING, error: null },
     });
 
     return {
@@ -198,7 +226,7 @@ export class FounderNodeSyncService {
     });
   }
 
-  private async waitForJob(jobId: string, timeoutMs = 45_000) {
+  private async waitForJob(jobId: string, timeoutMs = DEFAULT_JOB_TIMEOUT_MS) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const job = await this.prisma.founderNodeSyncJob.findUnique({ where: { id: jobId } });
@@ -222,7 +250,11 @@ export class FounderNodeSyncService {
         error: 'Timed out waiting for Founder Node',
       },
     });
-    return { ok: false as const, error: 'Timed out waiting for Founder Node' };
+    return {
+      ok: false as const,
+      error:
+        'Timed out waiting for Founder Node — open the tray app, update to Founder Node v0.4.0+, then retry Rebuild vector index',
+    };
   }
 
   private async findOnlineNode(userId: string) {
@@ -233,9 +265,7 @@ export class FounderNodeSyncService {
     return (
       nodes.find(
         (n) => n.lastSeenAt != null && Date.now() - n.lastSeenAt.getTime() < ONLINE_WINDOW_MS,
-      ) ??
-      nodes[0] ??
-      null
+      ) ?? null
     );
   }
 }

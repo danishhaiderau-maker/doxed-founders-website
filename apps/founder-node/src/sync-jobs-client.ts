@@ -5,6 +5,8 @@ import {
 } from '@dcf/founder-vault';
 import { readNodeConfig } from './vault-manager';
 
+const MAX_JOBS_PER_CYCLE = 5;
+
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
   return `${base}${path.startsWith('/') ? path : `/${path}`}`;
@@ -18,7 +20,11 @@ export async function fetchPendingSyncJob(
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/sync-jobs/pending'), {
     headers: { Authorization: founderNodeAuthHeader(nodeId, nodeToken) },
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.warn(`Sync job poll failed (${res.status}): ${text.slice(0, 200)}`);
+    return null;
+  }
   const body = (await res.json()) as {
     id?: string;
     kind?: string;
@@ -49,12 +55,12 @@ export async function completeSyncJob(
   }
 }
 
-export async function processPendingSyncJobs(vaultRoot: string): Promise<void> {
+async function processOneSyncJob(vaultRoot: string): Promise<boolean> {
   const config = readNodeConfig(vaultRoot);
-  if (!config) return;
+  if (!config) return false;
 
   const job = await fetchPendingSyncJob(config.apiBaseUrl, config.nodeId, config.nodeToken);
-  if (!job) return;
+  if (!job) return false;
 
   try {
     const result = executeSyncJobOnVault(vaultRoot, job.kind, job.payload);
@@ -63,6 +69,15 @@ export async function processPendingSyncJobs(vaultRoot: string): Promise<void> {
     await completeSyncJob(config.apiBaseUrl, config.nodeId, config.nodeToken, job.id, {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  return true;
+}
+
+export async function processPendingSyncJobs(vaultRoot: string): Promise<void> {
+  for (let i = 0; i < MAX_JOBS_PER_CYCLE; i += 1) {
+    const handled = await processOneSyncJob(vaultRoot);
+    if (!handled) break;
   }
 }
 

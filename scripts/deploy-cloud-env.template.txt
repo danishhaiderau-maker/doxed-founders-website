@@ -23,6 +23,10 @@ GITHUB_WEBHOOK_SECRET=YOUR_GITHUB_WEBHOOK_SECRET
 
 # Disable background poll if webhook-only: DISABLE_GITHUB_AUTO_SYNC=1
 
+# Conservative BTC Agent — live Agent Hub dashboard (optional second Railway service)
+# Deploy services/btc-conservative-agent, then set public URL (no trailing slash):
+TRADING_AGENT_BOT_URL=https://YOUR-BTC-BOT.up.railway.app
+
 # ─── VERCEL (Project → Settings → Environment Variables) ───
 NEXT_PUBLIC_API_URL=YOUR_RAILWAY_URL
 API_URL=YOUR_RAILWAY_URL

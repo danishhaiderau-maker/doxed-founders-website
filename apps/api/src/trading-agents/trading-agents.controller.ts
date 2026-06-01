@@ -23,6 +23,12 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @Get('bot/status')
+  botStatus() {
+    return this.tradingAgents.getBotBridgeStatus();
+  }
+
+  @Public()
   @UseGuards(OptionalJwtAuthGuard)
   @Get(':slug')
   getBySlug(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {

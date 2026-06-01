@@ -11,6 +11,7 @@ import {
   buildTradingAgentActionShareText,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { BotBridgeService } from './bot-bridge.service';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -91,8 +92,22 @@ async function fetchBtcPriceUsd(): Promise<number | null> {
 
 function serializeAgent(
   agent: Prisma.TradingAgentGetPayload<object>,
-  extra?: { following?: boolean },
+  extra?: {
+    following?: boolean;
+    liveStats?: {
+      balanceUsd?: number;
+      equityUsd?: number;
+      netReturnPct?: number;
+      tradeCount?: number;
+      winRatePct?: number;
+      liveSinceDays?: number;
+      currentPosition?: string;
+      currentAction?: string;
+    };
+    botConnected?: boolean;
+  },
 ) {
+  const live = extra?.liveStats;
   return {
     id: agent.id,
     slug: agent.slug,
@@ -102,26 +117,31 @@ function serializeAgent(
     status: agent.status,
     assetSymbol: agent.assetSymbol,
     startingBalance: Number(agent.startingBalance),
-    balanceUsd: Number(agent.balanceUsd),
-    equityUsd: Number(agent.equityUsd),
-    netReturnPct: Number(agent.netReturnPct),
-    tradeCount: agent.tradeCount,
-    winRatePct: Number(agent.winRatePct),
+    balanceUsd: live?.balanceUsd ?? Number(agent.balanceUsd),
+    equityUsd: live?.equityUsd ?? Number(agent.equityUsd),
+    netReturnPct: live?.netReturnPct ?? Number(agent.netReturnPct),
+    tradeCount: live?.tradeCount ?? agent.tradeCount,
+    winRatePct: live?.winRatePct ?? Number(agent.winRatePct),
     costDdollarDay: agent.costDdollarDay,
     liveSince: agent.liveSince.toISOString(),
-    liveSinceDays: Math.max(
-      1,
-      Math.floor((Date.now() - agent.liveSince.getTime()) / (1000 * 60 * 60 * 24)),
-    ),
+    liveSinceDays:
+      live?.liveSinceDays ??
+      Math.max(1, Math.floor((Date.now() - agent.liveSince.getTime()) / (1000 * 60 * 60 * 24))),
     followerCount: agent.followerCount,
     isExperimental: agent.isExperimental,
     following: extra?.following ?? false,
+    botConnected: extra?.botConnected ?? false,
+    currentPosition: live?.currentPosition,
+    currentAction: live?.currentAction,
   };
 }
 
 @Injectable()
 export class TradingAgentsService implements OnModuleInit {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly botBridge: BotBridgeService,
+  ) {}
 
   async onModuleInit() {
     await this.ensureSeed().catch(() => undefined);
@@ -284,13 +304,48 @@ export class TradingAgentsService implements OnModuleInit {
     }
   }
 
+  private async enrichWithBotLive(
+    agent: Prisma.TradingAgentGetPayload<object>,
+    extra?: Parameters<typeof serializeAgent>[1],
+  ) {
+    if (agent.slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
+      return serializeAgent(agent, extra);
+    }
+    const live = await this.botBridge.getLiveDashboard(agent.name);
+    if (!live) {
+      return serializeAgent(agent, extra);
+    }
+    return serializeAgent(agent, {
+      ...extra,
+      liveStats: live.stats,
+      botConnected: true,
+    });
+  }
+
+  async getBotBridgeStatus() {
+    const url = this.botBridge.getBotUrl();
+    const enabled = this.botBridge.isEnabled();
+    const state = enabled ? await this.botBridge.fetchState() : null;
+    return {
+      enabled,
+      url: url ? `${url}/api/state` : null,
+      connected: Boolean(state),
+      strategyMode: state?.strategy_mode ?? null,
+      executionPaused: state?.execution_paused ?? false,
+      executionReason: state?.execution_reason ?? null,
+      price: state?.price ?? null,
+      lastFetchAt: state ? new Date().toISOString() : null,
+    };
+  }
+
   async list(kind?: TradingAgentKind) {
     const agents = await this.prisma.tradingAgent.findMany({
       where: kind ? { kind } : undefined,
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     });
+    const serialized = await Promise.all(agents.map((a) => this.enrichWithBotLive(a)));
     return {
-      agents: agents.map((a) => serializeAgent(a)),
+      agents: serialized,
       kinds: Object.values(TradingAgentKind),
     };
   }
@@ -307,12 +362,31 @@ export class TradingAgentsService implements OnModuleInit {
       following = Boolean(row);
     }
 
-    return serializeAgent(agent, { following });
+    return this.enrichWithBotLive(agent, { following });
   }
 
   async getDashboard(slug: string) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
+
+    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+      const live = await this.botBridge.getLiveDashboard(agent.name);
+      if (live) {
+        return {
+          agent: serializeAgent(agent, {
+            liveStats: live.stats,
+            botConnected: true,
+          }),
+          dashboard: live.dashboard,
+          updatedAt: new Date().toISOString(),
+          botConnected: true,
+          botSource: 'LIVE' as const,
+          strategyMode: live.strategyMode,
+          executionPaused: live.executionPaused,
+          executionReason: live.executionReason,
+        };
+      }
+    }
 
     const stored = agent.dashboardState as TradingAgentDashboardState;
     const livePrice = await fetchBtcPriceUsd();
@@ -330,6 +404,8 @@ export class TradingAgentsService implements OnModuleInit {
         agent: serializeAgent(agent),
         dashboard: refreshed,
         updatedAt: new Date().toISOString(),
+        botConnected: false,
+        botSource: 'FALLBACK' as const,
       };
     }
 
@@ -337,12 +413,34 @@ export class TradingAgentsService implements OnModuleInit {
       agent: serializeAgent(agent),
       dashboard: stored,
       updatedAt: agent.updatedAt.toISOString(),
+      botConnected: false,
+      botSource: 'FALLBACK' as const,
     };
   }
 
   async listActivity(slug: string, limit = 30) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
+
+    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+      const liveActivity = await this.botBridge.getLiveActivity(agent.name);
+      if (liveActivity?.length) {
+        const take = Math.min(50, Math.max(1, limit));
+        return liveActivity.slice(0, take).map((row) => ({
+          ...row,
+          shareText:
+            row.shareText ??
+            buildTradingAgentActionShareText({
+              agentName: agent.name,
+              action: row.title,
+              reason: row.reason,
+              edgeScore: row.edgeScore,
+              edgeRequired: row.edgeRequired,
+              marketRegime: row.marketRegime,
+            }),
+        }));
+      }
+    }
 
     const take = Math.min(50, Math.max(1, limit));
     const rows = await this.prisma.tradingAgentActivity.findMany({
@@ -412,6 +510,6 @@ export class TradingAgentsService implements OnModuleInit {
       where: { kind: TradingAgentKind.TRADING },
       orderBy: [{ status: 'asc' }, { netReturnPct: 'desc' }],
     });
-    return agents.map((a) => serializeAgent(a));
+    return Promise.all(agents.map((a) => this.enrichWithBotLive(a)));
   }
 }

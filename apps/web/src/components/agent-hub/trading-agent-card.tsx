@@ -51,9 +51,14 @@ export function TradingAgentCard({
           {isPaused ? (
             <p className="mt-1 text-xs text-zinc-500">Coming soon</p>
           ) : (
-            <p className="mt-1 flex items-center gap-2 text-xs text-zinc-400">
+            <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
               <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[agent.status] ?? 'bg-zinc-500'}`} />
               Status: {TRADING_AGENT_STATUS_LABELS[agent.status] ?? agent.status}
+              {agent.botConnected && (
+                <span className="rounded bg-emerald-950/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                  Bot live
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -93,11 +98,11 @@ export function TradingAgentCard({
             </div>
             <div>
               <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Current position</dt>
-              <dd className="font-medium text-zinc-200">NONE</dd>
+              <dd className="font-medium text-zinc-200">{agent.currentPosition ?? 'NONE'}</dd>
             </div>
             <div>
               <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Current action</dt>
-              <dd className="font-medium text-amber-200">WAITING</dd>
+              <dd className="font-medium text-amber-200">{agent.currentAction ?? 'WAITING'}</dd>
             </div>
           </dl>
 

@@ -1,6 +1,6 @@
 {
   "name": "@dcf/founder-node",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "private": true,
   "description": "Founder Node — local vault + metadata sync for Founder OS",
   "author": "Doxxed Crypto",

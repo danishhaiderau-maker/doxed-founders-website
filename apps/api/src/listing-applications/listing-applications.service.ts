@@ -225,12 +225,6 @@ export class ListingApplicationsService {
     });
 
     if (dto.status === 'APPROVED') {
-      if (application.votingClosesAt && application.votingClosesAt.getTime() <= Date.now()) {
-        throw new BadRequestException(
-          'Voting window has closed without admin approval — this listing cannot be published. Traders can still paper-trade the token.',
-        );
-      }
-
       const published = await this.publish.publishApprovedApplication(merged);
 
       const updated = await this.prisma.listingApplication.update({
@@ -247,6 +241,12 @@ export class ListingApplicationsService {
 
       if (application.userId) {
         await this.points.award(application.userId, POINTS.LISTING_SCOUT_APPROVED, 'LISTING_SCOUT_APPROVED');
+      }
+
+      for (const vote of application.votes) {
+        if (vote.vote === 'YES') {
+          await this.points.award(vote.userId, POINTS.VALIDATION_CORRECT, 'VALIDATION_CORRECT');
+        }
       }
 
       await this.predictionMarkets.seedMarketsForProject(published.projectId, {

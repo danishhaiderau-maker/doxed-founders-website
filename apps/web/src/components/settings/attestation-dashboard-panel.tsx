@@ -13,6 +13,27 @@ type Props = {
   accessToken: string;
 };
 
+const CHECK_NEXT_STEPS: Record<string, { title: string; detail: string }> = {
+  memory_mode: {
+    title: 'Enable Founder Vault',
+    detail: 'In Step 1 above, select Founder Vault (Founder Node) as your memory mode.',
+  },
+  encrypted_relay: {
+    title: 'Wait for encrypted backup sync',
+    detail:
+      'Keep Founder Node open for a few minutes — it pushes an encrypted vault blob the server cannot read. This happens automatically after pairing; no button needed.',
+  },
+  founder_node_online: {
+    title: 'Open Founder Node on your desktop',
+    detail: 'Launch the tray app from /founder-node and leave it running while you use Builder settings.',
+  },
+  vector_index: {
+    title: 'Build your local search index',
+    detail:
+      'In Step 4 above, click Rebuild vector index while Founder Node is online. This indexes your vault for semantic search.',
+  },
+};
+
 export function AttestationDashboardPanel({ accessToken }: Props) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -69,6 +90,9 @@ export function AttestationDashboardPanel({ accessToken }: Props) {
 
   const memory = dashboard.memoryIntegrity;
   const phala = dashboard.phalaTee;
+  const passedChecks = memory.checks.filter((c) => c.ok).length;
+  const totalChecks = memory.checks.length;
+  const pendingChecks = memory.checks.filter((c) => !c.ok);
   const scoreColor =
     memory.status === 'healthy'
       ? 'text-emerald-300'
@@ -82,6 +106,42 @@ export function AttestationDashboardPanel({ accessToken }: Props) {
       <p className="mt-1 text-sm text-zinc-500">
         Verify Phala TEE inference receipts and Founder Vault memory integrity — cryptographic proof, not trust-me badges.
       </p>
+
+      {memory.score < 100 && (
+        <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+          <p className="text-sm font-medium text-amber-100">
+            {memory.score}% — {passedChecks} of {totalChecks} privacy checks complete
+          </p>
+          <p className="mt-1 text-xs text-zinc-400">
+            Connecting Founder Node (Step 1) is only the start. Finish the steps below to reach 100% memory integrity,
+            then optionally verify Phala TEE receipts on the right.
+          </p>
+          {pendingChecks.length > 0 && (
+            <ol className="mt-3 space-y-2">
+              {pendingChecks.map((check, i) => {
+                const step = CHECK_NEXT_STEPS[check.name];
+                return (
+                  <li key={check.name} className="flex gap-3 text-sm">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-500/25 text-[10px] font-bold text-amber-200">
+                      {i + 1}
+                    </span>
+                    <div>
+                      <p className="font-medium text-zinc-200">{step?.title ?? check.detail}</p>
+                      <p className="text-xs text-zinc-500">{step?.detail ?? check.detail}</p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      )}
+
+      {memory.score >= 100 && (
+        <p className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-sm text-emerald-200">
+          All memory integrity checks passed. Use Phala Copilot and click Verify below to record TEE attestation receipts.
+        </p>
+      )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
