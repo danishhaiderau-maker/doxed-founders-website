@@ -3,7 +3,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { slugify, formatPublicAccountLabel, POINTS, STARTING_CASH_USD, RESTRICTED_CASH_THRESHOLD_USD, TOP_UP_FEE_USD, computeMissedAlpha } from '@dcf/utils';
+import {
+  slugify,
+  formatPublicAccountLabel,
+  POINTS,
+  STARTING_CASH_USD,
+  RESTRICTED_CASH_THRESHOLD_USD,
+  TOP_UP_FEE_USD,
+  computeMissedAlpha,
+  computeTrustWeight,
+} from '@dcf/utils';
 import { isSolanaTopUpConfigured, resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import {
   AnalyticsEventType,
@@ -27,6 +36,15 @@ import { PaperTradeDto } from './dto/paper-trading.dto';
 
 const STARTING_CASH = STARTING_CASH_USD;
 const MIN_SELL_USD = 0.01;
+const JOURNEY_DEFAULT_DAYS = 60;
+
+export type TradingTimelineEventType =
+  | 'BUY'
+  | 'SELL'
+  | 'ADD'
+  | 'REDUCE'
+  | 'THESIS_UPDATE'
+  | 'MILESTONE';
 
 @Injectable()
 export class PaperTradingService {
@@ -673,8 +691,63 @@ export class PaperTradingService {
     };
   }
 
-  async getPublicPortfolio(userId: string) {
+  async getPublicPortfolio(userId: string, opts?: { includeOlder?: boolean }) {
     const portfolio = await this.getPortfolio(userId);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        twitterHandle: true,
+        createdAt: true,
+        reputationPoints: true,
+        contributorLevel: true,
+        email: true,
+        oauthAccounts: { select: { id: true }, take: 1 },
+        passwordHash: true,
+        _count: { select: { followers: true } },
+      },
+    });
+
+    const accountAgeDays = user
+      ? Math.floor((Date.now() - user.createdAt.getTime()) / (24 * 60 * 60 * 1000))
+      : 0;
+    const trustWeight = computeTrustWeight({
+      verifiedAccount: Boolean(user?.passwordHash || user?.oauthAccounts.length),
+      contributorLevel: user?.contributorLevel ?? portfolio.contributorLevel,
+      reputationPoints: user?.reputationPoints ?? portfolio.reputationPoints,
+      accountAgeDays,
+    });
+    const trustScore = Math.min(100, trustWeight * 10);
+
+    const journeyCutoff = opts?.includeOlder
+      ? undefined
+      : new Date(Date.now() - JOURNEY_DEFAULT_DAYS * 24 * 60 * 60 * 1000);
+
+    const olderTradeCount = journeyCutoff
+      ? await this.prisma.paperTrade.count({
+          where: { userId, createdAt: { lt: journeyCutoff } },
+        })
+      : 0;
+
+    const journey = await this.buildTradingJourney(userId, journeyCutoff);
+
+    const sellScores = journey.closedTrades
+      .map((t) => t.convictionScore)
+      .filter((s): s is number => s != null);
+    const openThesisCount = portfolio.positions.filter(
+      (p) => p.convictionThesis || p.convictionCatalyst,
+    ).length;
+    let convictionScore = 50;
+    if (sellScores.length > 0) {
+      convictionScore = Math.round(
+        sellScores.reduce((a, b) => a + b, 0) / sellScores.length,
+      );
+    } else if (openThesisCount > 0) {
+      convictionScore = Math.min(
+        85,
+        55 + Math.round((openThesisCount / Math.max(1, portfolio.positions.length)) * 30),
+      );
+    }
+
     return {
       userId: portfolio.userId,
       displayName: formatPublicAccountLabel(
@@ -683,18 +756,21 @@ export class PaperTradingService {
       ),
       reputationPoints: portfolio.reputationPoints,
       contributorLevel: portfolio.contributorLevel,
-      twitterHandle: (
-        await this.prisma.user.findUnique({
-          where: { id: userId },
-          select: { twitterHandle: true },
-        })
-      )?.twitterHandle ?? null,
+      twitterHandle: user?.twitterHandle ?? null,
       cashBalance: portfolio.cashBalance,
       totalValue: portfolio.totalValue,
       pnl: portfolio.pnl,
       roi: portfolio.roi,
       startingCash: portfolio.startingCash,
       positionCount: portfolio.positions.length,
+      followersCount: user?._count.followers ?? 0,
+      trustScore,
+      convictionScore,
+      journeyDays: JOURNEY_DEFAULT_DAYS,
+      hasOlderHistory: olderTradeCount > 0,
+      olderTradeCount,
+      timeline: journey.timeline,
+      closedTrades: journey.closedTrades,
       positions: portfolio.positions.map((p) => ({
         projectId: p.projectId,
         ticker: p.ticker,
@@ -723,8 +799,207 @@ export class PaperTradingService {
         convictionTimeHorizon: p.convictionTimeHorizon,
         convictionRecordedAt: p.convictionRecordedAt,
         positionOpenedAt: p.positionOpenedAt,
+        daysHeld: p.positionOpenedAt
+          ? Math.max(
+              0,
+              Math.floor(
+                (Date.now() - new Date(p.positionOpenedAt).getTime()) / (24 * 60 * 60 * 1000),
+              ),
+            )
+          : 0,
+        convictionLevel:
+          p.convictionThesis && p.convictionCatalyst
+            ? ('High' as const)
+            : p.convictionThesis || p.convictionCatalyst
+              ? ('Medium' as const)
+              : ('Low' as const),
       })),
     };
+  }
+
+  private async buildTradingJourney(userId: string, since?: Date) {
+    const trades = await this.prisma.paperTrade.findMany({
+      where: {
+        userId,
+        ...(since ? { createdAt: { gte: since } } : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        project: { select: { id: true, ticker: true, name: true, logoUrl: true } },
+        feedPost: { select: { id: true, initialComment: true } },
+      },
+    });
+
+    const holdings = new Map<string, number>();
+    const lastThesis = new Map<string, string>();
+    const timeline: Array<{
+      id: string;
+      type: TradingTimelineEventType;
+      createdAt: string;
+      ticker: string;
+      projectName: string;
+      logoUrl: string | null;
+      amountUsd: number;
+      priceUsd: number;
+      quantity: number;
+      thesis: string | null;
+      catalyst: string | null;
+      feedPostId: string | null;
+      realizedPnlUsd: number | null;
+      realizedReturnPct: number | null;
+      whatIfHeldPct: number | null;
+      missedAlphaPct: number | null;
+      peakPriceUsd: number | null;
+      convictionScore: number | null;
+    }> = [];
+
+    const closedTrades: Array<{
+      id: string;
+      ticker: string;
+      projectName: string;
+      logoUrl: string | null;
+      closedAt: string;
+      entryPriceUsd: number;
+      exitPriceUsd: number;
+      investedUsd: number;
+      proceedsUsd: number;
+      realizedReturnPct: number;
+      whatIfHeldPct: number;
+      missedAlphaPct: number;
+      peakPriceUsd: number | null;
+      convictionScore: number | null;
+      thesis: string | null;
+    }> = [];
+
+    for (const trade of trades) {
+      const projectId = trade.projectId;
+      const prevQty = holdings.get(projectId) ?? 0;
+      const qty = Number(trade.quantity);
+      const priceUsd = Number(trade.priceUsd);
+      const totalUsd = Number(trade.totalUsd);
+      const thesis = trade.feedPost?.initialComment?.trim() || null;
+      const feedPostId = trade.feedPost?.id ?? null;
+
+      if (trade.side === PaperTradeSide.BUY) {
+        const isAdd = prevQty > 0.000001;
+        if (thesis && lastThesis.get(projectId) && lastThesis.get(projectId) !== thesis) {
+          timeline.push({
+            id: `${trade.id}-thesis`,
+            type: 'THESIS_UPDATE',
+            createdAt: trade.createdAt.toISOString(),
+            ticker: trade.project.ticker,
+            projectName: trade.project.name,
+            logoUrl: trade.project.logoUrl,
+            amountUsd: totalUsd,
+            priceUsd,
+            quantity: qty,
+            thesis,
+            catalyst: null,
+            feedPostId,
+            realizedPnlUsd: null,
+            realizedReturnPct: null,
+            whatIfHeldPct: null,
+            missedAlphaPct: null,
+            peakPriceUsd: null,
+            convictionScore: null,
+          });
+        }
+        if (thesis) lastThesis.set(projectId, thesis);
+
+        timeline.push({
+          id: trade.id,
+          type: isAdd ? 'ADD' : 'BUY',
+          createdAt: trade.createdAt.toISOString(),
+          ticker: trade.project.ticker,
+          projectName: trade.project.name,
+          logoUrl: trade.project.logoUrl,
+          amountUsd: totalUsd,
+          priceUsd,
+          quantity: qty,
+          thesis,
+          catalyst: null,
+          feedPostId,
+          realizedPnlUsd: null,
+          realizedReturnPct: null,
+          whatIfHeldPct: null,
+          missedAlphaPct: null,
+          peakPriceUsd: null,
+          convictionScore: null,
+        });
+        holdings.set(projectId, prevQty + qty);
+      } else {
+        const remaining = Math.max(0, prevQty - qty);
+        const isFullExit = remaining <= 0.000001;
+        const realizedPnlUsd =
+          trade.realizedPnlUsd != null ? Number(trade.realizedPnlUsd) : null;
+        const costBasis =
+          realizedPnlUsd != null ? Math.max(0, totalUsd - realizedPnlUsd) : totalUsd;
+        const realizedReturnPct =
+          costBasis > 0 && realizedPnlUsd != null
+            ? Math.round((realizedPnlUsd / costBasis) * 1000) / 10
+            : null;
+        const whatIfHeldPct =
+          trade.whatIfHeldPct != null ? Number(trade.whatIfHeldPct) : null;
+        const missedAlphaPct =
+          trade.missedAlphaPct != null ? Number(trade.missedAlphaPct) : null;
+        const peakPriceUsd =
+          trade.peakPriceUsd != null ? Number(trade.peakPriceUsd) : null;
+        const convictionScore = trade.convictionScore ?? null;
+        const entryPriceUsd =
+          costBasis > 0 && qty > 0 ? costBasis / qty : priceUsd;
+
+        timeline.push({
+          id: trade.id,
+          type: isFullExit ? 'SELL' : 'REDUCE',
+          createdAt: trade.createdAt.toISOString(),
+          ticker: trade.project.ticker,
+          projectName: trade.project.name,
+          logoUrl: trade.project.logoUrl,
+          amountUsd: totalUsd,
+          priceUsd,
+          quantity: qty,
+          thesis,
+          catalyst: null,
+          feedPostId,
+          realizedPnlUsd,
+          realizedReturnPct,
+          whatIfHeldPct,
+          missedAlphaPct,
+          peakPriceUsd,
+          convictionScore,
+        });
+
+        if (isFullExit) {
+          closedTrades.push({
+            id: trade.id,
+            ticker: trade.project.ticker,
+            projectName: trade.project.name,
+            logoUrl: trade.project.logoUrl,
+            closedAt: trade.createdAt.toISOString(),
+            entryPriceUsd: Math.round(entryPriceUsd * 1e8) / 1e8,
+            exitPriceUsd: priceUsd,
+            investedUsd: Math.round(costBasis * 100) / 100,
+            proceedsUsd: totalUsd,
+            realizedReturnPct: realizedReturnPct ?? 0,
+            whatIfHeldPct: whatIfHeldPct ?? 0,
+            missedAlphaPct: missedAlphaPct ?? 0,
+            peakPriceUsd,
+            convictionScore,
+            thesis,
+          });
+          lastThesis.delete(projectId);
+        }
+
+        holdings.set(projectId, remaining);
+      }
+    }
+
+    timeline.reverse();
+    closedTrades.sort(
+      (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime(),
+    );
+
+    return { timeline, closedTrades };
   }
 
   async previewToken(url: string) {
