@@ -2,9 +2,10 @@
 
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { useEffect, useRef, useState } from 'react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
+import { NotificationBell } from '@/components/notification-bell';
+import { LandingFeatureHub } from '@/components/landing/landing-feature-hub';
 import type { PlatformStats } from '@/lib/api';
 
 function formatStat(value: number) {
@@ -12,15 +13,6 @@ function formatStat(value: number) {
   if (value >= 1_000) return value.toLocaleString();
   return value.toLocaleString();
 }
-
-const EXPLORE_MENU = [
-  { href: '/founder-den', label: 'Founder OS' },
-  { href: '/settings/builder', label: 'Founder Node' },
-  { href: '/agent-hub', label: 'Agents' },
-  { href: '/raise-room', label: 'Raise Room' },
-  { href: '/ddollar', label: 'DDollar' },
-  { href: '/trust-center', label: 'Trust Center' },
-] as const;
 
 const WHY_DOXXED = [
   {
@@ -41,14 +33,6 @@ const WHY_DOXXED = [
     border: 'border-emerald-500/35',
     accent: 'text-emerald-300',
   },
-] as const;
-
-const LANDING_NAV = [
-  { href: '/discover', label: 'Discover' },
-  { href: '/projects', label: 'Projects' },
-  { href: '/leaderboard', label: 'Rankings' },
-  { href: '/founder-den', label: 'Founder OS' },
-  { href: '/raise-room', label: 'Raise Room' },
 ] as const;
 
 const NODE_ORBIT = [
@@ -116,75 +100,25 @@ function Card({
 
 export function LandingHeader() {
   const { data: session } = useSession();
-  const [exploreOpen, setExploreOpen] = useState(false);
-  const exploreRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function onDocClick(e: MouseEvent) {
-      if (exploreRef.current && !exploreRef.current.contains(e.target as Node)) {
-        setExploreOpen(false);
-      }
-    }
-    document.addEventListener('click', onDocClick);
-    return () => document.removeEventListener('click', onDocClick);
-  }, []);
 
   return (
     <header className="border-b border-zinc-800/80 bg-[#050508]">
-      <div className="mx-auto flex w-full max-w-[88rem] flex-wrap items-center justify-between gap-3 px-4 py-3 lg:px-8">
-        <SiteBrand className="text-sm font-bold tracking-tight" />
-        <nav className="hidden items-center gap-1 lg:flex">
-          {LANDING_NAV.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className="rounded-lg px-3 py-1.5 text-sm text-zinc-400 transition hover:text-white"
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
+      <div className="mx-auto flex w-full max-w-[88rem] items-center justify-between gap-3 px-4 py-3 lg:px-8">
+        <SiteBrand className="text-sm font-bold tracking-tight uppercase" />
         <div className="flex items-center gap-2">
-          <Link
-            href="/discover"
-            className="hidden rounded-lg p-2 text-zinc-500 hover:text-white sm:inline-flex"
-            aria-label="Search"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z" />
-            </svg>
-          </Link>
-          {!session && (
+          <NotificationBell />
+          {session ? (
+            <Link
+              href="/account"
+              className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-200 hover:text-white"
+            >
+              Profile
+            </Link>
+          ) : (
             <Link href="/login" className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-200">
               Login
             </Link>
           )}
-          <div className="relative" ref={exploreRef}>
-            <button
-              type="button"
-              onClick={() => setExploreOpen((o) => !o)}
-              className="flex items-center gap-1.5 rounded-lg border border-zinc-600 bg-zinc-900/80 px-4 py-2 text-sm font-semibold text-white hover:border-zinc-500"
-            >
-              Explore
-              <span className="text-[10px] text-zinc-400" aria-hidden>
-                ▼
-              </span>
-            </button>
-            {exploreOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
-                {EXPLORE_MENU.map((item) => (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={() => setExploreOpen(false)}
-                    className="block px-3 py-2 text-sm text-zinc-300 transition hover:bg-zinc-900 hover:text-white"
-                  >
-                    {item.label}
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </header>
@@ -307,8 +241,8 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
 
   return (
     <div className="mx-auto w-full max-w-[88rem] space-y-3 px-4 py-3 sm:px-6 lg:space-y-3.5 lg:px-8 lg:py-4">
-      {/* Row 1: Hero + stats (mission before technology) */}
-      <section className="grid gap-3 xl:grid-cols-[1.35fr_0.65fr] xl:items-stretch">
+      {/* Row 1: Hero */}
+      <section>
         <Card className="flex flex-col justify-center border-violet-500/10 p-4 lg:p-6">
           <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-red-400/90">
             Anti-scam · Doxxed founders · Public proof
@@ -354,11 +288,17 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
             Private by default. Public by proof. · Powered by Founder Node + Phala Network TEE
           </p>
         </Card>
+      </section>
 
+      {/* Row 2: Mission control hub — tap to enter any workspace */}
+      <LandingFeatureHub scoutPending={pendingReviews} />
+
+      {/* Row 3: Platform stats */}
+      <section>
         <PlatformStatsPanel stats={stats} />
       </section>
 
-      {/* Row 2: Why Doxxed exists */}
+      {/* Row 4: Why Doxxed exists */}
       <section>
         <Card className="p-4 lg:p-5">
           <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Why Doxxed exists</p>

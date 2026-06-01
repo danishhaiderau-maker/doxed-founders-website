@@ -9,6 +9,7 @@ import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
+import { hubPageTitle, isHubWorkspacePath } from '@/components/hub-nav-config';
 
 /** Row 1 — Explore */
 const PRIMARY_NAV = [
@@ -133,6 +134,22 @@ function SiteNavInner() {
   const fallbackRole = resolveGamifiedRole({
     platformRole: session?.user?.role,
   });
+
+  if (isHubWorkspacePath(pathname)) {
+    return (
+      <HubMinimalNav
+        pathname={pathname}
+        session={session}
+        isAdmin={isAdmin}
+        profileOpen={profileOpen}
+        setProfileOpen={setProfileOpen}
+        profileRef={profileRef}
+        profileActive={profileActive}
+        accountPreview={accountPreview}
+        fallbackRole={fallbackRole}
+      />
+    );
+  }
 
   return (
     <nav className="flex max-w-full flex-col items-end gap-2 text-sm md:gap-2.5">
@@ -299,6 +316,107 @@ function SiteNavInner() {
           <Link
             href="/login"
             className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-white"
+          >
+            Sign in
+          </Link>
+        )}
+      </div>
+    </nav>
+  );
+}
+
+function HubMinimalNav({
+  pathname,
+  session,
+  isAdmin,
+  profileOpen,
+  setProfileOpen,
+  profileRef,
+  profileActive,
+  accountPreview,
+  fallbackRole,
+}: {
+  pathname: string;
+  session: ReturnType<typeof useSession>['data'];
+  isAdmin: boolean;
+  profileOpen: boolean;
+  setProfileOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  profileRef: React.RefObject<HTMLDivElement | null>;
+  profileActive: boolean;
+  accountPreview: AccountOverview | null;
+  fallbackRole: ReturnType<typeof resolveGamifiedRole>;
+}) {
+  const title = hubPageTitle(pathname);
+
+  return (
+    <nav className="flex w-full max-w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 items-center gap-3">
+        <Link
+          href="/"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-600 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:border-zinc-500"
+        >
+          <span aria-hidden>←</span> Home
+        </Link>
+        <p className="truncate text-sm font-bold text-zinc-300 sm:text-base">{title}</p>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <NotificationBell />
+        {session ? (
+          <div className="relative" ref={profileRef}>
+            <button
+              type="button"
+              onClick={() => setProfileOpen((o) => !o)}
+              className={cn(
+                'flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition',
+                profileActive || profileOpen
+                  ? 'bg-zinc-700 font-semibold text-white ring-1 ring-zinc-500'
+                  : 'text-zinc-300 hover:bg-zinc-800 hover:text-white',
+              )}
+            >
+              <span className="hidden max-w-[120px] truncate sm:inline">
+                {accountPreview?.username ?? session.user?.name ?? 'Profile'}
+              </span>
+              <GamifiedRoleBadge
+                role={accountPreview?.gamifiedRole ?? fallbackRole}
+                className="hidden sm:inline-flex"
+              />
+              <span className="sm:hidden">Profile</span>
+            </button>
+            {profileOpen && (
+              <div className="absolute right-0 top-full z-50 mt-1 min-w-[220px] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
+                {PROFILE_LINKS.map((item) => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setProfileOpen(false)}
+                    className="block px-3 py-2 text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-white"
+                  >
+                    {item.label}
+                  </Link>
+                ))}
+                {isAdmin && (
+                  <Link
+                    href="/admin/control"
+                    onClick={() => setProfileOpen(false)}
+                    className="block border-t border-zinc-800 px-3 py-2 text-sm font-semibold text-amber-300/95 transition hover:bg-zinc-900"
+                  >
+                    Admin Control
+                  </Link>
+                )}
+                <button
+                  type="button"
+                  onClick={() => signOut({ callbackUrl: '/' })}
+                  className="block w-full px-3 py-2 text-left text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-white"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <Link
+            href="/login"
+            className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-200 hover:text-white"
           >
             Sign in
           </Link>
