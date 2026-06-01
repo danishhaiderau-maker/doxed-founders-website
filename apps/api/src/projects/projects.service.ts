@@ -1,5 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { FounderEventType, Prisma, ProjectSource, ListingStatus } from '@prisma/client';
+import {
+  FounderEventType,
+  InvestigationStatus,
+  Prisma,
+  ProjectSource,
+  ListingStatus,
+} from '@prisma/client';
 import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -123,21 +129,42 @@ export class ProjectsService {
       founderId: { not: null },
     } as const;
 
-    const [verifiedFounders, activeProjects, communityMembers, portfolioAgg, tradeCount, githubCommits, scoutVotes] =
-      await Promise.all([
-        this.prisma.founder.count({
-          where: { projects: { some: curatedWhere } },
-        }),
-        this.prisma.project.count({ where: curatedWhere }),
-        this.prisma.user.count({ where: { banned: false } }),
-        this.prisma.paperPortfolio.aggregate({
-          _sum: { totalValue: true },
-          _count: true,
-        }),
-        this.prisma.paperTrade.count(),
-        this.prisma.founderEvent.count({ where: { type: FounderEventType.GITHUB_COMMIT } }),
-        this.prisma.listingVote.count(),
-      ]);
+    const now = new Date();
+    const [
+      verifiedFounders,
+      activeProjects,
+      communityMembers,
+      portfolioAgg,
+      tradeCount,
+      githubCommits,
+      scoutVotes,
+      projectsAwaitingReview,
+      activeInvestigations,
+      ddollarAgg,
+    ] = await Promise.all([
+      this.prisma.founder.count({
+        where: { projects: { some: curatedWhere } },
+      }),
+      this.prisma.project.count({ where: curatedWhere }),
+      this.prisma.user.count({ where: { banned: false } }),
+      this.prisma.paperPortfolio.aggregate({
+        _sum: { totalValue: true },
+        _count: true,
+      }),
+      this.prisma.paperTrade.count(),
+      this.prisma.founderEvent.count({ where: { type: FounderEventType.GITHUB_COMMIT } }),
+      this.prisma.listingVote.count(),
+      this.prisma.listingApplication.count({
+        where: {
+          status: ListingStatus.COMMUNITY_VOTING,
+          OR: [{ votingClosesAt: null }, { votingClosesAt: { gt: now } }],
+        },
+      }),
+      this.prisma.projectInvestigation.count({
+        where: { status: { in: [InvestigationStatus.ACTIVE, InvestigationStatus.ADMIN_REVIEW] } },
+      }),
+      this.prisma.user.aggregate({ _sum: { reputationPoints: true } }),
+    ]);
 
     const simulatedCapital =
       Number(portfolioAgg._sum.totalValue ?? 0) > 0
@@ -153,6 +180,9 @@ export class ProjectsService {
       totalTrades: tradeCount,
       githubCommits,
       scoutVotes,
+      projectsAwaitingReview,
+      activeInvestigations,
+      ddollarDistributed: ddollarAgg._sum.reputationPoints ?? 0,
     };
   }
 
