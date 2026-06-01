@@ -59,6 +59,12 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 | `WEBAUTHN_ORIGIN` | `https://doxxedcrypto.digital` — passkey registration origin |
 | `WEBAUTHN_RP_ID` | `doxxedcrypto.digital` — WebAuthn relying party ID |
 | `PUBLIC_SITE_URL` | `https://doxxedcrypto.digital` — fallback for WebAuthn + links |
+| `WEB_APP_URL` | `https://doxxedcrypto.digital` — post-GitHub OAuth redirect |
+| `API_URL` | `https://doxed-founders-website-production.up.railway.app` |
+| `GITHUB_CLIENT_ID` | GitHub OAuth App — Founder OS repo connect |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth App secret |
+| `GITHUB_OAUTH_CALLBACK_URL` | `{API_URL}/api/auth/github/callback` |
+| `GITHUB_WEBHOOK_SECRET` | Optional — GitHub repo push webhook for instant sync |
 
 ## Failed deploy badges (22 / 15 / etc.)
 

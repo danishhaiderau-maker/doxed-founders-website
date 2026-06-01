@@ -9,12 +9,20 @@ import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 
-/** Row 1 — trading (amber family) */
-const TRADING_NAV = [
+/** Row 1 — discover & trust */
+const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
+  { href: '/projects', label: 'Projects' },
+  { href: '/leaderboard', label: 'Rankings' },
+  { href: '/founder-den', label: 'Founder OS', auth: true },
+  { href: '/raise-room', label: 'Raise Room' },
+  { href: '/trust-center', label: 'Trust Center' },
+] as const;
+
+/** Row 2 — trading (amber family) */
+const TRADING_NAV = [
   { href: '/feed', label: 'Feed' },
   { href: '/paper-trading', label: 'Trading Alpha' },
-  { href: '/leaderboard', label: 'Rankings' },
   { href: '/watchlist', label: 'Watchlist', auth: true },
   { hrefKey: 'portfolio' as const, label: 'Portfolio', auth: true },
 ] as const;
@@ -31,6 +39,12 @@ const BUILDING_NAV = [
 
 /** Row 3 — scout / list + profile */
 const ACTION_NAV = [
+  {
+    href: '/trust-center',
+    label: 'Trust Center',
+    active: 'bg-emerald-500 ring-2 ring-emerald-300/50',
+    idle: 'bg-emerald-700 hover:bg-emerald-600',
+  },
   {
     href: '/scout-votes',
     label: 'Scout vote',
@@ -66,6 +80,8 @@ function navActive(pathname: string, href: string) {
   if (href === '/developers') return pathname.startsWith('/developers');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/scout-votes') return pathname.startsWith('/scout-votes');
+  if (href === '/trust-center') return pathname.startsWith('/trust-center');
+  if (href === '/projects') return pathname.startsWith('/projects');
   if (href === '/settings/builder') return pathname.startsWith('/settings/builder');
   if (href.startsWith('/account')) return pathname.startsWith('/account');
   if (href === '/founder-node') return pathname.startsWith('/founder-node');
@@ -136,7 +152,29 @@ function SiteNavInner() {
 
   return (
     <nav className="flex max-w-full flex-col items-end gap-2 text-sm md:gap-2.5">
-      {/* Row 1 — Trading */}
+      {/* Row 1 — Primary */}
+      <div className="flex flex-wrap items-center justify-end gap-1.5 rounded-xl border border-zinc-700/40 bg-zinc-950/40 px-2 py-1.5 md:gap-2">
+        {PRIMARY_NAV.map((item) => {
+          if ('auth' in item && item.auth && !session) return null;
+          const href = item.href;
+          const active = navActive(pathname, href);
+          return (
+            <Link
+              key={href}
+              href={href}
+              className={cn(
+                'rounded-lg px-2.5 py-1.5 transition',
+                active
+                  ? 'bg-zinc-100/10 font-semibold text-white ring-1 ring-zinc-400/40'
+                  : 'text-zinc-300 hover:bg-zinc-800/60 hover:text-white',
+              )}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </div>
+      {/* Row 2 — Trading */}
       <div className="flex flex-wrap items-center justify-end gap-1.5 rounded-xl border border-amber-500/15 bg-amber-950/20 px-2 py-1.5 md:gap-2">
         {TRADING_NAV.map((item) => {
           if ('auth' in item && item.auth && !session) return null;

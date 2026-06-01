@@ -18,6 +18,7 @@ const LANDING_NAV = [
   { href: '/leaderboard', label: 'Rankings' },
   { href: '/founder-den', label: 'Founder OS' },
   { href: '/raise-room', label: 'Raise Room' },
+  { href: '/trust-center', label: 'Trust Center' },
 ] as const;
 
 const NODE_ORBIT = [

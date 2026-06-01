@@ -13,5 +13,6 @@ import { ListingVotesService } from './listing-votes.service';
   imports: [DexscreenerModule, AuthModule, PointsModule, NotificationsModule, PredictionMarketsModule],
   controllers: [ListingApplicationsController],
   providers: [ListingApplicationsService, ListingPublishService, ListingVotesService],
+  exports: [ListingVotesService, ListingApplicationsService],
 })
 export class ListingApplicationsModule {}

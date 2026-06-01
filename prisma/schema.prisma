@@ -37,6 +37,22 @@ enum ListingVoteValue {
   NO
 }
 
+enum CommunityValidationCategory {
+  LOOKS_LEGIT
+  BUILDING_CONSISTENTLY
+  COMMUNITY_EXISTS
+  NEEDS_MORE_PROOF
+  SUSPICIOUS
+  LIKELY_SCAM
+}
+
+enum InvestigationStatus {
+  ACTIVE
+  ADMIN_REVIEW
+  RESOLVED_KEEP
+  RESOLVED_DELIST
+}
+
 enum VerificationType {
   IDENTITY
   LINKEDIN
@@ -353,6 +369,7 @@ model User {
   feedComments         FeedComment[]
   listingApplications  ListingApplication[]
   listingVotes         ListingVote[]
+  projectTrustReports  ProjectTrustReport[]
   analyticsEvents      AnalyticsEvent[]
   searchLogs           SearchLog[]
   adminActions         AdminAction[]        @relation("AdminActions")
@@ -565,6 +582,8 @@ model Project {
   buildQueueItems  BuildQueueItem[]
   founderEvents    FounderEvent[]
   scoutMarkets     ScoutMarket[]
+  investigations   ProjectInvestigation[]
+  trustReports     ProjectTrustReport[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -840,14 +859,16 @@ model ListingApplication {
 }
 
 model ListingVote {
-  id            String           @id @default(cuid())
-  applicationId String
-  userId        String
-  vote          ListingVoteValue
-  whyList       String?          @db.Text
-  whyDoxxed     String?          @db.Text
-  comment       String?          @db.Text
-  createdAt     DateTime         @default(now())
+  id                   String                      @id @default(cuid())
+  applicationId        String
+  userId               String
+  vote                 ListingVoteValue
+  validationCategory   CommunityValidationCategory?
+  voteWeight           Int                         @default(1)
+  whyList              String?                     @db.Text
+  whyDoxxed            String?                     @db.Text
+  comment              String?                     @db.Text
+  createdAt            DateTime                    @default(now())
 
   application ListingApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -855,6 +876,52 @@ model ListingVote {
   @@unique([applicationId, userId])
   @@index([applicationId])
   @@index([userId])
+}
+
+model ProjectInvestigation {
+  id              String              @id @default(cuid())
+  projectId       String
+  status          InvestigationStatus @default(ACTIVE)
+  reason          String?             @db.Text
+  opensAt         DateTime            @default(now())
+  closesAt        DateTime
+  scamThreshold   Int                 @default(40)
+  minVoters       Int                 @default(5)
+  trustScore      Int                 @default(0)
+  scamScore       Int                 @default(0)
+  reviewNotes     String?             @db.Text
+  reviewedAt      DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  project  Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reports  ProjectTrustReport[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([closesAt])
+}
+
+model ProjectTrustReport {
+  id                 String                       @id @default(cuid())
+  projectId          String
+  userId             String
+  investigationId    String?
+  category           CommunityValidationCategory
+  voteWeight         Int                          @default(1)
+  evidenceUrl        String?
+  comment            String?                      @db.Text
+  rewarded           Boolean                      @default(false)
+  createdAt          DateTime                     @default(now())
+
+  project       Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  investigation ProjectInvestigation? @relation(fields: [investigationId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+  @@index([investigationId])
 }
 
 // ─── Reputation, notifications & founder updates ───────────────────────────────

@@ -157,7 +157,7 @@ export class CreateListingApplicationDto {
   @Transform(emptyToUndefined)
   @IsOptional()
   @IsIn(['DOXXED', 'BUILDING_IN_PUBLIC'])
-  founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+  founderDoxxedStatus?: 'DOXXED' | 'VERIFIED' | 'UNDOXXED' | 'BUILDING_IN_PUBLIC';
 
   @Transform(emptyToUndefined)
   @IsOptional()

@@ -44,37 +44,39 @@ export class ListingApplicationsService {
   }
 
   async create(dto: CreateListingApplicationDto, submitterUserId?: string | null) {
-    const verification = this.computeVerification(dto);
-
-    if (!verification.meetsSubmissionThreshold) {
-      throw new BadRequestException(
-        'Add at least one public founder video or interview/podcast URL. Anyone can submit if they found public proof on X, YouTube, etc.',
-      );
-    }
-
-    if (!dto.whyList?.trim()) {
-      throw new BadRequestException('Explain why this project should be listed (whyList).');
-    }
-
     const doxxedStatus =
       dto.founderDoxxedStatus ??
       (dto.whyDoxxed?.toLowerCase().includes('building in public')
         ? 'BUILDING_IN_PUBLIC'
         : 'DOXXED');
-    if (doxxedStatus === 'DOXXED' && !dto.whyDoxxed?.trim()) {
+
+    if (doxxedStatus === 'UNDOXXED') {
       throw new BadRequestException(
-        'Explain why the founder is doxxed (whyDoxxed), or select "Building in public (not fully doxxed)" and add a scout highlight.',
+        'Undoxxed founders are not eligible for official listings. Doxxed Crypto prioritizes transparency — only Doxxed or Verified founders receive official listings.',
       );
     }
-    if (doxxedStatus === 'BUILDING_IN_PUBLIC' && !dto.scoutHighlightNote?.trim()) {
-      const fromWhy = dto.whyDoxxed
-        ?.replace(/^\[Building in public[^\]]*\]\s*/i, '')
-        .trim();
-      if (!fromWhy || fromWhy.length < 20) {
-        throw new BadRequestException(
-          'Add a scout highlight — e.g. building in public, podcast appearances, GitHub activity.',
-        );
-      }
+
+    const verification = this.computeVerification(dto);
+
+    const hasProofLink = Boolean(
+      dto.founderVideoUrl?.trim() ||
+        dto.founderInterviewUrl?.trim() ||
+        dto.founderTwitter?.trim() ||
+        dto.founderLinkedIn?.trim(),
+    );
+
+    if (doxxedStatus === 'DOXXED' && !hasProofLink && !verification.meetsSubmissionThreshold) {
+      throw new BadRequestException(
+        'Doxxed founders require a public proof link — X/Twitter, YouTube, podcast, interview, or team page.',
+      );
+    }
+
+    if (doxxedStatus === 'VERIFIED' && !dto.founderLinkedIn?.trim() && !dto.founderInterviewUrl?.trim()) {
+      throw new BadRequestException('Verified founders require a verification link (LinkedIn or public interview).');
+    }
+
+    if (!dto.whyList?.trim() && !dto.scoutHighlightNote?.trim()) {
+      throw new BadRequestException('Add a short note on why this founder deserves community review.');
     }
 
     const activeUsers = await this.prisma.user.count({
@@ -105,7 +107,7 @@ export class ListingApplicationsService {
         companyDetails: dto.companyDetails,
         auditUrl: dto.auditUrl,
         summary: dto.summary,
-        whyList: dto.whyList.trim(),
+        whyList: dto.whyList?.trim() ?? dto.scoutHighlightNote?.trim() ?? 'Community listing submission',
         whyDoxxed: dto.whyDoxxed?.trim() ?? null,
         founderDoxxedStatus: doxxedStatus,
         scoutHighlightNote:
