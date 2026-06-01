@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { TradingChart } from '@/components/trading-chart';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
+import { TradeCloseShareButtons } from '@/components/trade-close-share-buttons';
 import { BustPenaltyModal } from '@/components/trade-modals';
 import { TradeAccountabilityModal } from '@/components/trade-accountability-modal';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
@@ -82,6 +83,17 @@ function PaperTradingPageContent() {
   const [resetLoading, setResetLoading] = useState(false);
   const [bustDismissed, setBustDismissed] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [closeShare, setCloseShare] = useState<{
+    ticker: string;
+    investedUsd: number;
+    proceedsUsd: number;
+    missedAlpha: {
+      realizedReturnPct: number;
+      whatIfHeldReturnPct: number;
+      missedAlphaPct: number;
+      convictionScore: number;
+    };
+  } | null>(null);
   const [closingProjectId, setClosingProjectId] = useState<string | null>(null);
   const [swapFrom, setSwapFrom] = useState<Position | null>(null);
   const [swapTargetUrl, setSwapTargetUrl] = useState('');
@@ -107,10 +119,13 @@ function PaperTradingPageContent() {
   }, []);
 
   useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 5000);
+    if (!toast && !closeShare) return;
+    const timer = setTimeout(() => {
+      setToast(null);
+      setCloseShare(null);
+    }, 12000);
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [toast, closeShare]);
 
   useEffect(() => {
     if (authStatus === 'loading') return;
@@ -300,9 +315,24 @@ function PaperTradingPageContent() {
         result.realizedPnlUsd >= 0
           ? `+${formatUsd(result.realizedPnlUsd)}`
           : formatUsd(result.realizedPnlUsd);
-      setToast(
-        `Closed ${result.ticker} · proceeds ${formatUsd(result.proceedsUsd)} · realized P&L ${pnlLabel}`,
-      );
+      const investedUsd = pos.quantity * pos.avgBuyPrice;
+      if (result.missedAlpha) {
+        setCloseShare({
+          ticker: result.ticker,
+          investedUsd,
+          proceedsUsd: result.proceedsUsd,
+          missedAlpha: result.missedAlpha,
+        });
+        const ma = result.missedAlpha;
+        setToast(
+          `Closed ${result.ticker} · +${ma.realizedReturnPct.toFixed(0)}% realized · What If I Held? +${ma.whatIfHeldReturnPct.toFixed(0)}% · Conviction ${ma.convictionScore}/100`,
+        );
+      } else {
+        setCloseShare(null);
+        setToast(
+          `Closed ${result.ticker} · proceeds ${formatUsd(result.proceedsUsd)} · realized P&L ${pnlLabel}`,
+        );
+      }
       setLastFeedPostId(result.feedPostId);
       if (intelPosition?.ticker === pos.ticker) setIntelPosition(null);
       await refreshPortfolio(userId);
@@ -593,9 +623,24 @@ function PaperTradingPageContent() {
             {guestPortfolioNotice}
           </div>
         )}
-        {toast && (
+        {(toast || closeShare) && (
           <div className="lg:col-span-5 rounded-xl border border-emerald-500/40 bg-emerald-950/25 px-4 py-3 text-sm text-emerald-100">
             {toast}
+            {closeShare && userId && (
+              <TradeCloseShareButtons
+                ticker={closeShare.ticker}
+                investedUsd={closeShare.investedUsd}
+                proceedsUsd={closeShare.proceedsUsd}
+                realizedReturnPct={closeShare.missedAlpha.realizedReturnPct}
+                whatIfHeldReturnPct={closeShare.missedAlpha.whatIfHeldReturnPct}
+                missedAlphaPct={closeShare.missedAlpha.missedAlphaPct}
+                portfolioUrl={
+                  typeof window !== 'undefined'
+                    ? `${window.location.origin}/portfolio/${userId}`
+                    : undefined
+                }
+              />
+            )}
           </div>
         )}
         <div className="lg:col-span-5 flex flex-wrap gap-2">
@@ -612,10 +657,10 @@ function PaperTradingPageContent() {
             Top losers → learn from busts
           </Link>
           <Link
-            href="/notifications"
-            className="rounded-full border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-muted)] hover:text-white"
+            href="/leaderboard?tab=missed-alpha"
+            className="rounded-full border border-amber-500/40 bg-amber-950/25 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-950/40"
           >
-            Trade alerts
+            Most alpha left on the table →
           </Link>
           {userId && (
             <Link

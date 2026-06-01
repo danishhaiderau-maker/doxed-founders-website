@@ -31,6 +31,7 @@ import { PredictionMarketsModule } from './prediction-markets/prediction-markets
 import { FounderNodeModule } from './founder-node/founder-node.module';
 import { AttestationModule } from './attestation/attestation.module';
 import { TrustCenterModule } from './trust-center/trust-center.module';
+import { TownHallModule } from './town-hall/town-hall.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { TrustCenterModule } from './trust-center/trust-center.module';
     FounderNodeModule,
     AttestationModule,
     TrustCenterModule,
+    TownHallModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

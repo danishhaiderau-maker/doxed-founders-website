@@ -94,6 +94,11 @@ export class PaperTradingController {
     return this.limitOrders.cancel(dto.userId, orderId);
   }
 
+  @Get('leaderboard/missed-alpha')
+  missedAlphaLeaderboard() {
+    return this.paperTrading.getMissedAlphaLeaderboard();
+  }
+
   @Get('leaderboard')
   leaderboard() {
     return this.paperTrading.getLeaderboard();
