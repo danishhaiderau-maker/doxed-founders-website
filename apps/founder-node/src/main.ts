@@ -36,6 +36,12 @@ const SYNC_INTERVAL_MS = 60_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 
+/** Prevent multiple tray instances (portable + installer + double-click). */
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
@@ -269,6 +275,17 @@ function buildTrayMenu(vaultRoot: string) {
 
 function refreshTrayMenu(vaultRoot: string): void {
   tray?.setContextMenu(buildTrayMenu(vaultRoot));
+}
+
+if (gotSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (pairWindow && !pairWindow.isDestroyed()) {
+      pairWindow.show();
+      pairWindow.focus();
+      return;
+    }
+    tray?.popUpContextMenu();
+  });
 }
 
 app.whenReady().then(() => {
