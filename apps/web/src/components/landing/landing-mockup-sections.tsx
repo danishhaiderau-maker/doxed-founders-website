@@ -290,8 +290,8 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Card>
       </section>
 
-      {/* Row 2: Mission control hub — tap to enter any workspace */}
-      <LandingFeatureHub scoutPending={pendingReviews} />
+      {/* Row 2: Navigation V5 hub + live preview widgets */}
+      <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />
 
       {/* Row 3: Platform stats */}
       <section>

@@ -72,20 +72,26 @@ export type HubNavItem = {
 
 export type HubNavRow = {
   id: string;
+  rowNumber: string;
   label: string;
   subtitle: string;
+  sidebarDescription: string;
   borderClass: string;
   labelClass: string;
+  rowBgClass: string;
   items: HubNavItem[];
 };
 
 export const HUB_NAV_ROWS: HubNavRow[] = [
   {
     id: 'explore',
+    rowNumber: 'Row 1',
     label: 'Explore',
     subtitle: 'Find projects · Rankings · Trust',
-    borderClass: 'border-zinc-600/40 bg-zinc-900/40',
-    labelClass: 'text-zinc-400',
+    sidebarDescription: 'Find projects, founders, rankings, and opportunities.',
+    borderClass: 'border-zinc-600/40',
+    labelClass: 'text-zinc-300',
+    rowBgClass: 'bg-zinc-900/50',
     items: [
       { href: '/discover', label: 'Discover', icon: '🔍' },
       { href: '/projects', label: 'Projects', icon: '📦' },
@@ -96,10 +102,13 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
   },
   {
     id: 'trading',
+    rowNumber: 'Row 2',
     label: 'Community + Trading',
     subtitle: 'Feed · DDollar · Paper trade',
-    borderClass: 'border-amber-500/25 bg-amber-950/15',
-    labelClass: 'text-amber-300/90',
+    sidebarDescription: 'Follow activity, earn DDollar, track markets, watchlist, manage portfolio.',
+    borderClass: 'border-amber-500/25',
+    labelClass: 'text-amber-200',
+    rowBgClass: 'bg-amber-950/20',
     items: [
       { href: '/feed', label: 'Feed', icon: '📰' },
       { href: '/ddollar', label: 'DDollar', icon: '💵' },
@@ -110,10 +119,13 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
   },
   {
     id: 'build',
+    rowNumber: 'Row 3',
     label: 'Build',
     subtitle: 'Founder OS · Raise · List',
-    borderClass: 'border-violet-500/25 bg-violet-950/15',
-    labelClass: 'text-violet-300/90',
+    sidebarDescription: 'Build startups, raise funds, and list new projects.',
+    borderClass: 'border-violet-500/25',
+    labelClass: 'text-violet-200',
+    rowBgClass: 'bg-violet-950/20',
     items: [
       { href: '/founder-den', label: 'Founder OS', icon: '⚡', auth: true },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
