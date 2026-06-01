@@ -156,8 +156,14 @@ export class CreateListingApplicationDto {
 
   @Transform(emptyToUndefined)
   @IsOptional()
-  @IsIn(['DOXXED', 'BUILDING_IN_PUBLIC'])
+  @IsIn(['DOXXED', 'VERIFIED', 'UNDOXXED', 'BUILDING_IN_PUBLIC'])
   founderDoxxedStatus?: 'DOXXED' | 'VERIFIED' | 'UNDOXXED' | 'BUILDING_IN_PUBLIC';
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @ValidateIf((_o, v) => v != null)
+  @IsUrl({ require_tld: false })
+  proofLinkUrl?: string;
 
   @Transform(emptyToUndefined)
   @IsOptional()

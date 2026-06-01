@@ -114,7 +114,23 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
             {v2?.pendingJobs} pending sync job(s)
           </span>
         )}
+        {v2?.appVersion && (
+          <span className="rounded-full bg-zinc-700/60 px-2.5 py-1 text-zinc-300">v{v2.appVersion}</span>
+        )}
       </div>
+
+      {v2?.paired && v2.online && v2.appVersion && !v2.appVersion.startsWith('0.4') && (
+        <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
+          <p className="font-medium">Update Founder Node to v0.4.0+</p>
+          <p className="mt-1 text-xs text-zinc-400">
+            Your tray app (v{v2.appVersion}) cannot process sync jobs. Download the latest installer from{' '}
+            <Link href="/founder-node" className="text-cyan-300 underline">
+              /founder-node
+            </Link>
+            , install it, then restart the app and retry Rebuild vector index.
+          </p>
+        </div>
+      )}
 
       {!v2?.paired && (
         <p className="mt-4 text-sm text-zinc-400">
@@ -128,6 +144,25 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
 
       {v2?.paired && (
         <div className="mt-6 space-y-4">
+          <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-4">
+            <p className="text-sm font-medium text-cyan-100">After pairing — do this next</p>
+            <ol className="mt-2 space-y-1.5 text-xs text-zinc-400">
+              <li className={v2.online ? 'text-emerald-300' : 'text-amber-200'}>
+                {v2.online ? '✓' : '○'} Keep Founder Node tray app open on your desktop
+              </li>
+              <li className={(v2.vectorChunks ?? 0) > 0 ? 'text-emerald-300' : 'text-zinc-300'}>
+                {(v2.vectorChunks ?? 0) > 0 ? '✓' : '○'} Click <strong className="font-medium">Rebuild vector index</strong>{' '}
+                once (indexes vault for search — Step 5 needs this)
+              </li>
+              <li className="text-zinc-400">
+                ○ Wait a few minutes for encrypted backup sync (Step 5 “encrypted relay” check)
+              </li>
+              <li className="text-zinc-400">
+                ○ Optional: set a goal focus above, then <strong className="font-medium">Push goal to vault</strong>
+              </li>
+            </ol>
+          </div>
+
           <div className="grid gap-3 sm:grid-cols-3">
             <button
               type="button"
@@ -198,7 +233,22 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
       )}
 
       {msg && <p className="mt-3 text-sm text-emerald-300">{msg}</p>}
-      {err && <p className="mt-3 text-sm text-red-400">{err}</p>}
+      {err && (
+        <div className="mt-3 space-y-2">
+          <p className="text-sm text-red-400">{err}</p>
+          {err.toLowerCase().includes('timed out') && (
+            <div className="rounded-lg border border-red-500/25 bg-red-950/20 p-3 text-xs text-zinc-400">
+              <p className="font-medium text-red-200">Founder Node did not respond in time</p>
+              <ul className="mt-2 list-disc space-y-1 pl-4">
+                <li>Confirm the tray app shows connected (not just “paired” in the browser)</li>
+                <li>Restart Founder Node, then try Rebuild vector index again</li>
+                <li>On Windows, allow Founder Node through firewall if prompted</li>
+                <li>First index build can take 30–60s — keep the app in the foreground</li>
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }

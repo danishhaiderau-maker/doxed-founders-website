@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.4.0';
 
 type ReleaseAsset = {
   name: string;

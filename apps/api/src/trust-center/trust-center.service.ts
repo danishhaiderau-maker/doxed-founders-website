@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import {
   INVESTIGATION_SCAM_THRESHOLD_PERCENT,
@@ -27,13 +28,18 @@ export type FileTrustReportDto = {
 };
 
 @Injectable()
-export class TrustCenterService {
+export class TrustCenterService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
     private readonly trustWeight: TrustWeightService,
     private readonly listingVotes: ListingVotesService,
   ) {}
+
+  onModuleInit() {
+    void this.expireInvestigations();
+    setInterval(() => void this.expireInvestigations(), 15 * 60 * 1000);
+  }
 
   async getOverview() {
     const now = new Date();
@@ -175,19 +181,114 @@ export class TrustCenterService {
   }
 
   async getRecentlyDelisted(limit = 12) {
-    return this.prisma.listingApplication.findMany({
-      where: { status: ListingStatus.REJECTED },
+    const investigations = await this.prisma.projectInvestigation.findMany({
+      where: { status: InvestigationStatus.RESOLVED_DELIST },
       orderBy: { updatedAt: 'desc' },
       take: limit,
-      select: {
-        id: true,
-        projectName: true,
-        ticker: true,
-        logoUrl: true,
-        reviewNotes: true,
-        updatedAt: true,
+      include: {
+        project: {
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+            ticker: true,
+            logoUrl: true,
+            approved: true,
+          },
+        },
       },
     });
+    return investigations.map((inv) => ({
+      id: inv.id,
+      projectName: inv.project.name,
+      ticker: inv.project.ticker,
+      logoUrl: inv.project.logoUrl,
+      slug: inv.project.slug,
+      reason: inv.reason,
+      delistedAt: inv.updatedAt,
+    }));
+  }
+
+  async getCommunityReviews(limit = 40) {
+    return this.prisma.listingVote.findMany({
+      where: {
+        OR: [{ comment: { not: null } }, { whyList: { not: null } }, { whyDoxxed: { not: null } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: {
+        user: { select: { id: true, name: true, contributorLevel: true } },
+        application: {
+          select: {
+            id: true,
+            projectName: true,
+            ticker: true,
+            logoUrl: true,
+            status: true,
+          },
+        },
+      },
+    });
+  }
+
+  async resolveInvestigation(id: string, decision: 'KEEP' | 'DELIST', notes?: string) {
+    const investigation = await this.prisma.projectInvestigation.findUnique({
+      where: { id },
+      include: { project: true, reports: true },
+    });
+    if (!investigation) throw new NotFoundException('Investigation not found');
+    if (
+      investigation.status !== InvestigationStatus.ADMIN_REVIEW &&
+      investigation.status !== InvestigationStatus.ACTIVE
+    ) {
+      throw new BadRequestException('Investigation is already resolved');
+    }
+
+    if (decision === 'DELIST') {
+      await this.prisma.project.update({
+        where: { id: investigation.projectId },
+        data: { approved: false },
+      });
+      await this.prisma.projectInvestigation.update({
+        where: { id },
+        data: {
+          status: InvestigationStatus.RESOLVED_DELIST,
+          reason: notes?.trim() || investigation.reason,
+        },
+      });
+      for (const report of investigation.reports) {
+        if (NEGATIVE_REPORT(report.category)) {
+          await this.points.award(report.userId, POINTS.SCAM_CONFIRMED, 'SCAM_CONFIRMED');
+        }
+      }
+      return { status: InvestigationStatus.RESOLVED_DELIST, projectSlug: investigation.project.slug };
+    }
+
+    await this.prisma.projectInvestigation.update({
+      where: { id },
+      data: {
+        status: InvestigationStatus.RESOLVED_KEEP,
+        reason: notes?.trim() || investigation.reason,
+      },
+    });
+    return { status: InvestigationStatus.RESOLVED_KEEP, projectSlug: investigation.project.slug };
+  }
+
+  async expireInvestigations() {
+    const now = new Date();
+    const expired = await this.prisma.projectInvestigation.findMany({
+      where: {
+        status: InvestigationStatus.ACTIVE,
+        closesAt: { lt: now },
+      },
+    });
+    for (const inv of expired) {
+      await this.prisma.projectInvestigation.update({
+        where: { id: inv.id },
+        data: { status: InvestigationStatus.ADMIN_REVIEW },
+      });
+    }
+    return { expired: expired.length };
   }
 
   async getProjectTrustMetrics(slug: string) {

@@ -9,7 +9,7 @@ import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 
-/** Row 1 — discover & trust */
+/** Row 1 — discover, trust, agent hub */
 const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
@@ -17,9 +17,7 @@ const PRIMARY_NAV = [
   { href: '/trust-center', label: 'Trust Center' },
   { href: '/scout-votes', label: 'Scout Vote' },
   { href: '/agent-hub', label: 'Agent Hub' },
-  { href: '/founder-den', label: 'Founder OS', auth: true },
-  { href: '/raise-room', label: 'Raise Room' },
-  { href: '/list-your-project', label: 'List Project' },
+  { href: '/town-hall', label: 'Town Hall' },
 ] as const;
 
 /** Row 2 — trading (amber family) */
@@ -30,36 +28,14 @@ const TRADING_NAV = [
   { hrefKey: 'portfolio' as const, label: 'Portfolio', auth: true },
 ] as const;
 
-/** Row 2 — building (violet family) */
+/** Row 3 — build & list (violet family) */
 const BUILDING_NAV = [
   { href: '/founder-den', label: 'Founder OS', auth: true },
-  { href: '/developers', label: 'Developers' },
   { href: '/founder-node', label: 'Founder Node' },
-  { href: '/agent-hub', label: 'Agent Hub' },
+  { href: '/developers', label: 'Developers' },
   { href: '/raise-room', label: 'Raise Room' },
+  { href: '/list-your-project', label: 'List Project' },
   { href: '/settings/builder', label: 'AI Stack', auth: true },
-] as const;
-
-/** Row 3 — scout / list + profile */
-const ACTION_NAV = [
-  {
-    href: '/trust-center',
-    label: 'Trust Center',
-    active: 'bg-emerald-500 ring-2 ring-emerald-300/50',
-    idle: 'bg-emerald-700 hover:bg-emerald-600',
-  },
-  {
-    href: '/scout-votes',
-    label: 'Scout vote',
-    active: 'bg-sky-500 ring-2 ring-sky-300/50',
-    idle: 'bg-sky-600 hover:bg-sky-500',
-  },
-  {
-    href: '/list-your-project',
-    label: 'List project',
-    active: 'bg-violet-500 ring-2 ring-violet-300/50',
-    idle: 'bg-violet-600 hover:bg-violet-500',
-  },
 ] as const;
 
 const PROFILE_LINKS = [
@@ -228,24 +204,8 @@ function SiteNavInner() {
         })}
       </div>
 
-      {/* Row 3 — Scout / list + profile */}
+      {/* Row 3 — Profile */}
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {ACTION_NAV.map((item) => {
-          const active = navActive(pathname, item.href);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                'rounded-lg px-4 py-2 font-semibold text-white shadow-lg transition',
-                active ? item.active : item.idle,
-              )}
-            >
-              {item.label}
-            </Link>
-          );
-        })}
-
         {session ? (
           <div className="relative border-l border-[var(--color-border)] pl-2 md:pl-3" ref={profileRef}>
             <button

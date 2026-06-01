@@ -25,13 +25,14 @@ import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encr
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SYNC_INTERVAL_MS = 60_000;
 const INFERENCE_POLL_MS = 3_000;
-const SYNC_JOB_POLL_MS = 3_000;
+const SYNC_JOB_POLL_MS = 1_500;
 
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let inferenceTimer: ReturnType<typeof setInterval> | null = null;
 let syncJobTimer: ReturnType<typeof setInterval> | null = null;
+let syncJobInFlight = false;
 
 function loadAppIcon() {
   const candidates = [
@@ -56,6 +57,7 @@ function startSyncLoop(vaultRoot: string) {
     inferenceTimer = setInterval(() => runInferenceCycle(vaultRoot).catch(console.error), INFERENCE_POLL_MS);
   }
   if (!syncJobTimer) {
+    runSyncJobCycle(vaultRoot).catch(console.error);
     syncJobTimer = setInterval(() => runSyncJobCycle(vaultRoot).catch(console.error), SYNC_JOB_POLL_MS);
   }
 }
@@ -87,9 +89,15 @@ async function runInferenceCycle(vaultRoot: string): Promise<void> {
 }
 
 async function runSyncJobCycle(vaultRoot: string): Promise<void> {
+  if (syncJobInFlight) return;
   const config = readNodeConfig(vaultRoot);
   if (!config) return;
-  await processPendingSyncJobs(vaultRoot);
+  syncJobInFlight = true;
+  try {
+    await processPendingSyncJobs(vaultRoot);
+  } finally {
+    syncJobInFlight = false;
+  }
 }
 
 async function runSyncCycle(vaultRoot: string): Promise<void> {

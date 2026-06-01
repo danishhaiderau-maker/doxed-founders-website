@@ -121,26 +121,83 @@ export function AgentActivityFeed({ items }: { items: TradingAgentActivityEntry[
   );
 }
 
+export function BotConnectionBanner({
+  botConnected,
+  botSource,
+  strategyMode,
+  executionPaused,
+  executionReason,
+}: {
+  botConnected?: boolean;
+  botSource?: 'LIVE' | 'FALLBACK';
+  strategyMode?: string | null;
+  executionPaused?: boolean;
+  executionReason?: string | null;
+}) {
+  if (botConnected && botSource === 'LIVE') {
+    return (
+      <div className="rounded-2xl border border-emerald-500/40 bg-emerald-950/25 px-5 py-3">
+        <p className="text-sm font-semibold text-emerald-200">
+          LIVE — connected to your research bot
+        </p>
+        <p className="mt-1 text-xs text-emerald-100/80">
+          {strategyMode ?? 'RESEARCH'} mode · Bybit WS + DeepSeek pipeline · refreshes every 15s
+          {executionPaused && executionReason
+            ? ` · Paused: ${executionReason}`
+            : ''}
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-2xl border border-amber-500/30 bg-amber-950/20 px-5 py-3">
+      <p className="text-sm font-semibold text-amber-200">DEMO — research bot offline</p>
+      <p className="mt-1 text-xs text-amber-100/75">
+        Showing CoinGecko price + seeded demo state. Run the Python bot locally and set{' '}
+        <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on Railway to go live.
+      </p>
+    </div>
+  );
+}
+
 export function LiveMissionControl({
   agent,
   dashboard,
   activity,
+  botConnected,
+  botSource,
+  strategyMode,
+  executionPaused,
+  executionReason,
 }: {
   agent: TradingAgentSummary;
   dashboard: TradingAgentDashboardState;
   activity: TradingAgentActivityEntry[];
+  botConnected?: boolean;
+  botSource?: 'LIVE' | 'FALLBACK';
+  strategyMode?: string | null;
+  executionPaused?: boolean;
+  executionReason?: string | null;
 }) {
   const d = dashboard;
   return (
     <div className="space-y-6">
       <AgentWarningBanner />
+      <BotConnectionBanner
+        botConnected={botConnected}
+        botSource={botSource}
+        strategyMode={strategyMode}
+        executionPaused={executionPaused}
+        executionReason={executionReason}
+      />
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Live Mission Control</p>
           <h1 className="mt-1 text-2xl font-bold text-white">{agent.name}</h1>
           <p className="text-sm text-zinc-500">
-            {agent.assetSymbol} · {agent.status} · updated live
+            {agent.assetSymbol} · {agent.status} ·{' '}
+            {botConnected ? 'research bot live' : 'demo fallback'}
           </p>
         </div>
         <div className="text-right text-sm">

@@ -83,13 +83,21 @@ export function executeSyncJobOnVault(
   switch (kind) {
     case 'PUSH_GOAL':
       applyPushGoal(vaultRoot, String(payload.goal ?? ''));
-      return { ok: true, applied: 'PUSH_GOAL', chunks: rebuildVaultVectorIndex(vaultRoot).chunks.length };
+      return {
+        ok: true,
+        applied: 'PUSH_GOAL',
+        chunks: readVaultVectorIndex(vaultRoot)?.chunks.length ?? 0,
+      };
     case 'PUSH_TASK':
       applyPushTask(vaultRoot, {
         title: String(payload.title ?? ''),
         taskId: typeof payload.taskId === 'string' ? payload.taskId : undefined,
       });
-      return { ok: true, applied: 'PUSH_TASK', chunks: rebuildVaultVectorIndex(vaultRoot).chunks.length };
+      return {
+        ok: true,
+        applied: 'PUSH_TASK',
+        chunks: readVaultVectorIndex(vaultRoot)?.chunks.length ?? 0,
+      };
     case 'VAULT_SEARCH': {
       const query = String(payload.query ?? '').trim();
       const topK = Number(payload.topK ?? 5);

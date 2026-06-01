@@ -129,7 +129,16 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
                 Alerts: trade opened · closed · new high · strategy change
               </span>
             </div>
-            <LiveMissionControl agent={data.agent} dashboard={data.dashboard} activity={activity} />
+            <LiveMissionControl
+              agent={data.agent}
+              dashboard={data.dashboard}
+              activity={activity}
+              botConnected={data.botConnected}
+              botSource={data.botSource}
+              strategyMode={data.strategyMode}
+              executionPaused={data.executionPaused}
+              executionReason={data.executionReason}
+            />
           </>
         )}
       </div>

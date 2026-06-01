@@ -192,15 +192,20 @@ export class ListingVotesService implements OnModuleInit {
     return updated;
   }
 
-  async promoteToAdminReview(applicationId: string, projectName: string) {
+  async promoteToAdminReview(applicationId: string, projectName: string, reason?: string) {
     const application = await this.prisma.listingApplication.findUnique({
       where: { id: applicationId },
     });
     if (!application || application.status !== ListingStatus.COMMUNITY_VOTING) return;
 
+    const adminDeadline = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     await this.prisma.listingApplication.update({
       where: { id: applicationId },
-      data: { status: ListingStatus.PENDING },
+      data: {
+        status: ListingStatus.PENDING,
+        votingClosesAt: adminDeadline,
+        reviewNotes: reason ?? application.reviewNotes,
+      },
     });
 
     await this.notifications.notifyAllUsers({
@@ -223,22 +228,32 @@ export class ListingVotesService implements OnModuleInit {
 
     let expiredCount = 0;
     for (const app of expired) {
-      const tally = tallyListingVotes(
-        this.mapVotes(app.votes),
-        app.requiredVoters,
-        app.minYesPercent,
-      );
+      if (app.status === ListingStatus.COMMUNITY_VOTING) {
+        const tally = tallyListingVotes(
+          this.mapVotes(app.votes),
+          app.requiredVoters,
+          app.minYesPercent,
+        );
+        const note = tally.passed
+          ? 'Community validation passed — queued for admin review.'
+          : `48h community window ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}% weighted) — admin review queue.`;
+        await this.promoteToAdminReview(app.id, app.projectName, note);
+        expiredCount += 1;
+        continue;
+      }
 
-      await this.prisma.listingApplication.update({
-        where: { id: app.id },
-        data: {
-          status: ListingStatus.REJECTED,
-          reviewNotes: tally.passed
-            ? 'Voting passed but admin did not approve before the 48h window closed.'
-            : `48h voting ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}% weighted) — not listed.`,
-        },
-      });
-      expiredCount += 1;
+      if (app.status === ListingStatus.PENDING) {
+        await this.prisma.listingApplication.update({
+          where: { id: app.id },
+          data: {
+            status: ListingStatus.REJECTED,
+            reviewNotes:
+              app.reviewNotes ??
+              'Admin review window expired without approval.',
+          },
+        });
+        expiredCount += 1;
+      }
     }
 
     if (expiredCount > 0) {

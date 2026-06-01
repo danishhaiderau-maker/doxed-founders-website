@@ -2349,12 +2349,20 @@ export interface TradingAgentSummary {
   followerCount: number;
   isExperimental: boolean;
   following?: boolean;
+  botConnected?: boolean;
+  currentPosition?: string;
+  currentAction?: string;
 }
 
 export interface TradingAgentDashboard {
   agent: TradingAgentSummary;
   dashboard: import('@dcf/utils').TradingAgentDashboardState;
   updatedAt: string;
+  botConnected?: boolean;
+  botSource?: 'LIVE' | 'FALLBACK';
+  strategyMode?: string | null;
+  executionPaused?: boolean;
+  executionReason?: string | null;
 }
 
 export interface TradingAgentActivityEntry {
@@ -2536,7 +2544,9 @@ export interface BuilderSettings {
   founderNodeV2?: {
     paired: boolean;
     online: boolean;
+    nodeId: string | null;
     nodeLabel: string | null;
+    appVersion: string | null;
     vectorChunks: number | null;
     vectorIndexedAt: string | null;
     lastPullSyncAt: string | null;
