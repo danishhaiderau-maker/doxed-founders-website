@@ -2405,6 +2405,8 @@ export interface TradingAgentSummary {
 export interface TradingAgentDashboard {
   agent: TradingAgentSummary;
   dashboard: import('@dcf/utils').TradingAgentDashboardState;
+  /** Full research bot snapshot when TRADING_AGENT_BOT_URL is connected. */
+  rawBotState?: Record<string, unknown> | null;
   updatedAt: string;
   botConnected?: boolean;
   botSource?: 'LIVE' | 'FALLBACK';

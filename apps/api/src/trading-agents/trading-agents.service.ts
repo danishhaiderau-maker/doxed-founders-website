@@ -386,6 +386,7 @@ export class TradingAgentsService implements OnModuleInit {
             botConnected: true,
           }),
           dashboard: live.dashboard,
+          rawBotState: live.rawState,
           updatedAt: new Date().toISOString(),
           botConnected: true,
           botSource: 'LIVE' as const,
