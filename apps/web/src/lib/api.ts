@@ -598,6 +598,7 @@ export interface PublicPortfolio {
   olderTradeCount: number;
   timeline: TradingTimelineEvent[];
   closedTrades: ClosedTradeCard[];
+  tradeJourneys: TradeJourneyCard[];
   positions: {
     projectId?: string;
     ticker: string;
@@ -658,6 +659,13 @@ export interface TradingTimelineEvent {
   missedAlphaPct: number | null;
   peakPriceUsd: number | null;
   convictionScore: number | null;
+  postExitPeakPriceUsd: number | null;
+  postExitTroughPriceUsd: number | null;
+  pumpAfterExitPct: number | null;
+  dropAfterExitPct: number | null;
+  whatIfHeldTotalPct: number | null;
+  missedAfterExitPct: number | null;
+  exitNarrative: 'regret' | 'smart' | 'neutral' | null;
 }
 
 export interface ClosedTradeCard {
@@ -666,6 +674,8 @@ export interface ClosedTradeCard {
   projectName: string;
   logoUrl: string | null;
   closedAt: string;
+  openedAt: string | null;
+  durationDays: number;
   entryPriceUsd: number;
   exitPriceUsd: number;
   investedUsd: number;
@@ -676,6 +686,22 @@ export interface ClosedTradeCard {
   peakPriceUsd: number | null;
   convictionScore: number | null;
   thesis: string | null;
+  postExitPeakPriceUsd: number;
+  postExitTroughPriceUsd: number;
+  pumpAfterExitPct: number;
+  dropAfterExitPct: number;
+  whatIfHeldTotalPct: number;
+  missedAfterExitPct: number;
+  exitNarrative: 'regret' | 'smart' | 'neutral';
+}
+
+export interface TradeJourneyCard {
+  closedTradeId: string;
+  ticker: string;
+  projectName: string;
+  logoUrl: string | null;
+  events: TradingTimelineEvent[];
+  closed: ClosedTradeCard;
 }
 
 export function fetchPublicPortfolio(userId: string, includeOlder = false) {

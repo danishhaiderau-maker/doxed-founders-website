@@ -12,6 +12,7 @@ import {
   TOP_UP_FEE_USD,
   computeMissedAlpha,
   computeTrustWeight,
+  computePostExitStory,
 } from '@dcf/utils';
 import { isSolanaTopUpConfigured, resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import {
@@ -618,6 +619,13 @@ export class PaperTradingService {
           convictionScore: input.convictionScore ?? undefined,
           peakPriceUsd:
             input.peakPriceUsd != null ? new Prisma.Decimal(input.peakPriceUsd) : undefined,
+          ...(input.side === PaperTradeSide.SELL
+            ? {
+                postExitPeakPriceUsd: new Prisma.Decimal(price),
+                postExitTroughPriceUsd: new Prisma.Decimal(price),
+                postExitUpdatedAt: new Date(),
+              }
+            : {}),
         },
       });
 
@@ -722,6 +730,8 @@ export class PaperTradingService {
       ? undefined
       : new Date(Date.now() - JOURNEY_DEFAULT_DAYS * 24 * 60 * 60 * 1000);
 
+    await this.refreshPostExitPrices(userId, journeyCutoff);
+
     const olderTradeCount = journeyCutoff
       ? await this.prisma.paperTrade.count({
           where: { userId, createdAt: { lt: journeyCutoff } },
@@ -771,6 +781,7 @@ export class PaperTradingService {
       olderTradeCount,
       timeline: journey.timeline,
       closedTrades: journey.closedTrades,
+      tradeJourneys: journey.tradeJourneys,
       positions: portfolio.positions.map((p) => ({
         projectId: p.projectId,
         ticker: p.ticker,
@@ -817,6 +828,41 @@ export class PaperTradingService {
     };
   }
 
+  private async refreshPostExitPrices(userId: string, since?: Date) {
+    const sells = await this.prisma.paperTrade.findMany({
+      where: {
+        userId,
+        side: PaperTradeSide.SELL,
+        ...(since ? { createdAt: { gte: since } } : {}),
+      },
+      select: { id: true, projectId: true, priceUsd: true, postExitPeakPriceUsd: true, postExitTroughPriceUsd: true },
+    });
+
+    await Promise.all(
+      sells.map(async (trade) => {
+        try {
+          const { priceUsd: livePrice } = await this.getProjectLivePrice(trade.projectId);
+          if (!livePrice || livePrice <= 0) return;
+
+          const exitPrice = Number(trade.priceUsd);
+          const prevPeak = Number(trade.postExitPeakPriceUsd ?? exitPrice);
+          const prevTrough = Number(trade.postExitTroughPriceUsd ?? exitPrice);
+
+          await this.prisma.paperTrade.update({
+            where: { id: trade.id },
+            data: {
+              postExitPeakPriceUsd: new Prisma.Decimal(Math.max(prevPeak, livePrice)),
+              postExitTroughPriceUsd: new Prisma.Decimal(Math.min(prevTrough, livePrice)),
+              postExitUpdatedAt: new Date(),
+            },
+          });
+        } catch {
+          /* skip tokens we cannot price */
+        }
+      }),
+    );
+  }
+
   private async buildTradingJourney(userId: string, since?: Date) {
     const trades = await this.prisma.paperTrade.findMany({
       where: {
@@ -851,6 +897,13 @@ export class PaperTradingService {
       missedAlphaPct: number | null;
       peakPriceUsd: number | null;
       convictionScore: number | null;
+      postExitPeakPriceUsd: number | null;
+      postExitTroughPriceUsd: number | null;
+      pumpAfterExitPct: number | null;
+      dropAfterExitPct: number | null;
+      whatIfHeldTotalPct: number | null;
+      missedAfterExitPct: number | null;
+      exitNarrative: 'regret' | 'smart' | 'neutral' | null;
     }> = [];
 
     const closedTrades: Array<{
@@ -859,6 +912,8 @@ export class PaperTradingService {
       projectName: string;
       logoUrl: string | null;
       closedAt: string;
+      openedAt: string | null;
+      durationDays: number;
       entryPriceUsd: number;
       exitPriceUsd: number;
       investedUsd: number;
@@ -869,7 +924,16 @@ export class PaperTradingService {
       peakPriceUsd: number | null;
       convictionScore: number | null;
       thesis: string | null;
+      postExitPeakPriceUsd: number;
+      postExitTroughPriceUsd: number;
+      pumpAfterExitPct: number;
+      dropAfterExitPct: number;
+      whatIfHeldTotalPct: number;
+      missedAfterExitPct: number;
+      exitNarrative: 'regret' | 'smart' | 'neutral';
     }> = [];
+
+    const cycleOpenedAt = new Map<string, string>();
 
     for (const trade of trades) {
       const projectId = trade.projectId;
@@ -902,6 +966,13 @@ export class PaperTradingService {
             missedAlphaPct: null,
             peakPriceUsd: null,
             convictionScore: null,
+            postExitPeakPriceUsd: null,
+            postExitTroughPriceUsd: null,
+            pumpAfterExitPct: null,
+            dropAfterExitPct: null,
+            whatIfHeldTotalPct: null,
+            missedAfterExitPct: null,
+            exitNarrative: null,
           });
         }
         if (thesis) lastThesis.set(projectId, thesis);
@@ -925,7 +996,17 @@ export class PaperTradingService {
           missedAlphaPct: null,
           peakPriceUsd: null,
           convictionScore: null,
+          postExitPeakPriceUsd: null,
+          postExitTroughPriceUsd: null,
+          pumpAfterExitPct: null,
+          dropAfterExitPct: null,
+          whatIfHeldTotalPct: null,
+          missedAfterExitPct: null,
+          exitNarrative: null,
         });
+        if (!isAdd) {
+          cycleOpenedAt.set(projectId, trade.createdAt.toISOString());
+        }
         holdings.set(projectId, prevQty + qty);
       } else {
         const remaining = Math.max(0, prevQty - qty);
@@ -948,6 +1029,20 @@ export class PaperTradingService {
         const entryPriceUsd =
           costBasis > 0 && qty > 0 ? costBasis / qty : priceUsd;
 
+        let postExitStory: ReturnType<typeof computePostExitStory> | null = null;
+        if (isFullExit) {
+          const postExitPeak = Number(trade.postExitPeakPriceUsd ?? priceUsd);
+          const postExitTrough = Number(trade.postExitTroughPriceUsd ?? priceUsd);
+          postExitStory = computePostExitStory({
+            entryPriceUsd,
+            exitPriceUsd: priceUsd,
+            inTradePeakPriceUsd: peakPriceUsd ?? priceUsd,
+            postExitPeakPriceUsd: postExitPeak,
+            postExitTroughPriceUsd: postExitTrough,
+            realizedReturnPct: realizedReturnPct ?? 0,
+          });
+        }
+
         timeline.push({
           id: trade.id,
           type: isFullExit ? 'SELL' : 'REDUCE',
@@ -967,15 +1062,34 @@ export class PaperTradingService {
           missedAlphaPct,
           peakPriceUsd,
           convictionScore,
+          postExitPeakPriceUsd: postExitStory?.postExitPeakPriceUsd ?? null,
+          postExitTroughPriceUsd: postExitStory?.postExitTroughPriceUsd ?? null,
+          pumpAfterExitPct: postExitStory?.pumpAfterExitPct ?? null,
+          dropAfterExitPct: postExitStory?.dropAfterExitPct ?? null,
+          whatIfHeldTotalPct: postExitStory?.whatIfHeldTotalPct ?? null,
+          missedAfterExitPct: postExitStory?.missedAfterExitPct ?? null,
+          exitNarrative: postExitStory?.narrative ?? null,
         });
 
-        if (isFullExit) {
+        if (isFullExit && postExitStory) {
+          const openedAt = cycleOpenedAt.get(projectId) ?? null;
+          const durationDays = openedAt
+            ? Math.max(
+                0,
+                Math.floor(
+                  (trade.createdAt.getTime() - new Date(openedAt).getTime()) /
+                    (24 * 60 * 60 * 1000),
+                ),
+              )
+            : 0;
           closedTrades.push({
             id: trade.id,
             ticker: trade.project.ticker,
             projectName: trade.project.name,
             logoUrl: trade.project.logoUrl,
             closedAt: trade.createdAt.toISOString(),
+            openedAt,
+            durationDays,
             entryPriceUsd: Math.round(entryPriceUsd * 1e8) / 1e8,
             exitPriceUsd: priceUsd,
             investedUsd: Math.round(costBasis * 100) / 100,
@@ -986,8 +1100,16 @@ export class PaperTradingService {
             peakPriceUsd,
             convictionScore,
             thesis,
+            postExitPeakPriceUsd: postExitStory.postExitPeakPriceUsd,
+            postExitTroughPriceUsd: postExitStory.postExitTroughPriceUsd,
+            pumpAfterExitPct: postExitStory.pumpAfterExitPct,
+            dropAfterExitPct: postExitStory.dropAfterExitPct,
+            whatIfHeldTotalPct: postExitStory.whatIfHeldTotalPct,
+            missedAfterExitPct: postExitStory.missedAfterExitPct,
+            exitNarrative: postExitStory.narrative,
           });
           lastThesis.delete(projectId);
+          cycleOpenedAt.delete(projectId);
         }
 
         holdings.set(projectId, remaining);
@@ -999,7 +1121,30 @@ export class PaperTradingService {
       (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime(),
     );
 
-    return { timeline, closedTrades };
+    const chronological = [...timeline].reverse();
+    const tradeJourneys = closedTrades.map((closed) => {
+      const sellIdx = chronological.findIndex((e) => e.id === closed.id);
+      let startIdx = sellIdx >= 0 ? sellIdx : 0;
+      if (sellIdx >= 0) {
+        for (let i = sellIdx - 1; i >= 0; i--) {
+          if (chronological[i].ticker !== closed.ticker) break;
+          if (chronological[i].type === 'SELL') break;
+          startIdx = i;
+        }
+      }
+      const events =
+        sellIdx >= 0 ? chronological.slice(startIdx, sellIdx + 1) : [chronological[sellIdx]].filter(Boolean);
+      return {
+        closedTradeId: closed.id,
+        ticker: closed.ticker,
+        projectName: closed.projectName,
+        logoUrl: closed.logoUrl,
+        events,
+        closed,
+      };
+    });
+
+    return { timeline, closedTrades, tradeJourneys };
   }
 
   async previewToken(url: string) {

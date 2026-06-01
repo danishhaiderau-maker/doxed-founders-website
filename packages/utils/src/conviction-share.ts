@@ -1,8 +1,6 @@
 import { formatTokenPrice } from './token-price';
 import {
   buildPortfolioShareUrl,
-  appendPlatformXShareFooter,
-  fitXShareTextWithFooter,
   type PositionShareInput,
   type ProofOfConvictionInput,
 } from './share';
@@ -79,7 +77,7 @@ export function buildProofOfConvictionThread(input: ProofOfConvictionInput): str
   }
 
   lines.push('', '#ProofOfConviction #PaperTrading');
-  return appendPlatformXShareFooter(lines.join('\n'));
+  return lines.join('\n');
 }
 
 /** Single-tweet instant post (≤280 chars) with story beats */
@@ -98,7 +96,7 @@ export function buildProofOfConvictionMessage(input: ProofOfConvictionInput): st
   }
   parts.push('#ProofOfConviction');
 
-  return fitXShareTextWithFooter(parts.join('\n'));
+  return parts.join('\n');
 }
 
 export type { ProofOfConvictionInput };

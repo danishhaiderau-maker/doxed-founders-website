@@ -9,7 +9,7 @@ import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-int
 import { SharePortfolio } from '@/components/share-portfolio';
 import { TraderProfileHeader } from '@/components/trader/profile-header';
 import { TraderOpenPositionCard } from '@/components/trader/open-position-card';
-import { TraderClosedTradeCard } from '@/components/trader/closed-trade-card';
+import { TradeJourneyCard } from '@/components/trader/trade-journey-card';
 import { TradingTimeline } from '@/components/trader/trading-timeline';
 import { fetchAccountFollowing, fetchPublicPortfolio, PublicPortfolio } from '@/lib/api';
 
@@ -155,17 +155,17 @@ export default function PublicPortfolioPage() {
               loadingOlder={loadingOlder}
             />
 
-            {portfolio.closedTrades.length > 0 && (
+            {(portfolio.tradeJourneys?.length ?? 0) > 0 && (
               <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-                <h3 className="font-semibold">Closed trades</h3>
+                <h3 className="font-semibold">Closed trade journeys</h3>
                 <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  Profit, what-if-I-held, and shareable &ldquo;sold too early&rdquo; moments
+                  Buy → thesis → sell → what happened after exit. Regret or smart-exit stories.
                 </p>
-                <ul className="mt-4 space-y-3">
-                  {portfolio.closedTrades.map((trade) => (
-                    <TraderClosedTradeCard
-                      key={trade.id}
-                      trade={trade}
+                <ul className="mt-4 space-y-4">
+                  {portfolio.tradeJourneys.map((journey) => (
+                    <TradeJourneyCard
+                      key={journey.closedTradeId}
+                      journey={journey}
                       userId={portfolio.userId}
                     />
                   ))}
