@@ -18,6 +18,11 @@ export class FounderOsController {
     return this.founderOs.getIntegrationProviders();
   }
 
+  @Get('onboarding')
+  onboarding(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getOnboardingStatus(user.id);
+  }
+
   @Post('github/connect')
   connectGitHub(@CurrentUser() user: AuthUser, @Body() body: { repoFullName: string }) {
     return this.founderOs.connectGitHubRepo(user.id, body.repoFullName);

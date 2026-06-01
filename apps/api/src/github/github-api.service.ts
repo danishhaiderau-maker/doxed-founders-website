@@ -74,6 +74,29 @@ export class GitHubApiService {
     }));
   }
 
+  async fetchLatestCommit(
+    userId: string,
+    repo: string,
+  ): Promise<{ fullSha: string; shortSha: string; message: string; date: string } | null> {
+    const token = await this.getToken(userId);
+    const res = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=1`, {
+      headers: this.headers(token),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      sha: string;
+      commit: { message: string; author: { date: string } };
+    }[];
+    const latest = data[0];
+    if (!latest) return null;
+    return {
+      fullSha: latest.sha,
+      shortSha: latest.sha.slice(0, 7),
+      message: latest.commit.message.split('\n')[0] ?? latest.commit.message,
+      date: latest.commit.author.date,
+    };
+  }
+
   async listPullRequests(userId: string, repo: string): Promise<GitHubPullRequest[]> {
     const token = await this.getToken(userId);
     const res = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&per_page=15`, {

@@ -105,7 +105,13 @@ export function FounderOsPanel({
     }
     try {
       const result = await syncGitHubCommits(accessToken);
-      setMsg(`Synced ${result.commits.length} commits — review and publish everywhere`);
+      if (result.unchanged) {
+        setMsg('Already up to date — auto-sync is watching this repo');
+      } else if (result.suggestion) {
+        setMsg(`Synced ${result.commits.length} commits — review and publish everywhere`);
+      } else {
+        setMsg(`Synced ${result.commits.length} commits`);
+      }
       load();
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Sync failed');
@@ -330,7 +336,7 @@ export function FounderOsPanel({
             >
               {linkedRepo}
             </a>
-            <span className="ml-2 text-emerald-600">— synced to Founder Copilot memory</span>
+            <span className="ml-2 text-emerald-600">— auto-sync enabled (every 15 min + Copilot open)</span>
           </div>
         )}
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
@@ -361,9 +367,10 @@ export function FounderOsPanel({
           <button
             type="button"
             onClick={handleSyncGitHub}
-            className="rounded-lg border border-emerald-500/40 px-4 py-2 text-sm text-emerald-200"
+            className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200"
+            title="Force refresh — commits sync automatically in the background"
           >
-            Sync commits
+            Force sync now
           </button>
         </div>
       </div>

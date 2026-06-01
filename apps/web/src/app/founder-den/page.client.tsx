@@ -6,6 +6,10 @@ import { useSearchParams } from 'next/navigation';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { FounderWorkspace, WorkspaceTab } from '@/components/founder-workspace';
 import {
+  clearFounderOnboardingDismiss,
+  FounderOnboardingWizard,
+} from '@/components/founder-onboarding-wizard';
+import {
   createBuildPost,
   createSimulatedRaise,
   fetchFounderDashboard,
@@ -61,6 +65,13 @@ export default function FounderDenPageClient() {
     maxParticipantSlots: '',
     plannedLaunchDate: '',
   });
+  const [wizardKey, setWizardKey] = useState(0);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setWizardDismissed(window.localStorage.getItem('dcf-founder-onboarding-dismissed') === '1');
+  }, [wizardKey]);
 
   useEffect(() => {
     setTab(parseTab(searchParams.get('tab')));
@@ -195,6 +206,31 @@ export default function FounderDenPageClient() {
           <p className="rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-2 text-sm text-red-300">
             {error}
           </p>
+        )}
+
+        {session?.accessToken && (
+          <FounderOnboardingWizard
+            key={wizardKey}
+            accessToken={session.accessToken}
+            onRefresh={load}
+            onMessage={(msg) => {
+              setMessage(msg);
+              load();
+            }}
+          />
+        )}
+
+        {session?.accessToken && wizardDismissed && (
+          <button
+            type="button"
+            onClick={() => {
+              clearFounderOnboardingDismiss();
+              setWizardKey((k) => k + 1);
+            }}
+            className="text-xs text-zinc-500 underline hover:text-zinc-300"
+          >
+            Resume setup wizard
+          </button>
         )}
 
         <FounderWorkspace

@@ -21,7 +21,6 @@ import {
   buildDeploySuggestion,
   buildFeedPostBody,
   buildSuggestionFromBuildPrompt,
-  buildSuggestedUpdateFromCommits,
   buildXUpdateTweet,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -31,6 +30,7 @@ import { UserXPostingService } from '../x-social/user-x-posting.service';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
 import { EventsService } from '../events/events.service';
 import { FounderOsMemoryService } from '../github/founder-os-memory.service';
+import { GithubAutoSyncService } from './github-auto-sync.service';
 
 @Injectable()
 export class FounderOsService {
@@ -42,6 +42,7 @@ export class FounderOsService {
     private readonly integrations: FounderOsIntegrationService,
     private readonly events: EventsService,
     private readonly memory: FounderOsMemoryService,
+    private readonly githubAutoSync: GithubAutoSyncService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -224,6 +225,7 @@ export class FounderOsService {
 
     void this.memory.bootstrapRepoMemory(userId, normalized).catch(() => undefined);
     void this.memory.syncProjectMemoryToRepo(userId, normalized).catch(() => undefined);
+    void this.githubAutoSync.syncForUser(userId, { force: true }).catch(() => undefined);
 
     return { success: true, repoFullName: normalized };
   }
@@ -232,86 +234,85 @@ export class FounderOsService {
     return this.memory.syncProjectMemoryToRepo(userId);
   }
 
+  autoSyncGitHubCommits(userId: string) {
+    return this.githubAutoSync.syncForUser(userId);
+  }
+
   async syncGitHubCommits(userId: string) {
-    const conn = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
+    return this.githubAutoSync.syncForUser(userId, { force: true });
+  }
+
+  async getOnboardingStatus(userId: string) {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
-      include: { projects: { take: 1 } },
+      include: { projects: { where: { approved: true }, take: 1 } },
     });
-    if (!founder) throw new ForbiddenException('Founder profile required');
-
-    const repo = conn?.repoFullName ?? founder.githubRepoFullName;
-    if (!repo) throw new BadRequestException('Connect a GitHub repo first (owner/repo)');
-
-    const res = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=8`, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'DoxxedCrypto-FounderOS' },
-    });
-    if (!res.ok) throw new BadRequestException('Could not fetch GitHub commits — check repo is public');
-
-    const data = (await res.json()) as {
-      sha: string;
-      commit: { message: string; author: { date: string } };
-    }[];
-
-    const commits = data.map((c) => ({
-      sha: c.sha.slice(0, 7),
-      message: c.commit.message,
-      date: c.commit.author.date,
-    }));
-
-    const dayNumber = (founder.buildStreakDays || 0) + 1;
-    const suggested = buildSuggestedUpdateFromCommits(commits, dayNumber);
-
-    const record = await this.prisma.suggestedBuildUpdate.create({
-      data: {
-        founderId: founder.id,
-        projectId: founder.projects[0]?.id,
-        headline: suggested.headline,
-        body: suggested.body,
-        devSummary: suggested.devSummary,
-        traderSummary: suggested.traderSummary,
-        commitShas: commits.map((c) => c.sha),
-        source: 'github',
-      },
-    });
-
-    await this.prisma.gitHubConnection.upsert({
-      where: { userId },
-      create: {
-        userId,
-        githubUsername: repo.split('/')[0]!,
-        repoFullName: repo,
-        lastSyncedAt: new Date(),
-        lastCommitSha: data[0]?.sha,
-      },
-      update: { lastSyncedAt: new Date(), lastCommitSha: data[0]?.sha },
-    });
-
+    const gh = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
     const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
-    await this.events.emit({
-      founderId: founder.id,
-      projectId: founder.projects[0]?.id,
-      userId,
-      type: FounderEventType.GITHUB_COMMIT,
-      source: 'github',
-      title: suggested.headline,
-      payload: {
-        suggestionId: record.id,
-        commitCount: commits.length,
-        autoPublish: settings?.autoPublishOnEvent ?? false,
-      },
-      dedupeKey: data[0]?.sha ? `github:${founder.id}:${data[0].sha}` : undefined,
+    const creds = await this.prisma.integrationCredential.findMany({ where: { userId } });
+    const founderNode = await this.prisma.founderNode.findFirst({
+      where: { userId },
+      orderBy: { lastSeenAt: 'desc' },
     });
+
+    const llmConnected = creds.some(
+      (c) =>
+        c.verifiedAt &&
+        ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'].includes(c.provider),
+    );
+    const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
+    const githubConnected = Boolean(gh?.repoFullName ?? founder?.githubRepoFullName);
+    const goalSet = Boolean(settings?.currentGoalFocus?.trim());
+    const founderActive = Boolean(founder);
+    const nodeOnline =
+      Boolean(founderNode?.lastSeenAt) &&
+      Date.now() - (founderNode!.lastSeenAt?.getTime() ?? 0) < 180_000;
+
+    const steps = [
+      {
+        id: 'founder',
+        label: 'Activate founder profile',
+        complete: founderActive,
+        href: '/founder-den?tab=analytics',
+      },
+      {
+        id: 'github',
+        label: 'Connect GitHub repo',
+        complete: githubConnected,
+        detail: gh?.repoFullName ?? founder?.githubRepoFullName ?? null,
+        href: '/founder-den?tab=build',
+      },
+      {
+        id: 'ai_stack',
+        label: 'Connect AI Stack (LLM or Cursor)',
+        complete: llmConnected || cursorConnected,
+        detail: settings?.defaultProvider !== 'RULE_BASED' ? settings?.defaultProvider : null,
+        href: '/settings/builder',
+      },
+      {
+        id: 'goal',
+        label: 'Set your current goal',
+        complete: goalSet,
+        detail: settings?.currentGoalFocus?.slice(0, 80) ?? null,
+        href: '/settings/builder',
+      },
+      {
+        id: 'founder_node',
+        label: 'Pair Founder Node (Windows vault)',
+        complete: nodeOnline,
+        optional: true,
+        href: '/founder-node',
+      },
+    ];
+
+    const requiredComplete = steps.filter((s) => !('optional' in s && s.optional)).every((s) => s.complete);
 
     return {
-      commits,
-      suggestion: {
-        id: record.id,
-        headline: record.headline,
-        body: record.body,
-        devSummary: record.devSummary,
-        traderSummary: record.traderSummary,
-      },
+      steps,
+      requiredComplete,
+      allComplete: steps.every((s) => s.complete),
+      githubLastSyncedAt: gh?.lastSyncedAt?.toISOString() ?? null,
+      projectName: founder?.projects[0]?.name ?? null,
     };
   }
 

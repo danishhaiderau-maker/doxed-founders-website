@@ -1657,6 +1657,27 @@ export function runCursorBuildRoom(
   }>('/founder-os/build-room', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
+export interface FounderOnboardingStep {
+  id: 'founder' | 'github' | 'ai_stack' | 'goal' | 'founder_node';
+  label: string;
+  complete: boolean;
+  optional?: boolean;
+  detail?: string | null;
+  href?: string;
+}
+
+export interface FounderOnboardingStatus {
+  steps: FounderOnboardingStep[];
+  requiredComplete: boolean;
+  allComplete: boolean;
+  githubLastSyncedAt: string | null;
+  projectName: string | null;
+}
+
+export function fetchFounderOnboardingStatus(token: string) {
+  return apiFetch<FounderOnboardingStatus>('/founder-os/onboarding', undefined, token);
+}
+
 export function connectGitHubRepo(repoFullName: string, token: string) {
   return apiFetch<{ success: boolean; repoFullName: string }>(
     '/founder-os/github/connect',
@@ -1667,8 +1688,18 @@ export function connectGitHubRepo(repoFullName: string, token: string) {
 
 export function syncGitHubCommits(token: string) {
   return apiFetch<{
+    synced: boolean;
+    unchanged?: boolean;
     commits: { sha: string; message: string; date: string }[];
-    suggestion: { id: string; headline: string; body: string; devSummary: string; traderSummary: string };
+    suggestion?: {
+      id: string;
+      headline: string;
+      body: string;
+      devSummary: string;
+      traderSummary: string;
+    };
+    lastSyncedAt?: string;
+    reason?: string;
   }>('/founder-os/github/sync', { method: 'POST' }, token);
 }
 
