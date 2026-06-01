@@ -2,9 +2,12 @@
 
 import type { ReactNode } from 'react';
 import {
-  FOUNDER_VERIFICATION_LABELS,
-  contributorLevelLabel,
-  scoreFounderVerification,
+  VALIDATION_LABELS,
+  founderStatusLabel,
+  getPrimaryProofLink,
+  tallyListingVotes,
+  validateListingForApproval,
+  type CommunityValidationCategory,
 } from '@dcf/utils';
 import { AdminApplicationUpdates, PendingApplication } from '@/lib/api';
 
@@ -53,58 +56,21 @@ function formatUsd(value?: number | string | null) {
   return `$${n.toFixed(n < 1 ? 6 : 2)}`;
 }
 
-function Field({
-  label,
-  required,
-  hint,
-  children,
-}: {
-  label: string;
-  required?: boolean;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="text-xs font-medium text-[var(--color-muted)]">
-        {label}
-        {required && <span className="text-[var(--color-danger)]"> *</span>}
-      </span>
-      {hint && <span className="mt-0.5 block text-[10px] text-[var(--color-muted)]">{hint}</span>}
-      <div className="mt-1.5">{children}</div>
-    </label>
-  );
-}
-
-function inputClass(missing?: boolean) {
-  return `w-full rounded-lg border bg-[var(--color-background)] px-3 py-2 text-sm text-white outline-none focus:border-[var(--color-accent)] ${
-    missing ? 'border-[var(--color-danger)]/70' : 'border-[var(--color-border)]'
-  }`;
-}
-
-function LinkRow({ label, href }: { label: string; href: string | null | undefined }) {
-  if (!href?.trim()) {
-    return (
-      <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-        <span className="shrink-0 text-xs text-[var(--color-muted)] sm:w-36">{label}</span>
-        <span className="text-xs text-[var(--color-muted)]">Not provided</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-      <span className="shrink-0 text-xs text-[var(--color-muted)] sm:w-36">{label}</span>
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="break-all text-xs text-[var(--color-accent)] hover:underline"
-      >
-        {href}
-      </a>
-    </div>
-  );
+function approvalInput(item: PendingApplication, form: AdminApplicationUpdates) {
+  return {
+    dexscreenerUrl: form.dexscreenerUrl ?? item.dexscreenerUrl,
+    founderDoxxedStatus: item.founderDoxxedStatus,
+    founderVideoUrl: form.founderVideoUrl ?? item.founderVideoUrl,
+    founderInterviewUrl: form.founderInterviewUrl ?? item.founderInterviewUrl,
+    founderTwitter: form.founderTwitter ?? item.founderTwitter,
+    founderLinkedIn: form.founderLinkedIn ?? item.founderLinkedIn,
+    founderGithub: form.founderGithub ?? item.founderGithub,
+    websiteUrl: form.websiteUrl ?? item.websiteUrl,
+    chainSlug: form.chainSlug ?? item.chainSlug,
+    contractAddress: form.contractAddress ?? item.contractAddress,
+    founderName: form.founderName ?? item.founderName,
+    projectName: form.projectName ?? item.projectName,
+  };
 }
 
 export function applicationToReviewPayload(
@@ -151,24 +117,37 @@ export function ApplicationReviewCard({
   onApprove,
   onReject,
 }: ApplicationReviewCardProps) {
-  const liveVerification = scoreFounderVerification({
-    founderName: form.founderName,
-    founderLinkedIn: form.founderLinkedIn,
-    founderGithub: form.founderGithub,
-    companyDetails: form.companyDetails,
-    founderVideoUrl: form.founderVideoUrl,
-    founderInterviewUrl: form.founderInterviewUrl,
-  });
-  const eligible = liveVerification.meetsThreshold;
-  const missingFounderName = !form.founderName?.trim();
-  const missingChain = !form.chainSlug?.trim();
-  const canApprove = eligible && !missingFounderName && !missingChain;
+  const input = approvalInput(item, form);
+  const approval = validateListingForApproval(input);
+  const proofLink = getPrimaryProofLink(input);
+  const tally = tallyListingVotes(
+    (item.votes ?? []).map((v) => ({
+      vote: v.vote,
+      weight: v.voteWeight ?? 1,
+    })),
+    item.requiredVoters ?? 3,
+    item.minYesPercent ?? 70,
+  );
+
+  const categoryCounts = (item.votes ?? []).reduce<Record<string, number>>((acc, v) => {
+    if (v.validationCategory) {
+      acc[v.validationCategory] = (acc[v.validationCategory] ?? 0) + 1;
+    }
+    return acc;
+  }, {});
 
   function updateField<K extends keyof AdminApplicationUpdates>(
     key: K,
     value: AdminApplicationUpdates[K],
   ) {
     onFormChange({ ...form, [key]: value });
+  }
+
+  function requestMoreProof() {
+    onNotesChange(
+      reviewNotes.trim() ||
+        'Need stronger public proof — add a founder video, interview, verification page, or official team link before we can list.',
+    );
   }
 
   return (
@@ -181,19 +160,19 @@ export function ApplicationReviewCard({
         <div className="flex-1">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-lg font-semibold">
                   {item.projectName}{' '}
                   <span className="text-[var(--color-muted)]">({item.ticker})</span>
                 </h2>
                 <span
                   className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                    eligible
+                    approval.ok
                       ? 'bg-emerald-950/50 text-[var(--color-success)]'
                       : 'bg-amber-950/40 text-amber-300'
                   }`}
                 >
-                  {liveVerification.score}/6 {eligible ? '· Eligible' : '· Insufficient'}
+                  {approval.ok ? 'Ready to approve' : 'Missing proof'}
                 </span>
                 <span
                   className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
@@ -202,12 +181,11 @@ export function ApplicationReviewCard({
                       : 'bg-purple-950/50 text-purple-300'
                   }`}
                 >
-                  {item.status === 'COMMUNITY_VOTING' ? '48h vote · fast-track' : 'In admin queue'}
+                  {item.status === 'COMMUNITY_VOTING' ? '48h community vote' : 'Admin queue'}
                 </span>
               </div>
               <p className="mt-1 text-xs text-[var(--color-muted)]">
                 Submitted {new Date(item.createdAt).toLocaleString()}
-                {form.chainSlug ? ` · ${form.chainSlug}` : ' · Chain not set'}
               </p>
             </div>
             <button
@@ -215,312 +193,247 @@ export function ApplicationReviewCard({
               onClick={onToggle}
               className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-muted)] hover:text-white"
             >
-              {expanded ? 'Hide details' : 'Review full application'}
+              {expanded ? 'Hide enrichment' : 'Optional enrichment'}
             </button>
           </div>
 
-          <ul className="mt-3 flex flex-wrap gap-2">
-            {liveVerification.criteria.map((c) => (
-              <li
-                key={c}
-                className="rounded-md bg-[var(--color-background)] px-2 py-1 text-xs text-white"
-              >
-                {FOUNDER_VERIFICATION_LABELS[c]}
-              </li>
-            ))}
-            {liveVerification.criteria.length === 0 && (
-              <li className="text-xs text-[var(--color-muted)]">No verification criteria met yet</li>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Info label="Contract" value={form.contractAddress || item.contractAddress || '—'} />
+            <Info label="Market cap" value={formatUsd(form.marketPreview?.marketCap ?? item.marketPreview?.marketCap)} />
+            <Info label="Founder status" value={founderStatusLabel(item.founderDoxxedStatus)} />
+            <Info
+              label="Community score"
+              value={`${tally.yesPercent}% yes · ${tally.total}/${item.requiredVoters ?? 3} voters`}
+            />
+            <Info label="Trust signals" value={`${item.verificationScore}/6 verification`} />
+            <Info label="Chain" value={form.chainSlug || item.chainSlug || 'Auto from DexScreener'} />
+          </div>
+
+          <div className="mt-4 space-y-2 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-background)]/40 p-3">
+            <LinkRow label="DexScreener" href={form.dexscreenerUrl || item.dexscreenerUrl} required />
+            <LinkRow label="Proof link" href={proofLink} required />
+            {item.scoutHighlightNote && (
+              <p className="text-xs text-zinc-400">
+                <span className="text-zinc-500">Scout highlight:</span> {item.scoutHighlightNote}
+              </p>
             )}
-          </ul>
+          </div>
 
-          {!expanded && (
-            <div className="mt-4 space-y-2 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-background)]/40 p-3">
-              <LinkRow label="DexScreener" href={form.dexscreenerUrl} />
-              <LinkRow label="Interview / video" href={form.founderInterviewUrl || form.founderVideoUrl} />
-              <LinkRow label="Website" href={form.websiteUrl} />
-              {(missingFounderName || missingChain) && (
-                <p className="text-xs text-amber-300">
-                  Expand to add missing fields before approve
-                  {missingFounderName ? ' (founder name)' : ''}
-                  {missingChain ? ' (chain)' : ''}.
-                </p>
-              )}
-            </div>
+          {!approval.ok && (
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-amber-300">
+              {approval.errors.map((err) => (
+                <li key={err}>{err}</li>
+              ))}
+            </ul>
           )}
 
-          {expanded && (
-            <div className="mt-5 space-y-6 border-t border-[var(--color-border)] pt-5">
-              <section>
-                <h3 className="text-sm font-semibold text-white">Submitted links (open to verify)</h3>
-                <div className="mt-3 space-y-2 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-background)]/40 p-3">
-                  <LinkRow label="DexScreener" href={form.dexscreenerUrl} />
-                  <LinkRow label="Website" href={form.websiteUrl} />
-                  <LinkRow label="Docs" href={form.docsUrl} />
-                  <LinkRow label="Whitepaper" href={form.whitepaperUrl} />
-                  <LinkRow label="Telegram" href={form.telegramUrl} />
-                  <LinkRow label="Audit" href={form.auditUrl} />
-                  <LinkRow label="Founder video" href={form.founderVideoUrl} />
-                  <LinkRow label="Interview / talk" href={form.founderInterviewUrl} />
-                  <LinkRow label="LinkedIn" href={form.founderLinkedIn} />
-                  <LinkRow label="GitHub" href={form.founderGithub} />
-                </div>
-              </section>
-
-              {form.marketPreview && (
-                <section>
-                  <h3 className="text-sm font-semibold text-white">Market snapshot</h3>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                    <div className="rounded-md bg-[var(--color-background)] px-3 py-2">
-                      <div className="text-[var(--color-muted)]">Price</div>
-                      <div>{formatUsd(form.marketPreview.priceUsd)}</div>
-                    </div>
-                    <div className="rounded-md bg-[var(--color-background)] px-3 py-2">
-                      <div className="text-[var(--color-muted)]">Market cap</div>
-                      <div>{formatUsd(form.marketPreview.marketCap)}</div>
-                    </div>
-                    <div className="rounded-md bg-[var(--color-background)] px-3 py-2">
-                      <div className="text-[var(--color-muted)]">24h volume</div>
-                      <div>{formatUsd(form.marketPreview.volume24h)}</div>
-                    </div>
-                    <div className="rounded-md bg-[var(--color-background)] px-3 py-2">
-                      <div className="text-[var(--color-muted)]">Liquidity</div>
-                      <div>{formatUsd(form.marketPreview.liquidityUsd)}</div>
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              <section>
-                <h3 className="text-sm font-semibold text-white">Admin review — fill or correct fields</h3>
-                <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  Research the project, then complete anything missing before approving.
-                </p>
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <Field label="Project name">
-                    <input
-                      className={inputClass()}
-                      value={form.projectName ?? ''}
-                      onChange={(e) => updateField('projectName', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Ticker">
-                    <input
-                      className={inputClass()}
-                      value={form.ticker ?? ''}
-                      onChange={(e) => updateField('ticker', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Chain" required hint="Required to publish">
-                    <select
-                      className={inputClass(missingChain)}
-                      value={form.chainSlug ?? ''}
-                      onChange={(e) => updateField('chainSlug', e.target.value)}
-                    >
-                      <option value="">Select chain…</option>
-                      {CHAIN_OPTIONS.map((chain) => (
-                        <option key={chain} value={chain}>
-                          {chain}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Contract address">
-                    <input
-                      className={inputClass()}
-                      value={form.contractAddress ?? ''}
-                      onChange={(e) => updateField('contractAddress', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Founder name" required hint="Required to publish">
-                    <input
-                      className={inputClass(missingFounderName)}
-                      value={form.founderName ?? ''}
-                      onChange={(e) => updateField('founderName', e.target.value)}
-                      placeholder="Full name from your research"
-                    />
-                  </Field>
-                  <Field label="Founder Twitter / X">
-                    <input
-                      className={inputClass()}
-                      value={form.founderTwitter ?? ''}
-                      onChange={(e) => updateField('founderTwitter', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="DexScreener URL">
-                    <input
-                      className={inputClass()}
-                      value={form.dexscreenerUrl ?? ''}
-                      onChange={(e) => updateField('dexscreenerUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Website">
-                    <input
-                      className={inputClass()}
-                      value={form.websiteUrl ?? ''}
-                      onChange={(e) => updateField('websiteUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Logo URL">
-                    <input
-                      className={inputClass()}
-                      value={form.logoUrl ?? ''}
-                      onChange={(e) => updateField('logoUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Telegram">
-                    <input
-                      className={inputClass()}
-                      value={form.telegramUrl ?? ''}
-                      onChange={(e) => updateField('telegramUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Founder LinkedIn">
-                    <input
-                      className={inputClass()}
-                      value={form.founderLinkedIn ?? ''}
-                      onChange={(e) => updateField('founderLinkedIn', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Founder GitHub">
-                    <input
-                      className={inputClass()}
-                      value={form.founderGithub ?? ''}
-                      onChange={(e) => updateField('founderGithub', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Founder video URL">
-                    <input
-                      className={inputClass()}
-                      value={form.founderVideoUrl ?? ''}
-                      onChange={(e) => updateField('founderVideoUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Interview / podcast URL">
-                    <input
-                      className={inputClass()}
-                      value={form.founderInterviewUrl ?? ''}
-                      onChange={(e) => updateField('founderInterviewUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Docs URL">
-                    <input
-                      className={inputClass()}
-                      value={form.docsUrl ?? ''}
-                      onChange={(e) => updateField('docsUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Whitepaper URL">
-                    <input
-                      className={inputClass()}
-                      value={form.whitepaperUrl ?? ''}
-                      onChange={(e) => updateField('whitepaperUrl', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Audit URL">
-                    <input
-                      className={inputClass()}
-                      value={form.auditUrl ?? ''}
-                      onChange={(e) => updateField('auditUrl', e.target.value)}
-                    />
-                  </Field>
-                </div>
-                <div className="mt-4 grid gap-4">
-                  <Field label="Summary">
-                    <textarea
-                      className={`${inputClass()} min-h-[80px]`}
-                      value={form.summary ?? ''}
-                      onChange={(e) => updateField('summary', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Company / team details">
-                    <textarea
-                      className={`${inputClass()} min-h-[80px]`}
-                      value={form.companyDetails ?? ''}
-                      onChange={(e) => updateField('companyDetails', e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Admin review notes (internal)">
-                    <textarea
-                      className={`${inputClass()} min-h-[60px]`}
-                      value={reviewNotes}
-                      onChange={(e) => onNotesChange(e.target.value)}
-                      placeholder="Optional notes about your review decision"
-                    />
-                  </Field>
-                </div>
-              </section>
-
-              {!canApprove && (
-                <p className="text-sm text-amber-300">
-                  Before approving: add a public video or interview link, founder name, and chain.
-                </p>
-              )}
-            </div>
+          {approval.warnings.length > 0 && (
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-zinc-500">
+              {approval.warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
           )}
 
-          {(item.whyList || item.whyDoxxed || (item.votes && item.votes.length > 0)) && (
-            <section className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
-              <h3 className="text-sm font-semibold text-emerald-200">Community vote passed — scout thesis</h3>
+          {(item.votes?.length ?? 0) > 0 && (
+            <section className="mt-5 rounded-xl border border-emerald-500/20 bg-emerald-950/10 p-4">
+              <h3 className="text-sm font-semibold text-emerald-200">Community validation (48h)</h3>
+              <p className="mt-1 text-xs text-zinc-400">
+                Weighted yes: {tally.yesPercent}% · Pass threshold: {item.minYesPercent ?? 70}% ·{' '}
+                {tally.passed ? 'Vote passed' : 'Vote pending / did not pass'}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {Object.entries(categoryCounts).map(([cat, count]) => (
+                  <span
+                    key={cat}
+                    className="rounded-md bg-black/30 px-2 py-1 text-[10px] text-white"
+                  >
+                    {VALIDATION_LABELS[cat as CommunityValidationCategory] ?? cat} · {count}
+                  </span>
+                ))}
+              </div>
+              <ul className="mt-3 space-y-2 border-t border-[var(--color-border)]/40 pt-3">
+                {item.votes?.slice(0, 6).map((v) => (
+                  <li key={v.id} className="rounded-lg bg-black/20 p-2 text-xs">
+                    <span className={v.vote === 'YES' ? 'text-emerald-400' : 'text-red-400'}>
+                      {v.validationCategory
+                        ? VALIDATION_LABELS[v.validationCategory as CommunityValidationCategory]
+                        : v.vote}
+                    </span>{' '}
+                    · {v.user.name ?? 'Trader'} · wt {v.voteWeight ?? 1}
+                    {v.comment && <p className="mt-1 italic text-[var(--color-muted)]">{v.comment}</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {(item.whyList || item.whyDoxxed) && (
+            <section className="mt-4 rounded-lg border border-zinc-800 bg-black/20 p-3 text-sm">
               {item.whyList && (
-                <div className="mt-3">
-                  <p className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Why list</p>
-                  <p className="mt-1 text-sm whitespace-pre-wrap">{item.whyList}</p>
-                </div>
+                <p>
+                  <span className="text-xs uppercase text-zinc-500">Scout thesis</span>
+                  <span className="mt-1 block whitespace-pre-wrap">{item.whyList}</span>
+                </p>
               )}
               {item.whyDoxxed && (
-                <div className="mt-3">
-                  <p className="text-xs uppercase tracking-wider text-[var(--color-muted)]">Why doxxed</p>
-                  <p className="mt-1 text-sm whitespace-pre-wrap">{item.whyDoxxed}</p>
-                </div>
-              )}
-              {item.votes && item.votes.length > 0 && (
-                <ul className="mt-4 space-y-2 border-t border-[var(--color-border)] pt-3">
-                  {item.votes.map((v) => (
-                    <li key={v.id} className="rounded-lg bg-black/20 p-3 text-xs">
-                      <span className={v.vote === 'YES' ? 'text-emerald-400' : 'text-red-400'}>
-                        {v.vote}
-                      </span>{' '}
-                      · {v.user.name ?? 'Trader'} · {contributorLevelLabel(v.user.contributorLevel)}
-                      {v.whyList && <p className="mt-1 text-white/80">List: {v.whyList}</p>}
-                      {v.whyDoxxed && <p className="mt-1 text-white/80">Doxxed: {v.whyDoxxed}</p>}
-                      {v.comment && <p className="mt-1 italic text-[var(--color-muted)]">{v.comment}</p>}
-                    </li>
-                  ))}
-                </ul>
+                <p className="mt-2">
+                  <span className="text-xs uppercase text-zinc-500">Proof narrative</span>
+                  <span className="mt-1 block whitespace-pre-wrap">{item.whyDoxxed}</span>
+                </p>
               )}
             </section>
           )}
 
-          <div className="mt-4 flex flex-wrap gap-2">
+          {expanded && (
+            <div className="mt-5 space-y-4 border-t border-[var(--color-border)] pt-5">
+              <p className="text-xs text-[var(--color-muted)]">
+                Optional enrichment — auto-filled from DexScreener. Not required for approval.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Chain (if not auto-detected)">
+                  <select
+                    className={inputClass()}
+                    value={form.chainSlug ?? ''}
+                    onChange={(e) => updateField('chainSlug', e.target.value)}
+                  >
+                    <option value="">Auto from DexScreener</option>
+                    {CHAIN_OPTIONS.map((chain) => (
+                      <option key={chain} value={chain}>
+                        {chain}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Founder name (optional)">
+                  <input
+                    className={inputClass()}
+                    value={form.founderName ?? ''}
+                    onChange={(e) => updateField('founderName', e.target.value)}
+                  />
+                </Field>
+                <Field label="Proof video URL">
+                  <input
+                    className={inputClass()}
+                    value={form.founderVideoUrl ?? ''}
+                    onChange={(e) => updateField('founderVideoUrl', e.target.value)}
+                  />
+                </Field>
+                <Field label="Interview / podcast URL">
+                  <input
+                    className={inputClass()}
+                    value={form.founderInterviewUrl ?? ''}
+                    onChange={(e) => updateField('founderInterviewUrl', e.target.value)}
+                  />
+                </Field>
+                <Field label="Founder X / Twitter">
+                  <input
+                    className={inputClass()}
+                    value={form.founderTwitter ?? ''}
+                    onChange={(e) => updateField('founderTwitter', e.target.value)}
+                  />
+                </Field>
+                <Field label="LinkedIn">
+                  <input
+                    className={inputClass()}
+                    value={form.founderLinkedIn ?? ''}
+                    onChange={(e) => updateField('founderLinkedIn', e.target.value)}
+                  />
+                </Field>
+              </div>
+              <Field label="Admin review notes">
+                <textarea
+                  className={`${inputClass()} min-h-[60px]`}
+                  value={reviewNotes}
+                  onChange={(e) => onNotesChange(e.target.value)}
+                  placeholder="Internal notes — shown on reject / request more proof"
+                />
+              </Field>
+            </div>
+          )}
+
+          <div className="mt-5 flex flex-wrap gap-2">
             <button
               type="button"
-              disabled={busy || (expanded && !canApprove)}
+              disabled={busy || !approval.ok}
               onClick={onApprove}
               className="rounded-lg bg-[var(--color-success)]/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              title={
-                expanded && !canApprove
-                  ? 'Complete required fields before approving'
-                  : undefined
-              }
+              title={!approval.ok ? approval.errors.join(' ') : undefined}
             >
-              Approve & publish
+              Approve
             </button>
-            {item.status === 'COMMUNITY_VOTING' && (
-              <span className="self-center text-xs text-[var(--color-muted)]">
-                Fast-track: no need to wait for 48h vote
-              </span>
-            )}
             <button
               type="button"
               disabled={busy}
               onClick={onReject}
-              className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-muted)] hover:text-white disabled:opacity-50"
+              className="rounded-lg border border-red-500/40 px-4 py-2 text-sm text-red-300 hover:bg-red-950/20 disabled:opacity-50"
             >
               Reject
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={requestMoreProof}
+              className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/20 disabled:opacity-50"
+            >
+              Request more proof
             </button>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg bg-[var(--color-background)]/50 px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">{label}</p>
+      <p className="mt-0.5 text-sm font-medium text-white">{value}</p>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block text-xs font-medium text-[var(--color-muted)]">
+      {label}
+      <div className="mt-1.5">{children}</div>
+    </label>
+  );
+}
+
+function inputClass() {
+  return 'w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-white outline-none focus:border-[var(--color-accent)]';
+}
+
+function LinkRow({
+  label,
+  href,
+  required,
+}: {
+  label: string;
+  href: string | null | undefined;
+  required?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+      <span className="shrink-0 text-xs text-[var(--color-muted)] sm:w-28">
+        {label}
+        {required && <span className="text-red-400"> *</span>}
+      </span>
+      {href?.trim() ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="break-all text-xs text-[var(--color-accent)] hover:underline"
+        >
+          {href}
+        </a>
+      ) : (
+        <span className="text-xs text-amber-300">Missing</span>
+      )}
     </div>
   );
 }

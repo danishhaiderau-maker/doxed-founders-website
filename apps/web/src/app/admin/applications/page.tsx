@@ -74,12 +74,6 @@ export default function AdminApplicationsPage() {
     const form = forms[id];
     if (!form) return;
 
-    if (reviewStatus === 'APPROVED' && !expandedIds.has(id)) {
-      setExpandedIds((prev) => new Set(prev).add(id));
-      setError('Expand the application and review all details before approving.');
-      return;
-    }
-
     setBusyId(id);
     setSuccess(null);
     setPublishedSlug(null);
@@ -134,8 +128,8 @@ export default function AdminApplicationsPage() {
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Listing inbox</h1>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Signed in as {session?.user?.email}. Includes listings in 48h community vote (fast-track
-          approve anytime) and items ready after voting ends. Expand to edit fields before publish.
+          No proof = no listing. Approve when DexScreener URL, founder status, and proof link are present.
+          Community validation runs for 48 hours — vote results are signals, not blockers.
         </p>
 
         {error && <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>}

@@ -49,6 +49,7 @@ export interface ListingFormData {
   whyDoxxed?: string;
   founderDoxxedStatus?: 'DOXXED' | 'VERIFIED' | 'UNDOXXED' | 'BUILDING_IN_PUBLIC';
   scoutHighlightNote?: string;
+  proofLinkUrl?: string;
   marketPreview?: DexScreenerPreview['marketPreview'];
 }
 
@@ -78,6 +79,8 @@ export interface PendingApplication {
   verificationCriteria: string[] | null;
   whyList?: string | null;
   whyDoxxed?: string | null;
+  founderDoxxedStatus?: string | null;
+  scoutHighlightNote?: string | null;
   requiredVoters?: number;
   minYesPercent?: number;
   votingClosesAt?: string | null;
@@ -89,6 +92,8 @@ export interface PendingApplication {
 export interface ListingVoteRecord {
   id: string;
   vote: 'YES' | 'NO';
+  validationCategory?: string | null;
+  voteWeight?: number | null;
   whyList: string | null;
   whyDoxxed: string | null;
   comment: string | null;
