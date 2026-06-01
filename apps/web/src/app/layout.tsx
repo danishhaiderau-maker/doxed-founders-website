@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { AuthProvider } from '@/components/auth-provider';
 import { NotificationFlashProvider } from '@/components/notification-flash';
+import { ShareFooterProvider } from '@/components/share-footer-provider';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -24,7 +25,9 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <AuthProvider>
-          <NotificationFlashProvider>{children}</NotificationFlashProvider>
+          <ShareFooterProvider>
+            <NotificationFlashProvider>{children}</NotificationFlashProvider>
+          </ShareFooterProvider>
         </AuthProvider>
       </body>
     </html>

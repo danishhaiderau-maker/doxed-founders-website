@@ -263,6 +263,13 @@ function SiteNavInner() {
                 {isAdmin && (
                   <>
                     <Link
+                      href="/admin/control"
+                      onClick={() => setProfileOpen(false)}
+                      className="block border-t border-zinc-800 px-3 py-2 text-sm font-semibold text-amber-300/95 transition hover:bg-zinc-900"
+                    >
+                      Admin Control
+                    </Link>
+                    <Link
                       href="/admin/applications"
                       onClick={() => setProfileOpen(false)}
                       className="block px-3 py-2 text-sm text-amber-300/90 transition hover:bg-zinc-900"

@@ -81,4 +81,36 @@ export class BotBridgeService {
     if (!bot) return null;
     return mapBotStateToActivity(bot, agentName);
   }
+
+  async proxyBotPost(path: string, body: Record<string, unknown> = {}) {
+    const base = this.getBotUrl();
+    if (!base) {
+      return { ok: false, error: 'Bot bridge not configured' };
+    }
+    try {
+      const res = await fetch(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  }
+
+  async fetchHealth() {
+    const base = this.getBotUrl();
+    if (!base) return null;
+    try {
+      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return null;
+      return (await res.json()) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
 }

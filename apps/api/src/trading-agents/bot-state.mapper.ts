@@ -32,6 +32,7 @@ export type BotApiState = {
     decision?: string | null;
     comment?: string | null;
     reason?: string | null;
+    source?: string | null;
   };
   debug_state?: {
     last_edge_score?: number;

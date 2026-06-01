@@ -4,20 +4,24 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { buildTradingAgentFollowShareText } from '@dcf/utils';
+import { AgentPublicStatusBanner } from '@/components/agent-hub/agent-public-status';
 import { LiveMissionControl } from '@/components/agent-hub/live-mission-control';
 import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import {
+  fetchPublicAgentStatus,
   fetchTradingAgent,
   fetchTradingAgentActivity,
   fetchTradingAgentDashboard,
   followTradingAgent,
   unfollowTradingAgent,
+  type PublicAgentStatus,
 } from '@/lib/api';
 
 export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const { data: session } = useSession();
+  const isAdmin = session?.user?.role === 'ADMIN';
   const origin = useShareOrigin();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -27,17 +31,23 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [following, setFollowing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [viewMode, setViewMode] = useState<'mission' | 'research'>('research');
+  const [publicStatus, setPublicStatus] = useState<{ status: PublicAgentStatus; label: string }>({
+    status: 'offline',
+    label: 'Agent offline',
+  });
 
   const load = useCallback(async () => {
     try {
-      const [dash, act, meta] = await Promise.all([
+      const [dash, act, meta, statusRes] = await Promise.all([
         fetchTradingAgentDashboard(slug),
         fetchTradingAgentActivity(slug, 20),
         fetchTradingAgent(slug, session?.accessToken),
+        fetchPublicAgentStatus(),
       ]);
       setData(dash);
       setActivity(act);
       setFollowing(Boolean(meta.following));
+      setPublicStatus(statusRes);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load dashboard');
@@ -84,6 +94,23 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       hubUrl: `${origin}/agent-hub/${slug}`,
     });
 
+  const adminInfraDetails = isAdmin && data && (
+    <>
+      <strong className="text-amber-200">Admin runtime</strong>
+      <ul className="mt-2 space-y-1">
+        <li>Bridge: {data.botConnected ? 'live' : 'demo fallback'}</li>
+        <li>Source: {data.botSource ?? '—'}</li>
+        <li>Strategy: {data.strategyMode ?? '—'}</li>
+        {data.executionPaused && <li>Paused: {data.executionReason ?? 'yes'}</li>}
+        <li>
+          <Link href="/admin/control" className="text-amber-300 underline">
+            Open Admin Control →
+          </Link>
+        </li>
+      </ul>
+    </>
+  );
+
   return (
     <main className="min-h-screen bg-[#050508] text-white">
       <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
@@ -117,6 +144,13 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           </div>
         ) : (
           <>
+            <div className="mb-6">
+              <AgentPublicStatusBanner
+                status={publicStatus.status}
+                label={publicStatus.label}
+              />
+            </div>
+
             <div className="mb-6 flex flex-wrap gap-2">
               <button
                 type="button"
@@ -126,9 +160,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
               >
                 {following ? 'Following' : `Follow Agent · ${data.agent.costDdollarDay.toLocaleString()} DDollar/day`}
               </button>
-              {shareFollowText && (
-                <ShareOnXButton text={shareFollowText} label="Share to X" />
-              )}
+              {shareFollowText && <ShareOnXButton text={shareFollowText} label="Share to X" />}
               <div className="flex rounded-lg border border-zinc-800 p-0.5">
                 <button
                   type="button"
@@ -149,6 +181,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
                 Rental: DDollar/day · alerts on open/close
               </span>
             </div>
+
             {viewMode === 'research' && data.rawBotState && data.botConnected ? (
               <ResearchBotDetailDashboard
                 raw={data.rawBotState as Record<string, unknown>}
@@ -158,27 +191,26 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
                 onAutoRefreshChange={setAutoRefresh}
               />
             ) : (
-            <LiveMissionControl
-              agent={data.agent}
-              dashboard={data.dashboard}
-              activity={activity}
-              botConnected={data.botConnected}
-              botSource={data.botSource}
-              strategyMode={data.strategyMode}
-              executionPaused={data.executionPaused}
-              executionReason={data.executionReason}
-            />
+              <LiveMissionControl
+                agent={data.agent}
+                dashboard={data.dashboard}
+                activity={activity}
+                botConnected={data.botConnected}
+                botSource={data.botSource}
+                strategyMode={data.strategyMode}
+                executionPaused={data.executionPaused}
+                executionReason={data.executionReason}
+                publicStatus={publicStatus.status}
+                publicLabel={publicStatus.label}
+                isAdmin={isAdmin}
+                adminDetails={adminInfraDetails}
+              />
             )}
+
             {viewMode === 'research' && !data.rawBotState && (
-              <p className="mt-4 text-sm text-amber-200/80">
-                Research detail requires a live bot connection. Set <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on Railway API and deploy <code className="rounded bg-black/30 px-1">services/btc-conservative-agent</code>.
-              </p>
-            )}
-            {session?.user?.role === 'ADMIN' && data.botConnected && (
-              <p className="mt-6 rounded-xl border border-amber-500/25 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
-                <strong className="text-amber-200">Admin:</strong> Bot AI (DeepSeek) and Bybit keys live on the Python bot service env — not in your web login.
-                Set <code className="rounded bg-black/30 px-1">DEEPSEEK_API_KEY</code>, <code className="rounded bg-black/30 px-1">BYBIT_*</code> on the bot Railway service.
-                Set <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on the API service. Use the bot&apos;s native dashboard for LIVE ARM / leverage controls.
+              <p className="mt-4 text-sm text-zinc-400">
+                Research detail is unavailable while the agent is offline. Mission control shows demo activity until the
+                platform agent is back online.
               </p>
             )}
           </>

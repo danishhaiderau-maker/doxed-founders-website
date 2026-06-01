@@ -1,8 +1,13 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import { formatPercent, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 import { ShareOnXButton } from '@/components/share-on-x-button';
-import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
+import {
+  AgentPublicStatusBanner,
+  AgentPublicStatusInline,
+} from '@/components/agent-hub/agent-public-status';
+import type { PublicAgentStatus, TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 import { AgentWarningBanner } from './trading-agent-card';
 
 function Metric({ label, value, accent }: { label: string; value: string; accent?: string }) {
@@ -124,41 +129,46 @@ export function AgentActivityFeed({ items }: { items: TradingAgentActivityEntry[
 export function BotConnectionBanner({
   botConnected,
   botSource,
-  strategyMode,
   executionPaused,
-  executionReason,
+  publicStatus,
+  publicLabel,
+  isAdmin,
+  adminDetails,
 }: {
   botConnected?: boolean;
   botSource?: 'LIVE' | 'FALLBACK';
   strategyMode?: string | null;
   executionPaused?: boolean;
   executionReason?: string | null;
+  publicStatus?: PublicAgentStatus;
+  publicLabel?: string;
+  isAdmin?: boolean;
+  adminDetails?: ReactNode;
 }) {
-  if (botConnected && botSource === 'LIVE') {
-    return (
-      <div className="rounded-2xl border border-emerald-500/40 bg-emerald-950/25 px-5 py-3">
-        <p className="text-sm font-semibold text-emerald-200">
-          LIVE — connected to your research bot
-        </p>
-        <p className="mt-1 text-xs text-emerald-100/80">
-          {strategyMode ?? 'RESEARCH'} mode · Bybit WS + DeepSeek pipeline · refreshes every 15s
-          {executionPaused && executionReason
-            ? ` · Paused: ${executionReason}`
-            : ''}
-        </p>
-      </div>
-    );
-  }
+  const status: PublicAgentStatus =
+    publicStatus ??
+    (botConnected && botSource === 'LIVE'
+      ? executionPaused
+        ? 'updating'
+        : 'online'
+      : 'offline');
+  const label =
+    publicLabel ??
+    (status === 'online' ? 'Agent online' : status === 'updating' ? 'Agent updating' : 'Agent offline');
+
   return (
-    <div className="rounded-2xl border border-amber-500/30 bg-amber-950/20 px-5 py-3">
-      <p className="text-sm font-semibold text-amber-200">DEMO — research bot offline</p>
-      <p className="mt-1 text-xs text-amber-100/75">
-        Showing CoinGecko price + seeded demo state. Run the Python bot locally and set{' '}
-        <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on Railway to go live.
-      </p>
+    <div className="space-y-3">
+      <AgentPublicStatusBanner status={status} label={label} />
+      {isAdmin && adminDetails && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
+          {adminDetails}
+        </div>
+      )}
     </div>
   );
 }
+
+export { AgentPublicStatusInline };
 
 export function LiveMissionControl({
   agent,
@@ -166,9 +176,9 @@ export function LiveMissionControl({
   activity,
   botConnected,
   botSource,
-  strategyMode,
   executionPaused,
-  executionReason,
+  isAdmin,
+  adminDetails,
 }: {
   agent: TradingAgentSummary;
   dashboard: TradingAgentDashboardState;
@@ -178,18 +188,20 @@ export function LiveMissionControl({
   strategyMode?: string | null;
   executionPaused?: boolean;
   executionReason?: string | null;
+  publicStatus?: PublicAgentStatus;
+  publicLabel?: string;
+  isAdmin?: boolean;
+  adminDetails?: React.ReactNode;
 }) {
   const d = dashboard;
   return (
     <div className="space-y-6">
       <AgentWarningBanner />
-      <BotConnectionBanner
-        botConnected={botConnected}
-        botSource={botSource}
-        strategyMode={strategyMode}
-        executionPaused={executionPaused}
-        executionReason={executionReason}
-      />
+      {isAdmin && adminDetails && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
+          {adminDetails}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -197,7 +209,16 @@ export function LiveMissionControl({
           <h1 className="mt-1 text-2xl font-bold text-white">{agent.name}</h1>
           <p className="text-sm text-zinc-500">
             {agent.assetSymbol} · {agent.status} ·{' '}
-            {botConnected ? 'research bot live' : 'demo fallback'}
+            <AgentPublicStatusInline
+              status={botConnected && botSource === 'LIVE' ? (executionPaused ? 'updating' : 'online') : 'offline'}
+              label={
+                botConnected && botSource === 'LIVE'
+                  ? executionPaused
+                    ? 'Agent updating'
+                    : 'Agent online'
+                  : 'Agent offline'
+              }
+            />
           </p>
         </div>
         <div className="text-right text-sm">
