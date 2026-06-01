@@ -130,7 +130,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && v2.appVersion && !v2.appVersion.startsWith('0.4') && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to v0.4.0+</p>
+          <p className="font-medium">Update Founder Node to v0.5.0+</p>
           <p className="mt-1 text-xs text-zinc-400">
             Your tray app (v{v2.appVersion}) cannot process sync jobs. Download the latest installer in{' '}
             <strong className="text-cyan-200">Step 1 above</strong>, install it, then restart and retry Rebuild vector index.
