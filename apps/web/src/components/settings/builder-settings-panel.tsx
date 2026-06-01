@@ -15,9 +15,7 @@ import {
   fetchBuilderSettings,
   updateBuilderSettings,
 } from '@/lib/api';
-import { MemoryStoragePanel } from '@/components/memory-storage-panel';
-import { FounderNodeV2Panel } from '@/components/settings/founder-node-v2-panel';
-import { AttestationDashboardPanel } from '@/components/settings/attestation-dashboard-panel';
+import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
 import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
@@ -215,299 +213,69 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       p.key !== 'PHALA' &&
       p.key !== 'OPENROUTER',
   );
-  const openRouterProvider = settings.providers.find((p) => p.key === 'OPENROUTER');
-  const ollamaLocalProvider = settings.providers.find((p) => p.key === 'OLLAMA_LOCAL');
-  const phalaProvider = settings.providers.find((p) => p.key === 'PHALA');
-  const phalaStatus = settings.phalaPrivateAi;
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
-  const nodeAi = settings.founderNodeAi;
 
   return (
     <div className="space-y-8">
-      <MemoryStoragePanel
+      <FounderNodeHubPanel
         accessToken={accessToken}
-        currentMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
-        onModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
-        phalaPrivateAi={phalaStatus}
+        settings={settings}
+        onRefresh={load}
+        memoryMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
+        onMemoryModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
+        aiSection={{
+          settings,
+          apiKeyInput,
+          setApiKeyInput,
+          ollamaUrl,
+          setOllamaUrl,
+          ollamaModel,
+          setOllamaModel,
+          phalaKey,
+          setPhalaKey,
+          phalaUrl,
+          setPhalaUrl,
+          phalaModel,
+          setPhalaModel,
+          connecting,
+          onConnectOpenRouter: () => handleConnectProvider('openrouter'),
+          onConnectOllama: handleConnectOllamaDirect,
+          onConnectPhala: handleConnectPhala,
+          onDisconnectPhala: () => handleDisconnect('phala'),
+          onSaveSettings: saveSettings,
+        }}
       />
 
-      <FounderNodeV2Panel accessToken={accessToken} settings={settings} onRefresh={load} />
-
-      <AttestationDashboardPanel accessToken={accessToken} />
-
-      <section className="rounded-2xl border border-emerald-500/35 bg-emerald-950/10 p-6">
-        <h2 className="text-lg font-semibold text-white">Bring your own AI (Step 2)</h2>
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Pick who runs Copilot and Quick Build inference — your keys, your models, or local Ollama on your machine.
+          Optional cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys below power specs and
+          Founder Brain when not using local Ollama or Phala.
         </p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {openRouterProvider?.connected && (
-            <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-semibold text-emerald-200">
-              OpenRouter connected
-            </span>
-          )}
-          {ollamaLocalProvider?.connected && (
-            <span className="rounded-full bg-cyan-500/20 px-2.5 py-1 text-[10px] font-semibold text-cyan-100">
-              Ollama ready
-              {nodeAi?.ollamaModel ? ` · ${nodeAi.ollamaModel}` : ''}
-            </span>
-          )}
-          {nodeAi?.paired && !nodeAi.ollamaReady && (
-            <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100">
-              Founder Node paired — install Ollama locally
-            </span>
-          )}
-        </div>
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <p className="font-medium text-white">OpenRouter</p>
-                <p className="mt-1 text-xs text-zinc-500">
-                  One API key — route to Claude, GPT, Llama, DeepSeek, and more. Billed on your OpenRouter account.
-                </p>
-              </div>
-              {openRouterProvider?.connected && (
-                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-                  Connected
-                </span>
-              )}
-            </div>
-            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-              <input
-                type="password"
-                value={apiKeyInput.openrouter ?? ''}
-                onChange={(e) => setApiKeyInput({ ...apiKeyInput, openrouter: e.target.value })}
-                placeholder="sk-or-…"
-                className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-              />
-              <button
-                type="button"
-                disabled={connecting === 'openrouter'}
-                onClick={() => handleConnectProvider('openrouter')}
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              >
-                {openRouterProvider?.connected ? 'Update key' : 'Connect OpenRouter'}
-              </button>
-            </div>
-            <p className="mt-2 text-[11px] text-zinc-600">
-              Get a key at{' '}
-              <a href="https://openrouter.ai/keys" className="text-emerald-400 underline" target="_blank" rel="noreferrer">
-                openrouter.ai/keys
-              </a>
-              . Set default provider to OpenRouter above after connecting.
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-4">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <p className="font-medium text-white">Ollama (local)</p>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Prompts stay on your desktop. Pair{' '}
-                  <Link href="/founder-node" className="text-cyan-300 underline">
-                    Founder Node
-                  </Link>{' '}
-                  + run Ollama, or connect a direct URL for self-hosted setups.
-                </p>
-              </div>
-              {ollamaLocalProvider?.connected && (
-                <span className="rounded-full bg-cyan-500/20 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
-                  Ready
-                </span>
-              )}
-            </div>
-            {nodeAi && (
-              <p className="mt-2 text-xs text-zinc-400">
-                {nodeAi.paired
-                  ? nodeAi.online
-                    ? `Node online: ${nodeAi.nodeLabel ?? 'Founder Node'}${nodeAi.ollamaReady ? '' : ' — start Ollama locally'}`
-                    : 'Founder Node offline — open the tray app'
-                  : 'No Founder Node paired yet'}
-                {nodeAi.directOllamaUrl ? ` · Direct URL: ${nodeAi.directOllamaUrl}` : ''}
-              </p>
-            )}
-            <div className="mt-3 space-y-2">
-              <input
-                type="url"
-                value={ollamaUrl}
-                onChange={(e) => setOllamaUrl(e.target.value)}
-                placeholder="http://127.0.0.1:11434"
-                className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-              />
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <input
-                  value={ollamaModel}
-                  onChange={(e) => setOllamaModel(e.target.value)}
-                  placeholder="llama3.2"
-                  className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-                />
-                <button
-                  type="button"
-                  disabled={connecting === 'ollama'}
-                  onClick={handleConnectOllamaDirect}
-                  className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  Connect direct URL
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-fuchsia-500/35 bg-fuchsia-950/10 p-6">
-        <h2 className="text-lg font-semibold text-white">Private AI — Phala TEE (Step 3)</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Confidential inference in a hardware TEE — OpenAI-compatible API. Your key or platform credits; prompts are
-          not used for public model training.
-        </p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {phalaProvider?.connected && (
-            <span className="rounded-full bg-fuchsia-500/20 px-2.5 py-1 text-[10px] font-semibold text-fuchsia-100">
-              Private AI ready
-              {phalaStatus?.model ? ` · ${phalaStatus.model}` : ''}
-            </span>
-          )}
-          {phalaStatus?.platformAvailable && !phalaStatus.userKeyConnected && (
-            <span className="rounded-full bg-violet-500/20 px-2.5 py-1 text-[10px] font-semibold text-violet-100">
-              Platform Phala credits enabled
-            </span>
-          )}
-        </div>
-        <div className="mt-6 rounded-xl border border-fuchsia-500/30 bg-fuchsia-950/10 p-4">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <p className="font-medium text-white">Phala / Redpill API</p>
-              <p className="mt-1 text-xs text-zinc-500">
-                Connect your Phala Cloud key, or rely on platform credits when enabled on the API. Set{' '}
-                <strong className="font-medium text-zinc-300">Default provider</strong> to Private AI (Phala) after
-                connecting.
-              </p>
-            </div>
-            {phalaProvider?.connected && (
-              <span className="rounded-full bg-fuchsia-500/20 px-2 py-0.5 text-[10px] font-semibold text-fuchsia-200">
-                Connected
-              </span>
-            )}
-          </div>
-          <div className="mt-3 space-y-2">
+        <div className="mt-4 flex flex-wrap gap-4 text-sm text-zinc-300">
+          <label className="flex items-center gap-2">
             <input
-              type="password"
-              value={phalaKey}
-              onChange={(e) => setPhalaKey(e.target.value)}
-              placeholder="Phala API key"
-              className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+              type="checkbox"
+              checked={settings.autoPublishOnEvent}
+              onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
             />
-            <input
-              type="url"
-              value={phalaUrl}
-              onChange={(e) => setPhalaUrl(e.target.value)}
-              placeholder="https://api.redpill.ai/v1"
-              className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-            />
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <input
-                value={phalaModel}
-                onChange={(e) => setPhalaModel(e.target.value)}
-                placeholder="phala/deepseek-chat-v3-0324"
-                className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-              />
-              <button
-                type="button"
-                disabled={connecting === 'phala'}
-                onClick={handleConnectPhala}
-                className="rounded-lg bg-fuchsia-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              >
-                {phalaProvider?.connected ? 'Update connection' : 'Connect Phala'}
-              </button>
-              {phalaProvider?.connected && (
-                <button
-                  type="button"
-                  onClick={() => handleDisconnect('phala')}
-                  className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
-                >
-                  Disconnect
-                </button>
-              )}
-            </div>
-          </div>
-          <p className="mt-2 text-[11px] text-zinc-600">
-            Docs:{' '}
-            <a
-              href="https://docs.phala.com/phala-cloud/confidential-ai/confidential-model/confidential-ai-api"
-              className="text-fuchsia-300 underline"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Phala Confidential AI API
-            </a>
-            . See also <code className="text-zinc-500">docs/PHALA_PRIVATE_AI.md</code>.
-          </p>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-violet-500/30 bg-violet-950/10 p-6">
-        <h2 className="text-lg font-semibold text-white">Default builder</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Remote LLM for specs and Copilot chat, Cursor / OpenHands for agent dispatch, or Ollama local via Founder Node.
-        </p>
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <label className="block text-sm">
-            <span className="text-zinc-400">Default provider</span>
-            <select
-              value={settings.defaultProvider}
-              onChange={(e) => saveSettings({ defaultProvider: e.target.value })}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
-            >
-              {settings.providers.map((p) => (
-                <option key={p.key} value={p.key}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
+            Auto-publish on deploy events
           </label>
-          <label className="block text-sm">
-            <span className="text-zinc-400">Preferred model (LLM providers only)</span>
+          <label className="flex items-center gap-2">
             <input
-              defaultValue={settings.preferredModel ?? ''}
-              onBlur={(e) => saveSettings({ preferredModel: e.target.value || undefined })}
-              placeholder="gpt-4o-mini, openrouter/auto, llama3.2…"
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
+              type="checkbox"
+              checked={settings.autoCreateGitHubIssues}
+              onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
             />
+            Auto-create GitHub issues from Quick Build
           </label>
         </div>
-        <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={settings.autoPublishOnEvent}
-            onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
-          />
-          Auto-publish when deploy/commit events create suggested updates
-        </label>
-        <label className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={settings.autoCreateGitHubIssues}
-            onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
-          />
-          Auto-create GitHub issues when Quick Build captures ideas
-        </label>
-        <label className="mt-4 block text-sm">
-          <span className="text-zinc-400">Current goal focus</span>
-          <input
-            defaultValue={settings.currentGoalFocus ?? ''}
-            onBlur={(e) => saveSettings({ currentGoalFocus: e.target.value.trim() || undefined })}
-            placeholder="e.g. Referral System — shown on welcome-back briefing"
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
-          />
-        </label>
-      </section>
 
-      <section className="rounded-2xl border border-sky-500/30 bg-sky-950/10 p-6">
-        <h2 className="text-lg font-semibold text-white">Cursor Cloud Agents</h2>
+        <div className="mt-6 space-y-6">
+        <div className="rounded-xl border border-sky-500/30 bg-sky-950/10 p-4">
+        <h3 className="font-semibold text-white">Cursor Cloud Agents</h3>
         <p className="mt-1 text-sm text-zinc-500">
           Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an API key
           in{' '}
@@ -556,10 +324,10 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             </button>
           )}
         </div>
-      </section>
+        </div>
 
-      <section className="rounded-2xl border border-indigo-500/30 bg-indigo-950/10 p-6">
-        <h2 className="text-lg font-semibold text-white">OpenHands — remote coding agent</h2>
+        <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/10 p-4">
+        <h3 className="font-semibold text-white">OpenHands — remote coding agent</h3>
         <p className="mt-1 text-sm text-zinc-500">
           Self-hosted OpenHands or{' '}
           <a href="https://app.all-hands.dev" className="text-indigo-300 underline" target="_blank" rel="noreferrer">
@@ -605,18 +373,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             )}
           </div>
         </div>
-      </section>
+        </div>
 
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="text-lg font-semibold text-white">LLM providers (specs & Founder Brain)</h2>
+        <div className="rounded-xl border border-zinc-800 p-4">
+        <h3 className="font-semibold text-white">LLM providers (specs & Founder Brain)</h3>
         <p className="mt-1 text-sm text-zinc-500">
-          Your API keys — encrypted at rest. Billed to your account. Pick one as your{' '}
-          <strong className="font-medium text-zinc-300">default provider</strong> above — Cursor and
-          OpenHands are separate (they dispatch cloud agents, not chat completions).
-        </p>
-        <p className="mt-2 text-xs text-zinc-600">
-          Only DeepSeek connected? Set default to DeepSeek — specs and Founder Brain work without Cursor.
-          Only Cursor connected? Quick Build dispatches agents; use an LLM key above for AI-written specs.
+          Additional API keys — encrypted at rest. Set default provider in Founder Node Step 3 above.
         </p>
         <div className="mt-4 space-y-4">
           {llmProviders.map((p) => (
@@ -663,10 +425,10 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             </div>
           ))}
         </div>
-      </section>
+        </div>
 
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="text-lg font-semibold text-white">GitHub personal access token</h2>
+        <div className="rounded-xl border border-zinc-800 p-4">
+        <h3 className="font-semibold text-white">GitHub personal access token</h3>
         <p className="mt-1 text-sm text-zinc-500">
           Required for creating issues and listing PRs on private repos. Connect repo in{' '}
           <Link href="/founder-den?tab=build" className="text-emerald-400 underline">
@@ -698,6 +460,8 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               Remove
             </button>
           )}
+        </div>
+        </div>
         </div>
       </section>
 

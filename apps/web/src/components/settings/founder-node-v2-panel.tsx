@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import Link from 'next/link';
 import type { BuilderSettings } from '@/lib/api';
 import {
   pushGoalToFounderNode,
@@ -13,9 +12,10 @@ type Props = {
   accessToken: string;
   settings: BuilderSettings;
   onRefresh: () => void;
+  embedded?: boolean;
 };
 
-export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) {
+export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded }: Props) {
   const v2 = settings.founderNodeV2;
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -81,17 +81,26 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
   }
 
   if (!isFounderNodeMode && !v2?.paired) {
-    return null;
+    return embedded ? (
+      <p className="text-sm text-zinc-500">
+        Enable <strong className="text-zinc-300">Founder Vault (Founder Node)</strong> in Step 2 above, then pair
+        your desktop app.
+      </p>
+    ) : null;
   }
 
-  return (
-    <section className="rounded-2xl border border-cyan-500/35 bg-cyan-950/10 p-6">
-      <h2 className="text-lg font-semibold text-white">Founder Node v2 (Step 4)</h2>
-      <p className="mt-1 text-sm text-zinc-500">
-        Local vector index, bidirectional sync, and on-device agents — cloud pushes goals; your vault stays on the desktop.
-      </p>
+  const inner = (
+    <>
+      {!embedded && (
+        <>
+          <h2 className="text-lg font-semibold text-white">Founder Node v2 (Step 4)</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            Local vector index, bidirectional sync, and on-device agents — cloud pushes goals; your vault stays on the desktop.
+          </p>
+        </>
+      )}
 
-      <div className="mt-4 flex flex-wrap gap-2 text-[10px] font-semibold">
+      <div className={`flex flex-wrap gap-2 text-[10px] font-semibold ${embedded ? 'mt-0' : 'mt-4'}`}>
         {v2?.paired ? (
           <span className="rounded-full bg-cyan-500/20 px-2.5 py-1 text-cyan-100">
             Node paired{v2.nodeLabel ? ` · ${v2.nodeLabel}` : ''}
@@ -123,22 +132,15 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
           <p className="font-medium">Update Founder Node to v0.4.0+</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Your tray app (v{v2.appVersion}) cannot process sync jobs. Download the latest installer from{' '}
-            <Link href="/founder-node" className="text-cyan-300 underline">
-              /founder-node
-            </Link>
-            , install it, then restart the app and retry Rebuild vector index.
+            Your tray app (v{v2.appVersion}) cannot process sync jobs. Download the latest installer in{' '}
+            <strong className="text-cyan-200">Step 1 above</strong>, install it, then restart and retry Rebuild vector index.
           </p>
         </div>
       )}
 
-      {!v2?.paired && (
+      {!v2?.paired && !embedded && (
         <p className="mt-4 text-sm text-zinc-400">
-          Enable <strong>Founder Vault (Founder Node)</strong> above and install the tray app from{' '}
-          <Link href="/founder-node" className="text-cyan-300 underline">
-            /founder-node
-          </Link>
-          .
+          Enable <strong>Founder Vault (Founder Node)</strong> in Step 2 and install the tray app from Step 1.
         </p>
       )}
 
@@ -249,6 +251,12 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh }: Props) 
           )}
         </div>
       )}
-    </section>
+    </>
+  );
+
+  if (embedded) return <div>{inner}</div>;
+
+  return (
+    <section className="rounded-2xl border border-cyan-500/35 bg-cyan-950/10 p-6">{inner}</section>
   );
 }

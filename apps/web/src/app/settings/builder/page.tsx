@@ -14,8 +14,10 @@ export default function BuilderSettingsPage() {
         <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">Builder settings</h1>
-            <p className="text-sm text-zinc-500">AI providers · GitHub · default builder</p>
+            <h1 className="mt-1 text-2xl font-bold">Founder Node</h1>
+            <p className="text-sm text-zinc-500">
+              Download, pair, connect AI, sync your vault, and verify privacy — all in one place
+            </p>
           </div>
           <SiteNav />
         </div>
