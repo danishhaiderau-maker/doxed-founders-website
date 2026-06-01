@@ -1,5 +1,5 @@
-import AgentsPageClient from './page.client';
+import { redirect } from 'next/navigation';
 
-export default function AgentsPage() {
-  return <AgentsPageClient />;
+export default function AgentsRedirectPage() {
+  redirect('/agent-hub');
 }

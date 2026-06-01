@@ -2323,6 +2323,83 @@ export function runAgent(agentId: string, prompt: string, token: string) {
   }>(`/agents/${agentId}/run`, { method: 'POST', body: JSON.stringify({ prompt }) }, token);
 }
 
+export function followFounderAgent(agentId: string, token: string) {
+  return apiFetch<{ following: boolean }>(`/agents/${agentId}/follow`, { method: 'POST' }, token);
+}
+
+// ─── Trading Agents (Agent Hub) ──────────────────────────────────────────────
+
+export interface TradingAgentSummary {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  kind: string;
+  status: string;
+  assetSymbol: string;
+  startingBalance: number;
+  balanceUsd: number;
+  equityUsd: number;
+  netReturnPct: number;
+  tradeCount: number;
+  winRatePct: number;
+  costDdollarDay: number;
+  liveSince: string;
+  liveSinceDays: number;
+  followerCount: number;
+  isExperimental: boolean;
+  following?: boolean;
+}
+
+export interface TradingAgentDashboard {
+  agent: TradingAgentSummary;
+  dashboard: import('@dcf/utils').TradingAgentDashboardState;
+  updatedAt: string;
+}
+
+export interface TradingAgentActivityEntry {
+  id: string;
+  type: string;
+  title: string;
+  reason: string | null;
+  outcome: string | null;
+  profitPct: number | null;
+  edgeScore: number | null;
+  edgeRequired: number | null;
+  marketRegime: string | null;
+  shareText: string | null;
+  createdAt: string;
+}
+
+export function fetchTradingAgents(kind?: string) {
+  const q = kind ? `?kind=${encodeURIComponent(kind)}` : '';
+  return apiFetch<{ agents: TradingAgentSummary[]; kinds: string[] }>(`/trading-agents${q}`);
+}
+
+export function fetchTradingAgentLeaderboard() {
+  return apiFetch<TradingAgentSummary[]>('/trading-agents/leaderboard');
+}
+
+export function fetchTradingAgent(slug: string, token?: string) {
+  return apiFetch<TradingAgentSummary>(`/trading-agents/${slug}`, {}, token);
+}
+
+export function fetchTradingAgentDashboard(slug: string) {
+  return apiFetch<TradingAgentDashboard>(`/trading-agents/${slug}/dashboard`);
+}
+
+export function fetchTradingAgentActivity(slug: string, limit = 30) {
+  return apiFetch<TradingAgentActivityEntry[]>(`/trading-agents/${slug}/activity?limit=${limit}`);
+}
+
+export function followTradingAgent(agentId: string, token: string) {
+  return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'POST' }, token);
+}
+
+export function unfollowTradingAgent(agentId: string, token: string) {
+  return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'DELETE' }, token);
+}
+
 // ─── Build Queue (Phase 4) ───────────────────────────────────────────────────
 
 export type BuildQueueItemKind = 'IDEA' | 'TASK' | 'GITHUB_ISSUE' | 'ROADMAP' | 'SPEC';

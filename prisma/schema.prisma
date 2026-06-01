@@ -408,6 +408,7 @@ model User {
   agentInstalls        AgentInstall[]
   agentRuns            AgentRun[]
   agentFollows         AgentFollow[]
+  tradingAgentFollows  TradingAgentFollow[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
   founderNodes              FounderNode[]
@@ -972,6 +973,7 @@ enum NotificationType {
   BUILD_QUEUE
   AGENT_RESULT
   FOUNDER_EVENT
+  TRADING_AGENT_UPDATE
   SYSTEM
 }
 
@@ -1872,6 +1874,98 @@ model AgentFollow {
   createdAt DateTime @default(now())
 
   agent FounderAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId])
+  @@index([userId])
+}
+
+// ─── Agent Hub — transparent trading agents ────────────────────────────────────
+
+enum TradingAgentStatus {
+  TESTING
+  LIVE
+  PAUSED
+  RETIRED
+}
+
+enum TradingAgentKind {
+  TRADING
+  RESEARCH
+  FOUNDER
+  SCOUT
+}
+
+enum TradingAgentActivityType {
+  NO_TRADE
+  ANALYZED
+  REJECTED
+  POSITION_OPENED
+  POSITION_CLOSED
+  AI_APPROVED
+  AI_REJECTED
+  STRATEGY_CHANGE
+  NEW_HIGH
+  BIAS_CHANGE
+}
+
+model TradingAgent {
+  id              String             @id @default(cuid())
+  slug            String             @unique
+  name            String
+  description     String?            @db.Text
+  kind            TradingAgentKind   @default(TRADING)
+  status          TradingAgentStatus @default(TESTING)
+  assetSymbol     String             @default("BTC")
+  startingBalance Decimal            @db.Decimal(16, 2)
+  balanceUsd      Decimal            @db.Decimal(16, 2)
+  equityUsd       Decimal            @db.Decimal(16, 2)
+  netReturnPct    Decimal            @db.Decimal(8, 4)
+  tradeCount      Int                @default(0)
+  winRatePct      Decimal            @db.Decimal(5, 2)
+  costDdollarDay  Int                @default(1000)
+  liveSince       DateTime
+  followerCount   Int                @default(0)
+  dashboardState  Json
+  isExperimental  Boolean            @default(true)
+  sortOrder       Int                @default(0)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  activities TradingAgentActivity[]
+  followers  TradingAgentFollow[]
+
+  @@index([kind])
+  @@index([sortOrder])
+}
+
+model TradingAgentActivity {
+  id           String                   @id @default(cuid())
+  agentId      String
+  type         TradingAgentActivityType
+  title        String
+  reason       String?                  @db.Text
+  outcome      String?
+  profitPct    Decimal?                 @db.Decimal(8, 4)
+  edgeScore    Int?
+  edgeRequired Int?
+  marketRegime String?
+  metadata     Json?
+  shareText    String?                  @db.Text
+  createdAt    DateTime                 @default(now())
+
+  agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt(sort: Desc)])
+}
+
+model TradingAgentFollow {
+  id        String   @id @default(cuid())
+  agentId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
   user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([agentId, userId])

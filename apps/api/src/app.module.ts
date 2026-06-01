@@ -32,6 +32,7 @@ import { FounderNodeModule } from './founder-node/founder-node.module';
 import { AttestationModule } from './attestation/attestation.module';
 import { TrustCenterModule } from './trust-center/trust-center.module';
 import { TownHallModule } from './town-hall/town-hall.module';
+import { TradingAgentsModule } from './trading-agents/trading-agents.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { TownHallModule } from './town-hall/town-hall.module';
     AttestationModule,
     TrustCenterModule,
     TownHallModule,
+    TradingAgentsModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

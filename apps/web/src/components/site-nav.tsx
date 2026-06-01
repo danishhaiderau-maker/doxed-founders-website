@@ -14,10 +14,12 @@ const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
   { href: '/leaderboard', label: 'Rankings' },
+  { href: '/trust-center', label: 'Trust Center' },
+  { href: '/scout-votes', label: 'Scout Vote' },
+  { href: '/agent-hub', label: 'Agent Hub' },
   { href: '/founder-den', label: 'Founder OS', auth: true },
   { href: '/raise-room', label: 'Raise Room' },
-  { href: '/trust-center', label: 'Trust Center' },
-  { href: '/town-hall', label: 'Town Hall' },
+  { href: '/list-your-project', label: 'List Project' },
 ] as const;
 
 /** Row 2 — trading (amber family) */
@@ -33,7 +35,7 @@ const BUILDING_NAV = [
   { href: '/founder-den', label: 'Founder OS', auth: true },
   { href: '/developers', label: 'Developers' },
   { href: '/founder-node', label: 'Founder Node' },
-  { href: '/agents', label: 'Agents' },
+  { href: '/agent-hub', label: 'Agent Hub' },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/settings/builder', label: 'AI Stack', auth: true },
 ] as const;
@@ -76,7 +78,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
-  if (href === '/agents') return pathname.startsWith('/agents');
+  if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
   if (href === '/developers') return pathname.startsWith('/developers');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');

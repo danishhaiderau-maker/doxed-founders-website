@@ -67,3 +67,4 @@ export * from './notification-preferences';
 export * from './prediction-markets';
 export * from './project-name';
 export * from './repo-starter-templates';
+export * from './trading-agents';
