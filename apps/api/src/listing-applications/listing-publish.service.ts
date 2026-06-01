@@ -5,8 +5,10 @@ import {
 import {
   FounderVerificationCriterion,
   normalizeProjectName,
+  resolveListingChain,
   scoreFounderVerification,
   slugify,
+  validateListingForApproval,
 } from '@dcf/utils';
 import {
   ChainSlug,
@@ -43,35 +45,52 @@ export class ListingPublishService {
   async publishApprovedApplication(
     application: ListingApplication,
   ): Promise<PublishedProjectResult> {
-    const verification = scoreFounderVerification({
-      founderName: application.founderName,
-      founderLinkedIn: application.founderLinkedIn,
-      founderGithub: application.founderGithub,
-      companyDetails: application.companyDetails,
+    const approval = validateListingForApproval({
+      dexscreenerUrl: application.dexscreenerUrl,
+      founderDoxxedStatus: application.founderDoxxedStatus,
       founderVideoUrl: application.founderVideoUrl,
       founderInterviewUrl: application.founderInterviewUrl,
+      founderTwitter: application.founderTwitter,
+      founderLinkedIn: application.founderLinkedIn,
+      founderGithub: application.founderGithub,
+      websiteUrl: application.websiteUrl,
+      chainSlug: application.chainSlug,
+      contractAddress: application.contractAddress,
+      founderName: application.founderName,
+      projectName: application.projectName,
     });
 
-    if (!verification.meetsThreshold) {
+    if (!approval.ok) {
+      throw new BadRequestException(approval.errors.join(' '));
+    }
+
+    const chainSlug = resolveListingChain(application);
+    if (!chainSlug) {
       throw new BadRequestException(
-        'Cannot publish: need a public founder video or interview URL on the application',
+        'Cannot publish: chain could not be inferred from DexScreener — set chain during admin review (optional enrichment).',
       );
     }
 
-    if (!application.chainSlug) {
-      throw new BadRequestException(
-        'Cannot publish: chain is required on the listing application',
-      );
-    }
+    const effectiveApplication: ListingApplication = {
+      ...application,
+      chainSlug: chainSlug as ListingApplication['chainSlug'],
+      founderName:
+        application.founderName?.trim() ||
+        application.projectName.trim() ||
+        application.ticker,
+    };
 
-    if (!application.founderName?.trim()) {
-      throw new BadRequestException(
-        'Cannot publish: add founder name before approving (can be filled during admin review)',
-      );
-    }
+    const verification = scoreFounderVerification({
+      founderName: effectiveApplication.founderName,
+      founderLinkedIn: effectiveApplication.founderLinkedIn,
+      founderGithub: effectiveApplication.founderGithub,
+      companyDetails: effectiveApplication.companyDetails,
+      founderVideoUrl: effectiveApplication.founderVideoUrl,
+      founderInterviewUrl: effectiveApplication.founderInterviewUrl,
+    });
 
     const result = await this.prisma.$transaction(async (tx) =>
-      this.publishInTransaction(tx, application, verification.criteria),
+      this.publishInTransaction(tx, effectiveApplication, verification.criteria),
     );
 
     return result;

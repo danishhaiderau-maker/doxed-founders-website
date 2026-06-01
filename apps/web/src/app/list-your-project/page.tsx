@@ -4,9 +4,8 @@ import Link from 'next/link';
 import { FormEvent, useMemo, useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { FounderVerificationChecklist } from '@/components/founder-verification-checklist';
 import { GeckoTerminalChart } from '@/components/gecko-terminal-chart';
-import { extractPoolAddressFromDexUrl } from '@dcf/utils';
+import { extractPoolAddressFromDexUrl, validateListingForApproval, applyProofLinkUrl } from '@dcf/utils';
 import {
   DexScreenerPreview,
   ListingFormData,
@@ -16,7 +15,6 @@ import {
   updateListingScoutFields,
   fetchProject,
 } from '@/lib/api';
-import { scoreFounderVerification } from '@dcf/utils';
 
 const CHAIN_OPTIONS = [
   'SOLANA',
@@ -52,6 +50,7 @@ const emptyForm: ListingFormData = {
   whyDoxxed: '',
   founderDoxxedStatus: 'DOXXED',
   scoutHighlightNote: '',
+  proofLinkUrl: '',
 };
 
 function ListYourProjectPageInner() {
@@ -157,15 +156,20 @@ function ListYourProjectPageInner() {
 
   function goToScoutStep() {
     setError(null);
-    const verification = scoreFounderVerification(form);
-    if (!verification.meetsSubmissionThreshold) {
-      setError(
-        'Add a public founder video or interview/podcast URL before continuing. You do not need to be the founder.',
-      );
+    const input = applyProofLinkUrl({
+      ...form,
+      dexscreenerUrl: form.dexscreenerUrl || dexUrl,
+    });
+    const approval = validateListingForApproval({
+      ...input,
+      founderDoxxedStatus: form.founderDoxxedStatus,
+    });
+    if (!approval.ok) {
+      setError(approval.errors.join(' '));
       return;
     }
     if (!form.projectName.trim() || !form.ticker.trim()) {
-      setError('Project name and ticker are required.');
+      setError('Project name and ticker are required — use DexScreener auto-fill.');
       return;
     }
     setStep(2);
@@ -176,11 +180,16 @@ function ListYourProjectPageInner() {
     e.preventDefault();
     setError(null);
 
-    const verification = scoreFounderVerification(form);
-    if (!verification.meetsSubmissionThreshold) {
-      setError(
-        'Add a public founder video or interview/podcast URL. You do not need to be the founder — if you found proof on X or YouTube, that is enough.',
-      );
+    const input = applyProofLinkUrl({
+      ...form,
+      dexscreenerUrl: form.dexscreenerUrl || dexUrl,
+    });
+    const approval = validateListingForApproval({
+      ...input,
+      founderDoxxedStatus: form.founderDoxxedStatus,
+    });
+    if (!approval.ok) {
+      setError(approval.errors.join(' '));
       return;
     }
 
@@ -351,9 +360,8 @@ function ListYourProjectPageInner() {
       <div className="mx-auto max-w-5xl px-6 py-12">
         <h1 className="text-3xl font-bold tracking-tight">List your project</h1>
         <p className="mt-3 max-w-2xl text-[var(--color-muted)]">
-          Anyone can suggest a project — you do not need to be the founder. Found a public
-          video or podcast? Paste it below with basic project info. DexScreener or contract
-          lookup is optional (helps fill Telegram, Twitter, prices).
+          Three things required: DexScreener URL, founder status, and a public proof link (X, YouTube,
+          interview, team page). Everything else is optional enrichment.
         </p>
 
         <div className="mt-6 flex items-center gap-3 text-sm">
@@ -500,17 +508,22 @@ function ListYourProjectPageInner() {
               <Field label="Summary" value={form.summary ?? ''} onChange={(v) => updateField('summary', v)} multiline />
             </Section>
 
-            <Section title="Founder proof (community submissions welcome)">
-              <FounderVerificationChecklist input={form} />
+            <Section title="Founder proof">
+              <Field
+                label="Proof link (required)"
+                value={form.proofLinkUrl ?? ''}
+                onChange={(v) => updateField('proofLinkUrl', v)}
+                placeholder="X/Twitter, YouTube, interview, podcast, team page, verification page…"
+                required
+              />
+              <p className="mt-2 text-xs text-[var(--color-muted)]">
+                Or paste specific links below — any public proof counts.
+              </p>
               <div className="mt-4 space-y-4">
-                <Field label="Founder video URL (on camera)" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} placeholder="YouTube, Loom, X video… — required if no interview below" />
-                <Field label="Public interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} placeholder="Twitter Spaces, podcast, conference talk… — required if no video above" />
-                <Field label="Founder name (optional — admin can add later)" value={form.founderName ?? ''} onChange={(v) => updateField('founderName', v)} />
-                <Field label="LinkedIn (optional)" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
-                <Field label="Twitter / X (optional)" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
-                <Field label="GitHub (optional)" value={form.founderGithub ?? ''} onChange={(v) => updateField('founderGithub', v)} />
-                <Field label="Company details (optional)" value={form.companyDetails ?? ''} onChange={(v) => updateField('companyDetails', v)} multiline placeholder="Legal entity, team size, location…" />
-                <Field label="Audit report URL (optional)" value={form.auditUrl ?? ''} onChange={(v) => updateField('auditUrl', v)} />
+                <Field label="Founder video URL" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} />
+                <Field label="Interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} />
+                <Field label="Twitter / X" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
+                <Field label="LinkedIn" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
               </div>
             </Section>
 
@@ -539,13 +552,29 @@ function ListYourProjectPageInner() {
                 <input
                   type="radio"
                   name="doxxedStatus"
-                  checked={form.founderDoxxedStatus !== 'BUILDING_IN_PUBLIC'}
+                  checked={form.founderDoxxedStatus === 'VERIFIED'}
+                  onChange={() => updateField('founderDoxxedStatus', 'VERIFIED')}
+                  className="mt-1"
+                />
+                <span>
+                  <strong className="text-white">Verified founder</strong>
+                  <span className="block text-xs text-zinc-500">LinkedIn or official verification link required</span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="doxxedStatus"
+                  checked={
+                    form.founderDoxxedStatus !== 'BUILDING_IN_PUBLIC' &&
+                    form.founderDoxxedStatus !== 'VERIFIED'
+                  }
                   onChange={() => updateField('founderDoxxedStatus', 'DOXXED')}
                   className="mt-1"
                 />
                 <span>
-                  <strong className="text-white">Doxxed / verified founder</strong>
-                  <span className="block text-xs text-zinc-500">Public video, interview, LinkedIn, or identity proof</span>
+                  <strong className="text-white">Doxxed founder</strong>
+                  <span className="block text-xs text-zinc-500">Public video, interview, X, or team page</span>
                 </span>
               </label>
               <label className="flex cursor-pointer items-start gap-2 text-sm">

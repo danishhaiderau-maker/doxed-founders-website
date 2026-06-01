@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { computeVotingThreshold, POINTS, scoreFounderVerification } from '@dcf/utils';
+import { computeVotingThreshold, POINTS, applyProofLinkUrl, scoreFounderVerification, validateListingForApproval } from '@dcf/utils';
 import { ListingStatus, NotificationType, Prisma } from '@prisma/client';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -44,40 +44,50 @@ export class ListingApplicationsService {
   }
 
   async create(dto: CreateListingApplicationDto, submitterUserId?: string | null) {
+    const mapped = applyProofLinkUrl({
+      ...dto,
+      dexscreenerUrl: dto.dexscreenerUrl,
+      founderDoxxedStatus: dto.founderDoxxedStatus,
+      proofLinkUrl: dto.proofLinkUrl,
+      founderVideoUrl: dto.founderVideoUrl,
+      founderInterviewUrl: dto.founderInterviewUrl,
+      founderTwitter: dto.founderTwitter,
+      founderLinkedIn: dto.founderLinkedIn,
+      founderGithub: dto.founderGithub,
+      websiteUrl: dto.websiteUrl,
+      chainSlug: dto.chainSlug,
+      contractAddress: dto.contractAddress,
+      founderName: dto.founderName,
+      projectName: dto.projectName,
+    });
+
     const doxxedStatus =
-      dto.founderDoxxedStatus ??
+      mapped.founderDoxxedStatus ??
       (dto.whyDoxxed?.toLowerCase().includes('building in public')
         ? 'BUILDING_IN_PUBLIC'
         : 'DOXXED');
 
-    if (doxxedStatus === 'UNDOXXED') {
-      throw new BadRequestException(
-        'Undoxxed founders are not eligible for official listings. Doxxed Crypto prioritizes transparency — only Doxxed or Verified founders receive official listings.',
-      );
-    }
+    const approval = validateListingForApproval({
+      ...mapped,
+      founderDoxxedStatus: doxxedStatus,
+    });
 
-    const verification = this.computeVerification(dto);
-
-    const hasProofLink = Boolean(
-      dto.founderVideoUrl?.trim() ||
-        dto.founderInterviewUrl?.trim() ||
-        dto.founderTwitter?.trim() ||
-        dto.founderLinkedIn?.trim(),
-    );
-
-    if (doxxedStatus === 'DOXXED' && !hasProofLink && !verification.meetsSubmissionThreshold) {
-      throw new BadRequestException(
-        'Doxxed founders require a public proof link — X/Twitter, YouTube, podcast, interview, or team page.',
-      );
-    }
-
-    if (doxxedStatus === 'VERIFIED' && !dto.founderLinkedIn?.trim() && !dto.founderInterviewUrl?.trim()) {
-      throw new BadRequestException('Verified founders require a verification link (LinkedIn or public interview).');
+    if (!approval.ok) {
+      throw new BadRequestException(approval.errors.join(' '));
     }
 
     if (!dto.whyList?.trim() && !dto.scoutHighlightNote?.trim()) {
       throw new BadRequestException('Add a short note on why this founder deserves community review.');
     }
+
+    const verification = this.computeVerification({
+      ...dto,
+      founderVideoUrl: mapped.founderVideoUrl,
+      founderInterviewUrl: mapped.founderInterviewUrl,
+      founderLinkedIn: mapped.founderLinkedIn,
+      founderTwitter: mapped.founderTwitter,
+      founderGithub: mapped.founderGithub,
+    });
 
     const activeUsers = await this.prisma.user.count({
       where: { banned: false },
@@ -99,11 +109,11 @@ export class ListingApplicationsService {
         logoUrl: dto.logoUrl,
         telegramUrl: dto.telegramUrl,
         founderName: dto.founderName,
-        founderLinkedIn: dto.founderLinkedIn,
-        founderTwitter: dto.founderTwitter,
-        founderGithub: dto.founderGithub,
-        founderVideoUrl: dto.founderVideoUrl,
-        founderInterviewUrl: dto.founderInterviewUrl,
+        founderLinkedIn: mapped.founderLinkedIn,
+        founderTwitter: mapped.founderTwitter,
+        founderGithub: mapped.founderGithub,
+        founderVideoUrl: mapped.founderVideoUrl,
+        founderInterviewUrl: mapped.founderInterviewUrl,
         companyDetails: dto.companyDetails,
         auditUrl: dto.auditUrl,
         summary: dto.summary,
