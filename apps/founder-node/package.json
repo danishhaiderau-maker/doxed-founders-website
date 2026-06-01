@@ -73,9 +73,16 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
+      "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Founder Node"
+      "shortcutName": "Founder Node",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "extraMetadata": {
+      "name": "Founder Node"
     },
     "publish": {
       "provider": "github",
