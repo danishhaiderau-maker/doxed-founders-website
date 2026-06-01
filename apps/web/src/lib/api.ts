@@ -1251,6 +1251,9 @@ export interface PlatformStats {
   totalTrades: number;
   githubCommits: number;
   scoutVotes: number;
+  projectsAwaitingReview: number;
+  activeInvestigations: number;
+  ddollarDistributed: number;
 }
 
 export function fetchPlatformStats() {
