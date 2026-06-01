@@ -2458,6 +2458,77 @@ export function unfollowTradingAgent(agentId: string, token: string) {
   return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'DELETE' }, token);
 }
 
+export type PublicAgentStatus = 'online' | 'offline' | 'updating';
+
+export function fetchPublicAgentStatus() {
+  return apiFetch<{ status: PublicAgentStatus; label: string }>('/admin-control/agent-status');
+}
+
+export function fetchGlobalShareFooter() {
+  return apiFetch<{ footer: string }>('/admin-control/share-footer');
+}
+
+export interface AdminControlOverview {
+  agent: {
+    name: string;
+    slug: string;
+    status: string;
+    balanceUsd: number;
+    equityUsd: number;
+    netReturnPct: number;
+    followerCount: number;
+    costDdollarDay: number;
+  } | null;
+  runtime: {
+    publicStatus: PublicAgentStatus;
+    bridgeEnabled: boolean;
+    connected: boolean;
+    strategyMode: string | null;
+    executionPaused: boolean;
+    executionReason: string | null;
+    price: number | null;
+    wsHealth: unknown;
+    deepSeekConnected: boolean;
+    deployVersion: unknown;
+    lastFetchAt: string | null;
+  };
+  infrastructure: {
+    botConfigured: boolean;
+    botReachable: boolean;
+    runtimeHost: string | null;
+    websocketStatus: unknown;
+    deepSeekStatus: string;
+  };
+}
+
+export function fetchAdminControlOverview(token: string) {
+  return apiFetch<AdminControlOverview>('/admin-control/overview', undefined, token);
+}
+
+export function updateGlobalShareFooter(footer: string, token: string) {
+  return apiFetch<{ globalShareFooter: string }>(
+    '/admin-control/share-footer',
+    { method: 'PATCH', body: JSON.stringify({ footer }) },
+    token,
+  );
+}
+
+export function pauseTradingAgent(token: string) {
+  return apiFetch<{ ok: boolean; error?: string; data?: unknown }>(
+    '/admin-control/agent/pause',
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function resumeTradingAgent(token: string) {
+  return apiFetch<{ ok: boolean; error?: string; data?: unknown }>(
+    '/admin-control/agent/resume',
+    { method: 'POST' },
+    token,
+  );
+}
+
 // ─── Build Queue (Phase 4) ───────────────────────────────────────────────────
 
 export type BuildQueueItemKind = 'IDEA' | 'TASK' | 'GITHUB_ISSUE' | 'ROADMAP' | 'SPEC';

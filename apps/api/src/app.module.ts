@@ -33,6 +33,7 @@ import { AttestationModule } from './attestation/attestation.module';
 import { TrustCenterModule } from './trust-center/trust-center.module';
 import { TownHallModule } from './town-hall/town-hall.module';
 import { TradingAgentsModule } from './trading-agents/trading-agents.module';
+import { AdminControlModule } from './admin-control/admin-control.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { TradingAgentsModule } from './trading-agents/trading-agents.module';
     TrustCenterModule,
     TownHallModule,
     TradingAgentsModule,
+    AdminControlModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

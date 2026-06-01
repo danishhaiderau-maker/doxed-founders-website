@@ -5039,6 +5039,13 @@ def api_resume():
     set_execution_paused("")
     return jsonify({"status": "resumed"})
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    data = request.get_json() or {}
+    reason = data.get("reason", "ADMIN_PAUSE")
+    set_execution_paused(reason)
+    return jsonify({"status": "paused", "reason": reason})
+
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
     with state_lock:

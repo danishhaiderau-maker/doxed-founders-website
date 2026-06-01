@@ -1168,6 +1168,14 @@ model PlatformTreasury {
   updatedAt             DateTime @updatedAt
 }
 
+/** Singleton platform ops — admin-editable copy and flags. */
+model PlatformSettings {
+  id                String   @id @default("default")
+  globalShareFooter String?  @db.Text
+  updatedByUserId   String?
+  updatedAt         DateTime @updatedAt
+}
+
 model TopUpPayment {
   id              String              @id @default(cuid())
   userId          String

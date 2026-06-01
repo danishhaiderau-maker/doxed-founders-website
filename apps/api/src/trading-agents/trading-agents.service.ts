@@ -331,18 +331,54 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   async getBotBridgeStatus() {
-    const url = this.botBridge.getBotUrl();
     const enabled = this.botBridge.isEnabled();
     const state = enabled ? await this.botBridge.fetchState() : null;
+    let status: 'online' | 'offline' | 'updating' = 'offline';
+    if (enabled && state) {
+      status = state.execution_paused ? 'updating' : 'online';
+    }
+    return {
+      status,
+      label: status === 'online' ? 'Agent online' : status === 'updating' ? 'Agent updating' : 'Agent offline',
+    };
+  }
+
+  async getBotBridgeStatusAdmin() {
+    const enabled = this.botBridge.isEnabled();
+    const url = this.botBridge.getBotUrl();
+    const [state, health] = await Promise.all([
+      enabled ? this.botBridge.fetchState(true) : Promise.resolve(null),
+      enabled ? this.botBridge.fetchHealth() : Promise.resolve(null),
+    ]);
+
+    let publicStatus: 'online' | 'offline' | 'updating' = 'offline';
+    if (enabled && state) {
+      publicStatus = state.execution_paused ? 'updating' : 'online';
+    }
+
+    let host: string | null = null;
+    if (url) {
+      try {
+        host = new URL(url).hostname;
+      } catch {
+        host = 'configured';
+      }
+    }
+
     return {
       enabled,
-      url: url ? `${url}/api/state` : null,
       connected: Boolean(state),
+      publicStatus,
       strategyMode: state?.strategy_mode ?? null,
       executionPaused: state?.execution_paused ?? false,
       executionReason: state?.execution_reason ?? null,
       price: state?.price ?? null,
+      wsHealth: state?.diag?.ws_status ?? state?.ws_ready ?? null,
+      deepSeekConnected: Boolean(state?.last_ai?.source && state.last_ai.source !== 'NONE'),
+      appVersion: (state as Record<string, unknown> | null)?.app_version ?? null,
       lastFetchAt: state ? new Date().toISOString() : null,
+      stateEndpoint: host,
+      health,
     };
   }
 

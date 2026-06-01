@@ -1,6 +1,7 @@
 'use client';
 
 import { buildTwitterIntentUrl } from '@dcf/utils';
+import { useShareFooter } from '@/components/share-footer-provider';
 
 type Props = {
   text: string;
@@ -17,7 +18,8 @@ export function ShareOnXButton({
   className = '',
   stopPropagation = false,
 }: Props) {
-  const href = buildTwitterIntentUrl(text, url);
+  const shareFooter = useShareFooter();
+  const href = buildTwitterIntentUrl(text, url, shareFooter);
 
   return (
     <a

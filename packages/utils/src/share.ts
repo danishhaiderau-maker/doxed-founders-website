@@ -132,15 +132,17 @@ export const PLATFORM_X_SHARE_FOOTER = [
   'Back real builders. Bring back HODL.',
 ].join('\n');
 
-export function appendPlatformXShareFooter(text: string): string {
+export function appendPlatformXShareFooter(text: string, customFooter?: string | null): string {
   const base = text.trimEnd();
-  if (base.includes('Built for shrimps, not whales')) return base;
-  return `${base}\n\n${PLATFORM_X_SHARE_FOOTER}`;
+  const footer = (customFooter?.trim() || PLATFORM_X_SHARE_FOOTER).trim();
+  if (!footer) return base;
+  if (base.includes(footer.split('\n')[0] ?? '')) return base;
+  return `${base}\n\n${footer}`;
 }
 
 /** Keep marketing footer on single tweets — trim body if needed (280 char X limit). */
-export function fitXShareTextWithFooter(body: string, maxLen = 280): string {
-  const withFooter = appendPlatformXShareFooter(body);
+export function fitXShareTextWithFooter(body: string, maxLen = 280, customFooter?: string | null): string {
+  const withFooter = appendPlatformXShareFooter(body, customFooter);
   if (withFooter.length <= maxLen) return withFooter;
 
   const compactFooter = [
@@ -159,8 +161,8 @@ export function fitXShareTextWithFooter(body: string, maxLen = 280): string {
   return `${clipped}${compactFooter}`.slice(0, maxLen);
 }
 
-export function buildTwitterIntentUrl(text: string, url?: string): string {
-  const fullText = appendPlatformXShareFooter(text);
+export function buildTwitterIntentUrl(text: string, url?: string, customFooter?: string | null): string {
+  const fullText = appendPlatformXShareFooter(text, customFooter);
   const params = new URLSearchParams({ text: fullText });
   if (url) {
     params.set('url', url);
