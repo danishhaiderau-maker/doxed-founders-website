@@ -1,11 +1,10 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { InvestigationStatus } from '@prisma/client';
+import { AdminGuard } from '../auth/guards';
 import { Public } from '../auth/public.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
-import { Roles } from '../auth/roles.decorator';
-import { RolesGuard } from '../auth/roles.guard';
 import { TrustCenterService, FileTrustReportDto } from './trust-center.service';
 import { TrustWeightService } from './trust-weight.service';
 
@@ -80,8 +79,7 @@ export class TrustCenterController {
   }
 
   @Post('investigations/:id/resolve')
-  @UseGuards(RolesGuard)
-  @Roles('ADMIN')
+  @UseGuards(AdminGuard)
   resolveInvestigation(
     @Param('id') id: string,
     @Body() body: { decision: 'KEEP' | 'DELIST'; notes?: string },

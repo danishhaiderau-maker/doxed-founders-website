@@ -241,6 +241,7 @@ export function pointActionLabel(actionKey: string): string {
   if (base === 'BOUNTY') return 'Founder bounty awarded';
   if (base === 'EARLY_SCOUT') return 'Early scout badge';
   if (base === 'SCOUT_STAKE') return 'Scout market stake';
+  if (base === 'AGENT_RENTAL') return 'Trading agent rental';
   return base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 

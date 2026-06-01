@@ -16,12 +16,15 @@ import {
   fetchTrustInvestigations,
   fetchTrustRecentlyDelisted,
   fetchTrustRecentlyListed,
+  fetchTrustCommunityReviews,
+  type TrustCommunityReview,
 } from '@/lib/api';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'pending', label: 'Pending Listings' },
   { id: 'investigations', label: 'Investigations' },
+  { id: 'reviews', label: 'Community Reviews' },
   { id: 'listed', label: 'Recently Listed' },
   { id: 'delisted', label: 'Recently Delisted' },
   { id: 'scouts', label: 'Top Scouts' },
@@ -44,22 +47,25 @@ function TrustCenterInner() {
   const [investigations, setInvestigations] = useState<TrustInvestigation[]>([]);
   const [listed, setListed] = useState<Awaited<ReturnType<typeof fetchTrustRecentlyListed>>>([]);
   const [delisted, setDelisted] = useState<Awaited<ReturnType<typeof fetchTrustRecentlyDelisted>>>([]);
+  const [reviews, setReviews] = useState<TrustCommunityReview[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [voteBusy, setVoteBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [ov, open, inv, recent, removed] = await Promise.all([
+    const [ov, open, inv, recent, removed, communityReviews] = await Promise.all([
       fetchTrustCenterOverview(),
       fetchOpenScoutListings(),
       fetchTrustInvestigations(),
       fetchTrustRecentlyListed(),
       fetchTrustRecentlyDelisted(),
+      fetchTrustCommunityReviews(),
     ]);
     setOverview(ov);
     setPending(open);
     setInvestigations(inv);
     setListed(recent);
     setDelisted(removed);
+    setReviews(communityReviews);
   }, []);
 
   useEffect(() => {
@@ -122,8 +128,14 @@ function TrustCenterInner() {
             </button>
           ))}
           <Link
+            href="/rules"
+            className="ml-auto rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:text-white"
+          >
+            Rules
+          </Link>
+          <Link
             href="/list-your-project"
-            className="ml-auto rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-semibold hover:bg-violet-500"
+            className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-semibold hover:bg-violet-500"
           >
             List project →
           </Link>
@@ -233,9 +245,47 @@ function TrustCenterInner() {
                     Trust {inv.trustScore}% · Suspicious {inv.scamScore}% · closes{' '}
                     {new Date(inv.closesAt).toLocaleDateString()}
                   </p>
-                  <Link href={`/project/${inv.project.slug}`} className="mt-2 inline-block text-xs text-emerald-400">
-                    View project →
+                  <Link
+                    href={`/trust-center/investigations/${inv.id}`}
+                    className="mt-2 inline-block text-xs text-emerald-400 hover:underline"
+                  >
+                    Full investigation →
                   </Link>
+                  <Link href={`/project/${inv.project.slug}`} className="mt-2 ml-4 inline-block text-xs text-zinc-500 hover:text-white">
+                    Project room
+                  </Link>
+                </article>
+              ))
+            )}
+          </div>
+        )}
+
+        {tab === 'reviews' && (
+          <div className="space-y-3">
+            {reviews.length === 0 ? (
+              <p className="text-zinc-500">No community validation reviews yet.</p>
+            ) : (
+              reviews.map((review) => (
+                <article key={review.id} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-semibold text-white">{review.application.projectName}</span>
+                    <span className="text-zinc-500">${review.application.ticker}</span>
+                    {review.validationCategory && (
+                      <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">
+                        {VALIDATION_LABELS[review.validationCategory as keyof typeof VALIDATION_LABELS] ??
+                          review.validationCategory}
+                      </span>
+                    )}
+                    <span className="text-zinc-500">
+                      {review.user.name ?? 'Member'} · {contributorLevelLabel(review.user.contributorLevel)}
+                    </span>
+                  </div>
+                  {review.comment && <p className="mt-2 text-sm text-zinc-300">{review.comment}</p>}
+                  {review.whyList && (
+                    <p className="mt-1 text-xs text-zinc-400">
+                      <span className="text-zinc-600">Why list:</span> {review.whyList}
+                    </p>
+                  )}
                 </article>
               ))
             )}
@@ -261,8 +311,19 @@ function TrustCenterInner() {
           <div className="space-y-3">
             {delisted.map((item) => (
               <div key={item.id} className="rounded-xl border border-zinc-800 p-3">
-                <p className="font-semibold">{item.projectName}</p>
-                <p className="text-xs text-zinc-500">{item.reviewNotes}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold">{item.projectName}</p>
+                  <span className="text-xs text-zinc-500">${item.ticker}</span>
+                  {item.slug && (
+                    <Link href={`/project/${item.slug}`} className="text-xs text-zinc-500 hover:text-white">
+                      View →
+                    </Link>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-zinc-500">{item.reason ?? 'Delisted after investigation'}</p>
+                <p className="mt-1 text-[10px] text-zinc-600">
+                  {new Date(item.delistedAt).toLocaleDateString()}
+                </p>
               </div>
             ))}
           </div>

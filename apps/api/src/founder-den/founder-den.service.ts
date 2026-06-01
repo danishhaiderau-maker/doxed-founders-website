@@ -1163,6 +1163,7 @@ export class FounderDenService {
           isLiveToken: p.isLiveToken || effectiveStage === 'LIVE_TRADING',
           source: p.source,
           listingKind,
+          communityValidated: listingKind === 'verified',
           createdAt: p.createdAt,
         };
       }),

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import {
   NotificationType,
   Prisma,
@@ -11,6 +11,8 @@ import {
   buildTradingAgentActionShareText,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { PointsService } from '../points/points.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BotBridgeService } from './bot-bridge.service';
 
 function daysAgo(n: number) {
@@ -138,13 +140,19 @@ function serializeAgent(
 
 @Injectable()
 export class TradingAgentsService implements OnModuleInit {
+  private readonly logger = new Logger(TradingAgentsService.name);
+  private lastBotPosition: string | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly botBridge: BotBridgeService,
+    private readonly points: PointsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async onModuleInit() {
     await this.ensureSeed().catch(() => undefined);
+    setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 
   async ensureSeed() {
@@ -471,7 +479,12 @@ export class TradingAgentsService implements OnModuleInit {
     const existing = await this.prisma.tradingAgentFollow.findUnique({
       where: { agentId_userId: { agentId, userId } },
     });
-    if (existing) return { following: true };
+    if (existing) return { following: true, costDdollarDay: agent.costDdollarDay };
+
+    const cost = agent.costDdollarDay;
+    if (cost > 0) {
+      await this.points.spend(userId, cost, `AGENT_RENTAL:${agent.slug}`);
+    }
 
     await this.prisma.tradingAgentFollow.create({ data: { agentId, userId } });
     await this.prisma.tradingAgent.update({
@@ -479,17 +492,17 @@ export class TradingAgentsService implements OnModuleInit {
       data: { followerCount: { increment: 1 } },
     });
 
-    await this.prisma.notification.create({
-      data: {
-        userId,
-        type: NotificationType.TRADING_AGENT_UPDATE,
-        title: `Following ${agent.name}`,
-        body: 'You will receive alerts when this agent opens trades, closes positions, or changes bias.',
-        link: `/agent-hub/${agent.slug}`,
-      },
+    await this.notifications.notifyUser(userId, {
+      type: NotificationType.TRADING_AGENT_UPDATE,
+      title: `Following ${agent.name}`,
+      body:
+        cost > 0
+          ? `Charged ${cost.toLocaleString()} DDollar/day rental. Alerts on trade open, close, and bias shifts.`
+          : 'You will receive alerts when this agent opens trades, closes positions, or changes bias.',
+      link: `/agent-hub/${agent.slug}`,
     });
 
-    return { following: true };
+    return { following: true, costDdollarDay: cost };
   }
 
   async unfollow(userId: string, agentId: string) {
@@ -511,5 +524,73 @@ export class TradingAgentsService implements OnModuleInit {
       orderBy: [{ status: 'asc' }, { netReturnPct: 'desc' }],
     });
     return Promise.all(agents.map((a) => this.enrichWithBotLive(a)));
+  }
+
+  private async pollBotPositionAlerts() {
+    if (!this.botBridge.isEnabled()) return;
+
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
+    if (!agent || agent.status === TradingAgentStatus.PAUSED) return;
+
+    const bot = await this.botBridge.fetchState();
+    if (!bot) return;
+
+    const positions = bot.positions ?? [];
+    const openPos = positions[0];
+    const position =
+      positions.length === 0 ? 'NONE' : (openPos?.dir ?? openPos?.side ?? 'OPEN').toUpperCase();
+
+    if (this.lastBotPosition === null) {
+      this.lastBotPosition = position;
+      return;
+    }
+
+    if (position === this.lastBotPosition) return;
+
+    const prev = this.lastBotPosition;
+    this.lastBotPosition = position;
+
+    if (prev === 'NONE' && position !== 'NONE') {
+      await this.notifyAgentFollowers(agent, {
+        title: `${agent.name} opened ${position}`,
+        body: `Live position detected at $${(bot.price ?? 0).toLocaleString()} — edge ${bot.debug_state?.last_edge_score ?? bot.last_edge ?? 0}/${bot.edge_threshold ?? 3}.`,
+      });
+      return;
+    }
+
+    if (prev !== 'NONE' && position === 'NONE') {
+      const lastTrade = bot.trades?.[0];
+      const pnl = lastTrade?.pnl ?? lastTrade?.net_pnl_usd;
+      await this.notifyAgentFollowers(agent, {
+        title: `${agent.name} closed ${prev}`,
+        body:
+          pnl != null
+            ? `Position closed · PnL ${Number(pnl) >= 0 ? '+' : ''}${Number(pnl).toFixed(2)}%`
+            : 'Position closed — check mission control for details.',
+      });
+    }
+  }
+
+  private async notifyAgentFollowers(
+    agent: { id: string; slug: string; name: string },
+    alert: { title: string; body: string },
+  ) {
+    const followers = await this.prisma.tradingAgentFollow.findMany({
+      where: { agentId: agent.id },
+      select: { userId: true },
+    });
+    if (followers.length === 0) return;
+
+    await Promise.all(
+      followers.map((row) =>
+        this.notifications.notifyUser(row.userId, {
+          type: NotificationType.TRADING_AGENT_UPDATE,
+          title: alert.title,
+          body: alert.body,
+          link: `/agent-hub/${agent.slug}`,
+        }),
+      ),
+    );
+    this.logger.log(`Notified ${followers.length} follower(s): ${alert.title}`);
   }
 }

@@ -16,7 +16,7 @@ const PRIMARY_NAV = [
   { href: '/leaderboard', label: 'Rankings' },
   { href: '/trust-center', label: 'Trust Center' },
   { href: '/scout-votes', label: 'Scout Vote' },
-  { href: '/agent-hub', label: 'Agent Hub' },
+  { href: '/agent-hub', label: 'Agents' },
   { href: '/town-hall', label: 'Town Hall' },
 ] as const;
 

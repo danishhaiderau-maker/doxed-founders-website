@@ -71,6 +71,7 @@ function ListYourProjectPageInner() {
   const [successId, setSuccessId] = useState<string | null>(null);
   const [scoutSaved, setScoutSaved] = useState(false);
   const [scoutSaving, setScoutSaving] = useState(false);
+  const [step, setStep] = useState<1 | 2>(1);
 
   const poolAddress = useMemo(
     () => extractPoolAddressFromDexUrl(form.dexscreenerUrl ?? dexUrl),
@@ -152,6 +153,23 @@ function ListYourProjectPageInner() {
     });
     setMarketPreview(preview.marketPreview);
     setDexUrl(preview.dexscreenerUrl);
+  }
+
+  function goToScoutStep() {
+    setError(null);
+    const verification = scoreFounderVerification(form);
+    if (!verification.meetsSubmissionThreshold) {
+      setError(
+        'Add a public founder video or interview/podcast URL before continuing. You do not need to be the founder.',
+      );
+      return;
+    }
+    if (!form.projectName.trim() || !form.ticker.trim()) {
+      setError('Project name and ticker are required.');
+      return;
+    }
+    setStep(2);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -338,6 +356,17 @@ function ListYourProjectPageInner() {
           lookup is optional (helps fill Telegram, Twitter, prices).
         </p>
 
+        <div className="mt-6 flex items-center gap-3 text-sm">
+          <span className={step === 1 ? 'font-semibold text-white' : 'text-[var(--color-muted)]'}>
+            1. Project & proof
+          </span>
+          <span className="text-[var(--color-muted)]">→</span>
+          <span className={step === 2 ? 'font-semibold text-white' : 'text-[var(--color-muted)]'}>
+            2. Scout thesis
+          </span>
+        </div>
+
+        {step === 1 && (
         <div className="mt-8 space-y-6">
         <div className="rounded-xl border border-[var(--color-accent)]/30 bg-[var(--color-card)] p-6">
           <label className="text-sm font-medium">DexScreener link (auto-fill)</label>
@@ -395,8 +424,9 @@ function ListYourProjectPageInner() {
           </div>
         </div>
         </div>
+        )}
 
-        {(form.dexscreenerUrl || marketPreview) && (
+        {(form.dexscreenerUrl || marketPreview) && step === 1 && (
         <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
           {form.dexscreenerUrl && (
             <div className="mt-3 flex flex-wrap gap-3 text-sm">
@@ -457,32 +487,43 @@ function ListYourProjectPageInner() {
           </p>
         )}
 
+        {step === 1 ? (
+          <div className="mt-8 space-y-6">
+            <Section title="Project">
+              <Field label="Project name" value={form.projectName} onChange={(v) => updateField('projectName', v)} required />
+              <Field label="Ticker" value={form.ticker} onChange={(v) => updateField('ticker', v)} required />
+              <Field label="Website" value={form.websiteUrl ?? ''} onChange={(v) => updateField('websiteUrl', v)} />
+              <Field label="Docs URL" value={form.docsUrl ?? ''} onChange={(v) => updateField('docsUrl', v)} />
+              <Field label="Contract address" value={form.contractAddress ?? ''} onChange={(v) => updateField('contractAddress', v)} />
+              <Field label="Chain" value={form.chainSlug ?? ''} onChange={(v) => updateField('chainSlug', v)} placeholder="SOLANA, ETHEREUM, …" />
+              <Field label="Telegram" value={form.telegramUrl ?? ''} onChange={(v) => updateField('telegramUrl', v)} />
+              <Field label="Summary" value={form.summary ?? ''} onChange={(v) => updateField('summary', v)} multiline />
+            </Section>
+
+            <Section title="Founder proof (community submissions welcome)">
+              <FounderVerificationChecklist input={form} />
+              <div className="mt-4 space-y-4">
+                <Field label="Founder video URL (on camera)" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} placeholder="YouTube, Loom, X video… — required if no interview below" />
+                <Field label="Public interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} placeholder="Twitter Spaces, podcast, conference talk… — required if no video above" />
+                <Field label="Founder name (optional — admin can add later)" value={form.founderName ?? ''} onChange={(v) => updateField('founderName', v)} />
+                <Field label="LinkedIn (optional)" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
+                <Field label="Twitter / X (optional)" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
+                <Field label="GitHub (optional)" value={form.founderGithub ?? ''} onChange={(v) => updateField('founderGithub', v)} />
+                <Field label="Company details (optional)" value={form.companyDetails ?? ''} onChange={(v) => updateField('companyDetails', v)} multiline placeholder="Legal entity, team size, location…" />
+                <Field label="Audit report URL (optional)" value={form.auditUrl ?? ''} onChange={(v) => updateField('auditUrl', v)} />
+              </div>
+            </Section>
+
+            <button
+              type="button"
+              onClick={goToScoutStep}
+              className="w-full rounded-lg bg-[var(--color-accent)] py-3 text-sm font-medium text-white sm:w-auto sm:px-10"
+            >
+              Continue to scout thesis →
+            </button>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="mt-8 space-y-6">
-          <Section title="Project">
-            <Field label="Project name" value={form.projectName} onChange={(v) => updateField('projectName', v)} required />
-            <Field label="Ticker" value={form.ticker} onChange={(v) => updateField('ticker', v)} required />
-            <Field label="Website" value={form.websiteUrl ?? ''} onChange={(v) => updateField('websiteUrl', v)} />
-            <Field label="Docs URL" value={form.docsUrl ?? ''} onChange={(v) => updateField('docsUrl', v)} />
-            <Field label="Contract address" value={form.contractAddress ?? ''} onChange={(v) => updateField('contractAddress', v)} />
-            <Field label="Chain" value={form.chainSlug ?? ''} onChange={(v) => updateField('chainSlug', v)} placeholder="SOLANA, ETHEREUM, …" />
-            <Field label="Telegram" value={form.telegramUrl ?? ''} onChange={(v) => updateField('telegramUrl', v)} />
-            <Field label="Summary" value={form.summary ?? ''} onChange={(v) => updateField('summary', v)} multiline />
-          </Section>
-
-          <Section title="Founder proof (community submissions welcome)">
-            <FounderVerificationChecklist input={form} />
-            <div className="mt-4 space-y-4">
-              <Field label="Founder video URL (on camera)" value={form.founderVideoUrl ?? ''} onChange={(v) => updateField('founderVideoUrl', v)} placeholder="YouTube, Loom, X video… — required if no interview below" />
-              <Field label="Public interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} placeholder="Twitter Spaces, podcast, conference talk… — required if no video above" />
-              <Field label="Founder name (optional — admin can add later)" value={form.founderName ?? ''} onChange={(v) => updateField('founderName', v)} />
-              <Field label="LinkedIn (optional)" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
-              <Field label="Twitter / X (optional)" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
-              <Field label="GitHub (optional)" value={form.founderGithub ?? ''} onChange={(v) => updateField('founderGithub', v)} />
-              <Field label="Company details (optional)" value={form.companyDetails ?? ''} onChange={(v) => updateField('companyDetails', v)} multiline placeholder="Legal entity, team size, location…" />
-              <Field label="Audit report URL (optional)" value={form.auditUrl ?? ''} onChange={(v) => updateField('auditUrl', v)} />
-            </div>
-          </Section>
-
           <Section title="Scout thesis (public on vote board)">
             <Field
               label="Why should this project be listed?"
@@ -543,22 +584,32 @@ function ListYourProjectPageInner() {
           </Section>
 
           <p className="text-xs text-[var(--color-muted)]">
-            Free listing during beta. After submit, traders vote for <strong className="text-white">48 hours</strong> on the{' '}
+            Free listing during beta. After submit, traders validate for <strong className="text-white">48 hours</strong> on the{' '}
             <Link href="/scout-votes" className="text-emerald-400 hover:underline">
               scout board
             </Link>
             . Passed listings queue sooner; after 48h all listings land in admin inbox either way.
-            {!session && ' Sign in to earn scout points (+50 submit, +1,000 if approved).'}
+            {!session && ' Sign in to earn scout points (+50 submit, +500 if approved).'}
           </p>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-lg bg-[var(--color-accent)] py-3 text-sm font-medium text-white disabled:opacity-50 sm:w-auto sm:px-10"
-          >
-            {submitting ? 'Submitting…' : 'Submit listing request'}
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setStep(1)}
+              className="rounded-lg border border-[var(--color-border)] px-6 py-3 text-sm font-medium text-[var(--color-muted)] hover:text-white"
+            >
+              ← Back
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="rounded-lg bg-[var(--color-accent)] py-3 text-sm font-medium text-white disabled:opacity-50 sm:px-10"
+            >
+              {submitting ? 'Submitting…' : 'Submit listing request'}
+            </button>
+          </div>
         </form>
+        )}
       </div>
     </main>
   );

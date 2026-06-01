@@ -52,9 +52,16 @@ export function DiscoverProjectCard({ project }: { project: DiscoverProject }) {
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <Link href={`/project/${project.slug}`} className="font-semibold text-white hover:text-emerald-300">
-                {project.name}
-              </Link>
+              <div className="flex flex-wrap items-center gap-2">
+                <Link href={`/project/${project.slug}`} className="font-semibold text-white hover:text-emerald-300">
+                  {project.name}
+                </Link>
+                {project.communityValidated && (
+                  <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                    Community validated
+                  </span>
+                )}
+              </div>
               <p className="mt-0.5 text-xs" style={{ color: bucket.border }}>
                 {bucket.label}
               </p>
