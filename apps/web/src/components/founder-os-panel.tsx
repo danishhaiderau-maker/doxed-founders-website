@@ -12,6 +12,7 @@ import {
   disconnectIntegration,
   fetchCopilotMemory,
   fetchFounderOsDashboard,
+  fetchGitHubOAuthStart,
   FounderOsDashboard,
   IntegrationProviderConfig,
   publishSuggestedUpdate,
@@ -340,6 +341,20 @@ export function FounderOsPanel({
           </div>
         )}
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const { url } = await fetchGitHubOAuthStart(accessToken);
+                window.location.href = url;
+              } catch (err) {
+                setMsg(err instanceof Error ? err.message : 'GitHub OAuth unavailable');
+              }
+            }}
+            className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
+          >
+            Connect with GitHub
+          </button>
           <input
             value={repoInput}
             onChange={(e) => setRepoInput(e.target.value)}

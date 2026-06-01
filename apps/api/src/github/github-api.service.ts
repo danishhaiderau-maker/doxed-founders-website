@@ -196,6 +196,47 @@ export class GitHubApiService {
     return { created: !sha, sha: payload.content?.sha };
   }
 
+  async createUserRepo(
+    userId: string,
+    name: string,
+    options?: { description?: string; isPrivate?: boolean },
+  ): Promise<{ repoFullName: string; htmlUrl: string }> {
+    const token = await this.getToken(userId);
+    if (!token) {
+      throw new BadRequestException('Connect GitHub OAuth or a personal access token first');
+    }
+
+    const conn = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
+    const res = await fetch('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.trim().replace(/[^a-zA-Z0-9._-]/g, '-'),
+        description: options?.description?.slice(0, 280),
+        private: options?.isPrivate ?? false,
+        auto_init: false,
+      }),
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? 'Could not create GitHub repository');
+    }
+    const repo = (await res.json()) as { full_name: string; html_url: string; owner?: { login?: string } };
+    const owner = repo.owner?.login ?? conn?.githubUsername ?? repo.full_name.split('/')[0]!;
+    return { repoFullName: repo.full_name, htmlUrl: repo.html_url };
+  }
+
+  async listUserRepos(userId: string, perPage = 30): Promise<{ fullName: string; private: boolean }[]> {
+    const token = await this.getToken(userId);
+    if (!token) return [];
+    const res = await fetch(`https://api.github.com/user/repos?per_page=${perPage}&sort=updated`, {
+      headers: this.headers(token),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { full_name: string; private: boolean }[];
+    return data.map((r) => ({ fullName: r.full_name, private: r.private }));
+  }
+
   private headers(token: string | null): Record<string, string> {
     const h: Record<string, string> = {
       Accept: 'application/vnd.github+json',

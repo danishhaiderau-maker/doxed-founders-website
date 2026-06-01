@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common';
 import {
   FounderVerificationCriterion,
+  normalizeProjectName,
   scoreFounderVerification,
   slugify,
 } from '@dcf/utils';
@@ -94,7 +95,8 @@ export class ListingPublishService {
 
     const projectSlug = await this.uniqueProjectSlug(
       tx,
-      slugify(application.projectName) || slugify(application.ticker),
+      slugify(normalizeProjectName(application.projectName) || application.projectName) ||
+        slugify(application.ticker),
     );
 
     const existing = await tx.project.findFirst({
@@ -147,8 +149,9 @@ export class ListingPublishService {
   ): Omit<Prisma.ProjectUncheckedCreateInput, 'slug'> {
     const { lifecycleStage, isLiveToken } = this.resolveListingLifecycle(application);
 
+    const displayName = normalizeProjectName(application.projectName);
     return {
-      name: application.projectName,
+      name: displayName || application.projectName.trim(),
       ticker: application.ticker.toUpperCase(),
       summary: application.summary,
       description: application.companyDetails ?? application.summary,

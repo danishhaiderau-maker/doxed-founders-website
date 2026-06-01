@@ -36,6 +36,7 @@ type NavItem =
 
 const SIDEBAR_NAV: NavItem[] = [
   { kind: 'tab', id: 'activity', label: 'Copilot', icon: '✦' },
+  { kind: 'tab', id: 'launch', label: 'Launch', icon: '🚀' },
   { kind: 'tab', id: 'community', label: 'Projects', icon: '◈' },
   { kind: 'tab', id: 'build', label: 'Memory', icon: '🧠' },
   { kind: 'link', href: '/settings/builder', label: 'Integrations', icon: '⚡' },

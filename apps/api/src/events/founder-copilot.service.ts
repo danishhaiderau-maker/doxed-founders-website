@@ -13,6 +13,7 @@ import {
   buildWeeklySummary,
   computeProjectProgress,
   detectHandsFreeAction,
+  detectCursorDispatchIntent,
   detectWorkforceIntent,
   formatOrchestratorCopilotAnswer,
   formatRelativeTime,
@@ -394,9 +395,91 @@ export class FounderCopilotService {
     };
   }
 
+  private async dispatchCursorFromCopilot(userId: string, prompt: string) {
+    const memory = await this.getProjectMemory(userId);
+    const cursorCred = await this.prisma.integrationCredential.findFirst({
+      where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+    });
+    if (!cursorCred) {
+      return {
+        answer:
+          'Connect Cursor in AI Stack first (Cursor Cloud API key), then say "command cursor: your task".',
+        answerProvider: 'RULE_BASED',
+        stats: {
+          commits: 0,
+          deploys: 0,
+          followers: 0,
+          featureRequests: 0,
+          launchReadiness: memory.launchReadiness,
+          buildStreak: memory.buildStreakDays,
+        },
+      };
+    }
+
+    const taskPrompt =
+      prompt.replace(/^(command|run|dispatch|start|use)\s+cursor\s*[:\-]?\s*/i, '').trim() ||
+      prompt.replace(/^cursor[:\s]+/i, '').trim() ||
+      memory.currentGoal ||
+      prompt;
+
+    try {
+      const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
+        spec: taskPrompt,
+        cursorPrompt: taskPrompt,
+        repository: memory.repoFullName ?? undefined,
+      });
+      const founder = await this.prisma.founder.findUnique({ where: { userId } });
+      await this.events.emit({
+        founderId: founder!.id,
+        projectId: memory.project?.id,
+        userId,
+        type: FounderEventType.CURSOR_BUILD_SESSION,
+        source: 'copilot',
+        title: `Cursor: ${taskPrompt.slice(0, 60)}`,
+        payload: { agentUrl: dispatch.agentUrl, mode: dispatch.mode },
+      });
+      return {
+        answer: `Cursor agent ${dispatch.mode === 'follow_up' ? 'resumed' : 'started'} — ${dispatch.agentUrl}`,
+        answerProvider: 'CURSOR',
+        runtime: {
+          toolsUsed: ['cursor_agent'],
+          githubIssuesCreated: 0,
+          githubRepo: memory.repoFullName,
+          cursorDispatched: true,
+          cursorAgentUrl: dispatch.agentUrl,
+        },
+        stats: {
+          commits: 0,
+          deploys: 0,
+          followers: memory.community.followers,
+          featureRequests: memory.community.featureRequests,
+          launchReadiness: memory.launchReadiness,
+          buildStreak: memory.buildStreakDays,
+        },
+      };
+    } catch (err) {
+      return {
+        answer: err instanceof Error ? err.message : 'Cursor dispatch failed',
+        answerProvider: 'RULE_BASED',
+        stats: {
+          commits: 0,
+          deploys: 0,
+          followers: memory.community.followers,
+          featureRequests: memory.community.featureRequests,
+          launchReadiness: memory.launchReadiness,
+          buildStreak: memory.buildStreakDays,
+        },
+      };
+    }
+  }
+
   async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null }) {
     const text = prompt.trim();
     if (!text) throw new BadRequestException('Prompt required');
+
+    if (detectCursorDispatchIntent(text)) {
+      return this.dispatchCursorFromCopilot(userId, text);
+    }
 
     const intent = detectWorkforceIntent(text, options?.agentTemplate);
     if (intent) {
@@ -940,6 +1023,18 @@ export class FounderCopilotService {
       }
       case 'resume_work': {
         const result = await this.resumeWork(userId);
+        const cursorStarted =
+          result.cursorCloudDispatch &&
+          'agentUrl' in result.cursorCloudDispatch &&
+          Boolean(result.cursorCloudDispatch.agentUrl);
+        if (cursorStarted) {
+          return {
+            action,
+            answer: result.message,
+            memory: result.memory,
+            cursorCopy: result.cursorCopy,
+          };
+        }
         const queued = await this.buildQueue.quickBuild(userId, {
           prompt: result.memory.suggestedNextStep,
           source: 'QUICK_BUILD',
@@ -950,6 +1045,14 @@ export class FounderCopilotService {
           memory: result.memory,
           cursorCopy: result.cursorCopy,
           queued,
+        };
+      }
+      case 'cursor_dispatch': {
+        const result = await this.dispatchCursorFromCopilot(userId, text);
+        return {
+          action,
+          answer: result.answer,
+          stats: result.stats,
         };
       }
       case 'quick_build':

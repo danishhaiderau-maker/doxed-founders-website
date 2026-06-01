@@ -73,6 +73,30 @@ export class BuildQueueService {
     private readonly events: EventsService,
   ) {}
 
+  private orchestratorFingerprint(template: string, prompt: string) {
+    return `${template}:${prompt.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 240)}`;
+  }
+
+  private async findOpenOrchestratorIdea(founderId: string, template: string, prompt: string) {
+    const fingerprint = this.orchestratorFingerprint(template, prompt);
+    const candidates = await this.prisma.buildQueueItem.findMany({
+      where: {
+        founderId,
+        kind: BuildQueueItemKind.IDEA,
+        status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        source: BuildQueueSource.AGENT,
+        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+    });
+    const match = candidates.find((item) => {
+      const meta = item.metadata as Record<string, unknown> | null;
+      return meta?.template === template && meta?.promptFingerprint === fingerprint;
+    });
+    return match?.id ?? null;
+  }
+
   private async requireFounder(userId: string) {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
@@ -770,6 +794,10 @@ export class BuildQueueService {
     });
     if (!founder) return null;
 
+    const fingerprint = this.orchestratorFingerprint(template, prompt);
+    const existingId = await this.findOpenOrchestratorIdea(founder.id, template, prompt);
+    if (existingId) return existingId;
+
     const project = founder.projects[0];
     const source = BuildQueueSource.AGENT;
     const agentSlug = `copilot-${template.toLowerCase()}`;
@@ -790,7 +818,7 @@ export class BuildQueueService {
           '',
           ...output.tasks.map((t) => `- ${t}`),
         ].join('\n'),
-        metadata: { orchestrator: true, template, agentSlug, copilot: true },
+        metadata: { orchestrator: true, template, agentSlug, copilot: true, promptFingerprint: fingerprint },
       },
     });
 
@@ -844,6 +872,10 @@ export class BuildQueueService {
     });
     if (!founder) return null;
 
+    const fingerprint = this.orchestratorFingerprint(agent.template, prompt);
+    const existingId = await this.findOpenOrchestratorIdea(founder.id, agent.template, prompt);
+    if (existingId) return existingId;
+
     const project = founder.projects[0];
     const source = BuildQueueSource.AGENT;
 
@@ -864,7 +896,11 @@ export class BuildQueueService {
           '',
           ...output.tasks.map((t) => `- ${t}`),
         ].join('\n'),
-        metadata: { agentSlug: agent.slug, template: agent.template },
+        metadata: {
+          agentSlug: agent.slug,
+          template: agent.template,
+          promptFingerprint: fingerprint,
+        },
       },
     });
 

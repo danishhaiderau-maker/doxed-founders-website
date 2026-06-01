@@ -1703,6 +1703,53 @@ export function syncGitHubCommits(token: string) {
   }>('/founder-os/github/sync', { method: 'POST' }, token);
 }
 
+export function fetchGitHubOAuthStart(token: string) {
+  return apiFetch<{ url: string }>('/auth/github/start', undefined, token);
+}
+
+export function fetchGitHubOAuthStatus(token: string) {
+  return apiFetch<{ configured: boolean }>('/auth/github/status', undefined, token);
+}
+
+export interface RepoStarterTemplateSummary {
+  key: string;
+  label: string;
+  description: string;
+  tags: string[];
+  defaultRepoName: string;
+}
+
+export function fetchRepoStarterTemplates() {
+  return apiFetch<RepoStarterTemplateSummary[]>('/founder-os/github/templates');
+}
+
+export function scaffoldGitHubRepo(
+  data: { templateKey: string; repoName: string },
+  token: string,
+) {
+  return apiFetch<{ success: boolean; repoFullName: string; htmlUrl: string; template: string }>(
+    '/founder-os/github/scaffold',
+    { method: 'POST', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function fetchUserGitHubRepos(token: string) {
+  return apiFetch<{ repos: { fullName: string; private: boolean }[] }>(
+    '/founder-os/github/repos',
+    undefined,
+    token,
+  );
+}
+
+export function requestLaunchpadAccess(projectId: string, token: string) {
+  return apiFetch<{ success: boolean; requestedAt: string }>(
+    `/founder-den/projects/${projectId}/launchpad-request`,
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function syncFounderOsMemory(token: string) {
   return apiFetch<{ synced: boolean; repo?: string; reason?: string }>(
     '/founder-os/memory/sync',
