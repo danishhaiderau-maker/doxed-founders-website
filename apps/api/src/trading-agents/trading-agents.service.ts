@@ -96,6 +96,7 @@ function serializeAgent(
   agent: Prisma.TradingAgentGetPayload<object>,
   extra?: {
     following?: boolean;
+    hired?: boolean;
     liveStats?: {
       balanceUsd?: number;
       equityUsd?: number;
@@ -132,6 +133,7 @@ function serializeAgent(
     followerCount: agent.followerCount,
     isExperimental: agent.isExperimental,
     following: extra?.following ?? false,
+    hired: extra?.hired ?? false,
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
@@ -399,14 +401,37 @@ export class TradingAgentsService implements OnModuleInit {
     if (!agent) throw new NotFoundException('Agent not found');
 
     let following = false;
+    let hired = false;
     if (userId) {
-      const row = await this.prisma.tradingAgentFollow.findUnique({
-        where: { agentId_userId: { agentId: agent.id, userId } },
-      });
-      following = Boolean(row);
+      const [followRow, instanceRow] = await Promise.all([
+        this.prisma.tradingAgentFollow.findUnique({
+          where: { agentId_userId: { agentId: agent.id, userId } },
+        }),
+        this.prisma.tradingAgentInstance.findUnique({
+          where: { agentId_userId: { agentId: agent.id, userId } },
+        }),
+      ]);
+      following = Boolean(followRow);
+      hired = instanceRow?.status === 'ACTIVE';
     }
 
-    return this.enrichWithBotLive(agent, { following });
+    return this.enrichWithBotLive(agent, { following, hired });
+  }
+
+  /** Public showcase dashboard — admin bot only, no user keys. */
+  async getPublicDashboard(slug: string, userId?: string, role?: string) {
+    const payload = await this.getDashboard(slug);
+    const isAdmin = role === 'ADMIN';
+    const { rawBotState, ...rest } = payload as typeof payload & {
+      rawBotState?: unknown;
+    };
+    return {
+      ...rest,
+      ...(isAdmin && rawBotState ? { rawBotState } : {}),
+      kind: 'public' as const,
+      showcaseNote:
+        'Platform-owned showcase. Hire this agent for an isolated private instance with your exchange API.',
+    };
   }
 
   async getDashboard(slug: string) {

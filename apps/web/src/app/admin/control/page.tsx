@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd } from '@dcf/utils';
+import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PROVIDERS, TRADING_AGENT_AI_PROVIDER_LABELS, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import {
@@ -13,6 +13,9 @@ import {
   fetchGlobalShareFooter,
   pauseTradingAgent,
   resumeTradingAgent,
+  restartTradingAgent,
+  resetShowcaseSimulation,
+  updateShowcaseConfig,
   updateGlobalShareFooter,
 } from '@/lib/api';
 
@@ -84,20 +87,45 @@ export default function AdminControlPage() {
     }
   }
 
-  async function handleAgentAction(action: 'pause' | 'resume') {
+  async function handleAgentAction(action: 'pause' | 'resume' | 'restart' | 'reset') {
     if (!token) return;
     setBusy(action);
     setError(null);
     try {
-      const res = action === 'pause' ? await pauseTradingAgent(token) : await resumeTradingAgent(token);
-      if (!res.ok) {
-        setError(typeof res.error === 'string' ? res.error : 'Agent action failed');
+      if (action === 'pause') {
+        const res = await pauseTradingAgent(token);
+        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Pause failed');
+        else setMsg('Trading paused on showcase runtime.');
+      } else if (action === 'resume') {
+        const res = await resumeTradingAgent(token);
+        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Resume failed');
+        else setMsg('Trading resumed on showcase runtime.');
+      } else if (action === 'restart') {
+        const res = await restartTradingAgent(token);
+        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Restart failed');
+        else setMsg('Showcase runtime restart requested.');
       } else {
-        setMsg(action === 'pause' ? 'Trading paused on bot runtime.' : 'Trading resumed on bot runtime.');
-        await load();
+        const res = await resetShowcaseSimulation(token);
+        setMsg(res.message ?? (res.ok ? 'Simulation reset.' : 'Reset not wired yet.'));
       }
+      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleShowcaseConfig(field: 'exchangeProvider' | 'aiProvider', value: string) {
+    if (!token) return;
+    setBusy(field);
+    setError(null);
+    try {
+      const ov = await updateShowcaseConfig({ [field]: value }, token);
+      setOverview(ov);
+      setMsg('Showcase configuration saved.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
       setBusy(null);
     }
@@ -108,6 +136,8 @@ export default function AdminControlPage() {
   const runtime = overview?.runtime;
   const agent = overview?.agent;
   const infra = overview?.infrastructure;
+  const showcase = overview?.showcase;
+  const adapters = overview?.adapters;
 
   return (
     <div className="min-h-screen bg-[#050508] text-white">
@@ -158,29 +188,75 @@ export default function AdminControlPage() {
 
           {section === 'agent' && (
             <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
-              <h2 className="text-lg font-semibold">BTC Conservative Agent</h2>
+              <h2 className="text-lg font-semibold">BTC Conservative Agent — Public Showcase</h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Platform-owned agent. DeepSeek and exchange keys live on the bot service — users only rent access.
+                Admin-owned proof-of-skill dashboard. Your exchange + AI keys power this only — never user instances.
               </p>
 
               {!overview ? (
                 <p className="mt-4 text-sm text-zinc-500">Loading runtime…</p>
               ) : (
                 <>
+                  <div className="mt-6 grid gap-4 lg:grid-cols-2">
+                    <div className="rounded-lg border border-zinc-800 bg-black/20 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Showcase exchange</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {EXCHANGE_PROVIDERS.map((id) => (
+                          <button
+                            key={id}
+                            type="button"
+                            disabled={busy != null}
+                            onClick={() => void handleShowcaseConfig('exchangeProvider', id)}
+                            className={`rounded-full px-3 py-1 text-xs ${
+                              showcase?.exchangeProvider === id
+                                ? 'bg-amber-500/20 text-amber-100 ring-1 ring-amber-500/40'
+                                : 'border border-zinc-700 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            {EXCHANGE_PROVIDER_LABELS[id]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-black/20 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Showcase AI</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {TRADING_AGENT_AI_PROVIDERS.map((id) => (
+                          <button
+                            key={id}
+                            type="button"
+                            disabled={busy != null}
+                            onClick={() => void handleShowcaseConfig('aiProvider', id)}
+                            className={`rounded-full px-3 py-1 text-xs ${
+                              showcase?.aiProvider === id
+                                ? 'bg-violet-500/20 text-violet-100 ring-1 ring-violet-500/40'
+                                : 'border border-zinc-700 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            {TRADING_AGENT_AI_PROVIDER_LABELS[id]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <Stat label="Exchange API" value={adapters?.exchangeStatus ?? '—'} />
+                    <Stat label="Market data" value={adapters?.marketDataStatus ?? '—'} />
+                    <Stat label="AI" value={adapters?.aiStatus ?? '—'} />
+                    <Stat label="Simulation" value={adapters?.simulationStatus ?? '—'} />
+                    <Stat label="Last decision" value={adapters?.lastDecision ?? '—'} />
+                    <Stat label="Last AI opinion" value={adapters?.lastAiOpinion ?? '—'} />
+                  </div>
+
                   <div className="mt-6 grid gap-3 sm:grid-cols-2">
                     <Stat label="Public status" value={runtime?.publicStatus ?? 'offline'} />
                     <Stat label="Railway runtime" value={infra?.botReachable ? 'Connected' : 'Not reachable'} />
                     <Stat label="DeepSeek" value={runtime?.deepSeekConnected ? 'Connected' : 'Unknown / offline'} />
                     <Stat label="Websocket" value={String(runtime?.wsHealth ?? '—')} />
                     <Stat label="Version" value={String(runtime?.deployVersion ?? '—')} />
-                    <Stat
-                      label="Balance"
-                      value={agent ? formatUsd(agent.balanceUsd) : '—'}
-                    />
-                    <Stat
-                      label="PnL"
-                      value={agent ? formatPercent(agent.netReturnPct) : '—'}
-                    />
+                    <Stat label="Balance" value={agent ? formatUsd(agent.balanceUsd) : '—'} />
+                    <Stat label="PnL" value={agent ? formatPercent(agent.netReturnPct) : '—'} />
                     <Stat label="Followers" value={agent ? String(agent.followerCount) : '—'} />
                   </div>
 
@@ -197,7 +273,7 @@ export default function AdminControlPage() {
                       onClick={() => void handleAgentAction('resume')}
                       className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
                     >
-                      Resume trading
+                      Resume agent
                     </button>
                     <button
                       type="button"
@@ -205,27 +281,46 @@ export default function AdminControlPage() {
                       onClick={() => void handleAgentAction('pause')}
                       className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/30 disabled:opacity-50"
                     >
-                      Pause trading
+                      Pause agent
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy != null}
+                      onClick={() => void handleAgentAction('restart')}
+                      className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-50"
+                    >
+                      Restart runtime
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy != null}
+                      onClick={() => void handleAgentAction('reset')}
+                      className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-50"
+                    >
+                      Reset simulation
                     </button>
                     <Link
                       href="/agent-hub/conservative-btc"
-                      className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white"
+                      className="rounded-lg border border-violet-500/40 bg-violet-950/20 px-4 py-2 text-sm text-violet-200 hover:text-white"
                     >
                       Open public dashboard →
                     </Link>
                   </div>
 
                   <div className="mt-6 rounded-lg border border-zinc-800 bg-black/20 p-4 text-xs text-zinc-400">
-                    <p className="font-semibold text-zinc-300">Deploy new version</p>
+                    <p className="font-semibold text-zinc-300">Deployments</p>
                     <ol className="mt-2 list-decimal space-y-1 pl-4">
                       <li>Push bot code to Railway bot service</li>
-                      <li>Redeploy container (fresh runtime — trade history preserved in DB)</li>
+                      <li>Redeploy container — fresh runtime, historical trades preserved in DB</li>
                       <li>Verify status here and on Agent Hub</li>
                     </ol>
                     <p className="mt-2">
                       Runtime host: {infra?.runtimeHost ?? 'not configured'} · Bridge:{' '}
                       {infra?.botConfigured ? 'configured' : 'missing env'}
                     </p>
+                    {adapters?.lastMarketUpdate && (
+                      <p className="mt-1">Last market update: {new Date(adapters.lastMarketUpdate).toLocaleString()}</p>
+                    )}
                   </div>
                 </>
               )}
