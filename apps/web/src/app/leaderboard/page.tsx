@@ -9,7 +9,8 @@ import { TraderRankTabs, type TraderRankTab } from '@/components/trader-rank-tab
 function LeaderboardInner() {
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const initialTab: TraderRankTab = tabParam === 'losers' ? 'losers' : 'winners';
+  const initialTab: TraderRankTab =
+    tabParam === 'losers' ? 'losers' : tabParam === 'missed-alpha' ? 'missed-alpha' : 'winners';
 
   return (
     <main className="min-h-screen bg-[#050508]">

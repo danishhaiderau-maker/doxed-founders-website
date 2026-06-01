@@ -631,6 +631,13 @@ export function closePaperPosition(input: {
     realizedPnlUsd: number;
     feedPostId: string;
     cashBalance: number;
+    missedAlpha?: {
+      realizedReturnPct: number;
+      whatIfHeldReturnPct: number;
+      missedAlphaPct: number;
+      alphaLeftOnTableUsd: number;
+      convictionScore: number;
+    };
   }>('/paper-trading/close', {
     method: 'POST',
     body: JSON.stringify(input),
@@ -825,6 +832,46 @@ export function postInitialFeedComment(feedPostId: string, userId: string, body:
 
 export function fetchLeaderboard() {
   return apiFetch<LeaderboardEntry[]>('/paper-trading/leaderboard');
+}
+
+export interface MissedAlphaLeaderboardEntry {
+  rank: number;
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  ticker: string;
+  projectName: string;
+  realizedPnlUsd: number;
+  missedAlphaPct: number;
+  whatIfHeldPct: number;
+  convictionScore: number | null;
+  closedAt: string;
+}
+
+export function fetchMissedAlphaLeaderboard() {
+  return apiFetch<MissedAlphaLeaderboardEntry[]>('/paper-trading/leaderboard/missed-alpha');
+}
+
+export interface TownHallPost {
+  id: string;
+  title: string;
+  body: string;
+  category: string;
+  pinned: boolean;
+  featured: boolean;
+  publishedAt: string;
+  author?: { id: string; name: string | null; role: string };
+}
+
+export function fetchTownHallPosts(limit = 30) {
+  return apiFetch<TownHallPost[]>(`/town-hall?limit=${limit}`);
+}
+
+export function createTownHallPost(
+  body: { title: string; body: string; category?: string; pinned?: boolean; featured?: boolean },
+  token: string,
+) {
+  return apiFetch<TownHallPost>('/town-hall', { method: 'POST', body: JSON.stringify(body) }, token);
 }
 
 export interface ReputationLeaderboardEntry {

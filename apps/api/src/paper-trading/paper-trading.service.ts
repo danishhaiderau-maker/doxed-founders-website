@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { slugify, formatPublicAccountLabel, POINTS, STARTING_CASH_USD, RESTRICTED_CASH_THRESHOLD_USD, TOP_UP_FEE_USD } from '@dcf/utils';
+import { slugify, formatPublicAccountLabel, POINTS, STARTING_CASH_USD, RESTRICTED_CASH_THRESHOLD_USD, TOP_UP_FEE_USD, computeMissedAlpha } from '@dcf/utils';
 import { isSolanaTopUpConfigured, resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import {
   AnalyticsEventType,
@@ -135,6 +135,14 @@ export class PaperTradingService {
         });
         const price = Number(project?.metrics?.priceUsd ?? position.avgBuyPrice);
         const quantity = Number(position.quantity);
+        const storedPeak = position.peakPriceUsd ? Number(position.peakPriceUsd) : Number(position.avgBuyPrice);
+        const peakPriceUsd = Math.max(storedPeak, price);
+        if (peakPriceUsd > storedPeak + 1e-9) {
+          await this.prisma.paperPosition.update({
+            where: { id: position.id },
+            data: { peakPriceUsd: new Prisma.Decimal(peakPriceUsd) },
+          });
+        }
         const marketValue = quantity * price;
         const costBasis = quantity * Number(position.avgBuyPrice);
         const pnl = marketValue - costBasis;
@@ -222,7 +230,39 @@ export class PaperTradingService {
       priceUsd: Number(t.priceUsd),
       totalUsd: Number(t.totalUsd),
       realizedPnlUsd: t.realizedPnlUsd != null ? Number(t.realizedPnlUsd) : null,
+      whatIfHeldPct: t.whatIfHeldPct != null ? Number(t.whatIfHeldPct) : null,
+      missedAlphaPct: t.missedAlphaPct != null ? Number(t.missedAlphaPct) : null,
+      convictionScore: t.convictionScore ?? null,
       createdAt: t.createdAt.toISOString(),
+    }));
+  }
+
+  async getMissedAlphaLeaderboard(limit = 30) {
+    const trades = await this.prisma.paperTrade.findMany({
+      where: {
+        side: PaperTradeSide.SELL,
+        missedAlphaPct: { gt: 0 },
+      },
+      orderBy: { missedAlphaPct: 'desc' },
+      take: Math.min(limit, 50),
+      include: {
+        user: { select: { id: true, name: true, email: true, twitterHandle: true } },
+        project: { select: { ticker: true, name: true } },
+      },
+    });
+
+    return trades.map((t, index) => ({
+      rank: index + 1,
+      userId: t.userId,
+      displayName: formatPublicAccountLabel(t.user.name, t.user.email),
+      twitterHandle: t.user.twitterHandle,
+      ticker: t.project.ticker,
+      projectName: t.project.name,
+      realizedPnlUsd: t.realizedPnlUsd != null ? Number(t.realizedPnlUsd) : 0,
+      missedAlphaPct: Number(t.missedAlphaPct ?? 0),
+      whatIfHeldPct: Number(t.whatIfHeldPct ?? 0),
+      convictionScore: t.convictionScore ?? null,
+      closedAt: t.createdAt.toISOString(),
     }));
   }
 
@@ -324,7 +364,19 @@ export class PaperTradingService {
     }
 
     const avgBuy = Number(position.avgBuyPrice);
+    const peakPrice = Math.max(
+      Number(position.peakPriceUsd ?? position.avgBuyPrice),
+      price,
+    );
+    const costBasisUsd = avgBuy * sellQty;
     const realizedPnlUsd = Math.round((price - avgBuy) * sellQty * 100) / 100;
+    const missedAlpha = computeMissedAlpha({
+      entryPriceUsd: avgBuy,
+      exitPriceUsd: price,
+      peakPriceUsd: peakPrice,
+      investedUsd: costBasisUsd,
+      proceedsUsd: amountUsd,
+    });
 
     const result = await this.executeTradeInternal({
       userId,
@@ -334,6 +386,10 @@ export class PaperTradingService {
       amountUsd: Math.max(amountUsd, MIN_SELL_USD),
       quantityOverride: sellQty,
       realizedPnlUsd,
+      whatIfHeldPct: missedAlpha.whatIfHeldReturnPct,
+      missedAlphaPct: missedAlpha.missedAlphaPct,
+      convictionScore: missedAlpha.convictionScore,
+      peakPriceUsd: peakPrice,
       comment: opts?.comment ?? (sellPercent >= 99 ? 'Closed position' : `Closed ${sellPercent}%`),
       marketPreview: livePreview?.marketPreview,
     });
@@ -354,6 +410,7 @@ export class PaperTradingService {
       realizedPnlUsd,
       proceedsUsd: result.amountUsd,
       ticker: position.project.ticker,
+      missedAlpha,
     };
   }
 
@@ -392,6 +449,10 @@ export class PaperTradingService {
     amountUsd: number;
     quantityOverride?: number;
     realizedPnlUsd?: number;
+    whatIfHeldPct?: number;
+    missedAlphaPct?: number;
+    convictionScore?: number;
+    peakPriceUsd?: number;
     comment?: string;
     catalyst?: string;
     targetUsd?: number;
@@ -489,11 +550,15 @@ export class PaperTradingService {
             projectId: project.id,
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
+            peakPriceUsd: new Prisma.Decimal(price),
             ...convictionFields,
           },
           update: {
             quantity: new Prisma.Decimal(newQty),
             avgBuyPrice: new Prisma.Decimal(newAvg),
+            peakPriceUsd: new Prisma.Decimal(
+              Math.max(Number(existingPosition?.peakPriceUsd ?? price), price),
+            ),
             ...convictionFields,
           },
         });
@@ -528,6 +593,13 @@ export class PaperTradingService {
             input.realizedPnlUsd != null
               ? new Prisma.Decimal(input.realizedPnlUsd)
               : undefined,
+          whatIfHeldPct:
+            input.whatIfHeldPct != null ? new Prisma.Decimal(input.whatIfHeldPct) : undefined,
+          missedAlphaPct:
+            input.missedAlphaPct != null ? new Prisma.Decimal(input.missedAlphaPct) : undefined,
+          convictionScore: input.convictionScore ?? undefined,
+          peakPriceUsd:
+            input.peakPriceUsd != null ? new Prisma.Decimal(input.peakPriceUsd) : undefined,
         },
       });
 

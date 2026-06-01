@@ -19,6 +19,7 @@ const LANDING_NAV = [
   { href: '/founder-den', label: 'Founder OS' },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/trust-center', label: 'Trust Center' },
+  { href: '/town-hall', label: 'Town Hall' },
 ] as const;
 
 const NODE_ORBIT = [
@@ -412,7 +413,10 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
       </section>
 
       <footer className="border-t border-zinc-800/80 pt-3 text-center text-[9px] text-zinc-600">
-        © {new Date().getFullYear()} Doxxed Crypto · Private by default. Public by proof.
+        © {new Date().getFullYear()} Doxxed Crypto · Private by default. Public by proof. ·{' '}
+        <Link href="/privacy" className="hover:text-zinc-400">
+          Privacy
+        </Link>
       </footer>
     </div>
   );

@@ -9,12 +9,14 @@ import {
   fetchAccountFollowing,
   fetchBustedTraders,
   fetchLeaderboard,
+  fetchMissedAlphaLeaderboard,
   LeaderboardEntry,
+  MissedAlphaLeaderboardEntry,
 } from '@/lib/api';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import { TraderRankShareButton } from '@/components/trader-rank-share-button';
 
-export type TraderRankTab = 'winners' | 'losers';
+export type TraderRankTab = 'winners' | 'losers' | 'missed-alpha';
 
 type Props = {
   initialTab?: TraderRankTab;
@@ -27,14 +29,16 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
   const [tab, setTab] = useState<TraderRankTab>(initialTab);
   const [winners, setWinners] = useState<LeaderboardEntry[]>([]);
   const [losers, setLosers] = useState<BustedTraderEntry[]>([]);
+  const [missedAlpha, setMissedAlpha] = useState<MissedAlphaLeaderboardEntry[]>([]);
   const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([fetchLeaderboard(), fetchBustedTraders()])
-      .then(([w, l]) => {
+    Promise.all([fetchLeaderboard(), fetchBustedTraders(), fetchMissedAlphaLeaderboard()])
+      .then(([w, l, m]) => {
         setWinners(w);
         setLosers(l);
+        setMissedAlpha(m);
         setError(null);
       })
       .catch((err: Error) => setError(err.message));
@@ -71,6 +75,17 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
           }`}
         >
           Top losers
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('missed-alpha')}
+          className={`rounded-full px-4 py-2 text-sm font-medium ${
+            tab === 'missed-alpha'
+              ? 'bg-amber-600 text-white'
+              : 'border border-[var(--color-border)] text-[var(--color-muted)] hover:text-white'
+          }`}
+        >
+          Alpha left on table
         </button>
       </div>
 
@@ -138,7 +153,7 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
               ))}
             </tbody>
           </table>
-        ) : (
+        ) : tab === 'losers' ? (
           <table className="w-full text-left text-sm">
             <thead className="bg-[var(--color-card)] text-[var(--color-muted)]">
               <tr>
@@ -202,6 +217,40 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                       />
                     </div>
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <table className="w-full text-left text-sm">
+            <thead className="bg-[var(--color-card)] text-[var(--color-muted)]">
+              <tr>
+                <th className="px-4 py-3 font-medium">#</th>
+                <th className="px-4 py-3 font-medium">Trader</th>
+                <th className="px-4 py-3 font-medium">Token</th>
+                <th className="px-4 py-3 font-medium">What If I Held?</th>
+                <th className="px-4 py-3 font-medium">Missed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {missedAlpha.length === 0 && !error && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-8 text-center text-[var(--color-muted)]">
+                    No early exits recorded yet — close a trade to populate this board.
+                  </td>
+                </tr>
+              )}
+              {missedAlpha.map((entry) => (
+                <tr key={`${entry.userId}-${entry.ticker}-${entry.closedAt}`} className="border-t border-[var(--color-border)]">
+                  <td className="px-4 py-3 font-semibold">#{entry.rank}</td>
+                  <td className="px-4 py-3">
+                    <Link href={`/portfolio/${entry.userId}`} className="hover:text-amber-300">
+                      {entry.displayName}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3">${entry.ticker}</td>
+                  <td className="px-4 py-3 text-amber-300">+{entry.whatIfHeldPct.toFixed(0)}%</td>
+                  <td className="px-4 py-3 text-amber-400">+{entry.missedAlphaPct.toFixed(0)}%</td>
                 </tr>
               ))}
             </tbody>

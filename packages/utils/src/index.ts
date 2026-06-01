@@ -33,6 +33,7 @@ export * from './share';
 export * from './reputation-points';
 export * from './listing-voting';
 export * from './trust-weight';
+export * from './missed-alpha';
 export * from './airdrop';
 export * from './token-price';
 export * from './token-input';

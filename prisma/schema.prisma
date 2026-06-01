@@ -414,6 +414,7 @@ model User {
   founderNodePairings       FounderNodePairingCode[]
   founderNodeInferenceJobs  FounderNodeInferenceJob[]
   founderNodeSyncJobs       FounderNodeSyncJob[]
+  townHallPosts             TownHallPost[]
   privacyAttestationLogs    PrivacyAttestationLog[]
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
@@ -700,6 +701,7 @@ model PaperPosition {
   convictionTargetUsd Decimal? @db.Decimal(24, 12)
   convictionTimeHorizon String?
   convictionRecordedAt DateTime?
+  peakPriceUsd       Decimal? @db.Decimal(24, 12)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -720,6 +722,10 @@ model PaperTrade {
   priceUsd       Decimal        @db.Decimal(24, 12)
   totalUsd       Decimal        @db.Decimal(16, 2)
   realizedPnlUsd Decimal?       @db.Decimal(16, 2)
+  whatIfHeldPct  Decimal?       @db.Decimal(8, 2)
+  missedAlphaPct Decimal?       @db.Decimal(8, 2)
+  convictionScore Int?
+  peakPriceUsd   Decimal?       @db.Decimal(24, 12)
   createdAt      DateTime       @default(now())
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -922,6 +928,35 @@ model ProjectTrustReport {
   @@index([projectId])
   @@index([userId])
   @@index([investigationId])
+}
+
+enum TownHallCategory {
+  PLATFORM_UPDATE
+  RULE_CHANGE
+  SCAM_WARNING
+  DELISTING
+  FEATURE_RELEASE
+  WEEKLY_RECAP
+  ANNOUNCEMENT
+}
+
+model TownHallPost {
+  id          String           @id @default(cuid())
+  authorId    String
+  title       String
+  body        String           @db.Text
+  category    TownHallCategory @default(ANNOUNCEMENT)
+  pinned      Boolean          @default(false)
+  featured    Boolean          @default(false)
+  publishedAt DateTime         @default(now())
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([publishedAt])
+  @@index([pinned])
+  @@index([category])
 }
 
 // ─── Reputation, notifications & founder updates ───────────────────────────────

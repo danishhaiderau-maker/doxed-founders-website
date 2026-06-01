@@ -17,6 +17,7 @@ const PRIMARY_NAV = [
   { href: '/founder-den', label: 'Founder OS', auth: true },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/trust-center', label: 'Trust Center' },
+  { href: '/town-hall', label: 'Town Hall' },
 ] as const;
 
 /** Row 2 — trading (amber family) */
@@ -81,6 +82,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/scout-votes') return pathname.startsWith('/scout-votes');
   if (href === '/trust-center') return pathname.startsWith('/trust-center');
+  if (href === '/town-hall') return pathname.startsWith('/town-hall');
   if (href === '/projects') return pathname.startsWith('/projects');
   if (href === '/settings/builder') return pathname.startsWith('/settings/builder');
   if (href.startsWith('/account')) return pathname.startsWith('/account');
