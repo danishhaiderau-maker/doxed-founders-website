@@ -67,6 +67,7 @@ export class BotBridgeService {
       dashboard: mapBotStateToDashboard(bot),
       stats: mapBotStateToAgentStats(bot),
       activity: mapBotStateToActivity(bot, agentName),
+      rawState: bot,
       botConnected: true,
       botUrl: this.getBotUrl(),
       strategyMode: bot.strategy_mode ?? 'RESEARCH',

@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { buildTradingAgentFollowShareText } from '@dcf/utils';
 import { LiveMissionControl } from '@/components/agent-hub/live-mission-control';
+import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import {
@@ -24,6 +25,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof fetchTradingAgentDashboard>> | null>(null);
   const [activity, setActivity] = useState<Awaited<ReturnType<typeof fetchTradingAgentActivity>>>([]);
   const [following, setFollowing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [viewMode, setViewMode] = useState<'mission' | 'research'>('research');
 
   const load = useCallback(async () => {
     try {
@@ -45,9 +48,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 15_000);
+    const ms = autoRefresh ? 60_000 : 15_000;
+    const interval = setInterval(load, ms);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, autoRefresh]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !data) {
@@ -120,15 +124,40 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
                 disabled={followBusy}
                 className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
               >
-                {following ? 'Following' : 'Follow Agent'}
+                {following ? 'Following' : `Follow Agent · ${data.agent.costDdollarDay.toLocaleString()} DDollar/day`}
               </button>
               {shareFollowText && (
                 <ShareOnXButton text={shareFollowText} label="Share to X" />
               )}
+              <div className="flex rounded-lg border border-zinc-800 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('research')}
+                  className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'research' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                >
+                  Research detail
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('mission')}
+                  className={`rounded-md px-3 py-1.5 text-xs ${viewMode === 'mission' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                >
+                  Mission control
+                </button>
+              </div>
               <span className="self-center text-xs text-zinc-600">
-                Alerts: trade opened · closed · new high · strategy change
+                Rental: DDollar/day · alerts on open/close
               </span>
             </div>
+            {viewMode === 'research' && data.rawBotState && data.botConnected ? (
+              <ResearchBotDetailDashboard
+                raw={data.rawBotState as Record<string, unknown>}
+                updatedAt={data.updatedAt}
+                onRefresh={() => void load()}
+                autoRefresh={autoRefresh}
+                onAutoRefreshChange={setAutoRefresh}
+              />
+            ) : (
             <LiveMissionControl
               agent={data.agent}
               dashboard={data.dashboard}
@@ -139,6 +168,19 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
               executionPaused={data.executionPaused}
               executionReason={data.executionReason}
             />
+            )}
+            {viewMode === 'research' && !data.rawBotState && (
+              <p className="mt-4 text-sm text-amber-200/80">
+                Research detail requires a live bot connection. Set <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on Railway API and deploy <code className="rounded bg-black/30 px-1">services/btc-conservative-agent</code>.
+              </p>
+            )}
+            {session?.user?.role === 'ADMIN' && data.botConnected && (
+              <p className="mt-6 rounded-xl border border-amber-500/25 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
+                <strong className="text-amber-200">Admin:</strong> Bot AI (DeepSeek) and Bybit keys live on the Python bot service env — not in your web login.
+                Set <code className="rounded bg-black/30 px-1">DEEPSEEK_API_KEY</code>, <code className="rounded bg-black/30 px-1">BYBIT_*</code> on the bot Railway service.
+                Set <code className="rounded bg-black/30 px-1">TRADING_AGENT_BOT_URL</code> on the API service. Use the bot&apos;s native dashboard for LIVE ARM / leverage controls.
+              </p>
+            )}
           </>
         )}
       </div>
