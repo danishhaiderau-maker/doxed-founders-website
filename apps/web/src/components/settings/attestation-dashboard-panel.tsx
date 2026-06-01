@@ -9,10 +9,6 @@ import {
 
 type Dashboard = Awaited<ReturnType<typeof fetchAttestationDashboard>>;
 
-type Props = {
-  accessToken: string;
-};
-
 const CHECK_NEXT_STEPS: Record<string, { title: string; detail: string }> = {
   memory_mode: {
     title: 'Enable Founder Vault',
@@ -25,16 +21,20 @@ const CHECK_NEXT_STEPS: Record<string, { title: string; detail: string }> = {
   },
   founder_node_online: {
     title: 'Open Founder Node on your desktop',
-    detail: 'Launch the tray app from /founder-node and leave it running while you use Builder settings.',
+    detail: 'Launch the tray app from Step 1 and leave it running while you complete the steps below.',
   },
   vector_index: {
     title: 'Build your local search index',
-    detail:
-      'In Step 4 above, click Rebuild vector index while Founder Node is online. This indexes your vault for semantic search.',
+    detail: 'In Step 4, click Rebuild vector index while Founder Node is online.',
   },
 };
 
-export function AttestationDashboardPanel({ accessToken }: Props) {
+type Props = {
+  accessToken: string;
+  embedded?: boolean;
+};
+
+export function AttestationDashboardPanel({ accessToken, embedded }: Props) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -100,21 +100,24 @@ export function AttestationDashboardPanel({ accessToken }: Props) {
         ? 'text-amber-200'
         : 'text-zinc-400';
 
-  return (
-    <section className="rounded-2xl border border-fuchsia-500/35 bg-fuchsia-950/10 p-6">
-      <h2 className="text-lg font-semibold text-white">Attestation dashboard (Step 5)</h2>
-      <p className="mt-1 text-sm text-zinc-500">
-        Verify Phala TEE inference receipts and Founder Vault memory integrity — cryptographic proof, not trust-me badges.
-      </p>
+  const body = (
+    <>
+      {!embedded && (
+        <>
+          <h2 className="text-lg font-semibold text-white">Attestation dashboard (Step 5)</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            Verify Phala TEE inference receipts and Founder Vault memory integrity — cryptographic proof, not trust-me badges.
+          </p>
+        </>
+      )}
 
       {memory.score < 100 && (
-        <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+        <div className={`rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 ${embedded ? '' : 'mt-4'}`}>
           <p className="text-sm font-medium text-amber-100">
             {memory.score}% — {passedChecks} of {totalChecks} privacy checks complete
           </p>
           <p className="mt-1 text-xs text-zinc-400">
-            Connecting Founder Node (Step 1) is only the start. Finish the steps below to reach 100% memory integrity,
-            then optionally verify Phala TEE receipts on the right.
+            Pairing is only the start. Finish the numbered steps above to reach 100%, then verify Phala TEE receipts below.
           </p>
           {pendingChecks.length > 0 && (
             <ol className="mt-3 space-y-2">
@@ -247,6 +250,12 @@ export function AttestationDashboardPanel({ accessToken }: Props) {
 
       {msg && <p className="mt-4 text-sm text-emerald-300">{msg}</p>}
       {err && <p className="mt-4 text-sm text-red-400">{err}</p>}
-    </section>
+    </>
+  );
+
+  if (embedded) return <div>{body}</div>;
+
+  return (
+    <section className="rounded-2xl border border-fuchsia-500/35 bg-fuchsia-950/10 p-6">{body}</section>
   );
 }

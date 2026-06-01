@@ -31,11 +31,10 @@ const TRADING_NAV = [
 /** Row 3 — build & list (violet family) */
 const BUILDING_NAV = [
   { href: '/founder-den', label: 'Founder OS', auth: true },
-  { href: '/founder-node', label: 'Founder Node' },
+  { href: '/settings/builder', label: 'Founder Node', auth: true },
   { href: '/developers', label: 'Developers' },
   { href: '/raise-room', label: 'Raise Room' },
   { href: '/list-your-project', label: 'List Project' },
-  { href: '/settings/builder', label: 'AI Stack', auth: true },
 ] as const;
 
 const PROFILE_LINKS = [
@@ -62,9 +61,8 @@ function navActive(pathname: string, href: string) {
   if (href === '/trust-center') return pathname.startsWith('/trust-center');
   if (href === '/town-hall') return pathname.startsWith('/town-hall');
   if (href === '/projects') return pathname.startsWith('/projects');
-  if (href === '/settings/builder') return pathname.startsWith('/settings/builder');
+  if (href === '/settings/builder') return pathname.startsWith('/settings/builder') || pathname.startsWith('/founder-node');
   if (href.startsWith('/account')) return pathname.startsWith('/account');
-  if (href === '/founder-node') return pathname.startsWith('/founder-node');
   if (href === '/watchlist') return pathname.startsWith('/watchlist');
   if (href === '/list-your-project') return pathname.startsWith('/list-your-project');
   return pathname === href || pathname.startsWith(`${href}/`);

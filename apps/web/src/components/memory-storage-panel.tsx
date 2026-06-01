@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import {
   MEMORY_STORAGE_MODES,
   extractVaultRelaySummary,
@@ -26,9 +25,11 @@ type Props = {
     platformAvailable: boolean;
     model: string;
   } | null;
+  /** Render inside Founder Node hub without duplicate outer chrome */
+  embedded?: boolean;
 };
 
-export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, phalaPrivateAi }: Props) {
+export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, phalaPrivateAi, embedded }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -176,18 +177,21 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
   }
 
   return (
-    <section className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5">
-      <h3 className="font-semibold text-violet-100">Founder Vault — memory storage</h3>
-      <p className="mt-1 text-xs text-violet-200/70">
-        Choose where goals, tasks, and private notes live. Founder Vault (Founder Node) keeps full
-        company memory on your machine — we only relay encrypted metadata.
-      </p>
-      <p className="mt-2 text-[10px] text-violet-300/60">
-        Tagline: own your memory · own your agents · own your company intelligence.{' '}
-        <Link href="/founder-node" className="underline hover:text-violet-200">
-          Install Founder Node →
-        </Link>
-      </p>
+    <div className={embedded ? '' : 'rounded-xl border border-violet-500/30 bg-violet-950/15 p-5'}>
+      {!embedded && (
+        <>
+          <h3 className="font-semibold text-violet-100">Founder Vault — memory storage</h3>
+          <p className="mt-1 text-xs text-violet-200/70">
+            Choose where goals, tasks, and private notes live. Founder Vault (Founder Node) keeps full
+            company memory on your machine — we only relay encrypted metadata.
+          </p>
+        </>
+      )}
+      {!embedded && (
+        <p className="mt-2 text-[10px] text-violet-300/60">
+          Tagline: own your memory · own your agents · own your company intelligence.
+        </p>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2">
         {phalaPrivateAi?.ready && (
@@ -353,6 +357,6 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
 
       {msg && <p className="mt-3 text-xs text-emerald-300">{msg}</p>}
       {err && <p className="mt-3 text-xs text-red-300">{err}</p>}
-    </section>
+    </div>
   );
 }

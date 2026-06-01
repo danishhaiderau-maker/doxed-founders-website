@@ -11,7 +11,12 @@ type ReleaseAsset = {
   browser_download_url: string;
 };
 
-export function FounderNodeDownloads() {
+type Props = {
+  /** Show numbered install steps below download buttons */
+  showInstallGuide?: boolean;
+};
+
+export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
   const [winUrl, setWinUrl] = useState<string | null>(null);
   const [macUrl, setMacUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -56,8 +61,42 @@ export function FounderNodeDownloads() {
           ? 'Checking latest release…'
           : winUrl || macUrl
             ? `Version ${APP_VERSION} — one-click install, no Node.js required.`
-            : `Installers for v${APP_VERSION} will appear here after the first GitHub release. Until then, use the developer setup below.`}
+            : `Installers for v${APP_VERSION} on GitHub releases. Until then use ${RELEASES_PAGE}.`}
       </p>
+
+      {showInstallGuide && (
+        <div className="rounded-lg border border-cyan-500/25 bg-cyan-950/15 p-4">
+          <p className="text-sm font-medium text-cyan-100">Installation (recommended order)</p>
+          <ol className="mt-3 list-decimal space-y-2 pl-5 text-xs text-zinc-300">
+            <li>
+              Download <strong className="text-white">Founder-Node-{APP_VERSION}-win-x64.exe</strong> and run it —
+              allow through Windows Firewall if prompted.
+            </li>
+            <li>Launch from the system tray (bottom-right). The app runs in the background.</li>
+            <li>
+              In <strong className="text-white">Step 2 below</strong>, select <strong className="text-white">Founder Vault (Founder Node)</strong> and
+              click <strong className="text-white">Generate pairing code</strong>.
+            </li>
+            <li>
+              Right-click the tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code.
+            </li>
+            <li>
+              Complete <strong className="text-white">Step 4</strong> — click <strong className="text-white">Rebuild vector index</strong> once
+              (first run can take up to 2 minutes).
+            </li>
+            <li>
+              Optional: install{' '}
+              <a href="https://ollama.com" className="text-cyan-300 underline" target="_blank" rel="noreferrer">
+                Ollama
+              </a>{' '}
+              locally for fully offline Copilot in Step 3.
+            </li>
+          </ol>
+          <p className="mt-3 text-[11px] text-zinc-500">
+            Vault files live at <code className="text-zinc-400">~/FounderVault/</code> on your machine — never uploaded in plain text.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
