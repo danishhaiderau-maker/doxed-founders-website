@@ -1,6 +1,6 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, redirect } from 'next/navigation';
 import { Suspense } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AccountHub, type AccountTab } from '@/components/account/account-hub';
@@ -19,6 +19,11 @@ const VALID_TABS = new Set<AccountTab>([
 function AccountPageInner() {
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab') ?? 'overview';
+
+  if (tabParam === 'points') {
+    redirect('/ddollar');
+  }
+
   const initialTab = VALID_TABS.has(tabParam as AccountTab)
     ? (tabParam as AccountTab)
     : 'overview';
@@ -31,7 +36,7 @@ function AccountPageInner() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Account</h1>
             <p className="text-sm text-zinc-500">
-              Overview · Security · Notifications · DDollar · Reputation
+              Overview · Security · Notifications · Reputation
             </p>
           </div>
           <SiteNav />

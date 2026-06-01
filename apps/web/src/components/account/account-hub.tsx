@@ -2,11 +2,10 @@
 
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   contributorLevelLabel,
   formatUsd,
-  pointsToNextLevel,
 } from '@dcf/utils';
 import { SecuritySettingsPanel } from '@/components/settings/security-settings-panel';
 import { ReputationBadge } from '@/components/landing/project-spotlight';
@@ -17,10 +16,8 @@ import { TopUpPanel } from '@/components/account/topup-panel';
 import {
   AccountActivityItem,
   AccountOverview,
-  AccountPointLedgerEntry,
   fetchAccountActivity,
   fetchAccountOverview,
-  fetchAccountPointLedger,
 } from '@/lib/api';
 
 export type AccountTab =
@@ -39,7 +36,6 @@ const TABS: { id: AccountTab; label: string }[] = [
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'connected', label: 'Connected Accounts' },
-  { id: 'points', label: 'DDollar earned' },
   { id: 'reputation', label: 'Reputation' },
   { id: 'activity', label: 'Activity History' },
 ];
@@ -52,26 +48,11 @@ function formatDate(iso: string) {
   });
 }
 
-function groupLedgerByDate(entries: AccountPointLedgerEntry[]) {
-  const groups = new Map<string, AccountPointLedgerEntry[]>();
-  for (const entry of entries) {
-    const key = new Date(entry.createdAt).toLocaleDateString(undefined, {
-      month: 'long',
-      day: 'numeric',
-    });
-    const list = groups.get(key) ?? [];
-    list.push(entry);
-    groups.set(key, list);
-  }
-  return groups;
-}
-
 export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTab }) {
   const { data: session } = useSession();
   const token = session?.accessToken;
   const [tab, setTab] = useState<AccountTab>(initialTab);
   const [overview, setOverview] = useState<AccountOverview | null>(null);
-  const [ledger, setLedger] = useState<AccountPointLedgerEntry[]>([]);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,13 +60,11 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
     if (!token) return;
     setError(null);
     try {
-      const [ov, lg, act] = await Promise.all([
+      const [ov, act] = await Promise.all([
         fetchAccountOverview(token),
-        fetchAccountPointLedger(token),
         fetchAccountActivity(token),
       ]);
       setOverview(ov);
-      setLedger(lg);
       setActivity(act);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load account');
@@ -99,13 +78,6 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
   useEffect(() => {
     setTab(initialTab);
   }, [initialTab]);
-
-  const progress = useMemo(
-    () => (overview ? pointsToNextLevel(overview.reputation.reputationPoints) : null),
-    [overview],
-  );
-
-  const ledgerGroups = useMemo(() => groupLedgerByDate(ledger), [ledger]);
 
   if (!token) {
     return (
@@ -140,6 +112,12 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
               {item.label}
             </button>
           ))}
+          <Link
+            href="/ddollar"
+            className="rounded-lg px-3 py-2 text-sm font-medium text-amber-300/90 hover:bg-zinc-900"
+          >
+            DDollar wallet →
+          </Link>
           <Link
             href="/notifications"
             className="rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-900 hover:text-white"
@@ -211,7 +189,12 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
             </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
-              <StatCard label="Points" value={overview.reputation.reputationPoints.toLocaleString()} />
+              <Link href="/ddollar" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4 transition hover:border-amber-500/40">
+                <p className="text-xs uppercase tracking-wide text-zinc-500">DDollar</p>
+                <p className="mt-1 text-xl font-bold text-amber-200">
+                  {overview.reputation.reputationPoints.toLocaleString()}
+                </p>
+              </Link>
               <StatCard
                 label="Rank"
                 value={contributorLevelLabel(overview.reputation.contributorLevel)}
@@ -228,90 +211,6 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
         )}
 
         {tab === 'connected' && token && <ConnectedAccountsPanel accessToken={token} />}
-
-        {tab === 'points' && overview && (
-          <section className="space-y-6">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <StatCard
-                label="DDollar earned"
-                value={overview.reputation.reputationPoints.toLocaleString()}
-              />
-              <StatCard
-                label="Leaderboard position"
-                value={
-                  overview.reputation.rank != null
-                    ? `#${overview.reputation.rank} of ${overview.reputation.totalParticipants}`
-                    : 'Unranked'
-                }
-              />
-            </div>
-            {progress && progress.nextLevel != null && (
-              <div className="rounded-xl border border-zinc-800 p-4">
-                <p className="text-sm text-zinc-400">
-                  {progress.pointsNeeded.toLocaleString()} points to level{' '}
-                  {progress.nextLevel} ({contributorLevelLabel(progress.nextLevel)})
-                </p>
-                <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-800">
-                  <div
-                    className="h-full bg-emerald-500 transition-all"
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        ((overview.reputation.reputationPoints -
-                          (progress.currentLevel === 1
-                            ? 0
-                            : [0, 250, 800, 2000, 5000][progress.currentLevel - 1] ?? 0)) /
-                          Math.max(1, progress.pointsNeeded)) *
-                          100,
-                      )}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div>
-              <h3 className="font-semibold text-white">Point history</h3>
-              <p className="mt-1 text-xs text-zinc-500">
-                Every reward is logged so you always know why points were earned.
-              </p>
-              {ledger.length === 0 ? (
-                <p className="mt-4 text-sm text-zinc-500">No point activity yet.</p>
-              ) : (
-                <div className="mt-4 space-y-6">
-                  {[...ledgerGroups.entries()].map(([date, entries]) => (
-                    <div key={date}>
-                      <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                        {date}
-                      </p>
-                      <ul className="mt-2 divide-y divide-zinc-800 rounded-xl border border-zinc-800">
-                        {entries.map((entry) => (
-                          <li
-                            key={entry.id}
-                            className="flex items-center justify-between px-4 py-3"
-                          >
-                            <div>
-                              <p className="text-sm font-medium text-emerald-300">
-                                +{entry.amount}
-                              </p>
-                              <p className="text-sm text-zinc-300">{entry.label}</p>
-                            </div>
-                            <span className="text-xs text-zinc-600">
-                              {new Date(entry.createdAt).toLocaleTimeString(undefined, {
-                                hour: 'numeric',
-                                minute: '2-digit',
-                              })}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </section>
-        )}
 
         {tab === 'reputation' && overview && (
           <section className="space-y-6">

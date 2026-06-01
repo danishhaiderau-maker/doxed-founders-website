@@ -22,11 +22,11 @@ import {
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
-  { id: 'pending', label: 'Pending Listings' },
-  { id: 'investigations', label: 'Investigations' },
+  { id: 'scout-voting', label: 'Scout Voting' },
   { id: 'reviews', label: 'Community Reviews' },
+  { id: 'investigations', label: 'Investigations' },
   { id: 'listed', label: 'Recently Listed' },
-  { id: 'delisted', label: 'Recently Delisted' },
+  { id: 'delisted', label: 'Delisting Requests' },
   { id: 'scouts', label: 'Top Scouts' },
 ] as const;
 
@@ -40,7 +40,11 @@ const VALIDATION_OPTIONS = Object.entries(VALIDATION_LABELS) as [
 function TrustCenterInner() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
-  const initialTab = (searchParams.get('tab') as TabId) || 'overview';
+  const tabParam = searchParams.get('tab');
+  const normalizedTab = tabParam === 'pending' ? 'scout-voting' : tabParam;
+  const tabIds = new Set<string>(TABS.map((t) => t.id));
+  const initialTab: TabId =
+    normalizedTab && tabIds.has(normalizedTab) ? (normalizedTab as TabId) : 'overview';
   const [tab, setTab] = useState<TabId>(initialTab);
   const [overview, setOverview] = useState<TrustCenterOverview | null>(null);
   const [pending, setPending] = useState<ScoutListing[]>([]);
@@ -71,6 +75,10 @@ function TrustCenterInner() {
   useEffect(() => {
     load().catch((err) => setError(err instanceof Error ? err.message : 'Failed to load Trust Center'));
   }, [load]);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   async function handleValidationVote(
     listingId: string,
@@ -150,7 +158,7 @@ function TrustCenterInner() {
         {tab === 'overview' && overview && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
-              { label: 'Pending listings', value: overview.pendingListings, href: '?tab=pending' },
+              { label: 'Scout voting', value: overview.pendingListings, href: '?tab=scout-voting' },
               { label: 'Active investigations', value: overview.activeInvestigations, href: '?tab=investigations' },
               { label: 'Listed (14d)', value: overview.recentlyListed, href: '?tab=listed' },
               { label: 'Delisted (14d)', value: overview.recentlyDelisted, href: '?tab=delisted' },
@@ -181,7 +189,7 @@ function TrustCenterInner() {
           </div>
         )}
 
-        {tab === 'pending' && (
+        {tab === 'scout-voting' && (
           <div className="space-y-4">
             {pending.length === 0 ? (
               <p className="text-zinc-500">No listings awaiting community validation.</p>
@@ -197,8 +205,8 @@ function TrustCenterInner() {
                         {listing.tally.remainingVoters} needed
                       </p>
                     </div>
-                    <Link href={`/scout-votes`} className="text-xs text-sky-400 hover:underline">
-                      Full scout board →
+                    <Link href="/list-your-project" className="text-xs text-sky-400 hover:underline">
+                      Submit a listing →
                     </Link>
                   </div>
                   {session && (

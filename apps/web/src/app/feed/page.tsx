@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { SiteNav, getActiveUserId } from '@/components/site-nav';
 import { PushNotificationPrompt } from '@/components/push-notification-prompt';
@@ -30,15 +31,38 @@ import {
   fetchUnifiedFeed,
   postFeedComment,
   postInitialFeedComment,
+  fetchTownHallPosts,
+  fetchTrustInvestigations,
+  type TownHallPost,
+  type TrustInvestigation,
 } from '@/lib/api';
 
-const CATEGORIES: { id: UnifiedFeedCategory; label: string }[] = [
-  { id: 'all', label: 'All activity' },
-  { id: 'founder', label: 'Founder' },
-  { id: 'trading', label: 'Trading' },
-  { id: 'market', label: 'Market' },
-  { id: 'community', label: 'Community' },
+type FeedViewId =
+  | 'all'
+  | 'projects'
+  | 'announcements'
+  | 'listings'
+  | 'investigations'
+  | 'agents';
+
+const FEED_VIEWS: { id: FeedViewId; label: string; category?: UnifiedFeedCategory }[] = [
+  { id: 'all', label: 'All', category: 'all' },
+  { id: 'projects', label: 'Projects', category: 'founder' },
+  { id: 'announcements', label: 'Announcements' },
+  { id: 'listings', label: 'Listings', category: 'community' },
+  { id: 'investigations', label: 'Investigations' },
+  { id: 'agents', label: 'Agent Activity', category: 'trading' },
 ];
+
+const TOWN_HALL_LABELS: Record<string, string> = {
+  PLATFORM_UPDATE: 'Platform update',
+  RULE_CHANGE: 'Rule change',
+  SCAM_WARNING: 'Scam warning',
+  DELISTING: 'Delisting notice',
+  FEATURE_RELEASE: 'Feature release',
+  WEEKLY_RECAP: 'Weekly recap',
+  ANNOUNCEMENT: 'Announcement',
+};
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -56,24 +80,71 @@ function tierBorder(tier: number) {
 }
 
 export default function FeedPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#050508]" />}>
+      <FeedPageInner />
+    </Suspense>
+  );
+}
+
+function FeedPageInner() {
+  const searchParams = useSearchParams();
+  const viewParam = searchParams.get('view') as FeedViewId | null;
+  const initialView =
+    viewParam && FEED_VIEWS.some((v) => v.id === viewParam) ? viewParam : 'all';
+
   const { data: session } = useSession();
   const origin = useShareOrigin();
-  const [category, setCategory] = useState<UnifiedFeedCategory>('all');
+  const [view, setView] = useState<FeedViewId>(initialView);
+  const category =
+    FEED_VIEWS.find((v) => v.id === view)?.category ?? 'all';
   const [items, setItems] = useState<UnifiedFeedItem[]>([]);
   const [pulse, setPulse] = useState<PlatformPulseItem[]>([]);
   const [hotQuestions, setHotQuestions] = useState<HotPredictionItem[]>([]);
   const [scoutListings, setScoutListings] = useState<ScoutListingFeedItem[]>([]);
+  const [announcements, setAnnouncements] = useState<TownHallPost[]>([]);
+  const [investigations, setInvestigations] = useState<TrustInvestigation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
   const [tradePosts, setTradePosts] = useState<Record<string, FeedPost>>({});
 
-  const load = useCallback(async (cat: UnifiedFeedCategory) => {
+  useEffect(() => {
+    setView(initialView);
+  }, [initialView]);
+
+  const load = useCallback(async (cat: UnifiedFeedCategory, feedView: FeedViewId) => {
     try {
+      if (feedView === 'announcements') {
+        const posts = await fetchTownHallPosts();
+        setAnnouncements(posts);
+        setItems([]);
+        setPulse([]);
+        setHotQuestions([]);
+        setScoutListings([]);
+        setInvestigations([]);
+        setError(null);
+        return;
+      }
+
+      if (feedView === 'investigations') {
+        const inv = await fetchTrustInvestigations();
+        setInvestigations(inv);
+        setAnnouncements([]);
+        setItems([]);
+        setPulse([]);
+        setHotQuestions([]);
+        setScoutListings([]);
+        setError(null);
+        return;
+      }
+
       const data = await fetchUnifiedFeed(cat);
       setItems(data.items);
       setPulse(data.pulse);
       setHotQuestions(data.hotQuestions ?? []);
       setScoutListings(data.scoutListings ?? []);
+      setAnnouncements([]);
+      setInvestigations([]);
       setError(null);
 
       const tradeIds = data.items.filter((i) => i.tradePostId).map((i) => i.tradePostId!);
@@ -91,10 +162,10 @@ export default function FeedPage() {
   }, []);
 
   useEffect(() => {
-    load(category);
-    const interval = setInterval(() => load(category), 60_000);
+    load(category, view);
+    const interval = setInterval(() => load(category, view), 60_000);
     return () => clearInterval(interval);
-  }, [category, load]);
+  }, [category, view, load]);
 
   return (
     <div className="min-h-screen bg-[#050508]">
@@ -106,7 +177,9 @@ export default function FeedPage() {
               Doxxed crypto
             </Link>
             <h1 className="text-xl font-bold">Feed</h1>
-            <p className="text-xs text-[var(--color-muted)]">Builders · traders · market pulse</p>
+            <p className="text-xs text-[var(--color-muted)]">
+              Public activity — founders, listings, announcements, agents
+            </p>
           </div>
           <SiteNav />
         </div>
@@ -168,15 +241,15 @@ export default function FeedPage() {
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-sky-300">
                   Scout votes — validate listings
                 </h2>
-                <Link href="/scout-votes" className="text-xs text-sky-400 hover:underline">
-                  Vote now →
+                <Link href="/trust-center?tab=scout-voting" className="text-xs text-sky-400 hover:underline">
+                  Vote in Trust Center →
                 </Link>
               </div>
               <ul className="mt-3 space-y-2">
                 {scoutListings.map((s) => (
                   <li key={s.id} className="flex items-start justify-between gap-2">
                     <Link
-                      href="/scout-votes"
+                      href="/trust-center?tab=scout-voting"
                       className="block min-w-0 flex-1 rounded-lg border border-sky-500/20 bg-black/20 px-3 py-2.5 transition hover:border-sky-500/40"
                     >
                       <p className="font-medium text-white">
@@ -193,7 +266,7 @@ export default function FeedPage() {
                         ticker: s.ticker,
                         scoutThesis: s.whyList,
                       })}
-                      url={buildSiteUrl(origin, '/scout-votes')}
+                      url={buildSiteUrl(origin, '/trust-center?tab=scout-voting')}
                       label="Share"
                       className="shrink-0 mt-2"
                     />
@@ -261,24 +334,78 @@ export default function FeedPage() {
           )}
 
           <div className="mb-4 flex flex-wrap gap-2">
-            {CATEGORIES.map((c) => (
-              <button
+            {FEED_VIEWS.map((c) => (
+              <Link
                 key={c.id}
-                type="button"
-                onClick={() => setCategory(c.id)}
+                href={c.id === 'all' ? '/feed' : `/feed?view=${c.id}`}
                 className={`rounded-full px-4 py-1.5 text-sm ${
-                  category === c.id
+                  view === c.id
                     ? 'bg-[var(--color-accent)] text-white'
                     : 'border border-[var(--color-border)] text-[var(--color-muted)] hover:text-white'
                 }`}
               >
                 {c.label}
-              </button>
+              </Link>
             ))}
           </div>
 
           {error && <p className="mb-4 text-sm text-red-300">{error}</p>}
 
+          {view === 'announcements' && (
+            <div className="space-y-3">
+              {announcements.length === 0 && !error && (
+                <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
+                  No platform announcements yet.
+                </div>
+              )}
+              {announcements.map((post) => (
+                <article
+                  key={post.id}
+                  className={`rounded-xl border p-4 ${
+                    post.pinned
+                      ? 'border-amber-500/40 bg-amber-950/15'
+                      : 'border-[var(--color-border)] bg-[var(--color-card)]'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                    <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">
+                      {TOWN_HALL_LABELS[post.category] ?? post.category}
+                    </span>
+                    {post.pinned && <span className="text-amber-400">Pinned</span>}
+                    <span>{timeAgo(post.publishedAt)}</span>
+                  </div>
+                  <h3 className="mt-2 font-semibold text-white">{post.title}</h3>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{post.body}</p>
+                </article>
+              ))}
+            </div>
+          )}
+
+          {view === 'investigations' && (
+            <div className="space-y-3">
+              {investigations.length === 0 && !error && (
+                <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
+                  No active investigations.{' '}
+                  <Link href="/trust-center?tab=investigations" className="text-[var(--color-accent)]">
+                    Trust Center →
+                  </Link>
+                </div>
+              )}
+              {investigations.map((inv) => (
+                <Link
+                  key={inv.id}
+                  href={`/trust-center/investigations/${inv.id}`}
+                  className="block rounded-xl border border-amber-500/25 bg-amber-950/10 p-4 transition hover:border-amber-500/50"
+                >
+                  <p className="font-semibold text-white">{inv.project.name}</p>
+                  <p className="text-xs text-zinc-500">${inv.project.ticker} · {inv.status.replace(/_/g, ' ')}</p>
+                  {inv.reason && <p className="mt-2 text-sm text-zinc-400">{inv.reason}</p>}
+                </Link>
+              ))}
+            </div>
+          )}
+
+          {view !== 'announcements' && view !== 'investigations' && (
           <div className="space-y-3">
             {items.length === 0 && !error && (
               <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
@@ -301,13 +428,14 @@ export default function FeedPage() {
                     )
                   }
                   userId={getActiveUserId(session?.user?.id)}
-                  onRefresh={() => load(category)}
+                  onRefresh={() => load(category, view)}
                 />
               ) : (
                 <ActivityCard key={item.id} item={item} origin={origin} />
               ),
             )}
           </div>
+          )}
         </div>
 
         <aside className="hidden md:block">
@@ -319,26 +447,27 @@ export default function FeedPage() {
                 <li>Trader positions and conviction posts</li>
                 <li>Hot buys when ≥2% of active traders align</li>
                 <li>Blazing predictions — stake YES/NO on AI questions</li>
-                <li>Scout votes to validate new listings</li>
+                <li>Platform announcements (formerly Town Hall)</li>
+                <li>Scout voting in Trust Center</li>
               </ul>
               <Link
+                href="/ddollar"
+                className="mt-4 block rounded-lg border border-amber-500/30 py-2.5 text-center text-sm font-medium text-amber-200"
+              >
+                DDollar wallet →
+              </Link>
+              <Link
                 href="/paper-trading"
-                className="mt-4 block rounded-lg bg-[var(--color-accent)] py-2.5 text-center text-sm font-medium text-white"
+                className="mt-2 block rounded-lg bg-[var(--color-accent)] py-2.5 text-center text-sm font-medium text-white"
               >
                 Trading Alpha terminal
               </Link>
             </div>
             <Link
-              href="/predict"
-              className="block rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-4 text-sm text-indigo-200 hover:border-indigo-500/50"
-            >
-              Predict the future → stake YES/NO on AI questions
-            </Link>
-            <Link
-              href="/scout-votes"
+              href="/trust-center?tab=scout-voting"
               className="block rounded-xl border border-violet-500/30 bg-violet-950/20 p-4 text-sm text-violet-200 hover:border-violet-500/50"
             >
-              Scout votes → validate listings before launch
+              Scout voting → validate listings in Trust Center
             </Link>
           </div>
         </aside>

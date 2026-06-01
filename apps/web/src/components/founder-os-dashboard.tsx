@@ -39,7 +39,8 @@ const SIDEBAR_NAV: NavItem[] = [
   { kind: 'tab', id: 'launch', label: 'Launch', icon: '🚀' },
   { kind: 'tab', id: 'community', label: 'Projects', icon: '◈' },
   { kind: 'tab', id: 'build', label: 'Memory', icon: '🧠' },
-  { kind: 'link', href: '/settings/builder', label: 'Integrations', icon: '⚡' },
+  { kind: 'link', href: '/settings/builder', label: 'Founder Node', icon: '🖥' },
+  { kind: 'link', href: '/settings/builder', label: 'AI Stack', icon: '⚡' },
   { kind: 'tab', id: 'agents', label: 'Agents', icon: '🤖' },
   { kind: 'tab', id: 'analytics', label: 'Settings', icon: '⚙' },
   { kind: 'tab', id: 'notifications', label: 'Notifications', icon: '🔔' },
@@ -296,7 +297,7 @@ export function FounderOsDashboardLayout({
               if (item.kind === 'link') {
                 return (
                   <Link
-                    key={item.href}
+                    key={item.label}
                     href={item.href}
                     className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-200"
                   >
