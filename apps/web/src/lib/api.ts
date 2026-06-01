@@ -47,7 +47,7 @@ export interface ListingFormData {
   summary?: string;
   whyList?: string;
   whyDoxxed?: string;
-  founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+  founderDoxxedStatus?: 'DOXXED' | 'VERIFIED' | 'UNDOXXED' | 'BUILDING_IN_PUBLIC';
   scoutHighlightNote?: string;
   marketPreview?: DexScreenerPreview['marketPreview'];
 }
@@ -309,7 +309,7 @@ export function updateListingScoutFields(
     scoutHighlightNote?: string;
     whyList?: string;
     whyDoxxed?: string;
-    founderDoxxedStatus?: 'DOXXED' | 'BUILDING_IN_PUBLIC';
+    founderDoxxedStatus?: 'DOXXED' | 'VERIFIED' | 'UNDOXXED' | 'BUILDING_IN_PUBLIC';
   },
   token: string,
 ) {
@@ -334,7 +334,14 @@ export function fetchScoutListing(id: string) {
 export function castScoutVote(
   id: string,
   body: {
-    vote: 'YES' | 'NO';
+    vote?: 'YES' | 'NO';
+    validationCategory?:
+      | 'LOOKS_LEGIT'
+      | 'BUILDING_CONSISTENTLY'
+      | 'COMMUNITY_EXISTS'
+      | 'NEEDS_MORE_PROOF'
+      | 'SUSPICIOUS'
+      | 'LIKELY_SCAM';
     whyList?: string;
     whyDoxxed?: string;
     comment?: string;
@@ -345,6 +352,111 @@ export function castScoutVote(
     method: 'POST',
     body: JSON.stringify(body),
   }, token);
+}
+
+export interface TrustCenterOverview {
+  pendingListings: number;
+  activeInvestigations: number;
+  recentlyListed: number;
+  recentlyDelisted: number;
+  topScouts: Array<{
+    id: string;
+    name: string | null;
+    reputationPoints: number;
+    contributorLevel: number;
+    trustWeight: number;
+  }>;
+  platformStats: ScoutListing['platformVoting'];
+  thresholds: {
+    listingApprovalPercent: number;
+    investigationScamPercent: number;
+    windowHours: number;
+  };
+}
+
+export interface TrustInvestigation {
+  id: string;
+  status: string;
+  reason: string | null;
+  opensAt: string;
+  closesAt: string;
+  trustScore: number;
+  scamScore: number;
+  minVoters: number;
+  scamThreshold: number;
+  project: {
+    id: string;
+    slug: string;
+    name: string;
+    ticker: string;
+    logoUrl: string | null;
+    approved: boolean;
+  };
+  tally?: {
+    yesPercent: number;
+    scamPercent: number;
+    totalVoters: number;
+  };
+}
+
+export function fetchTrustCenterOverview() {
+  return apiFetch<TrustCenterOverview>('/trust-center/overview');
+}
+
+export function fetchTrustInvestigations(status?: string) {
+  const q = status ? `?status=${encodeURIComponent(status)}` : '';
+  return apiFetch<TrustInvestigation[]>(`/trust-center/investigations${q}`);
+}
+
+export function fetchTrustRecentlyListed() {
+  return apiFetch<
+    Array<{
+      id: string;
+      slug: string;
+      name: string;
+      ticker: string;
+      logoUrl: string | null;
+      createdAt: string;
+    }>
+  >('/trust-center/recently-listed');
+}
+
+export function fetchTrustRecentlyDelisted() {
+  return apiFetch<
+    Array<{
+      id: string;
+      projectName: string;
+      ticker: string;
+      logoUrl: string | null;
+      reviewNotes: string | null;
+      updatedAt: string;
+    }>
+  >('/trust-center/recently-delisted');
+}
+
+export function fileProjectTrustReport(
+  slug: string,
+  body: {
+    category:
+      | 'LOOKS_LEGIT'
+      | 'BUILDING_CONSISTENTLY'
+      | 'COMMUNITY_EXISTS'
+      | 'NEEDS_MORE_PROOF'
+      | 'SUSPICIOUS'
+      | 'LIKELY_SCAM';
+    evidenceUrl?: string;
+    comment?: string;
+  },
+  token: string,
+) {
+  return apiFetch(`/trust-center/projects/${slug}/report`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, token);
+}
+
+export function fetchMyTrustWeight(token: string) {
+  return apiFetch<{ weight: number }>('/trust-center/my-weight', undefined, token);
 }
 
 export function fetchPendingApplications(token: string) {

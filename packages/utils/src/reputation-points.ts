@@ -1,18 +1,31 @@
+/** DDollar reward amounts — single ecosystem currency (stored as reputationPoints). */
 export const POINTS = {
   REGISTER: 50,
+  DAILY_LOGIN: 5,
   PAPER_TRADE: 10,
-  FEED_COMMENT: 5,
+  FEED_COMMENT: 2,
+  FEED_COMMENT_HELPFUL: 10,
   WATCHLIST_ADD: 2,
   /** Scout submits a listing for community vote (logged-in user). */
   LISTING_SUBMIT: 50,
-  /** Cast a community vote on a scout listing. */
-  LISTING_VOTE: 15,
-  /** Scout bonus when admin approves and project goes live — highest reward. */
-  LISTING_SCOUT_APPROVED: 1000,
-  /** Founder launches a project — reputation points (credits granted separately). */
+  /** Cast a community validation vote on a pending listing. */
+  LISTING_VOTE: 10,
+  /** Helpful validation review with thesis. */
+  VALIDATION_HELPFUL: 25,
+  /** Validation judged correct after listing decision. */
+  VALIDATION_CORRECT: 50,
+  /** Scout bonus when admin approves and project goes live. */
+  LISTING_SCOUT_APPROVED: 500,
+  /** Confirmed scam discovery after investigation. */
+  SCAM_CONFIRMED: 250,
+  /** Early scam discovery (first accurate report). */
+  SCAM_EARLY: 500,
+  /** Founder launches a project — DDollar reward (credits granted separately). */
   FOUNDER_PROJECT_LAUNCH: 500,
-  /** Founder build-in-public post. */
-  FOUNDER_BUILD_POST: 100,
+  /** Founder build-in-public post / weekly update. */
+  FOUNDER_BUILD_POST: 50,
+  /** GitHub activity synced to build feed. */
+  GITHUB_ACTIVITY: 10,
   /** Founder community thread or announcement. */
   FOUNDER_COMMUNITY_POST: 75,
   /** Founder video update. */

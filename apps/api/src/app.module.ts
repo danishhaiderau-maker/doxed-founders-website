@@ -30,6 +30,7 @@ import { AccountModule } from './account/account.module';
 import { PredictionMarketsModule } from './prediction-markets/prediction-markets.module';
 import { FounderNodeModule } from './founder-node/founder-node.module';
 import { AttestationModule } from './attestation/attestation.module';
+import { TrustCenterModule } from './trust-center/trust-center.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { AttestationModule } from './attestation/attestation.module';
     PredictionMarketsModule,
     FounderNodeModule,
     AttestationModule,
+    TrustCenterModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

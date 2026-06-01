@@ -3,7 +3,7 @@ export const VOTING_WINDOW_HOURS = 48;
 
 export const VOTING_MIN_VOTERS = 3;
 export const VOTING_MAX_VOTERS = 50;
-export const VOTING_MIN_YES_PERCENT = 65;
+export const VOTING_MIN_YES_PERCENT = 70;
 
 export type VotingThreshold = {
   activeUsers: number;
@@ -17,7 +17,7 @@ export type VotingThreshold = {
  * Scales with platform size so early users aren't blocked, but quality bar rises as you grow.
  *
  * requiredVoters = clamp(3, ceil(sqrt(activeUsers) * 1.5), 50)
- * Early pass: total votes >= requiredVoters AND yes% >= 65% → admin inbox sooner
+ * Early pass: total votes >= requiredVoters AND yes% >= 70% → admin inbox sooner
  * After 48h: always moves to admin inbox (you approve or reject — vote is signal only)
  */
 export function computeVotingThreshold(activeUsers: number): VotingThreshold {
@@ -48,14 +48,18 @@ export type VoteTally = {
 };
 
 export function tallyListingVotes(
-  votes: { vote: 'YES' | 'NO' }[],
+  votes: { vote: 'YES' | 'NO'; weight?: number }[],
   requiredVoters: number,
   minYesPercent: number,
 ): VoteTally {
   const yes = votes.filter((v) => v.vote === 'YES').length;
   const no = votes.filter((v) => v.vote === 'NO').length;
   const total = yes + no;
-  const yesPercent = total > 0 ? Math.round((yes / total) * 100) : 0;
+  const yesWeight = votes
+    .filter((v) => v.vote === 'YES')
+    .reduce((sum, v) => sum + (v.weight ?? 1), 0);
+  const totalWeight = votes.reduce((sum, v) => sum + (v.weight ?? 1), 0);
+  const yesPercent = totalWeight > 0 ? Math.round((yesWeight / totalWeight) * 100) : 0;
   const passed = total >= requiredVoters && yesPercent >= minYesPercent;
 
   return {

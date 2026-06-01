@@ -178,4 +178,35 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
       lastSyncedAt: new Date().toISOString(),
     };
   }
+
+  /** GitHub App / webhook push — instant sync when repo receives commits. */
+  async handlePushWebhook(payload: {
+    repository?: { full_name?: string };
+    ref?: string;
+  }): Promise<{ synced: boolean; reason?: string }> {
+    const repo = payload.repository?.full_name?.trim();
+    if (!repo) return { synced: false, reason: 'no_repo' };
+    if (payload.ref && !payload.ref.endsWith('/main') && !payload.ref.endsWith('/master')) {
+      return { synced: false, reason: 'ignored_ref' };
+    }
+
+    const connections = await this.prisma.gitHubConnection.findMany({
+      where: { repoFullName: repo },
+      select: { userId: true },
+    });
+    if (connections.length === 0) {
+      const founderMatch = await this.prisma.founder.findFirst({
+        where: { githubRepoFullName: repo },
+        select: { userId: true },
+      });
+      if (!founderMatch?.userId) return { synced: false, reason: 'no_connection' };
+      await this.syncForUser(founderMatch.userId, { force: true });
+      return { synced: true };
+    }
+
+    for (const conn of connections) {
+      await this.syncForUser(conn.userId, { force: true });
+    }
+    return { synced: true };
+  }
 }

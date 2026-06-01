@@ -9,8 +9,11 @@ import {
 import {
   POINTS,
   VOTING_WINDOW_HOURS,
+  computeTrustWeight,
   computeVotingThreshold,
   tallyListingVotes,
+  validationCategoryToVote,
+  type CommunityValidationCategory,
 } from '@dcf/utils';
 import { ListingStatus, ListingVoteValue } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -33,11 +36,33 @@ export class ListingVotesService implements OnModuleInit {
     setInterval(() => void this.expireClosedVoting(), 15 * 60 * 1000);
   }
 
+  private async trustWeightForUser(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { oauthAccounts: { select: { provider: true } } },
+    });
+    if (!user) return 1;
+    return computeTrustWeight({
+      verifiedAccount: Boolean(
+        user.emailVerified ||
+          user.twitterHandle?.trim() ||
+          user.oauthAccounts.some((a) => a.provider === 'google' || a.provider === 'twitter'),
+      ),
+      contributorLevel: user.contributorLevel,
+      reputationPoints: user.reputationPoints,
+      accountAgeDays: Math.floor((Date.now() - user.createdAt.getTime()) / 86400000),
+    });
+  }
+
   async getVotingStats() {
     const activeUsers = await this.prisma.user.count({
       where: { banned: false, role: 'USER' },
     });
     return computeVotingThreshold(activeUsers);
+  }
+
+  private mapVotes(votes: { vote: ListingVoteValue; voteWeight: number }[]) {
+    return votes.map((v) => ({ vote: v.vote, weight: v.voteWeight }));
   }
 
   async findOpenForVoting() {
@@ -64,7 +89,7 @@ export class ListingVotesService implements OnModuleInit {
     return applications.map((app) => ({
       ...app,
       tally: tallyListingVotes(
-        app.votes.map((v) => ({ vote: v.vote })),
+        this.mapVotes(app.votes),
         app.requiredVoters,
         app.minYesPercent,
       ),
@@ -79,7 +104,7 @@ export class ListingVotesService implements OnModuleInit {
         user: { select: { id: true, name: true, reputationPoints: true, contributorLevel: true } },
         votes: {
           include: {
-            user: { select: { id: true, name: true, contributorLevel: true } },
+            user: { select: { id: true, name: true, contributorLevel: true, reputationPoints: true } },
           },
           orderBy: { createdAt: 'desc' },
         },
@@ -91,7 +116,7 @@ export class ListingVotesService implements OnModuleInit {
     return {
       ...app,
       tally: tallyListingVotes(
-        app.votes.map((v) => ({ vote: v.vote })),
+        this.mapVotes(app.votes),
         app.requiredVoters,
         app.minYesPercent,
       ),
@@ -117,16 +142,34 @@ export class ListingVotesService implements OnModuleInit {
       throw new BadRequestException('Scouts cannot vote on their own submission');
     }
 
-    if (dto.vote === 'YES' && (!dto.whyList?.trim() || !dto.whyDoxxed?.trim())) {
-      throw new BadRequestException('YES votes require whyList and whyDoxxed');
+    if (!dto.validationCategory && !dto.vote) {
+      throw new BadRequestException('Select a validation option or YES/NO vote');
     }
+
+    const vote = dto.validationCategory
+      ? validationCategoryToVote(dto.validationCategory)
+      : dto.vote;
+
+    if (vote === 'YES' && dto.validationCategory && POSITIVE_REQUIRES_COMMENT(dto.validationCategory)) {
+      if (!dto.comment?.trim() || dto.comment.trim().length < 20) {
+        throw new BadRequestException('Add a short review comment (20+ characters)');
+      }
+    }
+
+    if (vote === 'YES' && !dto.validationCategory && (!dto.whyList?.trim() || !dto.whyDoxxed?.trim())) {
+      throw new BadRequestException('YES votes require whyList and whyDoxxed, or use a validation category');
+    }
+
+    const voteWeight = await this.trustWeightForUser(userId);
 
     try {
       await this.prisma.listingVote.create({
         data: {
           applicationId,
           userId,
-          vote: dto.vote as ListingVoteValue,
+          vote: vote as ListingVoteValue,
+          validationCategory: dto.validationCategory ?? undefined,
+          voteWeight,
           whyList: dto.whyList?.trim(),
           whyDoxxed: dto.whyDoxxed?.trim(),
           comment: dto.comment?.trim(),
@@ -137,6 +180,9 @@ export class ListingVotesService implements OnModuleInit {
     }
 
     await this.points.award(userId, POINTS.LISTING_VOTE, 'LISTING_VOTE');
+    if (dto.comment && dto.comment.trim().length >= 40) {
+      await this.points.award(userId, POINTS.VALIDATION_HELPFUL, 'VALIDATION_HELPFUL');
+    }
 
     const updated = await this.findOneForVoting(applicationId);
     if (updated.tally.passed) {
@@ -160,8 +206,8 @@ export class ListingVotesService implements OnModuleInit {
     await this.notifications.notifyAllUsers({
       type: 'LISTING_VOTING',
       title: `${projectName} passed community vote`,
-      body: 'Scout listing cleared the community bar and is queued for admin review. See votes and thesis comments on the scout board.',
-      link: `/scout-votes/${applicationId}`,
+      body: 'Scout listing cleared the community bar and is queued for admin review. See votes and thesis comments in Trust Center.',
+      link: `/trust-center?tab=pending`,
     });
   }
 
@@ -178,7 +224,7 @@ export class ListingVotesService implements OnModuleInit {
     let expiredCount = 0;
     for (const app of expired) {
       const tally = tallyListingVotes(
-        app.votes.map((v) => ({ vote: v.vote })),
+        this.mapVotes(app.votes),
         app.requiredVoters,
         app.minYesPercent,
       );
@@ -189,7 +235,7 @@ export class ListingVotesService implements OnModuleInit {
           status: ListingStatus.REJECTED,
           reviewNotes: tally.passed
             ? 'Voting passed but admin did not approve before the 48h window closed.'
-            : `48h voting ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}%) — not listed.`,
+            : `48h voting ended (${tally.yes}/${tally.total} yes, ${tally.yesPercent}% weighted) — not listed.`,
         },
       });
       expiredCount += 1;
@@ -205,4 +251,8 @@ export class ListingVotesService implements OnModuleInit {
   static votingWindowEnd(from = new Date()) {
     return new Date(from.getTime() + VOTING_WINDOW_HOURS * 60 * 60 * 1000);
   }
+}
+
+function POSITIVE_REQUIRES_COMMENT(category: CommunityValidationCategory) {
+  return ['LOOKS_LEGIT', 'BUILDING_CONSISTENTLY', 'COMMUNITY_EXISTS'].includes(category);
 }

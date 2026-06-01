@@ -9,8 +9,19 @@ PRISMA_DB_PUSH=true
 PRISMA_SCHEMA=prisma/schema.prisma
 NODE_ENV=production
 CORS_ORIGINS=https://doxxedcrypto.digital,https://www.doxxedcrypto.digital
-# Start command (set in railway.toml): node scripts/start-api-prod.mjs
-# Do NOT use: NODE_ENV=production node ... (breaks Dockerfile deploy)
+WEB_APP_URL=https://doxxedcrypto.digital
+API_URL=https://doxed-founders-website-production.up.railway.app
+
+# GitHub OAuth — Founder OS one-click connect (create OAuth App at github.com/settings/developers)
+GITHUB_CLIENT_ID=YOUR_GITHUB_OAUTH_CLIENT_ID
+GITHUB_CLIENT_SECRET=YOUR_GITHUB_OAUTH_CLIENT_SECRET
+GITHUB_OAUTH_CALLBACK_URL=https://doxed-founders-website-production.up.railway.app/api/auth/github/callback
+
+# GitHub push webhook — instant commit sync (optional; 15-min poll remains as fallback)
+GITHUB_WEBHOOK_SECRET=YOUR_GITHUB_WEBHOOK_SECRET
+# Webhook URL: https://doxed-founders-website-production.up.railway.app/api/founder-os/webhooks/github
+
+# Disable background poll if webhook-only: DISABLE_GITHUB_AUTO_SYNC=1
 
 # ─── VERCEL (Project → Settings → Environment Variables) ───
 NEXT_PUBLIC_API_URL=YOUR_RAILWAY_URL
