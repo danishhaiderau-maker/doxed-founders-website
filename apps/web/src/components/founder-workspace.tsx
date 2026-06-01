@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { RaiseRoomPanel } from '@/components/raise-room-panel';
+import { LaunchPipelinePanel } from '@/components/launch-pipeline-panel';
 import { BuildRoom2 } from '@/components/build-room-2';
 import { AgentsWorkspacePanel } from '@/components/agents-workspace-panel';
 import { FounderMissionControl } from '@/components/founder-mission-control';
@@ -19,6 +20,7 @@ export type WorkspaceTab =
   | 'tasks'
   | 'community'
   | 'funding'
+  | 'launch'
   | 'agents'
   | 'build'
   | 'analytics'
@@ -27,6 +29,7 @@ export type WorkspaceTab =
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'activity', label: 'Mission control' },
   { id: 'build', label: 'Founder Copilot' },
+  { id: 'launch', label: 'Launch' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'community', label: 'Community' },
   { id: 'funding', label: 'Raise Room' },
@@ -185,6 +188,18 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
               Open project room (channels & demand) →
             </Link>
           )}
+        </OsSection>
+      )}
+
+      {tab === 'launch' && session && (
+        <OsSection title="Launch pipeline" subtitle="Readiness · launchpad · repo scaffolds · go-live" disabled={!hasFounder}>
+          <LaunchPipelinePanel
+            accessToken={session.accessToken}
+            room={room}
+            onRefresh={onRefresh}
+            onTabChange={onTabChange}
+            onMessage={onWorkspaceMessage}
+          />
         </OsSection>
       )}
 

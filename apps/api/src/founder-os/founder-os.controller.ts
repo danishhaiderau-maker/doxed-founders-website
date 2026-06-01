@@ -28,6 +28,24 @@ export class FounderOsController {
     return this.founderOs.connectGitHubRepo(user.id, body.repoFullName);
   }
 
+  @Get('github/repos')
+  listGitHubRepos(@CurrentUser() user: AuthUser) {
+    return this.founderOs.listGitHubRepos(user.id);
+  }
+
+  @Get('github/templates')
+  repoTemplates() {
+    return this.founderOs.listRepoStarterTemplates();
+  }
+
+  @Post('github/scaffold')
+  scaffoldRepo(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { templateKey: string; repoName: string },
+  ) {
+    return this.founderOs.scaffoldGitHubRepo(user.id, body);
+  }
+
   @Post('github/sync')
   syncGitHub(@CurrentUser() user: AuthUser) {
     return this.founderOs.syncGitHubCommits(user.id);

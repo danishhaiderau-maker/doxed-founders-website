@@ -21,6 +21,8 @@ import {
   RESTRICTED_CASH_THRESHOLD_USD,
   TOP_UP_FEE_USD,
   slugify,
+  normalizeProjectName,
+  projectTickerFromName,
   inferProjectLifecycleStage,
   resolveProjectListingKind,
   resolveEffectiveLifecycleStage,
@@ -678,16 +680,21 @@ export class FounderDenService {
     const chain = await this.prisma.chain.findFirst();
     if (!chain) throw new BadRequestException('Platform not configured — no chains seeded.');
 
-    const baseSlug = slugify(dto.projectName);
+    const projectName = normalizeProjectName(dto.projectName);
+    if (projectName.length < 2) {
+      throw new BadRequestException('Enter a project name (not a URL alone)');
+    }
+
+    const baseSlug = slugify(projectName);
     let slug = baseSlug;
     let n = 1;
     while (await this.prisma.project.findUnique({ where: { slug } })) {
       slug = `${baseSlug}-${n++}`;
     }
 
-    const founderSlug = slugify(dto.projectName + '-founder').slice(0, 48);
+    const founderSlug = slugify(projectName + '-founder').slice(0, 48);
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    const founderName = user?.name ?? dto.projectName;
+    const founderName = user?.name ?? projectName;
 
     const result = await this.prisma.$transaction(async (tx) => {
       const founder = await tx.founder.create({
@@ -710,8 +717,8 @@ export class FounderDenService {
       const project = await tx.project.create({
         data: {
           slug,
-          name: dto.projectName.trim(),
-          ticker: dto.projectName.slice(0, 6).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'IDEA',
+          name: projectName,
+          ticker: projectTickerFromName(projectName),
           summary: dto.ideaDescription.slice(0, 280),
           description: dto.ideaDescription.trim(),
           websiteUrl: dto.websiteUrl?.trim(),
@@ -760,7 +767,7 @@ export class FounderDenService {
       const application = await tx.founderApplication.create({
         data: {
           userId,
-          projectName: dto.projectName.trim(),
+          projectName,
           websiteUrl: dto.websiteUrl?.trim(),
           twitterHandle: dto.twitterHandle?.trim(),
           githubUrl: dto.githubUrl?.trim(),
@@ -798,13 +805,13 @@ export class FounderDenService {
       userId,
       result.founder.id,
       result.project.id,
-      dto.projectName,
+      projectName,
     );
     if (awarded) {
       await this.notifications.notifyUser(userId, {
         type: NotificationType.POINTS_EARNED,
         title: `+${FOUNDER_LAUNCH_REPUTATION_POINTS} reputation points`,
-        body: `Your project "${dto.projectName}" is live on Founder OS.`,
+        body: `Your project "${projectName}" is live on Founder OS.`,
         link: '/founder-den',
       });
     }

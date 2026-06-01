@@ -26,10 +26,23 @@ export type HandsFreeAction =
   | 'launch_report'
   | 'roadmap'
   | 'community_update'
-  | 'resume_work';
+  | 'resume_work'
+  | 'cursor_dispatch';
+
+/** Detect when the user wants Copilot to dispatch Cursor Cloud directly. */
+export function detectCursorDispatchIntent(prompt: string): boolean {
+  const p = prompt.trim();
+  if (!p) return false;
+  return (
+    /\b(command|run|dispatch|start|use)\s+cursor\b/i.test(p) ||
+    /\bcursor\s+(build|run|fix|implement|ship)\b/i.test(p) ||
+    /^cursor[:\s]/i.test(p)
+  );
+}
 
 export function detectHandsFreeAction(prompt: string): HandsFreeAction {
   const p = prompt.toLowerCase();
+  if (detectCursorDispatchIntent(prompt)) return 'cursor_dispatch';
   if (/^(finish|continue|resume|where i left|pick up)/.test(p.trim()) || /\bfinish it\b/.test(p)) {
     return 'resume_work';
   }

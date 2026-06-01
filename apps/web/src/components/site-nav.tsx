@@ -22,6 +22,7 @@ const TRADING_NAV = [
 /** Row 2 — building (violet family) */
 const BUILDING_NAV = [
   { href: '/founder-den', label: 'Founder OS', auth: true },
+  { href: '/developers', label: 'Developers' },
   { href: '/founder-node', label: 'Founder Node' },
   { href: '/agents', label: 'Agents' },
   { href: '/raise-room', label: 'Raise Room' },
@@ -62,6 +63,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agents') return pathname.startsWith('/agents');
   if (href === '/founder-den') return pathname.startsWith('/founder-den');
+  if (href === '/developers') return pathname.startsWith('/developers');
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/scout-votes') return pathname.startsWith('/scout-votes');
   if (href === '/settings/builder') return pathname.startsWith('/settings/builder');

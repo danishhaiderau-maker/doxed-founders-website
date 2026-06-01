@@ -9,6 +9,7 @@ import {
   connectGitHubToken,
   createFounderNodePairingCode,
   fetchFounderOnboardingStatus,
+  fetchGitHubOAuthStart,
   submitFounderApplication,
   updateBuilderSettings,
   type FounderOnboardingStatus,
@@ -72,6 +73,18 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage }: P
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('github') === 'connected') {
+      onMessage?.('GitHub connected via OAuth — pick your repo below');
+      load();
+      const url = new URL(window.location.href);
+      url.searchParams.delete('github');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }, [accessToken, load, onMessage]);
 
   const currentStepId = STEP_ORDER[stepIndex] ?? 'founder';
   const currentStep = stepById(status, currentStepId);
@@ -289,6 +302,26 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage }: P
               We poll your repo every 15 minutes and when you open Copilot. New commits draft build updates
               automatically (deduped by SHA).
             </p>
+            <div className="mt-3">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setErr(null);
+                  try {
+                    const { url } = await fetchGitHubOAuthStart(accessToken);
+                    window.location.href = url;
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : 'GitHub OAuth not configured — use token below');
+                    setBusy(false);
+                  }
+                }}
+                className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
+              >
+                Connect with GitHub (OAuth)
+              </button>
+            </div>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
               <input
                 value={repoInput}

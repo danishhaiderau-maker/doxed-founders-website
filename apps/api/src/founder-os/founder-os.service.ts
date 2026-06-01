@@ -22,6 +22,8 @@ import {
   buildFeedPostBody,
   buildSuggestionFromBuildPrompt,
   buildXUpdateTweet,
+  getRepoStarterTemplate,
+  REPO_STARTER_TEMPLATES,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -30,6 +32,7 @@ import { UserXPostingService } from '../x-social/user-x-posting.service';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
 import { EventsService } from '../events/events.service';
 import { FounderOsMemoryService } from '../github/founder-os-memory.service';
+import { GitHubApiService } from '../github/github-api.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
 
 @Injectable()
@@ -42,6 +45,7 @@ export class FounderOsService {
     private readonly integrations: FounderOsIntegrationService,
     private readonly events: EventsService,
     private readonly memory: FounderOsMemoryService,
+    private readonly github: GitHubApiService,
     private readonly githubAutoSync: GithubAutoSyncService,
   ) {}
 
@@ -230,6 +234,46 @@ export class FounderOsService {
     return { success: true, repoFullName: normalized };
   }
 
+  listRepoStarterTemplates() {
+    return REPO_STARTER_TEMPLATES.map(({ key, label, description, tags, defaultRepoName }) => ({
+      key,
+      label,
+      description,
+      tags,
+      defaultRepoName,
+    }));
+  }
+
+  async scaffoldGitHubRepo(userId: string, input: { templateKey: string; repoName: string }) {
+    const template = getRepoStarterTemplate(input.templateKey);
+    if (!template) throw new BadRequestException('Unknown starter template');
+
+    const repoName = input.repoName.trim().replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80);
+    if (!repoName) throw new BadRequestException('Repo name required');
+
+    const { repoFullName, htmlUrl } = await this.github.createUserRepo(userId, repoName, {
+      description: template.description,
+    });
+
+    for (const file of template.files) {
+      await this.github.upsertRepoFile(
+        userId,
+        repoFullName,
+        file.path,
+        file.content,
+        `Scaffold ${file.path} from Founder OS`,
+      );
+    }
+
+    await this.connectGitHubRepo(userId, repoFullName);
+    return { success: true, repoFullName, htmlUrl, template: template.key };
+  }
+
+  async listGitHubRepos(userId: string) {
+    const repos = await this.github.listUserRepos(userId);
+    return { repos };
+  }
+
   async syncProjectMemory(userId: string) {
     return this.memory.syncProjectMemoryToRepo(userId);
   }
@@ -261,7 +305,10 @@ export class FounderOsService {
         ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'].includes(c.provider),
     );
     const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
-    const githubConnected = Boolean(gh?.repoFullName ?? founder?.githubRepoFullName);
+    const githubConnected = Boolean(
+      (gh?.repoFullName ?? founder?.githubRepoFullName) &&
+        !String(gh?.repoFullName ?? founder?.githubRepoFullName).endsWith('/pending-setup'),
+    );
     const goalSet = Boolean(settings?.currentGoalFocus?.trim());
     const founderActive = Boolean(founder);
     const nodeOnline =

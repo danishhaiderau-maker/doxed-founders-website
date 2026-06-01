@@ -24,6 +24,7 @@ const VALID_TABS: WorkspaceTab[] = [
   'tasks',
   'community',
   'funding',
+  'launch',
   'agents',
   'build',
   'analytics',

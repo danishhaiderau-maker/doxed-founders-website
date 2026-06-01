@@ -63,3 +63,5 @@ export * from './unified-feed';
 export * from './gamified-roles';
 export * from './notification-preferences';
 export * from './prediction-markets';
+export * from './project-name';
+export * from './repo-starter-templates';
