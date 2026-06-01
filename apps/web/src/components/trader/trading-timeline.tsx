@@ -146,10 +146,21 @@ function TimelineNode({ event, isLast }: { event: TradingTimelineEvent; isLast: 
               )}
               {event.whatIfHeldPct != null && event.whatIfHeldPct > 0 && (
                 <p className="text-amber-300/90">
-                  What If I Held? +{event.whatIfHeldPct.toFixed(0)}%
+                  What If I Held? +{event.whatIfHeldTotalPct?.toFixed(0) ?? event.whatIfHeldPct.toFixed(0)}%
                   {event.missedAlphaPct != null && event.missedAlphaPct > 0 && (
-                    <span className="ml-2">· Missed +{event.missedAlphaPct.toFixed(0)}%</span>
+                    <span className="ml-2">· Missed +{event.missedAfterExitPct?.toFixed(0) ?? event.missedAlphaPct.toFixed(0)}%</span>
                   )}
+                </p>
+              )}
+              {event.pumpAfterExitPct != null && event.pumpAfterExitPct > 0 && (
+                <p className="text-amber-200/90">
+                  After exit: pumped +{event.pumpAfterExitPct.toFixed(0)}% to{' '}
+                  {formatTokenPrice(event.postExitPeakPriceUsd ?? event.priceUsd)}
+                </p>
+              )}
+              {event.exitNarrative === 'smart' && event.dropAfterExitPct != null && event.dropAfterExitPct > 0 && (
+                <p className="text-sky-300/90">
+                  Smart exit: fell {event.dropAfterExitPct.toFixed(0)}% after you sold
                 </p>
               )}
             </div>

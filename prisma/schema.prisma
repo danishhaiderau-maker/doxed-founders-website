@@ -727,6 +727,9 @@ model PaperTrade {
   missedAlphaPct Decimal?       @db.Decimal(8, 2)
   convictionScore Int?
   peakPriceUsd   Decimal?       @db.Decimal(24, 12)
+  postExitPeakPriceUsd   Decimal? @db.Decimal(24, 12)
+  postExitTroughPriceUsd Decimal? @db.Decimal(24, 12)
+  postExitUpdatedAt      DateTime?
   createdAt      DateTime       @default(now())
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)

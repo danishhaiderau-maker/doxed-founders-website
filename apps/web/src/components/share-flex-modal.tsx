@@ -17,6 +17,7 @@ import {
 } from '@dcf/utils';
 import type { PositionShareInput, ProofOfConvictionInput } from '@dcf/utils';
 import { fetchXConnectionStatus, postProofOfConvictionToX } from '@/lib/api';
+import { useShareFooter } from '@/components/share-footer-provider';
 
 export type ShareConvictionConfig = {
   pnlOrRoi: number;
@@ -68,9 +69,12 @@ export function ShareFlexModal({
   accessToken,
   conviction,
 }: ShareFlexModalProps) {
+  const shareFooter = useShareFooter();
   const imagePath = useMemo(() => pickShareImagePath(pnlOrRoi), [pnlOrRoi, open]);
   const win = pnlOrRoi >= 0;
-  const twitterUrl = buildTwitterIntentUrl(tweetText, shareUrl);
+  const twitterUrl = buildTwitterIntentUrl(tweetText, shareUrl, shareFooter);
+  const instantWithFooter = fitXShareTextWithFooter(instantTweetText, 280, shareFooter);
+  const previewWithFooter = appendPlatformXShareFooter(threadPreview, shareFooter);
   const [copied, setCopied] = useState(false);
   const [flipped, setFlipped] = useState(false);
   const [posting, setPosting] = useState(false);
@@ -149,7 +153,7 @@ export function ShareFlexModal({
     setPostError(null);
     try {
       const result = await postProofOfConvictionToX(
-        { projectId, text: instantTweetText, pnlPercent: pnlOrRoi },
+        { projectId, text: instantWithFooter, pnlPercent: pnlOrRoi },
         accessToken,
       );
       setPostedUrl(result.tweetUrl);
@@ -158,7 +162,7 @@ export function ShareFlexModal({
     } finally {
       setPosting(false);
     }
-  }, [accessToken, projectId, instantTweetText, pnlOrRoi]);
+  }, [accessToken, projectId, instantWithFooter, pnlOrRoi]);
 
   if (!open) return null;
 
@@ -286,7 +290,7 @@ export function ShareFlexModal({
             Auto-written thread
           </p>
           <p className="mt-1 max-h-40 overflow-y-auto rounded-lg bg-black/30 p-3 text-xs leading-relaxed whitespace-pre-wrap text-zinc-300">
-            {threadPreview}
+            {previewWithFooter}
           </p>
         </div>
 
@@ -468,13 +472,11 @@ export function buildPortfolioFlexShare(input: {
     '',
     '#ProofOfConviction',
   ].join('\n');
-  const threadPreview = appendPlatformXShareFooter(threadBody);
+  const threadPreview = threadBody;
   return {
     pnlOrRoi: input.roi,
-    tweetText: threadPreview,
-    instantTweetText: fitXShareTextWithFooter(
-      `🚨 Portfolio · ${sign}${input.roi.toFixed(1)}% paper ROI\n${proofUrl}\n#ProofOfConviction`,
-    ),
+    tweetText: threadBody,
+    instantTweetText: `🚨 Portfolio · ${sign}${input.roi.toFixed(1)}% paper ROI\n${proofUrl}\n#ProofOfConviction`,
     threadPreview,
     shareUrl: proofUrl,
     title: 'Portfolio conviction',

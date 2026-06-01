@@ -132,12 +132,31 @@ export const PLATFORM_X_SHARE_FOOTER = [
   'Back real builders. Bring back HODL.',
 ].join('\n');
 
+/** Remove baked-in platform marketing so admin footer can replace it. */
+export function stripPlatformShareFooter(text: string): string {
+  let body = text.trimEnd();
+  const markers = [
+    PLATFORM_X_SHARE_FOOTER,
+    'Built for shrimps, not whales.',
+    'Track missed opportunities on Doxxed Crypto.',
+    '#PaperTrading · Built for shrimps, not whales.',
+    'No scams. No pump & dumps. No extractors.',
+    'Back real builders. Bring back HODL.',
+  ];
+  for (const marker of markers) {
+    const idx = body.indexOf(marker);
+    if (idx >= 0) {
+      body = body.slice(0, idx).trimEnd();
+    }
+  }
+  return body.trimEnd();
+}
+
 export function appendPlatformXShareFooter(text: string, customFooter?: string | null): string {
-  const base = text.trimEnd();
+  const body = stripPlatformShareFooter(text);
   const footer = (customFooter?.trim() || PLATFORM_X_SHARE_FOOTER).trim();
-  if (!footer) return base;
-  if (base.includes(footer.split('\n')[0] ?? '')) return base;
-  return `${base}\n\n${footer}`;
+  if (!footer) return body;
+  return `${body}\n\n${footer}`;
 }
 
 /** Keep marketing footer on single tweets — trim body if needed (280 char X limit). */
