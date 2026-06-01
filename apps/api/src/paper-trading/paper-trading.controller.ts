@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
@@ -34,8 +34,13 @@ export class PaperTradingController {
   }
 
   @Get('portfolio/:userId/public')
-  getPublicPortfolio(@Param('userId') userId: string) {
-    return this.paperTrading.getPublicPortfolio(userId);
+  getPublicPortfolio(
+    @Param('userId') userId: string,
+    @Query('includeOlder') includeOlder?: string,
+  ) {
+    return this.paperTrading.getPublicPortfolio(userId, {
+      includeOlder: includeOlder === 'true' || includeOlder === '1',
+    });
   }
 
   @Get('portfolio/:userId')

@@ -38,6 +38,14 @@ function formatCompactUsd(value: number | null | undefined): string {
   return formatUsd(value, 0);
 }
 
+const THESIS_PRESETS = [
+  'Support bounce',
+  'Breakout',
+  'Long-term hold',
+  'Macro thesis',
+  'News event',
+] as const;
+
 export function TradeAccountabilityModal({
   open,
   preview,
@@ -215,6 +223,22 @@ export function TradeAccountabilityModal({
               <span className="text-sm font-medium text-zinc-300">
                 Why are you buying? <span className="text-zinc-500">(max 280 chars)</span>
               </span>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {THESIS_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => onThesisChange(preset)}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
+                      thesis === preset
+                        ? 'border-emerald-500/60 bg-emerald-950/40 text-emerald-200'
+                        : 'border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
               <textarea
                 value={thesis}
                 onChange={(e) => onThesisChange(e.target.value.slice(0, 280))}

@@ -590,6 +590,14 @@ export interface PublicPortfolio {
   roi: number;
   startingCash: number;
   positionCount: number;
+  followersCount: number;
+  trustScore: number;
+  convictionScore: number;
+  journeyDays: number;
+  hasOlderHistory: boolean;
+  olderTradeCount: number;
+  timeline: TradingTimelineEvent[];
+  closedTrades: ClosedTradeCard[];
   positions: {
     projectId?: string;
     ticker: string;
@@ -618,11 +626,61 @@ export interface PublicPortfolio {
     convictionTimeHorizon?: string | null;
     convictionRecordedAt?: string | null;
     positionOpenedAt?: string | null;
+    daysHeld?: number;
+    convictionLevel?: 'High' | 'Medium' | 'Low';
   }[];
 }
 
-export function fetchPublicPortfolio(userId: string) {
-  return apiFetch<PublicPortfolio>(`/paper-trading/portfolio/${userId}/public`);
+export type TradingTimelineEventType =
+  | 'BUY'
+  | 'SELL'
+  | 'ADD'
+  | 'REDUCE'
+  | 'THESIS_UPDATE'
+  | 'MILESTONE';
+
+export interface TradingTimelineEvent {
+  id: string;
+  type: TradingTimelineEventType;
+  createdAt: string;
+  ticker: string;
+  projectName: string;
+  logoUrl: string | null;
+  amountUsd: number;
+  priceUsd: number;
+  quantity: number;
+  thesis: string | null;
+  catalyst: string | null;
+  feedPostId: string | null;
+  realizedPnlUsd: number | null;
+  realizedReturnPct: number | null;
+  whatIfHeldPct: number | null;
+  missedAlphaPct: number | null;
+  peakPriceUsd: number | null;
+  convictionScore: number | null;
+}
+
+export interface ClosedTradeCard {
+  id: string;
+  ticker: string;
+  projectName: string;
+  logoUrl: string | null;
+  closedAt: string;
+  entryPriceUsd: number;
+  exitPriceUsd: number;
+  investedUsd: number;
+  proceedsUsd: number;
+  realizedReturnPct: number;
+  whatIfHeldPct: number;
+  missedAlphaPct: number;
+  peakPriceUsd: number | null;
+  convictionScore: number | null;
+  thesis: string | null;
+}
+
+export function fetchPublicPortfolio(userId: string, includeOlder = false) {
+  const qs = includeOlder ? '?includeOlder=true' : '';
+  return apiFetch<PublicPortfolio>(`/paper-trading/portfolio/${userId}/public${qs}`);
 }
 
 export function previewPaperTrade(url: string) {

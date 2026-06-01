@@ -22,7 +22,7 @@ function LeaderboardInner() {
             </Link>
             <h1 className="mt-1 text-2xl font-bold">Trader rankings</h1>
             <p className="text-sm text-[var(--color-muted)]">
-              Top traders by portfolio value · Top losers by biggest paper losses (busted accounts flagged).
+              Top traders by return — click any name to see their full trading journey.
             </p>
           </div>
           <SiteNav />
