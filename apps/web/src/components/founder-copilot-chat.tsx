@@ -4,13 +4,14 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   copilotAsk,
-  dispatchCursorCloudBuild,
+  executeBuildTask,
   fetchBuilderSettings,
+  fetchBuilderWorkerStatus,
   fetchCopilotMemory,
   ProjectMemory,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
-import { AI_STACK_HREF, resolveAiStackAction, shortProviderName } from '@/lib/copilot-ai-stack';
+import { AI_STACK_HREF } from '@/lib/copilot-ai-stack';
 
 type ChatMessage = {
   id: string;
@@ -46,26 +47,17 @@ type FounderCopilotChatProps = {
   accessToken: string;
   onResult?: (answer: string) => void;
   variant?: 'default' | 'hero' | 'embedded';
+  memory?: ProjectMemory | null;
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;
   agentTemplate?: string | null;
 };
 
 const ASK_CHIPS = [
-  'What is the most pressing issue?',
-  'What am I working on right now?',
-  'What changed this week?',
   'What should I ship today?',
-  'Explain this project to investors.',
-];
-
-const QUICK_ACTIONS = [
-  { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?' },
-  { label: 'Finish MVP', prompt: 'What is left to finish the MVP?' },
-  { label: 'Create tokenomics', prompt: 'Create tokenomics draft for community allocation.' },
-  { label: 'Prepare Raise', prompt: 'Prepare launch roadmap for Raise Room.' },
-  { label: 'Weekly update', prompt: "Generate this week's update." },
-  { label: 'Launch readiness', prompt: 'Create launch readiness report.' },
+  'What broke yesterday?',
+  'Continue last task',
+  'Create PR',
 ];
 
 function hasChatLlmProvider(
@@ -76,10 +68,15 @@ function hasChatLlmProvider(
   );
 }
 
+function canExecuteRemotely(worker: string | undefined) {
+  return worker === 'CURSOR' || worker === 'OPENHANDS';
+}
+
 export function FounderCopilotChat({
   accessToken,
   onResult,
   variant = 'default',
+  memory: memoryProp,
   initialPrompt,
   onInitialPromptConsumed,
   agentTemplate,
@@ -87,16 +84,15 @@ export function FounderCopilotChat({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
-  const [memory, setMemory] = useState<ProjectMemory | null>(null);
-  const [defaultProvider, setDefaultProvider] = useState('RULE_BASED');
-  const [providers, setProviders] = useState<
-    { key: string; label: string; connected: boolean; connectMode?: string }[]
-  >([]);
+  const [memoryLocal, setMemoryLocal] = useState<ProjectMemory | null>(null);
   const [llmConnected, setLlmConnected] = useState(false);
+  const [buildWorker, setBuildWorker] = useState<string>('NONE');
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const consumedPromptRef = useRef<string | null>(null);
+
+  const memory = memoryProp ?? memoryLocal;
 
   const onTranscript = useCallback((text: string) => {
     setPrompt(text);
@@ -117,21 +113,21 @@ export function FounderCopilotChat({
 
   const loadMeta = useCallback(async () => {
     try {
-      const [mem, builder] = await Promise.all([
-        fetchCopilotMemory(accessToken),
+      const [mem, builder, worker] = await Promise.all([
+        memoryProp ? Promise.resolve(memoryProp) : fetchCopilotMemory(accessToken),
         fetchBuilderSettings(accessToken),
+        fetchBuilderWorkerStatus(accessToken).catch(() => null),
       ]);
-      setMemory(mem);
-      setDefaultProvider(builder.defaultProvider);
-      setProviders(builder.providers);
+      if (!memoryProp) setMemoryLocal(mem);
       setLlmConnected(hasChatLlmProvider(builder.providers));
+      setBuildWorker(worker?.buildWorker ?? 'NONE');
     } catch {
-      setMemory(null);
+      if (!memoryProp) setMemoryLocal(null);
     }
-  }, [accessToken]);
+  }, [accessToken, memoryProp]);
 
   useEffect(() => {
-    loadMeta();
+    void loadMeta();
   }, [loadMeta]);
 
   useEffect(() => {
@@ -160,22 +156,17 @@ export function FounderCopilotChat({
         id: `a-${Date.now()}`,
         role: 'assistant',
         content: result.answer,
-        provider: result.routedAgent
-          ? `WORKER:${result.routedAgent.label}`
-          : result.answerProvider,
+        provider: result.routedAgent ? `WORKER:${result.routedAgent.label}` : result.answerProvider,
         routedAgent: result.routedAgent?.label,
         runtimeTools: result.runtime?.toolsUsed,
       };
       setMessages((prev) => [...prev, assistantMsg]);
       onResult?.(result.answer);
-      loadMeta();
+      void loadMeta();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Copilot request failed';
       setError(msg);
-      setMessages((prev) => [
-        ...prev,
-        { id: `e-${Date.now()}`, role: 'system', content: msg },
-      ]);
+      setMessages((prev) => [...prev, { id: `e-${Date.now()}`, role: 'system', content: msg }]);
       onResult?.(msg);
     } finally {
       setBusy(false);
@@ -183,27 +174,34 @@ export function FounderCopilotChat({
     }
   }
 
-  async function runOnCursor() {
+  async function runExecuteTask() {
     const q = prompt.trim();
-    const cursorReady = providers.some((p) => p.key === 'CURSOR' && p.connected);
-    if (!q || busy || !cursorReady) return;
+    if (!q || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await dispatchCursorCloudBuild(
-        { spec: q, cursorPrompt: q },
+      const result = await executeBuildTask(
+        { spec: q, cursorPrompt: q, repository: memory?.repoFullName ?? undefined },
         accessToken,
       );
-      const msg = `Cursor agent ${result.mode === 'follow_up' ? 'resumed' : 'started'}: ${result.agentUrl}`;
+      let msg: string;
+      if (result.status === 'dispatched' && result.agentUrl) {
+        msg = `Builder agent started — track progress in Agents.\n${result.agentUrl}`;
+      } else if (result.status === 'error') {
+        msg = result.error ?? 'Execute failed — check Settings.';
+      } else {
+        msg = result.message ?? 'Task queued. Connect a builder worker in Settings for remote execution.';
+      }
       setMessages((prev) => [
         ...prev,
-        { id: `u-${Date.now()}`, role: 'user', content: `[Cursor task] ${q}` },
-        { id: `a-${Date.now()}`, role: 'assistant', content: msg, provider: 'CURSOR' },
+        { id: `u-${Date.now()}`, role: 'user', content: q },
+        { id: `a-${Date.now()}`, role: 'assistant', content: msg, provider: 'BUILDER' },
       ]);
       setPrompt('');
       onResult?.(msg);
+      void loadMeta();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Cursor dispatch failed';
+      const msg = err instanceof Error ? err.message : 'Execute failed';
       setError(msg);
       onResult?.(msg);
     } finally {
@@ -223,22 +221,15 @@ export function FounderCopilotChat({
     sessionStorage.removeItem(STORAGE_KEY);
   }
 
-  const aiStackAction = resolveAiStackAction(providers, defaultProvider);
   const statusLabel = llmConnected
-    ? `Chat · ${shortProviderName(
-        providers.find((p) => p.key === defaultProvider && p.connected) ?? {
-          key: defaultProvider,
-          label: defaultProvider,
-        },
-      )}`
-    : aiStackAction.kind === 'cursor'
-      ? `${aiStackAction.label} connected · dispatch code from prompt`
-      : aiStackAction.kind === 'connected'
-        ? `${aiStackAction.label} connected · AI Stack`
-        : 'Rule-based · connect an LLM in AI Stack';
+    ? 'Copilot · connected'
+    : canExecuteRemotely(buildWorker)
+      ? 'Builder agent · ready'
+      : 'Connect stack in Settings';
 
   const isHero = variant === 'hero';
   const isEmbedded = variant === 'embedded';
+  const executeReady = canExecuteRemotely(buildWorker);
 
   return (
     <section
@@ -250,59 +241,17 @@ export function FounderCopilotChat({
             : 'border-zinc-800 bg-[#0d0d0f]'
       }`}
     >
-      {isHero && memory && (
-        <div className="border-b border-violet-500/20 px-5 py-5 sm:px-6">
-          <p className="text-xs font-semibold uppercase tracking-widest text-violet-300/80">
-            Founder Copilot
-          </p>
-          <h2 className="mt-2 text-xl font-semibold text-white sm:text-2xl">
-            {memory.welcomeMessage.split('\n')[0]}
-          </h2>
-          <p className="mt-1 text-sm text-zinc-400">
-            Your copilot uses project memory, GitHub, and tasks — connected to your stack.
-          </p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {QUICK_ACTIONS.map((a) => (
-              <button
-                key={a.label}
-                type="button"
-                disabled={busy}
-                onClick={() => sendMessage(a.prompt)}
-                className="rounded-xl border border-zinc-700/80 bg-zinc-900/50 px-3 py-2 text-[11px] font-medium text-zinc-200 transition hover:border-violet-500/50 hover:bg-violet-950/30 hover:text-white disabled:opacity-50 sm:text-xs"
-              >
-                {a.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
         <div className="min-w-0">
-          {!isHero && !isEmbedded && (
-            <>
-              <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
-              <p className="truncate text-xs text-zinc-500">
-                {memory?.project?.name ?? 'Project'} ·{' '}
-                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in AI Stack'}
-              </p>
-            </>
-          )}
-          {isEmbedded && (
-            <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
-          )}
-          {isHero && (
-            <p className="text-sm text-zinc-400">
-              {memory?.project?.name ?? 'Project'} · {memory?.progressPercent ?? 0}% · launch{' '}
-              {memory?.launchReadiness ?? 0}/100
+          <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
+          {!isHero && (
+            <p className="truncate text-xs text-zinc-500">
+              {memory?.project?.name ?? 'Project'} · {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal'}
             </p>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-md bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400">{statusLabel}</span>
-          <Link href={AI_STACK_HREF} className="text-[10px] text-violet-400 hover:underline">
-            AI Stack
-          </Link>
           {messages.length > 0 && (
             <button
               type="button"
@@ -315,10 +264,15 @@ export function FounderCopilotChat({
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex min-h-[320px] max-h-[min(58vh,520px)] flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
+      <div
+        ref={scrollRef}
+        className={`flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 ${
+          isHero ? 'min-h-[min(62vh,640px)] max-h-[min(72vh,720px)]' : 'min-h-[320px] max-h-[min(58vh,520px)]'
+        }`}
+      >
         {messages.length === 0 && !busy && (
           <p className="mx-auto max-w-lg text-center text-sm text-zinc-500">
-            Ask Founder Brain — answers use GitHub, tasks, roadmap, and build feed context.
+            What should we ship next? Ask anything — or use Execute Task to dispatch your builder agent.
           </p>
         )}
         {messages.map((m) => (
@@ -338,18 +292,12 @@ export function FounderCopilotChat({
               {m.role === 'assistant' && m.provider && (
                 <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                   {m.routedAgent
-                    ? `${m.routedAgent} worker · tasks queued${
-                        m.runtimeTools?.includes('github_issues') ? ' · GitHub' : ''
-                      }${m.runtimeTools?.includes('cursor_agent') ? ' · Cursor' : ''}`
-                    : m.provider === 'RULE_BASED'
-                      ? 'Project memory'
-                      : m.provider === 'CURSOR'
-                        ? 'Cursor + memory'
-                        : m.provider === 'PHALA'
-                          ? 'Private AI (Phala TEE)'
-                          : m.provider.startsWith('WORKER:')
-                            ? `${m.provider.replace('WORKER:', '')} worker`
-                            : m.provider.replace('_', ' ')}
+                    ? `${m.routedAgent} · tasks queued`
+                    : m.provider === 'BUILDER'
+                      ? 'Builder agent'
+                      : m.provider === 'RULE_BASED'
+                        ? 'Project memory'
+                        : 'Copilot'}
                 </p>
               )}
               {m.content}
@@ -363,7 +311,7 @@ export function FounderCopilotChat({
             </div>
           </div>
         )}
-        {!busy && (
+        {!busy && !isHero && (
           <div className="flex flex-wrap justify-center gap-2 border-t border-zinc-800/60 pt-3">
             {ASK_CHIPS.map((chip) => (
               <button
@@ -389,13 +337,9 @@ export function FounderCopilotChat({
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={handleKeyDown}
-          rows={3}
+          rows={isHero ? 4 : 3}
           disabled={busy}
-          placeholder={
-            isEmbedded
-              ? 'Ask Founder Copilot anything…'
-              : 'Ask Founder Copilot anything… Enter to send, Shift+Enter for new line'
-          }
+          placeholder="Ask Copilot anything…"
           className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-violet-500/50 disabled:opacity-60"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
@@ -416,33 +360,23 @@ export function FounderCopilotChat({
             >
               {listening ? '⏹' : '🎤'}
             </button>
-            {listening && <span className="text-[10px] text-red-300">Listening…</span>}
           </div>
           <div className="flex gap-2">
-            {aiStackAction.kind === 'connect' ? (
-              <Link
-                href={AI_STACK_HREF}
-                className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-950/50"
-              >
-                Connect AI Stack
-              </Link>
-            ) : aiStackAction.kind === 'cursor' ? (
+            {executeReady ? (
               <button
                 type="button"
                 disabled={busy || !prompt.trim()}
-                onClick={runOnCursor}
-                className="rounded-lg border border-emerald-600/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
-                title={`Dispatch ${aiStackAction.label} cloud agent`}
+                onClick={() => void runExecuteTask()}
+                className="rounded-lg border border-emerald-600/40 bg-emerald-950/30 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-950/50 disabled:opacity-50"
               >
-                {aiStackAction.label}
+                ▶ Execute Task
               </button>
             ) : (
               <Link
                 href={AI_STACK_HREF}
-                className="rounded-lg border border-sky-500/30 bg-sky-950/20 px-3 py-1.5 text-xs font-medium text-sky-200 hover:bg-sky-950/40"
-                title="Connected in AI Stack"
+                className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
               >
-                {aiStackAction.label}
+                Connect builder
               </Link>
             )}
             <button

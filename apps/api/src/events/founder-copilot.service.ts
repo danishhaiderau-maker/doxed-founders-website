@@ -331,8 +331,18 @@ export class FounderCopilotService {
       payload: { action: 'resume', suggestedNext: prompt },
     });
 
-    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
-    let message = `Resuming: ${prompt}`;
+    const githubPrefix = memory.repoFullName
+      ? `Read ${FOUNDER_OS_MEMORY_DIR}/ in repo ${memory.repoFullName} first.\n\n`
+      : '';
+
+    const dispatch = await this.builder.executeBuildTask(userId, {
+      spec: memory.currentGoal,
+      cursorPrompt: `${githubPrefix}${prompt}`,
+      repository: memory.repoFullName ?? undefined,
+    });
+
+    let message = `Last commit: ${memory.lastCommit?.split('\n')[0]?.slice(0, 80) ?? 'None'}\nOpen tasks: ${memory.openTasks.length}\nRecommended: ${prompt}\nEstimated time: ~2 hours`;
+
     let cursorCloudDispatch:
       | Awaited<ReturnType<BuilderService['dispatchCursorBuildTask']>>
       | { error: string }
@@ -342,56 +352,39 @@ export class FounderCopilotService {
       | { error: string }
       | null = null;
 
-    if (settings?.defaultProvider === 'CURSOR') {
-      const githubPrefix = memory.repoFullName
-        ? `Read ${FOUNDER_OS_MEMORY_DIR}/ in repo ${memory.repoFullName} first.\n\n`
-        : '';
-      try {
-        cursorCloudDispatch = await this.builder.dispatchCursorBuildTask(userId, {
-          spec: memory.currentGoal,
-          cursorPrompt: `${githubPrefix}${prompt}`,
-          repository: memory.repoFullName ?? undefined,
-        });
-        message =
-          cursorCloudDispatch.mode === 'follow_up'
-            ? `Cursor agent resumed — follow-up run started on ${memory.repoFullName ?? 'your repo'}.`
-            : `Cursor cloud agent started — building on ${memory.repoFullName ?? 'GitHub'}.`;
-      } catch (err) {
-        cursorCloudDispatch = {
-          error: err instanceof Error ? err.message : 'Cursor dispatch failed',
-        };
+    if (dispatch.status === 'dispatched') {
+      message =
+        dispatch.worker === 'CURSOR'
+          ? `Builder agent ${dispatch.mode === 'follow_up' ? 'resumed' : 'started'} on ${memory.repoFullName ?? 'your repo'}.`
+          : `Builder agent dispatched — ${prompt}`;
+      if (dispatch.worker === 'CURSOR' && dispatch.cursorCloud) {
+        cursorCloudDispatch = dispatch.cursorCloud;
+      } else if (dispatch.worker === 'OPENHANDS' && dispatch.openHands) {
+        openHandsDispatch = dispatch.openHands;
       }
-    } else if (settings?.defaultProvider === 'OPENHANDS') {
-      try {
-        openHandsDispatch = await this.builder.dispatchOpenHandsBuildTask(userId, {
-          spec: memory.currentGoal,
-          cursorPrompt: prompt,
-          repository: memory.repoFullName ?? undefined,
-        });
-        message = `OpenHands task dispatched — ${prompt}`;
-      } catch (err) {
-        openHandsDispatch = {
-          error: err instanceof Error ? err.message : 'OpenHands dispatch failed',
-        };
+    } else if (dispatch.status === 'error') {
+      message = `${message}\n\nDispatch note: ${dispatch.error}`;
+      if (dispatch.worker === 'CURSOR') {
+        cursorCloudDispatch = { error: dispatch.error ?? 'Dispatch failed' };
+      } else if (dispatch.worker === 'OPENHANDS') {
+        openHandsDispatch = { error: dispatch.error ?? 'Dispatch failed' };
       }
+    } else if (dispatch.status === 'queued') {
+      message = `${message}\n\n${dispatch.message ?? 'Queued locally — connect a builder in Settings for remote execution.'}`;
     }
 
-    const agentUrl =
-      cursorCloudDispatch && 'agentUrl' in cursorCloudDispatch
-        ? cursorCloudDispatch.agentUrl
-        : openHandsDispatch && 'conversationUrl' in openHandsDispatch
-          ? openHandsDispatch.conversationUrl
-          : null;
+    const agentUrl = dispatch.agentUrl ?? null;
 
     return {
       message,
       memory,
+      worker: dispatch.worker,
       cursorCopy: memory.cursorCopy,
       cursorCloudDispatch,
       openHandsDispatch,
       dispatchHint: agentUrl
-        ? `Remote agent running — open ${agentUrl}`
-        : 'Copy the prompt into your connected builder (Cursor, Claude Code, etc.) or type "Finish it" to queue via hands-free.',
+        ? `Remote agent running — ${agentUrl}`
+        : 'Use Execute Task in Copilot to dispatch when a builder worker is connected.',
     };
   }
 

@@ -365,39 +365,28 @@ export class BuildQueueService {
       | { error: string }
       | null = null;
 
-    if (settings?.defaultProvider === 'OPENHANDS') {
-      try {
-        const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
-        openHandsDispatch = await this.builder.dispatchOpenHandsBuildTask(userId, {
-          spec: parsed.spec,
-          cursorPrompt: parsed.cursorPrompt,
-          repository: repo,
-        });
-        await this.prisma.buildQueueItem.update({
-          where: { id: specItem.id },
-          data: { status: BuildQueueStatus.IN_PROGRESS },
-        });
-      } catch (err) {
-        openHandsDispatch = {
-          error: err instanceof Error ? err.message : 'OpenHands dispatch failed',
-        };
+    const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
+    const dispatch = await this.builder.executeBuildTask(userId, {
+      spec: parsed.spec,
+      cursorPrompt: parsed.cursorPrompt,
+      repository: repo,
+    });
+
+    if (dispatch.status === 'dispatched') {
+      await this.prisma.buildQueueItem.update({
+        where: { id: specItem.id },
+        data: { status: BuildQueueStatus.IN_PROGRESS },
+      });
+      if (dispatch.worker === 'CURSOR' && dispatch.cursorCloud) {
+        cursorCloudDispatch = dispatch.cursorCloud;
+      } else if (dispatch.worker === 'OPENHANDS' && dispatch.openHands) {
+        openHandsDispatch = dispatch.openHands;
       }
-    } else if (settings?.defaultProvider === 'CURSOR') {
-      try {
-        const repo = founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined;
-        cursorCloudDispatch = await this.builder.dispatchCursorBuildTask(userId, {
-          spec: parsed.spec,
-          cursorPrompt: parsed.cursorPrompt,
-          repository: repo,
-        });
-        await this.prisma.buildQueueItem.update({
-          where: { id: specItem.id },
-          data: { status: BuildQueueStatus.IN_PROGRESS },
-        });
-      } catch (err) {
-        cursorCloudDispatch = {
-          error: err instanceof Error ? err.message : 'Cursor dispatch failed',
-        };
+    } else if (dispatch.status === 'error') {
+      if (dispatch.worker === 'CURSOR') {
+        cursorCloudDispatch = { error: dispatch.error ?? 'Dispatch failed' };
+      } else if (dispatch.worker === 'OPENHANDS') {
+        openHandsDispatch = { error: dispatch.error ?? 'Dispatch failed' };
       }
     }
 
@@ -643,7 +632,6 @@ export class BuildQueueService {
     const runtime = emptyWorkforceRuntime(template);
     const founder = await this.requireFounder(userId);
     const project = founder.projects[0];
-    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
     const idea = await this.prisma.buildQueueItem.findUnique({ where: { id: ideaId } });
     if (!idea) return runtime;
 
@@ -690,19 +678,15 @@ export class BuildQueueService {
       }
     }
 
-    if (
-      runtime.permissions.includes('cursor_agent') &&
-      settings?.defaultProvider === 'CURSOR' &&
-      idea.cursorPrompt
-    ) {
-      try {
-        const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
-          spec: output.summary,
-          cursorPrompt: idea.cursorPrompt,
-          repository: repo ?? founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined,
-        });
+    if (runtime.permissions.includes('cursor_agent') && idea.cursorPrompt) {
+      const dispatch = await this.builder.executeBuildTask(userId, {
+        spec: output.summary,
+        cursorPrompt: idea.cursorPrompt,
+        repository: repo ?? founder.githubRepoFullName ?? project?.githubRepoFullName ?? undefined,
+      });
+      if (dispatch.status === 'dispatched' && dispatch.agentUrl) {
         runtime.cursorDispatched = true;
-        runtime.cursorAgentUrl = dispatch.agentUrl ?? null;
+        runtime.cursorAgentUrl = dispatch.agentUrl;
         runtime.toolsUsed.push('cursor_agent');
         await this.prisma.buildQueueItem.update({
           where: { id: ideaId },
@@ -714,11 +698,9 @@ export class BuildQueueService {
           userId,
           type: FounderEventType.CURSOR_BUILD_SESSION,
           source: 'cursor',
-          title: `Cursor agent started for ${labelFromTemplate(template)}`,
-          payload: { agentUrl: dispatch.agentUrl, ideaId, template },
+          title: `Builder agent started for ${labelFromTemplate(template)}`,
+          payload: { agentUrl: dispatch.agentUrl, ideaId, template, worker: dispatch.worker },
         });
-      } catch {
-        /* Cursor optional */
       }
     }
 

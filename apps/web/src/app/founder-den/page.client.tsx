@@ -19,20 +19,21 @@ import {
   submitFounderApplication,
 } from '@/lib/api';
 
-const VALID_TABS: WorkspaceTab[] = [
-  'activity',
-  'tasks',
-  'community',
-  'funding',
-  'launch',
-  'agents',
-  'build',
-  'analytics',
-  'notifications',
-];
+const PRIMARY_TABS: WorkspaceTab[] = ['activity', 'social', 'agents', 'analytics'];
+
+const TAB_ALIASES: Record<string, WorkspaceTab> = {
+  build: 'activity',
+  launch: 'activity',
+  tasks: 'activity',
+  community: 'social',
+  funding: 'analytics',
+  notifications: 'activity',
+  copilot: 'activity',
+};
 
 function parseTab(value: string | null): WorkspaceTab {
-  if (value && VALID_TABS.includes(value as WorkspaceTab)) return value as WorkspaceTab;
+  if (value && TAB_ALIASES[value]) return TAB_ALIASES[value];
+  if (value && PRIMARY_TABS.includes(value as WorkspaceTab)) return value as WorkspaceTab;
   return 'activity';
 }
 
@@ -209,7 +210,7 @@ export default function FounderDenPageClient() {
           </p>
         )}
 
-        {session?.accessToken && (
+        {session?.accessToken && !hasFounder && (
           <FounderOnboardingWizard
             key={wizardKey}
             accessToken={session.accessToken}
@@ -221,7 +222,7 @@ export default function FounderDenPageClient() {
           />
         )}
 
-        {session?.accessToken && wizardDismissed && (
+        {session?.accessToken && !hasFounder && wizardDismissed && (
           <button
             type="button"
             onClick={() => {

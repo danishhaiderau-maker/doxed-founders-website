@@ -72,3 +72,4 @@ export * from './trading-agent-adapters';
 export * from './listing-approval';
 export * from './discover-universe';
 export * from './feed-terminal';
+export * from './task-router';
