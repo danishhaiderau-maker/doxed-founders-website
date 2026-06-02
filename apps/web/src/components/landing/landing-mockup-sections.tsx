@@ -80,7 +80,104 @@ const NETWORK_RULES = [
   { icon: '✓', title: 'Transparency first', sub: 'Fair game' },
 ];
 
-const AI_PROVIDERS = ['OpenAI', 'DeepSeek', 'Claude', 'Gemini'];
+const AI_PROVIDERS = ['DeepSeek', 'OpenAI', 'Claude', 'Gemini', 'OpenRouter', 'Ollama', 'Cursor', 'OpenHands'];
+
+const PRODUCT_TRIAD = [
+  {
+    id: 'founder-os',
+    title: 'Founder OS',
+    tagline: 'The cockpit',
+    subtitle: 'Mission control for serious builders',
+    href: '/founder-den',
+    cta: 'Open Mission Control →',
+    border: 'border-violet-500/35',
+    headerBg: 'bg-violet-950/40',
+    accent: 'text-violet-300',
+    items: [
+      { label: 'Mission Control', icon: '◆' },
+      { label: 'Tasks', icon: '☑' },
+      { label: 'Agents', icon: '🤖' },
+      { label: 'Copilot', icon: '✦' },
+      { label: 'Progress', icon: '📈' },
+    ],
+  },
+  {
+    id: 'founder-node',
+    title: 'Founder Node',
+    tagline: 'The vault',
+    subtitle: 'Self-custody memory & private data',
+    href: '/settings/builder',
+    cta: 'Download Founder Node →',
+    border: 'border-emerald-500/35',
+    headerBg: 'bg-emerald-950/35',
+    accent: 'text-emerald-300',
+    items: [
+      { label: 'Self custody', icon: '🔐' },
+      { label: 'Encrypted memory', icon: '💾' },
+      { label: 'Private data', icon: '🛡' },
+      { label: 'TEE protected', icon: '🔒' },
+      { label: 'Local vault', icon: '🖥' },
+    ],
+  },
+  {
+    id: 'ai-stack',
+    title: 'AI Stack',
+    tagline: 'The brain',
+    subtitle: 'Your keys · your models · we orchestrate',
+    href: '/settings/builder',
+    cta: 'Connect AI providers →',
+    border: 'border-sky-500/35',
+    headerBg: 'bg-sky-950/30',
+    accent: 'text-sky-300',
+    items: [
+      { label: 'DeepSeek', icon: '◉' },
+      { label: 'OpenAI', icon: '◉' },
+      { label: 'Claude', icon: '◉' },
+      { label: 'Gemini', icon: '◉' },
+      { label: 'Cursor', icon: '◉' },
+      { label: 'OpenHands', icon: '◉' },
+    ],
+  },
+] as const;
+
+function LandingProductTriad() {
+  return (
+    <section className="grid gap-3 lg:grid-cols-3">
+      {PRODUCT_TRIAD.map((product) => (
+        <Card
+          key={product.id}
+          className={`flex flex-col border ${product.border} bg-gradient-to-b from-zinc-950/90 to-black/40`}
+        >
+          <div className={`border-b border-zinc-800/80 px-4 py-3 ${product.headerBg}`}>
+            <p className={`text-[10px] font-bold uppercase tracking-[0.22em] ${product.accent}`}>
+              {product.tagline}
+            </p>
+            <h3 className="mt-1 text-lg font-bold text-white">{product.title}</h3>
+            <p className="mt-0.5 text-[11px] text-zinc-500">{product.subtitle}</p>
+          </div>
+          <ul className="flex flex-1 flex-col gap-1 px-3 py-3">
+            {product.items.map((item) => (
+              <li
+                key={item.label}
+                className="flex items-center gap-2.5 rounded-lg border border-zinc-800/60 bg-black/25 px-2.5 py-2"
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 text-xs">
+                  {item.icon}
+                </span>
+                <span className="text-[11px] font-medium text-zinc-200">{item.label}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="border-t border-zinc-800/80 px-4 py-3">
+            <Link href={product.href} className={`text-xs font-semibold ${product.accent} hover:underline`}>
+              {product.cta}
+            </Link>
+          </div>
+        </Card>
+      ))}
+    </section>
+  );
+}
 
 function Card({
   children,
@@ -241,30 +338,76 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
 
   return (
     <div className="mx-auto w-full max-w-[88rem] space-y-3 px-4 py-3 sm:px-6 lg:space-y-3.5 lg:px-8 lg:py-4">
-      {/* Row 1: Hero */}
+      {/* Row 1: Hero V3 — privacy → AI → mission → anti-scam */}
       <section>
-        <Card className="flex flex-col justify-center border-violet-500/10 p-4 lg:p-6">
-          <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-red-400/90">
-            Anti-scam · Doxxed founders · Public proof
+        <Card className="overflow-hidden border-violet-500/15 bg-gradient-to-b from-violet-950/15 via-zinc-950/80 to-[#050508] p-5 lg:p-8">
+          <p className="text-[10px] font-bold uppercase tracking-[0.32em] text-violet-300/90">
+            Private by default.
+            <span className="text-zinc-500"> · </span>
+            Public by proof.
           </p>
-          <h1 className="mt-3 text-[1.65rem] font-bold uppercase leading-[0.95] tracking-tight text-white sm:text-[2.1rem] xl:text-[2.45rem]">
+
+          <h2 className="mt-5 max-w-3xl text-2xl font-bold leading-tight text-white sm:text-3xl lg:text-[2.15rem]">
+            Use the AI you trust.
+            <span className="block bg-gradient-to-r from-violet-200 via-indigo-200 to-sky-200 bg-clip-text text-transparent">
+              We orchestrate the rest.
+            </span>
+          </h2>
+
+          <p className="mt-4 text-base font-medium text-zinc-300 sm:text-lg">
+            The operating system for crypto startups.
+            <span className="mt-1 block text-sm font-normal text-zinc-500">
+              Build with AI · Validate with community · Launch with trust
+            </span>
+          </p>
+
+          <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
+            Build in public.
+            <span className="text-zinc-600"> · </span>
+            Validate demand.
+            <span className="text-zinc-600"> · </span>
+            Launch with trust.
+          </p>
+
+          {/* TEE strip */}
+          <div className="mt-6 flex flex-col gap-2 rounded-xl border border-emerald-500/25 bg-emerald-950/15 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-300/90">
+              Powered by Founder Node + Phala Network TEE
+            </p>
+            <p className="text-xs font-medium text-emerald-100/90">
+              Your data.
+              <span className="text-emerald-400/60"> · </span>
+              Your keys.
+              <span className="text-emerald-400/60"> · </span>
+              Your AI.
+            </p>
+          </div>
+
+          <div className="my-8 h-px bg-gradient-to-r from-transparent via-zinc-700/80 to-transparent" />
+
+          <h1 className="text-[1.65rem] font-bold uppercase leading-[0.95] tracking-tight text-white sm:text-[2.1rem] xl:text-[2.45rem]">
             If you want my money,
             <br />
             <span className="bg-gradient-to-r from-red-300 via-rose-200 to-amber-200 bg-clip-text text-transparent">
               show me your face.
             </span>
           </h1>
-          <p className="mt-3 text-lg font-semibold text-zinc-200">Trade founders. Not excuses.</p>
-          <p className="mt-3 max-w-xl text-sm leading-relaxed text-zinc-400">
-            Scammers hide behind anonymity. Builders stand behind their work. Track doxxed founders,
-            validate demand with DDollar, and back projects building in public.
-          </p>
-          <div className="mt-5 flex flex-wrap gap-2">
+
+          <p className="mt-4 text-lg font-semibold text-zinc-200">Trade founders. Not excuses.</p>
+
+          <div className="mt-4 max-w-xl space-y-2 text-sm leading-relaxed text-zinc-400">
+            <p>Scammers hide behind anonymity. Builders stand behind their work.</p>
+            <p>
+              Track doxxed founders, validate demand with DDollar, and back projects building in public.
+            </p>
+          </div>
+
+          <div className="mt-6 flex flex-wrap gap-2">
             <Link
               href="/founder-den"
               className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500"
             >
-              Open Founder OS →
+              Open Mission Control →
             </Link>
             <Link
               href="/list-your-project"
@@ -283,12 +426,11 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
               </span>
             </Link>
           </div>
-          <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[10px] text-emerald-300/90">
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-950/40 px-2 py-0.5">🛡</span>
-            Private by default. Public by proof. · Powered by Founder Node + Phala Network TEE
-          </p>
         </Card>
       </section>
+
+      {/* Row 1b: Three core products */}
+      <LandingProductTriad />
 
       {/* Row 2: Navigation V5 hub + live preview widgets */}
       <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />
@@ -452,7 +594,8 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           <p className="mt-1 text-sm font-semibold text-emerald-300">Enterprise-grade privacy</p>
         </Card>
         <Card className="p-3">
-          <p className="text-[9px] uppercase tracking-wider text-zinc-500">Use the models you trust</p>
+          <p className="text-[9px] uppercase tracking-wider text-zinc-500">Use the AI you trust</p>
+          <p className="mt-1 text-sm font-semibold text-sky-300">We orchestrate the rest</p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {AI_PROVIDERS.map((name) => (
               <span
