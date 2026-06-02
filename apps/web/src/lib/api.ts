@@ -942,6 +942,83 @@ export function fetchUnifiedFeed(category: UnifiedFeedCategory = 'all') {
   }>(`/feed/unified?category=${category}`);
 }
 
+export type FeedTerminalTab = 'all' | 'trades' | 'conviction' | 'movers' | 'regret' | 'activity';
+
+export type FeedTerminalCardKind =
+  | 'BUY'
+  | 'SELL'
+  | 'ADD'
+  | 'REDUCE'
+  | 'THESIS'
+  | 'NEW_THESIS'
+  | 'MISSED_ALPHA'
+  | 'SMART_EXIT'
+  | 'LOSS'
+  | 'FOLLOWER_SPIKE'
+  | 'LISTING'
+  | 'VALIDATION'
+  | 'MAJOR_UPDATE'
+  | 'HOT_BUY';
+
+export interface FeedTerminalCard {
+  id: string;
+  kind: FeedTerminalCardKind;
+  at: string;
+  traderName?: string;
+  traderId?: string;
+  projectSlug?: string;
+  projectTicker?: string;
+  projectName?: string;
+  projectLogoUrl?: string | null;
+  amountUsd?: number;
+  priceUsd?: number;
+  currentPriceUsd?: number;
+  reason?: string;
+  convictionLabel?: string;
+  pnlPct?: number;
+  pnlUsd?: number;
+  missedAlphaPct?: number;
+  avoidedLossPct?: number;
+  commentCount?: number;
+  followerSpike?: number;
+  link?: string;
+  feedPostId?: string;
+}
+
+export interface FeedTerminalResponse {
+  tab: FeedTerminalTab;
+  projectSlug: string | null;
+  cards: FeedTerminalCard[];
+  stats: {
+    buys24h: number;
+    sells24h: number;
+    buysPct: number;
+    sellsPct: number;
+    volume24h: number;
+    volumePct: number;
+    newTraders24h: number;
+    newTradersPct: number;
+    missedAlphaCount: number;
+    smartExitCount: number;
+  };
+  topTraders: { userId: string; name: string; pnlUsd: number }[];
+  projectChats: {
+    slug: string;
+    ticker: string;
+    name: string;
+    activeCount: number;
+    latestMessage: string;
+  }[];
+  scoutPending: number;
+}
+
+export function fetchFeedTerminal(tab: FeedTerminalTab = 'all', projectSlug?: string) {
+  const qs = new URLSearchParams();
+  qs.set('tab', tab);
+  if (projectSlug) qs.set('project', projectSlug);
+  return apiFetch<FeedTerminalResponse>(`/feed/terminal?${qs.toString()}`);
+}
+
 export function fetchEngagementFlashes(since?: string) {
   const qs = since ? `?since=${encodeURIComponent(since)}` : '';
   return apiFetch<EngagementFlash[]>(`/feed/flashes${qs}`);

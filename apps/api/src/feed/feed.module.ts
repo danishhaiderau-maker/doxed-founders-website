@@ -6,11 +6,12 @@ import { FeedService } from './feed.service';
 import { FeedShareService } from './feed-share.service';
 import { HotBuyService } from './hot-buy.service';
 import { UnifiedFeedService } from './unified-feed.service';
+import { FeedTerminalService } from './feed-terminal.service';
 
 @Module({
   imports: [NotificationsModule, BuilderModule],
   controllers: [FeedController],
-  providers: [FeedService, FeedShareService, HotBuyService, UnifiedFeedService],
-  exports: [FeedService, FeedShareService, HotBuyService, UnifiedFeedService],
+  providers: [FeedService, FeedShareService, HotBuyService, UnifiedFeedService, FeedTerminalService],
+  exports: [FeedService, FeedShareService, HotBuyService, UnifiedFeedService, FeedTerminalService],
 })
 export class FeedModule {}
