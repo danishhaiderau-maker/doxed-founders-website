@@ -42,6 +42,13 @@ import {
   buildFounderBrainContextBlock,
   FOUNDER_BRAIN_SYSTEM,
   FounderBrainContext,
+  computeDiscoverActivityScore,
+  computeDiscoverConvictionScore,
+  resolveDiscoverUniverseStage,
+  computeTrendDirection,
+  type DiscoverTimeframe,
+  type DiscoverUniverseStage,
+  timeframeToMs,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
@@ -52,7 +59,7 @@ import { EventsService } from '../events/events.service';
 import { BuilderService } from '../builder/builder.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 import { MetricsSyncService } from '../projects/metrics-sync.service';
-import { NotificationType, ScoutMarketStatus } from '@prisma/client';
+import { NotificationType, ScoutMarketStatus, ListingStatus, PaperTradeSide } from '@prisma/client';
 
 const founderRoomInclude = {
   user: { select: { id: true, name: true, email: true } },
@@ -1200,6 +1207,251 @@ export class FounderDenService {
     });
 
     return sorted;
+  }
+
+  async getDiscoverUniverse(options?: {
+    stageFilter?: DiscoverUniverseStage | 'all';
+    chainSlug?: string;
+    timeframe?: DiscoverTimeframe;
+  }) {
+    const timeframe = options?.timeframe ?? '24h';
+    const windowMs = timeframeToMs(timeframe);
+    const since = new Date(Date.now() - windowMs);
+    const priorSince = new Date(Date.now() - windowMs * 2);
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const baseProjects = await this.getDiscover('trending');
+    let projects = baseProjects;
+    if (options?.chainSlug) {
+      projects = projects.filter((p) => p.chain.slug === options.chainSlug);
+    }
+    if (options?.stageFilter && options.stageFilter !== 'all') {
+      projects = projects.filter(
+        (p) =>
+          resolveDiscoverUniverseStage({
+            stageBucket: p.stageBucket,
+            createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
+          }) === options.stageFilter,
+      );
+    }
+
+    const projectIds = projects.map((p) => p.slug);
+    const idRows = await this.prisma.project.findMany({
+      where: { slug: { in: projectIds } },
+      select: { id: true, slug: true },
+    });
+    const slugToId = Object.fromEntries(idRows.map((r) => [r.slug, r.id]));
+    const ids = idRows.map((r) => r.id);
+
+    const [
+      tradesWindow,
+      tradesPrior,
+      buildPosts,
+      follows,
+      githubEvents,
+      threads,
+      scoutMarkets,
+      scoutReviewsAwaiting,
+      newBuilders7d,
+      chains,
+    ] = await Promise.all([
+      this.prisma.paperTrade.groupBy({
+        by: ['projectId', 'side'],
+        where: { projectId: { in: ids }, createdAt: { gte: since } },
+        _sum: { totalUsd: true },
+      }),
+      this.prisma.paperTrade.groupBy({
+        by: ['projectId'],
+        where: { projectId: { in: ids }, createdAt: { gte: priorSince, lt: since } },
+        _sum: { totalUsd: true },
+      }),
+      this.prisma.founderBuildPost.groupBy({
+        by: ['projectId'],
+        where: { projectId: { in: ids }, publishedAt: { gte: since } },
+        _count: { id: true },
+      }),
+      this.prisma.projectFollow.groupBy({
+        by: ['projectId'],
+        where: { projectId: { in: ids }, createdAt: { gte: since } },
+        _count: { id: true },
+      }),
+      this.prisma.founderEvent.groupBy({
+        by: ['projectId'],
+        where: {
+          projectId: { in: ids },
+          createdAt: { gte: since },
+          type: { in: [FounderEventType.GITHUB_COMMIT, FounderEventType.DEPLOY_SUCCESS] },
+        },
+        _count: { id: true },
+      }),
+      this.prisma.communityThread.groupBy({
+        by: ['projectId'],
+        where: { projectId: { in: ids }, createdAt: { gte: since } },
+        _count: { id: true },
+      }),
+      this.prisma.scoutMarket.findMany({
+        where: { projectId: { in: ids }, status: ScoutMarketStatus.OPEN },
+        select: {
+          projectId: true,
+          yesPoolUsd: true,
+          noPoolUsd: true,
+          positions: {
+            where: { createdAt: { gte: since } },
+            select: { amountUsd: true },
+          },
+        },
+      }),
+      this.prisma.listingApplication.count({
+        where: { status: ListingStatus.COMMUNITY_VOTING },
+      }),
+      this.prisma.founder.count({ where: { createdAt: { gte: weekAgo } } }),
+      this.prisma.chain.findMany({ select: { slug: true, name: true }, orderBy: { name: 'asc' } }),
+    ]);
+
+    const mapCount = (rows: { projectId: string | null; _count: { id: number } }[]) => {
+      const m: Record<string, number> = {};
+      for (const r of rows) {
+        if (r.projectId) m[r.projectId] = r._count.id;
+      }
+      return m;
+    };
+
+    const buildMap = mapCount(buildPosts);
+    const followMap = mapCount(follows);
+    const githubMap = mapCount(githubEvents);
+    const threadMap = mapCount(threads);
+
+    const inflowMap: Record<string, number> = {};
+    const volumeMap: Record<string, number> = {};
+    for (const t of tradesWindow) {
+      const amt = Number(t._sum.totalUsd ?? 0);
+      volumeMap[t.projectId] = (volumeMap[t.projectId] ?? 0) + amt;
+      if (t.side === PaperTradeSide.BUY) {
+        inflowMap[t.projectId] = (inflowMap[t.projectId] ?? 0) + amt;
+      }
+    }
+
+    const priorVolumeMap: Record<string, number> = {};
+    for (const t of tradesPrior) {
+      priorVolumeMap[t.projectId] = Number(t._sum.totalUsd ?? 0);
+    }
+
+    const scoutPoolMap: Record<string, number> = {};
+    const scoutStakeMap: Record<string, number> = {};
+    for (const m of scoutMarkets) {
+      scoutPoolMap[m.projectId] =
+        Number(m.yesPoolUsd) + Number(m.noPoolUsd);
+      scoutStakeMap[m.projectId] = m.positions.reduce(
+        (s, p) => s + Number(p.amountUsd),
+        0,
+      );
+    }
+
+    const enriched = projects.map((p) => {
+      const pid = slugToId[p.slug];
+      const ddInflow = inflowMap[pid] ?? 0;
+      const ddVolume = volumeMap[pid] ?? 0;
+      const priorVol = priorVolumeMap[pid] ?? 0;
+      const trend = computeTrendDirection(ddVolume, priorVol);
+      const universeStage = resolveDiscoverUniverseStage({
+        stageBucket: p.stageBucket,
+        createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
+      });
+      const activityScore = computeDiscoverActivityScore({
+        buildPosts: buildMap[pid] ?? 0,
+        githubEvents: githubMap[pid] ?? 0,
+        tradesInflow: ddInflow,
+        tradesVolume: ddVolume,
+        followers: followMap[pid] ?? 0,
+        scoutStake: scoutStakeMap[pid] ?? 0,
+        communitySignals: threadMap[pid] ?? 0,
+        bubbleScore: p.bubbleScore,
+      });
+      const convictionScore = computeDiscoverConvictionScore({
+        launchReadiness: p.launchReadiness,
+        demandPct: p.demandPct,
+        founderScore: p.founderScore,
+        followerCount: p.followerCount,
+        scoutPoolUsd: scoutPoolMap[pid] ?? 0,
+      });
+
+      return {
+        ...p,
+        universeStage,
+        activityScore,
+        convictionScore,
+        ddInflow24h: ddInflow,
+        ddVolumeWindow: ddVolume,
+        trendDirection: trend.direction,
+        trendPct: trend.pct,
+        lastActivityPreview: p.lastUpdateHeadline
+          ? {
+              source: 'founder' as const,
+              text: p.lastUpdateHeadline,
+              at: p.lastUpdateAt,
+            }
+          : null,
+        scoutPoolUsd: scoutPoolMap[pid] ?? 0,
+      };
+    });
+
+    enriched.sort((a, b) => b.activityScore - a.activityScore);
+
+    const totalDdInflow = Object.values(inflowMap).reduce((s, v) => s + v, 0);
+    const avgConviction =
+      enriched.length > 0
+        ? Math.round(
+            enriched.reduce((s, p) => s + p.convictionScore, 0) / enriched.length,
+          )
+        : 0;
+
+    const topInflow = [...enriched]
+      .sort((a, b) => b.ddInflow24h - a.ddInflow24h)
+      .slice(0, 5)
+      .filter((p) => p.ddInflow24h > 0);
+
+    const topOutflow = [...enriched]
+      .map((p) => {
+        const pid = slugToId[p.slug];
+        let out = 0;
+        for (const t of tradesWindow) {
+          if (t.projectId === pid && t.side === PaperTradeSide.SELL) {
+            out += Number(t._sum.totalUsd ?? 0);
+          }
+        }
+        return { ...p, ddOutflow: out };
+      })
+      .sort((a, b) => b.ddOutflow - a.ddOutflow)
+      .slice(0, 3)
+      .filter((p) => p.ddOutflow > 0);
+
+    const mostFollowed = [...enriched]
+      .sort((a, b) => b.followerCount - a.followerCount)
+      .slice(0, 5);
+
+    const activeConversations = enriched
+      .filter((p) => p.lastActivityPreview)
+      .slice(0, 5);
+
+    return {
+      timeframe,
+      metrics: {
+        activeProjects: baseProjects.length,
+        ddInflow24h: totalDdInflow,
+        newBuilders7d,
+        avgConviction,
+        scoutReviewsAwaiting,
+      },
+      chains,
+      projects: enriched,
+      sidebar: {
+        trending: enriched.slice(0, 5),
+        topInflow,
+        topOutflow,
+        mostFollowed,
+        activeConversations,
+      },
+    };
   }
 
   async getEcosystemPulse() {
