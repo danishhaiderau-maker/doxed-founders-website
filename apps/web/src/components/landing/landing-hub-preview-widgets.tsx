@@ -36,16 +36,21 @@ const WAYS_TO_SPEND = [
   'Future Platform Services',
 ] as const;
 
-const FOUNDER_OS_TOOLS = [
-  { label: 'Founder Copilot', href: '/founder-den?tab=build', icon: '🧠' },
-  { label: 'Tasks', href: '/founder-den?tab=tasks', icon: '☑' },
-  { label: 'Community', href: '/founder-den?tab=community', icon: '👥' },
-  { label: 'Memory', href: '/founder-den?tab=activity', icon: '💾' },
-  { label: 'Founder Node', href: '/settings/builder', icon: '🖥' },
-  { label: 'AI Providers', href: '/founder-den?tab=agents', icon: '🤖' },
-  { label: 'Integrations', href: '/account?tab=connected', icon: '🔗' },
-  { label: 'Settings', href: '/founder-den?tab=analytics', icon: '⚙' },
+const FOUNDER_OS_ITEMS = [
+  { label: 'Mission Control', href: '/founder-den', icon: '◆' },
+  { label: 'Tasks', href: '/founder-den?tab=activity', icon: '☑' },
+  { label: 'Agents', href: '/founder-den?tab=agents', icon: '🤖' },
+  { label: 'Copilot', href: '/founder-den', icon: '✦' },
+  { label: 'Progress', href: '/founder-den', icon: '📈' },
 ] as const;
+
+const FOUNDER_NODE_ITEMS = [
+  { label: 'Self custody', icon: '🔐' },
+  { label: 'Encrypted memory', icon: '💾' },
+  { label: 'TEE protected', icon: '🔒' },
+] as const;
+
+const AI_STACK_ITEMS = ['DeepSeek', 'Claude', 'OpenAI', 'Gemini', 'Cursor'] as const;
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -192,7 +197,8 @@ export function LandingHubPreviewWidgets({
   };
 
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
       <WidgetShell
         title="Feed"
         subtitle="All public updates in one place."
@@ -323,12 +329,13 @@ export function LandingHubPreviewWidgets({
 
       <WidgetShell
         title="Founder OS"
-        subtitle="All tools to build and manage your startup."
+        subtitle="The cockpit — mission control for builders."
         headerClass="bg-violet-950/40"
         href="/founder-den"
+        footerLabel="Open Mission Control →"
       >
         <ul className="space-y-0.5">
-          {FOUNDER_OS_TOOLS.map((tool) => (
+          {FOUNDER_OS_ITEMS.map((tool) => (
             <li key={tool.label}>
               <Link
                 href={tool.href}
@@ -342,6 +349,52 @@ export function LandingHubPreviewWidgets({
             </li>
           ))}
         </ul>
+      </WidgetShell>
+
+      <WidgetShell
+        title="Founder Node"
+        subtitle="The vault — your data stays yours."
+        headerClass="bg-emerald-950/35"
+        href="/settings/builder"
+        footerLabel="Download Founder Node →"
+      >
+        <ul className="space-y-1.5">
+          {FOUNDER_NODE_ITEMS.map((item) => (
+            <li
+              key={item.label}
+              className="flex items-center gap-2 rounded-lg border border-emerald-500/15 bg-black/30 px-2 py-1.5 text-[11px] text-zinc-300"
+            >
+              <span aria-hidden>{item.icon}</span>
+              {item.label}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
+          Phala TEE · local vault · metadata sync only
+        </p>
+      </WidgetShell>
+
+      <WidgetShell
+        title="AI Stack"
+        subtitle="The brain — bring your own keys."
+        headerClass="bg-sky-950/30"
+        href="/settings/builder"
+        footerLabel="Connect providers →"
+      >
+        <p className="mb-2 text-[10px] font-medium text-sky-200/90">Use the AI you trust</p>
+        <div className="flex flex-wrap gap-1.5">
+          {AI_STACK_ITEMS.map((name) => (
+            <span
+              key={name}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300"
+            >
+              {name}
+            </span>
+          ))}
+        </div>
+        <p className="mt-3 text-[10px] leading-relaxed text-zinc-500">
+          Your key. Your model. Founder OS orchestrates agents, memory, and execution.
+        </p>
       </WidgetShell>
 
       <WidgetShell
@@ -379,6 +432,7 @@ export function LandingHubPreviewWidgets({
           </ul>
         )}
       </WidgetShell>
+      </div>
     </div>
   );
 }
