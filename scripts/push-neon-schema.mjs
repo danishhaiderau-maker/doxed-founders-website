@@ -33,7 +33,7 @@ if (!process.env.DATABASE_URL?.startsWith('postgres')) {
   process.exit(1);
 }
 
-const r = spawnSync('npx', ['prisma', 'db', 'push', '--schema', 'prisma/schema.prisma'], {
+const r = spawnSync('npx', ['prisma@6.8.2', 'db', 'push', '--schema', 'prisma/schema.prisma'], {
   cwd: root,
   stdio: 'inherit',
   shell: true,
