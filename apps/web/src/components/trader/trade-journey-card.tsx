@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { formatPercent, formatTokenPrice, formatUsd } from '@dcf/utils';
+import { formatPercent, formatTokenPrice, formatUsd, postExitOutcomeLabel } from '@dcf/utils';
 import { TradeCloseShareButtons } from '@/components/trade-close-share-buttons';
+import { TimelineEventShareButton } from '@/components/trader/timeline-event-share-button';
 import { useShareOrigin } from '@/components/share-on-x-button';
 import { buildPortfolioShareUrl } from '@dcf/utils';
 import type { TradeJourneyCard as Journey } from '@/lib/api';
@@ -25,6 +26,12 @@ export function TradeJourneyCard({ journey, userId }: Props) {
   const origin = useShareOrigin();
   const portfolioUrl = buildPortfolioShareUrl(origin, userId);
   const { closed: c, events } = journey;
+  const outcome = postExitOutcomeLabel({
+    narrative: c.exitNarrative,
+    missedAfterExitPct: c.missedAfterExitPct,
+    avoidedLossPct: c.avoidedLossPct ?? 0,
+    currentVsExitPct: c.currentVsExitPct ?? 0,
+  });
 
   return (
     <li className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-background)]">
@@ -53,19 +60,20 @@ export function TradeJourneyCard({ journey, userId }: Props) {
             >
               {formatPercent(c.realizedReturnPct)}
             </span>
-            {c.exitNarrative === 'regret' && (
-              <span className="rounded-full bg-amber-950/50 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
-                Sold early
-              </span>
-            )}
-            {c.exitNarrative === 'smart' && (
-              <span className="rounded-full bg-sky-950/50 px-2 py-0.5 text-[10px] font-semibold text-sky-300">
-                Smart exit
-              </span>
-            )}
+            <span
+              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                c.exitNarrative === 'regret'
+                  ? 'bg-amber-950/50 text-amber-300'
+                  : c.exitNarrative === 'smart'
+                    ? 'bg-sky-950/50 text-sky-300'
+                    : 'bg-zinc-800/80 text-zinc-300'
+              }`}
+            >
+              {outcome.emoji} {outcome.title}
+            </span>
           </div>
           <p className="mt-1 text-xs text-[var(--color-muted)]">
-            {events.length} steps · {c.durationDays}d held · tap to {expanded ? 'collapse' : 'expand'}
+            {outcome.detail} · {events.length} steps · {c.durationDays}d held
           </p>
         </div>
       </button>
@@ -74,7 +82,7 @@ export function TradeJourneyCard({ journey, userId }: Props) {
         <div className="flex flex-col items-center gap-0">
           {events.map((event, index) => (
             <div key={event.id} className="flex w-full flex-col items-center">
-              <JourneyStep event={event} />
+              <JourneyStep event={event} portfolioUrl={portfolioUrl} />
               {index < events.length - 1 && (
                 <div className="flex flex-col items-center py-1 text-[var(--color-muted)]" aria-hidden>
                   <span className="h-4 w-px bg-[var(--color-border)]" />
@@ -84,13 +92,13 @@ export function TradeJourneyCard({ journey, userId }: Props) {
             </div>
           ))}
 
-          {(c.whatIfHeldTotalPct > 0 || c.pumpAfterExitPct > 0 || c.dropAfterExitPct > 0) && (
+          {(c.pumpAfterExitPct > 0 || c.dropAfterExitPct > 0 || c.missedAfterExitPct > 0 || c.avoidedLossPct > 0) && (
             <>
               <div className="flex flex-col items-center py-1 text-[var(--color-muted)]" aria-hidden>
                 <span className="h-4 w-px bg-[var(--color-border)]" />
                 <span className="text-[10px]">↓</span>
               </div>
-              <PostExitBlock closed={c} />
+              <PostExitBlock closed={c} outcome={outcome} />
             </>
           )}
         </div>
@@ -121,14 +129,16 @@ export function TradeJourneyCard({ journey, userId }: Props) {
           investedUsd={c.investedUsd}
           proceedsUsd={c.proceedsUsd}
           realizedReturnPct={c.realizedReturnPct}
-          whatIfHeldReturnPct={c.whatIfHeldTotalPct || c.whatIfHeldPct}
-          missedAlphaPct={c.missedAfterExitPct || c.missedAlphaPct}
+          whatIfHeldReturnPct={c.pumpAfterExitPct}
+          missedAlphaPct={c.missedAfterExitPct}
           portfolioUrl={portfolioUrl}
           postExitPeakPriceUsd={c.postExitPeakPriceUsd}
           exitPriceUsd={c.exitPriceUsd}
           postExitTroughPriceUsd={c.postExitTroughPriceUsd}
           dropAfterExitPct={c.dropAfterExitPct}
           pumpAfterExitPct={c.pumpAfterExitPct}
+          currentVsExitPct={c.currentVsExitPct}
+          avoidedLossPct={c.avoidedLossPct}
           exitNarrative={c.exitNarrative}
         />
       </div>
@@ -138,8 +148,10 @@ export function TradeJourneyCard({ journey, userId }: Props) {
 
 function JourneyStep({
   event,
+  portfolioUrl,
 }: {
   event: Journey['events'][number];
+  portfolioUrl: string;
 }) {
   const date = new Date(event.createdAt).toLocaleDateString('en-US', {
     month: 'short',
@@ -174,38 +186,52 @@ function JourneyStep({
           Profit {formatPercent(event.realizedReturnPct)}
         </p>
       )}
+      <TimelineEventShareButton event={event} portfolioUrl={portfolioUrl} />
     </div>
   );
 }
 
-function PostExitBlock({ closed: c }: { closed: Journey['closed'] }) {
+function PostExitBlock({
+  closed: c,
+  outcome,
+}: {
+  closed: Journey['closed'];
+  outcome: ReturnType<typeof postExitOutcomeLabel>;
+}) {
   return (
     <div className="w-full max-w-md space-y-2">
-      {c.pumpAfterExitPct > 0 && (
+      {c.exitNarrative === 'regret' && c.missedAfterExitPct > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2.5 text-xs">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-400">
-            What If I Held?
+            {outcome.emoji} {outcome.title}
           </p>
-          <p className="mt-1 font-bold text-amber-100">+{c.whatIfHeldTotalPct.toFixed(0)}% total</p>
-          <p className="mt-1 text-amber-200/80">
-            Pumped +{c.pumpAfterExitPct.toFixed(0)}% after exit to{' '}
-            {formatTokenPrice(c.postExitPeakPriceUsd)}
-          </p>
-          {c.missedAfterExitPct > 0 && (
-            <p className="mt-1 text-amber-300">Missed alpha +{c.missedAfterExitPct.toFixed(0)}%</p>
+          <p className="mt-1 font-bold text-amber-100">{outcome.detail}</p>
+          {c.pumpAfterExitPct > c.missedAfterExitPct && (
+            <p className="mt-1 text-amber-200/80">
+              Peak since exit: +{c.pumpAfterExitPct.toFixed(0)}% to{' '}
+              {formatTokenPrice(c.postExitPeakPriceUsd)}
+            </p>
           )}
         </div>
       )}
-      {c.dropAfterExitPct > 0 && c.exitNarrative === 'smart' && (
+      {c.exitNarrative === 'neutral' && (
+        <div className="rounded-lg border border-zinc-600/40 bg-zinc-900/40 px-3 py-2.5 text-xs">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+            {outcome.emoji} {outcome.title}
+          </p>
+          <p className="mt-1 text-zinc-300">Price is within ~5% of your exit.</p>
+        </div>
+      )}
+      {c.exitNarrative === 'smart' && c.avoidedLossPct > 0 && (
         <div className="rounded-lg border border-sky-500/30 bg-sky-950/25 px-3 py-2.5 text-xs">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-sky-400">
-            After your exit
+            {outcome.emoji} {outcome.title}
           </p>
-          <p className="mt-1 font-bold text-sky-100">
-            Price fell {c.dropAfterExitPct.toFixed(0)}% to{' '}
-            {formatTokenPrice(c.postExitTroughPriceUsd)}
+          <p className="mt-1 font-bold text-sky-100">{outcome.detail}</p>
+          <p className="mt-1 text-sky-200/80">
+            Trough after exit: {formatTokenPrice(c.postExitTroughPriceUsd)} (−
+            {c.dropAfterExitPct.toFixed(0)}% from exit)
           </p>
-          <p className="mt-1 text-sky-200/80">You sold near the top.</p>
         </div>
       )}
     </div>

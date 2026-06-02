@@ -42,8 +42,8 @@ export const LIFECYCLE_STAGES = [
 export type StageBucket = 'IDEA_STAGE' | 'BUILDING' | 'LAUNCH_READY' | 'LIVE_TOKEN';
 
 export const STAGE_BUCKETS: { key: StageBucket; label: string; color: string; border: string }[] = [
-  { key: 'IDEA_STAGE', label: 'Building', color: '#3b82f6', border: '#60a5fa' },
-  { key: 'BUILDING', label: 'Building', color: '#3b82f6', border: '#60a5fa' },
+  { key: 'IDEA_STAGE', label: 'Ideas', color: '#3b82f6', border: '#60a5fa' },
+  { key: 'BUILDING', label: 'Shipping', color: '#22c55e', border: '#4ade80' },
   { key: 'LAUNCH_READY', label: 'Validation', color: '#eab308', border: '#facc15' },
   { key: 'LIVE_TOKEN', label: 'Live', color: '#a855f7', border: '#c084fc' },
 ];

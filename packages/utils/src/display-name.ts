@@ -1,3 +1,12 @@
+/** Normalize X/Twitter handle from URL, @handle, or bare username. */
+export function normalizeTwitterHandle(input?: string | null): string | null {
+  if (!input?.trim()) return null;
+  const s = input.trim();
+  const urlMatch = s.match(/(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/@?([^/?#]+)/i);
+  if (urlMatch?.[1]) return urlMatch[1].replace(/^@/, '').toLowerCase();
+  return s.replace(/^@/, '').toLowerCase();
+}
+
 /** True when the user set a custom trading / display name (not just their email). */
 export function hasTradingDisplayName(name?: string | null, email?: string | null): boolean {
   const trimmed = name?.trim();

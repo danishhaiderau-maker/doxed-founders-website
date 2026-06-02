@@ -5,6 +5,8 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
+import { buildPortfolioShareUrl } from '@dcf/utils';
+import { useShareOrigin } from '@/components/share-on-x-button';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio } from '@/components/share-portfolio';
 import { TraderProfileHeader } from '@/components/trader/profile-header';
@@ -28,6 +30,8 @@ export default function PublicPortfolioPage() {
   const [following, setFollowing] = useState(false);
 
   const isSelf = session?.user?.id === userId;
+  const origin = useShareOrigin();
+  const portfolioUrl = userId ? buildPortfolioShareUrl(origin, userId) : undefined;
 
   const load = useCallback(
     async (includeOlder = false) => {
@@ -153,6 +157,7 @@ export default function PublicPortfolioPage() {
               showOlder={showOlder}
               onShowOlder={() => load(true)}
               loadingOlder={loadingOlder}
+              portfolioUrl={portfolioUrl}
             />
 
             {(portfolio.tradeJourneys?.length ?? 0) > 0 && (

@@ -1,6 +1,6 @@
 'use client';
 
-import { formatPercent, formatTokenPrice, formatUsd } from '@dcf/utils';
+import { formatPercent, formatTokenPrice, formatUsd, postExitOutcomeLabel } from '@dcf/utils';
 import { TradeCloseShareButtons } from '@/components/trade-close-share-buttons';
 import { useShareOrigin } from '@/components/share-on-x-button';
 import { buildPortfolioShareUrl } from '@dcf/utils';
@@ -18,6 +18,12 @@ export function TraderClosedTradeCard({ trade, userId }: Props) {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
+  });
+  const outcome = postExitOutcomeLabel({
+    narrative: trade.exitNarrative,
+    missedAfterExitPct: trade.missedAfterExitPct,
+    avoidedLossPct: trade.avoidedLossPct ?? 0,
+    currentVsExitPct: trade.currentVsExitPct ?? 0,
   });
 
   return (
@@ -47,7 +53,7 @@ export function TraderClosedTradeCard({ trade, userId }: Props) {
           >
             {formatPercent(trade.realizedReturnPct)}
           </p>
-          <p className="text-xs text-[var(--color-muted)]">Profit</p>
+          <p className="text-xs text-[var(--color-muted)]">{outcome.emoji} {outcome.title}</p>
         </div>
       </div>
 
@@ -66,38 +72,32 @@ export function TraderClosedTradeCard({ trade, userId }: Props) {
             {formatUsd(trade.proceedsUsd - trade.investedUsd)}
           </dd>
         </div>
-        {trade.peakPriceUsd != null && trade.peakPriceUsd > trade.exitPriceUsd && (
-          <div>
-            <dt className="text-[var(--color-muted)]">Peak after entry</dt>
-            <dd className="mt-0.5 font-medium text-amber-300">
-              {formatTokenPrice(trade.peakPriceUsd)}
-            </dd>
-          </div>
-        )}
+        <div>
+          <dt className="text-[var(--color-muted)]">Since exit</dt>
+          <dd className="mt-0.5 font-medium text-amber-300">{outcome.detail}</dd>
+        </div>
       </dl>
 
-      {(trade.whatIfHeldPct > 0 || trade.missedAlphaPct > 0) && (
-        <div className="mt-4 rounded-lg border border-amber-500/25 bg-amber-950/20 px-3 py-2.5">
-          <div className="flex flex-wrap gap-4 text-sm">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
-                What If I Held?
-              </p>
-              <p className="mt-0.5 font-bold text-amber-200">
-                +{trade.whatIfHeldPct.toFixed(0)}%
-              </p>
-            </div>
-            {trade.missedAlphaPct > 0 && (
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
-                  Missed alpha
-                </p>
-                <p className="mt-0.5 font-bold text-amber-300">
-                  +{trade.missedAlphaPct.toFixed(0)}%
-                </p>
-              </div>
-            )}
-          </div>
+      {(trade.missedAfterExitPct > 0 || trade.avoidedLossPct > 0) && (
+        <div
+          className={`mt-4 rounded-lg border px-3 py-2.5 text-sm ${
+            trade.exitNarrative === 'smart'
+              ? 'border-sky-500/25 bg-sky-950/20'
+              : trade.exitNarrative === 'regret'
+                ? 'border-amber-500/25 bg-amber-950/20'
+                : 'border-zinc-600/40 bg-zinc-900/40'
+          }`}
+        >
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+            {outcome.emoji} {outcome.title}
+          </p>
+          <p className="mt-1 font-bold text-white">{outcome.detail}</p>
+          {trade.pumpAfterExitPct > 0 && trade.exitNarrative === 'regret' && (
+            <p className="mt-1 text-xs text-amber-200/80">
+              Peak since exit: +{trade.pumpAfterExitPct.toFixed(0)}% to{' '}
+              {formatTokenPrice(trade.postExitPeakPriceUsd)}
+            </p>
+          )}
         </div>
       )}
 
@@ -113,9 +113,17 @@ export function TraderClosedTradeCard({ trade, userId }: Props) {
         investedUsd={trade.investedUsd}
         proceedsUsd={trade.proceedsUsd}
         realizedReturnPct={trade.realizedReturnPct}
-        whatIfHeldReturnPct={trade.whatIfHeldPct}
-        missedAlphaPct={trade.missedAlphaPct}
+        whatIfHeldReturnPct={trade.pumpAfterExitPct}
+        missedAlphaPct={trade.missedAfterExitPct}
         portfolioUrl={portfolioUrl}
+        postExitPeakPriceUsd={trade.postExitPeakPriceUsd}
+        exitPriceUsd={trade.exitPriceUsd}
+        postExitTroughPriceUsd={trade.postExitTroughPriceUsd}
+        dropAfterExitPct={trade.dropAfterExitPct}
+        pumpAfterExitPct={trade.pumpAfterExitPct}
+        currentVsExitPct={trade.currentVsExitPct}
+        avoidedLossPct={trade.avoidedLossPct}
+        exitNarrative={trade.exitNarrative}
       />
     </li>
   );
