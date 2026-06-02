@@ -1649,6 +1649,42 @@ export interface DiscoverProject {
   } | null;
   communityValidated?: boolean;
   listingKind?: 'verified' | 'founder_os' | 'paper_track';
+  createdAt?: string;
+}
+
+export type DiscoverUniverseStageFilter = 'all' | 'building' | 'validation' | 'live' | 'recently_listed';
+export type DiscoverTimeframe = '1h' | '6h' | '24h' | '7d';
+
+export interface DiscoverUniverseProject extends DiscoverProject {
+  universeStage: DiscoverUniverseStageFilter;
+  activityScore: number;
+  convictionScore: number;
+  ddInflow24h: number;
+  ddVolumeWindow: number;
+  trendDirection: 'up' | 'down' | 'flat';
+  trendPct: number;
+  lastActivityPreview: { source: string; text: string; at: string } | null;
+  scoutPoolUsd: number;
+}
+
+export interface DiscoverUniverseResponse {
+  timeframe: DiscoverTimeframe;
+  metrics: {
+    activeProjects: number;
+    ddInflow24h: number;
+    newBuilders7d: number;
+    avgConviction: number;
+    scoutReviewsAwaiting: number;
+  };
+  chains: { slug: string; name: string }[];
+  projects: DiscoverUniverseProject[];
+  sidebar: {
+    trending: DiscoverUniverseProject[];
+    topInflow: DiscoverUniverseProject[];
+    topOutflow: (DiscoverUniverseProject & { ddOutflow?: number })[];
+    mostFollowed: DiscoverUniverseProject[];
+    activeConversations: DiscoverUniverseProject[];
+  };
 }
 
 export interface EcosystemPulse {
@@ -1691,6 +1727,19 @@ export function fetchDiscoverProjects(filter?: string, stageBucket?: string) {
   if (stageBucket) qs.set('stageBucket', stageBucket);
   const q = qs.toString();
   return apiFetch<DiscoverProject[]>(`/founder-den/discover${q ? `?${q}` : ''}`);
+}
+
+export function fetchDiscoverUniverse(options?: {
+  stageFilter?: DiscoverUniverseStageFilter;
+  chainSlug?: string;
+  timeframe?: DiscoverTimeframe;
+}) {
+  const qs = new URLSearchParams();
+  if (options?.stageFilter && options.stageFilter !== 'all') qs.set('stageFilter', options.stageFilter);
+  if (options?.chainSlug) qs.set('chainSlug', options.chainSlug);
+  if (options?.timeframe) qs.set('timeframe', options.timeframe);
+  const q = qs.toString();
+  return apiFetch<DiscoverUniverseResponse>(`/founder-den/discover/universe${q ? `?${q}` : ''}`);
 }
 
 export function fetchEcosystemPulse() {
