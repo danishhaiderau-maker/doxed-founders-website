@@ -3223,6 +3223,33 @@ export function dispatchCursorCloudBuild(
   }>('/builder/cursor/dispatch', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
+export function executeBuildTask(
+  data: { spec: string; cursorPrompt?: string; repository?: string },
+  token: string,
+) {
+  return apiFetch<{
+    worker: string;
+    status: 'dispatched' | 'queued' | 'error';
+    agentUrl?: string | null;
+    agentId?: string;
+    runId?: string;
+    mode?: 'create' | 'follow_up';
+    message?: string;
+    error?: string;
+  }>('/builder/execute-task', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export function fetchBuilderWorkerStatus(token: string) {
+  return apiFetch<{
+    buildWorker: string;
+    connections: { cursor: boolean; openHands: boolean; founderNode: boolean };
+    llmConnected: boolean;
+    githubConnected: boolean;
+    cursorAgentUrl: string | null;
+    latestRunId: string | null;
+  }>('/builder/worker-status', undefined, token);
+}
+
 export function disconnectAiProvider(provider: string, token: string) {
   return apiFetch(`/builder/providers/${provider}/disconnect`, { method: 'POST' }, token);
 }

@@ -62,6 +62,19 @@ export class BuilderController {
     return this.builder.dispatchCursorBuildTask(user.id, body);
   }
 
+  @Post('execute-task')
+  executeTask(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    return this.builder.executeBuildTask(user.id, body);
+  }
+
+  @Get('worker-status')
+  workerStatus(@CurrentUser() user: AuthUser) {
+    return this.builder.getWorkerStatus(user.id);
+  }
+
   @Post('providers/connect')
   connectProvider(@CurrentUser() user: AuthUser, @Body() body: { provider: string; apiKey: string }) {
     return this.builder.connectAiProvider(user.id, body.provider, body.apiKey);

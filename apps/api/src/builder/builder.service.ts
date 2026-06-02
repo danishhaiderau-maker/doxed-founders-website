@@ -11,6 +11,8 @@ import {
   isFounderNodeAiProvider,
   isRemoteAgentProvider,
   processQuickBuild,
+  resolveBuildWorker,
+  type BuildWorkerKey,
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { FounderNodeInferenceService } from '../founder-node/founder-node-inference.service';
@@ -476,6 +478,104 @@ export class BuilderService {
     });
 
     return result;
+  }
+
+  async getBuildWorkerConnections(userId: string) {
+    const connected = await this.listConnectedProviders(userId);
+    const settings = await this.ensureSettings(userId);
+    const ollamaReady = await this.founderNodeInference.isOllamaReady(userId);
+    return {
+      cursor: connected.has('cursor'),
+      openHands: connected.has('openhands'),
+      founderNode: ollamaReady,
+      defaultProvider: settings.defaultProvider,
+    };
+  }
+
+  async resolveBuildWorker(userId: string): Promise<BuildWorkerKey> {
+    const connections = await this.getBuildWorkerConnections(userId);
+    return resolveBuildWorker(connections);
+  }
+
+  async executeBuildTask(
+    userId: string,
+    input: { spec: string; cursorPrompt?: string; repository?: string },
+  ) {
+    const worker = await this.resolveBuildWorker(userId);
+
+    if (worker === 'CURSOR') {
+      try {
+        const result = await this.dispatchCursorBuildTask(userId, input);
+        return {
+          worker,
+          status: 'dispatched' as const,
+          agentUrl: result.agentUrl,
+          agentId: result.agentId,
+          runId: result.runId,
+          mode: result.mode,
+          cursorCloud: result,
+        };
+      } catch (err) {
+        return {
+          worker,
+          status: 'error' as const,
+          error: err instanceof Error ? err.message : 'Builder dispatch failed',
+        };
+      }
+    }
+
+    if (worker === 'OPENHANDS') {
+      try {
+        const result = await this.dispatchOpenHandsBuildTask(userId, input);
+        return {
+          worker,
+          status: 'dispatched' as const,
+          agentUrl: result.conversationUrl,
+          openHands: result,
+        };
+      } catch (err) {
+        return {
+          worker,
+          status: 'error' as const,
+          error: err instanceof Error ? err.message : 'Builder dispatch failed',
+        };
+      }
+    }
+
+    if (worker === 'FOUNDER_NODE') {
+      return {
+        worker,
+        status: 'queued' as const,
+        message:
+          'Founder Node is connected for chat — use Execute after queuing a spec, or dispatch via Quick Build on desktop.',
+      };
+    }
+
+    return {
+      worker: 'NONE' as const,
+      status: 'queued' as const,
+      message: 'Task queued. Connect a builder worker in Settings to auto-dispatch remotely.',
+    };
+  }
+
+  async getWorkerStatus(userId: string) {
+    const connections = await this.getBuildWorkerConnections(userId);
+    const worker = resolveBuildWorker(connections);
+    const llmProviders = await this.listUsableLlmCredentialProviders(userId);
+    const githubTokenConnected = Boolean(
+      await this.prisma.gitHubConnection.findFirst({
+        where: { userId, accessTokenEncrypted: { not: null } },
+      }),
+    );
+    const cursorMeta = await this.getCursorMeta(userId);
+    return {
+      buildWorker: worker,
+      connections,
+      llmConnected: llmProviders.size > 0,
+      githubConnected: githubTokenConnected,
+      cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
+      latestRunId: cursorMeta?.latestRunId ?? null,
+    };
   }
 
   async dispatchOpenHandsBuildTask(
