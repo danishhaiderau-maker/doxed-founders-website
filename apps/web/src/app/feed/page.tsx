@@ -1,748 +1,168 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState, Suspense } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useSession } from 'next-auth/react';
-import { SiteNav, getActiveUserId } from '@/components/site-nav';
+import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { PushNotificationPrompt } from '@/components/push-notification-prompt';
-import { LinkifiedText } from '@/components/linkified-text';
-import { pushEngagementFlash } from '@/components/engagement-flash-layer';
-import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
+import { FeedTerminalTabs } from '@/components/feed/feed-terminal-tabs';
+import { FeedProjectBubbleStrip } from '@/components/feed/feed-project-bubble-strip';
+import { FeedDdFlowBar } from '@/components/feed/feed-dd-flow-bar';
+import { FeedConvictionCard } from '@/components/feed/feed-conviction-card';
+import { FeedTerminalSidebar } from '@/components/feed/feed-terminal-sidebar';
 import {
-  formatUsd,
-  buildSiteUrl,
-  buildFeedShareMessage,
-  buildListingShareMessage,
-  buildPredictionShareMessage,
-  buildHotBuyShareMessage,
-  buildGrowthHotBuyTweet,
-} from '@dcf/utils';
-import {
-  FeedComment,
-  FeedPost,
-  UnifiedFeedCategory,
-  UnifiedFeedItem,
-  PlatformPulseItem,
-  HotPredictionItem,
-  ScoutListingFeedItem,
-  fetchFeed,
-  fetchFeedComments,
-  fetchUnifiedFeed,
-  postFeedComment,
-  postInitialFeedComment,
-  fetchTownHallPosts,
-  fetchTrustInvestigations,
-  type TownHallPost,
-  type TrustInvestigation,
+  fetchDiscoverUniverse,
+  fetchFeedTerminal,
+  type DiscoverUniverseResponse,
+  type FeedTerminalResponse,
+  type FeedTerminalTab,
 } from '@/lib/api';
 
-type FeedViewId =
-  | 'all'
-  | 'projects'
-  | 'announcements'
-  | 'listings'
-  | 'investigations'
-  | 'agents';
-
-const FEED_VIEWS: { id: FeedViewId; label: string; category?: UnifiedFeedCategory }[] = [
-  { id: 'all', label: 'All', category: 'all' },
-  { id: 'projects', label: 'Projects', category: 'founder' },
-  { id: 'announcements', label: 'Announcements' },
-  { id: 'listings', label: 'Listings', category: 'community' },
-  { id: 'investigations', label: 'Investigations' },
-  { id: 'agents', label: 'Agent Activity', category: 'trading' },
+const VALID_TABS: FeedTerminalTab[] = [
+  'all',
+  'trades',
+  'conviction',
+  'movers',
+  'regret',
+  'activity',
 ];
-
-const TOWN_HALL_LABELS: Record<string, string> = {
-  PLATFORM_UPDATE: 'Platform update',
-  RULE_CHANGE: 'Rule change',
-  SCAM_WARNING: 'Scam warning',
-  DELISTING: 'Delisting notice',
-  FEATURE_RELEASE: 'Feature release',
-  WEEKLY_RECAP: 'Weekly recap',
-  ANNOUNCEMENT: 'Announcement',
-};
-
-function timeAgo(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return `${Math.max(1, mins)}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
-}
-
-function tierBorder(tier: number) {
-  if (tier === 1) return 'border-amber-500/40 bg-amber-950/10';
-  if (tier === 2) return 'border-emerald-500/25 bg-emerald-950/5';
-  return 'border-[var(--color-border)] bg-[var(--color-card)]';
-}
 
 export default function FeedPage() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-[#050508]" />}>
-      <FeedPageInner />
+      <FeedTerminalPage />
     </Suspense>
   );
 }
 
-function FeedPageInner() {
+function FeedTerminalPage() {
   const searchParams = useSearchParams();
-  const viewParam = searchParams.get('view') as FeedViewId | null;
-  const initialView =
-    viewParam && FEED_VIEWS.some((v) => v.id === viewParam) ? viewParam : 'all';
+  const tabParam = searchParams.get('tab') as FeedTerminalTab | null;
+  const projectParam = searchParams.get('project');
 
-  const { data: session } = useSession();
-  const origin = useShareOrigin();
-  const [view, setView] = useState<FeedViewId>(initialView);
-  const category =
-    FEED_VIEWS.find((v) => v.id === view)?.category ?? 'all';
-  const [items, setItems] = useState<UnifiedFeedItem[]>([]);
-  const [pulse, setPulse] = useState<PlatformPulseItem[]>([]);
-  const [hotQuestions, setHotQuestions] = useState<HotPredictionItem[]>([]);
-  const [scoutListings, setScoutListings] = useState<ScoutListingFeedItem[]>([]);
-  const [announcements, setAnnouncements] = useState<TownHallPost[]>([]);
-  const [investigations, setInvestigations] = useState<TrustInvestigation[]>([]);
+  const [tab, setTab] = useState<FeedTerminalTab>(
+    tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'all',
+  );
+  const [projectSlug, setProjectSlug] = useState<string | null>(projectParam);
+  const [terminal, setTerminal] = useState<FeedTerminalResponse | null>(null);
+  const [universe, setUniverse] = useState<DiscoverUniverseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
-  const [tradePosts, setTradePosts] = useState<Record<string, FeedPost>>({});
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    setView(initialView);
-  }, [initialView]);
-
-  const load = useCallback(async (cat: UnifiedFeedCategory, feedView: FeedViewId) => {
+  const load = useCallback(async () => {
     try {
-      if (feedView === 'announcements') {
-        const posts = await fetchTownHallPosts();
-        setAnnouncements(posts);
-        setItems([]);
-        setPulse([]);
-        setHotQuestions([]);
-        setScoutListings([]);
-        setInvestigations([]);
-        setError(null);
-        return;
-      }
-
-      if (feedView === 'investigations') {
-        const inv = await fetchTrustInvestigations();
-        setInvestigations(inv);
-        setAnnouncements([]);
-        setItems([]);
-        setPulse([]);
-        setHotQuestions([]);
-        setScoutListings([]);
-        setError(null);
-        return;
-      }
-
-      const data = await fetchUnifiedFeed(cat);
-      setItems(data.items);
-      setPulse(data.pulse);
-      setHotQuestions(data.hotQuestions ?? []);
-      setScoutListings(data.scoutListings ?? []);
-      setAnnouncements([]);
-      setInvestigations([]);
+      const [term, uni] = await Promise.all([
+        fetchFeedTerminal(tab, projectSlug ?? undefined),
+        fetchDiscoverUniverse({ timeframe: '24h' }),
+      ]);
+      setTerminal(term);
+      setUniverse(uni);
       setError(null);
-
-      const tradeIds = data.items.filter((i) => i.tradePostId).map((i) => i.tradePostId!);
-      if (tradeIds.length > 0) {
-        const recent = await fetchFeed('recent');
-        const map: Record<string, FeedPost> = {};
-        for (const p of recent.posts) {
-          if (tradeIds.includes(p.id)) map[p.id] = p;
-        }
-        setTradePosts(map);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load feed');
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }, [tab, projectSlug]);
 
   useEffect(() => {
-    load(category, view);
-    const interval = setInterval(() => load(category, view), 60_000);
+    setLoading(true);
+    load();
+    const interval = setInterval(load, 60_000);
     return () => clearInterval(interval);
-  }, [category, view, load]);
+  }, [load]);
+
+  useEffect(() => {
+    if (tabParam && VALID_TABS.includes(tabParam)) setTab(tabParam);
+  }, [tabParam]);
+
+  useEffect(() => {
+    setProjectSlug(projectParam);
+  }, [projectParam]);
+
+  function updateUrl(nextTab: FeedTerminalTab, nextProject: string | null) {
+    const qs = new URLSearchParams();
+    if (nextTab !== 'all') qs.set('tab', nextTab);
+    if (nextProject) qs.set('project', nextProject);
+    const q = qs.toString();
+    window.history.replaceState(null, '', q ? `/feed?${q}` : '/feed');
+  }
+
+  function handleTabChange(next: FeedTerminalTab) {
+    setTab(next);
+    updateUrl(next, projectSlug);
+  }
+
+  function handleProjectSelect(slug: string | null) {
+    setProjectSlug(slug);
+    updateUrl(tab, slug);
+  }
 
   return (
     <div className="min-h-screen bg-[#050508]">
       <PushNotificationPrompt />
-      <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[#050508]/95 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[90rem] items-center justify-between px-4 py-4 sm:px-6 lg:px-10">
+      <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
+        <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-10">
           <div>
-            <Link href="/" className="text-xs uppercase tracking-widest text-[var(--color-muted)]">
-              Doxxed crypto
-            </Link>
-            <h1 className="text-xl font-bold">Feed</h1>
-            <p className="text-xs text-[var(--color-muted)]">
-              Public activity — founders, listings, announcements, agents
+            <SiteBrand className="text-sm" />
+            <h1 className="mt-1 text-xl font-bold tracking-tight">Social Conviction Terminal</h1>
+            <p className="text-xs text-zinc-500">
+              Trades · conviction · regret · DDollar flow — not another chat room
             </p>
           </div>
           <SiteNav />
         </div>
       </header>
 
-      <main className="mx-auto grid w-full max-w-[90rem] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_minmax(260px,320px)] lg:px-10">
-        <div>
-          {pulse.length > 0 ? (
-            <section className="mb-6 rounded-xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 to-zinc-950 p-4">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-300">
-                Platform pulse
-              </h2>
-              <ul className="mt-3 space-y-2">
-                {pulse.map((p) => (
-                  <li key={p.id} className="flex items-start justify-between gap-2">
-                    {p.link ? (
-                      <Link
-                        href={p.link}
-                        className="flex min-w-0 flex-1 gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-black/30"
-                      >
-                        <span>{p.emoji}</span>
-                        <span>
-                          <span className="font-medium text-white">{p.headline}</span>
-                          {p.detail && (
-                            <span className="ml-2 text-xs text-zinc-500">{p.detail}</span>
-                          )}
-                        </span>
-                      </Link>
-                    ) : (
-                      <div className="flex min-w-0 flex-1 gap-2 px-2 py-1.5 text-sm">
-                        <span>{p.emoji}</span>
-                        <span className="font-medium text-white">{p.headline}</span>
-                      </div>
-                    )}
-                    <ShareOnXButton
-                      text={buildFeedShareMessage({ headline: p.headline, detail: p.detail })}
-                      url={p.link ? buildSiteUrl(origin, p.link) : buildSiteUrl(origin, '/feed')}
-                      label="Share"
-                      className="shrink-0"
-                    />
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : (
-            <section className="mb-6 rounded-xl border border-dashed border-zinc-700 bg-zinc-900/30 p-4 text-sm text-zinc-500">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-                Platform pulse
-              </h2>
-              <p className="mt-2">
-                Live when traders buy, founders ship, and scout votes open — updates from the unified feed API.
-              </p>
-            </section>
-          )}
+      <main className="mx-auto w-full max-w-[90rem] px-4 py-6 sm:px-6 lg:px-10">
+        <FeedTerminalTabs active={tab} onChange={handleTabChange} />
 
-          {scoutListings.length > 0 && (
-            <section className="mb-6 rounded-xl border border-sky-500/25 bg-sky-950/10 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-sky-300">
-                  Scout votes — validate listings
-                </h2>
-                <Link href="/trust-center?tab=scout-voting" className="text-xs text-sky-400 hover:underline">
-                  Vote in Trust Center →
-                </Link>
-              </div>
-              <ul className="mt-3 space-y-2">
-                {scoutListings.map((s) => (
-                  <li key={s.id} className="flex items-start justify-between gap-2">
-                    <Link
-                      href="/trust-center?tab=scout-voting"
-                      className="block min-w-0 flex-1 rounded-lg border border-sky-500/20 bg-black/20 px-3 py-2.5 transition hover:border-sky-500/40"
-                    >
-                      <p className="font-medium text-white">
-                        {s.projectName} ({s.ticker})
-                      </p>
-                      <p className="mt-0.5 text-xs text-zinc-500">
-                        {s.voteCount} scout vote{s.voteCount === 1 ? '' : 's'}
-                        {s.whyList ? ` · ${s.whyList}` : ''}
-                      </p>
-                    </Link>
-                    <ShareOnXButton
-                      text={buildListingShareMessage({
-                        projectName: s.projectName,
-                        ticker: s.ticker,
-                        scoutThesis: s.whyList,
-                      })}
-                      url={buildSiteUrl(origin, '/trust-center?tab=scout-voting')}
-                      label="Share"
-                      className="shrink-0 mt-2"
-                    />
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {hotQuestions.length > 0 && (
-            <section className="mb-6 rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-indigo-300">
-                  Blazing predictions — stake paper $
-                </h2>
-                <Link href="/predict" className="text-xs text-indigo-400 hover:underline">
-                  All markets →
-                </Link>
-              </div>
-              <ul className="mt-3 space-y-2">
-                {hotQuestions.map((q) => (
-                  <li key={q.id} className="flex items-start justify-between gap-2">
-                    <Link
-                      href="/predict"
-                      className="block min-w-0 flex-1 rounded-lg border border-indigo-500/25 bg-black/20 px-3 py-2.5 transition hover:border-indigo-400/50"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-medium uppercase text-indigo-300">
-                          {q.projectTicker}
-                        </span>
-                        {q.heatLabel && (
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                              q.heatLabel === 'Blazing'
-                                ? 'bg-orange-500/25 text-orange-200'
-                                : 'bg-violet-500/20 text-violet-200'
-                            }`}
-                          >
-                            {q.heatLabel}
-                          </span>
-                        )}
-                        {q.totalPoolUsd > 0 && (
-                          <span className="text-xs text-emerald-400">
-                            Pool {formatUsd(q.totalPoolUsd, 0)}
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-1 text-sm text-white">{q.question}</p>
-                    </Link>
-                    <ShareOnXButton
-                      text={buildPredictionShareMessage({
-                        projectName: q.projectName,
-                        ticker: q.projectTicker,
-                        question: q.question,
-                        poolUsd: q.totalPoolUsd,
-                      })}
-                      url={buildSiteUrl(origin, '/predict')}
-                      label="Share"
-                      className="shrink-0 mt-2"
-                    />
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
-          <div className="mb-4 flex flex-wrap gap-2">
-            {FEED_VIEWS.map((c) => (
-              <Link
-                key={c.id}
-                href={c.id === 'all' ? '/feed' : `/feed?view=${c.id}`}
-                className={`rounded-full px-4 py-1.5 text-sm ${
-                  view === c.id
-                    ? 'bg-[var(--color-accent)] text-white'
-                    : 'border border-[var(--color-border)] text-[var(--color-muted)] hover:text-white'
-                }`}
-              >
-                {c.label}
-              </Link>
-            ))}
+        {universe && (
+          <div className="mt-5 space-y-4">
+            <FeedProjectBubbleStrip
+              projects={universe.projects}
+              selectedSlug={projectSlug}
+              onSelect={handleProjectSelect}
+            />
+            <FeedDdFlowBar sidebar={universe.sidebar} />
           </div>
+        )}
 
-          {error && <p className="mb-4 text-sm text-red-300">{error}</p>}
+        {error && (
+          <p className="mt-4 rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-3 text-sm text-red-300">
+            {error}
+          </p>
+        )}
 
-          {view === 'announcements' && (
-            <div className="space-y-3">
-              {announcements.length === 0 && !error && (
-                <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
-                  No platform announcements yet.
-                </div>
-              )}
-              {announcements.map((post) => (
-                <article
-                  key={post.id}
-                  className={`rounded-xl border p-4 ${
-                    post.pinned
-                      ? 'border-amber-500/40 bg-amber-950/15'
-                      : 'border-[var(--color-border)] bg-[var(--color-card)]'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-                    <span className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">
-                      {TOWN_HALL_LABELS[post.category] ?? post.category}
-                    </span>
-                    {post.pinned && <span className="text-amber-400">Pinned</span>}
-                    <span>{timeAgo(post.publishedAt)}</span>
-                  </div>
-                  <h3 className="mt-2 font-semibold text-white">{post.title}</h3>
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{post.body}</p>
-                </article>
-              ))}
-            </div>
-          )}
-
-          {view === 'investigations' && (
-            <div className="space-y-3">
-              {investigations.length === 0 && !error && (
-                <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
-                  No active investigations.{' '}
-                  <Link href="/trust-center?tab=investigations" className="text-[var(--color-accent)]">
-                    Trust Center →
-                  </Link>
-                </div>
-              )}
-              {investigations.map((inv) => (
-                <Link
-                  key={inv.id}
-                  href={`/trust-center/investigations/${inv.id}`}
-                  className="block rounded-xl border border-amber-500/25 bg-amber-950/10 p-4 transition hover:border-amber-500/50"
-                >
-                  <p className="font-semibold text-white">{inv.project.name}</p>
-                  <p className="text-xs text-zinc-500">${inv.project.ticker} · {inv.status.replace(/_/g, ' ')}</p>
-                  {inv.reason && <p className="mt-2 text-sm text-zinc-400">{inv.reason}</p>}
-                </Link>
-              ))}
-            </div>
-          )}
-
-          {view !== 'announcements' && view !== 'investigations' && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_280px]">
           <div className="space-y-3">
-            {items.length === 0 && !error && (
-              <div className="rounded-xl border border-dashed border-[var(--color-border)] p-12 text-center text-[var(--color-muted)]">
-                No activity yet.{' '}
-                <Link href="/paper-trading" className="text-[var(--color-accent)]">
+            {loading && !terminal && (
+              <div className="rounded-xl border border-zinc-800 p-12 text-center text-zinc-500">
+                Loading conviction feed…
+              </div>
+            )}
+            {terminal?.cards.length === 0 && !loading && (
+              <div className="rounded-xl border border-dashed border-zinc-800 p-12 text-center text-zinc-500">
+                No {tab === 'all' ? '' : tab} activity yet.{' '}
+                <Link href="/paper-trading" className="text-violet-400 hover:underline">
                   Open Trading Alpha →
                 </Link>
               </div>
             )}
-            {items.map((item) =>
-              item.tradePostId && tradePosts[item.tradePostId] ? (
-                <TradeFeedCard
-                  key={item.id}
-                  item={item}
-                  post={tradePosts[item.tradePostId]}
-                  expanded={expandedTradeId === item.tradePostId}
-                  onToggle={() =>
-                    setExpandedTradeId(
-                      expandedTradeId === item.tradePostId ? null : item.tradePostId!,
-                    )
-                  }
-                  userId={getActiveUserId(session?.user?.id)}
-                  onRefresh={() => load(category, view)}
-                />
-              ) : (
-                <ActivityCard key={item.id} item={item} origin={origin} />
-              ),
-            )}
+            {terminal?.cards.map((card) => (
+              <FeedConvictionCard key={card.id} card={card} />
+            ))}
           </div>
+
+          {terminal && universe && (
+            <FeedTerminalSidebar
+              terminal={terminal}
+              trending={universe.sidebar.trending}
+              scoutPending={terminal.scoutPending}
+            />
           )}
         </div>
-
-        <aside className="hidden md:block">
-          <div className="sticky top-24 space-y-4">
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-              <h3 className="font-semibold">Unified activity</h3>
-              <ul className="mt-3 space-y-2 text-sm text-[var(--color-muted)]">
-                <li>Founder builds, deploys, and raise room signals</li>
-                <li>Trader positions and conviction posts</li>
-                <li>Hot buys when ≥2% of active traders align</li>
-                <li>Blazing predictions — stake YES/NO on AI questions</li>
-                <li>Platform announcements (formerly Town Hall)</li>
-                <li>Scout voting in Trust Center</li>
-              </ul>
-              <Link
-                href="/ddollar"
-                className="mt-4 block rounded-lg border border-amber-500/30 py-2.5 text-center text-sm font-medium text-amber-200"
-              >
-                DDollar wallet →
-              </Link>
-              <Link
-                href="/paper-trading"
-                className="mt-2 block rounded-lg bg-[var(--color-accent)] py-2.5 text-center text-sm font-medium text-white"
-              >
-                Trading Alpha terminal
-              </Link>
-            </div>
-            <Link
-              href="/trust-center?tab=scout-voting"
-              className="block rounded-xl border border-violet-500/30 bg-violet-950/20 p-4 text-sm text-violet-200 hover:border-violet-500/50"
-            >
-              Scout voting → validate listings in Trust Center
-            </Link>
-          </div>
-        </aside>
       </main>
     </div>
-  );
-}
-
-function ActivityCard({ item, origin }: { item: UnifiedFeedItem; origin: string }) {
-  const isTrading = item.category === 'trading';
-  const isBuy = item.tradeSide === 'BUY' || item.eventType === 'position_opened' || item.eventType === 'conviction_posted';
-  const isSell = item.tradeSide === 'SELL' || item.eventType === 'position_closed';
-  const shareUrl = item.link ? buildSiteUrl(origin, item.link) : buildSiteUrl(origin, '/feed');
-  const ctx = item.shareContext;
-  const shareText =
-    item.eventType === 'hot_buy' || item.eventType === 'top_trader_buy'
-      ? item.projectSlug
-        ? buildGrowthHotBuyTweet({
-            ticker: item.projectTicker ?? 'TOKEN',
-            projectName: ctx?.projectName ?? item.projectTicker ?? 'Token',
-            projectSlug: item.projectSlug,
-            buyerNames: item.recentBuyerNames ?? [],
-            origin,
-            pctOfActive: ctx?.pctOfActive,
-            detailLine: ctx?.detailLine ?? item.detail,
-            scoutHighlight: ctx?.scoutHighlight,
-            scoutThesis: ctx?.scoutThesis,
-            summary: ctx?.summary,
-            communitySnippets: ctx?.communitySnippets,
-          })
-        : buildHotBuyShareMessage({
-            ticker: item.projectTicker ?? 'TOKEN',
-            buyerNames: item.recentBuyerNames ?? [],
-            projectName: ctx?.projectName ?? item.projectSlug,
-            pctOfActive: ctx?.pctOfActive,
-            detailLine: ctx?.detailLine ?? item.detail,
-            scoutHighlight: ctx?.scoutHighlight,
-            scoutThesis: ctx?.scoutThesis,
-            summary: ctx?.summary,
-            communitySnippets: ctx?.communitySnippets,
-          })
-      : item.eventType === 'listing_live'
-        ? buildListingShareMessage({
-            projectName:
-              item.headline.replace(/^New listing:\s*/, '').replace(/\s*\([^)]*\)\s*$/, '').trim() ||
-              item.headline,
-            ticker: item.projectTicker ?? '',
-            scoutThesis: item.detail,
-          })
-        : buildFeedShareMessage({ headline: item.headline, detail: item.detail });
-
-  const content = (
-    <>
-      <span className="text-lg">{item.emoji ?? '•'}</span>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5 uppercase tracking-wide">
-            {item.category}
-          </span>
-          {isTrading && (isBuy || isSell) && (
-            <span
-              className={`rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-orange-500/15 text-orange-400'
-              }`}
-            >
-              {isBuy ? 'BUY' : 'SELL'}
-            </span>
-          )}
-          {item.projectTicker && isTrading && (
-            <span className="font-semibold text-white">{item.projectTicker}</span>
-          )}
-          {item.amountUsd != null && isTrading && (
-            <span>{formatUsd(item.amountUsd, 0)} paper</span>
-          )}
-          <span>{timeAgo(item.at)}</span>
-          {item.pinned && (
-            <span className="rounded bg-sky-500/20 px-1.5 py-0.5 font-semibold text-sky-200">Pinned · X</span>
-          )}
-          {item.tier === 1 && !item.pinned && (
-            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-300">Priority</span>
-          )}
-        </div>
-        <p className="mt-1 font-semibold text-white">{item.headline}</p>
-        {item.detail && <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>}
-        {item.sourceUrl && (
-          <a
-            href={item.sourceUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-2 inline-block text-xs text-sky-400 hover:underline"
-            onClick={(e) => e.stopPropagation()}
-          >
-            View on X →
-          </a>
-        )}
-      </div>
-    </>
-  );
-
-  return (
-    <article className={`rounded-xl border p-4 ${tierBorder(item.tier)}`}>
-      <div className="flex items-start gap-3">
-        {item.link ? (
-          <Link href={item.link} className="flex min-w-0 flex-1 items-start gap-3 transition hover:opacity-95">
-            {content}
-          </Link>
-        ) : (
-          <div className="flex min-w-0 flex-1 items-start gap-3">{content}</div>
-        )}
-        <ShareOnXButton text={shareText} url={shareUrl} label="Share" className="shrink-0" />
-      </div>
-    </article>
-  );
-}
-
-function TradeFeedCard({
-  item,
-  post,
-  expanded,
-  onToggle,
-  userId,
-  onRefresh,
-}: {
-  item: UnifiedFeedItem;
-  post: FeedPost;
-  expanded: boolean;
-  onToggle: () => void;
-  userId: string | null;
-  onRefresh: () => void;
-}) {
-  const [comments, setComments] = useState<FeedComment[]>([]);
-  const [initialComment, setInitialComment] = useState<string | null>(post.initialComment);
-  const [reply, setReply] = useState('');
-  const [thesis, setThesis] = useState('');
-  const [loading, setLoading] = useState(false);
-  const isBuy = post.side === 'BUY';
-  const isOwner = userId === post.trader.id;
-
-  useEffect(() => {
-    if (!expanded) return;
-    fetchFeedComments(post.id)
-      .then((data) => {
-        setComments(data.comments);
-        setInitialComment(data.initialComment);
-      })
-      .catch(() => {});
-  }, [expanded, post.id]);
-
-  async function submitReply() {
-    if (!userId || !reply.trim()) return;
-    setLoading(true);
-    try {
-      const c = await postFeedComment(post.id, userId, reply.trim());
-      setComments((prev) => [...prev, c]);
-      setReply('');
-      pushEngagementFlash({
-        emoji: '💬',
-        message: 'Comment posted — earn points for research on /predict',
-        link: '/predict',
-      });
-      onRefresh();
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function submitThesis() {
-    if (!userId || !thesis.trim() || !isOwner) return;
-    setLoading(true);
-    try {
-      await postInitialFeedComment(post.id, userId, thesis.trim());
-      setInitialComment(thesis.trim());
-      setThesis('');
-      onRefresh();
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <article className={`rounded-xl border p-4 ${tierBorder(item.tier)}`}>
-      <div className="flex items-start gap-3">
-        <span className="text-lg">{item.emoji ?? '📈'}</span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <Link href={`/portfolio/${post.trader.id}`} className="font-semibold hover:text-[var(--color-accent)]">
-              {post.trader.name}
-            </Link>
-            <span
-              className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
-                isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-orange-500/15 text-orange-400'
-              }`}
-            >
-              {post.side}
-            </span>
-            <span className="text-xs text-[var(--color-muted)]">{timeAgo(item.at)}</span>
-          </div>
-          <div className="mt-3 flex items-center gap-3 rounded-lg bg-[var(--color-background)] p-3">
-            <div className="flex-1">
-              <Link href={`/project/${post.project.slug}`} className="font-bold hover:text-[var(--color-accent)]">
-                {post.project.ticker}
-              </Link>
-              <p className="text-xs text-[var(--color-muted)]">{post.project.name}</p>
-            </div>
-            <div className="text-right">
-              <p className="font-semibold">{formatUsd(post.amountUsd, 0)}</p>
-              <p className="text-xs text-[var(--color-muted)]">paper</p>
-            </div>
-          </div>
-          {initialComment && (
-            <p className="mt-3 rounded-lg bg-[var(--color-background)] p-3 text-sm italic text-zinc-300">
-              &ldquo;<LinkifiedText text={initialComment} />&rdquo;
-            </p>
-          )}
-          <button type="button" onClick={onToggle} className="mt-3 text-sm text-[var(--color-accent)] hover:underline">
-            {expanded ? 'Hide' : 'View'} discussion ({post.commentCount})
-          </button>
-        </div>
-      </div>
-      {expanded && (
-        <div className="mt-4 border-t border-[var(--color-border)] pt-4 pl-10">
-          {isOwner && !initialComment && (
-            <div className="mb-4">
-              <textarea
-                value={thesis}
-                onChange={(e) => setThesis(e.target.value)}
-                rows={2}
-                placeholder="Share your conviction thesis…"
-                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm"
-              />
-              <button
-                type="button"
-                disabled={loading || !thesis.trim()}
-                onClick={submitThesis}
-                className="mt-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
-              >
-                Post thesis
-              </button>
-            </div>
-          )}
-          <ul className="space-y-2">
-            {comments.map((c) => (
-              <li key={c.id} className="text-sm">
-                <span className="font-medium text-[var(--color-accent)]">{c.user.name}:</span>{' '}
-                <LinkifiedText text={c.body} />
-              </li>
-            ))}
-          </ul>
-          {userId ? (
-            <div className="mt-4 flex gap-2">
-              <input
-                value={reply}
-                onChange={(e) => setReply(e.target.value)}
-                placeholder="Agree or disagree…"
-                className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm"
-              />
-              <button
-                type="button"
-                disabled={loading || !reply.trim()}
-                onClick={submitReply}
-                className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
-              >
-                Reply
-              </button>
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-[var(--color-muted)]">
-              <Link href="/login" className="text-[var(--color-accent)]">
-                Sign in
-              </Link>{' '}
-              to join the discussion.
-            </p>
-          )}
-        </div>
-      )}
-    </article>
   );
 }

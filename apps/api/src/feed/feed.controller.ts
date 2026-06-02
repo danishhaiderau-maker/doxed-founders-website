@@ -7,6 +7,8 @@ import { AddInitialCommentDto, CreateFeedCommentDto } from './dto/feed.dto';
 import { FeedService } from './feed.service';
 import { FeedShareService } from './feed-share.service';
 import { UnifiedFeedService } from './unified-feed.service';
+import { FeedTerminalService } from './feed-terminal.service';
+import type { FeedTerminalTab } from '@dcf/utils';
 
 @SkipThrottle()
 @Controller('feed')
@@ -15,7 +17,17 @@ export class FeedController {
     private readonly feed: FeedService,
     private readonly unifiedFeed: UnifiedFeedService,
     private readonly feedShare: FeedShareService,
+    private readonly feedTerminal: FeedTerminalService,
   ) {}
+
+  @Public()
+  @Get('terminal')
+  terminal(
+    @Query('tab') tab?: FeedTerminalTab,
+    @Query('project') projectSlug?: string,
+  ) {
+    return this.feedTerminal.getTerminal(tab ?? 'all', projectSlug || undefined);
+  }
 
   @Public()
   @Get('flashes')
