@@ -13,6 +13,7 @@ import { ProjectRoomPanel } from '@/components/project-room';
 import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { ProjectRecentBuyersPanel } from '@/components/project-recent-buyers';
 import { WatchlistButton } from '@/components/watchlist-button';
+import { ClaimProfilePanel } from '@/components/claim-profile-panel';
 import { fetchProject, ProjectDetail } from '@/lib/api';
 
 export default function ProjectDetailPage() {
@@ -70,6 +71,15 @@ export default function ProjectDetailPage() {
 
         {project && (
           <div className="space-y-8">
+            {project.claimProfile?.claimable && (
+              <ClaimProfilePanel
+                slug={project.slug}
+                projectName={project.name}
+                claimProfile={project.claimProfile}
+                onClaimed={load}
+              />
+            )}
+
             <section className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
               <div className="flex gap-4">
                 <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-[var(--color-card)] text-lg font-bold text-[var(--color-accent)]">

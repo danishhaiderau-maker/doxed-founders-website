@@ -670,6 +670,8 @@ export interface TradingTimelineEvent {
   dropAfterExitPct: number | null;
   whatIfHeldTotalPct: number | null;
   missedAfterExitPct: number | null;
+  currentVsExitPct: number | null;
+  avoidedLossPct: number | null;
   exitNarrative: 'regret' | 'smart' | 'neutral' | null;
 }
 
@@ -697,6 +699,8 @@ export interface ClosedTradeCard {
   dropAfterExitPct: number;
   whatIfHeldTotalPct: number;
   missedAfterExitPct: number;
+  currentVsExitPct: number;
+  avoidedLossPct: number;
   exitNarrative: 'regret' | 'smart' | 'neutral';
 }
 
@@ -1211,6 +1215,21 @@ export interface ProjectDetail extends ProjectSummary {
     telegramUrl?: string | null;
     auditUrl?: string | null;
   } | null;
+  claimProfile?: {
+    claimable: boolean;
+    claimed: boolean;
+    isOwner: boolean;
+    projectTwitterHandle: string | null;
+    requiresXSignIn: boolean;
+  };
+}
+
+export function claimProjectProfile(slug: string, token: string) {
+  return apiFetch<{ claimed: boolean; founderSlug: string; projectSlug: string }>(
+    `/projects/${encodeURIComponent(slug)}/claim`,
+    { method: 'POST' },
+    token,
+  );
 }
 
 export interface FounderSummary {

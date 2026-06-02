@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import {
   FounderEventType,
   InvestigationStatus,
@@ -6,7 +6,14 @@ import {
   ProjectSource,
   ListingStatus,
 } from '@prisma/client';
-import { formatUsd, inferProjectLifecycleStage, resolveProjectListingKind, resolveEffectiveLifecycleStage } from '@dcf/utils';
+import {
+  formatUsd,
+  inferProjectLifecycleStage,
+  resolveProjectListingKind,
+  resolveEffectiveLifecycleStage,
+  normalizeTwitterHandle,
+  slugify,
+} from '@dcf/utils';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
@@ -24,6 +31,7 @@ const projectInclude = {
       twitterUrl: true,
       githubUrl: true,
       videoUrl: true,
+      userId: true,
       verifications: { where: { verified: true }, select: { type: true } },
     },
   },
@@ -385,6 +393,131 @@ export class ProjectsService {
               verificationCriteria: project.founder.verifications.map((v) => v.type),
             }
           : null,
+      claimProfile: this.buildClaimProfile(project, listing),
+    };
+  }
+
+  async claimProject(userId: string, slug: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        oauthAccounts: { where: { provider: 'twitter' }, take: 1 },
+        founder: true,
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const userTwitter =
+      normalizeTwitterHandle(user.twitterHandle) ??
+      normalizeTwitterHandle(user.oauthAccounts[0]?.providerId);
+    if (!userTwitter) {
+      throw new BadRequestException('Sign in with X (Twitter) to claim this project profile.');
+    }
+
+    const project = await this.prisma.project.findFirst({
+      where: { slug, approved: true },
+      include: { socials: true, founder: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    if (project.founder?.userId && project.founder.userId !== userId) {
+      throw new ForbiddenException('This project profile is already claimed.');
+    }
+    if (project.founder?.userId === userId) {
+      return {
+        claimed: true,
+        founderSlug: project.founder.slug,
+        projectSlug: project.slug,
+      };
+    }
+
+    const listing = await this.prisma.listingApplication.findFirst({
+      where: { ticker: project.ticker },
+      orderBy: { createdAt: 'desc' },
+      select: { founderTwitter: true, founderName: true },
+    });
+
+    const projectTwitter = normalizeTwitterHandle(
+      project.socials?.twitterUrl ?? listing?.founderTwitter ?? project.founder?.twitterUrl,
+    );
+    if (!projectTwitter) {
+      throw new BadRequestException(
+        'No X/Twitter handle found on this project — add social links on DexScreener first.',
+      );
+    }
+    if (projectTwitter !== userTwitter) {
+      throw new BadRequestException(
+        `Your X (@${userTwitter}) must match the project X (@${projectTwitter}).`,
+      );
+    }
+
+    const founderName = listing?.founderName?.trim() || user.name?.trim() || project.name;
+    const founderSlugBase = slugify(founderName) || slugify(project.name) || 'founder';
+    let founderSlug = founderSlugBase;
+    let n = 0;
+    while (await this.prisma.founder.findUnique({ where: { slug: founderSlug } })) {
+      n += 1;
+      founderSlug = `${founderSlugBase}-${n}`;
+    }
+
+    const twitterUrl = `https://x.com/${projectTwitter}`;
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      let founderId = project.founderId;
+      if (founderId && project.founder) {
+        await tx.founder.update({
+          where: { id: founderId },
+          data: { userId, twitterUrl: project.founder.twitterUrl ?? twitterUrl },
+        });
+      } else {
+        const founder = await tx.founder.create({
+          data: {
+            slug: founderSlug,
+            userId,
+            name: founderName,
+            twitterUrl,
+            websiteUrl: project.websiteUrl,
+            publicBuildingSince: new Date(),
+          },
+        });
+        founderId = founder.id;
+        await tx.project.update({
+          where: { id: project.id },
+          data: { founderId, source: ProjectSource.DYNAMIC },
+        });
+      }
+
+      const linked = await tx.founder.findUnique({ where: { id: founderId! } });
+      return linked!;
+    });
+
+    return {
+      claimed: true,
+      founderSlug: result.slug,
+      projectSlug: project.slug,
+    };
+  }
+
+  private buildClaimProfile(
+    project: Prisma.ProjectGetPayload<{ include: typeof projectInclude }>,
+    listing?: { founderTwitter?: string | null } | null,
+  ) {
+    const projectTwitter = normalizeTwitterHandle(
+      project.socials?.twitterUrl ?? listing?.founderTwitter ?? project.founder?.twitterUrl,
+    );
+    const claimed = Boolean(project.founder?.userId);
+    const listingKind = resolveProjectListingKind({
+      source: project.source,
+      founderId: project.founderId,
+    });
+    const claimable = !claimed && Boolean(projectTwitter) && listingKind !== 'verified';
+
+    return {
+      claimable,
+      claimed,
+      isOwner: false,
+      projectTwitterHandle: projectTwitter,
+      requiresXSignIn: true,
     };
   }
 

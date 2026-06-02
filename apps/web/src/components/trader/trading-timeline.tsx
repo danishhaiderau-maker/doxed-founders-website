@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { formatPercent, formatTokenPrice, formatUsd } from '@dcf/utils';
+import { formatPercent, formatTokenPrice, formatUsd, postExitOutcomeLabel } from '@dcf/utils';
 import type { TradingTimelineEvent, TradingTimelineEventType } from '@/lib/api';
+import { TimelineEventShareButton } from '@/components/trader/timeline-event-share-button';
 
 const EVENT_LABELS: Record<TradingTimelineEventType, string> = {
   BUY: 'Buy',
@@ -30,6 +31,7 @@ type Props = {
   showOlder: boolean;
   onShowOlder: () => void;
   loadingOlder?: boolean;
+  portfolioUrl?: string;
 };
 
 export function TradingTimeline({
@@ -40,6 +42,7 @@ export function TradingTimeline({
   showOlder,
   onShowOlder,
   loadingOlder,
+  portfolioUrl,
 }: Props) {
   return (
     <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
@@ -61,7 +64,7 @@ export function TradingTimeline({
       ) : (
         <ol className="relative mt-6 space-y-0 pl-1">
           {events.map((event, index) => (
-            <TimelineNode key={event.id} event={event} isLast={index === events.length - 1} />
+            <TimelineNode key={event.id} event={event} isLast={index === events.length - 1} portfolioUrl={portfolioUrl} />
           ))}
         </ol>
       )}
@@ -82,7 +85,15 @@ export function TradingTimeline({
   );
 }
 
-function TimelineNode({ event, isLast }: { event: TradingTimelineEvent; isLast: boolean }) {
+function TimelineNode({
+  event,
+  isLast,
+  portfolioUrl,
+}: {
+  event: TradingTimelineEvent;
+  isLast: boolean;
+  portfolioUrl?: string;
+}) {
   const date = new Date(event.createdAt).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -144,24 +155,33 @@ function TimelineNode({ event, isLast }: { event: TradingTimelineEvent; isLast: 
                   )}
                 </p>
               )}
-              {event.whatIfHeldPct != null && event.whatIfHeldPct > 0 && (
+              {event.exitNarrative === 'regret' && event.missedAfterExitPct != null && event.missedAfterExitPct > 0 && (
                 <p className="text-amber-300/90">
-                  What If I Held? +{event.whatIfHeldTotalPct?.toFixed(0) ?? event.whatIfHeldPct.toFixed(0)}%
-                  {event.missedAlphaPct != null && event.missedAlphaPct > 0 && (
-                    <span className="ml-2">· Missed +{event.missedAfterExitPct?.toFixed(0) ?? event.missedAlphaPct.toFixed(0)}%</span>
+                  {postExitOutcomeLabel({
+                    narrative: 'regret',
+                    missedAfterExitPct: event.missedAfterExitPct,
+                    avoidedLossPct: 0,
+                    currentVsExitPct: event.currentVsExitPct ?? event.missedAfterExitPct,
+                  }).detail}
+                  {event.pumpAfterExitPct != null && event.pumpAfterExitPct > event.missedAfterExitPct && (
+                    <span className="ml-2">
+                      · Peak +{event.pumpAfterExitPct.toFixed(0)}% since exit
+                    </span>
                   )}
                 </p>
               )}
-              {event.pumpAfterExitPct != null && event.pumpAfterExitPct > 0 && (
-                <p className="text-amber-200/90">
-                  After exit: pumped +{event.pumpAfterExitPct.toFixed(0)}% to{' '}
-                  {formatTokenPrice(event.postExitPeakPriceUsd ?? event.priceUsd)}
+              {event.exitNarrative === 'smart' && event.avoidedLossPct != null && event.avoidedLossPct > 0 && (
+                <p className="text-sky-300/90">
+                  {postExitOutcomeLabel({
+                    narrative: 'smart',
+                    missedAfterExitPct: 0,
+                    avoidedLossPct: event.avoidedLossPct,
+                    currentVsExitPct: event.currentVsExitPct ?? -event.avoidedLossPct,
+                  }).detail}
                 </p>
               )}
-              {event.exitNarrative === 'smart' && event.dropAfterExitPct != null && event.dropAfterExitPct > 0 && (
-                <p className="text-sky-300/90">
-                  Smart exit: fell {event.dropAfterExitPct.toFixed(0)}% after you sold
-                </p>
+              {event.exitNarrative === 'neutral' && (
+                <p className="text-zinc-400">Neutral exit — price near your sell level</p>
               )}
             </div>
           ) : null}
@@ -182,6 +202,7 @@ function TimelineNode({ event, isLast }: { event: TradingTimelineEvent; isLast: 
               )}
             </div>
           )}
+          <TimelineEventShareButton event={event} portfolioUrl={portfolioUrl} />
         </div>
       </div>
     </li>

@@ -75,15 +75,13 @@ export type WhatIfIHeldShareInput = {
 /** Viral X thread for "sold too early" moments. Footer appended by ShareOnXButton. */
 export function buildWhatIfIHeldShareText(input: WhatIfIHeldShareInput): string {
   const lines = [
-    `I turned ${formatDdollar(input.investedUsd)} into ${formatDdollar(input.proceedsUsd)} on $${input.ticker.toUpperCase()}.`,
+    `I sold $${input.ticker.toUpperCase()} too early.`,
     '',
-    `Thought I nailed the trade (+${input.realizedReturnPct.toFixed(0)}%).`,
+    `Locked +${input.realizedReturnPct.toFixed(0)}% on exit.`,
     '',
-    'Turns out I sold too early.',
+    `Price since exit: +${input.missedAlphaPct.toFixed(0)}% missed alpha.`,
     '',
-    `What If I Held? +${input.whatIfHeldReturnPct.toFixed(0)}%`,
-    '',
-    `(Missed alpha: +${input.missedAlphaPct.toFixed(0)}%) 💀`,
+    'Profit taken — alpha left on the table.',
   ];
   if (input.portfolioUrl) lines.push('', input.portfolioUrl);
   return lines.join('\n');
@@ -97,78 +95,117 @@ export function buildShareWinText(input: {
   portfolioUrl?: string;
 }): string {
   const lines = [
-    `Closed $${input.ticker.toUpperCase()} paper trade on @DoxxedCrypto`,
-    `${formatDdollar(input.investedUsd)} → ${formatDdollar(input.proceedsUsd)} (+${input.realizedReturnPct.toFixed(0)}%)`,
-    '#PaperTrading',
+    `Sold $${input.ticker.toUpperCase()}`,
+    '',
+    `Gain: +${input.realizedReturnPct.toFixed(0)}%`,
+    `${formatDdollar(input.investedUsd)} → ${formatDdollar(input.proceedsUsd)}`,
+    '',
+    'Thesis played out.',
   ];
-  if (input.portfolioUrl) lines.push(input.portfolioUrl);
+  if (input.portfolioUrl) lines.push('', input.portfolioUrl);
   return lines.join('\n');
 }
 
 export type PostExitStory = {
   postExitPeakPriceUsd: number;
   postExitTroughPriceUsd: number;
+  /** Highest move above exit price since sell (peak since exit / exit). */
   pumpAfterExitPct: number;
+  /** Largest drawdown below exit since sell (exit - trough / exit). */
   dropAfterExitPct: number;
-  whatIfHeldTotalPct: number;
+  /** Current price vs exit — positive = missed upside, negative = avoided loss. */
+  currentVsExitPct: number;
+  /** max(0, currentVsExitPct) — missed alpha from current price. */
   missedAfterExitPct: number;
+  /** max(0, -currentVsExitPct) — loss avoided vs current price. */
+  avoidedLossPct: number;
+  /** @deprecated use pumpAfterExitPct — kept for API compat */
+  whatIfHeldTotalPct: number;
   narrative: 'regret' | 'smart' | 'neutral';
 };
 
+const POST_EXIT_THRESHOLD_PCT = 5;
+
+/**
+ * Post-exit story — all percentages reference SELL price as baseline (not entry ATH).
+ */
 export function computePostExitStory(input: {
-  entryPriceUsd: number;
   exitPriceUsd: number;
-  inTradePeakPriceUsd: number;
   postExitPeakPriceUsd: number;
   postExitTroughPriceUsd: number;
-  realizedReturnPct: number;
+  currentPriceUsd: number;
 }): PostExitStory {
-  const entry = Math.max(input.entryPriceUsd, 1e-12);
-  const exit = Math.max(input.exitPriceUsd, 0);
-  const postPeak = Math.max(input.postExitPeakPriceUsd, exit, entry);
-  const postTrough = Math.min(input.postExitTroughPriceUsd, exit);
-  const truePeak = Math.max(input.inTradePeakPriceUsd, postPeak, exit);
+  const exit = Math.max(input.exitPriceUsd, 1e-12);
+  const current = Math.max(input.currentPriceUsd, 0);
+  const postPeak = Math.max(input.postExitPeakPriceUsd, exit, current);
+  const postTrough = Math.min(input.postExitTroughPriceUsd, exit, current || exit);
 
-  const pumpAfterExitPct =
-    exit > 0 ? Math.max(0, round1(((postPeak - exit) / exit) * 100)) : 0;
-  const dropAfterExitPct =
-    exit > 0 ? Math.max(0, round1(((exit - postTrough) / exit) * 100)) : 0;
-  const whatIfHeldTotalPct = round1(((truePeak - entry) / entry) * 100);
-  const missedAfterExitPct = Math.max(0, round1(whatIfHeldTotalPct - input.realizedReturnPct));
+  const pumpAfterExitPct = round1(Math.max(0, ((postPeak - exit) / exit) * 100));
+  const currentVsExitPct = round1(((current - exit) / exit) * 100);
+  const dropAfterExitPct = round1(Math.max(0, ((exit - postTrough) / exit) * 100));
+  const missedAfterExitPct = round1(Math.max(0, currentVsExitPct));
+  const avoidedLossPct = round1(Math.max(0, -currentVsExitPct));
 
   let narrative: PostExitStory['narrative'] = 'neutral';
-  if (pumpAfterExitPct >= 8) narrative = 'regret';
-  else if (dropAfterExitPct >= 8) narrative = 'smart';
+  if (currentVsExitPct >= POST_EXIT_THRESHOLD_PCT) narrative = 'regret';
+  else if (currentVsExitPct <= -POST_EXIT_THRESHOLD_PCT) narrative = 'smart';
 
   return {
     postExitPeakPriceUsd: postPeak,
     postExitTroughPriceUsd: postTrough,
     pumpAfterExitPct,
     dropAfterExitPct,
-    whatIfHeldTotalPct,
+    currentVsExitPct,
     missedAfterExitPct,
+    avoidedLossPct,
+    whatIfHeldTotalPct: pumpAfterExitPct,
     narrative,
+  };
+}
+
+export function postExitOutcomeLabel(story: Pick<
+  PostExitStory,
+  'narrative' | 'missedAfterExitPct' | 'avoidedLossPct' | 'currentVsExitPct'
+>): { emoji: string; title: string; detail: string } {
+  if (story.narrative === 'regret') {
+    return {
+      emoji: '🚀',
+      title: 'Sold Too Early',
+      detail: `Missed alpha +${story.missedAfterExitPct.toFixed(0)}%`,
+    };
+  }
+  if (story.narrative === 'smart') {
+    return {
+      emoji: '🛡',
+      title: 'Smart Exit',
+      detail: `Avoided loss −${story.avoidedLossPct.toFixed(0)}%`,
+    };
+  }
+  return {
+    emoji: '🎯',
+    title: 'Neutral Exit',
+    detail: 'Price near your exit',
   };
 }
 
 export function buildRegretShareText(input: {
   ticker: string;
-  investedUsd: number;
-  proceedsUsd: number;
   realizedReturnPct: number;
-  whatIfHeldTotalPct: number;
   missedAfterExitPct: number;
-  postExitPeakPriceUsd: number;
+  pumpAfterExitPct: number;
   exitPriceUsd: number;
+  postExitPeakPriceUsd: number;
   portfolioUrl?: string;
 }): string {
   const lines = [
-    `Sold $${input.ticker.toUpperCase()} for +${input.realizedReturnPct.toFixed(0)}% (${formatDdollar(input.investedUsd)} → ${formatDdollar(input.proceedsUsd)}).`,
+    `I sold $${input.ticker.toUpperCase()} too early.`,
     '',
-    `Then it pumped to ${formatTokenPrice(input.postExitPeakPriceUsd)} after my exit (sold at ${formatTokenPrice(input.exitPriceUsd)}).`,
+    `Exit: +${input.realizedReturnPct.toFixed(0)}% locked.`,
     '',
-    `What If I Held? +${input.whatIfHeldTotalPct.toFixed(0)}%`,
-    `(Missed +${input.missedAfterExitPct.toFixed(0)}% after I sold) 💀`,
+    `Missed: +${input.missedAfterExitPct.toFixed(0)}% since exit`,
+    `(peaked +${input.pumpAfterExitPct.toFixed(0)}% after ${formatTokenPrice(input.exitPriceUsd)})`,
+    '',
+    'Track conviction trades with DDollar.',
   ];
   if (input.portfolioUrl) lines.push('', input.portfolioUrl);
   return lines.join('\n');
@@ -178,16 +215,74 @@ export function buildSmartExitShareText(input: {
   ticker: string;
   exitPriceUsd: number;
   postExitTroughPriceUsd: number;
-  dropAfterExitPct: number;
+  avoidedLossPct: number;
   realizedReturnPct: number;
   portfolioUrl?: string;
 }): string {
   const lines = [
-    `Sold $${input.ticker.toUpperCase()} at ${formatTokenPrice(input.exitPriceUsd)} (+${input.realizedReturnPct.toFixed(0)}%).`,
+    `Smart exit on $${input.ticker.toUpperCase()}.`,
     '',
-    `Price fell to ${formatTokenPrice(input.postExitTroughPriceUsd)} after my exit (−${input.dropAfterExitPct.toFixed(0)}%).`,
+    `Sold at ${formatTokenPrice(input.exitPriceUsd)} (+${input.realizedReturnPct.toFixed(0)}%).`,
     '',
-    'Called the top. Skill > luck on @DoxxedCrypto.',
+    `Price fell to ${formatTokenPrice(input.postExitTroughPriceUsd)} after exit.`,
+    '',
+    `Avoided loss −${input.avoidedLossPct.toFixed(0)}%.`,
+  ];
+  if (input.portfolioUrl) lines.push('', input.portfolioUrl);
+  return lines.join('\n');
+}
+
+export function buildTimelineBuyShareText(input: {
+  ticker: string;
+  amountUsd: number;
+  thesis?: string | null;
+  portfolioUrl?: string;
+}): string {
+  const lines = [
+    `Bought $${input.ticker.toUpperCase()}`,
+    '',
+    `DDollar position: ${formatDdollar(input.amountUsd)}`,
+  ];
+  if (input.thesis?.trim()) {
+    lines.push('', `Reason:`, `"${input.thesis.trim().slice(0, 120)}"`);
+  }
+  lines.push('', 'Track builders, not hype.');
+  if (input.portfolioUrl) lines.push('', input.portfolioUrl);
+  return lines.join('\n');
+}
+
+export function buildTimelineSellShareText(input: {
+  ticker: string;
+  realizedReturnPct: number;
+  amountUsd: number;
+  thesis?: string | null;
+  portfolioUrl?: string;
+}): string {
+  const lines = [
+    `Sold $${input.ticker.toUpperCase()}`,
+    '',
+    `Gain: ${input.realizedReturnPct >= 0 ? '+' : ''}${input.realizedReturnPct.toFixed(0)}%`,
+    `${formatDdollar(input.amountUsd)} proceeds`,
+  ];
+  if (input.thesis?.trim()) {
+    lines.push('', `Thesis: "${input.thesis.trim().slice(0, 100)}"`);
+  }
+  lines.push('', 'Track conviction trades.');
+  if (input.portfolioUrl) lines.push('', input.portfolioUrl);
+  return lines.join('\n');
+}
+
+export function buildTimelineThesisShareText(input: {
+  ticker: string;
+  thesis: string;
+  portfolioUrl?: string;
+}): string {
+  const lines = [
+    `Updated thesis on $${input.ticker.toUpperCase()}`,
+    '',
+    `"${input.thesis.trim().slice(0, 200)}"`,
+    '',
+    'Conviction on record.',
   ];
   if (input.portfolioUrl) lines.push('', input.portfolioUrl);
   return lines.join('\n');

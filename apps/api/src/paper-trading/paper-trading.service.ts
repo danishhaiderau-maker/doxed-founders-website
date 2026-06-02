@@ -876,6 +876,20 @@ export class PaperTradingService {
       },
     });
 
+    const livePriceByProject = new Map<string, number>();
+    const resolveLivePrice = async (projectId: string, fallback: number) => {
+      if (livePriceByProject.has(projectId)) return livePriceByProject.get(projectId)!;
+      try {
+        const { priceUsd } = await this.getProjectLivePrice(projectId);
+        const price = priceUsd > 0 ? priceUsd : fallback;
+        livePriceByProject.set(projectId, price);
+        return price;
+      } catch {
+        livePriceByProject.set(projectId, fallback);
+        return fallback;
+      }
+    };
+
     const holdings = new Map<string, number>();
     const lastThesis = new Map<string, string>();
     const timeline: Array<{
@@ -903,6 +917,8 @@ export class PaperTradingService {
       dropAfterExitPct: number | null;
       whatIfHeldTotalPct: number | null;
       missedAfterExitPct: number | null;
+      currentVsExitPct: number | null;
+      avoidedLossPct: number | null;
       exitNarrative: 'regret' | 'smart' | 'neutral' | null;
     }> = [];
 
@@ -930,6 +946,8 @@ export class PaperTradingService {
       dropAfterExitPct: number;
       whatIfHeldTotalPct: number;
       missedAfterExitPct: number;
+      currentVsExitPct: number;
+      avoidedLossPct: number;
       exitNarrative: 'regret' | 'smart' | 'neutral';
     }> = [];
 
@@ -972,6 +990,8 @@ export class PaperTradingService {
             dropAfterExitPct: null,
             whatIfHeldTotalPct: null,
             missedAfterExitPct: null,
+            currentVsExitPct: null,
+            avoidedLossPct: null,
             exitNarrative: null,
           });
         }
@@ -1002,6 +1022,8 @@ export class PaperTradingService {
           dropAfterExitPct: null,
           whatIfHeldTotalPct: null,
           missedAfterExitPct: null,
+          currentVsExitPct: null,
+          avoidedLossPct: null,
           exitNarrative: null,
         });
         if (!isAdd) {
@@ -1031,15 +1053,17 @@ export class PaperTradingService {
 
         let postExitStory: ReturnType<typeof computePostExitStory> | null = null;
         if (isFullExit) {
-          const postExitPeak = Number(trade.postExitPeakPriceUsd ?? priceUsd);
+          const currentPrice = await resolveLivePrice(projectId, priceUsd);
+          const postExitPeak = Math.max(
+            Number(trade.postExitPeakPriceUsd ?? priceUsd),
+            currentPrice,
+          );
           const postExitTrough = Number(trade.postExitTroughPriceUsd ?? priceUsd);
           postExitStory = computePostExitStory({
-            entryPriceUsd,
             exitPriceUsd: priceUsd,
-            inTradePeakPriceUsd: peakPriceUsd ?? priceUsd,
             postExitPeakPriceUsd: postExitPeak,
             postExitTroughPriceUsd: postExitTrough,
-            realizedReturnPct: realizedReturnPct ?? 0,
+            currentPriceUsd: currentPrice,
           });
         }
 
@@ -1066,8 +1090,10 @@ export class PaperTradingService {
           postExitTroughPriceUsd: postExitStory?.postExitTroughPriceUsd ?? null,
           pumpAfterExitPct: postExitStory?.pumpAfterExitPct ?? null,
           dropAfterExitPct: postExitStory?.dropAfterExitPct ?? null,
-          whatIfHeldTotalPct: postExitStory?.whatIfHeldTotalPct ?? null,
+          whatIfHeldTotalPct: postExitStory?.pumpAfterExitPct ?? null,
           missedAfterExitPct: postExitStory?.missedAfterExitPct ?? null,
+          currentVsExitPct: postExitStory?.currentVsExitPct ?? null,
+          avoidedLossPct: postExitStory?.avoidedLossPct ?? null,
           exitNarrative: postExitStory?.narrative ?? null,
         });
 
@@ -1104,8 +1130,10 @@ export class PaperTradingService {
             postExitTroughPriceUsd: postExitStory.postExitTroughPriceUsd,
             pumpAfterExitPct: postExitStory.pumpAfterExitPct,
             dropAfterExitPct: postExitStory.dropAfterExitPct,
-            whatIfHeldTotalPct: postExitStory.whatIfHeldTotalPct,
+            whatIfHeldTotalPct: postExitStory.pumpAfterExitPct,
             missedAfterExitPct: postExitStory.missedAfterExitPct,
+            currentVsExitPct: postExitStory.currentVsExitPct,
+            avoidedLossPct: postExitStory.avoidedLossPct,
             exitNarrative: postExitStory.narrative,
           });
           lastThesis.delete(projectId);
