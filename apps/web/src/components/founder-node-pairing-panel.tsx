@@ -39,6 +39,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
   const [err, setErr] = useState<string | null>(null);
 
   const isPaired = nodes.length > 0;
+  const anyOnline = nodes.some((n) => n.status === 'online');
 
   const refresh = useCallback(async () => {
     try {
@@ -119,10 +120,35 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         </p>
       </div>
 
-      {isPaired && !showNewPairing && (
+      {isPaired && !showNewPairing && anyOnline && (
         <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
           ✓ Vault connected — pairing code hidden. The pairing popup may close; the tray app must keep running
-          (icon near the clock). Offline means the tray app quit or cannot reach the site — you do not need a new code.
+          (icon near the clock).
+        </div>
+      )}
+
+      {isPaired && !showNewPairing && !anyOnline && (
+        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-3 text-xs text-amber-100">
+          <p className="font-semibold text-amber-200">Paired on the website, but your desktop is not syncing</p>
+          <p className="mt-2 leading-relaxed text-zinc-300">
+            The cloud only knows your machine was linked before. Step 4 stays offline until the{' '}
+            <strong className="text-white">Founder Node tray app</strong> is open and heartbeating (~every 60s).
+          </p>
+          <ol className="mt-2 list-decimal space-y-1 pl-4 text-zinc-300">
+            <li>
+              Open <strong className="text-white">Founder Node</strong> from the Start Menu — quit extra tray copies if
+              you see more than one icon.
+            </li>
+            <li>
+              If the pairing window appears, click <strong className="text-white">Pair another desktop device</strong>{' '}
+              below, generate a <strong className="text-white">new</strong> code, and paste it there (upgrading or
+              re-pairing on the site invalidates the old desktop token).
+            </li>
+            <li>
+              Right-click the tray icon → <strong className="text-white">Sync now</strong>, then wait for{' '}
+              <strong className="text-emerald-300">● online</strong> in Step 4.
+            </li>
+          </ol>
         </div>
       )}
 

@@ -375,6 +375,13 @@ app.whenReady().then(() => {
 
   const config = readNodeConfig(vaultRoot);
   if (!config) {
+    const hadCredentials = fs.existsSync(path.join(vaultRoot, 'node-config.json.bak'));
+    if (hadCredentials) {
+      notifyDesktop(
+        'Founder Node needs pairing again',
+        'Your desktop link expired. Generate a new code in Founder OS → Settings → Builder (Step 2) and enter it here.',
+      );
+    }
     openPairWindow();
   } else {
     startSyncLoop(vaultRoot);
