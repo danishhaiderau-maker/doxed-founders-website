@@ -27,14 +27,17 @@ import {
 import { formatThinkingInChat, revealTextInChat } from '@/lib/copilot-inline-stream';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import { useVoiceInput } from '@/hooks/use-voice-input';
+import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import {
   AI_STACK_HREF,
   CopilotSendMode,
+  copilotSetupGapMessage,
   defaultSendMode,
   formatMessageProviderLabel,
   listChatProviders,
   primaryButtonLabel,
   ProviderRow,
+  resolveAiTeamCards,
   resolveCopilotStack,
   shortProviderName,
 } from '@/lib/copilot-ai-stack';
@@ -137,6 +140,8 @@ export function FounderCopilotChat({
     return row ? shortProviderName(row) : stack.askLabel;
   }, [providers, activeChatProvider, stack.askLabel]);
 
+  const aiTeam = useMemo(() => resolveAiTeamCards(stack, providers), [stack, providers]);
+
   const patchMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
@@ -157,7 +162,7 @@ export function FounderCopilotChat({
   const onTranscript = useCallback((text: string) => {
     setPrompt(text);
   }, []);
-  const { listening, supported, toggle, stop } = useVoiceInput(onTranscript);
+  const { listening, starting, phase, supported, toggle, stop } = useVoiceInput(onTranscript);
 
   useEffect(() => {
     setMessages(loadMessages());
@@ -264,6 +269,25 @@ export function FounderCopilotChat({
       if (!q || busy) return;
       stop();
       setError(null);
+
+      const setupGap = copilotSetupGapMessage(mode, stack);
+      if (setupGap) {
+        const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: q };
+        setMessages((prev) => [
+          ...prev,
+          userMsg,
+          {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            content: setupGap,
+            provider: 'FOUNDER_OS',
+          },
+        ]);
+        setPrompt('');
+        onResult?.(setupGap);
+        return;
+      }
+
       setBusy(true);
 
       const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: q };
@@ -385,10 +409,13 @@ export function FounderCopilotChat({
             await pollOpenHandsIntoMessage(assistantId, conversationId, q);
           } else if (result.status === 'dispatched') {
             const msg = [
-              `**${workerLabel}** started on your repo.`,
+              `**Builder Agent** is working on your repo.`,
               '',
-              '_Live output will appear in this chat when the worker reports status._',
-            ].join('\n');
+              'Progress streams here — you do not need to open Cursor.',
+              result.agentUrl ? `\n[Optional: open full diff view](${result.agentUrl})` : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
             setMessages((prev) => [
               ...prev,
               {
@@ -556,23 +583,17 @@ export function FounderCopilotChat({
             : 'border-zinc-800 bg-[#0d0d0f]'
       }`}
     >
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-zinc-100">Founder Copilot</p>
-          {!isHero && (
-            <p className="truncate text-xs text-zinc-500">
-              {memory?.project?.name ?? 'Project'} · {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal'}
-            </p>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Link
-            href={AI_STACK_HREF}
-            title={stack.statusLine}
-            className="max-w-[min(100%,280px)] truncate rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-400 hover:border-violet-500/40 hover:text-violet-200"
-          >
-            {stack.statusLine}
-          </Link>
+      <header className="border-b border-zinc-800 px-4 py-3 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-zinc-100">Founder AI Team</p>
+            {!isHero && (
+              <p className="truncate text-xs text-zinc-500">
+                {memory?.project?.name ?? 'Project'} ·{' '}
+                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Settings'}
+              </p>
+            )}
+          </div>
           {messages.length > 0 && (
             <button
               type="button"
@@ -583,6 +604,7 @@ export function FounderCopilotChat({
             </button>
           )}
         </div>
+        <FounderAiTeamStrip agents={aiTeam} />
       </header>
 
       {!isHero && (
@@ -609,23 +631,8 @@ export function FounderCopilotChat({
       >
         {messages.length === 0 && !busy && (
           <div className="mx-auto max-w-lg space-y-2 text-center text-sm text-zinc-500">
-            <p>One box, two roles — pick who handles your message:</p>
-            <ul className="text-left text-xs text-zinc-600">
-              <li>
-                <span className="text-violet-300">Ask</span> —{' '}
-                {stack.canAsk
-                  ? `streams answers inline from ${stack.chatProviders.map((p) => p.label).join(', ')}`
-                  : 'uses project memory until you connect an LLM'}
-                .
-              </li>
-              <li>
-                <span className="text-emerald-300">Run in repo</span> —{' '}
-                {stack.canBuild
-                  ? stack.buildWorkers.map((w) => w.label).join(' and ')
-                  : 'Cursor or OpenHands'}{' '}
-                stream here with GitHub sync — push from Cursor IDE to stay aligned.
-              </li>
-            </ul>
+            <p>Type a goal below. Pick <strong className="text-violet-300">Ask</strong> to think, or{' '}
+            <strong className="text-emerald-300">Build</strong> to ship code — all in this chat.</p>
           </div>
         )}
         {messages.map((m) => (
@@ -745,7 +752,7 @@ export function FounderCopilotChat({
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              Ask {stack.askLabel}
+              Ask
             </button>
             <button
               type="button"
@@ -756,7 +763,7 @@ export function FounderCopilotChat({
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              Run in {stack.buildLabel}
+              Build
             </button>
           </div>
         )}
@@ -768,7 +775,13 @@ export function FounderCopilotChat({
         <textarea
           ref={inputRef}
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => {
+            if (phase !== 'idle') stop();
+            setPrompt(e.target.value);
+          }}
+          onFocus={() => {
+            if (phase !== 'idle') stop();
+          }}
           onKeyDown={handleKeyDown}
           rows={isHero ? 4 : 3}
           disabled={busy}
@@ -776,29 +789,45 @@ export function FounderCopilotChat({
           className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-violet-500/50 disabled:opacity-60"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => {
                 if (!supported) {
-                  setError('Voice not supported — type your message');
+                  setError('Voice not supported in this browser — type your message');
                   return;
                 }
                 toggle(prompt);
               }}
-              className={`rounded-lg px-2 py-1.5 text-sm ${
-                listening ? 'bg-red-600 text-white' : 'text-zinc-500 hover:bg-zinc-900 hover:text-white'
+              className={`rounded-lg px-2.5 py-1.5 text-sm font-medium ${
+                listening
+                  ? 'bg-red-600 text-white ring-2 ring-red-500/50'
+                  : starting
+                    ? 'bg-amber-600/90 text-white'
+                    : 'text-zinc-500 hover:bg-zinc-900 hover:text-white'
               }`}
-              title="Voice input"
+              title={
+                listening
+                  ? 'Stop recording'
+                  : starting
+                    ? 'Starting microphone…'
+                    : 'Voice input'
+              }
             >
-              {listening ? '⏹' : '🎤'}
+              {listening ? '⏹ Stop' : starting ? '…' : '🎤'}
             </button>
+            {starting && (
+              <span className="text-[10px] text-amber-200 animate-pulse">Starting mic… allow if prompted</span>
+            )}
+            {listening && (
+              <span className="text-[10px] font-medium text-red-200">Speak now — tap Stop or type to end</span>
+            )}
             {!stack.canAsk && !stack.canBuild && (
               <Link
                 href={AI_STACK_HREF}
                 className="text-[11px] text-violet-400 hover:underline"
               >
-                Connect AI Stack
+                Connect agents in Settings
               </Link>
             )}
           </div>

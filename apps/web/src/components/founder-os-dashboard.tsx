@@ -85,6 +85,7 @@ export function FounderOsDashboardLayout({
   const [chatKey, setChatKey] = useState(0);
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [roleLabel, setRoleLabel] = useState<string>('Founder');
   const [resumeBusy, setResumeBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<Awaited<
     ReturnType<typeof fetchPlatformSyncStatus>
@@ -106,6 +107,7 @@ export function FounderOsDashboardLayout({
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
         setAvatarUrl(account.avatarUrl);
+        setRoleLabel(account.gamifiedRole?.label ?? 'Founder');
       }
     } catch {
       setBuildRoom(null);
@@ -224,7 +226,7 @@ export function FounderOsDashboardLayout({
               </div>
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-white">{username}</p>
-                <p className="text-[10px] text-zinc-600">Pro Founder</p>
+                <p className="text-[10px] text-zinc-600">{roleLabel}</p>
               </div>
             </div>
           </div>

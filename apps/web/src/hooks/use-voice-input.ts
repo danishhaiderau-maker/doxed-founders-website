@@ -6,6 +6,8 @@ type SpeechRecognitionCtor = new () => {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  onstart: (() => void) | null;
+  onspeechstart: (() => void) | null;
   onresult: ((ev: SpeechRecognitionEventLike) => void) | null;
   onerror: ((ev: { error: string }) => void) | null;
   onend: (() => void) | null;
@@ -25,6 +27,8 @@ type SpeechRecognitionEventLike = {
   };
 };
 
+export type VoiceInputPhase = 'idle' | 'starting' | 'listening';
+
 function getSpeechRecognition(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
   const w = window as Window & {
@@ -36,7 +40,7 @@ function getSpeechRecognition(): SpeechRecognitionCtor | null {
 
 /** Keeps mic open until user toggles off — restarts on browser auto-end. */
 export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => void) {
-  const [listening, setListening] = useState(false);
+  const [phase, setPhase] = useState<VoiceInputPhase>('idle');
   const [supported, setSupported] = useState(false);
   const recRef = useRef<InstanceType<NonNullable<ReturnType<typeof getSpeechRecognition>>> | null>(
     null,
@@ -44,12 +48,19 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const wantListeningRef = useRef(false);
   const transcriptBaseRef = useRef('');
 
+  const listening = phase === 'listening';
+  const starting = phase === 'starting';
+
   useEffect(() => {
     setSupported(Boolean(getSpeechRecognition()));
     return () => {
       wantListeningRef.current = false;
       recRef.current?.abort();
     };
+  }, []);
+
+  const markListening = useCallback(() => {
+    setPhase('listening');
   }, []);
 
   const startRecognition = useCallback(() => {
@@ -61,7 +72,16 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     rec.interimResults = true;
     rec.lang = 'en-US';
 
+    rec.onstart = () => {
+      markListening();
+    };
+
+    rec.onspeechstart = () => {
+      markListening();
+    };
+
     rec.onresult = (ev) => {
+      markListening();
       let interim = '';
       let finalChunk = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -80,12 +100,13 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     rec.onerror = (ev) => {
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         wantListeningRef.current = false;
-        setListening(false);
+        setPhase('idle');
       }
     };
 
     rec.onend = () => {
       if (wantListeningRef.current) {
+        setPhase('starting');
         try {
           rec.start();
         } catch {
@@ -94,24 +115,24 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
           }, 300);
         }
       } else {
-        setListening(false);
+        setPhase('idle');
       }
     };
 
     recRef.current = rec;
     try {
       rec.start();
-      setListening(true);
     } catch {
-      setListening(false);
+      setPhase('idle');
       wantListeningRef.current = false;
     }
-  }, [onTranscript]);
+  }, [markListening, onTranscript]);
 
   const start = useCallback(
     (existingText = '') => {
       transcriptBaseRef.current = existingText.trim();
       wantListeningRef.current = true;
+      setPhase('starting');
       startRecognition();
     },
     [startRecognition],
@@ -120,16 +141,16 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const stop = useCallback(() => {
     wantListeningRef.current = false;
     recRef.current?.stop();
-    setListening(false);
+    setPhase('idle');
   }, []);
 
   const toggle = useCallback(
     (existingText = '') => {
-      if (listening) stop();
+      if (phase !== 'idle') stop();
       else start(existingText);
     },
-    [listening, start, stop],
+    [phase, start, stop],
   );
 
-  return { listening, supported, start, stop, toggle };
+  return { listening, starting, phase, supported, start, stop, toggle };
 }
