@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(founder-os): Ask/Build UX, voice mic ready state, and AI Team strip
+Add exchange adapters for Bybit, Binance, OKX, Bitfinex, and Hyperliquid
 
 ## Last Activity
 
