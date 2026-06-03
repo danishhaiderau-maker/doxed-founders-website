@@ -26,6 +26,13 @@ Findings before this change:
 - API returned `X-Powered-By: Express`.
 - API CORS response was origin-varying and credential-aware.
 
+Latest live recheck (2026-06-03 23:43 UTC):
+
+- Web currently returns HSTS with `includeSubDomains; preload`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and `Permissions-Policy`.
+- API currently returns HSTS with `includeSubDomains`, `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`.
+- API still returns `X-Powered-By: Express` on the live Railway endpoint. The branch code disables this header; deploy/merge this branch to remove it from production.
+- API live `Permissions-Policy` was not present in the header check; the branch code adds it.
+
 Changes implemented:
 
 - Web now sets:
@@ -39,7 +46,7 @@ Changes implemented:
 
 ## OWASP ZAP / Burp status
 
-The cloud agent image used for this pass did not include OWASP ZAP, Burp Suite, Docker, or `zap-baseline.py`; only Java and curl were available. Because of that, this pass used non-invasive live header checks and repository review instead of an authenticated ZAP/Burp crawl.
+The cloud agent image used for this pass did not include OWASP ZAP, Burp Suite, Docker, or `zap-baseline.py`; only Java and curl were available during the latest recheck. Because of that, this pass used non-invasive live header checks and repository review instead of an authenticated ZAP/Burp crawl.
 
 Recommended follow-up from a security workstation or CI runner:
 
