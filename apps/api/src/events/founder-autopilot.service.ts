@@ -296,6 +296,118 @@ export class FounderAutopilotService {
     };
   }
 
+  /** Read-only infrastructure snapshot for Social Hub drafts (no redeploy / publish). */
+  async buildDraftInfrastructureSnapshot(userId: string) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    const status = await this.getPlatformSyncStatus(userId);
+    const gh = status.platforms.find((p) => p.key === 'github');
+
+    const steps: AutopilotStep[] = [
+      {
+        step: 'github_sync',
+        ok: gh?.connected ?? false,
+        detail: gh?.connected
+          ? status.repoFullName
+            ? `Repo linked: ${status.repoFullName}`
+            : 'GitHub connected — set default repo in Stack'
+          : 'GitHub not connected — link in AI Stack',
+      },
+      {
+        step: 'memory_sync',
+        ok: true,
+        detail: `Memory mode ${status.memoryStorageMode} — ${memoryStoragePrivacyLabel(status.memoryStorageMode)}`,
+      },
+    ];
+
+    steps.push(await this.tryNeonPlatform(userId));
+    steps.push(await this.checkVercelLinked(userId));
+    steps.push(await this.checkRailwayLinked(userId));
+
+    const pending = await this.prisma.suggestedBuildUpdate.count({
+      where: { founderId: founder.id, status: SuggestedUpdateStatus.PENDING },
+    });
+    steps.push({
+      step: 'publish',
+      ok: true,
+      detail:
+        pending > 0
+          ? `${pending} build update(s) queued — Autopilot ${settings?.autopilotEnabled ? 'can publish' : 'off; publish manually or enable Autopilot'}`
+          : 'No pending build updates in queue',
+    });
+
+    return { steps, syncStatus: status };
+  }
+
+  private async checkVercelLinked(userId: string): Promise<AutopilotStep> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'vercel' } },
+    });
+    if (!cred?.token) {
+      return { step: 'vercel_deploy', ok: false, detail: 'Vercel not connected — add token in Stack hub' };
+    }
+    const token = this.crypto.decrypt(cred.token);
+    if (!token) {
+      return { step: 'vercel_deploy', ok: false, detail: 'Vercel token invalid — reconnect' };
+    }
+    const meta = (cred.metadata as { projectName?: string }) ?? {};
+    const projectName = meta.projectName?.trim();
+    return {
+      step: 'vercel_deploy',
+      ok: true,
+      detail: projectName
+        ? `Vercel linked (project ${projectName}) — production also deploys on Git push`
+        : 'Vercel connected — production deploys follow Git push (add project name in Stack for API redeploy)',
+    };
+  }
+
+  private async checkRailwayLinked(userId: string): Promise<AutopilotStep> {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'railway' } },
+    });
+    if (!cred?.token) {
+      return { step: 'railway_deploy', ok: false, detail: 'Railway not connected — add token in Stack hub' };
+    }
+    const token = this.crypto.decrypt(cred.token);
+    if (!token) {
+      return { step: 'railway_deploy', ok: false, detail: 'Railway token invalid — reconnect' };
+    }
+    try {
+      const query = `query { projects { edges { node { id name } } } }`;
+      const res = await fetch('https://backboard.railway.app/graphql/v2', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query }),
+      });
+      if (!res.ok) {
+        return { step: 'railway_deploy', ok: false, detail: `Railway API error (${res.status})` };
+      }
+      const data = (await res.json()) as {
+        data?: { projects?: { edges?: Array<{ node: { name: string } }> } };
+      };
+      const names = data.data?.projects?.edges?.map((e) => e.node.name) ?? [];
+      return {
+        step: 'railway_deploy',
+        ok: names.length > 0,
+        detail:
+          names.length > 0
+            ? `Railway linked (${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}) — API reachable`
+            : 'Railway token valid but no projects returned',
+      };
+    } catch (err) {
+      return {
+        step: 'railway_deploy',
+        ok: false,
+        detail: err instanceof Error ? err.message : 'Railway check failed',
+      };
+    }
+  }
+
   private async tryNeonPlatform(userId: string): Promise<AutopilotStep> {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'neon' } },
