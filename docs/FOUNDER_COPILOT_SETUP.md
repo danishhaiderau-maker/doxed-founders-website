@@ -250,5 +250,6 @@ Agents are **workers Copilot invokes** — they do not run 24/7 on their own.
 
 ## Related docs
 
+- [FOUNDER_COPILOT_MVP_USER_STORIES.md](./FOUNDER_COPILOT_MVP_USER_STORIES.md) — MVP research and content-generation user stories
 - [PHALA_PRIVATE_AI.md](./PHALA_PRIVATE_AI.md) — private TEE inference (Step 3)
 - [apps/founder-node/README.md](../apps/founder-node/README.md) — Founder Node pairing & vault
