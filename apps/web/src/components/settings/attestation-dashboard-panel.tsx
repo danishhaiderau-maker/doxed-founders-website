@@ -59,8 +59,16 @@ export function AttestationDashboardPanel({ accessToken, embedded }: Props) {
     setMsg(null);
     setErr(null);
     try {
-      await scanVaultIntegrity(accessToken);
-      setMsg('Vault integrity scan recorded');
+      const result = await scanVaultIntegrity(accessToken);
+      const stillPending = dashboard?.memoryIntegrity.checks.filter((c) => !c.ok).length ?? 0;
+      const base =
+        result.summary ??
+        `Vault integrity snapshot saved (${result.status})`;
+      setMsg(
+        stillPending > 0
+          ? `${base}. Your score is still ${dashboard?.memoryIntegrity.score ?? '—'}% — complete the steps above (tray app online, encrypted sync, vector index) to reach 100%. The scan does not run those steps for you.`
+          : `${base}. All checks passed — you are at 100% memory integrity.`,
+      );
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Vault scan failed');
@@ -162,11 +170,21 @@ export function AttestationDashboardPanel({ accessToken, embedded }: Props) {
               </li>
             ))}
           </ul>
+          <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
+            <strong className="text-zinc-400">What this button does:</strong> saves a timestamped snapshot of the four
+            checks above to your attestation log (for audit). It does <strong className="text-zinc-400">not</strong>{' '}
+            open Founder Node, push encrypted backup, or build the vector index — finish Steps 1–4 for that.
+          </p>
+          {memory.lastVaultScanAt && (
+            <p className="mt-1 text-[11px] text-zinc-600">
+              Last scan recorded: {new Date(memory.lastVaultScanAt).toLocaleString()}
+            </p>
+          )}
           <button
             type="button"
             disabled={Boolean(busy)}
             onClick={runVaultScan}
-            className="mt-4 rounded-lg border border-fuchsia-500/40 bg-fuchsia-950/30 px-3 py-2 text-sm text-fuchsia-100 disabled:opacity-50"
+            className="mt-3 rounded-lg border border-fuchsia-500/40 bg-fuchsia-950/30 px-3 py-2 text-sm text-fuchsia-100 disabled:opacity-50"
           >
             Scan vault integrity
           </button>
