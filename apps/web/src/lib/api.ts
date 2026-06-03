@@ -3536,7 +3536,18 @@ export function fetchBuilderCursorRun(agentId: string, runId: string, token: str
     git?: {
       branches?: { repoUrl?: string; branch?: string; prUrl?: string }[];
     } | null;
+    workspaceActivity?: import('@dcf/utils').WorkspaceActivity | null;
+    platformReconciliation?: string | null;
   }>(`/builder/cursor/runs/${encodeURIComponent(agentId)}/${encodeURIComponent(runId)}`, undefined, token);
+}
+
+export function fetchWorkspaceActivity(token: string, repository?: string) {
+  const q = repository ? `?repository=${encodeURIComponent(repository)}` : '';
+  return apiFetch<import('@dcf/utils').WorkspaceActivity>(
+    `/builder/workspace-activity${q}`,
+    undefined,
+    token,
+  );
 }
 
 export function fetchBuilderWorkerStatus(token: string) {

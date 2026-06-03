@@ -10,9 +10,12 @@ import {
   fetchBuilderSettings,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
+  fetchWorkspaceActivity,
   ProjectMemory,
   runCopilotAutopilot,
+  syncGitHubCommits,
 } from '@/lib/api';
+import { formatWorkspaceActivityForChat } from '@dcf/utils';
 import {
   formatBuilderRunInChat,
   formatOpenHandsRunInChat,
@@ -112,6 +115,7 @@ export function FounderCopilotChat({
   const [preferredBuildWorker, setPreferredBuildWorker] = useState<'CURSOR' | 'OPENHANDS' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [thinkingLabel, setThinkingLabel] = useState<string | null>(null);
+  const [workspaceStrip, setWorkspaceStrip] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const consumedPromptRef = useRef<string | null>(null);
@@ -167,6 +171,18 @@ export function FounderCopilotChat({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, busy]);
 
+  const refreshWorkspaceStrip = useCallback(
+    async (repo?: string | null) => {
+      try {
+        const activity = await fetchWorkspaceActivity(accessToken, repo ?? undefined);
+        setWorkspaceStrip(formatWorkspaceActivityForChat(activity));
+      } catch {
+        setWorkspaceStrip(null);
+      }
+    },
+    [accessToken],
+  );
+
   const loadMeta = useCallback(async () => {
     try {
       const [mem, builder, worker] = await Promise.all([
@@ -175,6 +191,7 @@ export function FounderCopilotChat({
         fetchBuilderWorkerStatus(accessToken).catch(() => null),
       ]);
       if (!memoryProp) setMemoryLocal(mem);
+      void refreshWorkspaceStrip(mem.repoFullName ?? builder.repoFullName);
       setProviders(builder.providers);
       setDefaultProvider(builder.defaultProvider);
       setPreferredChatKey(builder.defaultProvider);
@@ -196,7 +213,7 @@ export function FounderCopilotChat({
     } catch {
       if (!memoryProp) setMemoryLocal(null);
     }
-  }, [accessToken, memoryProp]);
+  }, [accessToken, memoryProp, refreshWorkspaceStrip]);
 
   useEffect(() => {
     void loadMeta();
@@ -252,6 +269,10 @@ export function FounderCopilotChat({
       const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: q };
       setMessages((prev) => [...prev, userMsg]);
       setPrompt('');
+
+      void syncGitHubCommits(accessToken)
+        .then(() => refreshWorkspaceStrip(memory?.repoFullName))
+        .catch(() => undefined);
 
       if (/take full control|sync everything|push all updates/i.test(q)) {
         const assistantId = `a-${Date.now()}`;
@@ -477,6 +498,7 @@ export function FounderCopilotChat({
       busy,
       loadMeta,
       memory?.repoFullName,
+      refreshWorkspaceStrip,
       onResult,
       patchMessage,
       pollCursorIntoMessage,
@@ -564,13 +586,18 @@ export function FounderCopilotChat({
       </header>
 
       {!isHero && (
-        <div className="border-b border-zinc-800 px-3 py-2">
+        <div className="border-b border-zinc-800 px-3 py-2 space-y-2">
           <HybridControlPlane
             accessToken={accessToken}
             onMessage={onResult}
             onRefresh={() => void loadMeta()}
             autoRunWhenAutopilot={false}
           />
+          {workspaceStrip && (
+            <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 px-3 py-2 text-[11px] leading-relaxed text-zinc-400 whitespace-pre-wrap">
+              {workspaceStrip}
+            </p>
+          )}
         </div>
       )}
 
@@ -596,7 +623,7 @@ export function FounderCopilotChat({
                 {stack.canBuild
                   ? stack.buildWorkers.map((w) => w.label).join(' and ')
                   : 'Cursor or OpenHands'}{' '}
-                stream code status and output here (no need to leave Mission Control).
+                stream here with GitHub sync — push from Cursor IDE to stay aligned.
               </li>
             </ul>
           </div>
