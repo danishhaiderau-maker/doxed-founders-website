@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(scripts): add Railway API and bot service sync helper
+fix(founder-os): deep-dive social updates from real GitHub 24h data
 
 ## Last Activity
 
