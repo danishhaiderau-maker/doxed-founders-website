@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { resolveJwtSecret } from './jwt-secret.util';
 
 function deriveKey(): Buffer {
-  const secret = process.env.JWT_SECRET ?? 'dev-secret-change-in-production';
+  const secret = resolveJwtSecret();
   return scryptSync(secret, 'dcf-security-v1', 32);
 }
 

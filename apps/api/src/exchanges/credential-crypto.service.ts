@@ -1,13 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { resolveJwtSecret } from '../security/jwt-secret.util';
 
 @Injectable()
 export class CredentialCryptoService {
   private readonly key: Buffer;
 
-  constructor(config: ConfigService) {
-    const secret = config.get<string>('JWT_SECRET') ?? 'dev-credential-key-change-me';
+  constructor() {
+    const secret = resolveJwtSecret();
     this.key = createHash('sha256').update(secret).digest();
   }
 

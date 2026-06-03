@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { GitHubModule } from '../github/github.module';
 import { SecurityModule } from '../security/security.module';
+import { resolveJwtSecret } from '../security/jwt-secret.util';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AdminGuard, JwtAuthGuard } from './guards';
@@ -15,7 +16,7 @@ import { JwtStrategy } from './jwt.strategy';
     GitHubModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({
-      secret: process.env.JWT_SECRET ?? 'dev-secret-change-in-production',
+      secret: resolveJwtSecret(),
       signOptions: {
         expiresIn: (process.env.JWT_EXPIRES_IN ?? '7d') as `${number}d`,
       },
