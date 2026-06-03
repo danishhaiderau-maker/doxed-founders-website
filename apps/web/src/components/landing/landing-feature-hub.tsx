@@ -7,7 +7,7 @@ import { getActiveUserId } from '@/components/site-nav';
 import { LandingHubPreviewWidgets } from '@/components/landing/landing-hub-preview-widgets';
 import type { PlatformStats } from '@/lib/api';
 
-type Props = {
+type HubProps = {
   scoutPending?: number;
   platformStats?: PlatformStats | null;
 };
@@ -48,7 +48,8 @@ function NavPill({
   );
 }
 
-export function LandingFeatureHub({ scoutPending = 0, platformStats = null }: Props) {
+/** Three-row navigation table (Explore · Community · Build). */
+export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number }) {
   const { data: session } = useSession();
   const portfolioUserId = session?.user?.id ?? getActiveUserId(session?.user?.id);
 
@@ -70,7 +71,6 @@ export function LandingFeatureHub({ scoutPending = 0, platformStats = null }: Pr
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-      {/* Navigation V5 — three-row hub */}
       <div className="grid lg:grid-cols-[1fr_minmax(11rem,13rem)]">
         <div className="divide-y divide-zinc-800/70">
           {HUB_NAV_ROWS.map((row) => (
@@ -100,7 +100,6 @@ export function LandingFeatureHub({ scoutPending = 0, platformStats = null }: Pr
           ))}
         </div>
 
-        {/* Row legend — desktop sidebar like mockup */}
         <aside className="hidden border-l border-zinc-800/70 bg-black/20 px-3 py-4 lg:block">
           <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-600">Navigation</p>
           <ul className="mt-3 space-y-4">
@@ -113,11 +112,27 @@ export function LandingFeatureHub({ scoutPending = 0, platformStats = null }: Pr
           </ul>
         </aside>
       </div>
+    </section>
+  );
+}
 
-      {/* Preview widgets — Feed · DDollar · Trust · Founder OS · Notifications */}
-      <div className="border-t border-zinc-800/80 bg-black/30 p-2 sm:p-3">
+/** Feed · DDollar · Trust · Founder OS preview widgets. */
+export function LandingHubPreviews({ scoutPending = 0, platformStats = null }: HubProps) {
+  return (
+    <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="bg-black/30 p-2 sm:p-3">
         <LandingHubPreviewWidgets scoutPending={scoutPending} platformStats={platformStats} />
       </div>
     </section>
+  );
+}
+
+/** Nav table + previews together (legacy combined block). */
+export function LandingFeatureHub({ scoutPending = 0, platformStats = null }: HubProps) {
+  return (
+    <>
+      <LandingHubNavTable scoutPending={scoutPending} />
+      <LandingHubPreviews scoutPending={scoutPending} platformStats={platformStats} />
+    </>
   );
 }

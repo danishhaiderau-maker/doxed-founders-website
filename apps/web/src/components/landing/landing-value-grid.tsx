@@ -9,7 +9,7 @@ export function LandingValueGrid() {
     <div className="space-y-3">
       <section aria-label="Platform value proposition" className="w-full overflow-hidden rounded-2xl border border-emerald-500/25 shadow-2xl shadow-emerald-950/30">
         {/* Crop bottom fun-fact row from PNG — replaced by LandingFunFactBar */}
-        <div className="relative aspect-[16/10] w-full sm:aspect-[16/9]">
+        <div className="relative aspect-[16/8.5] w-full sm:aspect-[2/1]">
           <Image
             src="/images/landing-value-grid-primary.png"
             alt="Private by default, public by proof. Show your face. Trust through execution. Trade builders, not hype."
