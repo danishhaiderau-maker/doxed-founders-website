@@ -7,7 +7,7 @@ import {
   createCryptoTopUpIntent,
   type CryptoTopUpIntent,
 } from '@/lib/api';
-import { formatUsd, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD } from '@dcf/utils';
+import { formatDdollar, formatUsd, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD } from '@dcf/utils';
 
 interface ModalShellProps {
   open: boolean;
@@ -148,14 +148,14 @@ export function BustPenaltyModal({
       <div className="text-3xl">💀</div>
       <h2 className="mt-3 text-lg font-bold">You went bust</h2>
       <p className="mt-3 text-sm leading-relaxed text-[var(--color-muted)]">
-        Cash below {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions). Pay the
-        restart penalty to restore {formatUsd(STARTING_CASH_USD, 0)} paper cash and keep trading.
+        Cash below {formatDdollar(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions). Pay the
+        restart penalty to restore {formatDdollar(STARTING_CASH_USD, 0)} and keep trading.
       </p>
       <div className="mt-4 rounded-lg border border-red-500/30 bg-red-950/30 px-4 py-3 text-center">
         <p className="text-xs uppercase tracking-widest text-red-300">Restart penalty</p>
         <p className="mt-1 text-2xl font-bold text-white">{formatUsd(resetFeeUsd, 0)}</p>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
-          → fresh {formatUsd(STARTING_CASH_USD, 0)} paper cash
+          → fresh {formatDdollar(STARTING_CASH_USD, 0)}
         </p>
       </div>
 

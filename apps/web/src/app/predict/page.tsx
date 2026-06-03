@@ -3,7 +3,16 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { formatUsd, PREDICTION_MARKET_HOURS, TOP_UP_FEE_USD, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD, buildSiteUrl, buildPredictionShareMessage } from '@dcf/utils';
+import {
+  formatDdollar,
+  formatUsd,
+  PREDICTION_MARKET_HOURS,
+  TOP_UP_FEE_USD,
+  RESTRICTED_CASH_THRESHOLD_USD,
+  STARTING_CASH_USD,
+  buildSiteUrl,
+  buildPredictionShareMessage,
+} from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import { heatBadgeClass } from '@/components/engagement-flash-layer';
@@ -97,7 +106,7 @@ export default function PredictPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Predict the future</h1>
             <p className="text-sm text-zinc-500">
-              Stake paper dollars on YES/NO — winners split the pool after {PREDICTION_MARKET_HOURS}h
+              Stake Ddollar on YES/NO — winners split the pool after {PREDICTION_MARKET_HOURS}h
             </p>
           </div>
           <SiteNav />
@@ -106,12 +115,12 @@ export default function PredictPage() {
 
       <div className="mx-auto max-w-5xl space-y-8 px-6 py-8">
         <section className="rounded-xl border border-indigo-500/30 bg-indigo-950/15 p-5 text-sm text-indigo-100">
-          <p className="font-medium">Gamified paper-money markets</p>
+          <p className="font-medium">Gamified Ddollar prediction markets</p>
           <ul className="mt-2 list-inside list-disc space-y-1 text-indigo-200/90">
-            <li>Stake virtual cash from your paper trading portfolio (min $10)</li>
+            <li>Stake Ddollar from your paper trading desk (min {formatDdollar(10, 0)})</li>
             <li>
-              Below ${RESTRICTED_CASH_THRESHOLD_USD.toLocaleString()}? Top up for ${TOP_UP_FEE_USD} real →
-              ${STARTING_CASH_USD.toLocaleString()} paper — or earn points via comments &amp; research
+              Below {formatDdollar(RESTRICTED_CASH_THRESHOLD_USD, 0)}? Top up for {formatUsd(TOP_UP_FEE_USD, 0)} USDC →
+              {formatDdollar(STARTING_CASH_USD, 0)} — or earn Ddollar via comments &amp; research
             </li>
             <li>When the window closes, the side with more stake wins and splits the full pool fairly</li>
             <li>
@@ -224,13 +233,13 @@ export default function PredictPage() {
                   <div className="mt-3 flex flex-wrap gap-4 text-sm">
                     <span className="text-emerald-300">{m.conviction}% YES conviction</span>
                     <span className="text-zinc-400">
-                      Pool {formatUsd(m.totalPoolUsd ?? m.yesPoolUsd + m.noPoolUsd, 0)} ({formatUsd(m.yesPoolUsd, 0)} YES /{' '}
-                      {formatUsd(m.noPoolUsd, 0)} NO)
+                      Pool {formatDdollar(m.totalPoolUsd ?? m.yesPoolUsd + m.noPoolUsd, 0)} ({formatDdollar(m.yesPoolUsd, 0)} YES /{' '}
+                      {formatDdollar(m.noPoolUsd, 0)} NO)
                     </span>
                     <span className="text-zinc-600">{m.participantCount} traders</span>
                     {m.viewerPosition && (
                       <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-xs text-violet-200">
-                        You: {formatUsd(m.viewerPosition.amountUsd, 0)} {m.viewerPosition.side}
+                        You: {formatDdollar(m.viewerPosition.amountUsd, 0)} {m.viewerPosition.side}
                       </span>
                     )}
                   </div>

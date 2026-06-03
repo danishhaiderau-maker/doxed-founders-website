@@ -11,9 +11,9 @@ export default function DdollarPage() {
         <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">DDollar</h1>
+            <h1 className="mt-1 text-2xl font-bold">Ddollar</h1>
             <p className="text-sm text-zinc-500">
-              Earn by validating listings · Spend on agents and trading
+              In-game currency — earn by contributing · spend on agents and paper trading
             </p>
           </div>
           <SiteNav />
@@ -22,7 +22,7 @@ export default function DdollarPage() {
 
       <div className="mx-auto max-w-4xl px-6 py-8">
         <p className="mb-6 text-sm text-zinc-500">
-          DDollar powers paper trading, agent rentals, scout voting, and platform rewards.{' '}
+          Ddollar powers paper trading, agent rentals, scout voting, and platform rewards.{' '}
           <Link href="/leaderboard" className="text-emerald-400 hover:underline">
             Leaderboard →
           </Link>

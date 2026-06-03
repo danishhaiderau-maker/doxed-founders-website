@@ -11,7 +11,16 @@ import { BustPenaltyModal } from '@/components/trade-modals';
 import { TradeAccountabilityModal } from '@/components/trade-accountability-modal';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio, SharePosition } from '@/components/share-portfolio';
-import { formatUsd, formatPercent, formatPublicAccountLabel, formatTokenPrice, RESTRICTED_CASH_THRESHOLD_USD, STARTING_CASH_USD, TOP_UP_FEE_USD } from '@dcf/utils';
+import {
+  formatDdollar,
+  formatUsd,
+  formatPercent,
+  formatPublicAccountLabel,
+  formatTokenPrice,
+  RESTRICTED_CASH_THRESHOLD_USD,
+  STARTING_CASH_USD,
+  TOP_UP_FEE_USD,
+} from '@dcf/utils';
 import { AccountWelcome } from '@/components/account-welcome';
 import {
   cancelPaperLimitOrder,
@@ -313,8 +322,8 @@ function PaperTradingPageContent() {
       });
       const pnlLabel =
         result.realizedPnlUsd >= 0
-          ? `+${formatUsd(result.realizedPnlUsd)}`
-          : formatUsd(result.realizedPnlUsd);
+          ? `+${formatDdollar(result.realizedPnlUsd)}`
+          : formatDdollar(result.realizedPnlUsd);
       const investedUsd = pos.quantity * pos.avgBuyPrice;
       if (result.missedAlpha) {
         setCloseShare({
@@ -330,7 +339,7 @@ function PaperTradingPageContent() {
       } else {
         setCloseShare(null);
         setToast(
-          `Closed ${result.ticker} · proceeds ${formatUsd(result.proceedsUsd)} · realized P&L ${pnlLabel}`,
+          `Closed ${result.ticker} · proceeds ${formatDdollar(result.proceedsUsd)} · realized P&L ${pnlLabel}`,
         );
       }
       setLastFeedPostId(result.feedPostId);
@@ -355,7 +364,7 @@ function PaperTradingPageContent() {
         comment: `Swap ${swapFrom.ticker}`,
       });
       setToast(
-        `Swapped ${result.sell.ticker} → ${result.buy.ticker} · ${formatUsd(result.buy.amountUsd)} bought`,
+        `Swapped ${result.sell.ticker} → ${result.buy.ticker} · ${formatDdollar(result.buy.amountUsd)} bought`,
       );
       setSwapFrom(null);
       setSwapTargetUrl('');
@@ -435,8 +444,8 @@ function PaperTradingPageContent() {
       if (side === 'SELL' && result.realizedPnlUsd != null) {
         const pnlLabel =
           result.realizedPnlUsd >= 0
-            ? `+${formatUsd(result.realizedPnlUsd)}`
-            : formatUsd(result.realizedPnlUsd);
+            ? `+${formatDdollar(result.realizedPnlUsd)}`
+            : formatDdollar(result.realizedPnlUsd);
         setToast(`Sold ${result.ticker} · realized P&L ${pnlLabel}`);
       }
       setTradeComment('');
@@ -592,11 +601,11 @@ function PaperTradingPageContent() {
           <div className="flex flex-wrap items-center gap-4">
             {portfolio && (
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <StatPill label="Cash" value={formatUsd(portfolio.cashBalance)} />
-                <StatPill label="Portfolio" value={formatUsd(portfolio.totalValue)} />
+                <StatPill label="Cash (Ddollar)" value={formatDdollar(portfolio.cashBalance)} />
+                <StatPill label="Portfolio (Ddollar)" value={formatDdollar(portfolio.totalValue)} />
                 <StatPill
-                  label="P&amp;L"
-                  value={formatUsd(portfolio.pnl)}
+                  label="P&amp;L (Ddollar)"
+                  value={formatDdollar(portfolio.pnl)}
                   accent={portfolio.pnl >= 0 ? 'green' : 'red'}
                 />
                 <StatPill
@@ -860,7 +869,7 @@ function PaperTradingPageContent() {
                           <option value="">Select position…</option>
                           {portfolio.positions.map((p) => (
                             <option key={p.projectId} value={p.projectId}>
-                              {p.ticker} · {formatUsd(p.marketValue)}
+                              {p.ticker} · {formatDdollar(p.marketValue)}
                             </option>
                           ))}
                         </select>
@@ -935,16 +944,16 @@ function PaperTradingPageContent() {
             <div className="rounded-xl border border-red-500/40 bg-red-950/20 p-4 text-sm">
               <p className="font-medium text-red-200">💀 Portfolio wiped</p>
               <p className="mt-2 text-[var(--color-muted)]">
-                Cash below {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions).
-                Top up for {formatUsd(TOP_UP_FEE_USD, 0)} USDC to restore {formatUsd(STARTING_CASH_USD, 0)}{' '}
-                paper cash.
+                Cash below {formatDdollar(RESTRICTED_CASH_THRESHOLD_USD, 0)} (with or without open positions).
+                Top up for {formatUsd(TOP_UP_FEE_USD, 0)} USDC to restore {formatDdollar(STARTING_CASH_USD, 0)}{' '}
+                Ddollar balance.
               </p>
               <button
                 type="button"
                 onClick={() => setShowBustModal(true)}
                 className="mt-3 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
               >
-                Top up $25 &amp; continue
+                Top up {formatUsd(TOP_UP_FEE_USD, 0)} USDC &amp; continue
               </button>
             </div>
           )}
@@ -976,7 +985,7 @@ function PaperTradingPageContent() {
                       )}
                       <p className="text-xs text-[var(--color-muted)]">{pos.name}</p>
                     </div>
-                    <span className="font-medium">{formatUsd(pos.marketValue)}</span>
+                    <span className="font-medium">{formatDdollar(pos.marketValue)}</span>
                   </div>
                   <p className="mt-2 text-xs text-[var(--color-muted)]">
                     {pos.quantity.toFixed(4)} tokens @ {formatTokenPrice(pos.avgBuyPrice)}
@@ -988,7 +997,7 @@ function PaperTradingPageContent() {
                         pos.pnl >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'
                       }
                     >
-                      {formatUsd(pos.pnl)} ({formatPercent(pos.pnlPercent)})
+                      {formatDdollar(pos.pnl)} ({formatPercent(pos.pnlPercent)})
                     </span>
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
@@ -1073,7 +1082,7 @@ function PaperTradingPageContent() {
                     className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--color-background)] px-3 py-2"
                   >
                     <span>
-                      {trade.side} {trade.ticker} · {formatUsd(trade.totalUsd)}
+                      {trade.side} {trade.ticker} · {formatDdollar(trade.totalUsd)}
                     </span>
                     {trade.realizedPnlUsd != null && (
                       <span
@@ -1084,7 +1093,7 @@ function PaperTradingPageContent() {
                         }
                       >
                         Realized {trade.realizedPnlUsd >= 0 ? '+' : ''}
-                        {formatUsd(trade.realizedPnlUsd)}
+                        {formatDdollar(trade.realizedPnlUsd)}
                       </span>
                     )}
                   </li>

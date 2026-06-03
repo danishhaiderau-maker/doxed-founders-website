@@ -5,6 +5,7 @@ import type { DexScreenerPreview } from '@/lib/api';
 import {
   computeTokenRiskScore,
   formatTokenPrice,
+  formatDdollar,
   formatUsd,
   riskScoreColor,
   RESTRICTED_CASH_THRESHOLD_USD,
@@ -312,8 +313,8 @@ export function TradeAccountabilityModal({
                 value={estTokens > 0 ? `${estTokens.toLocaleString()} ${preview.ticker}` : '—'}
               />
               <TradeCell label="Slippage" value={`${slippagePct}%`} />
-              <TradeCell label="Network fee" value={`~${formatUsd(networkFee)}`} />
-              <TradeCell label="Total" value={`~${formatUsd(totalCost)}`} accent />
+              <TradeCell label="Network fee" value={`~${formatDdollar(networkFee)}`} />
+              <TradeCell label="Total" value={`~${formatDdollar(totalCost)}`} accent />
             </div>
           </div>
 
@@ -321,10 +322,10 @@ export function TradeAccountabilityModal({
           <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3.5">
             <p className="text-sm font-semibold text-amber-200">Account Risk Notice</p>
             <p className="mt-1.5 text-xs leading-relaxed text-amber-100/80">
-              Current balance: {formatUsd(cashBalance)} · After trade: ~{formatUsd(Math.max(0, balanceAfter))}.
-              If your account goes bust (cash near {formatUsd(RESTRICTED_CASH_THRESHOLD_USD, 0)} with or
+              Current balance: {formatDdollar(cashBalance)} · After trade: ~{formatDdollar(Math.max(0, balanceAfter))}.
+              If your account goes bust (cash near {formatDdollar(RESTRICTED_CASH_THRESHOLD_USD, 0)} with or
               without open positions), you may need to pay a {formatUsd(resetFeeUsd, 0)} USDC reset fee for
-              fresh {formatUsd(STARTING_CASH_USD, 0)} paper cash. This encourages responsible risk
+              fresh {formatDdollar(STARTING_CASH_USD, 0)}. This encourages responsible risk
               management.
             </p>
           </div>
