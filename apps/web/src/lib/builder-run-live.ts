@@ -11,6 +11,14 @@ export type BuilderRunSnapshot = {
   } | null;
 };
 
+export type OpenHandsRunSnapshot = {
+  conversationId: string;
+  status: string;
+  result?: string | null;
+  terminal?: boolean;
+  conversationUrl?: string | null;
+};
+
 export function formatBuilderRunInChat(input: {
   workerLabel: string;
   task: string;
@@ -48,10 +56,40 @@ export function formatBuilderRunInChat(input: {
       '',
       snapshot.status === 'FINISHED'
         ? '_Run finished — review the branch/PR, commit from GitHub, then publish from Founder OS._'
-        : '_Run ended — check details below or open Cursor for the full session._',
+        : '_Run ended — details below._',
     );
   } else {
     lines.push('', '_Updating live in Mission Control…_');
+  }
+
+  return lines.join('\n');
+}
+
+export function formatOpenHandsRunInChat(input: {
+  workerLabel: string;
+  task: string;
+  repo?: string | null;
+  snapshot: OpenHandsRunSnapshot;
+}): string {
+  const { workerLabel, task, repo, snapshot } = input;
+  const lines: string[] = [
+    `**${workerLabel}** · coding on your repo`,
+    repo ? `Repository: \`${repo}\`` : '',
+    '',
+    `**Your task**`,
+    task.trim().slice(0, 1200),
+    '',
+    `**Status:** ${snapshot.status}`,
+  ].filter(Boolean);
+
+  if (snapshot.result?.trim()) {
+    lines.push('', '**Agent output**', snapshot.result.trim().slice(0, 4000));
+  }
+
+  if (snapshot.terminal) {
+    lines.push('', '_OpenHands run finished — review output above._');
+  } else {
+    lines.push('', '_Streaming OpenHands output here…_');
   }
 
   return lines.join('\n');
@@ -63,6 +101,24 @@ export function isBuilderRunTerminal(status: string): boolean {
   return CURSOR_TERMINAL_STATUSES.has(status.toUpperCase());
 }
 
+export async function pollRunInChat<T extends { terminal?: boolean; status: string }>(
+  fetchSnapshot: () => Promise<T>,
+  onUpdate: (snapshot: T) => void,
+  isTerminal: (status: string, snap: T) => boolean,
+  maxAttempts = 45,
+  intervalMs = 2500,
+): Promise<T> {
+  let last = await fetchSnapshot();
+  onUpdate(last);
+  for (let i = 0; i < maxAttempts; i++) {
+    if (last.terminal ?? isTerminal(last.status, last)) break;
+    await new Promise((r) => setTimeout(r, intervalMs));
+    last = await fetchSnapshot();
+    onUpdate(last);
+  }
+  return last;
+}
+
 export async function pollCursorRunInChat(
   agentId: string,
   runId: string,
@@ -72,12 +128,28 @@ export async function pollCursorRunInChat(
   maxAttempts = 45,
   intervalMs = 2500,
 ): Promise<BuilderRunSnapshot> {
-  let last: BuilderRunSnapshot = { id: runId, agentId, status: 'CREATING' };
-  for (let i = 0; i < maxAttempts; i++) {
-    last = await fetchRun(agentId, runId, token);
-    onUpdate(last);
-    if (last.terminal ?? isBuilderRunTerminal(last.status)) break;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return last;
+  return pollRunInChat(
+    () => fetchRun(agentId, runId, token),
+    onUpdate,
+    (status) => isBuilderRunTerminal(status),
+    maxAttempts,
+    intervalMs,
+  );
+}
+
+export async function pollOpenHandsRunInChat(
+  conversationId: string,
+  token: string,
+  fetchRun: (conversationId: string, token: string) => Promise<OpenHandsRunSnapshot>,
+  onUpdate: (snapshot: OpenHandsRunSnapshot) => void,
+  maxAttempts = 40,
+  intervalMs = 3000,
+): Promise<OpenHandsRunSnapshot> {
+  return pollRunInChat(
+    () => fetchRun(conversationId, token),
+    onUpdate,
+    (status, snap) => Boolean(snap.terminal) || ['COMPLETED', 'FINISHED', 'ERROR', 'FAILED', 'CANCELLED', 'STOPPED', 'DONE'].includes(status.toUpperCase()),
+    maxAttempts,
+    intervalMs,
+  );
 }

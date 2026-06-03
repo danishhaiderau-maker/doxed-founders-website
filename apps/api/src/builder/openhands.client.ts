@@ -139,4 +139,106 @@ async function dispatchV0(root: string, input: OpenHandsDispatchInput): Promise<
   };
 }
 
+export type OpenHandsRunSnapshot = {
+  conversationId: string;
+  status: string;
+  result?: string | null;
+  terminal?: boolean;
+  conversationUrl?: string | null;
+};
+
+const OPENHANDS_TERMINAL = new Set([
+  'COMPLETED',
+  'FINISHED',
+  'ERROR',
+  'FAILED',
+  'CANCELLED',
+  'STOPPED',
+  'DONE',
+]);
+
+export function isOpenHandsRunTerminal(status: string): boolean {
+  return OPENHANDS_TERMINAL.has(status.toUpperCase());
+}
+
+function extractTextFromEvents(items: unknown[]): string {
+  const parts: string[] = [];
+  for (const raw of items) {
+    if (!raw || typeof raw !== 'object') continue;
+    const ev = raw as Record<string, unknown>;
+    const kind = String(ev.kind ?? '');
+    if (kind === 'MessageEvent') {
+      const msg = ev.message ?? ev.content;
+      if (typeof msg === 'string' && msg.trim()) parts.push(msg.trim());
+      else if (Array.isArray(msg)) {
+        for (const c of msg) {
+          if (c && typeof c === 'object' && (c as { type?: string }).type === 'text') {
+            const t = (c as { text?: string }).text;
+            if (t?.trim()) parts.push(t.trim());
+          }
+        }
+      }
+    }
+    if (kind === 'ObservationEvent' && ev.observation && typeof ev.observation === 'object') {
+      const obs = ev.observation as Record<string, unknown>;
+      if (typeof obs.content === 'string' && obs.content.trim()) parts.push(obs.content.trim());
+      else if (typeof obs.text === 'string' && obs.text.trim()) parts.push(obs.text.trim());
+    }
+  }
+  return parts.slice(-12).join('\n\n');
+}
+
+export async function fetchOpenHandsConversationSnapshot(
+  baseUrl: string,
+  apiKey: string,
+  conversationId: string,
+  apiVersion: 'v1' | 'v0' = 'v1',
+  conversationUrl?: string | null,
+): Promise<OpenHandsRunSnapshot> {
+  const root = normalizeOpenHandsBaseUrl(baseUrl);
+  let status = 'WORKING';
+  let items: unknown[] = [];
+
+  if (apiVersion === 'v1') {
+    const convRes = await fetch(
+      `${root}/api/v1/app-conversations?ids=${encodeURIComponent(conversationId)}`,
+      { headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } },
+    );
+    if (convRes.ok) {
+      const convData = (await convRes.json()) as {
+        items?: { status?: string }[];
+      };
+      status = convData.items?.[0]?.status ?? status;
+    }
+    const evRes = await fetch(
+      `${root}/api/v1/conversation/${encodeURIComponent(conversationId)}/events/search?limit=60&sort_order=TIMESTAMP_DESC`,
+      { headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } },
+    );
+    if (evRes.ok) {
+      const evData = (await evRes.json()) as { items?: unknown[] };
+      items = [...(evData.items ?? [])].reverse();
+    }
+  } else {
+    const evRes = await fetch(
+      `${root}/api/conversations/${encodeURIComponent(conversationId)}/events?limit=60`,
+      { headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } },
+    );
+    if (evRes.ok) {
+      const evData = (await evRes.json()) as { events?: unknown[] };
+      items = evData.events ?? [];
+    }
+  }
+
+  const result = extractTextFromEvents(items);
+  const terminal = isOpenHandsRunTerminal(status);
+
+  return {
+    conversationId,
+    status,
+    result: result || null,
+    terminal,
+    conversationUrl: conversationUrl ?? buildOpenHandsConversationUrl(root, conversationId),
+  };
+}
+
 export type { OpenHandsCredentialMeta };

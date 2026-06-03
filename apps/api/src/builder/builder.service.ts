@@ -30,6 +30,8 @@ import {
 import {
   OpenHandsCredentialMeta,
   dispatchOpenHandsTask,
+  fetchOpenHandsConversationSnapshot,
+  isOpenHandsRunTerminal,
   verifyOpenHandsConnection,
 } from './openhands.client';
 import {
@@ -523,6 +525,29 @@ export class BuilderService {
     return resolveBuildWorker(connections);
   }
 
+  async getOpenHandsRunSnapshot(userId: string, conversationId: string) {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'openhands' } },
+    });
+    if (!cred?.token) {
+      throw new BadRequestException('Connect OpenHands in AI Stack first');
+    }
+    const meta = cred.metadata as OpenHandsCredentialMeta | null;
+    if (!meta?.baseUrl) throw new BadRequestException('OpenHands base URL missing — reconnect');
+    const apiKey = this.crypto.decrypt(cred.token);
+    if (!apiKey) throw new BadRequestException('OpenHands API key invalid — reconnect');
+    const snap = await fetchOpenHandsConversationSnapshot(
+      meta.baseUrl,
+      apiKey,
+      conversationId,
+      meta.apiVersion ?? 'v1',
+    );
+    return {
+      ...snap,
+      terminal: snap.terminal ?? isOpenHandsRunTerminal(snap.status),
+    };
+  }
+
   async getCursorRunSnapshot(userId: string, agentId: string, runId: string) {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'cursor' } },
@@ -585,6 +610,8 @@ export class BuilderService {
           worker,
           status: 'dispatched' as const,
           agentUrl: result.conversationUrl,
+          conversationId: result.conversationId,
+          openHandsApiVersion: result.apiVersion,
           openHands: result,
         };
       } catch (err) {

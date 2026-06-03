@@ -3287,10 +3287,23 @@ export function executeBuildTask(
     agentUrl?: string | null;
     agentId?: string;
     runId?: string;
+    conversationId?: string;
+    openHandsApiVersion?: 'v1' | 'v0';
     mode?: 'create' | 'follow_up';
     message?: string;
     error?: string;
+    openHands?: { conversationId?: string | null; apiVersion?: 'v1' | 'v0' };
   }>('/builder/execute-task', { method: 'POST', body: JSON.stringify(data) }, token);
+}
+
+export function fetchBuilderOpenHandsRun(conversationId: string, token: string) {
+  return apiFetch<{
+    conversationId: string;
+    status: string;
+    result?: string | null;
+    terminal: boolean;
+    conversationUrl?: string | null;
+  }>(`/builder/openhands/runs/${encodeURIComponent(conversationId)}`, undefined, token);
 }
 
 export function fetchBuilderCursorRun(agentId: string, runId: string, token: string) {

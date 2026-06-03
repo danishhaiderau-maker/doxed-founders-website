@@ -113,14 +113,15 @@ export function resolveCopilotStack(
 }
 
 export function formatMessageProviderLabel(provider?: string, routedAgent?: string): string {
-  if (routedAgent) return `${routedAgent} · workforce`;
+  if (routedAgent) return `${routedAgent} · streamed inline`;
   if (!provider) return 'Copilot';
-  if (provider === 'BUILDER') return 'Builder agent · codes in repo';
-  if (provider === 'CURSOR') return 'Cursor · codes in repo';
-  if (provider === 'RULE_BASED') return 'Project memory';
+  if (provider === 'BUILDER') return 'Builder agent · streamed in chat';
+  if (provider === 'CURSOR') return 'Cursor · streamed in chat';
+  if (provider === 'OPENHANDS') return 'OpenHands · streamed in chat';
+  if (provider === 'RULE_BASED') return 'Project memory · streamed inline';
   if (provider === 'FOUNDER_OS') return 'Founder OS · autopilot';
-  if (provider.startsWith('WORKER:')) return provider.replace('WORKER:', '') + ' · tasks';
-  return `${shortProviderName({ key: provider, label: provider })} · answers here`;
+  if (provider.startsWith('WORKER:')) return provider.replace('WORKER:', '') + ' · streamed inline';
+  return `${shortProviderName({ key: provider, label: provider })} · streamed inline`;
 }
 
 export type CopilotSendMode = 'ask' | 'build';
