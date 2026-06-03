@@ -50,8 +50,11 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         setPairingCode(null);
         setExpiresAt(null);
         setShowNewPairing(false);
+        const online = list.some((n) => n.status === 'online');
         setMsg(
-          'Vault paired successfully. You do not need a new code — Founder Node stays linked until you disconnect.',
+          online
+            ? 'Vault connected on your desktop. The pairing code stays hidden until you disconnect or pair another device.'
+            : 'Account linked in the cloud, but your PC is not heartbeating. Use Pair another desktop device below, generate a new code, and enter it in the Founder Node tray app (old tokens stop working after re-pair or 401).',
         );
       }
       setErr(null);
@@ -257,7 +260,15 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         </div>
       )}
 
-      {msg && <p className="mt-3 text-xs text-emerald-300">{msg}</p>}
+      {msg && (
+        <p
+          className={`mt-3 text-xs ${
+            isPaired && !anyOnline && !showNewPairing ? 'text-amber-200' : 'text-emerald-300'
+          }`}
+        >
+          {msg}
+        </p>
+      )}
       {err && <p className="mt-3 text-xs text-red-300">{err}</p>}
     </div>
   );
