@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+feat(founder-os): Ask/Build UX, voice mic ready state, and AI Team strip
 
 ## Last Activity
 
