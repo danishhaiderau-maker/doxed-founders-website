@@ -46,6 +46,34 @@ const PROFILE_LINKS = [
   { href: '/account?tab=activity', label: 'Activity History' },
 ] as const;
 
+/** Shown only for platform admins (profile menu). */
+const ADMIN_PROFILE_LINKS = [
+  { href: '/admin/control', label: 'Admin Control' },
+  { href: '/admin/applications', label: 'Listing inbox' },
+] as const;
+
+function AdminProfileLinks({ onNavigate }: { onNavigate: () => void }) {
+  return (
+    <>
+      {ADMIN_PROFILE_LINKS.map((item, index) => (
+        <Link
+          key={item.href}
+          href={item.href}
+          onClick={onNavigate}
+          className={cn(
+            'block px-3 py-2 text-sm transition hover:bg-zinc-900',
+            index === 0
+              ? 'border-t border-zinc-800 font-semibold text-amber-300/95'
+              : 'text-amber-300/90',
+          )}
+        >
+          {item.label}
+        </Link>
+      ))}
+    </>
+  );
+}
+
 function navActive(pathname: string, href: string) {
   if (href === '/discover') return pathname === '/discover';
   if (href === '/feed') return pathname === '/feed' || pathname === '/build-feed' || pathname.startsWith('/town-hall');
@@ -277,31 +305,7 @@ function SiteNavInner() {
                     {item.label}
                   </Link>
                 ))}
-                {isAdmin && (
-                  <>
-                    <Link
-                      href="/admin/control"
-                      onClick={() => setProfileOpen(false)}
-                      className="block border-t border-zinc-800 px-3 py-2 text-sm font-semibold text-amber-300/95 transition hover:bg-zinc-900"
-                    >
-                      Admin Control
-                    </Link>
-                    <Link
-                      href="/admin/applications"
-                      onClick={() => setProfileOpen(false)}
-                      className="block px-3 py-2 text-sm text-amber-300/90 transition hover:bg-zinc-900"
-                    >
-                      Listing inbox
-                    </Link>
-                    <Link
-                      href="/admin/platform"
-                      onClick={() => setProfileOpen(false)}
-                      className="block px-3 py-2 text-sm text-amber-300/90 transition hover:bg-zinc-900"
-                    >
-                      Treasury & top-ups
-                    </Link>
-                  </>
-                )}
+                {isAdmin && <AdminProfileLinks onNavigate={() => setProfileOpen(false)} />}
                 <button
                   type="button"
                   onClick={() => signOut({ callbackUrl: '/' })}
@@ -394,15 +398,7 @@ function HubMinimalNav({
                     {item.label}
                   </Link>
                 ))}
-                {isAdmin && (
-                  <Link
-                    href="/admin/control"
-                    onClick={() => setProfileOpen(false)}
-                    className="block border-t border-zinc-800 px-3 py-2 text-sm font-semibold text-amber-300/95 transition hover:bg-zinc-900"
-                  >
-                    Admin Control
-                  </Link>
-                )}
+                {isAdmin && <AdminProfileLinks onNavigate={() => setProfileOpen(false)} />}
                 <button
                   type="button"
                   onClick={() => signOut({ callbackUrl: '/' })}
