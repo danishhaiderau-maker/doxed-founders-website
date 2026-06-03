@@ -1,9 +1,21 @@
 export const CURSOR_CLOUD_API_BASE = 'https://api.cursor.com';
 
+/** Fallback when GitHub default branch cannot be resolved (this monorepo uses master). */
+export const CURSOR_FALLBACK_STARTING_REF = 'master';
+
+export function resolveCursorStartingRef(branch?: string | null): string {
+  const trimmed = branch?.trim();
+  if (trimmed) return trimmed;
+  const fromEnv =
+    typeof process !== 'undefined' ? process.env.CURSOR_DEFAULT_BRANCH?.trim() : undefined;
+  return fromEnv || CURSOR_FALLBACK_STARTING_REF;
+}
+
 export type CursorCloudDispatchInput = {
   apiKey: string;
   taskPrompt: string;
   repository?: string;
+  startingRef?: string;
   agentId?: string | null;
   agentRepoUrl?: string | null;
 };

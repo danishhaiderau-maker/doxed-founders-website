@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { signIn } from 'next-auth/react';
+import { signIn, signOut } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { getIntegrationConnectGuide } from '@dcf/utils';
 import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
@@ -9,6 +9,7 @@ import {
   connectGitHubRepo,
   connectIntegration,
   disconnectIntegration,
+  fetchBuilderSettings,
   fetchCopilotMemory,
   fetchFounderOsDashboard,
   fetchIntegrationProviders,
@@ -42,22 +43,59 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
 
   const load = useCallback(async () => {
     setErr(null);
-    try {
-      const [dash, memory, prov, x] = await Promise.all([
-        fetchFounderOsDashboard(accessToken),
-        fetchCopilotMemory(accessToken).catch(() => null),
-        fetchIntegrationProviders(),
-        fetchXConnectionStatus(accessToken).catch(() => null),
-      ]);
-      setData(dash);
-      setProviders(prov);
-      setXStatus(x);
-      const repo = memory?.repoFullName ?? null;
-      setLinkedRepo(repo);
-      if (repo) setRepoInput(repo);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Failed to load connected accounts');
+    const [dashResult, memory, prov, x] = await Promise.all([
+      fetchFounderOsDashboard(accessToken)
+        .then((value) => ({ ok: true as const, value }))
+        .catch((e: unknown) => ({ ok: false as const, error: e })),
+      fetchCopilotMemory(accessToken).catch(() => null),
+      fetchIntegrationProviders(),
+      fetchXConnectionStatus(accessToken).catch(() => null),
+    ]);
+
+    setProviders(prov);
+    setXStatus(x);
+    const repo = memory?.repoFullName ?? null;
+    setLinkedRepo(repo);
+    if (repo) setRepoInput(repo);
+
+    if (dashResult.ok) {
+      setData(dashResult.value);
+      return;
     }
+
+    const builder = await fetchBuilderSettings(accessToken).catch(() => null);
+    if (builder) {
+      const credentialKeys = new Set(
+        builder.providers.filter((p) => p.connected && p.credentialProvider).map((p) => p.credentialProvider!),
+      );
+      setData({
+        founderCredits: 0,
+        communityRewardPool: 0,
+        primaryProject: null,
+        connectedApps: prov.map((p) => ({
+          provider: p.key,
+          label: p.label,
+          connected:
+            p.key === 'github'
+              ? Boolean(repo)
+              : p.key === 'cursor'
+                ? credentialKeys.has('cursor')
+                : credentialKeys.has(p.key),
+          reputationBoost: p.reputationBoost,
+          billTip: p.billTip,
+          accountName: null,
+          webhookUrl: null,
+        })),
+        pendingSuggestions: [],
+        openBounties: [],
+      });
+    }
+
+    const message =
+      dashResult.error instanceof Error
+        ? dashResult.error.message
+        : 'Failed to load connected accounts';
+    setErr(message);
   }, [accessToken]);
 
   useEffect(() => {
@@ -169,7 +207,18 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         </p>
       )}
       {err && (
-        <p className="rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-2 text-sm text-red-300">{err}</p>
+        <div className="rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-2 text-sm text-red-300">
+          <p>{err}</p>
+          {err.includes('session expired') && (
+            <button
+              type="button"
+              onClick={() => signOut({ callbackUrl: '/login?callbackUrl=/account?tab=connected' })}
+              className="mt-2 font-semibold text-red-100 underline hover:text-white"
+            >
+              Sign out and sign in again
+            </button>
+          )}
+        </div>
       )}
 
       <ul className="space-y-3">

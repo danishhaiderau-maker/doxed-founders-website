@@ -57,6 +57,19 @@ export class GitHubApiService {
     return conn?.repoFullName ?? founderRepo ?? projectRepo ?? null;
   }
 
+  /** Resolves GitHub default branch (e.g. master vs main) for Cursor Cloud agent dispatch. */
+  async getDefaultBranch(userId: string, repo: string): Promise<string> {
+    const token = await this.getToken(userId);
+    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: this.headers(token),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { default_branch?: string };
+      if (data.default_branch?.trim()) return data.default_branch.trim();
+    }
+    return process.env.CURSOR_DEFAULT_BRANCH?.trim() || 'master';
+  }
+
   async listCommits(userId: string, repo: string, perPage = 10): Promise<GitHubCommit[]> {
     const token = await this.getToken(userId);
     const res = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=${perPage}`, {
