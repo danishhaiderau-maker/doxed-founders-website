@@ -174,7 +174,7 @@ export class ListingApplicationsService {
   }
 
   async findPending() {
-    return this.prisma.listingApplication.findMany({
+    const applications = await this.prisma.listingApplication.findMany({
       where: {
         status: { in: [ListingStatus.PENDING, ListingStatus.COMMUNITY_VOTING] },
       },
@@ -189,6 +189,13 @@ export class ListingApplicationsService {
         },
       },
     });
+
+    return Promise.all(
+      applications.map(async (app) => ({
+        ...app,
+        relistPreview: await this.publish.getRelistPreview(app),
+      })),
+    );
   }
 
   async findById(id: string) {
@@ -260,13 +267,22 @@ export class ListingApplicationsService {
       }
 
       await this.predictionMarkets.seedMarketsForProject(published.projectId, {
-        isNewListing: true,
+        isNewListing: !published.relisted,
       });
+
+      const relistNote =
+        published.relisted && (published.changedFieldCount ?? 0) > 0
+          ? ` ${published.changedFieldCount} field(s) updated on the live listing.`
+          : published.relisted
+            ? ' Listing refreshed with latest scout data.'
+            : '';
 
       await this.notifications.notifyAllUsers({
         type: NotificationType.LISTING_APPROVED,
-        title: `New listing: ${published.projectName}`,
-        body: `${published.projectName} (${merged.ticker}) is live — predict, paper trade, and scout the founder.`,
+        title: published.relisted
+          ? `Listing updated: ${published.projectName}`
+          : `New listing: ${published.projectName}`,
+        body: `${published.projectName} (${merged.ticker}) is live — predict, paper trade, and scout the founder.${relistNote}`,
         link: `/project/${published.projectSlug}`,
       });
 
