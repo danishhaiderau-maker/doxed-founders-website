@@ -5,7 +5,7 @@ import { useSession } from 'next-auth/react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
 import { NotificationBell } from '@/components/notification-bell';
-import { LandingFeatureHub } from '@/components/landing/landing-feature-hub';
+import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/landing-feature-hub';
 import { LandingValueGrid } from '@/components/landing/landing-value-grid';
 import type { PlatformStats } from '@/lib/api';
 
@@ -268,11 +268,14 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Link>
       </section>
 
-      {/* Navigation hub — full 3-row table directly under CTAs */}
-      <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />
+      {/* Navigation hub — 3-row table directly under CTAs */}
+      <LandingHubNavTable scoutPending={pendingReviews} />
 
-      {/* Value grid (4 panels) + fun fact with linked sources */}
+      {/* Value grid (4 panels) + fun fact — above Feed / preview widgets */}
       <LandingValueGrid />
+
+      {/* Feed · DDollar · Trust · Founder OS previews */}
+      <LandingHubPreviews scoutPending={pendingReviews} platformStats={stats} />
 
       {/* Row 3: Platform stats */}
       <section>
