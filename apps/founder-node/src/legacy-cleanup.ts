@@ -43,19 +43,31 @@ export function cleanupLegacyPortableInstallers(currentVersion: string): Cleanup
   const scanDirs = [
     path.join(os.homedir(), 'Downloads'),
     path.join(os.homedir(), 'Desktop'),
+    os.tmpdir(),
   ];
 
   for (const dir of scanDirs) {
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
       const match = EXE_PATTERN.exec(name);
-      if (!match) continue;
+      const isTempCopy = name === 'Founder Node.exe' && dir === os.tmpdir();
+      if (!match && !isTempCopy) continue;
 
-      const fileVersion = match[1];
+      const fileVersion = match?.[1] ?? currentVersion;
       const full = path.join(dir, name);
 
       if (runningPortable && path.resolve(runningPortable) === path.resolve(full)) {
         skipped.push(full);
+        continue;
+      }
+
+      if (isTempCopy) {
+        try {
+          fs.unlinkSync(full);
+          removed.push(full);
+        } catch {
+          skipped.push(full);
+        }
         continue;
       }
 

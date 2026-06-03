@@ -2,6 +2,8 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, Notification } fr
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { configureSharedElectronUserData } from './app-paths';
+import { enforceSingleFounderNodeInstance, releaseGlobalInstanceLock } from './single-instance';
 import {
   defaultVaultRoot,
   ensureVault,
@@ -38,10 +40,18 @@ const SYNC_INTERVAL_MS = 60_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 
-/** Prevent multiple tray instances (portable + installer + double-click). */
+configureSharedElectronUserData();
+
+/** Cross-path lock (portable + NSIS) then Electron single-instance. */
+if (!enforceSingleFounderNodeInstance()) {
+  app.quit();
+  process.exit(0);
+}
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
+  process.exit(0);
 }
 
 let tray: Tray | null = null;
@@ -409,4 +419,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   // Tray app — keep running in background
+});
+
+app.on('before-quit', () => {
+  if (syncTimer) clearInterval(syncTimer);
+  if (inferenceTimer) clearInterval(inferenceTimer);
+  if (syncJobTimer) clearInterval(syncJobTimer);
+  tray?.destroy();
+  tray = null;
+  releaseGlobalInstanceLock();
 });
