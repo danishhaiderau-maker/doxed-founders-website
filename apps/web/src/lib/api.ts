@@ -2883,7 +2883,15 @@ export interface HireAgentResult {
 
 export function hireTradingAgent(
   agentId: string,
-  body: { exchangeProvider: string; apiKey: string; apiSecret: string; testnet?: boolean },
+  body: {
+    exchangeProvider: string;
+    apiKey: string;
+    apiSecret: string;
+    testnet?: boolean;
+    aiMode?: 'platform' | 'own';
+    aiProvider?: string;
+    aiApiKey?: string;
+  },
   token: string,
 ) {
   return apiFetch<HireAgentResult>(`/trading-agents/${agentId}/hire`, {
@@ -2942,6 +2950,13 @@ export interface AdminControlOverview {
     aiProvider: string;
     aiLabel: string;
     note: string;
+    exchangeConfigured?: boolean;
+    aiConfigured?: boolean;
+    botPublicUrl?: string | null;
+    credentialsUpdatedAt?: string | null;
+    runtimePushedAt?: string | null;
+    botRuntimeNote?: string | null;
+    aiRuntimeNote?: string | null;
   };
   adapters?: {
     exchangeStatus: string;
@@ -2981,6 +2996,7 @@ export interface AdminControlOverview {
     runtimeHost: string | null;
     websocketStatus: unknown;
     deepSeekStatus: string;
+    railwayPushReady?: boolean;
   };
 }
 
@@ -3035,6 +3051,45 @@ export function updateShowcaseConfig(
   return apiFetch<AdminControlOverview>(
     '/admin-control/showcase-config',
     { method: 'PATCH', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function saveShowcaseCredentials(
+  body: {
+    exchangeProvider?: string;
+    aiProvider?: string;
+    exchangeApiKey?: string;
+    exchangeApiSecret?: string;
+    exchangePassphrase?: string;
+    testnet?: boolean;
+    aiApiKey?: string;
+    botPublicUrl?: string;
+  },
+  token: string,
+) {
+  return apiFetch<AdminControlOverview>(
+    '/admin-control/showcase-credentials',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function clearShowcaseCredentials(
+  target: 'exchange' | 'ai' | 'all',
+  token: string,
+) {
+  return apiFetch<AdminControlOverview>(
+    '/admin-control/showcase-credentials/clear',
+    { method: 'POST', body: JSON.stringify({ target }) },
+    token,
+  );
+}
+
+export function pushShowcaseRuntime(token: string) {
+  return apiFetch<{ ok: boolean; message: string; serviceName?: string; variablesSet?: string[] }>(
+    '/admin-control/showcase-runtime/push',
+    { method: 'POST' },
     token,
   );
 }

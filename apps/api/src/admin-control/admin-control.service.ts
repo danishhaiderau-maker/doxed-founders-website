@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ShowcaseRuntimeService } from './showcase-runtime.service';
 import {
   EXCHANGE_PROVIDER_LABELS,
   TRADING_AGENT_AI_PROVIDER_LABELS,
@@ -18,6 +19,7 @@ export class AdminControlService {
     private readonly prisma: PrismaService,
     private readonly botBridge: BotBridgeService,
     private readonly tradingAgents: TradingAgentsService,
+    private readonly showcaseRuntime: ShowcaseRuntimeService,
   ) {}
 
   async getShareFooter(): Promise<string> {
@@ -51,11 +53,12 @@ export class AdminControlService {
   }
 
   async getAgentControlOverview() {
-    const [bridge, agent, settings, botState] = await Promise.all([
+    const [bridge, agent, settings, botState, credentials] = await Promise.all([
       this.tradingAgents.getBotBridgeStatusAdmin(),
       this.prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } }),
       this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
       this.botBridge.fetchState(),
+      this.showcaseRuntime.getCredentialsStatus(),
     ]);
 
     const deepSeekConnected = Boolean(bridge.connected && bridge.deepSeekConnected);
@@ -78,11 +81,26 @@ export class AdminControlService {
         aiProvider,
         aiLabel: TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider] ?? aiProvider,
         note: 'Admin keys power the public showcase only — never user instances.',
+        exchangeConfigured: credentials.exchangeConfigured,
+        aiConfigured: credentials.aiConfigured,
+        botPublicUrl: credentials.botPublicUrl,
+        credentialsUpdatedAt: credentials.credentialsUpdatedAt,
+        runtimePushedAt: credentials.runtimePushedAt,
+        botRuntimeNote: credentials.botRuntimeNote,
+        aiRuntimeNote: credentials.aiRuntimeNote,
       },
       adapters: {
-        exchangeStatus: bridge.connected ? 'connected' : 'disconnected',
+        exchangeStatus: bridge.connected
+          ? 'connected'
+          : credentials.exchangeConfigured
+            ? 'configured (awaiting bridge)'
+            : 'disconnected',
         marketDataStatus: botState?.ws_ready || botState?.diag?.ws_status ? 'connected' : 'unknown',
-        aiStatus: deepSeekConnected ? 'connected' : 'unknown',
+        aiStatus: deepSeekConnected
+          ? 'connected'
+          : credentials.aiConfigured
+            ? 'configured (awaiting bridge)'
+            : 'unknown',
         simulationStatus: botState?.execution_paused
           ? 'paused'
           : bridge.connected
@@ -118,11 +136,19 @@ export class AdminControlService {
         lastFetchAt: bridge.lastFetchAt,
       },
       infrastructure: {
-        botConfigured: bridge.enabled,
+        botConfigured: bridge.enabled || Boolean(credentials.botPublicUrl),
         botReachable: bridge.connected,
-        runtimeHost: bridge.stateEndpoint,
+        runtimeHost: bridge.stateEndpoint ?? credentials.botPublicUrl,
         websocketStatus: bridge.wsHealth,
-        deepSeekStatus: deepSeekConnected ? 'connected' : 'unknown',
+        deepSeekStatus: deepSeekConnected
+          ? 'connected'
+          : credentials.aiConfigured
+            ? 'key saved'
+            : 'unknown',
+        railwayPushReady:
+          credentials.exchangeConfigured &&
+          credentials.aiConfigured &&
+          Boolean(credentials.botPublicUrl),
       },
     };
   }

@@ -5,11 +5,15 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { Public } from '../auth/public.decorator';
 import { AdminControlService } from './admin-control.service';
+import { ShowcaseRuntimeService } from './showcase-runtime.service';
 
 @SkipThrottle()
 @Controller('admin-control')
 export class AdminControlController {
-  constructor(private readonly adminControl: AdminControlService) {}
+  constructor(
+    private readonly adminControl: AdminControlService,
+    private readonly showcaseRuntime: ShowcaseRuntimeService,
+  ) {}
 
   @Public()
   @Get('share-footer')
@@ -66,5 +70,49 @@ export class AdminControlController {
     @Body() body: { exchangeProvider?: string; aiProvider?: string },
   ) {
     return this.adminControl.updateShowcaseConfig(user.id, body);
+  }
+
+  @UseGuards(AdminGuard)
+  @Get('showcase-credentials')
+  showcaseCredentials() {
+    return this.showcaseRuntime.getCredentialsStatus();
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('showcase-credentials')
+  saveShowcaseCredentials(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      exchangeProvider?: string;
+      aiProvider?: string;
+      exchangeApiKey?: string;
+      exchangeApiSecret?: string;
+      exchangePassphrase?: string;
+      testnet?: boolean;
+      aiApiKey?: string;
+      botPublicUrl?: string;
+    },
+  ) {
+    return this.showcaseRuntime.saveShowcaseCredentials(user.id, body).then(() =>
+      this.adminControl.getAgentControlOverview(),
+    );
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('showcase-credentials/clear')
+  clearShowcaseCredentials(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { target?: 'exchange' | 'ai' | 'all' },
+  ) {
+    return this.showcaseRuntime
+      .clearShowcaseCredentials(user.id, body.target ?? 'all')
+      .then(() => this.adminControl.getAgentControlOverview());
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('showcase-runtime/push')
+  pushShowcaseRuntime(@CurrentUser() user: AuthUser) {
+    return this.showcaseRuntime.pushToRailwayRuntime(user.id);
   }
 }
