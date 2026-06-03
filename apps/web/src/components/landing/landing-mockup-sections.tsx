@@ -1,13 +1,12 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
 import { NotificationBell } from '@/components/notification-bell';
 import { LandingFeatureHub } from '@/components/landing/landing-feature-hub';
-import { LandingConvictionTile } from '@/components/landing/landing-conviction-tile';
+import { LandingValueGrid } from '@/components/landing/landing-value-grid';
 import type { PlatformStats } from '@/lib/api';
 
 function formatStat(value: number) {
@@ -243,19 +242,7 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
 
   return (
     <div className="mx-auto w-full max-w-[88rem] space-y-3 px-4 py-3 sm:px-6 lg:space-y-3.5 lg:px-8 lg:py-4">
-      {/* Value proposition grid — primary messaging (public/images/landing-value-grid-v2.png) */}
-      <section aria-label="Platform value proposition">
-        <Image
-          src="/images/landing-value-grid-v2.png"
-          alt="Private by default, public by proof. Show your face. Trust through execution. Trade builders, not hype."
-          width={1536}
-          height={1024}
-          className="w-full rounded-2xl border border-emerald-500/25 shadow-2xl shadow-emerald-950/30"
-          priority
-        />
-      </section>
-
-      {/* Primary CTAs — detail copy lives in value grid above */}
+      {/* Primary CTAs */}
       <section className="flex flex-wrap gap-2">
         <Link
           href="/founder-den"
@@ -281,8 +268,8 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Link>
       </section>
 
-      {/* Conviction tile — show your face / HODL culture / Pump.fun data */}
-      <LandingConvictionTile />
+      {/* Value grid infographic (image 1) — below CTAs; replaces redundant conviction tile */}
+      <LandingValueGrid />
 
       {/* Navigation hub + live preview widgets */}
       <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />
