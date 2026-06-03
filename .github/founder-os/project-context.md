@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Allow admin relist when curated project exists; show field diff.
+chore(founder-os): sync tasks
 
 ## Last Activity
 
