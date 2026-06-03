@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Add exchange adapters for Bybit, Binance, OKX, Bitfinex, and Hyperliquid
+chore(founder-os): sync tasks
 
 ## Last Activity
 
