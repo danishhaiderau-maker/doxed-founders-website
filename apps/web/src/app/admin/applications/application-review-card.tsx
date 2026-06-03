@@ -238,9 +238,12 @@ export function ApplicationReviewCard({
                   {submitter.twitterHandle && (
                     <span className="text-zinc-500"> · @{submitter.twitterHandle}</span>
                   )}
-                  {' · '}
+                  <span className="mt-1 block font-mono text-[10px] text-zinc-600" title="User ID for platform messages">
+                    User ID: {submitter.id}
+                  </span>
+                  {' '}
                   <Link
-                    href={`/account?tab=messages&with=${submitter.id}`}
+                    href={`/account?tab=messages&with=${encodeURIComponent(submitter.id)}`}
                     className="text-cyan-400 hover:underline"
                   >
                     Message

@@ -2555,6 +2555,21 @@ export function fetchMessageThreads(token: string) {
   return apiFetch<MessageThread[]>('/messages/threads', undefined, token);
 }
 
+export function fetchUnreadMessageCount(token: string) {
+  return apiFetch<{ count: number }>('/messages/unread-count', undefined, token);
+}
+
+export type MessageRecipientLookup = {
+  userId: string;
+  label: string;
+  platformHandle: string | null;
+};
+
+export function resolveMessageRecipient(query: string, token: string) {
+  const q = encodeURIComponent(query.trim());
+  return apiFetch<MessageRecipientLookup>(`/messages/recipient?query=${q}`, undefined, token);
+}
+
 export function fetchMessageConversation(otherUserId: string, token: string) {
   return apiFetch<PlatformMessageItem[]>(`/messages/with/${otherUserId}`, undefined, token);
 }

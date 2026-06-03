@@ -12,6 +12,16 @@ export class MessagesController {
     return this.messages.listThreads(user.id);
   }
 
+  @Get('unread-count')
+  unreadCount(@CurrentUser() user: AuthUser) {
+    return this.messages.countUnread(user.id).then((count) => ({ count }));
+  }
+
+  @Get('recipient')
+  resolveRecipient(@CurrentUser() user: AuthUser, @Query('query') query?: string) {
+    return this.messages.resolveRecipient(user.id, query ?? '');
+  }
+
   @Get('with/:otherUserId')
   conversation(
     @CurrentUser() user: AuthUser,
