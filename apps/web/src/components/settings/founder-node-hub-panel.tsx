@@ -8,6 +8,7 @@ import { MemoryStoragePanel } from '@/components/memory-storage-panel';
 import { FounderNodeV2Panel } from '@/components/settings/founder-node-v2-panel';
 import { AttestationDashboardPanel } from '@/components/settings/attestation-dashboard-panel';
 import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
+import { PlatformSetupGuide } from '@/components/settings/platform-setup-guide';
 
 function HubStep({
   step,
@@ -83,6 +84,8 @@ export function FounderNodeHubPanel({
       </div>
 
       <div className="mt-6 space-y-5">
+        <PlatformSetupGuide />
+
         <HubStep
           step={1}
           title="Download & install"
@@ -108,7 +111,7 @@ export function FounderNodeHubPanel({
         <HubStep
           step={3}
           title="AI on your stack"
-          summary="OpenRouter, local Ollama via Founder Node, or Phala TEE — pick your default Copilot provider."
+          summary="Your connected LLM is the brain for Copilot Ask and all project agents — Cursor is only for coding."
         >
           <FounderNodeAiSection {...aiSection} settings={settings} />
         </HubStep>

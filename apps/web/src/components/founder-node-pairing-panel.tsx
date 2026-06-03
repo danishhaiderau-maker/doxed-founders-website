@@ -13,18 +13,36 @@ type Props = {
   active: boolean;
 };
 
+function formatExpiry(expiresAt: string) {
+  const exp = new Date(expiresAt);
+  const mins = Math.max(0, Math.round((exp.getTime() - Date.now()) / 60_000));
+  return { absolute: exp.toLocaleString(), mins };
+}
+
 export function FounderNodePairingPanel({ accessToken, active }: Props) {
   const [nodes, setNodes] = useState<FounderNodeStatusRow[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [showNewPairing, setShowNewPairing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const isPaired = nodes.length > 0;
+
   const refresh = useCallback(async () => {
     try {
       const status = await fetchFounderNodeStatus(accessToken);
-      setNodes(status.nodes);
+      const list = status.nodes;
+      setNodes(list);
+      if (list.length > 0) {
+        setPairingCode(null);
+        setExpiresAt(null);
+        setShowNewPairing(false);
+        setMsg(
+          'Vault paired successfully. You do not need a new code — Founder Node stays linked until you disconnect.',
+        );
+      }
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not load node status');
@@ -46,7 +64,10 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
       const result = await createFounderNodePairingCode(accessToken);
       setPairingCode(result.code);
       setExpiresAt(result.expiresAt);
-      setMsg('Enter this code in Founder Node on your PC — expires in 15 minutes.');
+      const { mins, absolute } = formatExpiry(result.expiresAt);
+      setMsg(
+        `Enter this one-time code in Founder Node within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}). After pairing succeeds, the code is cleared automatically.`,
+      );
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not create pairing code');
     } finally {
@@ -59,7 +80,8 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     setErr(null);
     try {
       await revokeFounderNode(nodeId, accessToken);
-      setMsg('Node disconnected.');
+      setMsg('Node disconnected. Generate a new code only if you pair a device again.');
+      setShowNewPairing(true);
       await refresh();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not revoke node');
@@ -68,47 +90,88 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     }
   }
 
+  const showPairingFlow = !isPaired || showNewPairing;
+
   return (
     <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-4">
       <h4 className="text-sm font-semibold text-cyan-100">Founder Node pairing</h4>
       <p className="mt-1 text-xs text-cyan-100/70">
-        Install Founder Node on your PC, Mac, or Linux. Your vault stays local — Founder OS only
-        receives tiny metadata snapshots (goal, progress, tasks count).
+        Install Founder Node on your PC, Mac, or Linux. Your vault stays local — Founder OS only receives tiny
+        metadata snapshots (goal, progress, tasks count), not your private vault files.
       </p>
 
-      <ol className="mt-3 list-inside list-decimal space-y-1 text-xs text-zinc-300">
-        <li>
-          Run{' '}
-          <code className="rounded bg-zinc-800 px-1 py-0.5">npm run dev:founder-node</code> from the
-          repo (or the packaged app when available).
-        </li>
-        <li>Generate a pairing code below and paste it into Founder Node.</li>
-        <li>Choose this storage mode — sync runs automatically every minute when online.</li>
-      </ol>
-
-      <div className="mt-4 flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled={busy === 'code'}
-          onClick={generateCode}
-          className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-        >
-          {busy === 'code' ? 'Generating…' : 'Generate pairing code'}
-        </button>
+      <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-950/15 p-3 text-[11px] text-emerald-100/90">
+        <p className="font-semibold text-emerald-200">What stays private</p>
+        <p className="mt-1">
+          Full company memory (private notes, raw task bodies, vault markdown) stays on your machine and in
+          encrypted blobs we cannot read. The website sees progress metadata and what you publish to GitHub or
+          the public feed.
+        </p>
       </div>
 
-      {pairingCode && (
-        <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
-          <p className="text-xs text-zinc-400">Pairing code</p>
-          <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">
-            {pairingCode}
-          </p>
-          {expiresAt && (
-            <p className="mt-1 text-[10px] text-zinc-500">
-              Expires {new Date(expiresAt).toLocaleString()}
-            </p>
-          )}
+      {isPaired && !showNewPairing && (
+        <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
+          ✓ Vault connected — pairing code hidden. Open Founder Node on your desktop to sync; going offline does
+          not require a new code.
         </div>
+      )}
+
+      {showPairingFlow && (
+        <>
+          <ol className="mt-3 list-inside list-decimal space-y-1 text-xs text-zinc-300">
+            <li>Download and open Founder Node (tray app).</li>
+            <li>Generate a pairing code below and paste it once into Founder Node.</li>
+            <li>When connected, this code disappears — you will not re-enter it every 15 minutes.</li>
+          </ol>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy === 'code'}
+              onClick={generateCode}
+              className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {busy === 'code' ? 'Generating…' : 'Generate pairing code'}
+            </button>
+            {isPaired && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNewPairing(false);
+                  setPairingCode(null);
+                  setExpiresAt(null);
+                }}
+                className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+
+          {pairingCode && (
+            <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
+              <p className="text-xs text-zinc-400">One-time pairing code</p>
+              <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">
+                {pairingCode}
+              </p>
+              {expiresAt && (
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {isPaired && !showNewPairing && (
+        <button
+          type="button"
+          onClick={() => setShowNewPairing(true)}
+          className="mt-3 text-[11px] text-cyan-400/90 underline hover:text-cyan-300"
+        >
+          Pair another desktop device
+        </button>
       )}
 
       {nodes.length > 0 && (
@@ -130,17 +193,13 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                 >
                   {node.status}
                 </span>
+                {node.status === 'offline' && (
+                  <span className="ml-2 text-zinc-500">— start Founder Node to sync</span>
+                )}
                 {node.ramGb != null && (
                   <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>
                 )}
-                {node.storageFreeGb != null && node.storageGb != null && (
-                  <span className="ml-2 text-zinc-500">
-                    {node.storageFreeGb} GB free / {node.storageGb} GB
-                  </span>
-                )}
-                <span
-                  className={`ml-2 ${node.vaultHealthy ? 'text-emerald-400' : 'text-red-400'}`}
-                >
+                <span className={`ml-2 ${node.vaultHealthy ? 'text-emerald-400' : 'text-red-400'}`}>
                   Vault {node.vaultHealthy ? 'healthy' : 'issue'}
                 </span>
               </div>

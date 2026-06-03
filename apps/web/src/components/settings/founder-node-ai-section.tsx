@@ -55,22 +55,54 @@ export function FounderNodeAiSection({
   const phalaStatus = settings.phalaPrivateAi;
   const nodeAi = settings.founderNodeAi;
 
+  const brainProviders = settings.providers.filter(
+    (p) =>
+      p.key !== 'RULE_BASED' &&
+      p.key !== 'CURSOR' &&
+      p.key !== 'OPENHANDS' &&
+      (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
+  );
+
   return (
     <div className="space-y-5">
+      <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 p-4 text-xs leading-relaxed text-zinc-400">
+        <p className="font-semibold text-violet-200">Brain vs code agent</p>
+        <ul className="mt-2 list-inside list-disc space-y-1">
+          <li>
+            <strong className="text-zinc-200">Brain (this section):</strong> the LLM you connect here powers
+            Copilot <em>Ask</em>, Founder Brain, and every project agent (community replies, marketing drafts,
+            research). Connect OpenRouter, Ollama, or Phala — not Cursor.
+          </li>
+          <li>
+            <strong className="text-zinc-200">Code (Remote builder agents below):</strong> Cursor / OpenHands
+            edit your GitHub repo. Use <em>Run in Cursor</em> in Mission Control.
+          </li>
+          <li>
+            <strong className="text-zinc-200">Project loyalty:</strong> agents run from your project profile only
+            promote and defend that project, using this brain.
+          </li>
+        </ul>
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block text-sm">
-          <span className="text-zinc-400">Default Copilot provider</span>
+          <span className="text-zinc-400">Default brain (Copilot + agents)</span>
           <select
             value={settings.defaultProvider}
             onChange={(e) => onSaveSettings({ defaultProvider: e.target.value })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
           >
-            {settings.providers.map((p) => (
+            {brainProviders.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.label}
+                {p.connected ? '' : ' (not connected)'}
               </option>
             ))}
+            <option value="RULE_BASED">Project memory only (no LLM)</option>
           </select>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            Connect at least one provider in the cards below, then select it here.
+          </p>
         </label>
         <label className="block text-sm">
           <span className="text-zinc-400">Preferred model</span>
