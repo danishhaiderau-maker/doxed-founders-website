@@ -3226,8 +3226,16 @@ export function publishGitHubIssues(token: string) {
 
 // ─── Builder settings (Phase 4B) ───────────────────────────────────────────────
 
+export type BrainActivation = {
+  defaultProvider: string;
+  preferredModel: string | null;
+  label: string;
+};
+
 export interface BuilderSettings {
   defaultProvider: string;
+  defaultBrainConnected?: boolean;
+  connectedBrainCount?: number;
   preferredModel: string | null;
   autoCreateGitHubIssues: boolean;
   autoPublishOnEvent: boolean;

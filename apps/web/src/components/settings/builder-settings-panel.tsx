@@ -85,7 +85,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     setErr(null);
     try {
       const result = await connectAiProvider(provider, key, accessToken);
-      setMsg(`${result.accountName} connected — AI costs bill to your account`);
+      const brain = (result as { brainActivated?: { label: string } }).brainActivated;
+      setMsg(
+        brain
+          ? `${result.accountName} connected — ${brain.label} is now your Copilot brain`
+          : `${result.accountName} connected — AI costs bill to your account`,
+      );
       setApiKeyInput({ ...apiKeyInput, [provider]: '' });
       load();
     } catch (e) {
@@ -153,7 +158,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         phalaModel.trim() || undefined,
         accessToken,
       );
-      setMsg(`${result.accountName} connected — Copilot can use TEE inference at ${result.inferenceUrl}`);
+      const brain = (result as { brainActivated?: { label: string } }).brainActivated;
+      setMsg(
+        brain
+          ? `${result.accountName} connected — ${brain.label} is now your Copilot brain (TEE at ${result.inferenceUrl})`
+          : `${result.accountName} connected — Copilot can use TEE inference at ${result.inferenceUrl}`,
+      );
       setPhalaKey('');
       load();
     } catch (e) {
@@ -172,7 +182,12 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     setErr(null);
     try {
       const result = await connectOllamaDirect(ollamaUrl.trim(), ollamaModel.trim() || undefined, accessToken);
-      setMsg(`${result.accountName} connected at ${result.baseUrl}`);
+      const brain = (result as { brainActivated?: { label: string } }).brainActivated;
+      setMsg(
+        brain
+          ? `${result.accountName} connected — ${brain.label} is now your Copilot brain`
+          : `${result.accountName} connected at ${result.baseUrl}`,
+      );
       load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Ollama connect failed');
@@ -479,7 +494,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
                   onClick={() => p.credentialProvider && handleConnectProvider(p.credentialProvider)}
                   className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                 >
-                  {p.connected ? 'Update key' : 'Connect'}
+                  {p.connected ? 'Update key' : 'Connect & activate'}
                 </button>
                 {p.connected && p.credentialProvider && (
                   <button

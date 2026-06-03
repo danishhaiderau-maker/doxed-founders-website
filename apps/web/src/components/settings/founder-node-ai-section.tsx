@@ -63,6 +63,11 @@ export function FounderNodeAiSection({
       (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
   );
 
+  const activeBrain = brainProviders.find((p) => p.key === settings.defaultProvider);
+  const brainReady = settings.defaultBrainConnected ?? Boolean(activeBrain?.connected);
+  const needsConnect =
+    (settings.connectedBrainCount ?? 0) > 0 && !brainReady && settings.defaultProvider !== 'RULE_BASED';
+
   return (
     <div className="space-y-5">
       <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 p-4 text-xs leading-relaxed text-zinc-400">
@@ -84,6 +89,24 @@ export function FounderNodeAiSection({
         </ul>
       </div>
 
+      {brainReady && activeBrain && (
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-sm text-emerald-100">
+          <strong className="text-white">Active brain:</strong> {activeBrain.label}
+          {settings.preferredModel ? (
+            <span className="text-emerald-200/80"> · model {settings.preferredModel}</span>
+          ) : null}
+          <span className="mt-1 block text-xs text-emerald-200/70">
+            Copilot Ask, Founder Brain, and project agents use this LLM.
+          </span>
+        </div>
+      )}
+      {needsConnect && (
+        <div className="rounded-lg border border-amber-500/35 bg-amber-950/20 px-4 py-3 text-xs text-amber-100">
+          Your saved brain ({settings.defaultProvider}) is not connected. Pick a connected provider below or
+          reconnect — we auto-activate when you click Connect.
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block text-sm">
           <span className="text-zinc-400">Default brain (Copilot + agents)</span>
@@ -93,15 +116,16 @@ export function FounderNodeAiSection({
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
           >
             {brainProviders.map((p) => (
-              <option key={p.key} value={p.key}>
+              <option key={p.key} value={p.key} disabled={!p.connected}>
                 {p.label}
-                {p.connected ? '' : ' (not connected)'}
+                {p.connected ? '' : ' (connect below first)'}
               </option>
             ))}
             <option value="RULE_BASED">Project memory only (no LLM)</option>
           </select>
           <p className="mt-1 text-[10px] text-zinc-600">
-            Connect at least one provider in the cards below, then select it here.
+            Connect a provider in the cards below — it becomes your brain automatically. Override here if you
+            use more than one.
           </p>
         </label>
         <label className="block text-sm">
@@ -161,7 +185,7 @@ export function FounderNodeAiSection({
               onClick={onConnectOpenRouter}
               className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
-              {openRouterProvider?.connected ? 'Update key' : 'Connect'}
+              {openRouterProvider?.connected ? 'Update key' : 'Connect & activate'}
             </button>
           </div>
         </div>
@@ -201,7 +225,7 @@ export function FounderNodeAiSection({
                 onClick={onConnectOllama}
                 className="rounded-lg bg-cyan-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                Connect
+                {ollamaLocalProvider?.connected ? 'Update' : 'Connect & activate'}
               </button>
             </div>
           </div>
@@ -238,7 +262,7 @@ export function FounderNodeAiSection({
                 onClick={onConnectPhala}
                 className="rounded-lg bg-fuchsia-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                {phalaProvider?.connected ? 'Update' : 'Connect'}
+                {phalaProvider?.connected ? 'Update' : 'Connect & activate'}
               </button>
             </div>
             {phalaProvider?.connected && (

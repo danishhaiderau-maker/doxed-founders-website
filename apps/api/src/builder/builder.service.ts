@@ -67,6 +67,7 @@ export class BuilderService {
   ) {}
 
   async getSettings(userId: string) {
+    await this.reconcileDefaultBrain(userId);
     const settings = await this.ensureSettings(userId);
     const connected = await this.listConnectedProviders(userId);
 
@@ -86,8 +87,15 @@ export class BuilderService {
     const repoFullName =
       githubConn?.repoFullName ?? founder?.githubRepoFullName ?? null;
 
+    const readyBrains = await this.listConnectedBrainProviders(userId);
+    const defaultBrainConnected =
+      settings.defaultProvider === AiProvider.RULE_BASED ||
+      readyBrains.includes(settings.defaultProvider);
+
     return {
       defaultProvider: settings.defaultProvider,
+      defaultBrainConnected,
+      connectedBrainCount: readyBrains.length,
       preferredModel: settings.preferredModel,
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
       autoPublishOnEvent: settings.autoPublishOnEvent,
@@ -262,7 +270,14 @@ export class BuilderService {
       update: { connected: true, metadata: { accountName: verified.accountName } as Prisma.InputJsonValue },
     });
 
-    return { success: true, provider, accountName: verified.accountName };
+    const brain = cfg.key ? await this.promoteDefaultBrain(userId, cfg.key as AiProvider) : null;
+
+    return {
+      success: true,
+      provider,
+      accountName: verified.accountName,
+      brainActivated: brain,
+    };
   }
 
   async connectOllama(userId: string, baseUrl: string, model?: string) {
@@ -306,7 +321,14 @@ export class BuilderService {
       update: { connected: true, metadata: { baseUrl: url } as Prisma.InputJsonValue },
     });
 
-    return { success: true, accountName: 'Ollama (direct URL)', baseUrl: url };
+    const brain = await this.promoteDefaultBrain(userId, AiProvider.OLLAMA_LOCAL, model?.trim());
+
+    return {
+      success: true,
+      accountName: 'Ollama (direct URL)',
+      baseUrl: url,
+      brainActivated: brain,
+    };
   }
 
   async connectPhala(
@@ -364,7 +386,15 @@ export class BuilderService {
       },
     });
 
-    return { success: true, accountName: metadata.accountName, inferenceUrl: normalizedUrl, model: resolvedModel };
+    const brain = await this.promoteDefaultBrain(userId, AiProvider.PHALA, resolvedModel);
+
+    return {
+      success: true,
+      accountName: metadata.accountName,
+      inferenceUrl: normalizedUrl,
+      model: resolvedModel,
+      brainActivated: brain,
+    };
   }
 
   async connectOpenHands(userId: string, baseUrl: string, apiKey: string) {
@@ -1258,6 +1288,90 @@ export class BuilderService {
       inferenceUrl: normalizePhalaBaseUrl(process.env.PHALA_INFERENCE_URL || DEFAULT_PHALA_INFERENCE_URL),
       model: process.env.PHALA_MODEL?.trim() || DEFAULT_PHALA_MODEL,
       source: 'platform' as const,
+    };
+  }
+
+  private readonly brainProviderPriority: AiProvider[] = [
+    AiProvider.PHALA,
+    AiProvider.OPENROUTER,
+    AiProvider.DEEPSEEK,
+    AiProvider.OPENAI,
+    AiProvider.ANTHROPIC,
+    AiProvider.GEMINI,
+    AiProvider.OLLAMA_LOCAL,
+  ];
+
+  private async listConnectedBrainProviders(userId: string): Promise<AiProvider[]> {
+    const connected = await this.listConnectedProviders(userId);
+    const ollamaReady = await this.founderNodeInference.isOllamaReady(userId);
+    const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
+    const ready: AiProvider[] = [];
+
+    for (const key of this.brainProviderPriority) {
+      const cfg = aiProviderConfig(key);
+      if (!cfg) continue;
+      if (key === AiProvider.PHALA) {
+        if (phalaStatus.ready) ready.push(key);
+      } else if (key === AiProvider.OLLAMA_LOCAL) {
+        if (ollamaReady) ready.push(key);
+      } else if (cfg.credentialProvider && connected.has(cfg.credentialProvider)) {
+        ready.push(key);
+      }
+    }
+    return ready;
+  }
+
+  /** Pick a connected brain when saved default is rule-based or disconnected. */
+  private async reconcileDefaultBrain(userId: string): Promise<void> {
+    const settings = await this.ensureSettings(userId);
+    const ready = await this.listConnectedBrainProviders(userId);
+    if (ready.length === 0) return;
+
+    const storedOk =
+      settings.defaultProvider !== AiProvider.RULE_BASED &&
+      ready.includes(settings.defaultProvider);
+    if (storedOk) return;
+
+    const pick =
+      ready.find((k) => k === settings.defaultProvider) ??
+      ready[0]!;
+    const cfg = aiProviderConfig(pick);
+    await this.prisma.founderBuilderSettings.update({
+      where: { userId },
+      data: {
+        defaultProvider: pick,
+        ...(!settings.preferredModel && cfg?.defaultModel
+          ? { preferredModel: cfg.defaultModel }
+          : {}),
+      },
+    });
+  }
+
+  private async promoteDefaultBrain(
+    userId: string,
+    prefer: AiProvider,
+    preferredModelOverride?: string,
+  ): Promise<{ defaultProvider: AiProvider; preferredModel: string | null; label: string } | null> {
+    const ready = await this.listConnectedBrainProviders(userId);
+    if (!ready.includes(prefer)) return null;
+
+    const settings = await this.ensureSettings(userId);
+    const cfg = aiProviderConfig(prefer);
+    const preferredModel =
+      preferredModelOverride?.trim() || cfg?.defaultModel || settings.preferredModel;
+
+    await this.prisma.founderBuilderSettings.update({
+      where: { userId },
+      data: {
+        defaultProvider: prefer,
+        ...(preferredModel ? { preferredModel } : {}),
+      },
+    });
+
+    return {
+      defaultProvider: prefer,
+      preferredModel: preferredModel ?? null,
+      label: cfg?.label ?? prefer,
     };
   }
 
