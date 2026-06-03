@@ -114,6 +114,12 @@ export class CreateListingApplicationDto {
   @IsOptional()
   @ValidateIf((_o, v) => v != null)
   @IsUrl({ require_tld: false })
+  projectGithubUrl?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @ValidateIf((_o, v) => v != null)
+  @IsUrl({ require_tld: false })
   founderVideoUrl?: string;
 
   @Transform(emptyToUndefined)
@@ -267,6 +273,12 @@ export class ReviewListingApplicationDto {
   @ValidateIf((_o, v) => v != null)
   @IsUrl({ require_tld: false })
   founderGithub?: string;
+
+  @Transform(emptyToUndefined)
+  @IsOptional()
+  @ValidateIf((_o, v) => v != null)
+  @IsUrl({ require_tld: false })
+  projectGithubUrl?: string;
 
   @Transform(emptyToUndefined)
   @IsOptional()

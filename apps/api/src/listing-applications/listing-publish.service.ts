@@ -13,6 +13,7 @@ import {
   slugify,
   snapshotFromApplication,
   validateListingForApproval,
+  resolveListingGithubRepo,
   type ListingRelistField,
   type ListingRelistMatchType,
 } from '@dcf/utils';
@@ -206,9 +207,13 @@ export class ListingPublishService {
       throw new BadRequestException(`Unknown chain: ${application.chainSlug}`);
     }
 
-    const founder = application.founderName
+    let founder = application.founderName
       ? await this.upsertFounder(tx, application, criteria)
       : null;
+
+    if (!founder && application.userId) {
+      founder = await this.ensureFounderFromSubmitter(tx, application);
+    }
 
     const slugBase =
       slugify(normalizeProjectName(application.projectName) || application.projectName) ||
@@ -245,17 +250,33 @@ export class ListingPublishService {
       orderBy: { name: 'asc' },
     });
 
+    const githubRepo = resolveListingGithubRepo(
+      application.projectGithubUrl,
+      application.founderGithub,
+    );
+
     const project = existing
       ? await tx.project.update({
           where: { id: existing.id },
-          data: this.projectData(application, chain.id, category?.id, founder?.id),
+          data: {
+            ...this.projectData(application, chain.id, category?.id, founder?.id),
+            githubRepoFullName: githubRepo?.repoFullName ?? undefined,
+          },
         })
       : await tx.project.create({
           data: {
             slug: projectSlug,
             ...this.projectData(application, chain.id, category?.id, founder?.id),
+            githubRepoFullName: githubRepo?.repoFullName ?? null,
           },
         });
+
+    if (founder && githubRepo?.repoFullName) {
+      await tx.founder.update({
+        where: { id: founder.id },
+        data: { githubRepoFullName: githubRepo.repoFullName },
+      });
+    }
 
     await this.upsertMetrics(tx, project.id, application.marketPreview);
     await this.upsertSocials(tx, project.id, application);
@@ -351,7 +372,12 @@ export class ListingPublishService {
       founderName: project.founder?.name,
       founderLinkedIn: project.founder?.linkedInUrl,
       founderTwitter: project.founder?.twitterUrl,
-      founderGithub: project.founder?.githubUrl ?? project.socials?.githubUrl,
+      founderGithub: project.founder?.githubUrl ?? null,
+      projectGithubUrl:
+        project.socials?.githubUrl ??
+        (project.githubRepoFullName
+          ? `https://github.com/${project.githubRepoFullName}`
+          : null),
       founderVideoUrl: project.founder?.videoUrl,
       founderInterviewUrl: null,
       companyDetails: project.description,
@@ -582,10 +608,13 @@ export class ListingPublishService {
   }
 
   private async upsertSocials(tx: Tx, projectId: string, application: ListingApplication) {
+    const githubRef = resolveListingGithubRepo(
+      application.projectGithubUrl,
+      application.founderGithub,
+    );
+    const githubUrl = githubRef?.githubUrl ?? application.founderGithub ?? null;
     const hasSocial =
-      application.telegramUrl ||
-      application.founderTwitter ||
-      application.founderGithub;
+      application.telegramUrl || application.founderTwitter || githubUrl;
 
     if (!hasSocial) return;
 
@@ -594,13 +623,45 @@ export class ListingPublishService {
       update: {
         telegramUrl: application.telegramUrl,
         twitterUrl: application.founderTwitter,
-        githubUrl: application.founderGithub,
+        githubUrl,
       },
       create: {
         projectId,
         telegramUrl: application.telegramUrl,
         twitterUrl: application.founderTwitter,
-        githubUrl: application.founderGithub,
+        githubUrl,
+      },
+    });
+  }
+
+  /** Link listing submitter to a founder row so GitHub commit events can feed Discover. */
+  private async ensureFounderFromSubmitter(tx: Tx, application: ListingApplication) {
+    if (!application.userId) return null;
+
+    const existing = await tx.founder.findUnique({
+      where: { userId: application.userId },
+    });
+    if (existing) return existing;
+
+    const name = application.founderName?.trim() || application.projectName.trim();
+    const baseSlug = slugify(name) || slugify(application.ticker) || 'founder';
+    const slug = await this.uniqueFounderSlug(tx, baseSlug);
+    const githubRef = resolveListingGithubRepo(
+      application.projectGithubUrl,
+      application.founderGithub,
+    );
+
+    return tx.founder.create({
+      data: {
+        slug,
+        userId: application.userId,
+        name,
+        githubUrl: githubRef?.githubUrl ?? application.founderGithub,
+        githubRepoFullName: githubRef?.repoFullName ?? null,
+        twitterUrl: application.founderTwitter,
+        linkedInUrl: application.founderLinkedIn,
+        videoUrl: application.founderVideoUrl,
+        bio: application.companyDetails,
       },
     });
   }

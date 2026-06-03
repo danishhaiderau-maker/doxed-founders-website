@@ -28,6 +28,7 @@ import {
 import { ListingVotesService } from './listing-votes.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 import { MessagesService } from '../messages/messages.service';
+import { ListedProjectGithubSyncService } from './listed-project-github-sync.service';
 
 @Injectable()
 export class ListingApplicationsService {
@@ -39,6 +40,7 @@ export class ListingApplicationsService {
     private readonly predictionMarkets: PredictionMarketsService,
     private readonly notifications: NotificationsService,
     private readonly messages: MessagesService,
+    private readonly listedGithubSync: ListedProjectGithubSyncService,
   ) {}
 
   private computeVerification(dto: CreateListingApplicationDto) {
@@ -46,6 +48,7 @@ export class ListingApplicationsService {
       founderName: dto.founderName,
       founderLinkedIn: dto.founderLinkedIn,
       founderGithub: dto.founderGithub,
+      projectGithubUrl: dto.projectGithubUrl,
       companyDetails: dto.companyDetails,
       founderVideoUrl: dto.founderVideoUrl,
       founderInterviewUrl: dto.founderInterviewUrl,
@@ -65,6 +68,7 @@ export class ListingApplicationsService {
       founderTwitter: dto.founderTwitter,
       founderLinkedIn: dto.founderLinkedIn,
       founderGithub: dto.founderGithub,
+      projectGithubUrl: dto.projectGithubUrl,
       websiteUrl: dto.websiteUrl,
       chainSlug: dto.chainSlug,
       contractAddress: dto.contractAddress,
@@ -98,6 +102,7 @@ export class ListingApplicationsService {
       founderLinkedIn: mapped.founderLinkedIn,
       founderTwitter: mapped.founderTwitter,
       founderGithub: mapped.founderGithub,
+      projectGithubUrl: mapped.projectGithubUrl,
     });
 
     const activeUsers = await this.prisma.user.count({
@@ -123,6 +128,7 @@ export class ListingApplicationsService {
         founderLinkedIn: mapped.founderLinkedIn,
         founderTwitter: mapped.founderTwitter,
         founderGithub: mapped.founderGithub,
+        projectGithubUrl: dto.projectGithubUrl?.trim() || mapped.projectGithubUrl,
         founderVideoUrl: mapped.founderVideoUrl,
         founderInterviewUrl: mapped.founderInterviewUrl,
         companyDetails: dto.companyDetails,
@@ -257,6 +263,7 @@ export class ListingApplicationsService {
       founderName: merged.founderName,
       founderLinkedIn: merged.founderLinkedIn,
       founderGithub: merged.founderGithub,
+      projectGithubUrl: merged.projectGithubUrl,
       companyDetails: merged.companyDetails,
       founderVideoUrl: merged.founderVideoUrl,
       founderInterviewUrl: merged.founderInterviewUrl,
@@ -290,6 +297,8 @@ export class ListingApplicationsService {
       await this.predictionMarkets.seedMarketsForProject(published.projectId, {
         isNewListing: !published.relisted,
       });
+
+      void this.listedGithubSync.syncAll().catch(() => undefined);
 
       const relistNote =
         published.relisted && (published.changedFieldCount ?? 0) > 0

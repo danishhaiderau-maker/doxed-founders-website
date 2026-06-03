@@ -40,6 +40,7 @@ export interface ListingFormData {
   founderLinkedIn?: string;
   founderTwitter?: string;
   founderGithub?: string;
+  projectGithubUrl?: string;
   founderVideoUrl?: string;
   founderInterviewUrl?: string;
   companyDetails?: string;
@@ -69,6 +70,7 @@ export interface PendingApplication {
   founderLinkedIn: string | null;
   founderTwitter: string | null;
   founderGithub: string | null;
+  projectGithubUrl: string | null;
   founderVideoUrl: string | null;
   founderInterviewUrl: string | null;
   companyDetails: string | null;

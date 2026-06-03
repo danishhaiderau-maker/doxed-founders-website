@@ -16,6 +16,7 @@ export const ADMIN_REVIEW_FIELD_KEYS = [
   'founderLinkedIn',
   'founderTwitter',
   'founderGithub',
+  'projectGithubUrl',
   'founderVideoUrl',
   'founderInterviewUrl',
   'companyDetails',

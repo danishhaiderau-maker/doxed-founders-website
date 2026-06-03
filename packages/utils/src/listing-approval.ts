@@ -13,6 +13,7 @@ export interface ListingApprovalInput {
   founderTwitter?: string | null;
   founderLinkedIn?: string | null;
   founderGithub?: string | null;
+  projectGithubUrl?: string | null;
   websiteUrl?: string | null;
   chainSlug?: string | null;
   contractAddress?: string | null;
@@ -43,6 +44,10 @@ export function applyProofLinkUrl<T extends ListingApprovalInput>(input: T): T {
     out.founderInterviewUrl = proof;
   }
 
+  if (lower.includes('github.com') && !out.projectGithubUrl?.trim()) {
+    out.projectGithubUrl = proof;
+  }
+
   return out;
 }
 
@@ -55,6 +60,7 @@ export function resolveProofLinks(input: ListingApprovalInput): string[] {
     normalized.founderTwitter,
     normalized.founderLinkedIn,
     normalized.founderGithub,
+    normalized.projectGithubUrl,
     normalized.websiteUrl,
   ]
     .map((v) => v?.trim())
@@ -146,6 +152,12 @@ export function validateListingForApproval(input: ListingApprovalInput): {
 
   if (!normalized.founderName?.trim()) {
     warnings.push('Founder name not set — project name will be used on publish.');
+  }
+
+  if (!normalized.projectGithubUrl?.trim()) {
+    warnings.push(
+      'No project GitHub repo — add one to track commits and rank higher in Discover activity.',
+    );
   }
 
   return { ok: errors.length === 0, errors, warnings };

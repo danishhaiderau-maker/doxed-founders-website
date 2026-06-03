@@ -874,6 +874,8 @@ model ListingApplication {
   founderLinkedIn String?
   founderTwitter  String?
   founderGithub       String?
+  /// Public project repo (owner/repo) — synced for Discover GitHub activity ranking
+  projectGithubUrl    String?
   founderVideoUrl     String?
   founderInterviewUrl String?
   companyDetails      String?       @db.Text
