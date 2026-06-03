@@ -91,6 +91,7 @@ export function FounderNodeDownloads({ showInstallGuide = false }: Props) {
             </li>
             <li>
               Right-click the tray icon → <strong className="text-white">Pair with Founder OS</strong> → paste the code.
+              The pairing window may close after success — the app stays in the tray; do not click Quit.
             </li>
             <li>
               Complete <strong className="text-white">Step 4</strong> — click{' '}

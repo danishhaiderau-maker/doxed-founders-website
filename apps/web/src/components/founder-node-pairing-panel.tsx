@@ -111,8 +111,8 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
 
       {isPaired && !showNewPairing && (
         <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
-          ✓ Vault connected — pairing code hidden. Open Founder Node on your desktop to sync; going offline does
-          not require a new code.
+          ✓ Vault connected — pairing code hidden. The pairing popup may close; the tray app must keep running
+          (icon near the clock). Offline means the tray app quit or cannot reach the site — you do not need a new code.
         </div>
       )}
 

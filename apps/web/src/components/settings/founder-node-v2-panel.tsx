@@ -144,13 +144,25 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
         </p>
       )}
 
+      {v2?.paired && !v2.online && (
+        <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-950/25 p-4 text-sm text-amber-100">
+          <p className="font-semibold text-amber-200">Paired, but desktop app is offline</p>
+          <p className="mt-2 text-xs leading-relaxed text-amber-100/90">
+            Closing the <strong className="text-white">Pair this machine</strong> popup is normal — that is not
+            Founder OS closing. The tray app must stay running (icon near the Windows clock; click the ^ arrow if
+            hidden). Right-click the tray icon → <strong className="text-white">Sync now</strong>, or launch Founder
+            Node from Start Menu. Founder OS marks you offline if no heartbeat arrives for ~3 minutes.
+          </p>
+        </div>
+      )}
+
       {v2?.paired && (
         <div className="mt-6 space-y-4">
           <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-4">
             <p className="text-sm font-medium text-cyan-100">After pairing — do this next</p>
             <ol className="mt-2 space-y-1.5 text-xs text-zinc-400">
               <li className={v2.online ? 'text-emerald-300' : 'text-amber-200'}>
-                {v2.online ? '✓' : '○'} Keep Founder Node tray app open on your desktop
+                {v2.online ? '✓' : '○'} Keep Founder Node tray app open on your desktop (popup can close; tray stays)
               </li>
               <li className={(v2.vectorChunks ?? 0) > 0 ? 'text-emerald-300' : 'text-zinc-300'}>
                 {(v2.vectorChunks ?? 0) > 0 ? '✓' : '○'} Click <strong className="font-medium">Rebuild vector index</strong>{' '}
