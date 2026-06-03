@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+chore(founder-os): sync project context
 
 ## Last Activity
 
