@@ -15,6 +15,11 @@ import {
 } from '@prisma/client';
 import {
   buildCommunityUpdateFromSummary,
+  buildFounderUpdateFallback,
+  formatCommitsLast24hForTraders,
+  resolveProjectDisplayForSocial,
+  PLATFORM_X_SHARE_FOOTER,
+  filterCommitsSince,
   buildDailyStandup,
   buildMissingLinkNarrativeHints,
   buildResumeCursorPrompt,
@@ -1131,6 +1136,17 @@ export class FounderCopilotService {
 
   private static readonly CODE_DRAFT_AGENTS = new Set(['CURSOR', 'OPENHANDS']);
 
+  private mapSocialDraftProvider(providerKey?: string): AiProvider | undefined {
+    const key = providerKey?.trim().toUpperCase();
+    if (key === 'DEEPSEEK') return AiProvider.DEEPSEEK;
+    if (key === 'OPENAI') return AiProvider.OPENAI;
+    if (key === 'ANTHROPIC' || key === 'CLAUDE') return AiProvider.ANTHROPIC;
+    if (key === 'GEMINI') return AiProvider.GEMINI;
+    if (key === 'OPENROUTER') return AiProvider.OPENROUTER;
+    if (key === 'PHALA') return AiProvider.PHALA;
+    return undefined;
+  }
+
   async draftSocialUpdate(
     userId: string,
     options?: { provider?: string },
@@ -1139,17 +1155,13 @@ export class FounderCopilotService {
     const codeAgent =
       providerKey && FounderCopilotService.CODE_DRAFT_AGENTS.has(providerKey) ? providerKey : null;
 
-    const memory = await this.getProjectMemory(userId);
-    if (memory.repoFullName) {
-      try {
-        await this.founderOs.syncGitHubCommits(userId);
-      } catch {
-        /* optional */
-      }
+    try {
+      await this.founderOs.syncGitHubCommits(userId);
+    } catch {
+      /* continue with live GitHub fetch */
     }
-    const refreshedMemory = memory.repoFullName
-      ? await this.getProjectMemory(userId)
-      : memory;
+
+    const memory = await this.getProjectMemory(userId);
 
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
@@ -1160,76 +1172,97 @@ export class FounderCopilotService {
           take: 1,
           include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
         },
-        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 5 },
       },
     });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
     const project = founder.projects[0];
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const { displayName: projectDisplayName, ticker: projectTicker } = resolveProjectDisplayForSocial(
+      project ? { name: project.name, ticker: project.ticker } : null,
+    );
 
-    const [recentCommits, openIdeas, infraSnapshot, paperPortfolio] = await Promise.all([
-      refreshedMemory.repoFullName
-        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 35)
-        : Promise.resolve([]),
-      this.prisma.buildQueueItem.findMany({
-        where: {
-          founderId: founder.id,
-          kind: 'IDEA',
-          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
-        },
-        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
-        take: 5,
-      }),
-      this.autopilot.buildDraftInfrastructureSnapshot(userId).catch(() => null),
-      this.prisma.paperPortfolio.findUnique({ where: { userId }, select: { cashBalance: true } }),
-    ]);
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    const todayCommits = recentCommits.filter((c) => new Date(c.date) >= todayStart);
-
-    const githubMemory = refreshedMemory.repoFullName
-      ? await this.memory.readRepoMemory(userId, refreshedMemory.repoFullName)
+    const workspaceActivity = memory.repoFullName
+      ? await this.builder.getWorkspaceActivity(userId, memory.repoFullName)
       : null;
 
-    const summary = buildWeeklySummary({
-      projectName: project?.name ?? founder.name,
-      commitCount: recentCommits.length,
-      deployCount: 0,
-      followerCount: project ? await this.prisma.projectFollow.count({ where: { projectId: project.id } }) : 0,
-      featureRequests: 0,
-      launchReadiness: refreshedMemory.launchReadiness,
-      launchReadinessDelta: 0,
-      buildStreak: founder.buildStreakDays,
-      recentHeadlines: founder.buildPosts.map((p) => p.headline),
-    });
+    const commits24h =
+      workspaceActivity?.commitsLast24h?.length
+        ? workspaceActivity.commitsLast24h
+        : memory.repoFullName
+          ? filterCommitsSince(
+              await this.github.listCommitsOnRef(userId, memory.repoFullName, 40),
+              24 * 60 * 60 * 1000,
+            )
+          : [];
+
+    const [openIdeas, infraSnapshot, paperPortfolio, doneTasks24h, deployEvents24h, platformRow] =
+      await Promise.all([
+        this.prisma.buildQueueItem.findMany({
+          where: {
+            founderId: founder.id,
+            kind: 'IDEA',
+            status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+          },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+          take: 5,
+        }),
+        this.autopilot.buildDraftInfrastructureSnapshot(userId).catch(() => null),
+        this.prisma.paperPortfolio.findUnique({ where: { userId }, select: { cashBalance: true } }),
+        this.prisma.buildQueueItem.findMany({
+          where: {
+            founderId: founder.id,
+            status: BuildQueueStatus.DONE,
+            updatedAt: { gte: since24h },
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 8,
+          select: { title: true },
+        }),
+        this.prisma.founderEvent.findMany({
+          where: {
+            founderId: founder.id,
+            type: FounderEventType.DEPLOY_SUCCESS,
+            createdAt: { gte: since24h },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: { title: true, payload: true },
+        }),
+        this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
+      ]);
+
+    const platformClosing =
+      platformRow?.globalShareFooter?.trim() || PLATFORM_X_SHARE_FOOTER;
+
+    const githubMemory = memory.repoFullName
+      ? await this.memory.readRepoMemory(userId, memory.repoFullName)
+      : null;
 
     const contextBlock = this.buildCopilotContextBlock({
-      memory: refreshedMemory,
+      memory,
       githubMemory,
-      recentCommits: todayCommits.length > 0 ? todayCommits : recentCommits.slice(0, 8),
+      recentCommits: commits24h.length > 0 ? commits24h : [],
       openIdeas,
       project: project ?? undefined,
-      summaryBody: summary.body,
+      summaryBody: formatCommitsLast24hForTraders(commits24h, projectDisplayName),
+      workspaceActivity,
     });
 
-    const lastCommit = recentCommits[0] ?? null;
-    const commitHighlights = recentCommits
-      .slice(0, 12)
-      .map((c) => `- ${c.sha.slice(0, 7)} ${c.message.split('\n')[0]?.trim() ?? c.message}`)
-      .join('\n');
+    const lastCommit = commits24h[0] ?? null;
 
     const accountBlock = buildSocialDraftFounderAccountBlock({
       founderName: founder.name,
-      projectName: project?.name,
+      projectName: projectDisplayName,
       journeyStage: founder.journeyStage,
       buildStreakDays: founder.buildStreakDays,
       reputationScore: founder.reputationScore,
       founderCredits: founder.founderCredits,
       paperCashUsd: paperPortfolio ? Number(paperPortfolio.cashBalance) : undefined,
-      launchReadiness: refreshedMemory.launchReadiness,
-      progressPercent: refreshedMemory.progressPercent,
-      currentGoal: refreshedMemory.currentGoal,
+      launchReadiness: memory.launchReadiness,
+      progressPercent: memory.progressPercent,
+      currentGoal: memory.currentGoal,
       userDisplayName: founder.user?.name ?? undefined,
     });
 
@@ -1242,7 +1275,7 @@ export class FounderCopilotService {
       : 'Hybrid control plane: snapshot unavailable — mention GitHub + Stack connections only if commits support it.';
 
     const missingLinkHints = buildMissingLinkNarrativeHints({
-      commits: recentCommits,
+      commits: commits24h,
       missingPlatforms: infraSnapshot?.syncStatus.controlPlane.missingForFullStack ?? [],
     });
 
@@ -1254,37 +1287,80 @@ export class FounderCopilotService {
       throw new BadRequestException('Connect OpenHands in AI Stack first');
     }
 
-    const forceProvider =
-      providerKey && Object.values(AiProvider).includes(providerKey as AiProvider)
-        ? (providerKey as AiProvider)
-        : undefined;
+    const forceProvider = this.mapSocialDraftProvider(providerKey);
+    const forcedLlmLabel =
+      forceProvider === AiProvider.DEEPSEEK
+        ? 'DEEPSEEK'
+        : forceProvider === AiProvider.OPENAI
+          ? 'OPENAI'
+          : forceProvider === AiProvider.ANTHROPIC
+            ? 'ANTHROPIC'
+            : forceProvider === AiProvider.GEMINI
+              ? 'GEMINI'
+              : forceProvider === AiProvider.OPENROUTER
+                ? 'OPENROUTER'
+                : forceProvider === AiProvider.PHALA
+                  ? 'PHALA'
+                  : undefined;
 
-    const systemPrompt = buildSocialDraftSystemPrompt(codeAgent);
+    const systemPrompt = buildSocialDraftSystemPrompt(codeAgent, {
+      forcedLlm: forcedLlmLabel as
+        | 'DEEPSEEK'
+        | 'OPENAI'
+        | 'ANTHROPIC'
+        | 'GEMINI'
+        | 'OPENROUTER'
+        | 'PHALA'
+        | undefined,
+    });
+
+    const completedTasks = [
+      ...doneTasks24h.map((t) => t.title),
+      ...deployEvents24h.map((e) => e.title),
+    ];
+
     const userPrompt = [
-      `Project: ${project?.name ?? founder.name}`,
-      codeAgent ? `Draft as: ${codeAgent} (code-aware, plain English for X and feed).` : '',
+      `PROJECT DISPLAY NAME: ${projectDisplayName}`,
+      projectTicker ? `DEXSCREENER / LISTING TICKER: ${projectTicker}` : '',
+      memory.repoFullName ? `GITHUB REPO: ${memory.repoFullName}` : 'GITHUB: not linked',
+      codeAgent ? `Draft voice: ${codeAgent} (code-aware, plain English).` : '',
+      forceProvider ? `Use ${forceProvider} for this draft.` : '',
+      '',
+      '=== LAST 24 HOURS (primary source — only describe work evidenced here) ===',
+      formatCommitsLast24hForTraders(commits24h, projectDisplayName),
+      completedTasks.length > 0
+        ? ['', '=== Mission Control tasks completed (24h) ===', ...completedTasks.map((t) => `- ${t}`)]
+        : [],
       '',
       '=== Founder account / profile ===',
       accountBlock,
       '',
-      '=== Hybrid control plane (include ✗ fail context in the story) ===',
+      '=== Hybrid control plane (Vercel / Railway / Neon / GitHub) ===',
       infraBlock,
       '',
-      '=== Last commit (full detail) ===',
+      '=== Last commit detail ===',
       formatLastCommitDetail(lastCommit),
       '',
-      '=== Commits by day (last 7 days) ===',
-      formatCommitsByDay(recentCommits, { maxDays: 7, maxPerDay: 6 }),
+      '=== Older context (7d — background only, do not treat as “today”) ===',
+      formatCommitsByDay(
+        commits24h.length > 0
+          ? commits24h
+          : memory.repoFullName
+            ? await this.github.listCommitsOnRef(userId, memory.repoFullName, 20)
+            : [],
+        { maxDays: 7, maxPerDay: 4 },
+      ),
       '',
-      '=== Commit highlights (recent subjects) ===',
-      commitHighlights || 'none',
-      '',
-      '=== Missing-link narrative (weave into BODY) ===',
+      '=== Missing-link narrative ===',
       missingLinkHints,
       '',
-      '=== Mission Control memory & weekly summary ===',
+      '=== Mission Control memory ===',
       contextBlock,
+      '',
+      '=== PLATFORM CLOSING (admin default — weave into final paragraph) ===',
+      platformClosing,
     ]
+      .flat()
       .filter(Boolean)
       .join('\n');
 
@@ -1294,39 +1370,46 @@ export class FounderCopilotService {
         })
       : await this.builder.tryCopilotChatCompletion(userId, systemPrompt, userPrompt);
 
-    const displayProvider = codeAgent ?? (aiResult.ok ? aiResult.provider : 'RULE_BASED');
+    const displayProvider =
+      codeAgent ?? (forceProvider ? String(forceProvider) : aiResult.ok ? aiResult.provider : 'RULE_BASED');
 
     if (aiResult.ok) {
       const parsed = parseSocialDraftLlmResponse(aiResult.text);
+      const bodyWithClosing = platformClosing
+        ? `${parsed.body.trim()}\n\n---\n${platformClosing}`
+        : parsed.body;
       return {
         headline: parsed.headline,
-        body: parsed.body,
+        body: bodyWithClosing,
         xHook: parsed.xHook,
         provider: displayProvider,
         llmProvider: aiResult.provider,
+        projectDisplayName,
+        platformClosing,
       };
     }
 
-    const fallbackHeadline =
-      todayCommits[0]?.message.split('\n')[0]?.slice(0, 120) ??
-      refreshedMemory.suggestedNextStep?.slice(0, 120) ??
-      `Progress on ${project?.name ?? 'our project'}`;
-    const fallbackBody = buildCommunityUpdateFromSummary({
-      title: fallbackHeadline,
-      body: summary.body,
-      traderView: refreshedMemory.suggestedNextStep
-        ? `Next: ${refreshedMemory.suggestedNextStep}`
-        : 'More shipping this week.',
+    const fallback = buildFounderUpdateFallback({
+      projectDisplayName,
+      commits24h,
+      currentGoal: memory.currentGoal,
+      suggestedNext: memory.suggestedNextStep,
+      launchReadiness: memory.launchReadiness,
+      buildStreakDays: founder.buildStreakDays,
+      completedTasks,
+      platformClosing,
     });
 
     return {
-      headline: fallbackHeadline,
-      body: fallbackBody,
-      xHook: fallbackHeadline,
+      headline: fallback.headline,
+      body: fallback.body,
+      xHook: fallback.xHook,
       provider: displayProvider,
       llmProvider: 'RULE_BASED' as const,
       llmErrors: aiResult.llmErrors,
       fallback: true,
+      projectDisplayName,
+      platformClosing,
     };
   }
 
