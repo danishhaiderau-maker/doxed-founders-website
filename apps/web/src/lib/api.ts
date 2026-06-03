@@ -3384,6 +3384,22 @@ export function fetchEventActivity(token: string) {
   return apiFetch<EventActivityFeed>('/events/activity', undefined, token);
 }
 
+export function fetchCopilotSocialDraft(provider: string | undefined, token: string) {
+  return apiFetch<{
+    headline: string;
+    body: string;
+    xHook: string;
+    provider: string;
+    llmProvider?: string;
+    llmErrors?: string[];
+    fallback?: boolean;
+  }>(
+    '/copilot/social-draft',
+    { method: 'POST', body: JSON.stringify({ provider: provider ?? undefined }) },
+    token,
+  );
+}
+
 export function copilotAsk(prompt: string, token: string, agentTemplate?: string | null) {
   return apiFetch<{
     answer: string;

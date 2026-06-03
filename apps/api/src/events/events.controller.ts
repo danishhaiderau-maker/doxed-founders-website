@@ -44,6 +44,11 @@ export class EventsController {
     return this.copilot.ask(user.id, body.prompt, { agentTemplate: body.agentTemplate });
   }
 
+  @Post('copilot/social-draft')
+  socialDraft(@CurrentUser() user: AuthUser, @Body() body: { provider?: string }) {
+    return this.copilot.draftSocialUpdate(user.id, { provider: body.provider });
+  }
+
   @Post('copilot/hands-free')
   handsFree(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
     return this.copilot.handsFree(user.id, body.prompt);
