@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+feat(admin): showcase API keys and hire-time BYO AI
 
 ## Last Activity
 
