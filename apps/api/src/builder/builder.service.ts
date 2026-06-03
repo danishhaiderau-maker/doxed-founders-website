@@ -23,6 +23,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   CursorCredentialMeta,
   dispatchCursorCloudTask,
+  fetchCursorRun,
+  isCursorRunTerminal,
   verifyCursorCloudConnection,
 } from './cursor-cloud.client';
 import {
@@ -521,11 +523,39 @@ export class BuilderService {
     return resolveBuildWorker(connections);
   }
 
+  async getCursorRunSnapshot(userId: string, agentId: string, runId: string) {
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: 'cursor' } },
+    });
+    if (!cred?.token) {
+      throw new BadRequestException('Connect Cursor in AI Stack first');
+    }
+    const apiKey = this.crypto.decrypt(cred.token);
+    if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
+    const run = await fetchCursorRun(apiKey, agentId, runId);
+    return {
+      ...run,
+      terminal: isCursorRunTerminal(run.status),
+      agentUrl: `https://cursor.com/agents/${agentId}`,
+    };
+  }
+
   async executeBuildTask(
     userId: string,
-    input: { spec: string; cursorPrompt?: string; repository?: string },
+    input: {
+      spec: string;
+      cursorPrompt?: string;
+      repository?: string;
+      worker?: 'CURSOR' | 'OPENHANDS';
+    },
   ) {
-    const worker = await this.resolveBuildWorker(userId);
+    const connections = await this.getBuildWorkerConnections(userId);
+    const worker =
+      input.worker === 'CURSOR' && connections.cursor
+        ? 'CURSOR'
+        : input.worker === 'OPENHANDS' && connections.openHands
+          ? 'OPENHANDS'
+          : await this.resolveBuildWorker(userId);
 
     if (worker === 'CURSOR') {
       try {
@@ -585,6 +615,9 @@ export class BuilderService {
   async getWorkerStatus(userId: string) {
     const connections = await this.getBuildWorkerConnections(userId);
     const worker = resolveBuildWorker(connections);
+    const buildWorkerOptions: { key: 'CURSOR' | 'OPENHANDS'; label: string }[] = [];
+    if (connections.cursor) buildWorkerOptions.push({ key: 'CURSOR', label: 'Cursor' });
+    if (connections.openHands) buildWorkerOptions.push({ key: 'OPENHANDS', label: 'OpenHands' });
     const llmProviders = await this.listUsableLlmCredentialProviders(userId);
     const githubTokenConnected = Boolean(
       await this.prisma.gitHubConnection.findFirst({
@@ -594,11 +627,13 @@ export class BuilderService {
     const cursorMeta = await this.getCursorMeta(userId);
     return {
       buildWorker: worker,
+      buildWorkerOptions,
       connections,
       llmConnected: llmProviders.size > 0,
       githubConnected: githubTokenConnected,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       latestRunId: cursorMeta?.latestRunId ?? null,
+      cursorAgentId: cursorMeta?.agentId ?? null,
     };
   }
 

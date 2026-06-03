@@ -44,6 +44,10 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   >([]);
   const [llmConnected, setLlmConnected] = useState(false);
   const [buildWorker, setBuildWorker] = useState('NONE');
+  const [workerConnections, setWorkerConnections] = useState<{
+    cursor: boolean;
+    openHands: boolean;
+  }>({ cursor: false, openHands: false });
   const [sendMode, setSendMode] = useState<CopilotSendMode>('ask');
 
   const onTranscript = useCallback((text: string) => {
@@ -64,6 +68,8 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       setMemory(mem);
       setDefaultProvider(builder.defaultProvider);
       setProviders(builder.providers);
+      const conn = worker?.connections ?? { cursor: false, openHands: false };
+      setWorkerConnections({ cursor: conn.cursor, openHands: conn.openHands });
       setBuildWorker(worker?.buildWorker ?? 'NONE');
       setLlmConnected(
         builder.providers.some(
@@ -106,18 +112,25 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   async function handleSubmit() {
     const q = prompt.trim();
     if (!q || busy) return;
-    const stack = resolveCopilotStack(providers, defaultProvider, buildWorker);
+    const stack = resolveCopilotStack(providers, defaultProvider, buildWorker, workerConnections);
     if (sendMode === 'build' && stack.canBuild) {
       setBusy(true);
       try {
         const result = await executeBuildTask(
-          { spec: q, cursorPrompt: q, repository: memory?.repoFullName ?? undefined },
+          {
+            spec: q,
+            cursorPrompt: q,
+            repository: memory?.repoFullName ?? undefined,
+            worker: stack.buildWorker as 'CURSOR' | 'OPENHANDS',
+          },
           accessToken,
         );
         const msg =
-          result.status === 'dispatched' && result.agentUrl
-            ? `${stack.buildLabel} started — ${result.agentUrl}`
-            : result.error ?? result.message ?? 'Run failed';
+          result.status === 'dispatched' && result.worker === 'CURSOR'
+            ? `**Cursor** started on ${memory?.repoFullName ?? 'your repo'} — open Mission Control chat for live output.`
+            : result.status === 'dispatched'
+              ? `**${stack.buildLabel}** started — check Mission Control for session details.`
+              : result.error ?? result.message ?? 'Run failed';
         setLastAnswer(msg);
         onResult?.(msg);
         setPrompt('');
@@ -141,7 +154,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   }
 
   const stats = feed?.weekStats;
-  const stack = resolveCopilotStack(providers, defaultProvider, buildWorker);
+  const stack = resolveCopilotStack(providers, defaultProvider, buildWorker, workerConnections);
   const showModeToggle = stack.canAsk && stack.canBuild;
   const buttonLabel = primaryButtonLabel(sendMode, stack);
 

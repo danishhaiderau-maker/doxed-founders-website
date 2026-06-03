@@ -5,12 +5,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   copilotAsk,
   executeBuildTask,
+  fetchBuilderCursorRun,
   fetchBuilderSettings,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
   ProjectMemory,
   runCopilotAutopilot,
 } from '@/lib/api';
+import {
+  formatBuilderRunInChat,
+  pollCursorRunInChat,
+  type BuilderRunSnapshot,
+} from '@/lib/builder-run-live';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import {
@@ -33,6 +39,8 @@ type ChatMessage = {
   provider?: string;
   routedAgent?: string;
   runtimeTools?: string[];
+  /** Optional deep link when full stream is on cursor.com */
+  builderAgentUrl?: string | null;
 };
 
 const STORAGE_KEY = 'dcf-copilot-chat-v1';
@@ -90,8 +98,13 @@ export function FounderCopilotChat({
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [defaultProvider, setDefaultProvider] = useState('RULE_BASED');
   const [buildWorker, setBuildWorker] = useState('NONE');
+  const [workerConnections, setWorkerConnections] = useState<{
+    cursor: boolean;
+    openHands: boolean;
+  }>({ cursor: false, openHands: false });
   const [sendMode, setSendMode] = useState<CopilotSendMode>('ask');
   const [preferredChatKey, setPreferredChatKey] = useState<string | null>(null);
+  const [preferredBuildWorker, setPreferredBuildWorker] = useState<'CURSOR' | 'OPENHANDS' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -101,8 +114,8 @@ export function FounderCopilotChat({
 
   const activeChatProvider = preferredChatKey ?? defaultProvider;
   const stack = useMemo(
-    () => resolveCopilotStack(providers, activeChatProvider, buildWorker),
-    [providers, activeChatProvider, buildWorker],
+    () => resolveCopilotStack(providers, activeChatProvider, buildWorker, workerConnections),
+    [providers, activeChatProvider, buildWorker, workerConnections],
   );
   const { connected: chatProviderOptions } = useMemo(
     () => listChatProviders(providers, activeChatProvider),
@@ -137,7 +150,21 @@ export function FounderCopilotChat({
       setProviders(builder.providers);
       setDefaultProvider(builder.defaultProvider);
       setPreferredChatKey(builder.defaultProvider);
-      setBuildWorker(worker?.buildWorker ?? 'NONE');
+      const conn = worker?.connections ?? { cursor: false, openHands: false };
+      setWorkerConnections({ cursor: conn.cursor, openHands: conn.openHands });
+      const bw = worker?.buildWorker ?? 'NONE';
+      setBuildWorker(bw);
+      const opts = worker?.buildWorkerOptions ?? [];
+      if (opts.length > 0) {
+        setPreferredBuildWorker((prev) => {
+          const pick =
+            (prev && opts.some((o) => o.key === prev) ? prev : null) ??
+            opts.find((o) => o.key === bw)?.key ??
+            opts[0].key;
+          setBuildWorker(pick);
+          return pick;
+        });
+      }
     } catch {
       if (!memoryProp) setMemoryLocal(null);
     }
@@ -150,6 +177,25 @@ export function FounderCopilotChat({
   useEffect(() => {
     setSendMode(defaultSendMode(stack));
   }, [stack.canAsk, stack.canBuild]);
+
+  const pollCursorIntoMessage = useCallback(
+    async (assistantId: string, agentId: string, runId: string, task: string, mode?: string) => {
+      const workerLabel = stack.buildLabel;
+      await pollCursorRunInChat(agentId, runId, accessToken, fetchBuilderCursorRun, (snap) => {
+        const content = formatBuilderRunInChat({
+          workerLabel,
+          task,
+          repo: memory?.repoFullName,
+          snapshot: snap as BuilderRunSnapshot,
+          mode,
+        });
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, content } : m)),
+        );
+      });
+    },
+    [accessToken, memory?.repoFullName, stack.buildLabel],
+  );
 
   const submit = useCallback(
     async (text: string, mode: CopilotSendMode) => {
@@ -193,31 +239,93 @@ export function FounderCopilotChat({
 
       try {
         if (useBuild) {
+          const workerKey =
+            preferredBuildWorker && stack.buildWorkers.some((w) => w.key === preferredBuildWorker)
+              ? preferredBuildWorker
+              : (stack.buildWorker as 'CURSOR' | 'OPENHANDS' | undefined);
           const result = await executeBuildTask(
-            { spec: q, cursorPrompt: q, repository: memory?.repoFullName ?? undefined },
+            {
+              spec: q,
+              cursorPrompt: q,
+              repository: memory?.repoFullName ?? undefined,
+              worker: workerKey,
+            },
             accessToken,
           );
-          let msg: string;
-          let provider = 'BUILDER';
-          if (result.status === 'dispatched' && result.agentUrl) {
-            msg = `${stack.buildLabel} agent started — work runs in Cursor/OpenHands, not in this chat. Track progress:\n${result.agentUrl}`;
-            provider = result.worker ?? 'BUILDER';
+          const provider = result.worker ?? 'BUILDER';
+          const workerLabel =
+            stack.buildWorkers.find((w) => w.key === result.worker)?.label ?? stack.buildLabel;
+
+          if (
+            result.status === 'dispatched' &&
+            result.worker === 'CURSOR' &&
+            result.agentId &&
+            result.runId
+          ) {
+            const assistantId = `a-${Date.now()}`;
+            const initial = formatBuilderRunInChat({
+              workerLabel,
+              task: q,
+              repo: memory?.repoFullName,
+              snapshot: {
+                id: result.runId,
+                agentId: result.agentId,
+                status: 'CREATING',
+              },
+              mode: result.mode,
+            });
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: assistantId,
+                role: 'assistant',
+                content: initial,
+                provider: 'CURSOR',
+                builderAgentUrl: result.agentUrl,
+              },
+            ]);
+            onResult?.(initial);
+            await pollCursorIntoMessage(assistantId, result.agentId, result.runId, q, result.mode);
+          } else if (result.status === 'dispatched') {
+            const msg = [
+              `**${workerLabel}** started on your repo.`,
+              result.agentUrl ? `\nSession: ${result.agentUrl}` : '',
+              '',
+              '_OpenHands runs in its workspace — connect GitHub in Founder OS to commit when done._',
+            ].join('\n');
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a-${Date.now()}`,
+                role: 'assistant',
+                content: msg,
+                provider,
+                builderAgentUrl: result.agentUrl,
+              },
+            ]);
+            onResult?.(msg);
           } else if (result.status === 'error') {
-            msg = result.error ?? 'Run failed — check AI Stack settings.';
+            const msg = result.error ?? 'Run failed — check AI Stack settings.';
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: 'assistant', content: msg, provider },
+            ]);
+            onResult?.(msg);
           } else {
-            msg =
+            const msg =
               result.message ??
               'Task queued. Connect Cursor or OpenHands in AI Stack to run code on your repo.';
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: 'assistant', content: msg, provider },
+            ]);
+            onResult?.(msg);
           }
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: 'assistant', content: msg, provider },
-          ]);
-          onResult?.(msg);
         } else {
           const result = await copilotAsk(q, accessToken, agentTemplate);
+          const assistantId = `a-${Date.now()}`;
           const assistantMsg: ChatMessage = {
-            id: `a-${Date.now()}`,
+            id: assistantId,
             role: 'assistant',
             content: result.answer,
             provider: result.routedAgent
@@ -225,9 +333,23 @@ export function FounderCopilotChat({
               : result.answerProvider,
             routedAgent: result.routedAgent?.label,
             runtimeTools: result.runtime?.toolsUsed,
+            builderAgentUrl: result.runtime?.cursorAgentUrl ?? null,
           };
           setMessages((prev) => [...prev, assistantMsg]);
           onResult?.(result.answer);
+          if (
+            result.runtime?.cursorDispatched &&
+            result.runtime.cursorAgentId &&
+            result.runtime.cursorRunId
+          ) {
+            await pollCursorIntoMessage(
+              assistantId,
+              result.runtime.cursorAgentId,
+              result.runtime.cursorRunId,
+              q,
+              result.runtime.cursorMode,
+            );
+          }
         }
         void loadMeta();
       } catch (err) {
@@ -240,7 +362,21 @@ export function FounderCopilotChat({
         inputRef.current?.focus();
       }
     },
-    [accessToken, agentTemplate, busy, loadMeta, memory?.repoFullName, onResult, stack.buildLabel, stack.canBuild, stop],
+    [
+      accessToken,
+      agentTemplate,
+      busy,
+      loadMeta,
+      memory?.repoFullName,
+      onResult,
+      pollCursorIntoMessage,
+      preferredBuildWorker,
+      stack.buildLabel,
+      stack.buildWorker,
+      stack.buildWorkers,
+      stack.canBuild,
+      stop,
+    ],
   );
 
   useEffect(() => {
@@ -341,7 +477,10 @@ export function FounderCopilotChat({
               </li>
               <li>
                 <span className="text-emerald-300">Run in repo</span> — dispatches{' '}
-                {stack.canBuild ? stack.buildLabel : 'Cursor/OpenHands'} to code on GitHub; open the agent link to watch.
+                {stack.canBuild
+                  ? stack.buildWorkers.map((w) => w.label).join(' or ')
+                  : 'Cursor/OpenHands'}{' '}
+                on GitHub; status and output stream here in Mission Control.
               </li>
             </ul>
           </div>
@@ -366,13 +505,26 @@ export function FounderCopilotChat({
                 </p>
               )}
               {m.content}
+              {m.builderAgentUrl ? (
+                <p className="mt-2 border-t border-zinc-800/80 pt-2 text-[10px] text-zinc-500">
+                  <a
+                    href={m.builderAgentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-400/90 hover:underline"
+                  >
+                    Open full session on Cursor ↗
+                  </a>
+                  {' · '}primary workflow stays in this dashboard
+                </p>
+              ) : null}
             </div>
           </div>
         ))}
         {busy && (
           <div className="flex justify-start">
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-500">
-              {sendMode === 'build' ? `Dispatching ${stack.buildLabel}…` : 'Thinking…'}
+              {sendMode === 'build' ? `Running ${stack.buildLabel} on your repo…` : 'Thinking…'}
             </div>
           </div>
         )}
@@ -430,6 +582,26 @@ export function FounderCopilotChat({
             </select>
           </div>
         )}
+        {stack.buildWorkers.length > 1 && sendMode === 'build' && (
+          <div className="mb-2">
+            <label className="text-[10px] text-zinc-500">Code with</label>
+            <select
+              value={preferredBuildWorker ?? stack.buildWorker}
+              onChange={(e) => {
+                const key = e.target.value as 'CURSOR' | 'OPENHANDS';
+                setPreferredBuildWorker(key);
+                setBuildWorker(key);
+              }}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-white"
+            >
+              {stack.buildWorkers.map((w) => (
+                <option key={w.key} value={w.key}>
+                  {w.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         {showModeToggle && (
           <div className="mb-2 flex rounded-lg border border-zinc-800 p-0.5 text-[11px]">
             <button
@@ -455,6 +627,11 @@ export function FounderCopilotChat({
               Run in {stack.buildLabel}
             </button>
           </div>
+        )}
+        {!showModeToggle && stack.canBuild && !stack.canAsk && stack.buildWorkers.length > 1 && (
+          <p className="mb-2 text-[10px] text-zinc-500">
+            Code agent: <span className="text-emerald-300">{stack.buildLabel}</span>
+          </p>
         )}
         <textarea
           ref={inputRef}

@@ -52,12 +52,25 @@ export function buildWorkerDisplayName(worker: string): string {
   }
 }
 
+export type BuildWorkerOption = { key: 'CURSOR' | 'OPENHANDS'; label: string };
+
+export function listBuildWorkers(connections: {
+  cursor?: boolean;
+  openHands?: boolean;
+}): BuildWorkerOption[] {
+  const out: BuildWorkerOption[] = [];
+  if (connections.cursor) out.push({ key: 'CURSOR', label: 'Cursor' });
+  if (connections.openHands) out.push({ key: 'OPENHANDS', label: 'OpenHands' });
+  return out;
+}
+
 export type CopilotStackSummary = {
   canAsk: boolean;
   canBuild: boolean;
   askLabel: string;
   buildLabel: string;
   chatProviders: { key: string; label: string }[];
+  buildWorkers: BuildWorkerOption[];
   buildWorker: string;
   statusLine: string;
 };
@@ -66,18 +79,26 @@ export function resolveCopilotStack(
   providers: ProviderRow[],
   defaultProvider: string,
   buildWorker: string,
+  connections?: { cursor?: boolean; openHands?: boolean },
 ): CopilotStackSummary {
   const { connected: chatProviders, defaultChat } = listChatProviders(providers, defaultProvider);
+  const buildWorkers = listBuildWorkers(connections ?? {});
+  const activeBuild =
+    buildWorkers.find((w) => w.key === buildWorker) ?? buildWorkers[0] ?? null;
   const canAsk = chatProviders.length > 0;
-  const canBuild = buildWorker === 'CURSOR' || buildWorker === 'OPENHANDS';
+  const canBuild = buildWorkers.length > 0;
   const askLabel = defaultChat ? shortProviderName(defaultChat) : 'Project memory';
-  const buildLabel = buildWorkerDisplayName(buildWorker) || 'Builder';
+  const buildLabel = activeBuild?.label ?? (buildWorkerDisplayName(buildWorker) || 'Builder');
 
   const parts: string[] = [];
-  if (canAsk) parts.push(`Answers: ${askLabel}`);
-  else parts.push('Answers: project memory (connect an LLM in AI Stack)');
-  if (canBuild) parts.push(`Codes: ${buildLabel} (cloud agent on your repo)`);
-  else parts.push('Codes: connect Cursor or OpenHands in AI Stack');
+  if (canAsk) {
+    const names = chatProviders.map((p) => shortProviderName(p)).join(', ');
+    parts.push(`Answers: ${names}`);
+  } else parts.push('Answers: project memory (connect an LLM in AI Stack)');
+  if (canBuild) {
+    const codeNames = buildWorkers.map((w) => w.label).join(', ');
+    parts.push(`Codes: ${codeNames} (live in this chat)`);
+  } else parts.push('Codes: connect Cursor or OpenHands in AI Stack');
 
   return {
     canAsk,
@@ -85,7 +106,8 @@ export function resolveCopilotStack(
     askLabel,
     buildLabel,
     chatProviders: chatProviders.map((p) => ({ key: p.key, label: shortProviderName(p) })),
-    buildWorker,
+    buildWorkers,
+    buildWorker: activeBuild?.key ?? buildWorker,
     statusLine: parts.join(' · '),
   };
 }

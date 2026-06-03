@@ -3273,7 +3273,12 @@ export function dispatchCursorCloudBuild(
 }
 
 export function executeBuildTask(
-  data: { spec: string; cursorPrompt?: string; repository?: string },
+  data: {
+    spec: string;
+    cursorPrompt?: string;
+    repository?: string;
+    worker?: 'CURSOR' | 'OPENHANDS';
+  },
   token: string,
 ) {
   return apiFetch<{
@@ -3288,14 +3293,31 @@ export function executeBuildTask(
   }>('/builder/execute-task', { method: 'POST', body: JSON.stringify(data) }, token);
 }
 
+export function fetchBuilderCursorRun(agentId: string, runId: string, token: string) {
+  return apiFetch<{
+    id: string;
+    agentId: string;
+    status: string;
+    result?: string | null;
+    durationMs?: number | null;
+    terminal: boolean;
+    agentUrl: string;
+    git?: {
+      branches?: { repoUrl?: string; branch?: string; prUrl?: string }[];
+    } | null;
+  }>(`/builder/cursor/runs/${encodeURIComponent(agentId)}/${encodeURIComponent(runId)}`, undefined, token);
+}
+
 export function fetchBuilderWorkerStatus(token: string) {
   return apiFetch<{
     buildWorker: string;
+    buildWorkerOptions?: { key: 'CURSOR' | 'OPENHANDS'; label: string }[];
     connections: { cursor: boolean; openHands: boolean; founderNode: boolean };
     llmConnected: boolean;
     githubConnected: boolean;
     cursorAgentUrl: string | null;
     latestRunId: string | null;
+    cursorAgentId?: string | null;
   }>('/builder/worker-status', undefined, token);
 }
 
@@ -3362,6 +3384,9 @@ export function copilotAsk(prompt: string, token: string, agentTemplate?: string
       githubRepo: string | null;
       cursorDispatched: boolean;
       cursorAgentUrl: string | null;
+      cursorAgentId?: string | null;
+      cursorRunId?: string | null;
+      cursorMode?: 'create' | 'follow_up';
       communityDraftSaved?: boolean;
       raiseRoomLinked?: boolean;
     };

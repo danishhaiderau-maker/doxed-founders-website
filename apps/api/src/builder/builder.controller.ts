@@ -68,9 +68,24 @@ export class BuilderController {
   @Post('execute-task')
   executeTask(
     @CurrentUser() user: AuthUser,
-    @Body() body: { spec: string; cursorPrompt?: string; repository?: string },
+    @Body()
+    body: {
+      spec: string;
+      cursorPrompt?: string;
+      repository?: string;
+      worker?: 'CURSOR' | 'OPENHANDS';
+    },
   ) {
     return this.builder.executeBuildTask(user.id, body);
+  }
+
+  @Get('cursor/runs/:agentId/:runId')
+  cursorRun(
+    @CurrentUser() user: AuthUser,
+    @Param('agentId') agentId: string,
+    @Param('runId') runId: string,
+  ) {
+    return this.builder.getCursorRunSnapshot(user.id, agentId, runId);
   }
 
   @Get('worker-status')

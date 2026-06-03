@@ -149,4 +149,50 @@ async function followUpRun(
   };
 }
 
+export type CursorRunSnapshot = {
+  id: string;
+  agentId: string;
+  status: string;
+  result?: string | null;
+  durationMs?: number | null;
+  git?: {
+    branches?: { repoUrl?: string; branch?: string; prUrl?: string }[];
+  } | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+const TERMINAL_RUN_STATUSES = new Set(['FINISHED', 'ERROR', 'CANCELLED', 'EXPIRED']);
+
+export function isCursorRunTerminal(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status.toUpperCase());
+}
+
+export async function fetchCursorRun(
+  apiKey: string,
+  agentId: string,
+  runId: string,
+): Promise<CursorRunSnapshot> {
+  const res = await fetch(`${CURSOR_CLOUD_API_BASE}/v1/agents/${agentId}/runs/${runId}`, {
+    headers: { Authorization: authHeader(apiKey) },
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new BadRequestException(
+      `Cursor run status failed (${res.status}): ${errText.slice(0, 240)}`,
+    );
+  }
+  const data = (await res.json()) as CursorRunSnapshot & { result?: string };
+  return {
+    id: data.id ?? runId,
+    agentId: data.agentId ?? agentId,
+    status: data.status ?? 'UNKNOWN',
+    result: data.result ?? null,
+    durationMs: data.durationMs ?? null,
+    git: data.git ?? null,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+  };
+}
+
 export type { CursorCloudDispatchResult };
