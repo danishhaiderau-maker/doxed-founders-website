@@ -29,6 +29,9 @@ export function DiscoverUniverseBubble({
   const size = bubbleRadiusFromActivityScore(project.activityScore);
   const stage = project.universeStage as DiscoverUniverseStage;
   const colors = DISCOVER_UNIVERSE_COLORS[stage] ?? DISCOVER_UNIVERSE_COLORS.building;
+  const isLive = stage === 'live';
+  const borderPx = isLive ? 4 : 3;
+  const outerRingPx = isLive ? 3 : 2;
   const floatDuration = 4 + (index % 5) * 0.6;
 
   return (
@@ -63,11 +66,13 @@ export function DiscoverUniverseBubble({
           style={{ background: colors.glow }}
         />
         <div
-          className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-full border-2 transition group-hover:scale-105"
+          className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-full transition group-hover:scale-105"
           style={{
+            borderWidth: borderPx,
+            borderStyle: 'solid',
             borderColor: colors.border,
             background: `radial-gradient(circle at 35% 30%, ${colors.color}55, #0a0a0f 70%)`,
-            boxShadow: `0 0 28px ${colors.glow}, inset 0 0 20px ${colors.color}22`,
+            boxShadow: `0 0 0 ${outerRingPx}px ${colors.border}, 0 0 ${isLive ? 40 : 28}px ${colors.glow}, inset 0 0 20px ${colors.color}22`,
           }}
         >
           {project.logoUrl ? (
