@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DexscreenerModule } from '../dexscreener/dexscreener.module';
 import { FeedModule } from '../feed/feed.module';
@@ -9,7 +9,7 @@ import { PlatformAdoptionService } from './platform-adoption.service';
 import { ProjectsService } from './projects.service';
 
 @Module({
-  imports: [AuthModule, DexscreenerModule, FeedModule],
+  imports: [AuthModule, DexscreenerModule, forwardRef(() => FeedModule)],
   controllers: [ProjectsController, FoundersController, ProjectsClaimController],
   providers: [ProjectsService, MetricsSyncService, PlatformAdoptionService],
   exports: [ProjectsService, MetricsSyncService, PlatformAdoptionService],
