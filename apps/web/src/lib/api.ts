@@ -3239,7 +3239,13 @@ export function fetchAttestationDashboard(token: string) {
 }
 
 export function scanVaultIntegrity(token: string) {
-  return apiFetch('/attestation/vault-scan', { method: 'POST' }, token);
+  return apiFetch<{
+    id: string;
+    verified: boolean;
+    status: string;
+    summary: string | null;
+    createdAt: string;
+  }>('/attestation/vault-scan', { method: 'POST' }, token);
 }
 
 export function verifyPhalaAttestation(token: string, logId?: string) {
