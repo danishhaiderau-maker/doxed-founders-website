@@ -7,6 +7,7 @@ import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
 import { NotificationBell } from '@/components/notification-bell';
 import { LandingFeatureHub } from '@/components/landing/landing-feature-hub';
+import { LandingConvictionTile } from '@/components/landing/landing-conviction-tile';
 import type { PlatformStats } from '@/lib/api';
 
 function formatStat(value: number) {
@@ -18,7 +19,7 @@ function formatStat(value: number) {
 const WHY_DOXXED = [
   {
     title: 'Scam culture',
-    body: 'Anonymous founders extracted billions.',
+    body: 'Anonymous founders and meme-coin launches — same risk as wiring a stranger online.',
     border: 'border-red-500/35',
     accent: 'text-red-300',
   },
@@ -279,6 +280,9 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           </span>
         </Link>
       </section>
+
+      {/* Conviction tile — show your face / HODL culture / Pump.fun data */}
+      <LandingConvictionTile />
 
       {/* Navigation hub + live preview widgets */}
       <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />

@@ -12,6 +12,7 @@ import {
   buildResumeCursorPrompt,
   buildWeeklySummary,
   computeProjectProgress,
+  detectAutopilotIntent,
   detectHandsFreeAction,
   detectCursorDispatchIntent,
   detectWorkforceIntent,
@@ -31,6 +32,7 @@ import { GitHubApiService } from '../github/github-api.service';
 import { FounderOsMemoryService } from '../github/founder-os-memory.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from './events.service';
+import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
 
 @Injectable()
@@ -46,6 +48,8 @@ export class FounderCopilotService {
     private readonly buildQueue: BuildQueueService,
     @Inject(forwardRef(() => FounderOsService))
     private readonly founderOs: FounderOsService,
+    @Inject(forwardRef(() => FounderAutopilotService))
+    private readonly autopilot: FounderAutopilotService,
   ) {}
 
   async getProjectMemory(userId: string) {
@@ -470,6 +474,10 @@ export class FounderCopilotService {
   async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null }) {
     const text = prompt.trim();
     if (!text) throw new BadRequestException('Prompt required');
+
+    if (detectAutopilotIntent(text)) {
+      return this.autopilot.runAutopilot(userId, text);
+    }
 
     if (detectCursorDispatchIntent(text)) {
       return this.dispatchCursorFromCopilot(userId, text);
@@ -968,7 +976,7 @@ export class FounderCopilotService {
           action,
           answer: body,
           summary: 'summary' in result ? result.summary : undefined,
-          stats: result.stats,
+          stats: 'stats' in result ? result.stats : undefined,
         };
       }
       case 'publish_progress': {
@@ -1014,6 +1022,19 @@ export class FounderCopilotService {
       case 'roadmap': {
         const result = await this.buildQueue.runCommand(userId, { intent: 'roadmap', prompt: text });
         return { action, answer: result.result.body, creditsSpent: result.creditsSpent };
+      }
+      case 'autopilot': {
+        const result = await this.autopilot.runAutopilot(userId, text);
+        return {
+          action,
+          answer: result.answer,
+          answerProvider: result.answerProvider,
+          autopilot: {
+            steps: result.steps,
+            published: result.published,
+            builderDispatch: result.builderDispatch,
+          },
+        };
       }
       case 'resume_work': {
         const result = await this.resumeWork(userId);

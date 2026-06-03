@@ -3,6 +3,7 @@ import type { DeviceMemoryPayload } from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { EventsService } from './events.service';
+import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
 
 @Controller()
@@ -10,6 +11,7 @@ export class EventsController {
   constructor(
     private readonly events: EventsService,
     private readonly copilot: FounderCopilotService,
+    private readonly autopilot: FounderAutopilotService,
   ) {}
 
   @Get('events')
@@ -45,6 +47,16 @@ export class EventsController {
   @Post('copilot/hands-free')
   handsFree(@CurrentUser() user: AuthUser, @Body() body: { prompt: string }) {
     return this.copilot.handsFree(user.id, body.prompt);
+  }
+
+  @Get('copilot/platform-sync')
+  platformSync(@CurrentUser() user: AuthUser) {
+    return this.autopilot.getPlatformSyncStatus(user.id);
+  }
+
+  @Post('copilot/autopilot')
+  runAutopilot(@CurrentUser() user: AuthUser, @Body() body: { prompt?: string }) {
+    return this.autopilot.runAutopilot(user.id, body.prompt);
   }
 
   @Get('copilot/memory/device-sync')

@@ -305,6 +305,12 @@ enum MemoryStorageMode {
   FOUNDER_NODE
 }
 
+/** Hybrid control plane entry: minimal Cursor path vs full stack orchestration. */
+enum ControlPlaneMode {
+  CURSOR_FIRST
+  FULL_STACK
+}
+
 enum FounderEventType {
   GITHUB_COMMIT
   GITHUB_PR_MERGED
@@ -1530,6 +1536,9 @@ model FounderBuilderSettings {
   preferredModel         String?
   autoCreateGitHubIssues Boolean    @default(false)
   autoPublishOnEvent     Boolean    @default(false)
+  autopilotEnabled       Boolean    @default(false)
+  autopilotRedeployHosts Boolean    @default(false)
+  controlPlaneMode       ControlPlaneMode @default(FULL_STACK)
   currentGoalFocus       String?
   memoryStorageMode      MemoryStorageMode @default(PLATFORM)
   createdAt              DateTime   @default(now())

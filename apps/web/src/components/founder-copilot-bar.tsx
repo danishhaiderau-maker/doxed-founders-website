@@ -4,15 +4,21 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import {
   copilotAsk,
-  dispatchCursorCloudBuild,
   EventActivityFeed,
+  executeBuildTask,
   fetchBuilderSettings,
+  fetchBuilderWorkerStatus,
   fetchCopilotMemory,
   fetchEventActivity,
   ProjectMemory,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
-import { AI_STACK_HREF, resolveAiStackAction } from '@/lib/copilot-ai-stack';
+import {
+  AI_STACK_HREF,
+  CopilotSendMode,
+  primaryButtonLabel,
+  resolveCopilotStack,
+} from '@/lib/copilot-ai-stack';
 
 const QUICK_ACTIONS = [
   { label: 'Continue where I left off', prompt: 'Resume work — what should I finish next?' },
@@ -37,6 +43,8 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     { key: string; label: string; connected: boolean; connectMode?: string }[]
   >([]);
   const [llmConnected, setLlmConnected] = useState(false);
+  const [buildWorker, setBuildWorker] = useState('NONE');
+  const [sendMode, setSendMode] = useState<CopilotSendMode>('ask');
 
   const onTranscript = useCallback((text: string) => {
     setPrompt(text);
@@ -46,15 +54,17 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
 
   const load = useCallback(async () => {
     try {
-      const [activity, mem, builder] = await Promise.all([
+      const [activity, mem, builder, worker] = await Promise.all([
         fetchEventActivity(accessToken),
         fetchCopilotMemory(accessToken),
         fetchBuilderSettings(accessToken),
+        fetchBuilderWorkerStatus(accessToken).catch(() => null),
       ]);
       setFeed(activity);
       setMemory(mem);
       setDefaultProvider(builder.defaultProvider);
       setProviders(builder.providers);
+      setBuildWorker(worker?.buildWorker ?? 'NONE');
       setLlmConnected(
         builder.providers.some(
           (p) => p.connectMode === 'api_key' && p.connected && p.key !== 'RULE_BASED',
@@ -93,25 +103,33 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     await handleAsk(actionPrompt);
   }
 
-  async function handleDispatchCursor() {
-    if (!prompt.trim() || busy) return;
-    setBusy(true);
-    try {
-      const result = await dispatchCursorCloudBuild(
-        { spec: prompt.trim(), cursorPrompt: prompt.trim() },
-        accessToken,
-      );
-      const msg = `Cursor agent ${result.mode === 'follow_up' ? 'resumed' : 'started'} — ${result.agentUrl}`;
-      setLastAnswer(msg);
-      onResult?.(msg);
-      setPrompt('');
-    } catch (err) {
-      onResult?.(
-        err instanceof Error ? err.message : 'Cursor dispatch failed — connect Cursor in AI Stack',
-      );
-    } finally {
-      setBusy(false);
+  async function handleSubmit() {
+    const q = prompt.trim();
+    if (!q || busy) return;
+    const stack = resolveCopilotStack(providers, defaultProvider, buildWorker);
+    if (sendMode === 'build' && stack.canBuild) {
+      setBusy(true);
+      try {
+        const result = await executeBuildTask(
+          { spec: q, cursorPrompt: q, repository: memory?.repoFullName ?? undefined },
+          accessToken,
+        );
+        const msg =
+          result.status === 'dispatched' && result.agentUrl
+            ? `${stack.buildLabel} started — ${result.agentUrl}`
+            : result.error ?? result.message ?? 'Run failed';
+        setLastAnswer(msg);
+        onResult?.(msg);
+        setPrompt('');
+        load();
+      } catch (err) {
+        onResult?.(err instanceof Error ? err.message : 'Builder dispatch failed');
+      } finally {
+        setBusy(false);
+      }
+      return;
     }
+    await handleAsk(q);
   }
 
   function handleVoiceToggle() {
@@ -123,11 +141,9 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
   }
 
   const stats = feed?.weekStats;
-  const aiStackAction = resolveAiStackAction(providers, defaultProvider);
-  const providerLabel =
-    aiStackAction.kind === 'connect'
-      ? 'Rule-based (local)'
-      : aiStackAction.label;
+  const stack = resolveCopilotStack(providers, defaultProvider, buildWorker);
+  const showModeToggle = stack.canAsk && stack.canBuild;
+  const buttonLabel = primaryButtonLabel(sendMode, stack);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 via-zinc-950/80 to-zinc-950 p-5 shadow-lg shadow-violet-950/20 md:p-6 lg:p-8">
@@ -141,8 +157,11 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
           </h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-2.5 py-1 text-[10px] font-medium text-violet-200">
-            {providerLabel}
+          <span
+            className="max-w-[240px] truncate rounded-full border border-violet-500/40 bg-violet-950/40 px-2.5 py-1 text-[10px] font-medium text-violet-200"
+            title={stack.statusLine}
+          >
+            {stack.statusLine}
           </span>
           <Link href={AI_STACK_HREF} className="text-[10px] text-zinc-500 hover:text-violet-300">
             AI Stack →
@@ -172,11 +191,37 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
       </div>
 
       <div className="mt-4 rounded-xl border border-zinc-800 bg-black/40 p-3 md:p-4">
+        {showModeToggle && (
+          <div className="mb-2 flex rounded-lg border border-zinc-800 p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setSendMode('ask')}
+              className={`flex-1 rounded-md px-2 py-1.5 font-medium ${
+                sendMode === 'ask' ? 'bg-violet-600 text-white' : 'text-zinc-500'
+              }`}
+            >
+              Ask {stack.askLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSendMode('build')}
+              className={`flex-1 rounded-md px-2 py-1.5 font-medium ${
+                sendMode === 'build' ? 'bg-emerald-700 text-white' : 'text-zinc-500'
+              }`}
+            >
+              Run in {stack.buildLabel}
+            </button>
+          </div>
+        )}
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={4}
-          placeholder="Ask Founder Copilot anything… e.g. What am I working on? Finish the landing page."
+          placeholder={
+            sendMode === 'build' && stack.canBuild
+              ? `Tell ${stack.buildLabel} what to implement in your repo…`
+              : `Ask ${stack.askLabel} about your project…`
+          }
           className="w-full resize-y min-h-[5rem] bg-transparent text-sm md:text-base text-white placeholder:text-zinc-600 outline-none"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/80 pt-2">
@@ -196,54 +241,27 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
             {listening && (
               <span className="self-center text-[10px] text-red-300">Listening…</span>
             )}
-            {aiStackAction.kind === 'cursor' && (
-              <span className="rounded-lg border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-300">
-                {aiStackAction.label} ready
-              </span>
-            )}
-            {aiStackAction.kind === 'connected' && (
-              <span className="rounded-lg border border-sky-500/30 px-2 py-1 text-[10px] text-sky-300">
-                {aiStackAction.label} connected
-              </span>
-            )}
-            {aiStackAction.kind === 'connect' && (
-              <span className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] text-zinc-500">
-                Connect an LLM or Cursor in AI Stack
-              </span>
-            )}
           </div>
           <div className="flex gap-2">
-            {aiStackAction.kind === 'connect' ? (
+            {!stack.canAsk && !stack.canBuild ? (
               <Link
                 href={AI_STACK_HREF}
                 className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-950/50"
               >
                 Connect AI Stack
               </Link>
-            ) : aiStackAction.kind === 'cursor' ? (
-              <button
-                type="button"
-                disabled={busy || !prompt.trim()}
-                onClick={handleDispatchCursor}
-                className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-50"
-              >
-                {aiStackAction.label}
-              </button>
-            ) : (
-              <Link
-                href={AI_STACK_HREF}
-                className="rounded-lg border border-sky-500/30 bg-sky-950/20 px-3 py-1.5 text-xs font-medium text-sky-200"
-              >
-                {aiStackAction.label}
-              </Link>
-            )}
+            ) : null}
             <button
               type="button"
               disabled={busy || !prompt.trim()}
-              onClick={() => handleAsk()}
-              className="rounded-lg bg-violet-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+              onClick={() => void handleSubmit()}
+              className={`rounded-lg px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-50 ${
+                sendMode === 'build' && stack.canBuild
+                  ? 'bg-emerald-600 hover:bg-emerald-500'
+                  : 'bg-violet-600 hover:bg-violet-500'
+              }`}
             >
-              {busy ? '…' : 'Send'}
+              {busy ? '…' : buttonLabel}
             </button>
           </div>
         </div>

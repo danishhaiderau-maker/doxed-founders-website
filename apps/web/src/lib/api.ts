@@ -3004,6 +3004,9 @@ export interface BuilderSettings {
   preferredModel: string | null;
   autoCreateGitHubIssues: boolean;
   autoPublishOnEvent: boolean;
+  autopilotEnabled?: boolean;
+  autopilotRedeployHosts?: boolean;
+  controlPlaneMode?: string;
   currentGoalFocus: string | null;
   memoryStorageMode?: string;
   githubTokenConnected: boolean;
@@ -3060,12 +3063,52 @@ export function updateBuilderSettings(
     preferredModel?: string;
     autoCreateGitHubIssues?: boolean;
     autoPublishOnEvent?: boolean;
+    autopilotEnabled?: boolean;
+    autopilotRedeployHosts?: boolean;
+    controlPlaneMode?: string;
     currentGoalFocus?: string;
     memoryStorageMode?: string;
   },
   token: string,
 ) {
   return apiFetch('/builder/settings', { method: 'PATCH', body: JSON.stringify(data) }, token);
+}
+
+export interface PlatformSyncStatus {
+  platforms: Array<{
+    key: string;
+    label: string;
+    connected: boolean;
+    detail?: string;
+    action?: string;
+  }>;
+  controlPlaneMode?: string;
+  controlPlane?: import('@dcf/utils').ControlPlaneReadiness;
+  memoryStorageMode: string;
+  memoryPrivacyNote: string;
+  autopilotEnabled: boolean;
+  autopilotRedeployHosts: boolean;
+  autoPublishOnEvent: boolean;
+  defaultProvider: string;
+  chatProviders: Array<{ key: string; label: string; connected: boolean }>;
+  buildWorker: string;
+  pendingPublishCount: number;
+  repoFullName: string | null;
+}
+
+export function fetchPlatformSyncStatus(token: string) {
+  return apiFetch<PlatformSyncStatus>('/copilot/platform-sync', undefined, token);
+}
+
+export function runCopilotAutopilot(prompt: string | undefined, token: string) {
+  return apiFetch<{
+    answer: string;
+    answerProvider?: string;
+    steps: Array<{ step: string; ok: boolean; detail: string }>;
+    published: number;
+    builderDispatch: string | null;
+    syncStatus: PlatformSyncStatus;
+  }>('/copilot/autopilot', { method: 'POST', body: JSON.stringify({ prompt }) }, token);
 }
 
 export function searchFounderVault(query: string, token: string, topK = 5) {

@@ -60,6 +60,9 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     preferredModel?: string;
     autoCreateGitHubIssues?: boolean;
     autoPublishOnEvent?: boolean;
+    autopilotEnabled?: boolean;
+    autopilotRedeployHosts?: boolean;
+    controlPlaneMode?: string;
     currentGoalFocus?: string;
   }) {
     setErr(null);
@@ -254,23 +257,89 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           Founder Brain when not using local Ollama or Phala.
         </p>
 
-        <div className="mt-4 flex flex-wrap gap-4 text-sm text-zinc-300">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={settings.autoPublishOnEvent}
-              onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
-            />
-            Auto-publish on deploy events
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={settings.autoCreateGitHubIssues}
-              onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
-            />
-            Auto-create GitHub issues from Quick Build
-          </label>
+        <div className="mt-4 space-y-3 rounded-xl border border-indigo-500/25 bg-indigo-950/10 p-4">
+          <h3 className="text-sm font-semibold text-indigo-100">Control plane mode</h3>
+          <div className="flex flex-wrap gap-2">
+            {(['CURSOR_FIRST', 'FULL_STACK'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => saveSettings({ controlPlaneMode: mode })}
+                className={`rounded-lg border px-3 py-2 text-xs ${
+                  (settings.controlPlaneMode ?? 'FULL_STACK') === mode
+                    ? 'border-indigo-400 bg-indigo-950/50 text-white'
+                    : 'border-zinc-700 text-zinc-500'
+                }`}
+              >
+                {mode === 'CURSOR_FIRST' ? 'Cursor for code' : 'Full stack'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-3 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
+          <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
+          <p className="text-xs text-zinc-500">
+            When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
+            connected), and resume your builder agent. Say &quot;take full control&quot; in Mission Control.
+          </p>
+          <div className="flex flex-col gap-2 text-sm text-zinc-300">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.autopilotEnabled ?? false}
+                onChange={(e) => saveSettings({ autopilotEnabled: e.target.checked })}
+              />
+              Enable Autopilot (sync + publish + builder resume)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.autopilotRedeployHosts ?? false}
+                onChange={(e) => saveSettings({ autopilotRedeployHosts: e.target.checked })}
+              />
+              Redeploy Vercel + Railway on Autopilot (requires tokens in Stack hub)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.autoPublishOnEvent}
+                onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
+              />
+              Auto-publish on deploy webhooks
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.autoCreateGitHubIssues}
+                onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
+              />
+              Auto-create GitHub issues from Quick Build
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <p className="text-xs font-medium text-zinc-400">Default chat AI (when multiple connected)</p>
+          <select
+            value={settings.defaultProvider}
+            onChange={(e) => saveSettings({ defaultProvider: e.target.value })}
+            className="mt-2 w-full max-w-md rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
+          >
+            {settings.providers
+              .filter(
+                (p) =>
+                  p.connected &&
+                  p.key !== 'RULE_BASED' &&
+                  (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
+              )
+              .map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+            <option value="RULE_BASED">Project memory only</option>
+          </select>
         </div>
 
         <div className="mt-6 space-y-6">
