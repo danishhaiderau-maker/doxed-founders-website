@@ -9,6 +9,7 @@ import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
+import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { hubPageTitle, isHubWorkspacePath } from '@/components/hub-nav-config';
 
 /** Row 1 — Explore */
@@ -255,8 +256,9 @@ function SiteNavInner() {
         })}
       </div>
 
-      {/* Right — Notifications + Profile */}
+      {/* Right — Messages + Notifications + Profile */}
       <div className="flex flex-wrap items-center justify-end gap-2">
+        <PlatformMessagesBell />
         <NotificationBell />
         {session ? (
           <div className="relative" ref={profileRef}>
@@ -365,6 +367,7 @@ function HubMinimalNav({
         <p className="truncate text-sm font-bold text-zinc-300 sm:text-base">{title}</p>
       </div>
       <div className="flex items-center justify-end gap-2">
+        <PlatformMessagesBell />
         <NotificationBell />
         {session ? (
           <div className="relative" ref={profileRef}>

@@ -126,6 +126,42 @@ export class MessagesService {
     );
   }
 
+  async countUnread(userId: string): Promise<number> {
+    return this.prisma.platformMessage.count({
+      where: { toUserId: userId, readAt: null },
+    });
+  }
+
+  async resolveRecipient(
+    requesterId: string,
+    query: string,
+  ): Promise<{ userId: string; label: string; platformHandle: string | null }> {
+    const q = query.trim();
+    if (q.length < 2) throw new BadRequestException('Enter a user ID or platform handle');
+
+    let user = await this.prisma.user.findUnique({
+      where: { id: q },
+      select: { id: true, name: true, email: true, platformHandle: true },
+    });
+    if (!user) {
+      user = await this.prisma.user.findUnique({
+        where: { platformHandle: q },
+        select: { id: true, name: true, email: true, platformHandle: true },
+      });
+    }
+    if (!user) throw new NotFoundException('No user found for that ID or handle');
+
+    if (user.id === requesterId) {
+      throw new BadRequestException('Cannot message yourself');
+    }
+
+    return {
+      userId: user.id,
+      label: formatPublicAccountLabel(user.name, user.email, user.platformHandle),
+      platformHandle: user.platformHandle,
+    };
+  }
+
   async getConversation(userId: string, otherUserId: string, limit = 80) {
     const messages = await this.prisma.platformMessage.findMany({
       where: {

@@ -15,6 +15,8 @@ import { NotificationSettingsPanel } from '@/components/account/notification-set
 import { ConnectedAccountsPanel } from '@/components/account/connected-accounts-panel';
 import { AccountMessagesPanel } from '@/components/account/account-messages-panel';
 import { PlatformHandleEditor } from '@/components/account/platform-handle-editor';
+import { UserIdField } from '@/components/account/user-id-field';
+import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
   AccountActivityItem,
@@ -66,6 +68,7 @@ export function AccountHub({
   const [overview, setOverview] = useState<AccountOverview | null>(null);
   const [activity, setActivity] = useState<AccountActivityItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const unreadMessages = useUnreadMessageCount(token);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -120,7 +123,14 @@ export function AccountHub({
                   : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
               }`}
             >
-              {item.label}
+              <span className="flex items-center gap-2">
+                {item.label}
+                {item.id === 'messages' && unreadMessages > 0 && (
+                  <span className="rounded-full bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                    {unreadMessages > 9 ? '9+' : unreadMessages}
+                  </span>
+                )}
+              </span>
             </button>
           ))}
           <Link
@@ -185,7 +195,9 @@ export function AccountHub({
                   )}
                 </div>
                 <p className="mt-1 text-sm text-zinc-500">{overview.email}</p>
-                <p className="mt-1 text-xs text-cyan-300/90">ID: {overview.platformHandle}</p>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Handle: <span className="text-cyan-300/90">{overview.platformHandle}</span>
+                </p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Joined {formatDate(overview.joinedAt)}
                   {overview.reputation.rank != null && (
@@ -204,7 +216,12 @@ export function AccountHub({
             </div>
 
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
-              <h3 className="font-semibold text-white">Platform ID</h3>
+              <h3 className="font-semibold text-white">User ID</h3>
+              <UserIdField userId={overview.userId} className="mt-3" />
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <h3 className="font-semibold text-white">Platform handle</h3>
               {token && (
                 <PlatformHandleEditor
                   accessToken={token}
@@ -264,6 +281,7 @@ export function AccountHub({
           <AccountMessagesPanel
             accessToken={token}
             initialOtherUserId={initialMessageWithUserId}
+            myUserId={overview?.userId}
           />
         )}
 
