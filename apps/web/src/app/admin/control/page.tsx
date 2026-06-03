@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PROVIDERS, TRADING_AGENT_AI_PROVIDER_LABELS, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS } from '@dcf/utils';
+import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PROVIDERS, TRADING_AGENT_AI_PROVIDER_LABELS, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS, EXCHANGE_CREDENTIAL_CONFIG, type ExchangeProvider } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import {
@@ -45,6 +45,7 @@ export default function AdminControlPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [exchangeApiKey, setExchangeApiKey] = useState('');
   const [exchangeApiSecret, setExchangeApiSecret] = useState('');
+  const [exchangePassphrase, setExchangePassphrase] = useState('');
   const [aiApiKey, setAiApiKey] = useState('');
   const [botPublicUrl, setBotPublicUrl] = useState('');
   const [showcaseTestnet, setShowcaseTestnet] = useState(false);
@@ -136,6 +137,7 @@ export default function AdminControlPage() {
           aiProvider: showcase?.aiProvider,
           exchangeApiKey: exchangeApiKey.trim() || undefined,
           exchangeApiSecret: exchangeApiSecret.trim() || undefined,
+          exchangePassphrase: exchangePassphrase.trim() || undefined,
           aiApiKey: aiApiKey.trim() || undefined,
           botPublicUrl: botPublicUrl.trim() || undefined,
           testnet: showcaseTestnet,
@@ -145,6 +147,7 @@ export default function AdminControlPage() {
       setOverview(ov);
       setExchangeApiKey('');
       setExchangeApiSecret('');
+      setExchangePassphrase('');
       setAiApiKey('');
       setMsg('Showcase API keys saved (encrypted at rest).');
     } catch (err) {
@@ -192,6 +195,8 @@ export default function AdminControlPage() {
   const infra = overview?.infrastructure;
   const showcase = overview?.showcase;
   const adapters = overview?.adapters;
+  const exchangeProvider = (showcase?.exchangeProvider ?? 'bybit') as ExchangeProvider;
+  const exchangeFields = EXCHANGE_CREDENTIAL_CONFIG[exchangeProvider] ?? EXCHANGE_CREDENTIAL_CONFIG.bybit;
 
   return (
     <div className="min-h-screen bg-[#050508] text-white">
@@ -313,7 +318,7 @@ export default function AdminControlPage() {
                     <div className="grid gap-4 lg:grid-cols-2">
                       <label className="block text-sm">
                         <span className="text-zinc-400">
-                          {showcase?.exchangeLabel ?? 'Exchange'} API key
+                          {exchangeFields.apiKeyLabel}
                           {showcase?.exchangeConfigured ? (
                             <span className="ml-2 text-emerald-400">· saved</span>
                           ) : null}
@@ -323,20 +328,40 @@ export default function AdminControlPage() {
                           autoComplete="off"
                           value={exchangeApiKey}
                           onChange={(e) => setExchangeApiKey(e.target.value)}
-                          placeholder={showcase?.exchangeConfigured ? 'Leave blank to keep' : 'Required'}
+                          placeholder={exchangeFields.apiKeyPlaceholder ?? (showcase?.exchangeConfigured ? 'Leave blank to keep' : 'Required')}
                           className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
                         />
                       </label>
                       <label className="block text-sm">
-                        <span className="text-zinc-400">API secret</span>
+                        <span className="text-zinc-400">{exchangeFields.apiSecretLabel}</span>
                         <input
                           type="password"
                           autoComplete="off"
                           value={exchangeApiSecret}
                           onChange={(e) => setExchangeApiSecret(e.target.value)}
+                          placeholder={exchangeFields.apiSecretPlaceholder}
                           className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
                         />
                       </label>
+                      {exchangeFields.passphraseLabel ? (
+                        <label className="block text-sm lg:col-span-2">
+                          <span className="text-zinc-400">
+                            {exchangeFields.passphraseLabel}
+                            {exchangeFields.passphraseRequired ? ' (required)' : ''}
+                          </span>
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            value={exchangePassphrase}
+                            onChange={(e) => setExchangePassphrase(e.target.value)}
+                            placeholder={exchangeFields.passphrasePlaceholder ?? (showcase?.exchangeConfigured ? 'Leave blank to keep' : undefined)}
+                            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                          />
+                        </label>
+                      ) : null}
+                      {exchangeFields.helpText ? (
+                        <p className="text-xs text-zinc-500 lg:col-span-2">{exchangeFields.helpText}</p>
+                      ) : null}
                       <label className="block text-sm lg:col-span-2">
                         <span className="text-zinc-400">
                           {showcase?.aiLabel ?? 'AI'} API key

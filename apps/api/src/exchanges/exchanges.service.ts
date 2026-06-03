@@ -22,7 +22,7 @@ export class ExchangesService {
     return this.registry.listProviders().map((id) => ({
       id,
       label: EXCHANGE_PROVIDER_LABELS[id],
-      available: id === 'bybit',
+      available: this.registry.isAvailable(id),
     }));
   }
 

@@ -78,6 +78,7 @@ export * from './project-name';
 export * from './repo-starter-templates';
 export * from './trading-agents';
 export * from './trading-agent-adapters';
+export * from './exchange-adapters';
 export * from './github-repo';
 export * from './listing-approval';
 export * from './listing-relist';

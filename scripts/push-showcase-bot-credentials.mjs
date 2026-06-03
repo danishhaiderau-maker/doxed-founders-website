@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createDecipheriv, scryptSync } from 'crypto';
 import { PrismaClient } from '@prisma/client';
+import { exchangeCredentialsToEnvVars } from '@dcf/utils';
 import { loadVaultEnv } from './load-vault-env.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -72,10 +73,13 @@ if (!row?.showcaseExchangeCredentialEnc) {
 
 const vars = { PORT: '5000' };
 const ex = JSON.parse(decryptSecret(row.showcaseExchangeCredentialEnc, jwtSecret));
-if (row.showcaseExchangeProvider === 'bybit' || !row.showcaseExchangeProvider) {
-  vars.BYBIT_API_KEY = ex.apiKey;
-  vars.BYBIT_SECRET = ex.apiSecret;
-}
+const provider = row.showcaseExchangeProvider ?? 'bybit';
+Object.assign(vars, exchangeCredentialsToEnvVars(provider, {
+  apiKey: ex.apiKey,
+  apiSecret: ex.apiSecret,
+  passphrase: ex.passphrase,
+  testnet: ex.testnet,
+}));
 
 const aiKey = row.showcaseAiCredentialEnc
   ? decryptSecret(row.showcaseAiCredentialEnc, jwtSecret)

@@ -1,28 +1,20 @@
 import type { ExchangeProvider } from '@dcf/utils';
-import type { ExchangeAdapter, ExchangeCredentials, ExchangeValidationResult } from './exchange-adapter.interface';
+import type { ExchangeAdapter } from './exchange-adapter.interface';
+import { BinanceExchangeAdapter } from './binance.adapter';
+import { BitfinexExchangeAdapter } from './bitfinex.adapter';
 import { BybitExchangeAdapter } from './bybit.adapter';
-
-class StubExchangeAdapter implements ExchangeAdapter {
-  constructor(readonly provider: ExchangeProvider) {}
-
-  async validateCredentials(_creds: ExchangeCredentials): Promise<ExchangeValidationResult> {
-    return {
-      ok: false,
-      message: `${this.provider} adapter coming soon — use Bybit for now`,
-    };
-  }
-}
-
-const STUBS: ExchangeProvider[] = ['hyperliquid', 'bitfinex', 'binance', 'okx'];
+import { HyperliquidExchangeAdapter } from './hyperliquid.adapter';
+import { OkxExchangeAdapter } from './okx.adapter';
 
 export class ExchangeAdapterRegistry {
   private readonly adapters = new Map<ExchangeProvider, ExchangeAdapter>();
 
   constructor() {
     this.adapters.set('bybit', new BybitExchangeAdapter());
-    for (const p of STUBS) {
-      this.adapters.set(p, new StubExchangeAdapter(p));
-    }
+    this.adapters.set('binance', new BinanceExchangeAdapter());
+    this.adapters.set('okx', new OkxExchangeAdapter());
+    this.adapters.set('bitfinex', new BitfinexExchangeAdapter());
+    this.adapters.set('hyperliquid', new HyperliquidExchangeAdapter());
   }
 
   get(provider: string): ExchangeAdapter | null {
@@ -31,5 +23,9 @@ export class ExchangeAdapterRegistry {
 
   listProviders(): ExchangeProvider[] {
     return [...this.adapters.keys()];
+  }
+
+  isAvailable(provider: string): boolean {
+    return this.adapters.has(provider as ExchangeProvider);
   }
 }

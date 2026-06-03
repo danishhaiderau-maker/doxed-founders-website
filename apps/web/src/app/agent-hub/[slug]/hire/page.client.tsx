@@ -8,6 +8,9 @@ import { SiteBrand, SiteNav } from '@/components/site-nav';
 import {
   TRADING_AGENT_AI_PROVIDERS,
   TRADING_AGENT_AI_PROVIDER_LABELS,
+  EXCHANGE_CREDENTIAL_CONFIG,
+  exchangeRequiresPassphrase,
+  type ExchangeProvider,
 } from '@dcf/utils';
 import {
   ExchangeProviderOption,
@@ -31,6 +34,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [exchange, setExchange] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  const [passphrase, setPassphrase] = useState('');
   const [testnet, setTestnet] = useState(false);
   const [aiProvider, setAiProvider] = useState('deepseek');
   const [aiApiKey, setAiApiKey] = useState('');
@@ -67,6 +71,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   async function handleActivate(e: FormEvent) {
     e.preventDefault();
     if (!token || !exchange || !apiKey || !apiSecret) return;
+    if (exchangeRequiresPassphrase(exchange as ExchangeProvider) && !passphrase.trim()) return;
     setBusy(true);
     setError(null);
     try {
@@ -76,6 +81,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
           exchangeProvider: exchange,
           apiKey,
           apiSecret,
+          passphrase: passphrase.trim() || undefined,
           testnet,
           aiMode: 'own',
           aiProvider,
@@ -92,6 +98,9 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   }
 
   const selectedProvider = providers.find((p) => p.id === exchange);
+  const exchangeFields = exchange
+    ? EXCHANGE_CREDENTIAL_CONFIG[exchange as ExchangeProvider]
+    : null;
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
@@ -144,6 +153,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                   disabled={!p.available}
                   onClick={() => {
                     setExchange(p.id);
+                    setPassphrase('');
                     setStep('credentials');
                   }}
                   className={`rounded-xl border px-4 py-3 text-left text-sm transition ${
@@ -168,6 +178,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             onSubmit={(e) => {
               e.preventDefault();
               if (!apiKey || !apiSecret) return;
+              if (exchangeRequiresPassphrase(exchange as ExchangeProvider) && !passphrase.trim()) return;
               if (!aiApiKey.trim()) return;
               setStep('confirm');
             }}
@@ -179,24 +190,43 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               Your keys power your private instance only. Admin showcase keys are never used.
             </p>
             <label className="block text-sm">
-              API Key
+              {exchangeFields?.apiKeyLabel ?? 'API Key'}
               <input
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
+                placeholder={exchangeFields?.apiKeyPlaceholder}
                 className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
                 required
               />
             </label>
             <label className="block text-sm">
-              API Secret
+              {exchangeFields?.apiSecretLabel ?? 'API Secret'}
               <input
                 type="password"
                 value={apiSecret}
                 onChange={(e) => setApiSecret(e.target.value)}
+                placeholder={exchangeFields?.apiSecretPlaceholder}
                 className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
                 required
               />
             </label>
+            {exchangeFields?.passphraseLabel ? (
+              <label className="block text-sm">
+                {exchangeFields.passphraseLabel}
+                {exchangeFields.passphraseRequired ? ' (required)' : ''}
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  placeholder={exchangeFields.passphrasePlaceholder}
+                  className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                  required={exchangeFields.passphraseRequired}
+                />
+              </label>
+            ) : null}
+            {exchangeFields?.helpText ? (
+              <p className="text-xs text-zinc-500">{exchangeFields.helpText}</p>
+            ) : null}
             <label className="flex items-center gap-2 text-sm text-zinc-400">
               <input type="checkbox" checked={testnet} onChange={(e) => setTestnet(e.target.checked)} />
               Use testnet credentials
