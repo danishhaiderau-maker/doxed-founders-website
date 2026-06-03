@@ -7,7 +7,7 @@ import { DiscoverUniverseMap } from '@/components/discover/discover-universe-map
 import { DiscoverSidebar } from '@/components/discover/discover-sidebar';
 import { DiscoverTopProjectsTable } from '@/components/discover/discover-top-table';
 import { DiscoverBottomCtas } from '@/components/discover/discover-bottom-ctas';
-import { DiscoverVisibilityGuide } from '@/components/discover/discover-visibility-guide';
+import { DiscoverRankingRules } from '@/components/discover/discover-ranking-rules';
 import {
   fetchDiscoverUniverse,
   type DiscoverTimeframe,
@@ -53,19 +53,19 @@ export default function DiscoverPage() {
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-[90rem] px-4 py-8 sm:px-6 lg:px-10">
+      <div className="mx-auto w-full max-w-[90rem] px-4 pb-10 pt-4 sm:px-6 lg:px-10">
         {error && (
           <p className="mb-4 rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-3 text-sm text-red-300">
             {error}
           </p>
         )}
 
-        {data && <DiscoverMetricsRow metrics={data.metrics} />}
+        <DiscoverRankingRules />
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_280px]">
+        <div className="mt-5 grid gap-6 lg:grid-cols-[1fr_280px]">
           <div>
             {loading && !data ? (
-              <div className="flex h-[520px] items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-950/50">
+              <div className="flex h-[560px] items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-950/50">
                 <p className="text-sm text-zinc-500">Loading project universe…</p>
               </div>
             ) : data ? (
@@ -90,13 +90,17 @@ export default function DiscoverPage() {
           )}
         </div>
 
+        {data && (
+          <div className="mt-8">
+            <DiscoverMetricsRow metrics={data.metrics} />
+          </div>
+        )}
+
         {data && data.projects.length > 0 && (
           <div className="mt-10">
             <DiscoverTopProjectsTable projects={data.projects} />
           </div>
         )}
-
-        <DiscoverVisibilityGuide />
 
         <div className="mt-10">
           <DiscoverBottomCtas scoutCount={data?.metrics.scoutReviewsAwaiting ?? 0} />

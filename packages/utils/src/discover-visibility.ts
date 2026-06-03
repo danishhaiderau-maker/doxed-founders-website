@@ -82,3 +82,13 @@ export const DISCOVER_BUBBLE_SCORE_FORMULA =
 
 export const DISCOVER_VISIBILITY_SUMMARY =
   'Bigger bubbles and higher sort order mean more real traction in the window you select (1h–7d). Traders see DDollar flow on the bubble, activity score on the badge, and conviction in the table — not hype alone.';
+
+/** Short copy for the transparent rules panel above the bubble map on /discover */
+export const DISCOVER_RANKING_RULES_HEADLINE =
+  'How ranking & bubble size work (transparent)';
+
+export const DISCOVER_RANKING_RULES_INTRO =
+  'Projects are sorted by activity score in your selected window (1h, 6h, 24h, or 7d). The number on each bubble is that score (0–100). More real traction in that window → higher score → larger bubble and higher placement.';
+
+export const DISCOVER_RING_LEGEND_NOTE =
+  'Outer ring color = project stage. Live tokens on-chain always use a green ring, even if listed recently.';

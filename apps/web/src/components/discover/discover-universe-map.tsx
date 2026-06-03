@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DISCOVER_UNIVERSE_COLORS,
   layoutBubblePositions,
@@ -39,7 +39,23 @@ export function DiscoverUniverseMap({
   onChainSlug: (v: string) => void;
   onTimeframe: (v: DiscoverTimeframe) => void;
 }) {
-  const [dims] = useState({ w: 720, h: 480 });
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ w: 960, h: 560 });
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const update = () => {
+      const w = Math.max(320, el.clientWidth);
+      const h = Math.round(Math.min(600, Math.max(480, w * 0.58)));
+      setDims({ w, h });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const positions = useMemo(
     () => layoutBubblePositions(Math.min(projects.length, 24), dims.w, dims.h),
     [projects.length, dims.w, dims.h],
@@ -105,21 +121,25 @@ export function DiscoverUniverseMap({
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="relative z-10 flex flex-wrap gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-zinc-500">
+      {/* Legend — outer ring matches bubble border */}
+      <div className="relative z-10 flex flex-wrap gap-4 px-4 py-2 text-[10px] uppercase tracking-wider text-zinc-500">
         {(Object.keys(DISCOVER_UNIVERSE_COLORS) as DiscoverUniverseStage[]).map((key) => {
           const meta = DISCOVER_UNIVERSE_COLORS[key];
           return (
             <span key={key} className="flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-full" style={{ background: meta.color }} />
+              <span
+                className="h-3 w-3 rounded-full border-[2.5px] bg-zinc-950/60"
+                style={{ borderColor: meta.border }}
+              />
               {meta.label}
             </span>
           );
         })}
+        <span className="text-zinc-600">· badge = activity score (0–100)</span>
       </div>
 
       {/* Bubble canvas */}
-      <div className="relative mx-auto w-full max-w-[720px]" style={{ height: dims.h }}>
+      <div ref={canvasRef} className="relative w-full" style={{ height: dims.h }}>
         {projects.length === 0 ? (
           <p className="flex h-full items-center justify-center text-sm text-zinc-500">
             No projects match these filters

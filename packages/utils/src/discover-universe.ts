@@ -35,11 +35,12 @@ export function timeframeToMs(tf: DiscoverTimeframe): number {
 export function resolveDiscoverUniverseStage(input: {
   stageBucket: string;
   createdAt: string | Date;
+  isLiveToken?: boolean;
 }): DiscoverUniverseStage {
+  if (input.isLiveToken || input.stageBucket === 'LIVE_TOKEN') return 'live';
   const created = new Date(input.createdAt).getTime();
   const daysSince = (Date.now() - created) / 86_400_000;
   if (daysSince <= 14) return 'recently_listed';
-  if (input.stageBucket === 'LIVE_TOKEN') return 'live';
   if (input.stageBucket === 'LAUNCH_READY') return 'validation';
   return 'building';
 }

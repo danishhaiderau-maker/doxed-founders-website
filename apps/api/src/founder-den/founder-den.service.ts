@@ -1231,6 +1231,7 @@ export class FounderDenService {
           resolveDiscoverUniverseStage({
             stageBucket: p.stageBucket,
             createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
+            isLiveToken: p.isLiveToken,
           }) === options.stageFilter,
       );
     }
@@ -1356,6 +1357,7 @@ export class FounderDenService {
       const universeStage = resolveDiscoverUniverseStage({
         stageBucket: p.stageBucket,
         createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
+        isLiveToken: p.isLiveToken,
       });
       const activityScore = computeDiscoverActivityScore({
         buildPosts: buildMap[pid] ?? 0,
