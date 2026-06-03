@@ -5,12 +5,13 @@ import { FeedModule } from '../feed/feed.module';
 import { FoundersController, ProjectsController } from './projects.controller';
 import { ProjectsClaimController } from './projects-claim.controller';
 import { MetricsSyncService } from './metrics-sync.service';
+import { PlatformAdoptionService } from './platform-adoption.service';
 import { ProjectsService } from './projects.service';
 
 @Module({
   imports: [AuthModule, DexscreenerModule, FeedModule],
   controllers: [ProjectsController, FoundersController, ProjectsClaimController],
-  providers: [ProjectsService, MetricsSyncService],
-  exports: [ProjectsService, MetricsSyncService],
+  providers: [ProjectsService, MetricsSyncService, PlatformAdoptionService],
+  exports: [ProjectsService, MetricsSyncService, PlatformAdoptionService],
 })
 export class ProjectsModule {}
