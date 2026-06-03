@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(api): break ProjectsModule/FeedModule circular import for Railway boot
+Allow admin relist when curated project exists; show field diff.
 
 ## Last Activity
 
