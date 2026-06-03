@@ -436,8 +436,21 @@ export class FounderCopilotService {
         title: `Cursor: ${taskPrompt.slice(0, 60)}`,
         payload: { agentUrl: dispatch.agentUrl, mode: dispatch.mode },
       });
+      const repo = memory.repoFullName ?? undefined;
       return {
-        answer: `Cursor agent ${dispatch.mode === 'follow_up' ? 'resumed' : 'started'} — ${dispatch.agentUrl}`,
+        answer: [
+          `**Cursor** · ${dispatch.mode === 'follow_up' ? 'continuing on repo' : 'coding on your repo'}`,
+          repo ? `Repository: \`${repo}\`` : '',
+          '',
+          `**Your task**`,
+          taskPrompt.slice(0, 1200),
+          '',
+          `**Status:** ${dispatch.status}`,
+          '',
+          '_Live output will stream in Mission Control — polling your cloud agent now._',
+        ]
+          .filter(Boolean)
+          .join('\n'),
         answerProvider: 'CURSOR',
         runtime: {
           toolsUsed: ['cursor_agent'],
@@ -445,6 +458,9 @@ export class FounderCopilotService {
           githubRepo: memory.repoFullName,
           cursorDispatched: true,
           cursorAgentUrl: dispatch.agentUrl,
+          cursorAgentId: dispatch.agentId,
+          cursorRunId: dispatch.runId,
+          cursorMode: dispatch.mode,
         },
         stats: {
           commits: 0,
