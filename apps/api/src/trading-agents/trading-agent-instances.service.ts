@@ -36,6 +36,7 @@ export class TradingAgentInstancesService {
       exchangeProvider: string;
       apiKey: string;
       apiSecret: string;
+      passphrase?: string;
       testnet?: boolean;
       aiMode?: 'platform' | 'own';
       aiProvider?: string;
@@ -55,6 +56,7 @@ export class TradingAgentInstancesService {
     const connected = await this.exchanges.connectUserExchange(userId, input.exchangeProvider, {
       apiKey: input.apiKey,
       apiSecret: input.apiSecret,
+      passphrase: input.passphrase,
       testnet: input.testnet,
     });
 

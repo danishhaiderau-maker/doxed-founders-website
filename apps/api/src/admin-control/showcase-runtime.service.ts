@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import {
   EXCHANGE_PROVIDER_LABELS,
   TRADING_AGENT_AI_PROVIDER_LABELS,
+  exchangeBotRuntimeNote,
+  exchangeCredentialsToEnvVars,
+  exchangeRequiresPassphrase,
   type ExchangeProvider,
   type TradingAgentAiProvider,
 } from '@dcf/utils';
@@ -46,10 +49,7 @@ export class ShowcaseRuntimeService {
       botPublicUrl: row?.showcaseBotPublicUrl ?? null,
       credentialsUpdatedAt: row?.showcaseCredentialsUpdatedAt?.toISOString() ?? null,
       runtimePushedAt: row?.showcaseRuntimePushedAt?.toISOString() ?? null,
-      botRuntimeNote:
-        exchangeProvider !== 'bybit'
-          ? 'Live bot v0.5.0 runs on Bybit env vars today — other exchanges are saved for the next bot release.'
-          : null,
+      botRuntimeNote: exchangeBotRuntimeNote(exchangeProvider),
       aiRuntimeNote:
         aiProvider !== 'deepseek'
           ? 'Live bot reads DEEPSEEK_API_KEY — we also push your selected provider key when possible.'
@@ -84,6 +84,9 @@ export class ShowcaseRuntimeService {
     if (key || secret) {
       if (!key || !secret) {
         throw new BadRequestException('Both exchange API key and secret are required to update');
+      }
+      if (exchangeRequiresPassphrase(exchangeProvider) && !input.exchangePassphrase?.trim()) {
+        throw new BadRequestException('Passphrase is required for this exchange');
       }
       const adapter = this.registry.get(exchangeProvider);
       if (!adapter) {
@@ -221,10 +224,8 @@ export class ShowcaseRuntimeService {
     const exchangeJson = this.crypto.decrypt(settings.showcaseExchangeCredentialEnc);
     if (exchangeJson) {
       const ex = JSON.parse(exchangeJson) as ShowcaseExchangePayload;
-      if (settings.showcaseExchangeProvider === 'bybit' || !settings.showcaseExchangeProvider) {
-        vars.BYBIT_API_KEY = ex.apiKey;
-        vars.BYBIT_SECRET = ex.apiSecret;
-      }
+      const provider = (settings.showcaseExchangeProvider ?? 'bybit') as ExchangeProvider;
+      Object.assign(vars, exchangeCredentialsToEnvVars(provider, ex));
     }
 
     const aiKey = this.crypto.decrypt(settings.showcaseAiCredentialEnc);

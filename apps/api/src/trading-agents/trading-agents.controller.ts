@@ -60,6 +60,7 @@ export class TradingAgentsController {
       exchangeProvider: string;
       apiKey: string;
       apiSecret: string;
+      passphrase?: string;
       testnet?: boolean;
       aiMode?: 'platform' | 'own';
       aiProvider?: string;
