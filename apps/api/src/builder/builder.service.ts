@@ -18,6 +18,7 @@ import { CredentialsCryptoService } from '../credentials/credentials-crypto.serv
 import { FounderNodeInferenceService } from '../founder-node/founder-node-inference.service';
 import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
 import { AttestationService } from '../attestation/attestation.service';
+import { GitHubApiService } from '../github/github-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CursorCredentialMeta,
@@ -44,6 +45,7 @@ export class BuilderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
+    private readonly github: GitHubApiService,
     private readonly founderNodeInference: FounderNodeInferenceService,
     private readonly founderNodeSync: FounderNodeSyncService,
     private readonly attestation: AttestationService,
@@ -456,11 +458,15 @@ export class BuilderService {
 
     const taskPrompt = buildCursorCloudTaskMessage(input.spec, input.cursorPrompt);
     const repoUrl = input.repository ? githubRepoToUrl(input.repository) : null;
+    const startingRef = input.repository
+      ? await this.github.getDefaultBranch(userId, input.repository)
+      : undefined;
 
     const result = await dispatchCursorCloudTask({
       apiKey,
       taskPrompt,
       repository: input.repository,
+      startingRef,
       agentId: meta.agentId,
       agentRepoUrl: meta.agentRepoUrl,
     });

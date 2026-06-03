@@ -5,6 +5,7 @@ import {
   CursorCloudDispatchResult,
   buildCursorAgentUrl,
   githubRepoToUrl,
+  resolveCursorStartingRef,
 } from '@dcf/utils';
 
 export type CursorCredentialMeta = {
@@ -48,13 +49,14 @@ export async function dispatchCursorCloudTask(
     return followUpRun(input.apiKey, input.agentId, input.taskPrompt);
   }
 
-  return createAgent(input.apiKey, input.taskPrompt, repoUrl);
+  return createAgent(input.apiKey, input.taskPrompt, repoUrl, input.startingRef);
 }
 
 async function createAgent(
   apiKey: string,
   promptText: string,
   repoUrl: string | null,
+  startingRef?: string,
 ): Promise<CursorCloudDispatchResult> {
   const body: Record<string, unknown> = {
     prompt: { text: promptText },
@@ -62,7 +64,7 @@ async function createAgent(
     name: promptText.slice(0, 100),
   };
   if (repoUrl) {
-    body.repos = [{ url: repoUrl, startingRef: 'main' }];
+    body.repos = [{ url: repoUrl, startingRef: resolveCursorStartingRef(startingRef) }];
   }
 
   const res = await fetch(`${CURSOR_CLOUD_API_BASE}/v1/agents`, {

@@ -143,6 +143,7 @@ export class FounderCopilotService {
       : 0;
 
     const githubMemory = repo ? await this.memory.readRepoMemory(userId, repo) : null;
+    const currentBranch = repo ? await this.github.getDefaultBranch(userId, repo) : null;
     const goalFromGithub = githubMemory?.currentGoalFromRepo?.trim();
 
     const deviceSyncRow = await this.prisma.projectMemoryDeviceSync.findUnique({
@@ -223,7 +224,7 @@ export class FounderCopilotService {
       lastActivityLabel: formatRelativeTime(lastEvent?.createdAt),
       lastCommit,
       repoFullName: repo,
-      currentBranch: repo ? 'main' : null,
+      currentBranch,
       openTasks: tasks.slice(0, 8).map((t) => ({
         id: t.id,
         title: t.title,

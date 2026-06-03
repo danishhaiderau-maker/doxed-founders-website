@@ -250,12 +250,18 @@ export interface BustedTraderEntry {
 }
 
 function parseApiError(body: unknown, status: number): string {
+  if (status === 401) {
+    return 'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
+  }
   if (body && typeof body === 'object' && 'message' in body) {
     const message = (body as { message: unknown }).message;
     if (Array.isArray(message)) {
       return message.join('. ');
     }
     if (typeof message === 'string') {
+      if (status === 401 && message.toLowerCase() === 'unauthorized') {
+        return 'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
+      }
       return message;
     }
   }
