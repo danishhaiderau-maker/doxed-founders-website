@@ -9,7 +9,8 @@ import {
   validateListingForApproval,
   type CommunityValidationCategory,
 } from '@dcf/utils';
-import { AdminApplicationUpdates, PendingApplication } from '@/lib/api';
+import Link from 'next/link';
+import { AdminApplicationUpdates, ListingRelistPreview, PendingApplication } from '@/lib/api';
 
 const CHAIN_OPTIONS = [
   'SOLANA',
@@ -129,6 +130,9 @@ export function ApplicationReviewCard({
     item.minYesPercent ?? 70,
   );
 
+  const relist = item.relistPreview;
+  const relistChanged = relist?.fields.filter((f) => f.changed) ?? [];
+
   const categoryCounts = (item.votes ?? []).reduce<Record<string, number>>((acc, v) => {
     if (v.validationCategory) {
       acc[v.validationCategory] = (acc[v.validationCategory] ?? 0) + 1;
@@ -208,6 +212,10 @@ export function ApplicationReviewCard({
             <Info label="Trust signals" value={`${item.verificationScore}/6 verification`} />
             <Info label="Chain" value={form.chainSlug || item.chainSlug || 'Auto from DexScreener'} />
           </div>
+
+          {relist?.hasExisting && (
+            <RelistPreviewPanel relist={relist} changedFields={relistChanged} />
+          )}
 
           <div className="mt-4 space-y-2 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-background)]/40 p-3">
             <LinkRow label="DexScreener" href={form.dexscreenerUrl || item.dexscreenerUrl} required />
@@ -358,9 +366,15 @@ export function ApplicationReviewCard({
               disabled={busy || !approval.ok}
               onClick={onApprove}
               className="rounded-lg bg-[var(--color-success)]/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              title={!approval.ok ? approval.errors.join(' ') : undefined}
+              title={
+                !approval.ok
+                  ? approval.errors.join(' ')
+                  : relist?.hasExisting
+                    ? 'Updates the live curated listing (same project URL)'
+                    : undefined
+              }
             >
-              Approve
+              {relist?.hasExisting ? 'Approve & relist' : 'Approve'}
             </button>
             <button
               type="button"
@@ -405,6 +419,95 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function inputClass() {
   return 'w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-white outline-none focus:border-[var(--color-accent)]';
+}
+
+function RelistPreviewPanel({
+  relist,
+  changedFields,
+}: {
+  relist: ListingRelistPreview;
+  changedFields: ListingRelistPreview['fields'];
+}) {
+  const matchLabel =
+    relist.matchType === 'contract'
+      ? 'same contract on this chain'
+      : relist.matchType === 'ticker'
+        ? 'same ticker on this chain'
+        : 'matching project slug';
+
+  return (
+    <section className="mt-4 rounded-xl border border-violet-500/35 bg-violet-950/20 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-violet-100">Relist — replaces live curated listing</p>
+          <p className="mt-1 text-xs text-zinc-400">
+            Found existing project ({matchLabel}
+            {relist.sameContract ? ', contract match' : ''}). Approving updates{' '}
+            <strong className="text-white">{relist.existingProjectName}</strong> — project URL stays the same.
+            {relist.changedFieldCount > 0
+              ? ` ${relist.changedFieldCount} field(s) differ from the current listing.`
+              : ' No field changes detected — refresh only.'}
+          </p>
+        </div>
+        {relist.existingProjectSlug && (
+          <Link
+            href={`/project/${relist.existingProjectSlug}`}
+            target="_blank"
+            className="shrink-0 text-xs text-violet-300 underline hover:text-violet-200"
+          >
+            View current listing →
+          </Link>
+        )}
+      </div>
+
+      {changedFields.length > 0 ? (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full min-w-[480px] text-left text-xs">
+            <thead>
+              <tr className="border-b border-violet-500/20 text-zinc-500">
+                <th className="py-2 pr-3 font-medium">Field</th>
+                <th className="py-2 pr-3 font-medium">Current listing</th>
+                <th className="py-2 font-medium">This application</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changedFields.map((field) => (
+                <tr key={field.key} className="border-b border-violet-500/10 align-top">
+                  <td className="py-2 pr-3 font-medium text-amber-200">{field.label}</td>
+                  <td className="py-2 pr-3 text-zinc-500 line-through decoration-zinc-600">
+                    {field.previous ?? '—'}
+                  </td>
+                  <td className="py-2 font-medium text-emerald-200">{field.next ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="mt-3 text-xs text-zinc-500">
+          Scout submission matches the current listing data — approve to confirm and refresh timestamps.
+        </p>
+      )}
+
+      {relist.fields.filter((f) => !f.changed && (f.previous || f.next)).length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[11px] text-zinc-500 hover:text-zinc-300">
+            Unchanged fields (
+            {relist.fields.filter((f) => !f.changed && (f.previous || f.next)).length})
+          </summary>
+          <ul className="mt-2 space-y-1 text-[11px] text-zinc-600">
+            {relist.fields
+              .filter((f) => !f.changed && (f.previous || f.next))
+              .map((f) => (
+                <li key={f.key}>
+                  {f.label}: {f.next ?? f.previous}
+                </li>
+              ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  );
 }
 
 function LinkRow({

@@ -85,7 +85,16 @@ export default function AdminApplicationsPage() {
       });
       if (result.published) {
         setPublishedSlug(result.published.projectSlug);
-        setSuccess(`Published ${result.published.projectName} to the curated directory.`);
+        if (result.published.relisted) {
+          const n = result.published.changedFieldCount ?? 0;
+          setSuccess(
+            n > 0
+              ? `Relisted ${result.published.projectName} — ${n} field(s) updated on the live project.`
+              : `Relisted ${result.published.projectName} — live listing refreshed.`,
+          );
+        } else {
+          setSuccess(`Published ${result.published.projectName} to the curated directory.`);
+        }
       } else if (reviewStatus === 'REJECTED') {
         setSuccess('Application rejected.');
       }

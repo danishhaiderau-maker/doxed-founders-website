@@ -87,7 +87,25 @@ export interface PendingApplication {
   status: string;
   createdAt: string;
   votes?: ListingVoteRecord[];
+  relistPreview?: ListingRelistPreview | null;
 }
+
+export type ListingRelistPreview = {
+  hasExisting: boolean;
+  matchType: 'contract' | 'ticker' | 'slug' | null;
+  existingProjectId: string | null;
+  existingProjectSlug: string | null;
+  existingProjectName: string | null;
+  sameContract: boolean;
+  changedFieldCount: number;
+  fields: Array<{
+    key: string;
+    label: string;
+    previous: string | null;
+    next: string | null;
+    changed: boolean;
+  }>;
+};
 
 export interface ListingVoteRecord {
   id: string;
@@ -527,6 +545,9 @@ export interface ReviewListingResult {
     projectSlug: string;
     projectName: string;
     founderSlug: string | null;
+    relisted?: boolean;
+    changedFieldCount?: number;
+    deactivatedDuplicateIds?: string[];
   } | null;
 }
 

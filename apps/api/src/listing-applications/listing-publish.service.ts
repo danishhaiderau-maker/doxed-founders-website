@@ -3,12 +3,18 @@ import {
   Injectable,
 } from '@nestjs/common';
 import {
+  buildListingRelistDiff,
+  countChangedFields,
   FounderVerificationCriterion,
+  normalizeContractAddress,
   normalizeProjectName,
   resolveListingChain,
   scoreFounderVerification,
   slugify,
+  snapshotFromApplication,
   validateListingForApproval,
+  type ListingRelistField,
+  type ListingRelistMatchType,
 } from '@dcf/utils';
 import {
   ChainSlug,
@@ -36,11 +42,103 @@ export interface PublishedProjectResult {
   projectSlug: string;
   projectName: string;
   founderSlug: string | null;
+  relisted?: boolean;
+  changedFieldCount?: number;
+  deactivatedDuplicateIds?: string[];
 }
+
+export type ListingRelistPreview = {
+  hasExisting: boolean;
+  matchType: ListingRelistMatchType | null;
+  existingProjectId: string | null;
+  existingProjectSlug: string | null;
+  existingProjectName: string | null;
+  sameContract: boolean;
+  changedFieldCount: number;
+  fields: ListingRelistField[];
+};
 
 @Injectable()
 export class ListingPublishService {
   constructor(private readonly prisma: PrismaService) {}
+
+  async getRelistPreview(application: ListingApplication): Promise<ListingRelistPreview> {
+    const chainSlug = resolveListingChain(application);
+    if (!chainSlug) {
+      return {
+        hasExisting: false,
+        matchType: null,
+        existingProjectId: null,
+        existingProjectSlug: null,
+        existingProjectName: null,
+        sameContract: false,
+        changedFieldCount: 0,
+        fields: [],
+      };
+    }
+
+    const chain = await this.prisma.chain.findUnique({
+      where: { slug: chainSlug as ChainSlug },
+    });
+    if (!chain) {
+      return {
+        hasExisting: false,
+        matchType: null,
+        existingProjectId: null,
+        existingProjectSlug: null,
+        existingProjectName: null,
+        sameContract: false,
+        changedFieldCount: 0,
+        fields: [],
+      };
+    }
+
+    const slugBase =
+      slugify(normalizeProjectName(application.projectName) || application.projectName) ||
+      slugify(application.ticker);
+    const match = await this.findExistingCuratedProject(
+      this.prisma,
+      application,
+      chain.id,
+      slugBase,
+    );
+
+    if (!match) {
+      return {
+        hasExisting: false,
+        matchType: null,
+        existingProjectId: null,
+        existingProjectSlug: null,
+        existingProjectName: null,
+        sameContract: false,
+        changedFieldCount: 0,
+        fields: [],
+      };
+    }
+
+    const previous = await this.projectToSnapshot(match.project.id);
+    const next = snapshotFromApplication({
+      ...application,
+      marketPreview:
+        application.marketPreview && typeof application.marketPreview === 'object'
+          ? (application.marketPreview as Record<string, unknown>)
+          : null,
+    });
+    const fields = buildListingRelistDiff(previous, next);
+    const contractNorm = normalizeContractAddress(application.contractAddress);
+    const existingNorm = normalizeContractAddress(match.project.contractAddress);
+
+    return {
+      hasExisting: true,
+      matchType: match.matchType,
+      existingProjectId: match.project.id,
+      existingProjectSlug: match.project.slug,
+      existingProjectName: match.project.name,
+      sameContract: Boolean(contractNorm && existingNorm && contractNorm === existingNorm),
+      changedFieldCount: countChangedFields(fields),
+      fields,
+    };
+  }
 
   async publishApprovedApplication(
     application: ListingApplication,
@@ -112,25 +210,36 @@ export class ListingPublishService {
       ? await this.upsertFounder(tx, application, criteria)
       : null;
 
-    const projectSlug = await this.uniqueProjectSlug(
-      tx,
+    const slugBase =
       slugify(normalizeProjectName(application.projectName) || application.projectName) ||
-        slugify(application.ticker),
-    );
+      slugify(application.ticker);
 
-    const existing = await tx.project.findFirst({
-      where: {
-        OR: [
-          { slug: projectSlug },
-          { ticker: application.ticker, chainId: chain.id },
-        ],
-      },
-    });
-    if (existing?.approved && existing.source === ProjectSource.CURATED) {
-      throw new BadRequestException(
-        `A curated project already exists for ${application.ticker} on this chain`,
-      );
+    const match = await this.findExistingCuratedProject(tx, application, chain.id, slugBase);
+    const existing = match?.project ?? null;
+    const relisted = Boolean(existing?.approved && existing.source === ProjectSource.CURATED);
+
+    let deactivatedDuplicateIds: string[] = [];
+    if (existing && relisted) {
+      const dupes = await tx.project.findMany({
+        where: {
+          chainId: chain.id,
+          ticker: application.ticker.toUpperCase(),
+          id: { not: existing.id },
+          source: ProjectSource.CURATED,
+          approved: true,
+        },
+        select: { id: true },
+      });
+      if (dupes.length > 0) {
+        deactivatedDuplicateIds = dupes.map((d) => d.id);
+        await tx.project.updateMany({
+          where: { id: { in: deactivatedDuplicateIds } },
+          data: { approved: false, trackingActive: false },
+        });
+      }
     }
+
+    const projectSlug = existing?.slug ?? (await this.uniqueProjectSlug(tx, slugBase));
 
     const category = await tx.category.findFirst({
       orderBy: { name: 'asc' },
@@ -152,12 +261,113 @@ export class ListingPublishService {
     await this.upsertSocials(tx, project.id, application);
     await this.upsertAudit(tx, project.id, application.auditUrl);
 
+    let changedFieldCount = 0;
+    if (relisted) {
+      const previous = await this.projectToSnapshot(existing!.id, tx);
+      const next = snapshotFromApplication({
+        ...application,
+        marketPreview:
+          application.marketPreview && typeof application.marketPreview === 'object'
+            ? (application.marketPreview as Record<string, unknown>)
+            : null,
+      });
+      changedFieldCount = countChangedFields(buildListingRelistDiff(previous, next));
+    }
+
     return {
       projectId: project.id,
       projectSlug: project.slug,
       projectName: project.name,
       founderSlug: founder?.slug ?? null,
+      relisted,
+      changedFieldCount: relisted ? changedFieldCount : undefined,
+      deactivatedDuplicateIds: deactivatedDuplicateIds.length
+        ? deactivatedDuplicateIds
+        : undefined,
     };
+  }
+
+  private async findExistingCuratedProject(
+    tx: Tx | PrismaService,
+    application: ListingApplication,
+    chainId: string,
+    slugBase: string,
+  ): Promise<{ project: { id: string; slug: string; name: string; contractAddress: string | null; approved: boolean; source: ProjectSource }; matchType: ListingRelistMatchType } | null> {
+    const contractNorm = normalizeContractAddress(application.contractAddress);
+    const ticker = application.ticker.toUpperCase();
+
+    const onChain = await tx.project.findMany({
+      where: { chainId, source: ProjectSource.CURATED, approved: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (contractNorm) {
+      const byContract = onChain.find(
+        (p) => normalizeContractAddress(p.contractAddress) === contractNorm,
+      );
+      if (byContract) {
+        return { project: byContract, matchType: 'contract' };
+      }
+    }
+
+    const byTicker = onChain.find((p) => p.ticker.toUpperCase() === ticker);
+    if (byTicker) {
+      return { project: byTicker, matchType: 'ticker' };
+    }
+
+    const bySlug = await tx.project.findFirst({
+      where: { slug: slugBase, chainId },
+    });
+    if (bySlug?.source === ProjectSource.CURATED) {
+      return { project: bySlug, matchType: 'slug' };
+    }
+
+    return null;
+  }
+
+  private async projectToSnapshot(projectId: string, tx: Tx | PrismaService = this.prisma) {
+    const project = await tx.project.findUnique({
+      where: { id: projectId },
+      include: {
+        socials: true,
+        metrics: true,
+        founder: true,
+      },
+    });
+    if (!project) {
+      return snapshotFromApplication({});
+    }
+
+    return snapshotFromApplication({
+      projectName: project.name,
+      ticker: project.ticker,
+      websiteUrl: project.websiteUrl,
+      docsUrl: project.docsUrl,
+      whitepaperUrl: project.whitepaperUrl,
+      contractAddress: project.contractAddress,
+      dexscreenerUrl: project.dexscreenerUrl,
+      logoUrl: project.logoUrl,
+      telegramUrl: project.socials?.telegramUrl,
+      founderName: project.founder?.name,
+      founderLinkedIn: project.founder?.linkedInUrl,
+      founderTwitter: project.founder?.twitterUrl,
+      founderGithub: project.founder?.githubUrl ?? project.socials?.githubUrl,
+      founderVideoUrl: project.founder?.videoUrl,
+      founderInterviewUrl: null,
+      companyDetails: project.description,
+      auditUrl: null,
+      summary: project.summary,
+      marketPreview: project.metrics
+        ? {
+            marketCap: project.metrics.marketCap
+              ? Number(project.metrics.marketCap)
+              : undefined,
+            priceUsd: project.metrics.priceUsd
+              ? String(project.metrics.priceUsd)
+              : undefined,
+          }
+        : null,
+    });
   }
 
   private projectData(
