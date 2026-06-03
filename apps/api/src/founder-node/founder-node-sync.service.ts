@@ -35,6 +35,9 @@ export class FounderNodeSyncService {
 
     const activeNode = onlineNode ?? nodes[0] ?? null;
 
+    const lastSeenAt =
+      activeNode?.lastSeenAt?.toISOString() ?? null;
+
     return {
       paired: nodes.length > 0,
       online: Boolean(onlineNode),
@@ -50,6 +53,7 @@ export class FounderNodeSyncService {
         onlineNode?.lastPullSyncAt?.toISOString() ??
         nodes[0]?.lastPullSyncAt?.toISOString() ??
         null,
+      lastSeenAt,
       pendingJobs,
       bidirectionalSync: Boolean(onlineNode),
     };

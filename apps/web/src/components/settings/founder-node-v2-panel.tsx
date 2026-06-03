@@ -1,7 +1,28 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
+
+/** Founder Node v0.5.0+ required for sync jobs / vector rebuild */
+function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
+  if (!version?.trim()) return true;
+  const m = version.trim().match(/^v?(\d+)\.(\d+)/i);
+  if (!m) return true;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major < 0 || (major === 0 && minor < 5);
+}
+
+function formatLastSeen(iso: string | null | undefined): string {
+  if (!iso) return 'never (no heartbeat yet)';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs} hour${hrs === 1 ? '' : 's'} ago`;
+  return new Date(iso).toLocaleString();
+}
 import {
   pushGoalToFounderNode,
   runFounderNodeAgent,
@@ -24,6 +45,12 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
   const [hits, setHits] = useState<Array<{ source: string; text: string; score: number }>>([]);
 
   const isFounderNodeMode = settings.memoryStorageMode === 'FOUNDER_NODE';
+
+  useEffect(() => {
+    if (!v2?.paired || v2.online) return;
+    const timer = setInterval(() => onRefresh(), 12_000);
+    return () => clearInterval(timer);
+  }, [v2?.paired, v2?.online, onRefresh]);
 
   const runSearch = useCallback(async () => {
     if (!query.trim()) return;
@@ -128,12 +155,13 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
         )}
       </div>
 
-      {v2?.paired && v2.online && v2.appVersion && !v2.appVersion.startsWith('0.4') && (
+      {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
           <p className="font-medium">Update Founder Node to v0.5.0+</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Your tray app (v{v2.appVersion}) cannot process sync jobs. Download the latest installer in{' '}
-            <strong className="text-cyan-200">Step 1 above</strong>, install it, then restart and retry Rebuild vector index.
+            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} cannot process sync jobs. Download the latest
+            installer in <strong className="text-cyan-200">Step 1 above</strong>, install it, then restart and retry
+            Rebuild vector index.
           </p>
         </div>
       )}
@@ -147,13 +175,67 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
       {v2?.paired && !v2.online && (
         <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-950/25 p-4 text-sm text-amber-100">
           <p className="font-semibold text-amber-200">Paired, but desktop app is offline</p>
-          <p className="mt-2 text-xs leading-relaxed text-amber-100/90">
-            Closing the <strong className="text-white">Pair this machine</strong> popup is normal — that is not
-            Founder OS closing. The tray app must stay running (icon near the Windows clock; click the ^ arrow if
-            hidden). Right-click the tray icon → <strong className="text-white">Sync now</strong>, or launch Founder
-            Node from Start Menu. Founder OS marks you offline if no heartbeat arrives for ~3 minutes.
+          <p className="mt-2 text-xs leading-relaxed text-zinc-300">
+            <strong className="text-white">Paired</strong> means this browser account is linked to your machine (one-time
+            setup). <strong className="text-white">Online</strong> means the Founder Node tray app is running on your PC
+            and sending a heartbeat to Founder OS — usually every ~60 seconds. The website cannot index your vault by
+            itself; <strong className="text-white">Rebuild vector index</strong> is disabled until the tray app is online.
           </p>
+          <p className="mt-2 text-[11px] text-zinc-500">
+            Last heartbeat from your node: <span className="text-zinc-400">{formatLastSeen(v2.lastSeenAt)}</span>
+            {v2.nodeLabel ? (
+              <>
+                {' '}
+                · machine: <span className="text-zinc-400">{v2.nodeLabel}</span>
+              </>
+            ) : null}
+            . This page refreshes every 12s while offline.
+          </p>
+
+          <div className="mt-4 rounded-lg border border-amber-500/25 bg-black/20 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-amber-200/90">
+              Get online (about 1 minute)
+            </p>
+            <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs leading-relaxed text-zinc-300">
+              <li>
+                Open <strong className="text-white">Founder Node</strong> from the Windows Start Menu (search “Founder
+                Node”). Do not use <strong className="text-white">Quit</strong> on the tray menu — that stops heartbeats.
+              </li>
+              <li>
+                Find the tray icon near the clock (bottom-right). If you do not see it, click the{' '}
+                <strong className="text-white">^</strong> arrow to show hidden icons.
+              </li>
+              <li>
+                Right-click the Founder Node tray icon → <strong className="text-white">Sync now</strong>. Wait until the
+                badge here shows <strong className="text-emerald-300">● online</strong> (within ~3 minutes of the last
+                heartbeat).
+              </li>
+              <li>
+                Then click <strong className="text-white">Rebuild vector index</strong> once (first run can take 30–60s).
+              </li>
+            </ol>
+          </div>
+
+          <div className="mt-3 space-y-1.5 text-[11px] text-zinc-500">
+            <p>
+              <strong className="text-zinc-400">Closing the pairing popup is OK.</strong> “Pair this machine” is only for
+              entering your code. After pairing, only the tray app needs to stay open — not the popup window.
+            </p>
+            <p>
+              <strong className="text-zinc-400">Still offline?</strong> Check Windows Firewall allowed Founder Node,
+              sign in to the same Founder OS account you paired with, and confirm Step 2 uses{' '}
+              <strong className="text-zinc-300">Founder Vault (Founder Node)</strong>. Restart the tray app, then Sync
+              now again.
+            </p>
+          </div>
         </div>
+      )}
+
+      {v2?.paired && v2.online && (
+        <p className="mt-3 text-xs text-emerald-300/90">
+          Desktop app is online — sync jobs run on your machine. Vault files never leave your PC unless you search (only
+          snippets return).
+        </p>
       )}
 
       {v2?.paired && (
@@ -177,28 +259,47 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
             </ol>
           </div>
 
+          {!v2.online && (
+            <p className="text-[11px] text-zinc-500">
+              Buttons below unlock when the tray app is <strong className="text-zinc-400">● online</strong>.
+            </p>
+          )}
+
           <div className="grid gap-3 sm:grid-cols-3">
             <button
               type="button"
               disabled={Boolean(busy) || !v2.online}
+              title={
+                v2.online
+                  ? 'Queue index rebuild on your desktop (vault-index agent)'
+                  : 'Start Founder Node tray app and wait for ● online'
+              }
               onClick={() => runAgent('vault-index')}
-              className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:opacity-50"
+              className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Rebuild vector index
             </button>
             <button
               type="button"
               disabled={Boolean(busy) || !v2.online}
+              title={v2.online ? undefined : 'Requires desktop app online'}
               onClick={() => runAgent('goal-align')}
-              className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:opacity-50"
+              className="rounded-lg border border-cyan-500/40 bg-cyan-950/30 px-3 py-2 text-sm text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Check goal alignment
             </button>
             <button
               type="button"
               disabled={Boolean(busy) || !v2.online || !settings.currentGoalFocus?.trim()}
+              title={
+                !v2.online
+                  ? 'Requires desktop app online'
+                  : !settings.currentGoalFocus?.trim()
+                    ? 'Set current goal focus in Step 3 first'
+                    : undefined
+              }
               onClick={pushGoal}
-              className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-2 text-sm text-violet-100 disabled:opacity-50"
+              className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-3 py-2 text-sm text-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Push goal to vault
             </button>

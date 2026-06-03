@@ -3091,6 +3091,7 @@ export interface BuilderSettings {
     vectorChunks: number | null;
     vectorIndexedAt: string | null;
     lastPullSyncAt: string | null;
+    lastSeenAt: string | null;
     pendingJobs: number;
     bidirectionalSync: boolean;
   };
