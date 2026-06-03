@@ -194,7 +194,20 @@ export class FounderOsIntegrationService {
       (metadata.webhookSecret as string | undefined) ??
       randomBytes(16).toString('hex');
 
-    const storedToken = token ? this.crypto.encrypt(token) : null;
+    const existingMetadata =
+      existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+        ? (existing.metadata as Record<string, unknown>)
+        : {};
+    const storedToken = token ? this.crypto.encrypt(token) : (existing?.token ?? null);
+    const storedMetadata =
+      token || !existing?.token
+        ? metadata
+        : {
+            ...existingMetadata,
+            founderCopilotToggle: true,
+            founderCopilotEnabledAt:
+              typeof metadata.enabledAt === 'string' ? metadata.enabledAt : new Date().toISOString(),
+          };
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider } },
@@ -202,13 +215,13 @@ export class FounderOsIntegrationService {
         userId,
         provider,
         token: storedToken,
-        metadata: metadata as Prisma.InputJsonValue,
+        metadata: storedMetadata as Prisma.InputJsonValue,
         webhookSecret,
         verifiedAt: new Date(),
       },
       update: {
         token: storedToken,
-        metadata: metadata as Prisma.InputJsonValue,
+        metadata: storedMetadata as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
     });

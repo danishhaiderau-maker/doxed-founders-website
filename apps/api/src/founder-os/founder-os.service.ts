@@ -304,7 +304,7 @@ export class FounderOsService {
         c.verifiedAt &&
         ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'].includes(c.provider),
     );
-    const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
+    const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt && c.token);
     const githubConnected = Boolean(
       (gh?.repoFullName ?? founder?.githubRepoFullName) &&
         !String(gh?.repoFullName ?? founder?.githubRepoFullName).endsWith('/pending-setup'),

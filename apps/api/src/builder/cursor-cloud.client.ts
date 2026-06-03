@@ -41,9 +41,8 @@ export async function verifyCursorCloudConnection(apiKey: string): Promise<{ acc
 export async function dispatchCursorCloudTask(
   input: CursorCloudDispatchInput,
 ): Promise<CursorCloudDispatchResult> {
-  const repoUrl = input.repository ? githubRepoToUrl(input.repository) : null;
-  const canFollowUp =
-    Boolean(input.agentId) && (!repoUrl || input.agentRepoUrl === repoUrl);
+  const repoUrl = githubRepoToUrl(input.repository);
+  const canFollowUp = Boolean(input.agentId) && input.agentRepoUrl === repoUrl;
 
   if (canFollowUp && input.agentId) {
     return followUpRun(input.apiKey, input.agentId, input.taskPrompt);
@@ -55,17 +54,15 @@ export async function dispatchCursorCloudTask(
 async function createAgent(
   apiKey: string,
   promptText: string,
-  repoUrl: string | null,
+  repoUrl: string,
   startingRef?: string,
 ): Promise<CursorCloudDispatchResult> {
   const body: Record<string, unknown> = {
     prompt: { text: promptText },
     autoCreatePR: true,
     name: promptText.slice(0, 100),
+    repos: [{ url: repoUrl, startingRef: resolveCursorStartingRef(startingRef) }],
   };
-  if (repoUrl) {
-    body.repos = [{ url: repoUrl, startingRef: resolveCursorStartingRef(startingRef) }];
-  }
 
   const res = await fetch(`${CURSOR_CLOUD_API_BASE}/v1/agents`, {
     method: 'POST',

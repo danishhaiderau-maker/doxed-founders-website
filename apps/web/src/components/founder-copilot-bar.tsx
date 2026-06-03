@@ -98,7 +98,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     setBusy(true);
     try {
       const result = await dispatchCursorCloudBuild(
-        { spec: prompt.trim(), cursorPrompt: prompt.trim() },
+        { spec: prompt.trim(), cursorPrompt: prompt.trim(), repository: memory?.repoFullName ?? undefined },
         accessToken,
       );
       const msg = `Cursor agent ${result.mode === 'follow_up' ? 'resumed' : 'started'} — ${result.agentUrl}`;

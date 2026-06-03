@@ -10,6 +10,7 @@ import {
   githubRepoToUrl,
   isFounderNodeAiProvider,
   isRemoteAgentProvider,
+  normalizeGitHubRepoFullName,
   processQuickBuild,
   resolveBuildWorker,
   type BuildWorkerKey,
@@ -456,16 +457,18 @@ export class BuilderService {
     const apiKey = this.crypto.decrypt(cred.token);
     if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
 
-    const taskPrompt = buildCursorCloudTaskMessage(input.spec, input.cursorPrompt);
-    const repoUrl = input.repository ? githubRepoToUrl(input.repository) : null;
-    const startingRef = input.repository
-      ? await this.github.getDefaultBranch(userId, input.repository)
-      : undefined;
+    const repository = await this.resolveCursorDispatchRepository(userId, input.repository);
+    const repoUrl = githubRepoToUrl(repository);
+    const startingRef = await this.github.getDefaultBranch(userId, repository);
+    const taskPrompt = buildCursorCloudTaskMessage(input.spec, input.cursorPrompt, {
+      repository,
+      startingRef,
+    });
 
     const result = await dispatchCursorCloudTask({
       apiKey,
       taskPrompt,
-      repository: input.repository,
+      repository,
       startingRef,
       agentId: meta.agentId,
       agentRepoUrl: meta.agentRepoUrl,
@@ -477,7 +480,7 @@ export class BuilderService {
         metadata: {
           ...meta,
           agentId: result.agentId,
-          agentRepoUrl: repoUrl ?? meta.agentRepoUrl ?? null,
+          agentRepoUrl: repoUrl,
           latestRunId: result.runId,
         } as Prisma.InputJsonValue,
       },
@@ -875,6 +878,40 @@ export class BuilderService {
     return (cred?.metadata as CursorCredentialMeta | null) ?? null;
   }
 
+  private async resolveCursorDispatchRepository(
+    userId: string,
+    requestedRepository?: string,
+  ): Promise<string> {
+    const requested = requestedRepository?.trim()
+      ? normalizeGitHubRepoFullName(requestedRepository)
+      : null;
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { where: { approved: true }, take: 1 } },
+    });
+    const connected = await this.github.resolveRepo(
+      userId,
+      founder?.githubRepoFullName,
+      founder?.projects[0]?.githubRepoFullName,
+    );
+    const connectedRepo = connected ? normalizeGitHubRepoFullName(connected) : null;
+
+    if (requested) {
+      if (!connectedRepo) {
+        throw new BadRequestException('Connect a GitHub repository before dispatching Cursor.');
+      }
+      if (requested.toLowerCase() !== connectedRepo.toLowerCase()) {
+        throw new BadRequestException(
+          `Cursor dispatch blocked: requested ${requested}, but the connected GitHub repository is ${connectedRepo}.`,
+        );
+      }
+      return requested;
+    }
+
+    if (connectedRepo) return connectedRepo;
+    throw new BadRequestException('Connect a GitHub repository before dispatching Cursor.');
+  }
+
   private async getPhalaMeta(userId: string): Promise<PhalaCredentialMeta | null> {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'phala' } },
@@ -948,9 +985,16 @@ export class BuilderService {
   private async listConnectedProviders(userId: string) {
     const creds = await this.prisma.integrationCredential.findMany({
       where: { userId, verifiedAt: { not: null } },
-      select: { provider: true },
+      select: { provider: true, token: true },
     });
-    return new Set(creds.map((c) => c.provider));
+    const connected = new Set<string>();
+    for (const c of creds) {
+      if ((c.provider === 'cursor' || c.provider === 'openhands') && !this.crypto.decrypt(c.token)) {
+        continue;
+      }
+      connected.add(c.provider);
+    }
+    return connected;
   }
 
   /** LLM keys with a stored token (verified optional — chat should still attempt). */

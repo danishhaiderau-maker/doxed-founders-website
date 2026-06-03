@@ -157,7 +157,7 @@ export class BuildQueueService {
 
     const cursorConnected = Boolean(
       await this.prisma.integrationCredential.findFirst({
-        where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+        where: { userId, provider: 'cursor', verifiedAt: { not: null }, token: { not: null } },
       }),
     );
 

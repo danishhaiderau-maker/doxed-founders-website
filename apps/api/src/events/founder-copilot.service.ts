@@ -392,7 +392,7 @@ export class FounderCopilotService {
   private async dispatchCursorFromCopilot(userId: string, prompt: string) {
     const memory = await this.getProjectMemory(userId);
     const cursorCred = await this.prisma.integrationCredential.findFirst({
-      where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+      where: { userId, provider: 'cursor', verifiedAt: { not: null }, token: { not: null } },
     });
     if (!cursorCred) {
       return {
