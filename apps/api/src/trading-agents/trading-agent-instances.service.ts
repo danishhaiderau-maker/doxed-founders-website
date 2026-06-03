@@ -7,8 +7,11 @@ import {
   TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_PROVIDER_LABELS,
   exchangeCredentialProvider,
+  tradingAiToCredentialProvider,
   type ExchangeProvider,
+  type TradingAgentAiProvider,
 } from '@dcf/utils';
+import { BuilderService } from '../builder/builder.service';
 import { TradingAgentInstanceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -23,12 +26,21 @@ export class TradingAgentInstancesService {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
+    private readonly builder: BuilderService,
   ) {}
 
   async hireAgent(
     userId: string,
     agentId: string,
-    input: { exchangeProvider: string; apiKey: string; apiSecret: string; testnet?: boolean },
+    input: {
+      exchangeProvider: string;
+      apiKey: string;
+      apiSecret: string;
+      testnet?: boolean;
+      aiMode?: 'platform' | 'own';
+      aiProvider?: string;
+      aiApiKey?: string;
+    },
   ) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { id: agentId } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -52,7 +64,15 @@ export class TradingAgentInstancesService {
     }
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    const aiProvider = showcase?.showcaseAiProvider ?? 'deepseek';
+    const useOwnAi = input.aiMode === 'own' && Boolean(input.aiApiKey?.trim());
+    const aiProvider = (useOwnAi
+      ? input.aiProvider ?? 'deepseek'
+      : showcase?.showcaseAiProvider ?? 'deepseek') as string;
+
+    if (useOwnAi && input.aiApiKey) {
+      const credProvider = tradingAiToCredentialProvider(aiProvider as TradingAgentAiProvider);
+      await this.builder.connectAiProvider(userId, credProvider, input.aiApiKey);
+    }
 
     const instance = await this.prisma.tradingAgentInstance.upsert({
       where: { agentId_userId: { agentId, userId } },
@@ -62,7 +82,7 @@ export class TradingAgentInstancesService {
         exchangeProvider: input.exchangeProvider,
         credentialId: connected.credentialId,
         status: TradingAgentInstanceStatus.ACTIVE,
-        aiProvidedByPlatform: true,
+        aiProvidedByPlatform: !useOwnAi,
         aiProvider,
         activatedAt: new Date(),
         lastBilledAt: new Date(),
@@ -71,7 +91,7 @@ export class TradingAgentInstancesService {
         exchangeProvider: input.exchangeProvider,
         credentialId: connected.credentialId,
         status: TradingAgentInstanceStatus.ACTIVE,
-        aiProvidedByPlatform: true,
+        aiProvidedByPlatform: !useOwnAi,
         aiProvider,
         activatedAt: new Date(),
         lastError: null,
@@ -87,7 +107,9 @@ export class TradingAgentInstancesService {
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} hired`,
-      body: `Private dashboard active on ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]}. AI included — no API key needed.`,
+      body: useOwnAi
+        ? `Private dashboard on ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} with your ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} key.`
+        : `Private dashboard active on ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]}. Platform AI included.`,
       link: `/agent-hub/${agent.slug}/my-dashboard`,
     });
 

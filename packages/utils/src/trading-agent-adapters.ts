@@ -41,3 +41,15 @@ export type AgentInstanceStatus = 'PENDING' | 'ACTIVE' | 'PAUSED' | 'ERROR';
 export function exchangeCredentialProvider(exchange: ExchangeProvider): string {
   return `exchange:${exchange}`;
 }
+
+/** Maps Agent Hub AI picker ids to integration credential provider keys. */
+export function tradingAiToCredentialProvider(ai: TradingAgentAiProvider): string {
+  const map: Record<TradingAgentAiProvider, string> = {
+    deepseek: 'deepseek',
+    openai: 'openai',
+    claude: 'anthropic',
+    gemini: 'gemini',
+    openrouter: 'openrouter',
+  };
+  return map[ai];
+}

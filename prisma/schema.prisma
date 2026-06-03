@@ -1235,6 +1235,14 @@ model PlatformSettings {
   /** Admin showcase agent — never used for user instances */
   showcaseExchangeProvider String   @default("bybit")
   showcaseAiProvider       String   @default("deepseek")
+  /** Encrypted JSON: { apiKey, apiSecret, passphrase?, testnet? } */
+  showcaseExchangeCredentialEnc String? @db.Text
+  /** Encrypted AI API key for showcase bot runtime */
+  showcaseAiCredentialEnc     String? @db.Text
+  /** Public URL of btc-conservative-agent Railway service (for admin reference) */
+  showcaseBotPublicUrl        String?
+  showcaseCredentialsUpdatedAt DateTime?
+  showcaseRuntimePushedAt      DateTime?
   updatedByUserId          String?
   updatedAt                DateTime @updatedAt
 }

@@ -17,6 +17,8 @@ import {
   resetShowcaseSimulation,
   updateShowcaseConfig,
   updateGlobalShareFooter,
+  saveShowcaseCredentials,
+  pushShowcaseRuntime,
 } from '@/lib/api';
 
 const SECTIONS = [
@@ -41,6 +43,11 @@ export default function AdminControlPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [exchangeApiKey, setExchangeApiKey] = useState('');
+  const [exchangeApiSecret, setExchangeApiSecret] = useState('');
+  const [aiApiKey, setAiApiKey] = useState('');
+  const [botPublicUrl, setBotPublicUrl] = useState('');
+  const [showcaseTestnet, setShowcaseTestnet] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -51,6 +58,7 @@ export default function AdminControlPage() {
       ]);
       setOverview(ov);
       setFooter(foot.footer);
+      if (ov.showcase?.botPublicUrl) setBotPublicUrl(ov.showcase.botPublicUrl);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load admin control');
@@ -111,6 +119,52 @@ export default function AdminControlPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleSaveShowcaseCredentials(e: FormEvent) {
+    e.preventDefault();
+    if (!token) return;
+    setBusy('credentials');
+    setError(null);
+    try {
+      const ov = await saveShowcaseCredentials(
+        {
+          exchangeProvider: showcase?.exchangeProvider,
+          aiProvider: showcase?.aiProvider,
+          exchangeApiKey: exchangeApiKey.trim() || undefined,
+          exchangeApiSecret: exchangeApiSecret.trim() || undefined,
+          aiApiKey: aiApiKey.trim() || undefined,
+          botPublicUrl: botPublicUrl.trim() || undefined,
+          testnet: showcaseTestnet,
+        },
+        token,
+      );
+      setOverview(ov);
+      setExchangeApiKey('');
+      setExchangeApiSecret('');
+      setAiApiKey('');
+      setMsg('Showcase API keys saved (encrypted at rest).');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handlePushRuntime() {
+    if (!token) return;
+    setBusy('push-runtime');
+    setError(null);
+    try {
+      const res = await pushShowcaseRuntime(token);
+      if (!res.ok) setError(res.message);
+      else setMsg(res.message);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Push failed');
     } finally {
       setBusy(null);
     }
@@ -239,6 +293,114 @@ export default function AdminControlPage() {
                       </div>
                     </div>
                   </div>
+
+                  <form
+                    onSubmit={handleSaveShowcaseCredentials}
+                    className="mt-6 space-y-4 rounded-lg border border-amber-500/20 bg-amber-950/10 p-4"
+                  >
+                    <p className="text-sm font-semibold text-amber-100">Showcase API keys (admin only)</p>
+                    <p className="text-xs text-zinc-500">
+                      Visitors see live performance from these keys. After hire, users connect their own exchange
+                      and optionally their own AI (DeepSeek recommended — same stack as the public proof).
+                    </p>
+                    {(showcase?.botRuntimeNote || showcase?.aiRuntimeNote) && (
+                      <p className="text-xs text-amber-200/80">
+                        {showcase.botRuntimeNote}
+                        {showcase.botRuntimeNote && showcase.aiRuntimeNote ? ' ' : ''}
+                        {showcase.aiRuntimeNote}
+                      </p>
+                    )}
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <label className="block text-sm">
+                        <span className="text-zinc-400">
+                          {showcase?.exchangeLabel ?? 'Exchange'} API key
+                          {showcase?.exchangeConfigured ? (
+                            <span className="ml-2 text-emerald-400">· saved</span>
+                          ) : null}
+                        </span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={exchangeApiKey}
+                          onChange={(e) => setExchangeApiKey(e.target.value)}
+                          placeholder={showcase?.exchangeConfigured ? 'Leave blank to keep' : 'Required'}
+                          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="text-zinc-400">API secret</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={exchangeApiSecret}
+                          onChange={(e) => setExchangeApiSecret(e.target.value)}
+                          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                        />
+                      </label>
+                      <label className="block text-sm lg:col-span-2">
+                        <span className="text-zinc-400">
+                          {showcase?.aiLabel ?? 'AI'} API key
+                          {showcase?.aiConfigured ? (
+                            <span className="ml-2 text-emerald-400">· saved</span>
+                          ) : null}
+                        </span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={aiApiKey}
+                          onChange={(e) => setAiApiKey(e.target.value)}
+                          placeholder={showcase?.aiConfigured ? 'Leave blank to keep' : 'Required for live AI'}
+                          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                        />
+                      </label>
+                      <label className="block text-sm lg:col-span-2">
+                        <span className="text-zinc-400">Bot public URL (Railway)</span>
+                        <input
+                          type="url"
+                          value={botPublicUrl}
+                          onChange={(e) => setBotPublicUrl(e.target.value)}
+                          placeholder="https://your-btc-bot.up.railway.app"
+                          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                        />
+                        <span className="mt-1 block text-xs text-zinc-500">
+                          Sets TRADING_AGENT_BOT_URL on the API service when you push runtime.
+                        </span>
+                      </label>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={showcaseTestnet}
+                        onChange={(e) => setShowcaseTestnet(e.target.checked)}
+                      />
+                      Testnet exchange credentials
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="submit"
+                        disabled={busy != null}
+                        className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium hover:bg-amber-500 disabled:opacity-50"
+                      >
+                        {busy === 'credentials' ? 'Saving…' : 'Save showcase keys'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy != null || !showcase?.exchangeConfigured}
+                        onClick={() => void handlePushRuntime()}
+                        className="rounded-lg border border-violet-500/40 bg-violet-950/30 px-4 py-2 text-sm text-violet-200 hover:text-white disabled:opacity-50"
+                      >
+                        {busy === 'push-runtime' ? 'Pushing…' : 'Apply to Railway runtime'}
+                      </button>
+                    </div>
+                    {showcase?.credentialsUpdatedAt && (
+                      <p className="text-xs text-zinc-500">
+                        Keys updated {new Date(showcase.credentialsUpdatedAt).toLocaleString()}
+                        {showcase.runtimePushedAt
+                          ? ` · Runtime pushed ${new Date(showcase.runtimePushedAt).toLocaleString()}`
+                          : ''}
+                      </p>
+                    )}
+                  </form>
 
                   <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <Stat label="Exchange API" value={adapters?.exchangeStatus ?? '—'} />

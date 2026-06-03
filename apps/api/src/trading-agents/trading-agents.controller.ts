@@ -56,7 +56,15 @@ export class TradingAgentsController {
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
     @Body()
-    body: { exchangeProvider: string; apiKey: string; apiSecret: string; testnet?: boolean },
+    body: {
+      exchangeProvider: string;
+      apiKey: string;
+      apiSecret: string;
+      testnet?: boolean;
+      aiMode?: 'platform' | 'own';
+      aiProvider?: string;
+      aiApiKey?: string;
+    },
   ) {
     return this.instances.hireAgent(user.id, id, body);
   }

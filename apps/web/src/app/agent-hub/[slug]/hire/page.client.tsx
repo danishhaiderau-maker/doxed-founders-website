@@ -6,6 +6,10 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import {
+  TRADING_AGENT_AI_PROVIDERS,
+  TRADING_AGENT_AI_PROVIDER_LABELS,
+} from '@dcf/utils';
+import {
   ExchangeProviderOption,
   fetchExchangeProviders,
   fetchTradingAgent,
@@ -28,6 +32,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
   const [testnet, setTestnet] = useState(false);
+  const [aiProvider, setAiProvider] = useState('deepseek');
+  const [aiApiKey, setAiApiKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,7 +72,15 @@ export default function AgentHireClient({ slug }: { slug: string }) {
     try {
       const result = await hireTradingAgent(
         agentId,
-        { exchangeProvider: exchange, apiKey, apiSecret, testnet },
+        {
+          exchangeProvider: exchange,
+          apiKey,
+          apiSecret,
+          testnet,
+          aiMode: 'own',
+          aiProvider,
+          aiApiKey,
+        },
         token,
       );
       router.push(result.dashboardUrl);
@@ -96,7 +110,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       <div className="mx-auto max-w-3xl px-6 py-10">
         <h1 className="text-2xl font-bold">Hire {agentName || 'Agent'}</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Connect your exchange API only. Platform AI is included — no AI key required.
+          Connect your exchange API and your own AI key. The public showcase is tuned on DeepSeek — we recommend
+          the same for your private instance.
         </p>
 
         {error && (
@@ -152,7 +167,9 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             className="mt-8 space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
-              if (apiKey && apiSecret) setStep('confirm');
+              if (!apiKey || !apiSecret) return;
+              if (!aiApiKey.trim()) return;
+              setStep('confirm');
             }}
           >
             <h2 className="font-semibold">
@@ -184,6 +201,41 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               <input type="checkbox" checked={testnet} onChange={(e) => setTestnet(e.target.checked)} />
               Use testnet credentials
             </label>
+
+            <div className="rounded-xl border border-violet-500/20 bg-violet-950/20 p-4 space-y-3">
+              <p className="text-sm font-semibold text-violet-100">AI provider</p>
+              <p className="text-xs text-zinc-500">
+                Tested on DeepSeek in the public showcase. Use your own key so decisions run on your account.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {TRADING_AGENT_AI_PROVIDERS.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setAiProvider(id)}
+                    className={`rounded-full px-3 py-1 text-xs ${
+                      aiProvider === id
+                        ? 'bg-violet-600 text-white'
+                        : 'border border-zinc-700 text-zinc-400'
+                    }`}
+                  >
+                    {TRADING_AGENT_AI_PROVIDER_LABELS[id]}
+                    {id === 'deepseek' ? ' (recommended)' : ''}
+                  </button>
+                ))}
+              </div>
+              <label className="block text-sm">
+                {TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as keyof typeof TRADING_AGENT_AI_PROVIDER_LABELS]} API key
+                <input
+                  type="password"
+                  value={aiApiKey}
+                  onChange={(e) => setAiApiKey(e.target.value)}
+                  required
+                  className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
+                />
+              </label>
+            </div>
+
             <div className="flex gap-2">
               <button
                 type="button"
@@ -213,7 +265,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                 <span className="text-zinc-500">Exchange:</span> {selectedProvider?.label ?? exchange}
               </p>
               <p>
-                <span className="text-zinc-500">AI:</span> Included by platform (DeepSeek)
+                <span className="text-zinc-500">AI:</span>{' '}
+                {TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as keyof typeof TRADING_AGENT_AI_PROVIDER_LABELS]} (your key)
               </p>
               <p>
                 <span className="text-zinc-500">Rental:</span> {costDay.toLocaleString()} DDollar/day
