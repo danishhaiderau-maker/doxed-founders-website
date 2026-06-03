@@ -42,6 +42,7 @@
     "sync:founder-updates": "node scripts/sync-founder-updates.mjs",
     "sync:x-social-daily": "node scripts/run-x-social-daily.mjs",
     "prepare:x-share-images": "node scripts/prepare-x-share-images.mjs",
+    "optimize:landing-grid": "node scripts/optimize-landing-value-grid.mjs",
     "finish:x-production": "node scripts/finish-x-production.mjs",
     "bootstrap:x-automation": "powershell -ExecutionPolicy Bypass -File scripts/bootstrap-x-automation.ps1",
     "print:railway-x": "powershell -ExecutionPolicy Bypass -File scripts/print-railway-x-vars.ps1",
