@@ -18,6 +18,7 @@ import {
   fetchTrustCommunityReviews,
   fetchUnifiedFeed,
 } from '@/lib/api';
+import { LandingAiStackPreview } from '@/components/landing/landing-ai-stack-preview';
 
 const FEED_FILTERS = ['All', 'Projects', 'Announcements', 'Listings', 'Investigations', 'Agent'] as const;
 
@@ -49,8 +50,6 @@ const FOUNDER_NODE_ITEMS = [
   { label: 'Encrypted memory', icon: '💾' },
   { label: 'TEE protected', icon: '🔒' },
 ] as const;
-
-const AI_STACK_ITEMS = ['DeepSeek', 'Claude', 'OpenAI', 'Gemini', 'Cursor'] as const;
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -376,25 +375,12 @@ export function LandingHubPreviewWidgets({
 
       <WidgetShell
         title="AI Stack"
-        subtitle="The brain — bring your own keys."
+        subtitle="Brain LLMs + code workers for your project agents."
         headerClass="bg-sky-950/30"
         href="/settings/builder"
-        footerLabel="Connect providers →"
+        footerLabel={token ? 'Manage AI Stack →' : 'Connect providers →'}
       >
-        <p className="mb-2 text-[10px] font-medium text-sky-200/90">Use the AI you trust</p>
-        <div className="flex flex-wrap gap-1.5">
-          {AI_STACK_ITEMS.map((name) => (
-            <span
-              key={name}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300"
-            >
-              {name}
-            </span>
-          ))}
-        </div>
-        <p className="mt-3 text-[10px] leading-relaxed text-zinc-500">
-          Your key. Your model. Founder OS orchestrates agents, memory, and execution.
-        </p>
+        <LandingAiStackPreview accessToken={token} />
       </WidgetShell>
 
       <WidgetShell
