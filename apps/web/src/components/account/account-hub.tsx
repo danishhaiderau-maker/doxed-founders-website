@@ -131,6 +131,25 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
           >
             Public Leaderboard →
           </Link>
+          {session?.user?.role === 'ADMIN' && (
+            <div className="mt-2 w-full border-t border-amber-500/25 pt-2 lg:mt-3">
+              <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
+                Admin
+              </p>
+              <Link
+                href="/admin/control"
+                className="block rounded-lg px-3 py-2 text-sm font-semibold text-amber-300/95 hover:bg-zinc-900"
+              >
+                Admin Control
+              </Link>
+              <Link
+                href="/admin/applications"
+                className="block rounded-lg px-3 py-2 text-sm font-medium text-amber-300/90 hover:bg-zinc-900"
+              >
+                Listing inbox
+              </Link>
+            </div>
+          )}
         </nav>
       </aside>
 
