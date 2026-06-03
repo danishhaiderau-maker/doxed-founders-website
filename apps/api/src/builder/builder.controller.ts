@@ -88,6 +88,14 @@ export class BuilderController {
     return this.builder.getCursorRunSnapshot(user.id, agentId, runId);
   }
 
+  @Get('openhands/runs/:conversationId')
+  openHandsRun(
+    @CurrentUser() user: AuthUser,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return this.builder.getOpenHandsRunSnapshot(user.id, conversationId);
+  }
+
   @Get('worker-status')
   workerStatus(@CurrentUser() user: AuthUser) {
     return this.builder.getWorkerStatus(user.id);
