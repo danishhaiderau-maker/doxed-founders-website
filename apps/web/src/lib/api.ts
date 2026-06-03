@@ -1387,6 +1387,43 @@ export function fetchPlatformStats() {
   return apiFetch<PlatformStats>('/projects/platform/stats');
 }
 
+export interface PlatformAdoptionDayPoint {
+  date: string;
+  tokensIn: number;
+  tokensOut: number;
+  aiCalls: number;
+  ddollarVolume: number;
+  githubEvents: number;
+  buildPosts: number;
+}
+
+export interface PlatformAdoptionProjectRow {
+  slug: string;
+  name: string;
+  ticker: string;
+  tokensIn: number;
+  tokensOut: number;
+  aiCalls: number;
+  ddollarVolume: number;
+  githubEvents: number;
+  buildPosts: number;
+  activityScore: number;
+  bubbleScore: number;
+  launchReadiness: number;
+}
+
+export interface PlatformAdoptionMetrics {
+  days: number;
+  series: PlatformAdoptionDayPoint[];
+  totals: Omit<PlatformAdoptionDayPoint, 'date'>;
+  projects: PlatformAdoptionProjectRow[];
+  updatedAt: string;
+}
+
+export function fetchPlatformAdoptionMetrics(days = 14) {
+  return apiFetch<PlatformAdoptionMetrics>(`/projects/platform/adoption-metrics?days=${days}`);
+}
+
 export interface PlatformActivityItem {
   id: string;
   kind: 'build' | 'video' | 'demand';

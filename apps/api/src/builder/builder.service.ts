@@ -43,6 +43,14 @@ import {
   verifyPhalaConnection,
   type PhalaChatResult,
 } from './phala.client';
+import {
+  estimateLlmTokensFromText,
+  parseAnthropicUsage,
+  parseOpenAiStyleUsage,
+} from '@dcf/utils';
+import { PlatformAdoptionService } from '../projects/platform-adoption.service';
+
+type LlmUsage = { promptTokens: number; completionTokens: number };
 
 @Injectable()
 export class BuilderService {
@@ -53,6 +61,7 @@ export class BuilderService {
     private readonly founderNodeInference: FounderNodeInferenceService,
     private readonly founderNodeSync: FounderNodeSyncService,
     private readonly attestation: AttestationService,
+    private readonly adoption: PlatformAdoptionService,
   ) {}
 
   async getSettings(userId: string) {
@@ -759,12 +768,30 @@ export class BuilderService {
         settings.preferredModel,
       );
       if (nodeResult.ok) {
+        await this.logAiTokenUsage(
+          userId,
+          AiProvider.OLLAMA_LOCAL,
+          system,
+          userPrompt,
+          nodeResult.text,
+          'copilot',
+        );
         return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
       }
       llmErrors.push(...nodeResult.errors);
 
       const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
-      if (direct.ok) return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      if (direct.ok) {
+        await this.logAiTokenUsage(
+          userId,
+          AiProvider.OLLAMA_LOCAL,
+          system,
+          userPrompt,
+          direct.text,
+          'copilot',
+        );
+        return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      }
       if (direct.error) llmErrors.push(direct.error);
     }
 
@@ -781,6 +808,14 @@ export class BuilderService {
           });
           if (chat?.text) {
             await this.recordPhalaChat(userId, chat);
+            await this.logAiTokenUsage(
+              userId,
+              AiProvider.PHALA,
+              system,
+              userPrompt,
+              chat.text,
+              'copilot',
+            );
             return { ok: true, text: chat.text, provider: AiProvider.PHALA };
           }
           llmErrors.push('PHALA: empty response');
@@ -831,6 +866,7 @@ export class BuilderService {
           });
           if (chat?.text) {
             await this.recordPhalaChat(userId, chat);
+            await this.logAiTokenUsage(userId, provider, system, userPrompt, chat.text, 'copilot');
             return { ok: true, text: chat.text, provider };
           }
           llmErrors.push(`${provider}: empty response`);
@@ -854,8 +890,19 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const text = await this.completionWithProvider(provider, apiKey, system, userPrompt, model);
-        if (text?.trim()) return { ok: true, text: text.trim(), provider };
+        const result = await this.completionWithProvider(provider, apiKey, system, userPrompt, model);
+        if (result?.text?.trim()) {
+          await this.logAiTokenUsage(
+            userId,
+            provider,
+            system,
+            userPrompt,
+            result.text.trim(),
+            'copilot',
+            result.usage,
+          );
+          return { ok: true, text: result.text.trim(), provider };
+        }
         llmErrors.push(`${provider}: empty response`);
       } catch (err) {
         llmErrors.push(
@@ -887,10 +934,30 @@ export class BuilderService {
         userPrompt,
         settings.preferredModel,
       );
-      if (nodeResult.ok) return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
+      if (nodeResult.ok) {
+        await this.logAiTokenUsage(
+          userId,
+          AiProvider.OLLAMA_LOCAL,
+          system,
+          userPrompt,
+          nodeResult.text,
+          'copilot_forced',
+        );
+        return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
+      }
       llmErrors.push(...nodeResult.errors);
       const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
-      if (direct.ok) return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      if (direct.ok) {
+        await this.logAiTokenUsage(
+          userId,
+          AiProvider.OLLAMA_LOCAL,
+          system,
+          userPrompt,
+          direct.text,
+          'copilot_forced',
+        );
+        return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      }
       if (direct.error) llmErrors.push(direct.error);
       return { ok: false, llmErrors };
     }
@@ -908,6 +975,14 @@ export class BuilderService {
         });
         if (chat?.text) {
           await this.recordPhalaChat(userId, chat);
+          await this.logAiTokenUsage(
+            userId,
+            AiProvider.PHALA,
+            system,
+            userPrompt,
+            chat.text,
+            'copilot_forced',
+          );
           return { ok: true, text: chat.text, provider: AiProvider.PHALA };
         }
         return { ok: false, llmErrors: ['PHALA: empty response'] };
@@ -941,8 +1016,19 @@ export class BuilderService {
         : cfg.defaultModel ?? undefined;
 
     try {
-      const text = await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
-      if (text?.trim()) return { ok: true, text: text.trim(), provider: forceProvider };
+      const result = await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
+      if (result?.text?.trim()) {
+        await this.logAiTokenUsage(
+          userId,
+          forceProvider,
+          system,
+          userPrompt,
+          result.text.trim(),
+          'copilot_forced',
+          result.usage,
+        );
+        return { ok: true, text: result.text.trim(), provider: forceProvider };
+      }
       return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
     } catch (err) {
       return {
@@ -958,7 +1044,7 @@ export class BuilderService {
     system: string,
     userPrompt: string,
     model?: string,
-  ): Promise<string | null> {
+  ): Promise<{ text: string; usage: LlmUsage | null } | null> {
     switch (provider) {
       case AiProvider.OPENAI:
         return this.callOpenAi(apiKey, system, userPrompt, model);
@@ -973,6 +1059,41 @@ export class BuilderService {
       default:
         return null;
     }
+  }
+
+  private async logAiTokenUsage(
+    userId: string,
+    provider: AiProvider | string,
+    system: string,
+    userPrompt: string,
+    text: string,
+    source: string,
+    usage?: LlmUsage | null,
+  ) {
+    const promptTokens =
+      usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
+    const completionTokens = usage?.completionTokens ?? estimateLlmTokensFromText(text);
+    const projectId = await this.resolvePrimaryProjectId(userId);
+    await this.adoption
+      .recordAiUsage({
+        userId,
+        provider: String(provider),
+        source,
+        promptTokens,
+        completionTokens,
+        projectId,
+      })
+      .catch(() => undefined);
+  }
+
+  private async resolvePrimaryProjectId(userId: string): Promise<string | null> {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      select: {
+        projects: { where: { approved: true }, take: 1, select: { id: true }, orderBy: { updatedAt: 'desc' } },
+      },
+    });
+    return founder?.projects[0]?.id ?? null;
   }
 
   private async tryDirectOllama(
@@ -1226,8 +1347,14 @@ export class BuilderService {
       }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content ?? null;
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) return null;
+    const usage = parseOpenAiStyleUsage(data);
+    return { text, usage };
   }
 
   private async callAnthropic(key: string, system: string, user: string, model?: string) {
@@ -1246,8 +1373,13 @@ export class BuilderService {
       }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as { content?: { type: string; text?: string }[] };
-    return data.content?.find((c) => c.type === 'text')?.text ?? null;
+    const data = (await res.json()) as {
+      content?: { type: string; text?: string }[];
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const text = data.content?.find((c) => c.type === 'text')?.text;
+    if (!text) return null;
+    return { text, usage: parseAnthropicUsage(data) };
   }
 
   private async callGemini(key: string, system: string, user: string, model?: string) {
@@ -1266,8 +1398,18 @@ export class BuilderService {
     if (!res.ok) return null;
     const data = (await res.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
     };
-    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
+    const usage =
+      data.usageMetadata != null
+        ? {
+            promptTokens: data.usageMetadata.promptTokenCount ?? 0,
+            completionTokens: data.usageMetadata.candidatesTokenCount ?? 0,
+          }
+        : null;
+    return { text, usage };
   }
 
   private async callDeepSeek(key: string, system: string, user: string, model?: string) {
@@ -1287,8 +1429,13 @@ export class BuilderService {
       const body = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
     }
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content ?? null;
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) return null;
+    return { text, usage: parseOpenAiStyleUsage(data) };
   }
 
   private async callOpenRouter(key: string, system: string, user: string, model?: string) {
@@ -1313,8 +1460,13 @@ export class BuilderService {
       const body = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
     }
-    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content ?? null;
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) return null;
+    return { text, usage: parseOpenAiStyleUsage(data) };
   }
 
   private async callOllama(baseUrl: string, system: string, user: string, model: string) {

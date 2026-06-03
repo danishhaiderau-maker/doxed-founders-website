@@ -61,6 +61,11 @@ async function run() {
     return res.ok && Array.isArray(body);
   });
 
+  await runCheck('adoption-metrics', async () => {
+    const { res, body } = await fetchJson('/api/projects/platform/adoption-metrics?days=14');
+    return res.ok && Array.isArray(body?.series) && body.series.length >= 7;
+  });
+
   await runCheck('reputation-leaderboard', async () => {
     const { res, body } = await fetchJson('/api/reputation/leaderboard?limit=5');
     return res.ok && Array.isArray(body?.entries);

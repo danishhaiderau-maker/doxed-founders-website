@@ -426,6 +426,7 @@ model User {
   privacyAttestationLogs    PrivacyAttestationLog[]
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
+  aiTokenUsageLogs     AiTokenUsageLog[]
 
   @@index([email])
   @@index([role])
@@ -525,6 +526,26 @@ model FounderVerification {
   @@index([founderId])
 }
 
+// ─── Platform adoption (AI tokens + traction signals) ─────────────────────────
+
+model AiTokenUsageLog {
+  id               String   @id @default(cuid())
+  userId           String?
+  projectId        String?
+  provider         String
+  source           String
+  promptTokens     Int
+  completionTokens Int
+  createdAt        DateTime @default(now())
+
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([projectId, createdAt])
+  @@index([userId, createdAt])
+}
+
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 model Project {
@@ -596,6 +617,7 @@ model Project {
   scoutMarkets     ScoutMarket[]
   investigations   ProjectInvestigation[]
   trustReports     ProjectTrustReport[]
+  aiTokenUsageLogs AiTokenUsageLog[]
 
   @@index([slug])
   @@index([lifecycleStage])

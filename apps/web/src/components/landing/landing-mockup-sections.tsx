@@ -6,6 +6,7 @@ import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
 import { NotificationBell } from '@/components/notification-bell';
 import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/landing-feature-hub';
+import { LandingPlatformAdoption } from '@/components/landing/landing-platform-adoption';
 import { LandingValueGrid } from '@/components/landing/landing-value-grid';
 import type { PlatformStats } from '@/lib/api';
 
@@ -419,6 +420,9 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </div>
         <p className="mt-2 text-center text-[10px] text-zinc-600">🛡 No bots allowed</p>
       </Card>
+
+      {/* Platform adoption — AI tokens + project traction */}
+      <LandingPlatformAdoption />
 
       {/* Row 5: Footer modules */}
       <section className="grid gap-2 sm:grid-cols-3">

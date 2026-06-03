@@ -79,5 +79,7 @@ export * from './trading-agents';
 export * from './trading-agent-adapters';
 export * from './listing-approval';
 export * from './discover-universe';
+export * from './discover-visibility';
+export * from './llm-tokens';
 export * from './feed-terminal';
 export * from './task-router';
