@@ -1301,16 +1301,41 @@ export interface ProjectDetail extends ProjectSummary {
   claimProfile?: {
     claimable: boolean;
     claimed: boolean;
-    isOwner: boolean;
+    isOwner?: boolean;
+    profileLocked?: boolean;
     projectTwitterHandle: string | null;
     requiresXSignIn: boolean;
   };
+}
+
+export function fetchProjectClaimContext(slug: string, token: string) {
+  return apiFetch<NonNullable<ProjectDetail['claimProfile']>>(
+    `/projects/${encodeURIComponent(slug)}/claim-context`,
+    undefined,
+    token,
+  );
 }
 
 export function claimProjectProfile(slug: string, token: string) {
   return apiFetch<{ claimed: boolean; founderSlug: string; projectSlug: string }>(
     `/projects/${encodeURIComponent(slug)}/claim`,
     { method: 'POST' },
+    token,
+  );
+}
+
+export function lockProjectProfile(slug: string, password: string, token: string) {
+  return apiFetch<{ locked: boolean; lockedAt?: string }>(
+    `/projects/${encodeURIComponent(slug)}/lock-profile`,
+    { method: 'POST', body: JSON.stringify({ password }) },
+    token,
+  );
+}
+
+export function unlockProjectProfile(slug: string, password: string, token: string) {
+  return apiFetch<{ locked: boolean }>(
+    `/projects/${encodeURIComponent(slug)}/unlock-profile`,
+    { method: 'POST', body: JSON.stringify({ password }) },
     token,
   );
 }

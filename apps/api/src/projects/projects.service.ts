@@ -17,6 +17,7 @@ import {
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
+import { hashProfileLockPassword, verifyProfileLockPassword } from './profile-lock.util';
 
 const projectInclude = {
   chain: { select: { slug: true, name: true } },
@@ -397,6 +398,73 @@ export class ProjectsService {
     };
   }
 
+  async getClaimContext(userId: string, slug: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { slug, approved: true },
+      include: { socials: true, founder: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const listing = await this.prisma.listingApplication.findFirst({
+      where: { ticker: project.ticker },
+      orderBy: { createdAt: 'desc' },
+      select: { founderTwitter: true },
+    });
+
+    return this.buildClaimProfile(project, listing, userId);
+  }
+
+  async lockProjectProfile(userId: string, slug: string, password: string) {
+    const pwd = password?.trim();
+    if (!pwd || pwd.length < 8) {
+      throw new BadRequestException('Choose a lock password of at least 8 characters.');
+    }
+
+    const project = await this.prisma.project.findFirst({
+      where: { slug, approved: true },
+      include: { founder: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    if (!project.founder?.userId || project.founder.userId !== userId) {
+      throw new ForbiddenException('Only the verified founder can lock this profile.');
+    }
+
+    await this.prisma.project.update({
+      where: { id: project.id },
+      data: {
+        profileLockHash: hashProfileLockPassword(pwd),
+        profileLockedAt: new Date(),
+      },
+    });
+
+    return { locked: true, lockedAt: new Date().toISOString() };
+  }
+
+  async unlockProjectProfile(userId: string, slug: string, password: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { slug, approved: true },
+      include: { founder: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    if (!project.founder?.userId || project.founder.userId !== userId) {
+      throw new ForbiddenException('Only the verified founder can unlock this profile.');
+    }
+    if (!project.profileLockHash) {
+      return { locked: false };
+    }
+
+    if (!verifyProfileLockPassword(password, project.profileLockHash)) {
+      throw new ForbiddenException('Incorrect lock password.');
+    }
+
+    await this.prisma.project.update({
+      where: { id: project.id },
+      data: { profileLockHash: null, profileLockedAt: null },
+    });
+
+    return { locked: false };
+  }
+
   async claimProject(userId: string, slug: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -419,6 +487,12 @@ export class ProjectsService {
       include: { socials: true, founder: true },
     });
     if (!project) throw new NotFoundException('Project not found');
+
+    if (project.profileLockHash && project.founder?.userId && project.founder.userId !== userId) {
+      throw new ForbiddenException(
+        'This profile is locked by the verified founder. Contact support if you are the real team.',
+      );
+    }
 
     if (project.founder?.userId && project.founder.userId !== userId) {
       throw new ForbiddenException('This project profile is already claimed.');
@@ -499,23 +573,33 @@ export class ProjectsService {
   }
 
   private buildClaimProfile(
-    project: Prisma.ProjectGetPayload<{ include: typeof projectInclude }>,
+    project: {
+      founderId: string | null;
+      source: ProjectSource;
+      profileLockHash: string | null;
+      founder: { userId: string | null; twitterUrl: string | null } | null;
+      socials: { twitterUrl: string | null } | null;
+    },
     listing?: { founderTwitter?: string | null } | null,
+    viewerUserId?: string,
   ) {
     const projectTwitter = normalizeTwitterHandle(
       project.socials?.twitterUrl ?? listing?.founderTwitter ?? project.founder?.twitterUrl,
     );
     const claimed = Boolean(project.founder?.userId);
+    const isOwner = Boolean(viewerUserId && project.founder?.userId === viewerUserId);
     const listingKind = resolveProjectListingKind({
       source: project.source,
       founderId: project.founderId,
     });
     const claimable = !claimed && Boolean(projectTwitter) && listingKind !== 'verified';
+    const profileLocked = Boolean(project.profileLockHash);
 
     return {
       claimable,
       claimed,
-      isOwner: false,
+      isOwner,
+      profileLocked,
       projectTwitterHandle: projectTwitter,
       requiresXSignIn: true,
     };
