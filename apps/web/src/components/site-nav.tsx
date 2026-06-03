@@ -39,6 +39,7 @@ const BUILDING_NAV = [
 
 const PROFILE_LINKS = [
   { href: '/account', label: 'Overview' },
+  { href: '/account?tab=messages', label: 'Messages' },
   { href: '/account?tab=security', label: 'Security' },
   { href: '/account?tab=notifications', label: 'Notification Settings' },
   { href: '/account?tab=connected', label: 'Connected Accounts' },

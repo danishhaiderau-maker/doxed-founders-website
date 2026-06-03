@@ -88,6 +88,13 @@ export interface PendingApplication {
   createdAt: string;
   votes?: ListingVoteRecord[];
   relistPreview?: ListingRelistPreview | null;
+  user?: {
+    id: string;
+    name: string | null;
+    email: string;
+    platformHandle: string | null;
+    twitterHandle: string | null;
+  } | null;
 }
 
 export type ListingRelistPreview = {
@@ -549,6 +556,18 @@ export interface ReviewListingResult {
     changedFieldCount?: number;
     deactivatedDuplicateIds?: string[];
   } | null;
+}
+
+export function requestListingMoreProof(
+  applicationId: string,
+  token: string,
+  message: string,
+) {
+  return apiFetch<{ application: { id: string }; messageSent: boolean }>(
+    `/listing-applications/${applicationId}/request-proof`,
+    { method: 'POST', body: JSON.stringify({ message }) },
+    token,
+  );
 }
 
 export function reviewListingApplication(
@@ -2510,9 +2529,62 @@ export function disconnectWallet(token: string, chain = 'SOLANA') {
 
 // ─── Account hub ─────────────────────────────────────────────────────────────
 
+export interface MessageThread {
+  otherUserId: string;
+  otherUserLabel: string;
+  lastBody: string;
+  lastAt: string;
+  unreadCount: number;
+  applicationId: string | null;
+  applicationLabel: string | null;
+}
+
+export interface PlatformMessageItem {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  body: string;
+  createdAt: string;
+  readAt: string | null;
+  mine: boolean;
+  fromLabel: string;
+  applicationId: string | null;
+}
+
+export function fetchMessageThreads(token: string) {
+  return apiFetch<MessageThread[]>('/messages/threads', undefined, token);
+}
+
+export function fetchMessageConversation(otherUserId: string, token: string) {
+  return apiFetch<PlatformMessageItem[]>(`/messages/with/${otherUserId}`, undefined, token);
+}
+
+export function sendPlatformMessage(
+  toUserId: string,
+  message: string,
+  token: string,
+  applicationId?: string,
+) {
+  return apiFetch('/messages/send', {
+    method: 'POST',
+    body: JSON.stringify({ toUserId, message, applicationId }),
+  }, token);
+}
+
+export function updatePlatformHandle(handle: string, token: string) {
+  return apiFetch<{ platformHandle: string }>(
+    '/account/platform-handle',
+    { method: 'PUT', body: JSON.stringify({ platformHandle: handle }) },
+    token,
+  );
+}
+
 export interface AccountOverview {
   userId: string;
   username: string;
+  platformHandle: string;
+  canEditPlatformHandle: boolean;
+  hasTwitterConnected: boolean;
   email: string;
   avatarUrl: string | null;
   joinedAt: string;

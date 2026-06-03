@@ -50,6 +50,10 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
           ← Home
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Create account</h1>
+        <p className="mt-3 rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-100">
+          You get a unique platform ID (animal · country). To <strong className="text-white">list projects</strong>, use{' '}
+          <strong className="text-white">Sign in with X</strong> — admins contact listers via Messages.
+        </p>
         <p className="mt-2 text-sm text-[var(--color-muted)]">
           Most traders start with <strong className="text-white">Sign up with X</strong> — your paper
           portfolio links to your handle, and you can share Proof of Conviction instantly (auto-written

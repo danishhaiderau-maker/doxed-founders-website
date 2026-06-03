@@ -355,8 +355,9 @@ model User {
   passwordHash  String?
   name          String?
   avatarUrl     String?
-  twitterHandle String?
-  role          UserRole  @default(USER)
+  twitterHandle   String?
+  platformHandle  String?   @unique
+  role            UserRole  @default(USER)
   emailVerified DateTime?
   banned        Boolean   @default(false)
   bannedReason  String?
@@ -427,9 +428,12 @@ model User {
   founderEvents        FounderEvent[]
   topUpPayments        TopUpPayment[]
   aiTokenUsageLogs     AiTokenUsageLog[]
+  messagesSent         PlatformMessage[] @relation("MessageFrom")
+  messagesReceived     PlatformMessage[] @relation("MessageTo")
 
   @@index([email])
   @@index([role])
+  @@index([platformHandle])
 }
 
 model OAuthAccount {
@@ -892,8 +896,9 @@ model ListingApplication {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  user  User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
-  votes ListingVote[]
+  user     User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  votes    ListingVote[]
+  messages PlatformMessage[]
 
   @@index([status])
   @@index([createdAt])
@@ -1001,6 +1006,7 @@ enum NotificationType {
   FOUNDER_UPDATES
   LISTING_APPROVED
   LISTING_VOTING
+  LISTING_PROOF_REQUEST
   TRENDING_BUYS
   TRADER_WIN
   TRADER_LOSS
@@ -1009,6 +1015,7 @@ enum NotificationType {
   AGENT_RESULT
   FOUNDER_EVENT
   TRADING_AGENT_UPDATE
+  PLATFORM_MESSAGE
   SYSTEM
 }
 
@@ -1046,6 +1053,24 @@ model Notification {
 
   @@index([userId, readAt])
   @@index([createdAt])
+}
+
+model PlatformMessage {
+  id              String   @id @default(cuid())
+  fromUserId      String
+  toUserId        String
+  applicationId   String?
+  body            String   @db.Text
+  readAt          DateTime?
+  createdAt       DateTime @default(now())
+
+  from        User                @relation("MessageFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  to          User                @relation("MessageTo", fields: [toUserId], references: [id], onDelete: Cascade)
+  application ListingApplication? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+
+  @@index([toUserId, readAt, createdAt])
+  @@index([fromUserId, toUserId, createdAt])
+  @@index([applicationId])
 }
 
 model FounderUpdate {

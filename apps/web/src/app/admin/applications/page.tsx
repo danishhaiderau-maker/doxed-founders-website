@@ -164,6 +164,7 @@ export default function AdminApplicationsPage() {
             <ApplicationReviewCard
               key={item.id}
               item={item}
+              accessToken={token!}
               expanded={expandedIds.has(item.id)}
               busy={busyId === item.id}
               reviewNotes={reviewNotes[item.id] ?? ''}

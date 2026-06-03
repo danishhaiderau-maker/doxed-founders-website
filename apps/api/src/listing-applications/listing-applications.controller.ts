@@ -92,6 +92,16 @@ export class ListingApplicationsController {
     return this.listingService.review(id, dto);
   }
 
+  @UseGuards(AdminGuard)
+  @Post(':id/request-proof')
+  requestProof(
+    @Param('id') id: string,
+    @CurrentUser() admin: AuthUser,
+    @Body() body: { message?: string },
+  ) {
+    return this.listingService.requestMoreProof(admin.id, id, body.message ?? '');
+  }
+
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
   @Patch(':id/scout')

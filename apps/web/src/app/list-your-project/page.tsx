@@ -9,6 +9,7 @@ import { extractPoolAddressFromDexUrl, validateListingForApproval, applyProofLin
 import {
   DexScreenerPreview,
   ListingFormData,
+  fetchAccountOverview,
   previewContract,
   previewDexScreener,
   submitListingApplication,
@@ -71,6 +72,7 @@ function ListYourProjectPageInner() {
   const [scoutSaved, setScoutSaved] = useState(false);
   const [scoutSaving, setScoutSaving] = useState(false);
   const [step, setStep] = useState<1 | 2>(1);
+  const [hasTwitter, setHasTwitter] = useState<boolean | null>(null);
 
   const poolAddress = useMemo(
     () => extractPoolAddressFromDexUrl(form.dexscreenerUrl ?? dexUrl),
@@ -106,6 +108,16 @@ function ListYourProjectPageInner() {
       })
       .catch(() => {});
   }, [editSlug]);
+
+  useEffect(() => {
+    if (!session?.accessToken) {
+      setHasTwitter(false);
+      return;
+    }
+    fetchAccountOverview(session.accessToken)
+      .then((ov) => setHasTwitter(ov.hasTwitterConnected))
+      .catch(() => setHasTwitter(false));
+  }, [session?.accessToken]);
 
   async function handleAutoFill() {
     setError(null);
@@ -194,7 +206,12 @@ function ListYourProjectPageInner() {
     }
 
     if (!session?.accessToken) {
-      setError('Sign in first so scout points link to your account.');
+      setError('Sign in with X (Twitter) to submit a listing — admins message you in Account → Messages when more proof is needed.');
+      return;
+    }
+
+    if (hasTwitter === false) {
+      setError('Connect X (Twitter) before submitting. Only Twitter-linked accounts can list projects and receive proof requests.');
       return;
     }
 
@@ -363,6 +380,27 @@ function ListYourProjectPageInner() {
           Three things required: DexScreener URL, founder status, and a public proof link (X, YouTube,
           interview, team page). Everything else is optional enrichment.
         </p>
+
+        <div className="mt-6 rounded-xl border border-cyan-500/30 bg-cyan-950/20 px-4 py-3 text-sm text-cyan-100">
+          <strong className="text-white">Twitter sign-in required to list.</strong> Sign in with X so admins can
+          request more proof via Messages. Email-only accounts can trade and vote but cannot submit listings.
+          {!session && (
+            <>
+              {' '}
+              <Link href="/login?callbackUrl=/list-your-project" className="font-semibold underline">
+                Sign in with X →
+              </Link>
+            </>
+          )}
+          {session && hasTwitter === false && (
+            <>
+              {' '}
+              <Link href="/account?tab=connected" className="font-semibold underline">
+                Connect X in Connected Accounts →
+              </Link>
+            </>
+          )}
+        </div>
 
         <div className="mt-6 flex items-center gap-3 text-sm">
           <span className={step === 1 ? 'font-semibold text-white' : 'text-[var(--color-muted)]'}>

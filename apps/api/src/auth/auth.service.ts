@@ -6,7 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { POINTS } from '@dcf/utils';
+import { POINTS, generatePlatformHandle, isReservedPlatformHandle } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { hashToken, randomToken } from '../security/security-crypto.util';
@@ -48,6 +48,7 @@ export class AuthService {
     });
 
     await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
+    await this.assignPlatformHandleIfNeeded(user.id);
 
     return await this.buildAuthResponse(user);
   }
@@ -151,8 +152,10 @@ export class AuthService {
           where: { id: linked.user.id },
           data: { twitterHandle },
         });
+        await this.assignPlatformHandleIfNeeded(user.id);
         return await this.buildAuthResponse(user);
       }
+      await this.assignPlatformHandleIfNeeded(linked.user.id);
       return await this.buildAuthResponse(linked.user);
     }
 
@@ -199,6 +202,7 @@ export class AuthService {
         data: updates,
       });
 
+      await this.assignPlatformHandleIfNeeded(user.id);
       return await this.buildAuthResponse(user);
     }
 
@@ -228,8 +232,31 @@ export class AuthService {
     });
 
     await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
+    await this.assignPlatformHandleIfNeeded(user.id);
 
     return await this.buildAuthResponse(user);
+  }
+
+  private async assignPlatformHandleIfNeeded(userId: string) {
+    const existing = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { platformHandle: true },
+    });
+    if (existing?.platformHandle) return;
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const candidate = generatePlatformHandle(userId, attempt);
+      if (isReservedPlatformHandle(candidate)) continue;
+      const taken = await this.prisma.user.findUnique({
+        where: { platformHandle: candidate },
+      });
+      if (taken) continue;
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { platformHandle: candidate },
+      });
+      return;
+    }
   }
 
   private resolveOAuthEmail(dto: OAuthLoginDto): string {

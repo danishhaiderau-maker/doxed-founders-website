@@ -3,7 +3,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { computeVotingThreshold, POINTS, applyProofLinkUrl, scoreFounderVerification, validateListingForApproval } from '@dcf/utils';
+import {
+  computeVotingThreshold,
+  POINTS,
+  applyProofLinkUrl,
+  scoreFounderVerification,
+  userHasTwitterConnected,
+  validateListingForApproval,
+} from '@dcf/utils';
 import { ListingStatus, NotificationType, Prisma } from '@prisma/client';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -20,6 +27,7 @@ import {
 } from './listing-application-review.util';
 import { ListingVotesService } from './listing-votes.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
+import { MessagesService } from '../messages/messages.service';
 
 @Injectable()
 export class ListingApplicationsService {
@@ -30,6 +38,7 @@ export class ListingApplicationsService {
     private readonly votes: ListingVotesService,
     private readonly predictionMarkets: PredictionMarketsService,
     private readonly notifications: NotificationsService,
+    private readonly messages: MessagesService,
   ) {}
 
   private computeVerification(dto: CreateListingApplicationDto) {
@@ -44,6 +53,8 @@ export class ListingApplicationsService {
   }
 
   async create(dto: CreateListingApplicationDto, submitterUserId?: string | null) {
+    await this.assertSubmitterCanList(submitterUserId);
+
     const mapped = applyProofLinkUrl({
       ...dto,
       dexscreenerUrl: dto.dexscreenerUrl,
@@ -180,7 +191,17 @@ export class ListingApplicationsService {
       },
       orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
       include: {
-        user: { select: { id: true, name: true, email: true, reputationPoints: true } },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            reputationPoints: true,
+            oauthAccounts: { select: { provider: true } },
+          },
+        },
         votes: {
           include: {
             user: { select: { id: true, name: true, contributorLevel: true } },
@@ -305,5 +326,65 @@ export class ListingApplicationsService {
     });
 
     return { application: updated, published: null };
+  }
+
+  async requestMoreProof(adminUserId: string, applicationId: string, message: string) {
+    const application = await this.findById(applicationId);
+    if (
+      application.status !== ListingStatus.PENDING &&
+      application.status !== ListingStatus.COMMUNITY_VOTING
+    ) {
+      throw new BadRequestException('Cannot request proof on a closed application');
+    }
+    if (!application.userId) {
+      throw new BadRequestException(
+        'This listing has no linked account — submitter must sign in with X (Twitter) to receive messages',
+      );
+    }
+
+    const trimmed =
+      message.trim() ||
+      'We need stronger public proof before we can list this project — please add a founder video, interview, verification page, or official team link.';
+
+    await this.messages.sendMessage(adminUserId, application.userId, trimmed, {
+      applicationId: application.id,
+    });
+
+    await this.notifications.notifyUser(application.userId, {
+      type: NotificationType.LISTING_PROOF_REQUEST,
+      title: `More proof needed: ${application.projectName}`,
+      body: trimmed.slice(0, 500),
+      link: `/account?tab=messages&with=${adminUserId}`,
+      metadata: { applicationId: application.id, fromAdminId: adminUserId },
+    });
+
+    const updated = await this.prisma.listingApplication.update({
+      where: { id: applicationId },
+      data: {
+        reviewNotes: trimmed,
+      },
+    });
+
+    return { application: updated, messageSent: true };
+  }
+
+  private async assertSubmitterCanList(submitterUserId?: string | null) {
+    if (!submitterUserId) {
+      throw new BadRequestException(
+        'Sign in with X (Twitter) to submit a listing — admins can message you when more proof is needed.',
+      );
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: submitterUserId },
+      include: { oauthAccounts: true },
+    });
+    if (!user) {
+      throw new BadRequestException('Sign in to submit a listing');
+    }
+    if (!userHasTwitterConnected(user)) {
+      throw new BadRequestException(
+        'Connect X (Twitter) before submitting a listing. Only Twitter sign-in accounts can list projects and receive admin proof requests in Messages.',
+      );
+    }
   }
 }

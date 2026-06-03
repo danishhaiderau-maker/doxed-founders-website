@@ -8,15 +8,20 @@ import {
   mergeNotificationPreferences,
   pointActionLabel,
   resolveGamifiedRole,
+  userHasTwitterConnected,
   type NotificationPreferenceGroups,
 } from '@dcf/utils';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReputationService } from '../reputation/reputation.service';
+import { PlatformHandleService } from './platform-handle.service';
 
 export type AccountOverview = {
   userId: string;
   username: string;
+  platformHandle: string;
+  canEditPlatformHandle: boolean;
+  hasTwitterConnected: boolean;
   email: string;
   avatarUrl: string | null;
   joinedAt: string;
@@ -41,6 +46,7 @@ export class AccountService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly reputation: ReputationService,
+    private readonly platformHandles: PlatformHandleService,
   ) {}
 
   async getOverview(userId: string): Promise<AccountOverview> {
@@ -56,6 +62,8 @@ export class AccountService {
         reputationPoints: true,
         passwordHash: true,
         createdAt: true,
+        twitterHandle: true,
+        platformHandle: true,
         oauthAccounts: { select: { provider: true } },
         webAuthnCredentials: { select: { id: true } },
         totp: { select: { enabled: true } },
@@ -81,6 +89,12 @@ export class AccountService {
     });
 
     if (!user) throw new NotFoundException('User not found');
+
+    const platformHandle = await this.platformHandles.ensureHandle(userId);
+    const hasTwitter = userHasTwitterConnected({
+      twitterHandle: user.twitterHandle,
+      oauthAccounts: user.oauthAccounts,
+    });
 
     const authMethods: AccountOverview['authMethods'] = [];
 
@@ -140,7 +154,10 @@ export class AccountService {
 
     return {
       userId: user.id,
-      username: formatPublicAccountLabel(user.name, user.email),
+      username: formatPublicAccountLabel(user.name, user.email, platformHandle),
+      platformHandle,
+      canEditPlatformHandle: user.role !== 'ADMIN',
+      hasTwitterConnected: hasTwitter,
       email: user.email,
       avatarUrl: user.avatarUrl,
       joinedAt: user.createdAt.toISOString(),

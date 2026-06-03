@@ -21,6 +21,8 @@ function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | 
           in: [
             NotificationType.LISTING_VOTING,
             NotificationType.LISTING_APPROVED,
+            NotificationType.LISTING_PROOF_REQUEST,
+            NotificationType.PLATFORM_MESSAGE,
             NotificationType.SYSTEM,
             NotificationType.FOUNDER_EVENT,
           ],

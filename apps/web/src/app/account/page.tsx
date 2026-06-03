@@ -7,6 +7,7 @@ import { AccountHub, type AccountTab } from '@/components/account/account-hub';
 
 const VALID_TABS = new Set<AccountTab>([
   'overview',
+  'messages',
   'topup',
   'security',
   'notifications',
@@ -27,6 +28,7 @@ function AccountPageInner() {
   const initialTab = VALID_TABS.has(tabParam as AccountTab)
     ? (tabParam as AccountTab)
     : 'overview';
+  const messageWith = searchParams.get('with');
 
   return (
     <main className="min-h-screen bg-[#050508]">
@@ -44,7 +46,10 @@ function AccountPageInner() {
       </header>
 
       <div className="mx-auto max-w-5xl px-6 py-8">
-        <AccountHub initialTab={initialTab} />
+        <AccountHub
+          initialTab={initialTab}
+          initialMessageWithUserId={messageWith}
+        />
       </div>
     </main>
   );
