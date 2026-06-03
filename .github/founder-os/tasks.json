@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-06-03T14:58:02.630Z",
+  "updatedAt": "2026-06-03T14:58:25.271Z",
   "currentGoal": "**Security Hardening** – Run OWASP ZAP or Burp Suite scan on the live site; enforce HTTPS with HSTS; review API keys and",
   "tasks": [
     {
