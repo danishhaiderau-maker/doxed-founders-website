@@ -268,11 +268,11 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Link>
       </section>
 
-      {/* Value grid infographic (image 1) — below CTAs; replaces redundant conviction tile */}
-      <LandingValueGrid />
-
-      {/* Navigation hub + live preview widgets */}
+      {/* Navigation hub — full 3-row table directly under CTAs */}
       <LandingFeatureHub scoutPending={pendingReviews} platformStats={stats} />
+
+      {/* Value grid (4 panels) + fun fact with linked sources */}
+      <LandingValueGrid />
 
       {/* Row 3: Platform stats */}
       <section>
