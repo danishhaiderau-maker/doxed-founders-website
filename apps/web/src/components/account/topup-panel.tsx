@@ -8,7 +8,7 @@ import {
   fetchResetInfo,
   type CryptoTopUpIntent,
 } from '@/lib/api';
-import { formatUsd, STARTING_CASH_USD, TOP_UP_FEE_USD } from '@dcf/utils';
+import { formatDdollar, formatUsd, STARTING_CASH_USD, TOP_UP_FEE_USD } from '@dcf/utils';
 
 type TopUpPanelProps = {
   accessToken: string;
@@ -71,9 +71,9 @@ export function TopUpPanel({ accessToken }: TopUpPanelProps) {
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-amber-500/30 bg-amber-950/15 p-6">
-        <h2 className="text-lg font-semibold text-amber-200">Top up paper cash</h2>
+        <h2 className="text-lg font-semibold text-amber-200">Top up paper trading (Ddollar)</h2>
         <p className="mt-2 text-sm text-zinc-400">
-          Add {formatUsd(STARTING_CASH_USD, 0)} Ddollar virtual cash for{' '}
+          Add {formatDdollar(STARTING_CASH_USD, 0)} for{' '}
           <strong className="text-white">{formatUsd(resetFeeUsd)} USDC</strong> — stake predictions,
           paper trade, and join Raise Room allocations.
         </p>

@@ -1,3 +1,5 @@
+import { formatDdollar } from './ddollar';
+
 function formatUsd(value: number, decimals = 2): string {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -123,7 +125,7 @@ export const PLATFORM_X_SHARE_FOOTER = [
   '',
   'Built for shrimps, not whales.',
   '',
-  '🎁 10,000 DDollar free at signup',
+  '🎁 10,000 Ddollar free at signup',
   '📈 Trade any token for free',
   '🏆 Build a following through skill',
   '',
@@ -167,7 +169,7 @@ export function fitXShareTextWithFooter(body: string, maxLen = 280, customFooter
   const compactFooter = [
     '',
     'Built for shrimps, not whales.',
-    '🎁 10,000 DDollar free · 📈 Trade free · 🏆 Skill > hype',
+    '🎁 10,000 Ddollar free · 📈 Trade free · 🏆 Skill > hype',
     'Back real builders. Bring back HODL.',
   ].join('\n');
 
@@ -295,11 +297,11 @@ export function buildPredictionShareMessage(input: {
 }): string {
   const pool =
     input.poolUsd != null && input.poolUsd > 0
-      ? ` · Pool ${formatUsd(input.poolUsd, 0)} paper $`
+      ? ` · Pool ${formatDdollar(input.poolUsd, 0)}`
       : '';
   const line = formatShareProjectLine(input.projectName, input.ticker);
   const q = input.question.trim().slice(0, 140);
-  return `🔮 Prediction market open: ${line}${pool}\n"${q}"\nStake YES/NO with paper $ on Doxxed Crypto 👇\n#Crypto #Predict @DoxxedCrypto`;
+  return `🔮 Prediction market open: ${line}${pool}\n"${q}"\nStake YES/NO with Ddollar on Doxxed Crypto 👇\n#Crypto #Predict @DoxxedCrypto`;
 }
 
 export function buildFeedShareMessage(input: {

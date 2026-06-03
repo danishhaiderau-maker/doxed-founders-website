@@ -1,6 +1,6 @@
 'use client';
 
-import { formatPercent, formatUsd } from '@dcf/utils';
+import { formatDdollar, formatPercent } from '@dcf/utils';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import { TraderRankShareButton } from '@/components/trader-rank-share-button';
 import type { PublicPortfolio } from '@/lib/api';
@@ -60,7 +60,7 @@ export function TraderProfileHeader({
           value={formatPercent(portfolio.roi)}
           accent={portfolio.roi >= 0 ? 'green' : 'red'}
         />
-        <Stat label="DDollar balance" value={formatUsd(portfolio.totalValue, 0)} />
+        <Stat label="Paper Ddollar" value={formatDdollar(portfolio.totalValue, 0)} />
         <Stat label="Followers" value={portfolio.followersCount.toLocaleString()} />
         <Stat label="Trust" value={`${portfolio.trustScore}`} />
         <Stat label="Conviction" value={`${portfolio.convictionScore}`} />

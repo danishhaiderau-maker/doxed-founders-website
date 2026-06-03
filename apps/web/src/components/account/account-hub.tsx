@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import {
   contributorLevelLabel,
+  formatDdollar,
   formatUsd,
 } from '@dcf/utils';
 import { SecuritySettingsPanel } from '@/components/settings/security-settings-panel';
@@ -116,7 +117,7 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
             href="/ddollar"
             className="rounded-lg px-3 py-2 text-sm font-medium text-amber-300/90 hover:bg-zinc-900"
           >
-            DDollar wallet →
+            Ddollar wallet →
           </Link>
           <Link
             href="/notifications"
@@ -190,9 +191,9 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
 
             <div className="grid gap-4 sm:grid-cols-3">
               <Link href="/ddollar" className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4 transition hover:border-amber-500/40">
-                <p className="text-xs uppercase tracking-wide text-zinc-500">DDollar</p>
+                <p className="text-xs uppercase tracking-wide text-zinc-500">Ddollar balance</p>
                 <p className="mt-1 text-xl font-bold text-amber-200">
-                  {overview.reputation.reputationPoints.toLocaleString()}
+                  {formatDdollar(overview.reputation.reputationPoints, 0)}
                 </p>
               </Link>
               <StatCard

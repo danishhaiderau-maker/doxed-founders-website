@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { POINTS, pointActionLabel } from '@dcf/utils';
+import { DDOLLAR_CURRENCY_NAME, formatDdollar, POINTS, pointActionLabel } from '@dcf/utils';
 import {
   AccountOverview,
   AccountPointLedgerEntry,
@@ -27,10 +27,6 @@ const WAYS_TO_SPEND = [
   { label: 'Premium Features', detail: 'Platform perks as they launch', href: '/rules' },
   { label: 'Future Platform Services', detail: 'More spend sinks coming', href: '/rules' },
 ] as const;
-
-function formatDdollar(n: number) {
-  return `${n.toLocaleString()} DDollar`;
-}
 
 export function DdollarWalletPage() {
   const { data: session } = useSession();
@@ -75,7 +71,7 @@ export function DdollarWalletPage() {
         <Link href="/login?callbackUrl=/ddollar" className="font-semibold underline">
           Sign in
         </Link>{' '}
-        to view your DDollar wallet and earn rewards across the platform.
+        to view your {DDOLLAR_CURRENCY_NAME} wallet and earn rewards across the platform.
       </div>
     );
   }
@@ -91,7 +87,9 @@ export function DdollarWalletPage() {
         <p className="mt-2 text-4xl font-bold text-white">
           {formatDdollar(overview?.reputation.reputationPoints ?? 0)}
         </p>
-        <p className="mt-1 text-sm text-zinc-400">Current balance — ecosystem currency for participation</p>
+        <p className="mt-1 text-sm text-zinc-400">
+          Current balance — in-game {DDOLLAR_CURRENCY_NAME} for participation, agents, and paper trading
+        </p>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
           <Stat label="Lifetime earned" value={formatDdollar(stats.lifetimeEarned || overview?.reputation.reputationPoints || 0)} />

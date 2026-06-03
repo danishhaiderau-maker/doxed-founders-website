@@ -16,6 +16,12 @@ export function formatUsd(value: number, decimals = 2): string {
   }).format(value);
 }
 
+export {
+  DDOLLAR_CURRENCY_NAME,
+  formatDdollar,
+  formatDdollarCompact,
+} from './ddollar';
+
 export function formatPercent(value: number, decimals = 2): string {
   const sign = value >= 0 ? '+' : '';
   return `${sign}${value.toFixed(decimals)}%`;

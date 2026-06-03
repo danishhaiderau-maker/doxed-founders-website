@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { formatUsd, LIFECYCLE_STAGES } from '@dcf/utils';
+import { formatDdollar, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { FounderAgentsWorkforce } from '@/components/founder-agents-workforce';
 import { FounderSocialHub } from '@/components/founder-social-hub';
@@ -221,15 +221,17 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
               </header>
               <BuilderSettingsPanel accessToken={session.accessToken} />
               {dashboard && (
-                <OsSection title="Account stats" subtitle="Credits and readiness">
+                <OsSection title="Account stats" subtitle="Ddollar and readiness">
                   <dl className="grid gap-2 text-sm">
                     <div className="flex justify-between">
                       <dt className="text-zinc-500">Followers</dt>
                       <dd className="text-white">{dashboard.followers ?? 0}</dd>
                     </div>
                     <div className="flex justify-between">
-                      <dt className="text-zinc-500">Founder credits</dt>
-                      <dd className="text-emerald-300">{dashboard.founderCredits ?? 0}</dd>
+                      <dt className="text-zinc-500">Founder Ddollar</dt>
+                      <dd className="text-emerald-300">
+                        {formatDdollar(dashboard.founderCredits ?? 0, 0)}
+                      </dd>
                     </div>
                     <div className="flex justify-between">
                       <dt className="text-zinc-500">Launch readiness</dt>
@@ -238,8 +240,8 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
                       </dd>
                     </div>
                     <div className="flex justify-between">
-                      <dt className="text-zinc-500">Paper cash</dt>
-                      <dd className="text-white">{formatUsd(dashboard.cashBalance, 0)}</dd>
+                      <dt className="text-zinc-500">Paper trading Ddollar</dt>
+                      <dd className="text-white">{formatDdollar(dashboard.cashBalance, 0)}</dd>
                     </div>
                   </dl>
                 </OsSection>

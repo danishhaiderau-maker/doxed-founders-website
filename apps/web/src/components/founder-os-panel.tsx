@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { getIntegrationConnectGuide } from '@dcf/utils';
+import { formatDdollar, getIntegrationConnectGuide } from '@dcf/utils';
 import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
 import {
   connectGitHubRepo,
@@ -236,16 +236,16 @@ export function FounderOsPanel({
       {!stackOnly && (
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-4">
-          <p className="text-[10px] uppercase text-violet-300">Founder Credits</p>
+          <p className="text-[10px] uppercase text-violet-300">Founder Ddollar</p>
           <p className="mt-1 text-2xl font-bold text-white">
-            {(data?.founderCredits ?? founderCredits).toLocaleString()}
+            {formatDdollar(data?.founderCredits ?? founderCredits, 0)}
           </p>
           <p className="mt-1 text-xs text-zinc-500">Bounties · build room · rewards</p>
         </div>
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4">
-          <p className="text-[10px] uppercase text-emerald-300">Community Pool</p>
+          <p className="text-[10px] uppercase text-emerald-300">Community pool (Ddollar)</p>
           <p className="mt-1 text-2xl font-bold text-white">
-            {(data?.communityRewardPool ?? communityRewardPool).toLocaleString()}
+            {formatDdollar(data?.communityRewardPool ?? communityRewardPool, 0)}
           </p>
           <p className="mt-1 text-xs text-zinc-500">Mark helpful replies to distribute</p>
         </div>
@@ -424,7 +424,7 @@ export function FounderOsPanel({
         </div>
         <details className="mt-4">
           <summary className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">
-            Manual session draft (50 credits)
+            Manual session draft (50 Ddollar)
           </summary>
           <input
             value={buildTitle}
@@ -444,7 +444,7 @@ export function FounderOsPanel({
             onClick={handleBuildRoom}
             className="mt-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white"
           >
-            Generate update (50 credits)
+            Generate update (50 Ddollar)
           </button>
         </details>
       </div>
@@ -569,7 +569,7 @@ export function FounderOsPanel({
       {projectId && !stackOnly && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
           <p className="text-sm font-semibold text-white">Post a bounty</p>
-          <p className="mt-1 text-xs text-zinc-500">Need design, dev, research? Pay in Founder Credits.</p>
+          <p className="mt-1 text-xs text-zinc-500">Need design, dev, research? Pay in Ddollar.</p>
           <input
             value={bountyTitle}
             onChange={(e) => setBountyTitle(e.target.value)}
