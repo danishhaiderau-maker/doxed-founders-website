@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(admin): showcase API keys and hire-time BYO AI
+chore(scripts): add Railway API and bot service sync helper
 
 ## Last Activity
 
