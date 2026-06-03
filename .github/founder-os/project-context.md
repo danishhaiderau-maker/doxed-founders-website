@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+docs(web): expand GitHub PAT guide on Builder settings with privacy details
 
 ## Last Activity
 
