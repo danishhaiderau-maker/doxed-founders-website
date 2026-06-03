@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
@@ -427,6 +428,18 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
             </Link>
           </div>
         </Card>
+      </section>
+
+      {/* Value proposition grid — replace asset at public/images/landing-value-grid-v2.png */}
+      <section aria-label="Platform value proposition">
+        <Image
+          src="/images/landing-value-grid-v2.png"
+          alt="Private by default, public by proof. Show your face. Trust through execution. Trade builders, not hype."
+          width={1536}
+          height={1024}
+          className="w-full rounded-2xl border border-emerald-500/25 shadow-2xl shadow-emerald-950/30"
+          priority
+        />
       </section>
 
       {/* Row 1b: Three core products */}
