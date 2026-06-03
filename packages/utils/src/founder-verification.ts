@@ -14,6 +14,7 @@ export interface FounderVerificationInput {
   founderName?: string | null;
   founderLinkedIn?: string | null;
   founderGithub?: string | null;
+  projectGithubUrl?: string | null;
   companyDetails?: string | null;
   founderVideoUrl?: string | null;
   founderInterviewUrl?: string | null;
@@ -46,7 +47,7 @@ export function scoreFounderVerification(input: FounderVerificationInput) {
   if (input.founderName?.trim()) {
     criteria.push('FOUNDER_NAME');
   }
-  if (input.founderGithub?.trim()) {
+  if (input.founderGithub?.trim() || input.projectGithubUrl?.trim()) {
     criteria.push('GITHUB');
   }
   if (input.companyDetails?.trim()) {

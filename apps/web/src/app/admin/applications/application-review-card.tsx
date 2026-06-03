@@ -46,6 +46,7 @@ function toFormState(item: PendingApplication): AdminApplicationUpdates {
     founderLinkedIn: item.founderLinkedIn ?? '',
     founderTwitter: item.founderTwitter ?? '',
     founderGithub: item.founderGithub ?? '',
+    projectGithubUrl: item.projectGithubUrl ?? '',
     founderVideoUrl: item.founderVideoUrl ?? '',
     founderInterviewUrl: item.founderInterviewUrl ?? '',
     companyDetails: item.companyDetails ?? '',
@@ -73,6 +74,7 @@ function approvalInput(item: PendingApplication, form: AdminApplicationUpdates) 
     founderTwitter: form.founderTwitter ?? item.founderTwitter,
     founderLinkedIn: form.founderLinkedIn ?? item.founderLinkedIn,
     founderGithub: form.founderGithub ?? item.founderGithub,
+    projectGithubUrl: form.projectGithubUrl ?? item.projectGithubUrl,
     websiteUrl: form.websiteUrl ?? item.websiteUrl,
     chainSlug: form.chainSlug ?? item.chainSlug,
     contractAddress: form.contractAddress ?? item.contractAddress,
@@ -286,6 +288,10 @@ export function ApplicationReviewCard({
           <div className="mt-4 space-y-2 rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-background)]/40 p-3">
             <LinkRow label="DexScreener" href={form.dexscreenerUrl || item.dexscreenerUrl} required />
             <LinkRow label="Proof link" href={proofLink} required />
+            <LinkRow
+              label="Project GitHub (optional)"
+              href={form.projectGithubUrl || item.projectGithubUrl}
+            />
             {item.scoutHighlightNote && (
               <p className="text-xs text-zinc-400">
                 <span className="text-zinc-500">Scout highlight:</span> {item.scoutHighlightNote}
@@ -412,6 +418,22 @@ export function ApplicationReviewCard({
                     className={inputClass()}
                     value={form.founderLinkedIn ?? ''}
                     onChange={(e) => updateField('founderLinkedIn', e.target.value)}
+                  />
+                </Field>
+                <Field label="Project GitHub repo (optional — Discover activity)">
+                  <input
+                    className={inputClass()}
+                    value={form.projectGithubUrl ?? ''}
+                    onChange={(e) => updateField('projectGithubUrl', e.target.value)}
+                    placeholder="https://github.com/org/repo"
+                  />
+                </Field>
+                <Field label="Founder GitHub profile (optional)">
+                  <input
+                    className={inputClass()}
+                    value={form.founderGithub ?? ''}
+                    onChange={(e) => updateField('founderGithub', e.target.value)}
+                    placeholder="https://github.com/username"
                   />
                 </Field>
               </div>

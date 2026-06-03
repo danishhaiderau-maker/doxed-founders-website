@@ -29,6 +29,7 @@ export type ListingRelistSnapshot = {
   founderLinkedIn: string | null;
   founderTwitter: string | null;
   founderGithub: string | null;
+  projectGithubUrl: string | null;
   founderVideoUrl: string | null;
   founderInterviewUrl: string | null;
   companyDetails: string | null;
@@ -50,7 +51,8 @@ const FIELD_DEFS: { key: keyof ListingRelistSnapshot; label: string }[] = [
   { key: 'founderName', label: 'Founder name' },
   { key: 'founderTwitter', label: 'Founder X' },
   { key: 'founderLinkedIn', label: 'LinkedIn' },
-  { key: 'founderGithub', label: 'GitHub' },
+  { key: 'founderGithub', label: 'Founder GitHub' },
+  { key: 'projectGithubUrl', label: 'Project GitHub repo' },
   { key: 'founderVideoUrl', label: 'Proof video' },
   { key: 'founderInterviewUrl', label: 'Interview' },
   { key: 'telegramUrl', label: 'Telegram' },
@@ -85,6 +87,7 @@ export function snapshotFromApplication(input: {
   founderLinkedIn?: string | null;
   founderTwitter?: string | null;
   founderGithub?: string | null;
+  projectGithubUrl?: string | null;
   founderVideoUrl?: string | null;
   founderInterviewUrl?: string | null;
   companyDetails?: string | null;
@@ -107,6 +110,7 @@ export function snapshotFromApplication(input: {
     founderLinkedIn: displayVal(input.founderLinkedIn),
     founderTwitter: displayVal(input.founderTwitter),
     founderGithub: displayVal(input.founderGithub),
+    projectGithubUrl: displayVal(input.projectGithubUrl),
     founderVideoUrl: displayVal(input.founderVideoUrl),
     founderInterviewUrl: displayVal(input.founderInterviewUrl),
     companyDetails: displayVal(input.companyDetails),

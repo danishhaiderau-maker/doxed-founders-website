@@ -42,6 +42,7 @@ const emptyForm: ListingFormData = {
   founderLinkedIn: '',
   founderTwitter: '',
   founderGithub: '',
+  projectGithubUrl: '',
   founderVideoUrl: '',
   founderInterviewUrl: '',
   companyDetails: '',
@@ -562,6 +563,22 @@ function ListYourProjectPageInner() {
                 <Field label="Interview / podcast URL" value={form.founderInterviewUrl ?? ''} onChange={(v) => updateField('founderInterviewUrl', v)} />
                 <Field label="Twitter / X" value={form.founderTwitter ?? ''} onChange={(v) => updateField('founderTwitter', v)} />
                 <Field label="LinkedIn" value={form.founderLinkedIn ?? ''} onChange={(v) => updateField('founderLinkedIn', v)} />
+                <Field
+                  label="Project GitHub repo (recommended)"
+                  value={form.projectGithubUrl ?? ''}
+                  onChange={(v) => updateField('projectGithubUrl', v)}
+                  placeholder="https://github.com/your-org/your-repo"
+                />
+                <p className="-mt-2 text-xs text-[var(--color-muted)]">
+                  Public repo URL — we track commits and pushes to rank your project in Discover activity
+                  (optional but strongly recommended for builders).
+                </p>
+                <Field
+                  label="Founder GitHub profile (optional)"
+                  value={form.founderGithub ?? ''}
+                  onChange={(v) => updateField('founderGithub', v)}
+                  placeholder="https://github.com/founder-username"
+                />
               </div>
             </Section>
 
