@@ -104,20 +104,23 @@ async function syncRailway(token, vars) {
   console.log(`Railway redeploy triggered on ${target.name} / ${service.name}`);
 }
 
-function upsertVercelEnv(name, value, environments = ['production']) {
+function upsertVercelEnv(name, value, environments = ['production'], sensitive = false) {
   if (!value?.trim()) {
     console.warn(`Skip empty Vercel var: ${name}`);
     return;
   }
   for (const env of environments) {
-    const add = spawnSync(
-      'vercel',
-      ['env', 'add', name, env, '--force', '--sensitive'],
-      { cwd: root, input: `${value.trim()}\n`, encoding: 'utf8' },
-    );
+    const args = ['env', 'add', name, env, '--force'];
+    if (sensitive) args.push('--sensitive');
+    const add = spawnSync('vercel', args, {
+      cwd: root,
+      input: `${value.trim()}\n`,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+    });
     if (add.status !== 0) {
-      const stderr = add.stderr?.toString?.() ?? '';
-      throw new Error(`Failed to set Vercel ${name} (${env}): ${stderr}`);
+      const stderr = [add.stderr, add.stdout].filter(Boolean).join('\n').trim();
+      throw new Error(`Failed to set Vercel ${name} (${env}): ${stderr || 'exit ' + add.status}`);
     }
     console.log(`Vercel ${name} (${env}) updated`);
   }
@@ -159,8 +162,9 @@ async function main() {
   if (googleId) vercelVars.GOOGLE_CLIENT_ID = googleId;
   if (googleSecret) vercelVars.GOOGLE_CLIENT_SECRET = googleSecret;
 
+  const sensitiveVercel = new Set(['NEXTAUTH_SECRET', 'GOOGLE_CLIENT_SECRET']);
   for (const [name, value] of Object.entries(vercelVars)) {
-    if (value?.trim()) upsertVercelEnv(name, value.trim());
+    if (value?.trim()) upsertVercelEnv(name, value.trim(), ['production'], sensitiveVercel.has(name));
   }
 
   console.log('\nDeploying Vercel production...');
