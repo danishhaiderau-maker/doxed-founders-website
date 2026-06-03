@@ -456,7 +456,7 @@ export class FounderCopilotService {
           '',
           `**Status:** ${dispatch.status}`,
           '',
-          '_Live output will stream in Mission Control — polling your cloud agent now._',
+          '_Live agent output streams in Founder Copilot chat — polling now._',
         ]
           .filter(Boolean)
           .join('\n'),
@@ -636,7 +636,7 @@ export class FounderCopilotService {
     });
 
     const systemPrompt =
-      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown.';
+      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown. Do not invent security incidents or claim secrets are exposed unless the user asks about security; generic hardening tips are fine but say they are preventive, not scan results. API keys and tokens stay server-side on Doxxed Crypto — never ask users to paste secrets in chat.';
 
     const aiResult = await this.builder.tryCopilotChatCompletion(
       userId,

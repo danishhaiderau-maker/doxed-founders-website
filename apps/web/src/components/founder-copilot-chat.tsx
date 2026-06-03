@@ -225,7 +225,7 @@ export function FounderCopilotChat({
   );
 
   const pollOpenHandsIntoMessage = useCallback(
-    async (assistantId: string, conversationId: string, task: string, agentUrl?: string | null) => {
+    async (assistantId: string, conversationId: string, task: string) => {
       const workerLabel = stack.buildLabel;
       await pollOpenHandsRunInChat(conversationId, accessToken, fetchBuilderOpenHandsRun, (snap) => {
         patchMessage(assistantId, {
@@ -235,7 +235,6 @@ export function FounderCopilotChat({
             repo: memory?.repoFullName,
             snapshot: snap as OpenHandsRunSnapshot,
           }),
-          builderAgentUrl: snap.conversationUrl ?? agentUrl ?? null,
         });
       });
     },
@@ -331,7 +330,6 @@ export function FounderCopilotChat({
                 role: 'assistant',
                 content: initial,
                 provider: 'CURSOR',
-                builderAgentUrl: result.agentUrl,
               },
             ]);
             onResult?.(initial);
@@ -360,17 +358,15 @@ export function FounderCopilotChat({
                 role: 'assistant',
                 content: initial,
                 provider: 'OPENHANDS',
-                builderAgentUrl: result.agentUrl,
               },
             ]);
             onResult?.(initial);
-            await pollOpenHandsIntoMessage(assistantId, conversationId, q, result.agentUrl);
+            await pollOpenHandsIntoMessage(assistantId, conversationId, q);
           } else if (result.status === 'dispatched') {
             const msg = [
               `**${workerLabel}** started on your repo.`,
-              result.agentUrl ? `\nSession: ${result.agentUrl}` : '',
               '',
-              '_Live output will appear here when the worker reports status._',
+              '_Live output will appear in this chat when the worker reports status._',
             ].join('\n');
             setMessages((prev) => [
               ...prev,
@@ -379,7 +375,6 @@ export function FounderCopilotChat({
                 role: 'assistant',
                 content: msg,
                 provider,
-                builderAgentUrl: result.agentUrl,
               },
             ]);
             onResult?.(msg);
@@ -420,21 +415,23 @@ export function FounderCopilotChat({
           const providerKey = result.routedAgent
             ? `WORKER:${result.routedAgent.label}`
             : (result.answerProvider ?? activeChatProvider);
+          const cursorDispatched =
+            Boolean(result.runtime?.cursorDispatched) &&
+            Boolean(result.runtime?.cursorAgentId) &&
+            Boolean(result.runtime?.cursorRunId);
+
           const providerMeta = {
             provider: providerKey,
             routedAgent: result.routedAgent?.label,
             runtimeTools: result.runtime?.toolsUsed,
-            builderAgentUrl: result.runtime?.cursorAgentUrl ?? null,
+            builderAgentUrl: null,
           };
 
           await streamAssistantAnswer(assistantId, result.answer, providerMeta);
           onResult?.(result.answer);
 
-          if (
-            result.runtime?.cursorDispatched &&
-            result.runtime.cursorAgentId &&
-            result.runtime.cursorRunId
-          ) {
+          if (cursorDispatched && result.runtime) {
+            const rt = result.runtime;
             const workerLabel = stack.buildWorkers.find((w) => w.key === 'CURSOR')?.label ?? 'Cursor';
             patchMessage(assistantId, {
               content: formatBuilderRunInChat({
@@ -442,20 +439,21 @@ export function FounderCopilotChat({
                 task: q,
                 repo: memory?.repoFullName,
                 snapshot: {
-                  id: result.runtime.cursorRunId,
-                  agentId: result.runtime.cursorAgentId,
+                  id: rt.cursorRunId!,
+                  agentId: rt.cursorAgentId!,
                   status: 'CREATING',
                 },
-                mode: result.runtime.cursorMode,
+                mode: rt.cursorMode,
               }),
               provider: 'CURSOR',
+              builderAgentUrl: null,
             });
             await pollCursorIntoMessage(
               assistantId,
-              result.runtime.cursorAgentId,
-              result.runtime.cursorRunId,
+              rt.cursorAgentId!,
+              rt.cursorRunId!,
               q,
-              result.runtime.cursorMode,
+              rt.cursorMode,
             );
           }
         }
@@ -623,19 +621,6 @@ export function FounderCopilotChat({
                 </p>
               )}
               {m.content}
-              {m.builderAgentUrl ? (
-                <p className="mt-2 border-t border-zinc-800/80 pt-2 text-[10px] text-zinc-500">
-                  <a
-                    href={m.builderAgentUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-emerald-400/90 hover:underline"
-                  >
-                    Open full session ↗
-                  </a>
-                  {' · '}live output streams in Mission Control
-                </p>
-              ) : null}
             </div>
           </div>
         ))}
