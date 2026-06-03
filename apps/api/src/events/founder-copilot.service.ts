@@ -16,9 +16,14 @@ import {
 import {
   buildCommunityUpdateFromSummary,
   buildDailyStandup,
+  buildMissingLinkNarrativeHints,
   buildResumeCursorPrompt,
+  buildSocialDraftFounderAccountBlock,
   buildSocialDraftSystemPrompt,
   buildWeeklySummary,
+  formatAutopilotInfrastructureBlock,
+  formatCommitsByDay,
+  formatLastCommitDetail,
   parseSocialDraftLlmResponse,
   computeProjectProgress,
   detectAutopilotIntent,
@@ -1132,24 +1137,24 @@ export class FounderCopilotService {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
       include: {
+        user: { select: { name: true } },
         projects: {
           where: { approved: true },
           take: 1,
           include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
         },
-        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 3 },
+        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 5 },
       },
     });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
     const project = founder.projects[0];
-    const weekAgo = new Date(Date.now() - 7 * 86400000);
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    const [recentCommits, openIdeas] = await Promise.all([
+    const [recentCommits, openIdeas, infraSnapshot, paperPortfolio] = await Promise.all([
       refreshedMemory.repoFullName
-        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 20)
+        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 35)
         : Promise.resolve([]),
       this.prisma.buildQueueItem.findMany({
         where: {
@@ -1160,6 +1165,8 @@ export class FounderCopilotService {
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
         take: 5,
       }),
+      this.autopilot.buildDraftInfrastructureSnapshot(userId).catch(() => null),
+      this.prisma.paperPortfolio.findUnique({ where: { userId }, select: { cashBalance: true } }),
     ]);
 
     const todayCommits = recentCommits.filter((c) => new Date(c.date) >= todayStart);
@@ -1189,6 +1196,39 @@ export class FounderCopilotService {
       summaryBody: summary.body,
     });
 
+    const lastCommit = recentCommits[0] ?? null;
+    const commitHighlights = recentCommits
+      .slice(0, 12)
+      .map((c) => `- ${c.sha.slice(0, 7)} ${c.message.split('\n')[0]?.trim() ?? c.message}`)
+      .join('\n');
+
+    const accountBlock = buildSocialDraftFounderAccountBlock({
+      founderName: founder.name,
+      projectName: project?.name,
+      journeyStage: founder.journeyStage,
+      buildStreakDays: founder.buildStreakDays,
+      reputationScore: founder.reputationScore,
+      founderCredits: founder.founderCredits,
+      paperCashUsd: paperPortfolio ? Number(paperPortfolio.cashBalance) : undefined,
+      launchReadiness: refreshedMemory.launchReadiness,
+      progressPercent: refreshedMemory.progressPercent,
+      currentGoal: refreshedMemory.currentGoal,
+      userDisplayName: founder.user?.name ?? undefined,
+    });
+
+    const infraBlock = infraSnapshot
+      ? formatAutopilotInfrastructureBlock({
+          steps: infraSnapshot.steps,
+          controlPlane: infraSnapshot.syncStatus.controlPlane,
+          siteUrl: process.env.NEXT_PUBLIC_SITE_URL ?? 'https://doxxedcrypto.digital',
+        })
+      : 'Hybrid control plane: snapshot unavailable — mention GitHub + Stack connections only if commits support it.';
+
+    const missingLinkHints = buildMissingLinkNarrativeHints({
+      commits: recentCommits,
+      missingPlatforms: infraSnapshot?.syncStatus.controlPlane.missingForFullStack ?? [],
+    });
+
     const connections = await this.builder.getBuildWorkerConnections(userId);
     if (codeAgent === 'CURSOR' && !connections.cursor) {
       throw new BadRequestException('Connect Cursor in AI Stack first');
@@ -1207,6 +1247,25 @@ export class FounderCopilotService {
       `Project: ${project?.name ?? founder.name}`,
       codeAgent ? `Draft as: ${codeAgent} (code-aware, plain English for X and feed).` : '',
       '',
+      '=== Founder account / profile ===',
+      accountBlock,
+      '',
+      '=== Hybrid control plane (include ✗ fail context in the story) ===',
+      infraBlock,
+      '',
+      '=== Last commit (full detail) ===',
+      formatLastCommitDetail(lastCommit),
+      '',
+      '=== Commits by day (last 7 days) ===',
+      formatCommitsByDay(recentCommits, { maxDays: 7, maxPerDay: 6 }),
+      '',
+      '=== Commit highlights (recent subjects) ===',
+      commitHighlights || 'none',
+      '',
+      '=== Missing-link narrative (weave into BODY) ===',
+      missingLinkHints,
+      '',
+      '=== Mission Control memory & weekly summary ===',
       contextBlock,
     ]
       .filter(Boolean)
