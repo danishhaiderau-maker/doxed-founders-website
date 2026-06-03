@@ -38,10 +38,16 @@ export function buildCursorAgentUrl(agentId: string): string {
   return `https://cursor.com/agents/${agentId}`;
 }
 
-export function buildCursorCloudTaskMessage(spec: string, cursorPrompt?: string): string {
+export function buildCursorCloudTaskMessage(
+  spec: string,
+  cursorPrompt?: string,
+  workspaceContext?: string,
+): string {
   const parts = [
     'Founder OS build dispatch — implement in the connected GitHub repository.',
     '',
+    workspaceContext?.trim() ? workspaceContext.trim() : '',
+    workspaceContext?.trim() ? '' : '',
     cursorPrompt?.trim() ? `## Task\n${cursorPrompt.trim()}` : '',
     spec?.trim() ? `## Spec\n${spec.trim()}` : '',
   ].filter(Boolean);

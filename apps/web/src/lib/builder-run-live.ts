@@ -1,3 +1,6 @@
+import type { WorkspaceActivity } from '@dcf/utils';
+import { formatWorkspaceActivityForChat } from '@dcf/utils';
+
 export type BuilderRunSnapshot = {
   id: string;
   agentId: string;
@@ -9,6 +12,8 @@ export type BuilderRunSnapshot = {
   git?: {
     branches?: { repoUrl?: string; branch?: string; prUrl?: string }[];
   } | null;
+  workspaceActivity?: WorkspaceActivity | null;
+  platformReconciliation?: string | null;
 };
 
 export type OpenHandsRunSnapshot = {
@@ -51,6 +56,18 @@ export function formatBuilderRunInChat(input: {
     }
   }
 
+  if (snapshot.agentUrl) {
+    lines.push('', `[Open this agent in Cursor](${snapshot.agentUrl}) — same session, full diff view.`);
+  }
+
+  if (snapshot.platformReconciliation?.trim()) {
+    lines.push('', snapshot.platformReconciliation.trim());
+  }
+
+  if (snapshot.workspaceActivity?.repoFullName) {
+    lines.push('', formatWorkspaceActivityForChat(snapshot.workspaceActivity));
+  }
+
   if (snapshot.terminal) {
     lines.push(
       '',
@@ -59,7 +76,7 @@ export function formatBuilderRunInChat(input: {
         : '_Run ended — details below._',
     );
   } else {
-    lines.push('', '_Live output streams in this chat — no need to open another tab._');
+    lines.push('', '_Live output streams in this chat — synced with GitHub on each refresh._');
   }
 
   return lines.join('\n');

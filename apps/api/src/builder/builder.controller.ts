@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { AiProvider, ControlPlaneMode, MemoryStorageMode } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
@@ -79,13 +79,20 @@ export class BuilderController {
     return this.builder.executeBuildTask(user.id, body);
   }
 
+  @Get('workspace-activity')
+  workspaceActivity(@CurrentUser() user: AuthUser, @Query('repository') repository?: string) {
+    return this.builder.getWorkspaceActivity(user.id, repository);
+  }
+
   @Get('cursor/runs/:agentId/:runId')
   cursorRun(
     @CurrentUser() user: AuthUser,
     @Param('agentId') agentId: string,
     @Param('runId') runId: string,
   ) {
-    return this.builder.getCursorRunSnapshot(user.id, agentId, runId);
+    return this.builder.getSettings(user.id).then((settings) =>
+      this.builder.getCursorRunSnapshot(user.id, agentId, runId, settings.repoFullName),
+    );
   }
 
   @Get('openhands/runs/:conversationId')

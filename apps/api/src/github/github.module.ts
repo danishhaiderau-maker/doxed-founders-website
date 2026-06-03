@@ -4,6 +4,7 @@ import { CredentialsCryptoService } from '../credentials/credentials-crypto.serv
 import { FounderOsMemoryService } from './founder-os-memory.service';
 import { GitHubApiService } from './github-api.service';
 import { GitHubOAuthService } from './github-oauth.service';
+import { WorkspaceActivityService } from './workspace-activity.service';
 
 @Module({
   imports: [
@@ -12,7 +13,19 @@ import { GitHubOAuthService } from './github-oauth.service';
       signOptions: { expiresIn: '10m' },
     }),
   ],
-  providers: [CredentialsCryptoService, GitHubApiService, FounderOsMemoryService, GitHubOAuthService],
-  exports: [GitHubApiService, CredentialsCryptoService, FounderOsMemoryService, GitHubOAuthService],
+  providers: [
+    CredentialsCryptoService,
+    GitHubApiService,
+    FounderOsMemoryService,
+    GitHubOAuthService,
+    WorkspaceActivityService,
+  ],
+  exports: [
+    GitHubApiService,
+    CredentialsCryptoService,
+    FounderOsMemoryService,
+    GitHubOAuthService,
+    WorkspaceActivityService,
+  ],
 })
 export class GitHubModule {}

@@ -1,4 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  mergeCommitsDeduped,
+  filterCommitsSince,
+  TWO_HOURS_MS,
+  type WorkspaceActivity,
+  type WorkspaceCommit,
+} from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -71,8 +78,21 @@ export class GitHubApiService {
   }
 
   async listCommits(userId: string, repo: string, perPage = 10): Promise<GitHubCommit[]> {
+    return this.listCommitsOnRef(userId, repo, perPage);
+  }
+
+  async listCommitsOnRef(
+    userId: string,
+    repo: string,
+    perPage = 10,
+    ref?: string,
+    since?: Date,
+  ): Promise<WorkspaceCommit[]> {
     const token = await this.getToken(userId);
-    const res = await fetch(`https://api.github.com/repos/${repo}/commits?per_page=${perPage}`, {
+    const params = new URLSearchParams({ per_page: String(perPage) });
+    if (ref) params.set('sha', ref);
+    if (since) params.set('since', since.toISOString());
+    const res = await fetch(`https://api.github.com/repos/${repo}/commits?${params}`, {
       headers: this.headers(token),
     });
     if (!res.ok) return [];
@@ -84,7 +104,53 @@ export class GitHubApiService {
       sha: c.sha.slice(0, 7),
       message: c.commit.message.split('\n')[0] ?? c.commit.message,
       date: c.commit.author.date,
+      branch: ref,
     }));
+  }
+
+  async listBranches(userId: string, repo: string, perPage = 100): Promise<string[]> {
+    const token = await this.getToken(userId);
+    const res = await fetch(`https://api.github.com/repos/${repo}/branches?per_page=${perPage}`, {
+      headers: this.headers(token),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { name: string }[];
+    return data.map((b) => b.name);
+  }
+
+  /** Ground truth for Copilot + Cursor — all recent pushes across default and cursor/* branches. */
+  async getWorkspaceActivity(userId: string, repo: string): Promise<WorkspaceActivity> {
+    const defaultBranch = await this.getDefaultBranch(userId, repo);
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const defaultCommits = await this.listCommitsOnRef(userId, repo, 30, defaultBranch, since24h);
+
+    const branches = await this.listBranches(userId, repo);
+    const cursorBranches = branches
+      .filter((b) => b.startsWith('cursor/') || b.includes('cursor'))
+      .slice(0, 8);
+
+    const cursorGroups: WorkspaceCommit[][] = [];
+    for (const branch of cursorBranches) {
+      const commits = await this.listCommitsOnRef(userId, repo, 5, branch, since24h);
+      if (commits.length > 0) cursorGroups.push(commits);
+    }
+
+    const all = mergeCommitsDeduped(defaultCommits, ...cursorGroups);
+    const commitsLast2h = filterCommitsSince(all, TWO_HOURS_MS);
+
+    return {
+      repoFullName: repo,
+      defaultBranch,
+      syncedAt: new Date().toISOString(),
+      commitsLast24h: all,
+      commitsLast2h,
+      cursorBranchCommits: mergeCommitsDeduped(...cursorGroups),
+      localWorkHint:
+        commitsLast2h.length === 0
+          ? '**Tip:** Work in Cursor IDE syncs here after `git push`. Cloud Agents do not see uncommitted local files.'
+          : undefined,
+    };
   }
 
   async fetchLatestCommit(

@@ -32,6 +32,7 @@ import {
   detectWorkforceIntent,
   formatOrchestratorCopilotAnswer,
   formatRelativeTime,
+  formatWorkspaceActivityForPrompt,
   FOUNDER_OS_MEMORY_DIR,
   stripDeviceMemoryToMetadata,
   isMetadataOnlyPayload,
@@ -435,6 +436,12 @@ export class FounderCopilotService {
       prompt;
 
     try {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* still dispatch with live GitHub activity fetch */
+      }
+
       const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
         spec: taskPrompt,
         cursorPrompt: taskPrompt,
@@ -631,6 +638,10 @@ export class FounderCopilotService {
       };
     }
 
+    const workspaceActivity = refreshedMemory.repoFullName
+      ? await this.builder.getWorkspaceActivity(userId, refreshedMemory.repoFullName)
+      : null;
+
     const contextBlock = this.buildCopilotContextBlock({
       memory: refreshedMemory,
       githubMemory,
@@ -638,6 +649,7 @@ export class FounderCopilotService {
       openIdeas,
       project,
       summaryBody: summary.body,
+      workspaceActivity,
     });
 
     const systemPrompt =
@@ -781,6 +793,7 @@ export class FounderCopilotService {
     openIdeas: { title: string; description: string | null }[];
     project: { name: string; roadmapItems: { title: string; status: RoadmapStatus }[] } | undefined;
     summaryBody: string;
+    workspaceActivity?: Awaited<ReturnType<BuilderService['getWorkspaceActivity']>> | null;
   }) {
     const lines: string[] = [
       `Project: ${input.memory.project?.name ?? 'Not linked'}`,
@@ -797,6 +810,10 @@ export class FounderCopilotService {
         'Recent commits:',
         ...input.recentCommits.slice(0, 6).map((c) => `- ${c.sha.slice(0, 7)} ${c.message}`),
       );
+    }
+
+    if (input.workspaceActivity?.repoFullName) {
+      lines.push('', formatWorkspaceActivityForPrompt(input.workspaceActivity));
     }
 
     if (input.githubMemory?.projectContext) {

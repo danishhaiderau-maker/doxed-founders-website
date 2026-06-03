@@ -19,6 +19,7 @@ import { FounderNodeInferenceService } from '../founder-node/founder-node-infere
 import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
 import { AttestationService } from '../attestation/attestation.service';
 import { GitHubApiService } from '../github/github-api.service';
+import { WorkspaceActivityService } from '../github/workspace-activity.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CursorCredentialMeta,
@@ -58,6 +59,7 @@ export class BuilderService {
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
     private readonly github: GitHubApiService,
+    private readonly workspaceActivity: WorkspaceActivityService,
     private readonly founderNodeInference: FounderNodeInferenceService,
     private readonly founderNodeSync: FounderNodeSyncService,
     private readonly attestation: AttestationService,
@@ -480,6 +482,10 @@ export class BuilderService {
     };
   }
 
+  async getWorkspaceActivity(userId: string, repository?: string | null) {
+    return this.workspaceActivity.getActivity(userId, repository);
+  }
+
   async dispatchCursorBuildTask(
     userId: string,
     input: { spec: string; cursorPrompt?: string; repository?: string },
@@ -495,7 +501,13 @@ export class BuilderService {
     const apiKey = this.crypto.decrypt(cred.token);
     if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
 
-    const taskPrompt = buildCursorCloudTaskMessage(input.spec, input.cursorPrompt);
+    const activity = await this.workspaceActivity.getActivity(userId, input.repository);
+    const workspaceContext = this.workspaceActivity.buildPromptContext(activity);
+    const taskPrompt = buildCursorCloudTaskMessage(
+      input.spec,
+      input.cursorPrompt,
+      workspaceContext,
+    );
     const repoUrl = input.repository ? githubRepoToUrl(input.repository) : null;
     const startingRef = input.repository
       ? await this.github.getDefaultBranch(userId, input.repository)
@@ -565,7 +577,12 @@ export class BuilderService {
     };
   }
 
-  async getCursorRunSnapshot(userId: string, agentId: string, runId: string) {
+  async getCursorRunSnapshot(
+    userId: string,
+    agentId: string,
+    runId: string,
+    repository?: string | null,
+  ) {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'cursor' } },
     });
@@ -575,10 +592,18 @@ export class BuilderService {
     const apiKey = this.crypto.decrypt(cred.token);
     if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
     const run = await fetchCursorRun(apiKey, agentId, runId);
+    const terminal = isCursorRunTerminal(run.status);
+    const activity = await this.workspaceActivity.getActivity(userId, repository);
+    const platformReconciliation = terminal
+      ? this.workspaceActivity.reconcileRunResult(run.result, activity)
+      : null;
+
     return {
       ...run,
-      terminal: isCursorRunTerminal(run.status),
+      terminal,
       agentUrl: `https://cursor.com/agents/${agentId}`,
+      workspaceActivity: activity,
+      platformReconciliation,
     };
   }
 

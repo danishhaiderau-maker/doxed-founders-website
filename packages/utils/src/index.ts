@@ -69,6 +69,7 @@ export * from './scout-markets';
 export * from './founder-brain';
 export * from './openhands';
 export * from './cursor-cloud';
+export * from './workspace-activity';
 export * from './unified-feed';
 export * from './gamified-roles';
 export * from './notification-preferences';
