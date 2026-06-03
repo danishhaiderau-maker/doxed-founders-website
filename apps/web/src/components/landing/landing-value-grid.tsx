@@ -1,22 +1,33 @@
 'use client';
 
-import Image from 'next/image';
 import { LandingFunFactBar } from '@/components/landing/landing-fun-fact-bar';
 
-/** Four-panel infographic (image 1, top crop) + interactive fun fact with linked sources. */
+const GRID_ALT =
+  'Private by default, public by proof. Show your face. Trust through execution. Trade builders, not hype.';
+
+/**
+ * Four-panel infographic — serves 1x/2x/3x assets so large displays stay sharp (no upscaled 1024px stretch).
+ */
 export function LandingValueGrid() {
   return (
     <div className="space-y-3">
-      <section aria-label="Platform value proposition" className="w-full overflow-hidden rounded-2xl border border-emerald-500/25 shadow-2xl shadow-emerald-950/30">
-        {/* Crop bottom fun-fact row from PNG — replaced by LandingFunFactBar */}
+      <section
+        aria-label="Platform value proposition"
+        className="w-full overflow-hidden rounded-2xl border border-emerald-500/25 shadow-2xl shadow-emerald-950/30"
+      >
         <div className="relative aspect-[16/8.5] w-full sm:aspect-[2/1]">
-          <Image
-            src="/images/landing-value-grid-primary.png"
-            alt="Private by default, public by proof. Show your face. Trust through execution. Trade builders, not hype."
-            fill
-            className="object-cover object-top"
-            priority
-            sizes="(max-width: 88rem) 100vw, 88rem"
+          {/* Native srcSet — avoids Next image optimizer downscaling UHD assets */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/images/landing-value-grid-2560.webp"
+            srcSet="/images/landing-value-grid-1536.webp 1536w, /images/landing-value-grid-2560.webp 2560w, /images/landing-value-grid-3840.webp 3840w"
+            sizes="(min-width: 1920px) min(100vw, 3840px), (min-width: 1280px) min(100vw, 2560px), 100vw"
+            alt={GRID_ALT}
+            width={2560}
+            height={1707}
+            decoding="async"
+            fetchPriority="high"
+            className="absolute inset-0 h-full w-full object-cover object-top"
           />
         </div>
         <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 border-t border-emerald-500/20 bg-black/60 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
