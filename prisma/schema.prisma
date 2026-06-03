@@ -557,6 +557,9 @@ model Project {
   bubbleScore     Int           @default(0)
   communityRewardPool Int       @default(10000)
   githubRepoFullName  String?
+  /// Set by verified founder after claim — blocks hijack via fake X handles
+  profileLockHash     String?
+  profileLockedAt     DateTime?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 

@@ -11,7 +11,8 @@ type Props = {
   claimProfile?: {
     claimable: boolean;
     claimed: boolean;
-    isOwner: boolean;
+    isOwner?: boolean;
+    profileLocked?: boolean;
     projectTwitterHandle: string | null;
     requiresXSignIn: boolean;
   };
@@ -63,8 +64,10 @@ export function ClaimProfilePanel({ slug, projectName, claimProfile, onClaimed }
     <div className="rounded-xl border border-violet-500/35 bg-violet-950/25 px-4 py-4">
       <p className="text-xs font-bold uppercase tracking-wider text-violet-300">Claim profile</p>
       <p className="mt-2 text-sm text-zinc-300">
-        Are you the founder of {projectName}? Verify with X to unlock Founder OS — updates, videos,
-        build logs, and community tools.
+        Are you the founder of {projectName}? Sign in with the <strong>same X listed on DexScreener</strong>{' '}
+        to claim automatically, edit this page, run AI agents for community replies, and get integration
+        tips pushed to you fast. Earn DDollar to reward scouts — connected founders qualify for the
+        airdrop (more DD = bigger share at launch).
       </p>
       {claimProfile.projectTwitterHandle && (
         <p className="mt-2 text-xs text-zinc-500">

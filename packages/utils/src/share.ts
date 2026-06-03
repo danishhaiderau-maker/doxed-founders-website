@@ -249,6 +249,17 @@ export function pickListingShareBlurb(input: {
   return `${input.projectName ?? 'This project'} is live — predict, paper trade, scout the founder`;
 }
 
+export function buildFounderClaimOutreachLine(projectTwitterHandle?: string | null): string {
+  const tag = projectTwitterHandle?.trim()
+    ? `@${projectTwitterHandle.replace(/^@/, '')}`
+    : 'Founders';
+  return [
+    `👋 ${tag} — yours? Claim on Doxxed Crypto with the same official X on DexScreener.`,
+    'Manage community here, run AI agents for updates, get integration tips fast.',
+    'Feedback welcome · connect = airdrop eligible · lock profile after claim.',
+  ].join(' ');
+}
+
 export function buildListingShareMessage(input: {
   projectName: string;
   ticker: string;
@@ -256,6 +267,7 @@ export function buildListingShareMessage(input: {
   scoutThesis?: string | null;
   whyDoxxed?: string | null;
   summary?: string | null;
+  projectTwitterHandle?: string | null;
 }): string {
   const line = formatShareProjectLine(input.projectName, input.ticker);
   const blurb = pickListingShareBlurb({
@@ -265,7 +277,14 @@ export function buildListingShareMessage(input: {
     summary: input.summary,
     projectName: input.projectName,
   });
-  return `🚀 New listing: ${line}\n${blurb}\nPredict · paper trade · scout the founder 👇\n#Crypto #FounderOS @DoxxedCrypto`;
+  const outreach = buildFounderClaimOutreachLine(input.projectTwitterHandle);
+  return [
+    `🚀 New listing: ${line}`,
+    blurb,
+    'Predict · paper trade · scout the founder 👇',
+    outreach,
+    '#Crypto #FounderOS @DoxxedCrypto',
+  ].join('\n');
 }
 
 export function buildPredictionShareMessage(input: {

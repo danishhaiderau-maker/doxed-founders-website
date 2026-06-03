@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useSession } from 'next-auth/react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { extractPoolAddressFromDexUrl, buildSiteUrl, buildListingShareMessage } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
@@ -14,7 +15,9 @@ import { FounderBrainPanel } from '@/components/founder-brain-panel';
 import { ProjectRecentBuyersPanel } from '@/components/project-recent-buyers';
 import { WatchlistButton } from '@/components/watchlist-button';
 import { ClaimProfilePanel } from '@/components/claim-profile-panel';
-import { fetchProject, ProjectDetail } from '@/lib/api';
+import { ProjectOwnerFlashBanner } from '@/components/project-owner-flash-banner';
+import { ProjectProfileLockButton } from '@/components/project-profile-lock-button';
+import { fetchProject, fetchProjectClaimContext, ProjectDetail } from '@/lib/api';
 
 export default function ProjectDetailPage() {
   const params = useParams<{ slug: string }>();
@@ -22,7 +25,11 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [claimContext, setClaimContext] = useState<ProjectDetail['claimProfile']>();
+  const { data: session } = useSession();
   const origin = useShareOrigin();
+
+  const claimProfile = claimContext ?? project?.claimProfile;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -30,17 +37,48 @@ export default function ProjectDetailPage() {
       const data = await fetchProject(slug);
       setProject(data);
       setError(null);
+      const token = session?.accessToken;
+      if (token) {
+        const ctx = await fetchProjectClaimContext(slug, token).catch(() => undefined);
+        setClaimContext(ctx ?? data.claimProfile);
+      } else {
+        setClaimContext(undefined);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Project not found');
       setProject(null);
     } finally {
       setLoading(false);
     }
-  }, [slug]);
+  }, [slug, session?.accessToken]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const token = session?.accessToken;
+    if (!token || !slug) {
+      setClaimContext(undefined);
+      return;
+    }
+    fetchProjectClaimContext(slug, token)
+      .then(setClaimContext)
+      .catch(() => setClaimContext(undefined));
+  }, [session?.accessToken, slug, project?.claimProfile?.claimed]);
+
+  const shareText = useMemo(() => {
+    if (!project) return '';
+    return buildListingShareMessage({
+      projectName: project.name,
+      ticker: project.ticker,
+      scoutHighlight: project.scoutHighlight,
+      scoutThesis: project.listingScoutThesis ?? project.verificationDossier?.whyList,
+      whyDoxxed: project.verificationDossier?.whyDoxxed,
+      summary: project.summary,
+      projectTwitterHandle: claimProfile?.projectTwitterHandle,
+    });
+  }, [project, claimProfile?.projectTwitterHandle]);
 
   const poolAddress =
     project?.dexscreenerUrl != null
@@ -71,13 +109,22 @@ export default function ProjectDetailPage() {
 
         {project && (
           <div className="space-y-8">
-            {project.claimProfile?.claimable && (
-              <ClaimProfilePanel
-                slug={project.slug}
-                projectName={project.name}
-                claimProfile={project.claimProfile}
-                onClaimed={load}
-              />
+            {(claimProfile?.claimable || claimProfile?.projectTwitterHandle) && (
+              <>
+                <ProjectOwnerFlashBanner
+                  projectName={project.name}
+                  slug={project.slug}
+                  claimProfile={claimProfile}
+                />
+                {claimProfile?.claimable && (
+                  <ClaimProfilePanel
+                    slug={project.slug}
+                    projectName={project.name}
+                    claimProfile={claimProfile}
+                    onClaimed={load}
+                  />
+                )}
+              </>
             )}
 
             <section className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
@@ -184,18 +231,19 @@ export default function ProjectDetailPage() {
                   Update listing
                 </Link>
                 <ShareOnXButton
-                  text={buildListingShareMessage({
-                    projectName: project.name,
-                    ticker: project.ticker,
-                    scoutHighlight: project.scoutHighlight,
-                    scoutThesis: project.listingScoutThesis ?? project.verificationDossier?.whyList,
-                    whyDoxxed: project.verificationDossier?.whyDoxxed,
-                    summary: project.summary,
-                  })}
+                  text={shareText}
                   url={buildSiteUrl(origin, `/project/${project.slug}`)}
                   label="Share on X"
                   className="px-4 py-2"
                 />
+                {claimProfile?.isOwner && session?.accessToken && (
+                  <ProjectProfileLockButton
+                    slug={project.slug}
+                    accessToken={session.accessToken}
+                    profileLocked={Boolean(claimProfile.profileLocked)}
+                    onUpdated={load}
+                  />
+                )}
               </div>
             </section>
 
