@@ -19,6 +19,16 @@ function formatExpiry(expiresAt: string) {
   return { absolute: exp.toLocaleString(), mins };
 }
 
+function formatLastSeen(iso: string | null | undefined): string {
+  if (!iso) return 'never';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ago`;
+}
+
 export function FounderNodePairingPanel({ accessToken, active }: Props) {
   const [nodes, setNodes] = useState<FounderNodeStatusRow[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -194,7 +204,12 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                   {node.status}
                 </span>
                 {node.status === 'offline' && (
-                  <span className="ml-2 text-zinc-500">— start Founder Node to sync</span>
+                  <span className="ml-2 text-zinc-500">
+                    — last heartbeat {formatLastSeen(node.lastSeenAt)}
+                    {node.lastSeenAt
+                      ? ' · open tray app or re-pair if sync fails (401)'
+                      : ' · start Founder Node tray app'}
+                  </span>
                 )}
                 {node.ramGb != null && (
                   <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>

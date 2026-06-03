@@ -103,6 +103,20 @@ export function writeNodeConfig(vaultRoot: string, config: FounderNodeConfig): v
   fs.writeFileSync(vaultFilePath(vaultRoot, 'nodeConfig'), JSON.stringify(config, null, 2), 'utf8');
 }
 
+/** Drop stored credentials so the user can pair again (e.g. after server revoked the token). */
+export function clearNodeConfig(vaultRoot: string): void {
+  const configPath = vaultFilePath(vaultRoot, 'nodeConfig');
+  if (fs.existsSync(configPath)) {
+    const backup = `${configPath}.bak`;
+    try {
+      fs.copyFileSync(configPath, backup);
+    } catch {
+      /* optional */
+    }
+    fs.unlinkSync(configPath);
+  }
+}
+
 export function buildSnapshotFromVault(vaultRoot: string, label: string) {
   const meta = JSON.parse(
     fs.readFileSync(vaultFilePath(vaultRoot, 'meta'), 'utf8'),
