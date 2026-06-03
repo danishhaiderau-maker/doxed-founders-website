@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat: platform messages, proof requests, and Twitter listing gate
+chore(founder-os): sync tasks
 
 ## Last Activity
 
