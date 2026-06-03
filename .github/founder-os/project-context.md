@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(founder-os): deep-dive social updates from real GitHub 24h data
+feat(listings): optional project GitHub repo for Discover activity tracking
 
 ## Last Activity
 
