@@ -5,12 +5,21 @@ import {
   Injectable,
   forwardRef,
 } from '@nestjs/common';
-import { BuildQueueStatus, FounderEventType, RoadmapStatus, SimulatedRaiseStatus, SuggestedUpdateStatus } from '@prisma/client';
+import {
+  AiProvider,
+  BuildQueueStatus,
+  FounderEventType,
+  RoadmapStatus,
+  SimulatedRaiseStatus,
+  SuggestedUpdateStatus,
+} from '@prisma/client';
 import {
   buildCommunityUpdateFromSummary,
   buildDailyStandup,
   buildResumeCursorPrompt,
+  buildSocialDraftSystemPrompt,
   buildWeeklySummary,
+  parseSocialDraftLlmResponse,
   computeProjectProgress,
   detectAutopilotIntent,
   detectHandsFreeAction,
@@ -1096,6 +1105,153 @@ export class FounderCopilotService {
         };
       }
     }
+  }
+
+  private static readonly CODE_DRAFT_AGENTS = new Set(['CURSOR', 'OPENHANDS']);
+
+  async draftSocialUpdate(
+    userId: string,
+    options?: { provider?: string },
+  ) {
+    const providerKey = options?.provider?.trim().toUpperCase();
+    const codeAgent =
+      providerKey && FounderCopilotService.CODE_DRAFT_AGENTS.has(providerKey) ? providerKey : null;
+
+    const memory = await this.getProjectMemory(userId);
+    if (memory.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional */
+      }
+    }
+    const refreshedMemory = memory.repoFullName
+      ? await this.getProjectMemory(userId)
+      : memory;
+
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: {
+        projects: {
+          where: { approved: true },
+          take: 1,
+          include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
+        },
+        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 3 },
+      },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const project = founder.projects[0];
+    const weekAgo = new Date(Date.now() - 7 * 86400000);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [recentCommits, openIdeas] = await Promise.all([
+      refreshedMemory.repoFullName
+        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 20)
+        : Promise.resolve([]),
+      this.prisma.buildQueueItem.findMany({
+        where: {
+          founderId: founder.id,
+          kind: 'IDEA',
+          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        take: 5,
+      }),
+    ]);
+
+    const todayCommits = recentCommits.filter((c) => new Date(c.date) >= todayStart);
+
+    const githubMemory = refreshedMemory.repoFullName
+      ? await this.memory.readRepoMemory(userId, refreshedMemory.repoFullName)
+      : null;
+
+    const summary = buildWeeklySummary({
+      projectName: project?.name ?? founder.name,
+      commitCount: recentCommits.length,
+      deployCount: 0,
+      followerCount: project ? await this.prisma.projectFollow.count({ where: { projectId: project.id } }) : 0,
+      featureRequests: 0,
+      launchReadiness: refreshedMemory.launchReadiness,
+      launchReadinessDelta: 0,
+      buildStreak: founder.buildStreakDays,
+      recentHeadlines: founder.buildPosts.map((p) => p.headline),
+    });
+
+    const contextBlock = this.buildCopilotContextBlock({
+      memory: refreshedMemory,
+      githubMemory,
+      recentCommits: todayCommits.length > 0 ? todayCommits : recentCommits.slice(0, 8),
+      openIdeas,
+      project: project ?? undefined,
+      summaryBody: summary.body,
+    });
+
+    const connections = await this.builder.getBuildWorkerConnections(userId);
+    if (codeAgent === 'CURSOR' && !connections.cursor) {
+      throw new BadRequestException('Connect Cursor in AI Stack first');
+    }
+    if (codeAgent === 'OPENHANDS' && !connections.openHands) {
+      throw new BadRequestException('Connect OpenHands in AI Stack first');
+    }
+
+    const forceProvider =
+      providerKey && Object.values(AiProvider).includes(providerKey as AiProvider)
+        ? (providerKey as AiProvider)
+        : undefined;
+
+    const systemPrompt = buildSocialDraftSystemPrompt(codeAgent);
+    const userPrompt = [
+      `Project: ${project?.name ?? founder.name}`,
+      codeAgent ? `Draft as: ${codeAgent} (code-aware, plain English for X and feed).` : '',
+      '',
+      contextBlock,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const aiResult = forceProvider
+      ? await this.builder.tryCopilotChatCompletion(userId, systemPrompt, userPrompt, {
+          forceProvider,
+        })
+      : await this.builder.tryCopilotChatCompletion(userId, systemPrompt, userPrompt);
+
+    const displayProvider = codeAgent ?? (aiResult.ok ? aiResult.provider : 'RULE_BASED');
+
+    if (aiResult.ok) {
+      const parsed = parseSocialDraftLlmResponse(aiResult.text);
+      return {
+        headline: parsed.headline,
+        body: parsed.body,
+        xHook: parsed.xHook,
+        provider: displayProvider,
+        llmProvider: aiResult.provider,
+      };
+    }
+
+    const fallbackHeadline =
+      todayCommits[0]?.message.split('\n')[0]?.slice(0, 120) ??
+      refreshedMemory.suggestedNextStep?.slice(0, 120) ??
+      `Progress on ${project?.name ?? 'our project'}`;
+    const fallbackBody = buildCommunityUpdateFromSummary({
+      title: fallbackHeadline,
+      body: summary.body,
+      traderView: refreshedMemory.suggestedNextStep
+        ? `Next: ${refreshedMemory.suggestedNextStep}`
+        : 'More shipping this week.',
+    });
+
+    return {
+      headline: fallbackHeadline,
+      body: fallbackBody,
+      xHook: fallbackHeadline,
+      provider: displayProvider,
+      llmProvider: 'RULE_BASED' as const,
+      llmErrors: aiResult.llmErrors,
+      fallback: true,
+    };
   }
 
   async getDeviceMemorySync(userId: string) {

@@ -737,10 +737,15 @@ export class BuilderService {
     userId: string,
     system: string,
     userPrompt: string,
+    options?: { forceProvider?: AiProvider },
   ): Promise<
     | { ok: true; text: string; provider: AiProvider }
     | { ok: false; llmErrors: string[] }
   > {
+    if (options?.forceProvider) {
+      return this.tryCopilotChatCompletionForced(userId, system, userPrompt, options.forceProvider);
+    }
+
     const settings = await this.ensureSettings(userId);
     const usable = await this.listUsableLlmCredentialProviders(userId);
     const order: AiProvider[] = [];
@@ -860,6 +865,91 @@ export class BuilderService {
     }
 
     return llmErrors.length > 0 ? { ok: false, llmErrors } : { ok: false, llmErrors: ['No LLM API key configured'] };
+  }
+
+  /** Single-provider completion (Social Hub draft buttons). */
+  private async tryCopilotChatCompletionForced(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    forceProvider: AiProvider,
+  ): Promise<
+    | { ok: true; text: string; provider: AiProvider }
+    | { ok: false; llmErrors: string[] }
+  > {
+    const settings = await this.ensureSettings(userId);
+    const llmErrors: string[] = [];
+
+    if (forceProvider === AiProvider.OLLAMA_LOCAL) {
+      const nodeResult = await this.founderNodeInference.runViaFounderNode(
+        userId,
+        system,
+        userPrompt,
+        settings.preferredModel,
+      );
+      if (nodeResult.ok) return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
+      llmErrors.push(...nodeResult.errors);
+      const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
+      if (direct.ok) return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+      if (direct.error) llmErrors.push(direct.error);
+      return { ok: false, llmErrors };
+    }
+
+    if (forceProvider === AiProvider.PHALA) {
+      const phala = await this.resolvePhalaCredentials(userId);
+      if (!phala) return { ok: false, llmErrors: ['PHALA: not connected'] };
+      try {
+        const chat = await callPhalaChat({
+          apiKey: phala.apiKey,
+          inferenceUrl: phala.inferenceUrl,
+          model: settings.preferredModel ?? phala.model,
+          system,
+          userPrompt,
+        });
+        if (chat?.text) {
+          await this.recordPhalaChat(userId, chat);
+          return { ok: true, text: chat.text, provider: AiProvider.PHALA };
+        }
+        return { ok: false, llmErrors: ['PHALA: empty response'] };
+      } catch (err) {
+        return {
+          ok: false,
+          llmErrors: [`PHALA: ${err instanceof Error ? err.message : 'request failed'}`],
+        };
+      }
+    }
+
+    const cfg = aiProviderConfig(forceProvider);
+    if (!cfg?.credentialProvider || cfg.connectMode !== 'api_key') {
+      return { ok: false, llmErrors: [`${forceProvider}: not available as chat provider`] };
+    }
+
+    const usable = await this.listUsableLlmCredentialProviders(userId);
+    if (!usable.has(cfg.credentialProvider)) {
+      return { ok: false, llmErrors: [`${forceProvider}: connect API key in AI Stack`] };
+    }
+
+    const cred = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: cfg.credentialProvider } },
+    });
+    const apiKey = this.crypto.decrypt(cred?.token);
+    if (!apiKey) return { ok: false, llmErrors: [`${forceProvider}: invalid credential`] };
+
+    const model =
+      settings.defaultProvider === forceProvider
+        ? settings.preferredModel ?? cfg.defaultModel ?? undefined
+        : cfg.defaultModel ?? undefined;
+
+    try {
+      const text = await this.completionWithProvider(forceProvider, apiKey, system, userPrompt, model);
+      if (text?.trim()) return { ok: true, text: text.trim(), provider: forceProvider };
+      return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
+    } catch (err) {
+      return {
+        ok: false,
+        llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`],
+      };
+    }
   }
 
   private async completionWithProvider(
