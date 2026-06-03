@@ -17,6 +17,7 @@ import {
   AI_STACK_HREF,
   CopilotSendMode,
   primaryButtonLabel,
+  copilotSetupGapMessage,
   resolveCopilotStack,
 } from '@/lib/copilot-ai-stack';
 
@@ -54,7 +55,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     setPrompt(text);
   }, []);
 
-  const { listening, supported, toggle, stop } = useVoiceInput(onTranscript);
+  const { listening, starting, phase, supported, toggle, stop } = useVoiceInput(onTranscript);
 
   const load = useCallback(async () => {
     try {
@@ -113,6 +114,12 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
     const q = prompt.trim();
     if (!q || busy) return;
     const stack = resolveCopilotStack(providers, defaultProvider, buildWorker, workerConnections);
+    const setupGap = copilotSetupGapMessage(sendMode, stack);
+    if (setupGap) {
+      setLastAnswer(setupGap);
+      onResult?.(setupGap);
+      return;
+    }
     if (sendMode === 'build' && stack.canBuild) {
       setBusy(true);
       try {
@@ -213,7 +220,7 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
                 sendMode === 'ask' ? 'bg-violet-600 text-white' : 'text-zinc-500'
               }`}
             >
-              Ask {stack.askLabel}
+              Ask
             </button>
             <button
               type="button"
@@ -222,13 +229,19 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
                 sendMode === 'build' ? 'bg-emerald-700 text-white' : 'text-zinc-500'
               }`}
             >
-              Run in {stack.buildLabel}
+              Build
             </button>
           </div>
         )}
         <textarea
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => {
+            if (phase !== 'idle') stop();
+            setPrompt(e.target.value);
+          }}
+          onFocus={() => {
+            if (phase !== 'idle') stop();
+          }}
           rows={4}
           placeholder={
             sendMode === 'build' && stack.canBuild
@@ -242,17 +255,28 @@ export function FounderCopilotBar({ accessToken, onResult }: FounderCopilotBarPr
             <button
               type="button"
               onClick={handleVoiceToggle}
-              title={listening ? 'Stop recording' : 'Voice — stays open while you talk'}
-              className={`rounded-lg px-2.5 py-1.5 text-sm ${
+              title={
+                listening
+                  ? 'Stop recording'
+                  : starting
+                    ? 'Starting microphone…'
+                    : 'Voice input'
+              }
+              className={`rounded-lg px-2.5 py-1.5 text-sm font-medium ${
                 listening
                   ? 'bg-red-600/80 text-white'
-                  : 'border border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-white'
+                  : starting
+                    ? 'bg-amber-600/80 text-white'
+                    : 'border border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-white'
               }`}
             >
-              {listening ? '⏹' : '🎤'}
+              {listening ? '⏹' : starting ? '…' : '🎤'}
             </button>
+            {starting && (
+              <span className="self-center text-[10px] text-amber-200">Starting mic…</span>
+            )}
             {listening && (
-              <span className="self-center text-[10px] text-red-300">Listening…</span>
+              <span className="self-center text-[10px] font-medium text-red-200">Speak now</span>
             )}
           </div>
           <div className="flex gap-2">

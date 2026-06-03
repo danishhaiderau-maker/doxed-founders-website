@@ -4265,7 +4265,11 @@ rest_failure_count = 0
 MAX_REST_FAILURES = 5
 POSITIONS_FILE = "open_positions.json"
 bybit_public = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap', 'unifiedMargin': True}})
-MARKETS = bybit_public.load_markets()
+try:
+    MARKETS = bybit_public.load_markets()
+except Exception as e:
+    MARKETS = {}
+    print(f"[WARN] Bybit load_markets failed at boot (will retry in engine): {e}", flush=True)
 api_key = os.getenv("BYBIT_API_KEY", "").strip()
 secret = os.getenv("BYBIT_SECRET", "").strip()
 bybit_private = ccxt.bybit({

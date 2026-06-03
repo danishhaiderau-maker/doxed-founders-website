@@ -131,14 +131,88 @@ export function defaultSendMode(stack: CopilotStackSummary): CopilotSendMode {
   return 'ask';
 }
 
-export function primaryButtonLabel(mode: CopilotSendMode, stack: CopilotStackSummary): string {
-  if (mode === 'build' && stack.canBuild) {
-    return `Run in ${stack.buildLabel}`;
+export function primaryButtonLabel(mode: CopilotSendMode, _stack: CopilotStackSummary): string {
+  return mode === 'build' ? 'Build' : 'Ask';
+}
+
+/** What Founder OS needs before it can act like a real operator (not a memory dump). */
+export function copilotSetupGapMessage(
+  mode: CopilotSendMode,
+  stack: CopilotStackSummary,
+): string | null {
+  if (mode === 'build') {
+    if (stack.canBuild) return null;
+    return [
+      '**Build** needs a code agent connected.',
+      '',
+      '1. Open **Settings → Founder Node** (AI stack)',
+      '2. Connect **Cursor** (API key) — or OpenHands',
+      '3. Link **GitHub** to your repo',
+      '4. Come back and tap **Build** again',
+      '',
+      '_Until then, use **Ask** for planning — or connect DeepSeek/OpenRouter for smarter answers._',
+    ].join('\n');
   }
-  if (stack.canAsk) {
-    return `Ask ${stack.askLabel}`;
-  }
-  return 'Send';
+  return null;
+}
+
+export type AiTeamAgentStatus = 'ready' | 'working' | 'offline' | 'needs_setup';
+
+export type AiTeamAgentCard = {
+  id: 'research' | 'builder' | 'content';
+  label: string;
+  role: string;
+  status: AiTeamAgentStatus;
+  statusLabel: string;
+  providerLabel?: string;
+};
+
+export function resolveAiTeamCards(
+  stack: CopilotStackSummary,
+  providers: ProviderRow[],
+): AiTeamAgentCard[] {
+  const researchConnected = providers.some(
+    (p) =>
+      p.connected &&
+      ['DEEPSEEK', 'OPENROUTER', 'PHALA', 'OPENAI', 'ANTHROPIC', 'GEMINI', 'OLLAMA_LOCAL'].includes(
+        p.key,
+      ),
+  );
+  const researchLabel =
+    stack.chatProviders.find((p) => p.key === 'DEEPSEEK')?.label ??
+    stack.chatProviders[0]?.label ??
+    'Not connected';
+
+  const builder = stack.buildWorkers[0];
+  const contentConnected = providers.some(
+    (p) => p.connected && ['OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER'].includes(p.key),
+  );
+
+  return [
+    {
+      id: 'research',
+      label: 'Research Agent',
+      role: 'Analysis · tokenomics · strategy',
+      status: researchConnected ? 'ready' : 'needs_setup',
+      statusLabel: researchConnected ? 'Connected' : 'Connect LLM',
+      providerLabel: researchConnected ? researchLabel : undefined,
+    },
+    {
+      id: 'builder',
+      label: 'Builder Agent',
+      role: 'Code · PRs · fixes · deploy',
+      status: stack.canBuild ? 'ready' : 'needs_setup',
+      statusLabel: stack.canBuild ? builder?.label ?? 'Ready' : 'Connect Cursor',
+      providerLabel: builder?.label,
+    },
+    {
+      id: 'content',
+      label: 'Content Agent',
+      role: 'Posts · docs · announcements',
+      status: contentConnected ? 'ready' : 'needs_setup',
+      statusLabel: contentConnected ? 'Ready' : 'Connect Claude/GPT',
+    },
+  ];
 }
 
 export type AiStackAction =

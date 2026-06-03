@@ -32,7 +32,7 @@ export function GamifiedRoleBadge({
       )}
       title={role.description}
     >
-      {role.label}
+      {role.label ?? 'Member'}
     </span>
   );
 }
