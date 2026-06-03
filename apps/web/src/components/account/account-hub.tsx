@@ -13,6 +13,8 @@ import { ReputationBadge } from '@/components/landing/project-spotlight';
 import { GamifiedRoleBadge, BuilderStatusBadge } from '@/components/account/gamified-role-badge';
 import { NotificationSettingsPanel } from '@/components/account/notification-settings-panel';
 import { ConnectedAccountsPanel } from '@/components/account/connected-accounts-panel';
+import { AccountMessagesPanel } from '@/components/account/account-messages-panel';
+import { PlatformHandleEditor } from '@/components/account/platform-handle-editor';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
   AccountActivityItem,
@@ -26,6 +28,7 @@ export type AccountTab =
   | 'security'
   | 'notifications'
   | 'connected'
+  | 'messages'
   | 'points'
   | 'reputation'
   | 'activity'
@@ -33,6 +36,7 @@ export type AccountTab =
 
 const TABS: { id: AccountTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
+  { id: 'messages', label: 'Messages' },
   { id: 'topup', label: 'Top up' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
@@ -49,7 +53,13 @@ function formatDate(iso: string) {
   });
 }
 
-export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTab }) {
+export function AccountHub({
+  initialTab = 'overview',
+  initialMessageWithUserId = null,
+}: {
+  initialTab?: AccountTab;
+  initialMessageWithUserId?: string | null;
+}) {
   const { data: session } = useSession();
   const token = session?.accessToken;
   const [tab, setTab] = useState<AccountTab>(initialTab);
@@ -175,6 +185,7 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
                   )}
                 </div>
                 <p className="mt-1 text-sm text-zinc-500">{overview.email}</p>
+                <p className="mt-1 text-xs text-cyan-300/90">ID: {overview.platformHandle}</p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Joined {formatDate(overview.joinedAt)}
                   {overview.reputation.rank != null && (
@@ -190,6 +201,23 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
                   </Link>
                 )}
               </div>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <h3 className="font-semibold text-white">Platform ID</h3>
+              {token && (
+                <PlatformHandleEditor
+                  accessToken={token}
+                  initialHandle={overview.platformHandle}
+                  canEdit={overview.canEditPlatformHandle}
+                  hasTwitterConnected={overview.hasTwitterConnected}
+                  onUpdated={(handle) =>
+                    setOverview((prev) =>
+                      prev ? { ...prev, platformHandle: handle, username: handle } : prev,
+                    )
+                  }
+                />
+              )}
             </div>
 
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
@@ -231,6 +259,13 @@ export function AccountHub({ initialTab = 'overview' }: { initialTab?: AccountTa
         )}
 
         {tab === 'connected' && token && <ConnectedAccountsPanel accessToken={token} />}
+
+        {tab === 'messages' && token && (
+          <AccountMessagesPanel
+            accessToken={token}
+            initialOtherUserId={initialMessageWithUserId}
+          />
+        )}
 
         {tab === 'reputation' && overview && (
           <section className="space-y-6">

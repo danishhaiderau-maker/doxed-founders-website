@@ -9,6 +9,7 @@ dist/
 out/
 build/
 .turbo/
+*.tsbuildinfo
 apps/founder-node/release/
 
 # Environment

@@ -4,13 +4,21 @@ import { DexscreenerModule } from '../dexscreener/dexscreener.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { PredictionMarketsModule } from '../prediction-markets/prediction-markets.module';
+import { MessagesModule } from '../messages/messages.module';
 import { ListingApplicationsController } from './listing-applications.controller';
 import { ListingApplicationsService } from './listing-applications.service';
 import { ListingPublishService } from './listing-publish.service';
 import { ListingVotesService } from './listing-votes.service';
 
 @Module({
-  imports: [DexscreenerModule, AuthModule, PointsModule, NotificationsModule, PredictionMarketsModule],
+  imports: [
+    DexscreenerModule,
+    AuthModule,
+    PointsModule,
+    NotificationsModule,
+    PredictionMarketsModule,
+    MessagesModule,
+  ],
   controllers: [ListingApplicationsController],
   providers: [ListingApplicationsService, ListingPublishService, ListingVotesService],
   exports: [ListingVotesService, ListingApplicationsService],

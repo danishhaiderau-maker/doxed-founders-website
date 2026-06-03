@@ -34,6 +34,7 @@ import { TrustCenterModule } from './trust-center/trust-center.module';
 import { TownHallModule } from './town-hall/town-hall.module';
 import { TradingAgentsModule } from './trading-agents/trading-agents.module';
 import { AdminControlModule } from './admin-control/admin-control.module';
+import { MessagesModule } from './messages/messages.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { AdminControlModule } from './admin-control/admin-control.module';
     TownHallModule,
     TradingAgentsModule,
     AdminControlModule,
+    MessagesModule,
     AnalyticsModule,
     AuthModule,
     HealthModule,

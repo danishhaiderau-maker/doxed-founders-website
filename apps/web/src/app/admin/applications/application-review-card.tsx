@@ -1,8 +1,10 @@
 'use client';
 
 import type { ReactNode } from 'react';
+import { useState } from 'react';
 import {
   VALIDATION_LABELS,
+  formatPublicAccountLabel,
   founderStatusLabel,
   getPrimaryProofLink,
   tallyListingVotes,
@@ -10,7 +12,12 @@ import {
   type CommunityValidationCategory,
 } from '@dcf/utils';
 import Link from 'next/link';
-import { AdminApplicationUpdates, ListingRelistPreview, PendingApplication } from '@/lib/api';
+import {
+  AdminApplicationUpdates,
+  ListingRelistPreview,
+  PendingApplication,
+  requestListingMoreProof,
+} from '@/lib/api';
 
 const CHAIN_OPTIONS = [
   'SOLANA',
@@ -99,11 +106,13 @@ interface ApplicationReviewCardProps {
   busy: boolean;
   reviewNotes: string;
   form: AdminApplicationUpdates;
+  accessToken: string;
   onToggle: () => void;
   onNotesChange: (value: string) => void;
   onFormChange: (updates: AdminApplicationUpdates) => void;
   onApprove: () => void;
   onReject: () => void;
+  onProofSent?: () => void;
 }
 
 export function ApplicationReviewCard({
@@ -112,12 +121,24 @@ export function ApplicationReviewCard({
   busy,
   reviewNotes,
   form,
+  accessToken,
   onToggle,
   onNotesChange,
   onFormChange,
   onApprove,
   onReject,
+  onProofSent,
 }: ApplicationReviewCardProps) {
+  const [proofOpen, setProofOpen] = useState(false);
+  const [proofMessage, setProofMessage] = useState('');
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [proofSent, setProofSent] = useState(false);
+
+  const submitter = item.user;
+  const submitterLabel = submitter
+    ? formatPublicAccountLabel(submitter.name, submitter.email, submitter.platformHandle)
+    : null;
   const input = approvalInput(item, form);
   const approval = validateListingForApproval(input);
   const proofLink = getPrimaryProofLink(input);
@@ -147,11 +168,30 @@ export function ApplicationReviewCard({
     onFormChange({ ...form, [key]: value });
   }
 
-  function requestMoreProof() {
-    onNotesChange(
+  function openProofModal() {
+    setProofError(null);
+    setProofMessage(
       reviewNotes.trim() ||
-        'Need stronger public proof — add a founder video, interview, verification page, or official team link before we can list.',
+        'We need stronger public proof before we can list this project — please add a founder video, interview, verification page, or official team link.',
     );
+    setProofOpen(true);
+  }
+
+  async function sendProofRequest() {
+    if (!submitter?.id) return;
+    setProofBusy(true);
+    setProofError(null);
+    try {
+      await requestListingMoreProof(item.id, accessToken, proofMessage);
+      onNotesChange(proofMessage);
+      setProofSent(true);
+      setProofOpen(false);
+      onProofSent?.();
+    } catch (e) {
+      setProofError(e instanceof Error ? e.message : 'Could not send message');
+    } finally {
+      setProofBusy(false);
+    }
   }
 
   return (
@@ -191,6 +231,29 @@ export function ApplicationReviewCard({
               <p className="mt-1 text-xs text-[var(--color-muted)]">
                 Submitted {new Date(item.createdAt).toLocaleString()}
               </p>
+              {submitter ? (
+                <p className="mt-2 text-xs text-zinc-400">
+                  Submitter:{' '}
+                  <span className="font-medium text-cyan-200">{submitterLabel}</span>
+                  {submitter.twitterHandle && (
+                    <span className="text-zinc-500"> · @{submitter.twitterHandle}</span>
+                  )}
+                  {' · '}
+                  <Link
+                    href={`/account?tab=messages&with=${submitter.id}`}
+                    className="text-cyan-400 hover:underline"
+                  >
+                    Message
+                  </Link>
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-amber-300/90">
+                  No linked account — submitter must sign in with X (Twitter) to receive proof requests.
+                </p>
+              )}
+              {proofSent && (
+                <p className="mt-1 text-xs text-emerald-300">Proof request sent via Messages.</p>
+              )}
             </div>
             <button
               type="button"
@@ -386,8 +449,13 @@ export function ApplicationReviewCard({
             </button>
             <button
               type="button"
-              disabled={busy}
-              onClick={requestMoreProof}
+              disabled={busy || proofBusy || !submitter?.id}
+              onClick={openProofModal}
+              title={
+                !submitter?.id
+                  ? 'Submitter must sign in with X (Twitter) before you can message them'
+                  : undefined
+              }
               className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/20 disabled:opacity-50"
             >
               Request more proof
@@ -395,6 +463,44 @@ export function ApplicationReviewCard({
           </div>
         </div>
       </div>
+
+      {proofOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-amber-500/30 bg-zinc-950 p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-white">Request more proof</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Sends a direct message to{' '}
+              <span className="text-cyan-200">{submitterLabel ?? 'submitter'}</span> and a notification.
+              They can reply in Account → Messages.
+            </p>
+            <textarea
+              value={proofMessage}
+              onChange={(e) => setProofMessage(e.target.value)}
+              rows={6}
+              className="mt-4 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
+            />
+            {proofError && <p className="mt-2 text-sm text-red-300">{proofError}</p>}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={proofBusy || proofMessage.trim().length < 2}
+                onClick={() => void sendProofRequest()}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {proofBusy ? 'Sending…' : 'Send message'}
+              </button>
+              <button
+                type="button"
+                disabled={proofBusy}
+                onClick={() => setProofOpen(false)}
+                className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-300"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

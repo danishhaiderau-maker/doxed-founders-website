@@ -130,6 +130,10 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
           ← Home
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Sign in</h1>
+        <p className="mt-3 rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-100">
+          To <strong className="text-white">list a project</strong>, sign in with <strong className="text-white">X (Twitter)</strong>.
+          Admins send proof requests through Account → Messages. Email sign-in works for trading and voting.
+        </p>
 
         {!pendingToken ? (
           <>

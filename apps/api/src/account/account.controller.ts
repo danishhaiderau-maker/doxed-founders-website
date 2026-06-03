@@ -3,10 +3,14 @@ import type { NotificationPreferenceGroups } from '@dcf/utils';
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AccountService } from './account.service';
+import { PlatformHandleService } from './platform-handle.service';
 
 @Controller('account')
 export class AccountController {
-  constructor(private readonly account: AccountService) {}
+  constructor(
+    private readonly account: AccountService,
+    private readonly platformHandles: PlatformHandleService,
+  ) {}
 
   @Get('overview')
   overview(@CurrentUser() user: AuthUser) {
@@ -51,5 +55,13 @@ export class AccountController {
   activity(@CurrentUser() user: AuthUser, @Query('limit') limit?: string) {
     const parsed = limit ? Math.min(100, Math.max(1, parseInt(limit, 10) || 40)) : 40;
     return this.account.getActivityHistory(user.id, parsed);
+  }
+
+  @Put('platform-handle')
+  updatePlatformHandle(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { platformHandle: string },
+  ) {
+    return this.platformHandles.updateHandle(user.id, body.platformHandle);
   }
 }

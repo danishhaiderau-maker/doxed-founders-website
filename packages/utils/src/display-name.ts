@@ -42,12 +42,14 @@ export function maskEmail(email?: string | null): string {
 }
 
 /**
- * Public-facing account label: trading name if set, otherwise masked email.
+ * Public-facing account label: platform handle, trading name, or masked email.
  */
 export function formatPublicAccountLabel(
   name?: string | null,
   email?: string | null,
+  platformHandle?: string | null,
 ): string {
+  if (platformHandle?.trim()) return platformHandle.trim();
   if (hasTradingDisplayName(name, email)) {
     return name!.trim();
   }
