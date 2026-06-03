@@ -25,5 +25,5 @@ export async function revealTextInChat(
 
 export function formatThinkingInChat(providerLabel: string, routedAgent?: string): string {
   const who = routedAgent ? `${routedAgent} via ${providerLabel}` : providerLabel;
-  return `**${who}** · thinking…\n\n_Answer will stream here in Mission Control._`;
+  return `**${who}** · thinking…\n\n_Answer streams in this chat._`;
 }

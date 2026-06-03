@@ -59,7 +59,7 @@ export function formatBuilderRunInChat(input: {
         : '_Run ended — details below._',
     );
   } else {
-    lines.push('', '_Updating live in Mission Control…_');
+    lines.push('', '_Live output streams in this chat — no need to open another tab._');
   }
 
   return lines.join('\n');
