@@ -1,3 +1,5 @@
+import { detectAutopilotIntent } from './founder-autopilot';
+
 export const EVENT_SOURCE_LABELS: Record<string, string> = {
   github: 'GitHub',
   vercel: 'Vercel',
@@ -27,7 +29,8 @@ export type HandsFreeAction =
   | 'roadmap'
   | 'community_update'
   | 'resume_work'
-  | 'cursor_dispatch';
+  | 'cursor_dispatch'
+  | 'autopilot';
 
 /** Detect when the user wants Copilot to dispatch Cursor Cloud directly. */
 export function detectCursorDispatchIntent(prompt: string): boolean {
@@ -42,6 +45,7 @@ export function detectCursorDispatchIntent(prompt: string): boolean {
 
 export function detectHandsFreeAction(prompt: string): HandsFreeAction {
   const p = prompt.toLowerCase();
+  if (detectAutopilotIntent(prompt)) return 'autopilot';
   if (detectCursorDispatchIntent(prompt)) return 'cursor_dispatch';
   if (/^(finish|continue|resume|where i left|pick up)/.test(p.trim()) || /\bfinish it\b/.test(p)) {
     return 'resume_work';

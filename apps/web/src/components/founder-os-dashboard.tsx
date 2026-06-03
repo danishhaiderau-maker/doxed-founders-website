@@ -10,7 +10,9 @@ import {
   resolveAiStackHealth,
   STAGE_COLOR_CLASSES,
 } from '@dcf/utils';
+import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
+import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
@@ -19,6 +21,8 @@ import {
   fetchBuildRoom,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
+  fetchPlatformSyncStatus,
+  updateBuilderSettings,
   FounderDashboard,
   ProjectMemory,
   ProjectRoom,
@@ -38,6 +42,7 @@ const COPILOT_CHIPS = [
   'What broke yesterday?',
   'Continue last task',
   'Create PR',
+  'Take full control and push all updates',
 ];
 
 export type FounderOsDashboardProps = {
@@ -81,18 +86,23 @@ export function FounderOsDashboardLayout({
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [resumeBusy, setResumeBusy] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<Awaited<
+    ReturnType<typeof fetchPlatformSyncStatus>
+  > | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, account] = await Promise.all([
+      const [br, mem, worker, account, platform] = await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
         fetchBuilderWorkerStatus(accessToken).catch(() => null),
         fetchAccountOverview(accessToken).catch(() => null),
+        fetchPlatformSyncStatus(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
       setWorkerStatus(worker);
+      setSyncStatus(platform);
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
         setAvatarUrl(account.avatarUrl);
@@ -241,6 +251,16 @@ export function FounderOsDashboardLayout({
                   {resumeBusy ? 'Loading…' : '▶ Resume Work'}
                 </button>
               </header>
+
+              <HybridControlPlane
+                accessToken={accessToken}
+                onMessage={onMessage}
+                onRefresh={() => {
+                  void load();
+                  onRefresh();
+                }}
+                autoRunWhenAutopilot
+              />
 
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
@@ -426,6 +446,28 @@ export function FounderOsDashboardLayout({
           </aside>
         )}
       </div>
+
+      <AutopilotPromoToast
+        show={showMissionControl}
+        autopilotEnabled={syncStatus?.autopilotEnabled ?? false}
+        pendingPublishCount={syncStatus?.pendingPublishCount}
+        onEnable={async () => {
+          try {
+            await updateBuilderSettings(
+              {
+                autopilotEnabled: true,
+                autopilotRedeployHosts: true,
+                autoPublishOnEvent: true,
+              },
+              accessToken,
+            );
+            onMessage?.('Autopilot enabled');
+            void load();
+          } catch (err) {
+            onMessage?.(err instanceof Error ? err.message : 'Failed to enable autopilot');
+          }
+        }}
+      />
 
       <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/80 bg-[#0a0a0e] px-4 py-2 text-[10px] text-zinc-600">
         <span className="flex items-center gap-1.5">

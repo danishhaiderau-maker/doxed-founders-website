@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
-import { AiProvider, MemoryStorageMode } from '@prisma/client';
+import { AiProvider, ControlPlaneMode, MemoryStorageMode } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { GitHubApiService } from '../github/github-api.service';
@@ -26,6 +26,9 @@ export class BuilderController {
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
+      autopilotEnabled?: boolean;
+      autopilotRedeployHosts?: boolean;
+      controlPlaneMode?: ControlPlaneMode;
       currentGoalFocus?: string;
       memoryStorageMode?: MemoryStorageMode;
     },

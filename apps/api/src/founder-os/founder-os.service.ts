@@ -656,7 +656,7 @@ export class FounderOsService {
       payload: {
         suggestionId: record.id,
         provider: payload.provider ?? cred.provider,
-        autoPublish: settings?.autoPublishOnEvent ?? false,
+        autoPublish: (settings?.autoPublishOnEvent || settings?.autopilotEnabled) ?? false,
       },
       dedupeKey: `deploy:${record.id}`,
     });

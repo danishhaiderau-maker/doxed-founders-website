@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { AiProvider, MemoryStorageMode, Prisma } from '@prisma/client';
+import { AiProvider, ControlPlaneMode, MemoryStorageMode, Prisma } from '@prisma/client';
 import {
   AI_PROVIDERS,
   QUICK_BUILD_AI_SYSTEM,
@@ -66,6 +66,9 @@ export class BuilderService {
       preferredModel: settings.preferredModel,
       autoCreateGitHubIssues: settings.autoCreateGitHubIssues,
       autoPublishOnEvent: settings.autoPublishOnEvent,
+      autopilotEnabled: settings.autopilotEnabled,
+      autopilotRedeployHosts: settings.autopilotRedeployHosts,
+      controlPlaneMode: settings.controlPlaneMode,
       currentGoalFocus: settings.currentGoalFocus,
       memoryStorageMode: settings.memoryStorageMode,
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
@@ -99,6 +102,9 @@ export class BuilderService {
       preferredModel?: string;
       autoCreateGitHubIssues?: boolean;
       autoPublishOnEvent?: boolean;
+      autopilotEnabled?: boolean;
+      autopilotRedeployHosts?: boolean;
+      controlPlaneMode?: ControlPlaneMode;
       currentGoalFocus?: string;
       memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC' | 'FOUNDER_NODE';
     },
@@ -146,6 +152,9 @@ export class BuilderService {
         preferredModel: input.preferredModel,
         autoCreateGitHubIssues: input.autoCreateGitHubIssues ?? false,
         autoPublishOnEvent: input.autoPublishOnEvent ?? false,
+        autopilotEnabled: input.autopilotEnabled ?? false,
+        autopilotRedeployHosts: input.autopilotRedeployHosts ?? false,
+        controlPlaneMode: input.controlPlaneMode ?? ControlPlaneMode.FULL_STACK,
         currentGoalFocus: input.currentGoalFocus,
         memoryStorageMode: input.memoryStorageMode ?? MemoryStorageMode.PLATFORM,
       },
@@ -157,6 +166,15 @@ export class BuilderService {
           : {}),
         ...(input.autoPublishOnEvent !== undefined
           ? { autoPublishOnEvent: input.autoPublishOnEvent }
+          : {}),
+        ...(input.autopilotEnabled !== undefined
+          ? { autopilotEnabled: input.autopilotEnabled }
+          : {}),
+        ...(input.autopilotRedeployHosts !== undefined
+          ? { autopilotRedeployHosts: input.autopilotRedeployHosts }
+          : {}),
+        ...(input.controlPlaneMode !== undefined
+          ? { controlPlaneMode: input.controlPlaneMode }
           : {}),
         ...(input.currentGoalFocus !== undefined ? { currentGoalFocus: input.currentGoalFocus } : {}),
         ...(input.memoryStorageMode !== undefined
