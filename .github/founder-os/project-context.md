@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Track AI token adoption on landing and explain Discover bubble visibility for founders.
+chore(founder-os): init launch checklist
 
 ## Last Activity
 
