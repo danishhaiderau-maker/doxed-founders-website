@@ -271,16 +271,16 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
       {/* Navigation hub — 3-row table directly under CTAs */}
       <LandingHubNavTable scoutPending={pendingReviews} />
 
-      {/* Value grid (4 panels) + fun fact — above Feed / preview widgets */}
+      {/* Value grid (4 panels) + fun fact */}
       <LandingValueGrid />
 
-      {/* Feed · DDollar · Trust · Founder OS previews */}
-      <LandingHubPreviews scoutPending={pendingReviews} platformStats={stats} />
-
-      {/* Row 3: Platform stats */}
+      {/* Platform stats — above Feed / preview widgets */}
       <section>
         <PlatformStatsPanel stats={stats} />
       </section>
+
+      {/* Feed · DDollar · Trust · Founder OS previews */}
+      <LandingHubPreviews scoutPending={pendingReviews} platformStats={stats} />
 
       {/* Row 4: Why Doxxed exists */}
       <section>
