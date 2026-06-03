@@ -19,6 +19,7 @@ import {
   fetchBuilderSettings,
   fetchBuilderWorkerStatus,
   fetchCopilotSocialDraft,
+  syncGitHubCommits,
   ProjectRoom,
 } from '@/lib/api';
 
@@ -160,14 +161,15 @@ export function FounderSocialHub({
     setDraftingKey(agent.key);
     setErr(null);
     try {
+      await syncGitHubCommits(accessToken).catch(() => undefined);
       const result = await fetchCopilotSocialDraft(agent.key, accessToken);
       setHeadline(result.headline);
       setBody(result.body);
       setLastDraftProvider(agent.label);
       onMessage?.(
         result.fallback
-          ? `${agent.label}: used project summary (connect an LLM for richer copy)`
-          : `${agent.label} drafted your update — edit and publish`,
+          ? `${agent.label}: drafted from your last 24h of GitHub commits (connect DeepSeek in AI Stack for richer AI copy)`
+          : `${agent.label} drafted from live GitHub + memory — edit and publish`,
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Draft failed';
@@ -179,10 +181,13 @@ export function FounderSocialHub({
   }
 
   const shareUrl = room ? `${origin}/project/${room.slug}` : origin;
+  const listingLabel = room?.ticker
+    ? `$${room.ticker.replace(/^\$/, '')}`
+    : room?.name;
   const xTweetText = buildXUpdateTweet({
     headline: headline.trim() || 'Founder update',
     traderSummary: body.trim().split('\n')[0] ?? '',
-    projectName: room?.name,
+    projectName: listingLabel,
   });
   const canPublish = Boolean(headline.trim() && body.trim());
 
@@ -202,8 +207,8 @@ export function FounderSocialHub({
       <section className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5">
         <h2 className="text-sm font-semibold text-white">Founder update</h2>
         <p className="mt-1 text-xs text-zinc-500">
-          Pick an AI to interpret what you shipped (even if it was only code) — why it matters and who
-          it helps.
+          Syncs GitHub, memory, and deploy checks for the last 24 hours — then DeepSeek or Cursor writes
+          a trader-friendly post (admin platform footer appended when configured).
         </p>
 
         {draftAgents.length > 0 ? (

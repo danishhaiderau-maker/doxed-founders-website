@@ -2,6 +2,7 @@
 
 import { DDOLLAR_CURRENCY_NAME, formatDdollar } from './ddollar';
 import type { ControlPlaneReadiness } from './control-plane';
+import { translateCommitForTraders } from './github-translate';
 
 export type SocialDraftCommit = {
   sha: string;
@@ -217,33 +218,125 @@ export function buildMissingLinkNarrativeHints(input: {
   );
 }
 
+export function resolveProjectDisplayForSocial(project?: {
+  name?: string | null;
+  ticker?: string | null;
+} | null): { displayName: string; ticker: string | null } {
+  const name = project?.name?.trim();
+  const rawTicker = project?.ticker?.trim().replace(/^\$/, '') ?? null;
+  const ticker = rawTicker ? `$${rawTicker}` : null;
+  if (name && ticker) {
+    return { displayName: `${name} (${ticker})`, ticker };
+  }
+  return { displayName: name ?? ticker ?? 'our project', ticker };
+}
+
+/** Plain-English digest of last-24h commits for traders (no LLM). */
+export function formatCommitsLast24hForTraders(
+  commits: SocialDraftCommit[],
+  projectDisplayName: string,
+): string {
+  if (commits.length === 0) {
+    return [
+      `**Last 24 hours on GitHub** — no new pushes yet for ${projectDisplayName}.`,
+      'If you coded locally, run `git push` so Founder OS and traders see real progress.',
+    ].join('\n');
+  }
+  const lines = [
+    `**Last 24 hours** — ${commits.length} commit${commits.length === 1 ? '' : 's'} on GitHub for ${projectDisplayName}:`,
+  ];
+  for (const c of commits.slice(0, 15)) {
+    const subject = c.message.split('\n')[0]?.trim() ?? c.message;
+    lines.push(`- \`${c.sha.slice(0, 7)}\` ${subject}`);
+    lines.push(`  → ${translateCommitForTraders(c.message)}`);
+  }
+  if (commits.length > 15) {
+    lines.push(`_…and ${commits.length - 15} more commit(s) in the same window._`);
+  }
+  return lines.join('\n');
+}
+
+export function buildFounderUpdateFallback(input: {
+  projectDisplayName: string;
+  commits24h: SocialDraftCommit[];
+  currentGoal?: string;
+  suggestedNext?: string;
+  launchReadiness?: number;
+  buildStreakDays?: number;
+  completedTasks?: string[];
+  platformClosing?: string;
+}): { headline: string; body: string; xHook: string } {
+  const digest = formatCommitsLast24hForTraders(input.commits24h, input.projectDisplayName);
+  const taskBlock =
+    input.completedTasks && input.completedTasks.length > 0
+      ? ['', '**Shipped in Mission Control:**', ...input.completedTasks.map((t) => `- ${t}`)]
+      : [];
+
+  const headline =
+    input.commits24h[0]?.message.split('\n')[0]?.slice(0, 100) ??
+    `Building ${input.projectDisplayName} in public`;
+
+  const body = [
+    `Here’s what we actually shipped for **${input.projectDisplayName}** in the last 24 hours — in plain English for traders and the community.`,
+    '',
+    digest,
+    ...taskBlock,
+    input.launchReadiness != null
+      ? `\n**Launch readiness:** ${input.launchReadiness}%${input.buildStreakDays != null ? ` · **Build streak:** ${input.buildStreakDays} day(s)` : ''}`
+      : '',
+    input.currentGoal ? `\n**Current focus:** ${input.currentGoal}` : '',
+    input.suggestedNext ? `\n**Next:** ${input.suggestedNext}` : '',
+    input.platformClosing
+      ? ['', '---', input.platformClosing.trim()]
+      : [],
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const xHook =
+    input.commits24h.length > 0
+      ? `${input.projectDisplayName}: ${input.commits24h[0].message.split('\n')[0]?.slice(0, 160) ?? 'New commits live'}`
+      : `${input.projectDisplayName} — shipping in public on Doxxed Crypto`;
+
+  return {
+    headline: headline.slice(0, 200),
+    body: body.slice(0, 6000),
+    xHook: xHook.slice(0, 280),
+  };
+}
+
 /** System prompt for Social Hub — LLM must return HEADLINE / BODY / X_HOOK blocks. */
-export function buildSocialDraftSystemPrompt(codeAgent?: string | null): string {
+export function buildSocialDraftSystemPrompt(
+  codeAgent?: string | null,
+  options?: { forcedLlm?: 'DEEPSEEK' | 'OPENAI' | 'ANTHROPIC' | 'GEMINI' | 'OPENROUTER' | 'PHALA' },
+): string {
   const lens =
     codeAgent === 'CURSOR'
       ? [
-          'You are drafting as the founder’s Cursor coding agent — you shipped the commits in context.',
-          'You must use ALL structured sections below: founder account, hybrid control plane (include every ✗ fail line verbatim in meaning),',
-          'last commit detail, day-by-day commit breakdown, highlights, and missing-link narrative.',
-          'Explain how recent commits + infra fixes close gaps in the stack (GitHub → memory → deploy → publish → community).',
+          'You are drafting as the founder’s Cursor coding agent who shipped the commits listed under LAST 24 HOURS.',
+          'Use GitHub truth, Mission Control memory, hybrid control plane, and deploy checks.',
+          'Never claim “no work” if commits are listed. Never recycle old feed headlines.',
         ].join(' ')
       : codeAgent === 'OPENHANDS'
-        ? 'You interpret the founder’s latest repo and builder activity (as their OpenHands coding agent). Use every context section provided.'
-        : 'You are an elite crypto founder marketing writer for build-in-public. Use every context section provided.';
+        ? 'You interpret the founder’s repo as their OpenHands agent. Use every section; only last-24h commits count as “today”.'
+        : options?.forcedLlm === 'DEEPSEEK'
+          ? 'You are DeepSeek drafting a founder build-in-public update. Be precise, warm, and trader-friendly.'
+          : 'You are an elite crypto founder marketing writer. Use every context section.';
 
   return [
     lens,
-    'Read the technical context and write for non-developers.',
-    'Explain WHAT shipped, WHY it matters, WHO benefits, and how it fixes “missing links” (trust, sync, deploy, publish) — like a sharp build-in-public story, not a raw changelog.',
-    'Include concrete proof: cite at least one commit subject/SHA, mention launch readiness or Ddollar balance if provided, and reference control-plane ✗ items as optional Stack connections (not as “the product is down”).',
-    'Use simple English. No jargon unless you immediately explain it.',
-    'Be honest — only claim what the context supports.',
-    'BODY should weave: (1) headline win, (2) day-by-day shipping rhythm, (3) hybrid plane / account snapshot, (4) what gap was closed, (5) what’s next.',
+    'Audience: crypto traders and community members — NOT developers. Use layman terms.',
+    'Deep dive ONLY on work from the LAST 24 HOURS section (commits, tasks, deploys). Ignore stale headlines.',
+    'Explain WHAT changed, WHY traders should care, WHO benefits, and what trust gap closed.',
+    'Cite at least 2 real commit subjects or SHAs from LAST 24 HOURS. Name the project using PROJECT DISPLAY NAME (includes $TICKER when provided).',
+    'If PLATFORM CLOSING is provided, weave its spirit into the final paragraph (do not paste verbatim unless it fits).',
+    'Never repeat bullet lines like "Day N — 8 commits" unless that exact count is in LAST 24 HOURS.',
+    'Never invent outages, hacks, or scanner failures.',
     '',
-    'Return exactly this format (no extra sections):',
-    'HEADLINE: (one punchy line, max 120 chars)',
-    'BODY: (3–5 short paragraphs covering commits, infra/account context, missing links fixed, next step)',
-    'X_HOOK: (one tweet-sized hook under 220 chars, exciting, no hashtag spam)',
+    'Return exactly:',
+    'HEADLINE: (one punchy line, max 120 chars, trader-friendly)',
+    'BODY: (4–6 short paragraphs: today’s wins, plain-English per theme, infra/memory snapshot, what’s next)',
+    'X_HOOK: (under 220 chars, exciting, no hashtag spam)',
   ].join('\n');
 }
 

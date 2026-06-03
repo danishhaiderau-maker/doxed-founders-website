@@ -3622,6 +3622,8 @@ export function fetchCopilotSocialDraft(provider: string | undefined, token: str
     llmProvider?: string;
     llmErrors?: string[];
     fallback?: boolean;
+    projectDisplayName?: string;
+    platformClosing?: string;
   }>(
     '/copilot/social-draft',
     { method: 'POST', body: JSON.stringify({ provider: provider ?? undefined }) },
