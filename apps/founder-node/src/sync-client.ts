@@ -72,6 +72,11 @@ export async function syncVaultMetadata(
   }
 }
 
+export function isFounderNodeAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\((401|403)\)/.test(msg) || /unauthorized/i.test(msg);
+}
+
 export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeHeartbeat {
   const ramGb = Math.round(os.totalmem() / 1e9);
   return {

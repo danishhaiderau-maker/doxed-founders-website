@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import {
   BuilderSettings,
@@ -16,6 +15,7 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
+import { GitHubPatConnectGuide } from '@/components/settings/github-pat-connect-guide';
 import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
@@ -499,12 +499,16 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         <div className="rounded-xl border border-zinc-800 p-4">
         <h3 className="font-semibold text-white">GitHub personal access token</h3>
         <p className="mt-1 text-sm text-zinc-500">
-          Required for creating issues and listing PRs on private repos. Connect repo in{' '}
-          <Link href="/founder-den?tab=build" className="text-emerald-400 underline">
-            Founder Copilot
-          </Link>{' '}
-          first.
+          Optional for public repos; <strong className="text-zinc-300">required for private repos</strong> so Founder
+          OS can sync commits, list PRs, publish issues, and update{' '}
+          <code className="text-violet-300/90">.github/founder-os/</code> memory files.
         </p>
+
+        <GitHubPatConnectGuide
+          githubTokenConnected={settings.githubTokenConnected}
+          repoLinked={settings.repoFullName ?? null}
+        />
+
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <input
             type="password"

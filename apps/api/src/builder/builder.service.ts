@@ -73,6 +73,16 @@ export class BuilderService {
     const ollamaStatus = await this.founderNodeInference.getOllamaStatus(userId);
     const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
     const founderNodeV2 = await this.founderNodeSync.getV2Status(userId);
+    const githubConn = await this.prisma.gitHubConnection.findUnique({
+      where: { userId },
+      select: { repoFullName: true, accessTokenEncrypted: true },
+    });
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      select: { githubRepoFullName: true },
+    });
+    const repoFullName =
+      githubConn?.repoFullName ?? founder?.githubRepoFullName ?? null;
 
     return {
       defaultProvider: settings.defaultProvider,
@@ -100,11 +110,9 @@ export class BuilderService {
                 ? ollamaStatus.ollamaReady
                 : connected.has(p.credentialProvider!),
       })),
-      githubTokenConnected: Boolean(
-        await this.prisma.gitHubConnection.findFirst({
-          where: { userId, accessTokenEncrypted: { not: null } },
-        }),
-      ),
+      githubTokenConnected: Boolean(githubConn?.accessTokenEncrypted),
+      repoFullName:
+        repoFullName && !String(repoFullName).endsWith('/pending-setup') ? repoFullName : null,
     };
   }
 

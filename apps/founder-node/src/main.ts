@@ -7,6 +7,7 @@ import {
   ensureVault,
   loadOrCreateNodeId,
   readNodeConfig,
+  clearNodeConfig,
   writeNodeConfig,
   buildSnapshotFromVault,
   vaultDiskStats,
@@ -14,6 +15,7 @@ import {
 import {
   defaultHeartbeat,
   pairNode,
+  isFounderNodeAuthError,
   sendHeartbeat,
   syncVaultMetadata,
 } from './sync-client';
@@ -175,6 +177,22 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   } catch (err) {
     lastSyncError = err instanceof Error ? err.message : String(err);
     console.error('Founder Node sync cycle failed:', lastSyncError);
+    if (isFounderNodeAuthError(err)) {
+      if (syncTimer) {
+        clearInterval(syncTimer);
+        syncTimer = null;
+      }
+      clearNodeConfig(vaultRoot);
+      lastSyncError =
+        'Session expired on the server — enter a new pairing code from Founder OS (Settings → Builder).';
+      refreshTrayMenu(vaultRoot);
+      notifyDesktop(
+        'Founder Node needs pairing',
+        'Your link expired. Generate a new code on the website and pair again.',
+      );
+      openPairWindow();
+      return;
+    }
     refreshTrayMenu(vaultRoot);
     throw err;
   }

@@ -3165,6 +3165,7 @@ export interface BuilderSettings {
   currentGoalFocus: string | null;
   memoryStorageMode?: string;
   githubTokenConnected: boolean;
+  repoFullName?: string | null;
   openHandsBaseUrl: string | null;
   cursorAgentUrl: string | null;
   founderNodeAi?: {
