@@ -1,3 +1,5 @@
+param([switch]$NonInteractive)
+
 # Stop all Founder Node main processes (keeps vault). Restart Explorer to clear ghost tray icons.
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -16,13 +18,15 @@ if (Test-Path $lock) {
   Write-Host 'Removed stale lock file.'
 }
 
-Write-Host ''
-Write-Host 'Optional: restart Explorer to clear old tray icons (log out/in also works).'
-$answer = Read-Host 'Restart Explorer now? (y/N)'
-if ($answer -eq 'y' -or $answer -eq 'Y') {
-  Stop-Process -Name explorer -Force
-  Start-Process explorer
-  Write-Host 'Explorer restarted.'
+if (-not $NonInteractive) {
+  Write-Host ''
+  Write-Host 'Optional: restart Explorer to clear old tray icons (log out/in also works).'
+  $answer = Read-Host 'Restart Explorer now? (y/N)'
+  if ($answer -eq 'y' -or $answer -eq 'Y') {
+    Stop-Process -Name explorer -Force
+    Start-Process explorer
+    Write-Host 'Explorer restarted.'
+  }
 }
 
 $installed = Join-Path $env:LOCALAPPDATA 'Programs\@dcffounder-node\Founder Node.exe'
@@ -31,5 +35,5 @@ if (Test-Path $installed) {
   Write-Host "Starting single instance: $installed"
   Start-Process -FilePath $installed
 } else {
-  Write-Host 'Install Founder Node from Founder OS (Settings → Builder) if not installed.'
+  Write-Host 'Install Founder Node from Founder OS (Settings - Builder) if not installed.'
 }

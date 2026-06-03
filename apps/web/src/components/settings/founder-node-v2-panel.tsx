@@ -172,9 +172,16 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
         </p>
       )}
 
+      {!v2?.paired && (
+        <p className="mt-3 text-xs text-amber-200/90">
+          Complete <strong className="text-amber-100">Step 2</strong> first — generate a pairing code and enter it in the
+          Founder Node tray app on this PC.
+        </p>
+      )}
+
       {v2?.paired && !v2.online && (
         <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-semibold text-amber-200">Paired, but desktop app is offline</p>
+          <p className="font-semibold text-amber-200">Paired on Founder OS, but desktop app is offline</p>
           <p className="mt-2 text-xs leading-relaxed text-zinc-300">
             <strong className="text-white">Paired</strong> means this browser account is linked to your machine (one-time
             setup). <strong className="text-white">Online</strong> means the Founder Node tray app is running on your PC
