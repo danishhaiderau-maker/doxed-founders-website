@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, Notification } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,6 +48,28 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 let inferenceTimer: ReturnType<typeof setInterval> | null = null;
 let syncJobTimer: ReturnType<typeof setInterval> | null = null;
 let syncJobInFlight = false;
+let lastSyncOkAt: Date | null = null;
+let lastSyncError: string | null = null;
+
+function notifyDesktop(title: string, body: string): void {
+  if (!Notification.isSupported()) return;
+  try {
+    new Notification({ title, body }).show();
+  } catch {
+    /* optional on some Linux setups */
+  }
+}
+
+function formatLastSyncLine(): string {
+  if (lastSyncError) {
+    return `Last sync failed: ${lastSyncError.slice(0, 72)}`;
+  }
+  if (lastSyncOkAt) {
+    const mins = Math.max(0, Math.floor((Date.now() - lastSyncOkAt.getTime()) / 60_000));
+    return mins < 1 ? 'Last sync: just now' : `Last sync: ${mins}m ago`;
+  }
+  return 'Last sync: waiting…';
+}
 
 function loadAppIcon() {
   const candidates = [
@@ -128,22 +150,33 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
 
   const ollama = await resolveOllamaConfig(vaultRoot);
 
-  await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
-    ...defaultHeartbeat(config.label, vaultRoot),
-    nodeId: config.nodeId,
-    storageGb: disk.storageGb,
-    storageFreeGb: disk.storageFreeGb,
-    ollamaEnabled: Boolean(ollama),
-    ollamaBaseUrl: ollama?.baseUrl,
-    ollamaModel: ollama?.model,
-  });
-
-  await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
-
   try {
-    maybeRebuildVectorIndex(vaultRoot);
+    await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
+      ...defaultHeartbeat(config.label, vaultRoot),
+      nodeId: config.nodeId,
+      storageGb: disk.storageGb,
+      storageFreeGb: disk.storageFreeGb,
+      ollamaEnabled: Boolean(ollama),
+      ollamaBaseUrl: ollama?.baseUrl,
+      ollamaModel: ollama?.model,
+    });
+
+    await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
+
+    lastSyncOkAt = new Date();
+    lastSyncError = null;
+    refreshTrayMenu(vaultRoot);
+
+    try {
+      maybeRebuildVectorIndex(vaultRoot);
+    } catch (err) {
+      console.warn('Vector index rebuild skipped:', err);
+    }
   } catch (err) {
-    console.warn('Vector index rebuild skipped:', err);
+    lastSyncError = err instanceof Error ? err.message : String(err);
+    console.error('Founder Node sync cycle failed:', lastSyncError);
+    refreshTrayMenu(vaultRoot);
+    throw err;
   }
 }
 
@@ -204,9 +237,9 @@ function openPairWindow(): void {
           code: document.getElementById('code').value.trim(),
           label: document.getElementById('label').value.trim(),
         });
-        msg.textContent = 'Paired! Vault sync will run in the background.';
+        msg.textContent = 'Paired! This window will close — Founder Node keeps running in your system tray (icon near the clock). Do not click Quit in the tray menu.';
         msg.className = 'ok';
-        setTimeout(() => window.close(), 1500);
+        setTimeout(() => window.close(), 5000);
       } catch (e) {
         msg.textContent = e.message || String(e);
         msg.className = 'err';
@@ -232,6 +265,10 @@ function buildTrayMenu(vaultRoot: string) {
     },
     {
       label: config ? `Connected: ${config.label}` : 'Not paired',
+      enabled: false,
+    },
+    {
+      label: config ? formatLastSyncLine() : 'Pair to enable sync',
       enabled: false,
     },
   ];
@@ -344,6 +381,10 @@ app.whenReady().then(() => {
 
       refreshTrayMenu(vaultRoot);
       startSyncLoop(vaultRoot);
+      notifyDesktop(
+        'Founder Node connected',
+        'Vault paired. This app runs in the system tray — keep it open so Founder OS shows online.',
+      );
     },
   );
 });
