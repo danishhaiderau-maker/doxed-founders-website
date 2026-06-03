@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(listings): optional project GitHub repo for Discover activity tracking
+chore(founder-os): sync tasks
 
 ## Last Activity
 
