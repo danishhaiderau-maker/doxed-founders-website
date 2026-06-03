@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SiteNav } from '@/components/site-nav';
 import { ProjectCard } from '@/components/project-card';
+import { ProjectsFounderClaimBanner } from '@/components/projects-founder-claim-banner';
 import { fetchProjects, ProjectSummary } from '@/lib/api';
 
 export default function ProjectsPage() {
@@ -109,6 +110,8 @@ export default function ProjectsPage() {
             Browse founders →
           </Link>
         </div>
+
+        <ProjectsFounderClaimBanner />
 
         {error && (
           <p className="mt-6 rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-3 text-sm text-red-300">
