@@ -11,6 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vault = join(dirname(root), 'doxedcryptofounder-secrets', 'vault');
 
 const RAILWAY_API = 'https://doxed-founders-website-production.up.railway.app';
+const BTC_BOT_URL = 'https://btc-conservative-agent-production.up.railway.app';
 const SITE_URL = 'https://doxxedcrypto.digital';
 const RAILWAY_GQL = 'https://backboard.railway.com/graphql/v2';
 
@@ -153,6 +154,7 @@ async function main() {
   }
 
   const vercelVars = {
+    NEXT_PUBLIC_API_URL: apiUrl,
     API_URL: apiUrl,
     NEXTAUTH_URL: SITE_URL,
     NEXTAUTH_SECRET: nextAuthSecret,
@@ -184,6 +186,14 @@ async function main() {
       PRISMA_DB_PUSH: 'true',
       PRISMA_SCHEMA: 'prisma/schema.prisma',
       CORS_ORIGINS: cors,
+      API_URL: apiUrl,
+      WEB_APP_URL: SITE_URL,
+      PUBLIC_SITE_URL: SITE_URL,
+      WEBAUTHN_ORIGIN: SITE_URL,
+      WEBAUTHN_RP_ID: 'doxxedcrypto.digital',
+      TRADING_AGENT_BOT_URL: BTC_BOT_URL,
+      CONSERVATIVE_BTC_BOT_URL: BTC_BOT_URL,
+      RAILWAY_TOKEN: railwayToken,
     });
   } else {
     console.warn('\nSkip Railway API sync — set RAILWAY_TOKEN in vault/.env.x.secrets');
