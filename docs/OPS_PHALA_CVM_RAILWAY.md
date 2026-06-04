@@ -13,6 +13,16 @@ Founder browser → Vercel → Railway API
 
 ---
 
+## One-command Step 1 (after secrets are filled)
+
+```bash
+npm run bootstrap:phala-cvm-env   # once — JWT_SECRET + PHALA_CVM_API_KEY
+# Edit vault/.env.phala → add PHALA_CLOUD_API_KEY=phak_... (Phala Cloud dashboard)
+npm run phala-cvm:step1           # deploy CVM → apply Railway → probe
+```
+
+---
+
 ## Step 1 — Bootstrap secrets file
 
 ```bash
@@ -24,15 +34,24 @@ Creates `../doxedcryptofounder-secrets/vault/.env.phala` with:
 - `JWT_SECRET` copied from `.env.vercel.check` (must match Railway API)
 - Random `PHALA_CVM_API_KEY` (workload bearer token)
 
-Add your Redpill/Phala key:
+Add tokens:
 
 ```env
-PHALA_API_KEY=phak_...
+PHALA_CLOUD_API_KEY=phak_...   # https://cloud.phala.network/dashboard/tokens — required to deploy CVM
+PHALA_API_KEY=phak_...         # optional same or separate — platform Phala inference
 ```
 
 ---
 
 ## Step 2 — Deploy CVM workload on Phala Cloud
+
+Automated:
+
+```bash
+npm run deploy:phala-cvm
+```
+
+Manual:
 
 Repo: `workers/phala-cvm-workload/`
 
