@@ -251,6 +251,20 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
       {/* Primary CTAs */}
       <section className="flex flex-wrap gap-2">
         <Link
+          href="/paper-trading"
+          className="rounded-xl border border-amber-500/50 bg-amber-950/35 px-5 py-2.5 text-sm font-semibold text-amber-50 shadow-lg shadow-amber-950/30 hover:bg-amber-900/40"
+        >
+          Trading Alpha
+          <span className="mt-0.5 block text-[10px] font-normal text-amber-200/70">Paper desk · verified rank</span>
+        </Link>
+        <Link
+          href="/predict?tab=rules"
+          className="rounded-xl border border-indigo-500/50 bg-indigo-950/40 px-5 py-2.5 text-sm font-semibold text-indigo-50 shadow-lg shadow-indigo-950/30 hover:bg-indigo-900/40"
+        >
+          Predictions
+          <span className="mt-0.5 block text-[10px] font-normal text-indigo-200/70">Constitution · Oracle rank</span>
+        </Link>
+        <Link
           href="/founder-den"
           className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500"
         >

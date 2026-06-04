@@ -27,6 +27,7 @@ const TRADING_NAV = [
   { href: '/feed', label: 'Feed', feedBadge: true as const },
   { href: '/ddollar', label: 'DDollar' },
   { href: '/paper-trading', label: 'Trading Alpha' },
+  { href: '/predict?tab=rules', label: 'Predictions' },
   { href: '/leaderboard', label: 'Top Traders' },
   { href: '/watchlist', label: 'Watchlist', auth: true },
   { hrefKey: 'portfolio' as const, label: 'Portfolio', auth: true },
@@ -83,6 +84,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/feed') return pathname === '/feed' || pathname === '/build-feed' || pathname.startsWith('/town-hall');
   if (href === '/ddollar') return pathname.startsWith('/ddollar');
   if (href === '/paper-trading') return pathname.startsWith('/paper-trading');
+  if (href.startsWith('/predict')) return pathname.startsWith('/predict');
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');

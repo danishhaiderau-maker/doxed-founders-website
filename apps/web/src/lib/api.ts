@@ -3359,6 +3359,24 @@ export interface BuilderSettings {
   controlPlaneMode?: string;
   currentGoalFocus: string | null;
   memoryStorageMode?: string;
+  secretsStorageMode?: string;
+  secretsStatus?: {
+    mode: string;
+    modeLabel: string;
+    phalaInferenceOnly: boolean;
+    credentialCount: number;
+    sealedPhalaCount: number;
+    credentials: Array<{
+      provider: string;
+      tier: string;
+      tierLabel: string;
+      connected: boolean;
+      sealedAt: string | null;
+    }>;
+    recentAccessCount: number;
+    lastAccessAt: string | null;
+    summary: string;
+  };
   githubTokenConnected: boolean;
   repoFullName?: string | null;
   openHandsBaseUrl: string | null;
@@ -3498,6 +3516,15 @@ export function fetchAttestationDashboard(token: string) {
       status: 'healthy' | 'partial' | 'offline';
       checks: Array<{ name: string; ok: boolean; detail?: string }>;
       lastVaultScanAt: string | null;
+    };
+    secretsStorage?: {
+      mode: string;
+      modeLabel: string;
+      phalaInferenceOnly: boolean;
+      credentialCount: number;
+      recentAccessCount: number;
+      lastAccessAt: string | null;
+      summary: string;
     };
     phalaTee: {
       recentCount: number;
@@ -3995,6 +4022,22 @@ export type PredictionMarketItem = ScoutMarketItem;
 
 export function fetchPredictionMarkets(token?: string) {
   return apiFetch<PredictionMarketItem[]>('/prediction-markets', undefined, token);
+}
+
+export interface OracleLeaderboardEntry {
+  userId: string;
+  displayName: string;
+  marketsWon: number;
+  marketsLost: number;
+  marketsPlayed: number;
+  accuracyPct: number;
+  oracleScore: number;
+  netDdollarUsd: number;
+  avgDifficulty: number;
+}
+
+export function fetchOracleLeaderboard() {
+  return apiFetch<OracleLeaderboardEntry[]>('/prediction-markets/oracle-leaderboard');
 }
 
 export function fetchScoutMarkets(slug: string, token?: string) {
