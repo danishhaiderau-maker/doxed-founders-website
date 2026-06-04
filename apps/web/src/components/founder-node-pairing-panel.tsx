@@ -161,7 +161,10 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         <>
           <ol className="mt-3 list-inside list-decimal space-y-1 text-xs text-zinc-300">
             <li>Download and open Founder Node (tray app).</li>
-            <li>Generate a pairing code below and paste it once into Founder Node.</li>
+            <li>
+              Generate a pairing code below and paste it once into the <strong>Founder Node tray popup</strong>{' '}
+              (Pair this machine — not a browser tab).
+            </li>
             <li>When connected, this code disappears — you will not re-enter it every 15 minutes.</li>
           </ol>
 

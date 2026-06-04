@@ -7,6 +7,7 @@ import { FounderNodeDownloads } from '@/components/founder-node-downloads';
 import { MemoryStoragePanel } from '@/components/memory-storage-panel';
 import { FounderNodeV2Panel } from '@/components/settings/founder-node-v2-panel';
 import { AttestationDashboardPanel } from '@/components/settings/attestation-dashboard-panel';
+import { PhalaCvmSealPanel } from '@/components/settings/phala-cvm-seal-panel';
 import { PhalaCvmVaultPanel } from '@/components/settings/phala-cvm-vault-panel';
 import { SealedSecretsPanel } from '@/components/settings/sealed-secrets-panel';
 import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
@@ -136,6 +137,12 @@ export function FounderNodeHubPanel({
         >
           <div className="space-y-4">
             <SealedSecretsPanel settings={settings} />
+            <PhalaCvmSealPanel
+              embedded
+              accessToken={accessToken}
+              cvmUnwrapReadyFromSettings={settings.secretsStatus?.cvmUnwrapReady}
+              activeUnwrapPathLabel={settings.secretsStatus?.activeUnwrapPathLabel}
+            />
             <PhalaCvmVaultPanel embedded accessToken={accessToken} />
             <AttestationDashboardPanel embedded accessToken={accessToken} />
           </div>

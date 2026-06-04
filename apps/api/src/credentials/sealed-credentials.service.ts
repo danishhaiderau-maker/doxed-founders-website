@@ -3,17 +3,22 @@ import { SecretsStorageMode } from '@prisma/client';
 import {
   SecretsAccessDeniedError,
   assertUnwrapAllowed,
+  readPhalaCvmSealPlatformConfig,
   readSecretsSeal,
   resolveSecretsTier,
   secretsTierForProvider,
+  secretsTierForStorageMode,
   secretsTierLabel,
   secretsStorageModeLabel,
+  unwrapPathLabel,
   withSecretsSeal,
   type SecretUnwrapPurpose,
   type SecretsSealTier,
+  type SecretsUnwrapPath,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { CredentialsCryptoService } from './credentials-crypto.service';
+import { CvmSealService } from './cvm-seal.service';
 
 const SECRET_ACCESS_KIND = 'SECRET_ACCESS';
 
@@ -21,6 +26,9 @@ export type SecretsStatusDto = {
   mode: SecretsStorageMode;
   modeLabel: string;
   phalaInferenceOnly: boolean;
+  cvmUnwrapReady: boolean;
+  activeUnwrapPath: SecretsUnwrapPath;
+  activeUnwrapPathLabel: string;
   credentialCount: number;
   sealedPhalaCount: number;
   credentials: Array<{
@@ -40,6 +48,7 @@ export class SealedCredentialsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CredentialsCryptoService,
+    private readonly cvmSeal: CvmSealService,
   ) {}
 
   async getStatus(userId: string): Promise<SecretsStatusDto> {
@@ -81,19 +90,27 @@ export class SealedCredentialsService {
     const phalaInferenceOnly = rows.some(
       (r) => r.provider === 'phala' && r.tier === 'phala_inference_only',
     );
+    const sealStatus = await this.cvmSeal.getSealStatus(userId);
+    const cvmConfigured = readPhalaCvmSealPlatformConfig().configured;
+    const activeUnwrapPath = sealStatus.activeUnwrapPath;
 
     return {
       mode,
       modeLabel: secretsStorageModeLabel(mode),
       phalaInferenceOnly,
+      cvmUnwrapReady: sealStatus.cvmUnwrapReady,
+      activeUnwrapPath,
+      activeUnwrapPathLabel: unwrapPathLabel(activeUnwrapPath),
       credentialCount: rows.length,
       sealedPhalaCount: rows.filter((r) => r.tier === 'phala_inference_only').length,
       credentials: rows,
       recentAccessCount: recentAccess,
       lastAccessAt: lastAccess?.createdAt.toISOString() ?? null,
-      summary: phalaInferenceOnly
-        ? 'Phala keys are inference-sealed; other keys are AES-encrypted and only unwrapped on the server for approved tasks.'
-        : 'API keys are AES-256-GCM encrypted at rest; unwrap events are audited — raw keys never reach the browser.',
+      summary: cvmConfigured
+        ? 'Credential unwrap routes through Phala CVM when configured; falls back to platform AES if the workload is unreachable.'
+        : phalaInferenceOnly
+          ? 'Phala keys are inference-sealed; other keys are AES-encrypted and only unwrapped on the server for approved tasks.'
+          : 'API keys are AES-256-GCM encrypted at rest; unwrap events are audited — raw keys never reach the browser.',
     };
   }
 
@@ -112,8 +129,12 @@ export class SealedCredentialsService {
   sealMetadata(
     provider: string,
     metadata: Record<string, unknown> | null | undefined,
+    secretsStorageMode?: SecretsStorageMode,
   ): Record<string, unknown> {
-    return withSecretsSeal(metadata, secretsTierForProvider(provider));
+    const tier = secretsStorageMode
+      ? secretsTierForStorageMode(provider, secretsStorageMode)
+      : secretsTierForProvider(provider);
+    return withSecretsSeal(metadata, tier);
   }
 
   async audit(
@@ -121,7 +142,9 @@ export class SealedCredentialsService {
     provider: string,
     action: 'store' | 'unwrap',
     purpose: SecretUnwrapPurpose,
+    unwrapPath?: SecretsUnwrapPath,
   ): Promise<void> {
+    const pathSuffix = unwrapPath ? ` [${unwrapPath}]` : '';
     await this.prisma.privacyAttestationLog
       .create({
         data: {
@@ -129,7 +152,7 @@ export class SealedCredentialsService {
           kind: SECRET_ACCESS_KIND,
           status: 'recorded',
           provider,
-          summary: `${action}:${provider} (${purpose})`,
+          summary: `${action}:${provider} (${purpose})${pathSuffix}`,
         },
       })
       .catch(() => undefined);
@@ -154,9 +177,25 @@ export class SealedCredentialsService {
       }
       throw e;
     }
-    const plain = this.crypto.decrypt(row.token);
+    let plain: string | null = null;
+    let unwrapPath: SecretsUnwrapPath = 'platform_encrypted';
+
+    const cvmAttempt = await this.cvmSeal.tryUnwrapViaCvm({
+      userId,
+      provider,
+      purpose,
+      encryptedToken: row.token,
+    });
+    if (cvmAttempt.plain) {
+      plain = cvmAttempt.plain;
+      unwrapPath = cvmAttempt.path;
+    } else {
+      plain = this.crypto.decrypt(row.token);
+      unwrapPath = 'platform_encrypted';
+    }
+
     if (plain && !options?.skipAudit) {
-      await this.audit(userId, provider, 'unwrap', purpose);
+      await this.audit(userId, provider, 'unwrap', purpose, unwrapPath);
     }
     return plain;
   }

@@ -20,6 +20,17 @@ export function SealedSecretsPanel({ settings }: Props) {
           <dt className="text-zinc-500">Storage mode</dt>
           <dd className="text-zinc-300">{status.modeLabel}</dd>
         </div>
+        {'activeUnwrapPathLabel' in status && status.activeUnwrapPathLabel && (
+          <div className="flex justify-between gap-4">
+            <dt className="text-zinc-500">Unwrap path</dt>
+            <dd className="text-zinc-300">{status.activeUnwrapPathLabel}</dd>
+          </div>
+        )}
+        {'cvmUnwrapReady' in status && status.cvmUnwrapReady && (
+          <div className="rounded-md border border-emerald-500/25 bg-emerald-950/20 px-2 py-1.5 text-emerald-300">
+            Phala CVM unwrap tier active — credentials unseal in TEE when configured.
+          </div>
+        )}
         <div className="flex justify-between gap-4">
           <dt className="text-zinc-500">Connected credentials</dt>
           <dd className="text-zinc-300">{status.credentialCount}</dd>

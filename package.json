@@ -16,6 +16,7 @@
     "pack:founder-node:linux": "node scripts/pack-founder-node.mjs --linux",
     "pack:founder-node:all": "node scripts/pack-founder-node.mjs --all",
     "pack:android": "node scripts/pack-android-app.mjs",
+    "diagnose:founder-node": "node scripts/diagnose-founder-node.mjs",
     "build:founder-vault": "npm run build --workspace=@dcf/founder-vault",
     "dev:web": "turbo run dev --filter=@dcf/web",
     "dev:api": "turbo run dev --filter=@dcf/api",

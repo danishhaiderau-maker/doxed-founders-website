@@ -3607,6 +3607,9 @@ export interface BuilderSettings {
     mode: string;
     modeLabel: string;
     phalaInferenceOnly: boolean;
+    cvmUnwrapReady?: boolean;
+    activeUnwrapPath?: string;
+    activeUnwrapPathLabel?: string;
     credentialCount: number;
     sealedPhalaCount: number;
     credentials: Array<{
@@ -3817,6 +3820,18 @@ export function verifyPhalaAttestation(token: string, logId?: string) {
 
 export function fetchVaultCvmCapabilities() {
   return apiFetch<import('@dcf/utils').PhalaCvmCapabilitiesPayload>('/vault/cvm-capabilities');
+}
+
+export function fetchVaultCvmSealCapabilities() {
+  return apiFetch<import('@dcf/utils').PhalaCvmSealCapabilitiesPayload>('/vault/cvm-seal-capabilities');
+}
+
+export function fetchVaultCvmSealStatus(token: string) {
+  return apiFetch<import('@dcf/utils').PhalaCvmSealStatusPayload>(
+    '/vault/cvm-seal-status',
+    undefined,
+    token,
+  );
 }
 
 export function fetchVaultCvmStatus(token: string) {

@@ -384,8 +384,9 @@ function openPairWindow(): void {
   code { background: #27272a; padding: 2px 6px; border-radius: 4px; }
 </style></head><body>
   <h1>Pair this machine</h1>
-  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then enter it here.</p>
-  <p style="margin-top:12px"><button type="button" id="openWeb" style="width:100%;padding:10px;border-radius:8px;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;cursor:pointer;font-weight:600">Open pairing page in browser</button></p>
+  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then paste the <strong>8-character code here</strong> (not in the browser).</p>
+  <p style="font-size:0.8rem;color:#fbbf24">If you already generated a new code after pairing once, the old link is dead — use the latest code only.</p>
+  <p style="margin-top:12px"><button type="button" id="openWeb" style="width:100%;padding:10px;border-radius:8px;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;cursor:pointer;font-weight:600">Open Builder settings in browser</button></p>
   <label>Founder OS URL</label>
   <input id="api" value="${DEFAULT_API}" />
   <label>Pairing code</label>
@@ -585,23 +586,33 @@ app.whenReady().then(() => {
       _event: unknown,
       input: { apiBaseUrl: string; code: string; label: string },
     ) => {
-      const result = await pairNode(input.apiBaseUrl, {
+      const apiBaseUrl = input.apiBaseUrl.replace(/\/$/, '');
+      const label = input.label || `${os.hostname()} Founder Node`;
+      const result = await pairNode(apiBaseUrl, {
         code: input.code,
         nodeId,
-        label: input.label || `${os.hostname()} Founder Node`,
+        label,
         platform: process.platform,
         appVersion: FOUNDER_NODE_APP_VERSION,
       });
 
-      writeNodeConfig(vaultRoot, {
-        version: 1,
-        apiBaseUrl: input.apiBaseUrl.replace(/\/$/, ''),
+      const draftConfig = {
+        version: 1 as const,
+        apiBaseUrl,
         nodeId: result.nodeId,
         nodeToken: result.nodeToken,
-        label: input.label || `${os.hostname()} Founder Node`,
+        label,
         pairedAt: new Date().toISOString(),
         ollama: defaultOllamaConfig(),
+      };
+
+      // Prove credentials before saving — avoids "paired" UI with immediate 401 sync.
+      await sendHeartbeat(apiBaseUrl, result.nodeId, result.nodeToken, {
+        ...defaultHeartbeat(label, vaultRoot),
+        nodeId: result.nodeId,
       });
+
+      writeNodeConfig(vaultRoot, draftConfig);
 
       resetAuthRecoveryState();
       refreshTrayMenu(vaultRoot);
