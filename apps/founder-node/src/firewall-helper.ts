@@ -17,7 +17,7 @@ export function getAppExecutablePath(): string {
 
 /** True when repeated sync failures look like network/firewall, not auth. */
 export function shouldOfferFirewallHelp(consecutiveTransientFailures: number): boolean {
-  return isWindows() && app.isPackaged && consecutiveTransientFailures >= 2;
+  return isWindows() && app.isPackaged && consecutiveTransientFailures >= 1;
 }
 
 export function canShowFirewallPrompt(): boolean {

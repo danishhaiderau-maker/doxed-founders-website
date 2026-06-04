@@ -6,7 +6,7 @@ export function classifySyncFailure(err: unknown): SyncFailureKind {
   if (isFounderNodeAuthError(err)) return 'auth';
   const msg = err instanceof Error ? err.message : String(err);
   if (
-    /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|socket hang up|network/i.test(
+    /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|socket hang up|network|timed out|timeout|502|503|504|certificate|SSL|TLS|blocked|firewall|ECONNABORTED/i.test(
       msg,
     )
   ) {
@@ -23,5 +23,5 @@ export function transientRetryDelayMs(consecutiveTransientFailures: number): num
 }
 
 export function authFailureUserMessage(): string {
-  return 'Session expired on the server — enter a new pairing code from Founder OS (Settings → Builder).';
+  return 'Desktop link expired (not a firewall issue) — generate a new pairing code in Founder OS → Settings → Builder and paste it in the tray app.';
 }
