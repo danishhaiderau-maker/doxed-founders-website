@@ -11,37 +11,74 @@ import {
   sendPlatformMessage,
   type MessageThread,
 } from '@/lib/api';
+import { subscribeInboxRefresh } from '@/lib/inbox-refresh';
+
+const POLL_MS = 15_000;
+
+function sumThreadUnread(threads: MessageThread[]): number {
+  return threads.reduce((n, t) => n + (t.unreadCount > 0 ? t.unreadCount : 0), 0);
+}
 
 export function useUnreadMessageCount(token: string | undefined) {
   const [count, setCount] = useState(0);
+
+  const refresh = useCallback(async () => {
+    if (!token) {
+      setCount(0);
+      return;
+    }
+    try {
+      const res = await fetchUnreadMessageCount(token);
+      setCount(res.count);
+    } catch {
+      try {
+        const threads = await fetchMessageThreads(token);
+        setCount(sumThreadUnread(threads));
+      } catch {
+        setCount((prev) => prev);
+      }
+    }
+  }, [token]);
 
   useEffect(() => {
     if (!token) {
       setCount(0);
       return;
     }
-    let cancelled = false;
-    async function poll() {
-      try {
-        const res = await fetchUnreadMessageCount(token!);
-        if (!cancelled) setCount(res.count);
-      } catch {
-        if (!cancelled) setCount(0);
-      }
-    }
-    poll();
-    const interval = setInterval(poll, 30_000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
+    void refresh();
+    const interval = setInterval(() => void refresh(), POLL_MS);
+    const onFocus = () => void refresh();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
     };
-  }, [token]);
+    const unsubInbox = subscribeInboxRefresh(() => void refresh());
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      unsubInbox();
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [token, refresh]);
 
   return count;
 }
 
+function MessageCountBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="pointer-events-none absolute -right-1 -top-1 z-10 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-violet-300/40 bg-violet-600 px-1 text-[10px] font-bold leading-none text-white shadow-[0_0_8px_rgba(139,92,246,0.55)]"
+      aria-hidden
+    >
+      {count > 99 ? '99+' : count > 9 ? '9+' : count}
+    </span>
+  );
+}
+
 export function PlatformMessagesBell() {
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
   const token = session?.accessToken;
   const unread = useUnreadMessageCount(token);
   const [open, setOpen] = useState(false);
@@ -68,9 +105,25 @@ export function PlatformMessagesBell() {
   useEffect(() => {
     if (!token) return;
     load();
-    const interval = setInterval(load, 30_000);
-    return () => clearInterval(interval);
+    const interval = setInterval(load, POLL_MS);
+    const onFocus = () => void load();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    const unsubInbox = subscribeInboxRefresh(() => void load());
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      unsubInbox();
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [token, load]);
+
+  useEffect(() => {
+    if (open && token) void load();
+  }, [open, token, load]);
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -82,12 +135,29 @@ export function PlatformMessagesBell() {
     return () => document.removeEventListener('click', onDocClick);
   }, []);
 
+  if (status === 'loading') {
+    return (
+      <span
+        className="relative inline-flex rounded-lg px-2.5 py-1.5 text-zinc-500"
+        title="Loading messages…"
+        aria-hidden
+      >
+        ✉️
+      </span>
+    );
+  }
+
   if (!token) {
+    const signedIn = status === 'authenticated';
     return (
       <Link
-        href="/login?callbackUrl=/account?tab=messages"
-        className="rounded-lg px-2.5 py-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
-        title="Sign in for messages"
+        href={signedIn ? '/account?tab=messages' : '/login?callbackUrl=/account?tab=messages'}
+        className="relative inline-flex overflow-visible rounded-lg px-2.5 py-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
+        title={
+          signedIn
+            ? 'Open messages (refresh sign-in if counts do not appear)'
+            : 'Sign in for messages'
+        }
       >
         ✉️
       </Link>
@@ -130,21 +200,20 @@ export function PlatformMessagesBell() {
     }
   }
 
+  const threadUnread = sumThreadUnread(threads);
+  const badgeCount = Math.max(unread, threadUnread);
+
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative overflow-visible" ref={ref}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="relative rounded-lg px-2.5 py-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
-        title="Messages"
-        aria-label={`Messages${unread > 0 ? `, ${unread} unread` : ''}`}
+        className="relative inline-flex overflow-visible rounded-lg px-2.5 py-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
+        title={badgeCount > 0 ? `${badgeCount} unread message${badgeCount === 1 ? '' : 's'}` : 'Messages'}
+        aria-label={`Messages${badgeCount > 0 ? `, ${badgeCount} unread` : ''}`}
       >
         ✉️
-        {unread > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-bold text-black">
-            {unread > 9 ? '9+' : unread}
-          </span>
-        )}
+        <MessageCountBadge count={badgeCount} />
       </button>
 
       {open && (
@@ -216,7 +285,7 @@ export function PlatformMessagesBell() {
                     <div className="flex items-start justify-between gap-2">
                       <p className="text-sm font-medium text-white">{t.otherUserLabel}</p>
                       {t.unreadCount > 0 && (
-                        <span className="rounded-full bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        <span className="rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
                           {t.unreadCount}
                         </span>
                       )}

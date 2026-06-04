@@ -11,6 +11,7 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
 } from '@/lib/api';
+import { subscribeInboxRefresh } from '@/lib/inbox-refresh';
 
 function accent(type: string, read: boolean) {
   if (type.includes('AGENT') || type === 'AGENT_RESULT') return 'border-purple-500/40';
@@ -46,9 +47,25 @@ export function NotificationBell() {
   useEffect(() => {
     if (!token) return;
     load();
-    const interval = setInterval(load, 60_000);
-    return () => clearInterval(interval);
+    const interval = setInterval(load, 30_000);
+    const onFocus = () => void load();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    const unsubInbox = subscribeInboxRefresh(() => void load());
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      unsubInbox();
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [token, load]);
+
+  useEffect(() => {
+    if (open && token) void load();
+  }, [open, token, load]);
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -83,18 +100,18 @@ export function NotificationBell() {
   }
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative overflow-visible" ref={ref}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="relative rounded-lg px-2.5 py-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
-        title="Notifications"
+        className="relative inline-flex overflow-visible rounded-lg px-2.5 py-1.5 text-zinc-300 transition hover:bg-zinc-800 hover:text-white"
+        title={unread > 0 ? `${unread} unread notification${unread === 1 ? '' : 's'}` : 'Notifications'}
         aria-label={`Notifications${unread > 0 ? `, ${unread} unread` : ''}`}
       >
         🔔
         {unread > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold text-black">
-            {unread > 9 ? '9+' : unread}
+          <span className="pointer-events-none absolute -right-1 -top-1 z-10 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-emerald-300/40 bg-emerald-600 px-1 text-[10px] font-bold leading-none text-white shadow-[0_0_8px_rgba(16,185,129,0.45)]">
+            {unread > 99 ? '99+' : unread > 9 ? '9+' : unread}
           </span>
         )}
       </button>
