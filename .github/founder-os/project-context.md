@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix unread message badge on landing and site header.
+chore(founder-os): sync roadmap
 
 ## Last Activity
 
