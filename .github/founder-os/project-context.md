@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (3 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(founder-den): provider-specific Ask/Build actions, drop Attention center
 
 ## Last Activity
 
