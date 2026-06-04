@@ -183,6 +183,7 @@ export function FounderOsDashboardLayout({
     missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
   const displayNextStep =
     rawNextStep && !isStaleBoilerplateMissionTask(rawNextStep) ? rawNextStep : null;
+  const openBuilderTask = buildRoom?.grouped.tasks.find((t) => t.status !== 'DONE');
   const copilotUsageLines = useMemo(() => {
     const actions = listCopilotActions(aiProviders, defaultAiProvider, {
       cursor: workerStatus?.connections?.cursor,
