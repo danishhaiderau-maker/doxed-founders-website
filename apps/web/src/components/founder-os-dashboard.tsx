@@ -10,11 +10,13 @@ import {
   resolveAiStackHealth,
   STAGE_COLOR_CLASSES,
   isAgentRunActive,
+  isStaleBoilerplateMissionTask,
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
 import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
+import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
 import { MissionStatePanel } from '@/components/mission-state-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
@@ -56,6 +58,7 @@ const SIDEBAR_NAV: NavItem[] = [
 ];
 
 const COPILOT_CHIPS = [
+  "What's the status?",
   'What am I working on?',
   'What should I ship today?',
   'What broke yesterday?',
@@ -174,8 +177,10 @@ export function FounderOsDashboardLayout({
   const currentGoal = memory?.currentGoal ?? 'Set your current goal in Settings';
   const displayInitiative =
     missionIntel?.currentInitiative?.trim() || currentGoal;
-  const displayNextStep =
+  const rawNextStep =
     missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
+  const displayNextStep =
+    rawNextStep && !isStaleBoilerplateMissionTask(rawNextStep) ? rawNextStep : null;
   const openBuilderTask = buildRoom?.grouped.tasks.find((t) => t.status !== 'DONE');
 
   const aiStackHealth = useMemo(
@@ -406,6 +411,14 @@ export function FounderOsDashboardLayout({
                   </button>
                 </div>
               </header>
+
+              <FounderMissionControlQuickstart
+                onTryStatus={() => {
+                  setQuickPrompt("What's the status?");
+                  setChatKey((k) => k + 1);
+                }}
+                onTryResume={() => void handleResumeWork()}
+              />
 
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,32%)]">
                 <div className="flex min-w-0 flex-col gap-4">

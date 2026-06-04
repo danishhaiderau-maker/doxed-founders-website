@@ -6,7 +6,7 @@ export function isStaleBoilerplateMissionTask(title: string | null | undefined):
   if (!title?.trim()) return false;
   const t = title.trim().toLowerCase();
   return (
-    /security hardening|owasp|burp suite|hsts header/.test(t) ||
+    /security hardening|owasp|burp suite|hsts header|review api keys/.test(t) ||
     /define (mvp|your next milestone|your next)/.test(t) ||
     /^define your next milestone/.test(t) ||
     /deploy verification.*(dns|ssl|page load)/.test(t) ||
