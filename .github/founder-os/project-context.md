@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(mission): Sprint 7d one-click build from Mission State with poll and after-build sync
+chore(founder-os): sync tasks
 
 ## Last Activity
 
