@@ -212,34 +212,55 @@ function PlatformStatsPanel({ stats }: { stats: PlatformStats | null }) {
 
 function FounderNodeProductCard() {
   return (
-    <Card className="border-emerald-500/20 bg-gradient-to-br from-emerald-950/20 to-zinc-950/80 p-3">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-400">Founder Node</p>
-      <div className="mt-2 flex h-[4.5rem] items-center justify-center rounded-xl border border-zinc-800 bg-black/50">
-        <div className="flex h-12 w-16 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 shadow-inner">
-          <span className="text-2xl" aria-hidden>
-            🖥
-          </span>
+    <div className="grid gap-3 sm:grid-cols-2">
+      <Card className="border-emerald-500/20 bg-gradient-to-br from-emerald-950/20 to-zinc-950/80 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-400">Android app</p>
+        <div className="mt-2 flex h-[4.5rem] items-center justify-center rounded-xl border border-zinc-800 bg-black/50">
+          <div className="flex h-12 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 shadow-inner">
+            <span className="text-2xl" aria-hidden>
+              📱
+            </span>
+          </div>
         </div>
-      </div>
-      <ul className="mt-2.5 space-y-1 text-[11px] text-zinc-300">
-        {[
-          'Self-custody vault on your PC',
-          'Your memory stays yours',
-          'Metadata sync only',
-          'Phala TEE encryption',
-          'Private data stays private',
-        ].map((line) => (
-          <li key={line} className="flex gap-2">
-            <span className="text-emerald-400">✓</span>
-            {line}
-          </li>
-        ))}
-      </ul>
-      <Link href="/settings/builder" className="mt-2 inline-block text-xs font-semibold text-emerald-300 hover:underline">
-        Download Founder Node →
-      </Link>
-      <p className="mt-0.5 text-[9px] text-zinc-600">Works on Windows, macOS, Linux</p>
-    </Card>
+        <ul className="mt-2.5 space-y-1 text-[11px] text-zinc-300">
+          {['Discover & trading on phone', 'Agents & Founder OS', 'Same login as the website'].map((line) => (
+            <li key={line} className="flex gap-2">
+              <span className="text-emerald-400">✓</span>
+              {line}
+            </li>
+          ))}
+        </ul>
+        <Link href="/mobile" className="mt-2 inline-block text-xs font-semibold text-emerald-300 hover:underline">
+          Download Android APK →
+        </Link>
+      </Card>
+      <Card className="border-violet-500/20 bg-gradient-to-br from-violet-950/20 to-zinc-950/80 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">Founder Node</p>
+        <div className="mt-2 flex h-[4.5rem] items-center justify-center rounded-xl border border-zinc-800 bg-black/50">
+          <div className="flex h-12 w-16 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 shadow-inner">
+            <span className="text-2xl" aria-hidden>
+              🖥
+            </span>
+          </div>
+        </div>
+        <ul className="mt-2.5 space-y-1 text-[11px] text-zinc-300">
+          {[
+            'Self-custody vault on your PC',
+            'Encrypted relay — server cannot read notes',
+            'Phala TEE or Ollama for private AI',
+          ].map((line) => (
+            <li key={line} className="flex gap-2">
+              <span className="text-violet-400">✓</span>
+              {line}
+            </li>
+          ))}
+        </ul>
+        <Link href="/settings/builder" className="mt-2 inline-block text-xs font-semibold text-violet-300 hover:underline">
+          Download Founder Node →
+        </Link>
+        <p className="mt-0.5 text-[9px] text-zinc-600">Windows, macOS, Linux</p>
+      </Card>
+    </div>
   );
 }
 
@@ -269,6 +290,13 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500"
         >
           Open Mission Control →
+        </Link>
+        <Link
+          href="/mobile"
+          className="rounded-xl border border-emerald-500/50 bg-emerald-950/35 px-5 py-2.5 text-sm font-semibold text-emerald-50 shadow-lg shadow-emerald-950/30 hover:bg-emerald-900/40"
+        >
+          Android app
+          <span className="mt-0.5 block text-[10px] font-normal text-emerald-200/70">Free APK · Discover &amp; trading</span>
         </Link>
         <Link
           href="/list-your-project"

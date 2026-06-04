@@ -48,6 +48,7 @@ flowchart TB
 
 **Protect your devices:** lock screen, official [Founder Node releases](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) only, revoke old paired nodes in Settings, never share `node-config.json`. Details → [**PRIVACY.md**](./PRIVACY.md).
 
+→ **Download Android app:** [doxxedcrypto.digital/mobile](https://doxxedcrypto.digital/mobile) · APK: `/downloads/doxxedcrypto-android.apk`  
 → **Mobile app & vault sync roadmap:** [docs/MOBILE_VAULT_ROADMAP.md](docs/MOBILE_VAULT_ROADMAP.md)  
 → **System architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)  
 → **Privacy stack (Steps 1–5):** [docs/PRIVACY_STACK.md](docs/PRIVACY_STACK.md)
