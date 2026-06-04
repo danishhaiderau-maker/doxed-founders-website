@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): remove sidebar Run build, use Build in chat
+fix(web): restore updateBuilderSettings import
 
 ## Last Activity
 
