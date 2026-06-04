@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(privacy): P0 data-class audit and public/private split
+feat(founder-node): v0.5.3 firewall prompts, Linux builds, smoother updates
 
 ## Last Activity
 
