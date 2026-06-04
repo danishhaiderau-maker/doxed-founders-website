@@ -1,0 +1,16 @@
+name: Security ZAP Baseline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  zap-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'https://doxxedcrypto.digital'
+          cmd_options: '-a -j'
+          allow_issue_writing: false

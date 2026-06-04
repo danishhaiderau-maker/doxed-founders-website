@@ -703,6 +703,24 @@ export class FounderCopilotService {
     };
   }
 
+  /** After GitHub sync — align mission graph with commit intelligence (not stale tasks.json). */
+  async reconcileMissionGraphFromGithub(userId: string) {
+    const intel = await this.computeMissionIntelligenceForUser(userId);
+    await this.reconcileMissionGraphWithIntelligence(userId, intel);
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    const goal = settings?.currentGoalFocus?.trim() ?? '';
+    if (
+      isStaleBoilerplateMissionTask(goal) &&
+      intel.currentInitiative?.trim()
+    ) {
+      await this.prisma.founderBuilderSettings.update({
+        where: { userId },
+        data: { currentGoalFocus: intel.currentInitiative.slice(0, 200) },
+      });
+    }
+  }
+
   private async reconcileMissionGraphWithIntelligence(
     userId: string,
     intel: Awaited<ReturnType<FounderCopilotService['computeMissionIntelligenceForUser']>>,

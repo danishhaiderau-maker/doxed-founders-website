@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, forwardRef } from '@nestjs/common';
 import { FounderEventType } from '@prisma/client';
 import { buildSuggestedUpdateFromCommits } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -9,6 +9,7 @@ import {
   publicBuildDayNumberForFounder,
   repairFounderBuildStreakIfInflated,
 } from './founder-build-streak.helper';
+import { FounderCopilotService } from '../events/founder-copilot.service';
 
 const USER_STALE_MS = 5 * 60 * 1000;
 const BACKGROUND_INTERVAL_MS = 15 * 60 * 1000;
@@ -38,6 +39,8 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
     private readonly github: GitHubApiService,
     private readonly events: EventsService,
     private readonly memory: FounderOsMemoryService,
+    @Inject(forwardRef(() => FounderCopilotService))
+    private readonly copilot: FounderCopilotService,
   ) {}
 
   onModuleInit() {
@@ -153,6 +156,7 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
     });
 
     void this.memory.syncProjectMemoryToRepo(userId, repo).catch(() => undefined);
+    void this.copilot.reconcileMissionGraphFromGithub(userId).catch(() => undefined);
 
     const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
     await this.events.emit({

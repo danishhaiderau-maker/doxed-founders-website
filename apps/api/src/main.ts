@@ -15,6 +15,10 @@ async function bootstrap() {
   }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  const http = app.getHttpAdapter().getInstance();
+  if (typeof http?.disable === 'function') {
+    http.disable('x-powered-by');
+  }
 
   app.setGlobalPrefix('api');
 
