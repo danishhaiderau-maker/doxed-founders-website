@@ -40,12 +40,16 @@ import { VoiceWaveform } from '@/components/voice-waveform';
 import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import {
   AI_STACK_HREF,
+  buildCopilotUsageLines,
+  CopilotAction,
   CopilotSendMode,
+  copilotActionSendMode,
   copilotSetupGapMessage,
-  defaultSendMode,
+  defaultCopilotAction,
   formatMessageProviderLabel,
   listChatProviders,
-  primaryButtonLabel,
+  listCopilotActions,
+  primaryButtonLabelForAction,
   ProviderRow,
   resolveAiTeamCards,
   resolveCopilotSendMode,
@@ -135,7 +139,7 @@ export function FounderCopilotChat({
     cursor: boolean;
     openHands: boolean;
   }>({ cursor: false, openHands: false });
-  const [sendMode, setSendMode] = useState<CopilotSendMode>(defaultSendModeProp ?? 'ask');
+  const [selectedActionId, setSelectedActionId] = useState<string | null>(null);
   const [preferredChatKey, setPreferredChatKey] = useState<string | null>(null);
   const [preferredBuildWorker, setPreferredBuildWorker] = useState<'CURSOR' | 'OPENHANDS' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -156,6 +160,25 @@ export function FounderCopilotChat({
   const { connected: chatProviderOptions } = useMemo(
     () => listChatProviders(providers, activeChatProvider),
     [providers, activeChatProvider],
+  );
+
+  const copilotActions = useMemo(
+    () => listCopilotActions(providers, activeChatProvider, workerConnections),
+    [providers, activeChatProvider, workerConnections],
+  );
+
+  const selectedAction = useMemo(
+    () =>
+      copilotActions.find((a) => a.id === selectedActionId) ??
+      defaultCopilotAction(copilotActions, defaultProvider),
+    [copilotActions, selectedActionId, defaultProvider],
+  );
+
+  const sendMode: CopilotSendMode = copilotActionSendMode(selectedAction);
+
+  const usageLines = useMemo(
+    () => buildCopilotUsageLines(copilotActions, defaultProvider),
+    [copilotActions, defaultProvider],
   );
 
   const askProviderLabel = useMemo(() => {
@@ -262,12 +285,40 @@ export function FounderCopilotChat({
   }, [loadMeta]);
 
   useEffect(() => {
-    if (defaultSendModeProp) {
-      setSendMode(defaultSendModeProp);
-      return;
-    }
-    setSendMode(defaultSendMode(stack));
-  }, [stack.canAsk, stack.canBuild, defaultSendModeProp]);
+    const def = defaultCopilotAction(copilotActions, defaultProvider);
+    if (!def) return;
+    setSelectedActionId((prev) => {
+      if (prev && copilotActions.some((a) => a.id === prev)) return prev;
+      if (defaultSendModeProp === 'ask') {
+        const ask = copilotActions.find((a) => a.kind === 'ask');
+        if (ask) return ask.id;
+      }
+      if (defaultSendModeProp === 'build') {
+        const build = copilotActions.find((a) => a.kind === 'build');
+        if (build) return build.id;
+      }
+      return def.id;
+    });
+  }, [copilotActions, defaultProvider, defaultSendModeProp]);
+
+  const applySelectedAction = useCallback(
+    (action: CopilotAction | null) => {
+      if (!action) return;
+      if (action.kind === 'ask' && action.providerKey) {
+        setPreferredChatKey(action.providerKey);
+        if (action.providerKey !== 'RULE_BASED') {
+          void updateBuilderSettings({ defaultProvider: action.providerKey }, accessToken).catch(
+            () => undefined,
+          );
+        }
+      }
+      if (action.kind === 'build' && action.workerKey) {
+        setPreferredBuildWorker(action.workerKey);
+        setBuildWorker(action.workerKey);
+      }
+    },
+    [accessToken],
+  );
 
   const syncMissionAfterBuild = useCallback(
     async (task: string, snap: BuilderRunSnapshot) => {
@@ -376,8 +427,12 @@ export function FounderCopilotChat({
       stop();
       setError(null);
 
+      applySelectedAction(selectedAction);
       const effectiveMode = resolveCopilotSendMode(q, stack, mode);
-      if (effectiveMode !== mode) setSendMode('ask');
+      if (effectiveMode !== mode) {
+        const askAction = copilotActions.find((a) => a.kind === 'ask');
+        if (askAction) setSelectedActionId(askAction.id);
+      }
 
       const setupGap = copilotSetupGapMessage(effectiveMode, stack);
       if (setupGap) {
@@ -631,7 +686,9 @@ export function FounderCopilotChat({
       activeChatProvider,
       agentTemplate,
       askProviderLabel,
+      applySelectedAction,
       busy,
+      copilotActions,
       loadMeta,
       memory?.repoFullName,
       refreshWorkspaceStrip,
@@ -641,10 +698,8 @@ export function FounderCopilotChat({
       pollOpenHandsIntoMessage,
       preferredBuildWorker,
       providers,
-      stack.buildLabel,
-      stack.buildWorker,
-      stack.buildWorkers,
-      stack.canBuild,
+      selectedAction,
+      stack,
       stop,
       streamAssistantAnswer,
     ],
@@ -684,14 +739,13 @@ export function FounderCopilotChat({
 
   const isHero = variant === 'hero';
   const isEmbedded = variant === 'embedded';
-  const showModeToggle = stack.canAsk && stack.canBuild;
-  const buttonLabel = primaryButtonLabel(sendMode, stack);
+  const buttonLabel = primaryButtonLabelForAction(selectedAction);
   const placeholder =
-    sendMode === 'build' && stack.canBuild
-      ? `Tell ${stack.buildLabel} what to implement in your repo…`
-      : stack.canAsk
-        ? `Ask ${stack.askLabel} about your project…`
-        : 'Ask about your project (uses project memory until you connect an LLM)…';
+    selectedAction?.kind === 'build'
+      ? `What should ${selectedAction.label.replace(/^Build with /, '')} implement in your repo?`
+      : selectedAction?.kind === 'ask'
+        ? `${selectedAction.label} about your project…`
+        : 'Ask about your project…';
 
   return (
     <section
@@ -712,7 +766,9 @@ export function FounderCopilotChat({
             <p className="truncate text-xs text-zinc-500">
               {isHero ? (
                 <span className="text-violet-300">
-                  Founder Brain — routes build, research, and strategy automatically
+                  {copilotActions.length > 0
+                    ? copilotActions.map((a) => a.label).join(' · ')
+                    : 'Connect models in Settings → AI stack'}
                 </span>
               ) : (
                 <>
@@ -757,14 +813,15 @@ export function FounderCopilotChat({
                 Founder Brain gives tailored answers — not generic rule-based replies.
               </p>
             )}
-            {isHero && (
-              <p className="rounded-lg border border-cyan-500/20 bg-cyan-950/10 px-3 py-2 text-left text-xs text-zinc-400">
-                <strong className="text-cyan-300">Try first:</strong> leave mode on{' '}
-                <strong className="text-violet-300">Ask</strong> and send{' '}
-                <strong className="text-zinc-200">What&apos;s the status?</strong> — Founder Brain
-                answers from GitHub commits, not old task lists. Use <strong className="text-zinc-200">Build</strong>{' '}
-                only when you want Cursor to change code.
-              </p>
+            {isHero && usageLines.length > 0 && (
+              <ul className="rounded-lg border border-cyan-500/20 bg-cyan-950/10 px-3 py-2 text-left text-xs text-zinc-400 space-y-1.5">
+                {usageLines.map((line) => (
+                  <li key={line.title}>
+                    <strong className="text-cyan-300">{line.title}</strong>
+                    {line.detail ? ` — ${line.detail}` : ''}
+                  </li>
+                ))}
+              </ul>
             )}
             {isHero && missionInitiative && (
               <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2 text-left text-xs text-zinc-300">
@@ -783,8 +840,9 @@ export function FounderCopilotChat({
                 ) : null}
               </p>
             )}
-            <p>Type a goal below. Pick <strong className="text-violet-300">Ask</strong> for status, or{' '}
-            <strong className="text-emerald-300">Build</strong> to ship code — all in this chat.</p>
+            <p>
+              Type below, then pick your model or code agent and send.
+            </p>
           </div>
         )}
         {messages.map((m) => (
@@ -834,7 +892,13 @@ export function FounderCopilotChat({
                         : /create pr|finish|implement|fix|ship/i.test(chip) && stack.canBuild
                           ? 'build'
                           : 'ask';
-                  if (mode === 'build') setSendMode('build');
+                  if (mode === 'build') {
+                    const buildAction = copilotActions.find((a) => a.kind === 'build');
+                    if (buildAction) setSelectedActionId(buildAction.id);
+                  } else {
+                    const askAction = copilotActions.find((a) => a.kind === 'ask');
+                    if (askAction) setSelectedActionId(askAction.id);
+                  }
                   void submit(chip, mode);
                 }}
                 className="rounded-full border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-[11px] text-zinc-300 hover:border-violet-500/50 hover:text-white"
@@ -851,7 +915,7 @@ export function FounderCopilotChat({
       )}
 
       <div className="border-t border-zinc-800 bg-[#0a0a0c] p-3">
-        {!isHero && chatProviderOptions.length > 1 && sendMode === 'ask' && (
+        {!isHero && chatProviderOptions.length > 1 && selectedAction?.kind === 'ask' && (
           <div className="mb-2">
             <label className="text-[10px] text-zinc-500">Chat with</label>
             <select
@@ -875,7 +939,7 @@ export function FounderCopilotChat({
             </select>
           </div>
         )}
-        {!isHero && stack.buildWorkers.length > 1 && sendMode === 'build' && (
+        {!isHero && stack.buildWorkers.length > 1 && selectedAction?.kind === 'build' && (
           <div className="mb-2">
             <label className="text-[10px] text-zinc-500">Code with</label>
             <select
@@ -895,44 +959,38 @@ export function FounderCopilotChat({
             </select>
           </div>
         )}
-        {isHero && (chatProviderOptions.length > 1 || stack.buildWorkers.length > 1) && (
-          <p className="mb-2 text-[10px] text-zinc-600">
-            Routing is automatic.{' '}
-            <Link href={AI_STACK_HREF} className="text-violet-400 hover:underline">
-              Advanced → Settings
+        {copilotActions.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {copilotActions.map((action) => {
+              const active = selectedAction?.id === action.id;
+              const isBuild = action.kind === 'build';
+              return (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedActionId(action.id);
+                    applySelectedAction(action);
+                  }}
+                  className={`rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition ${
+                    active
+                      ? isBuild
+                        ? 'bg-emerald-700 text-white'
+                        : 'bg-violet-600 text-white'
+                      : 'border border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-200'
+                  }`}
+                >
+                  {action.label}
+                </button>
+              );
+            })}
+            <Link
+              href={AI_STACK_HREF}
+              className="self-center px-1 text-[10px] text-zinc-600 hover:text-violet-400"
+            >
+              Settings
             </Link>
-          </p>
-        )}
-        {showModeToggle && (
-          <div className="mb-2 flex rounded-lg border border-zinc-800 p-0.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() => setSendMode('ask')}
-              className={`flex-1 rounded-md px-2 py-1.5 font-medium transition ${
-                sendMode === 'ask'
-                  ? 'bg-violet-600 text-white'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              Ask
-            </button>
-            <button
-              type="button"
-              onClick={() => setSendMode('build')}
-              className={`flex-1 rounded-md px-2 py-1.5 font-medium transition ${
-                sendMode === 'build'
-                  ? 'bg-emerald-700 text-white'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              Build
-            </button>
           </div>
-        )}
-        {!showModeToggle && stack.canBuild && !stack.canAsk && stack.buildWorkers.length > 1 && (
-          <p className="mb-2 text-[10px] text-zinc-500">
-            Code agent: <span className="text-emerald-300">{stack.buildLabel}</span>
-          </p>
         )}
         <textarea
           ref={inputRef}
@@ -1007,7 +1065,7 @@ export function FounderCopilotChat({
             disabled={busy || !prompt.trim()}
             onClick={() => void submit(prompt, sendMode)}
             className={`rounded-lg px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-50 ${
-              sendMode === 'build' && stack.canBuild
+              selectedAction?.kind === 'build' && stack.canBuild
                 ? 'bg-emerald-600 hover:bg-emerald-500'
                 : 'bg-violet-600 hover:bg-violet-500'
             }`}

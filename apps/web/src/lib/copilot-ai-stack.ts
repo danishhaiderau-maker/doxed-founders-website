@@ -126,6 +126,127 @@ export function formatMessageProviderLabel(provider?: string, routedAgent?: stri
 
 export type CopilotSendMode = 'ask' | 'build';
 
+export type CopilotAction = {
+  id: string;
+  kind: CopilotSendMode;
+  providerKey?: string;
+  workerKey?: 'CURSOR' | 'OPENHANDS';
+  label: string;
+};
+
+/** Connected chat LLMs + code agents as explicit actions (no generic Ask/Build). */
+export function listCopilotActions(
+  providers: ProviderRow[],
+  defaultProvider: string,
+  connections?: { cursor?: boolean; openHands?: boolean },
+): CopilotAction[] {
+  const { connected } = listChatProviders(providers, defaultProvider);
+  const asks: CopilotAction[] = connected.map((p) => ({
+    id: `ask:${p.key}`,
+    kind: 'ask',
+    providerKey: p.key,
+    label: `Ask ${shortProviderName(p)}`,
+  }));
+  const builds: CopilotAction[] = listBuildWorkers(connections ?? {}).map((w) => ({
+    id: `build:${w.key}`,
+    kind: 'build',
+    workerKey: w.key,
+    label: `Build with ${w.label}`,
+  }));
+  if (asks.length === 0) {
+    asks.push({
+      id: 'ask:RULE_BASED',
+      kind: 'ask',
+      providerKey: 'RULE_BASED',
+      label: 'Ask (project memory)',
+    });
+  }
+  return [...asks, ...builds];
+}
+
+export function defaultCopilotAction(
+  actions: CopilotAction[],
+  defaultProvider: string,
+): CopilotAction | null {
+  if (!actions.length) return null;
+  return (
+    actions.find((a) => a.kind === 'ask' && a.providerKey === defaultProvider) ??
+    actions.find((a) => a.kind === 'ask') ??
+    actions[0]
+  );
+}
+
+export function copilotActionSendMode(action: CopilotAction | null): CopilotSendMode {
+  return action?.kind === 'build' ? 'build' : 'ask';
+}
+
+export type CopilotUsageLine = { title: string; detail?: string };
+
+/** When to use each connected provider — varies per founder account. */
+export function buildCopilotUsageLines(
+  actions: CopilotAction[],
+  defaultProvider: string,
+): CopilotUsageLine[] {
+  const lines: CopilotUsageLine[] = [
+    {
+      title: 'Resume',
+      detail: 'Sync GitHub + vault briefing. No code changes.',
+    },
+    {
+      title: "What's the status?",
+      detail: 'GitHub-grounded answer — pick any Ask model below.',
+    },
+  ];
+
+  const askKeys = new Set(actions.filter((a) => a.kind === 'ask').map((a) => a.providerKey));
+  const defaultAsk = actions.find((a) => a.kind === 'ask' && a.providerKey === defaultProvider);
+  if (defaultAsk) {
+    lines.push({
+      title: defaultAsk.label,
+      detail: 'Your default for planning, status, and strategy.',
+    });
+  }
+  if (askKeys.has('OLLAMA_LOCAL')) {
+    lines.push({
+      title: 'Ask Ollama',
+      detail: 'Private on your machine — drafts and experiments without cloud API cost.',
+    });
+  }
+  if (askKeys.has('DEEPSEEK')) {
+    lines.push({
+      title: 'Ask DeepSeek',
+      detail: 'Strong reasoning for architecture, tradeoffs, and ship plans.',
+    });
+  }
+  if (askKeys.has('OPENROUTER') || askKeys.has('OPENAI') || askKeys.has('ANTHROPIC')) {
+    lines.push({
+      title: 'Cloud LLM',
+      detail: 'General chat when Ollama is off or you want a hosted model.',
+    });
+  }
+  const build = actions.find((a) => a.kind === 'build');
+  if (build) {
+    lines.push({
+      title: build.label,
+      detail: 'Implements in your GitHub repo — PRs and deploys (several minutes).',
+    });
+  }
+  if (!actions.some((a) => a.kind === 'build')) {
+    lines.push({
+      title: 'Build with Cursor',
+      detail: 'Connect Cursor in Settings → AI stack to edit the repo from chat.',
+    });
+  }
+  if (!actions.some((a) => a.kind === 'ask')) {
+    lines.push({
+      title: 'Ask (LLM)',
+      detail: 'Connect DeepSeek, Ollama, or OpenRouter in Settings for smarter answers.',
+    });
+  }
+
+  return lines;
+}
+
 export function defaultSendMode(stack: CopilotStackSummary): CopilotSendMode {
   if (stack.canBuild && !stack.canAsk) return 'build';
   return 'ask';
@@ -143,6 +264,11 @@ export function resolveCopilotSendMode(
 
 export function primaryButtonLabel(mode: CopilotSendMode, _stack: CopilotStackSummary): string {
   return mode === 'build' ? 'Build' : 'Ask';
+}
+
+export function primaryButtonLabelForAction(action: CopilotAction | null): string {
+  if (!action) return 'Send';
+  return action.label;
 }
 
 /** What Founder OS needs before it can act like a real operator (not a memory dump). */
