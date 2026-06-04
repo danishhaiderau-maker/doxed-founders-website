@@ -1,4 +1,5 @@
 import { buildSuggestionFromBuildPrompt } from './cursor-build-room';
+import { isFounderRepoStatusPrompt } from './founder-brain-router';
 
 export const AGENT_RUN_CREDITS = 15;
 
@@ -322,6 +323,8 @@ export function detectWorkforceIntent(
 ): WorkforceIntent | null {
   const trimmed = prompt.trim();
   if (!trimmed) return null;
+
+  if (isFounderRepoStatusPrompt(trimmed)) return null;
 
   if (explicitTemplate) {
     const match = WORKFORCE_TEMPLATES.find((t) => t.key === explicitTemplate);

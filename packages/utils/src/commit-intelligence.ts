@@ -2,6 +2,21 @@
 
 export type CommitSignal = { sha: string; message: string; date?: string };
 
+/** Repeated Founder OS memory sync — not product initiative signal. */
+export function isFounderOsSyncNoiseCommit(message: string): boolean {
+  const msg = message.trim();
+  if (!msg) return true;
+  return (
+    /^chore\(founder-os\):\s*sync\b/i.test(msg) ||
+    /^sync (project context|roadmap|tasks)\b/i.test(msg) ||
+    /^chore:\s*sync (tasks|roadmap|context)/i.test(msg)
+  );
+}
+
+export function filterCommitsForIntelligence(commits: CommitSignal[]): CommitSignal[] {
+  return commits.filter((c) => !isFounderOsSyncNoiseCommit(c.message));
+}
+
 export type InitiativeTheme = {
   key: string;
   label: string;
@@ -18,7 +33,7 @@ const THEME_RULES: { key: string; label: string; pattern: RegExp }[] = [
   { key: 'predictions', label: 'Prediction markets', pattern: /predict|market|oracle|stake/i },
   { key: 'rewards', label: 'Builder rewards & DDollar', pattern: /reward|ddollar|airdrop|reputation/i },
   { key: 'mobile', label: 'Mobile & Android', pattern: /android|capacitor|mobile/i },
-  { key: 'deploy', label: 'Deploy & infra', pattern: /deploy|vercel|railway|neon|sync|production/i },
+  { key: 'deploy', label: 'Deploy & infra', pattern: /deploy|vercel|railway|neon|production|sync:all/i },
   { key: 'security', label: 'Security & auth', pattern: /security|auth|webauthn|jwt|2fa/i },
 ];
 
@@ -27,7 +42,7 @@ export function groupCommitsByInitiative(commits: CommitSignal[]): InitiativeThe
 
   for (const c of commits) {
     const msg = c.message.trim();
-    if (!msg || /^merge\b/i.test(msg)) continue;
+    if (!msg || /^merge\b/i.test(msg) || isFounderOsSyncNoiseCommit(msg)) continue;
 
     let matched = false;
     for (const rule of THEME_RULES) {
@@ -68,7 +83,7 @@ export function summarizeShippedOutcomes(commits: CommitSignal[], max = 6): stri
 
   for (const c of commits) {
     const msg = c.message.trim();
-    if (!msg || /^merge\b/i.test(msg) || /^fix typo/i.test(msg)) continue;
+    if (!msg || /^merge\b/i.test(msg) || /^fix typo/i.test(msg) || isFounderOsSyncNoiseCommit(msg)) continue;
     const normalized = msg.toLowerCase();
     if (seen.has(normalized)) continue;
     seen.add(normalized);
