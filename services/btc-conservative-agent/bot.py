@@ -4912,6 +4912,29 @@ DASHBOARD_JS = """(function () {
   console.info("dashboard.js loaded: true");
 })();"""
 
+BOT_CONTROL_SECRET = os.getenv("BOT_CONTROL_SECRET", "").strip()
+_BOT_PUBLIC_GET_PATHS = frozenset({"/", "/health", "/api/state", "/static/dashboard.js"})
+
+def _bot_control_secret_ok():
+    if not BOT_CONTROL_SECRET:
+        if os.getenv("NODE_ENV") == "production" or os.getenv("RAILWAY_ENVIRONMENT"):
+            return False
+        return True
+    header = (request.headers.get("X-Bot-Control-Secret") or "").strip()
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        header = header or auth[7:].strip()
+    return header == BOT_CONTROL_SECRET
+
+@app.before_request
+def _enforce_bot_control_auth():
+    path = request.path.rstrip("/") or "/"
+    if request.method == "GET" and path in _BOT_PUBLIC_GET_PATHS:
+        return None
+    if not _bot_control_secret_ok():
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
 @app.route('/static/dashboard.js')
 def dashboard_js():
     return DASHBOARD_JS, 200, {'Content-Type': 'application/javascript'}

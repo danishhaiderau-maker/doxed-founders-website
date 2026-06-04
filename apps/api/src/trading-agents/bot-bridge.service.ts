@@ -87,10 +87,18 @@ export class BotBridgeService {
     if (!base) {
       return { ok: false, error: 'Bot bridge not configured' };
     }
+    const secret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (secret) {
+      headers['X-Bot-Control-Secret'] = secret;
+    }
     try {
       const res = await fetch(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        headers,
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(8000),
       });

@@ -115,7 +115,14 @@ export class FounderOsController {
     @Body() body: { repository?: { full_name?: string }; ref?: string },
   ) {
     const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
-    if (secret && signature && req.rawBody) {
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        return { ok: false, reason: 'webhook_not_configured' };
+      }
+    } else {
+      if (!signature || !req.rawBody) {
+        return { ok: false, reason: 'invalid_signature' };
+      }
       const expected = `sha256=${createHmac('sha256', secret).update(req.rawBody).digest('hex')}`;
       const a = Buffer.from(expected);
       const b = Buffer.from(signature);

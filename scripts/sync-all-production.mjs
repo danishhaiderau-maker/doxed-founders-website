@@ -20,21 +20,24 @@ function runSoft(cmd) {
 
 console.log('\n=== Full production sync ===\n');
 
-console.log('--- 1/5 Neon schema ---');
+console.log('--- 0/6 Production secrets (vault) ---');
+run('node scripts/ensure-production-secrets.mjs');
+
+console.log('--- 1/6 Neon schema ---');
 run('npm run db:push:neon');
 
-console.log('--- 2/5 Railway bot URL + API bridge ---');
+console.log('--- 2/6 Railway bot URL + API bridge ---');
 run('npm run ensure:btc-bot-url');
 
-console.log('--- 3/5 Railway services (API + btc bot) ---');
+console.log('--- 3/6 Railway services (API + btc bot) ---');
 run('node scripts/sync-railway-services.mjs');
 
-console.log('--- 4/5 Showcase bot credentials (skip if none saved) ---');
+console.log('--- 4/6 Showcase bot credentials (skip if none saved) ---');
 if (!runSoft('npm run push:showcase-bot')) {
   console.warn('Showcase credentials not in DB — save keys in Admin, then re-run push:showcase-bot');
 }
 
-console.log('--- 5/5 Vercel env + deploy + Railway API vars ---');
+console.log('--- 5/6 Vercel env + deploy + Railway API vars ---');
 run('npm run sync:production');
 
 console.log('\n=== Full sync complete ===');

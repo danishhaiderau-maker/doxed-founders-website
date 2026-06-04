@@ -178,6 +178,7 @@ export type AdminApplicationUpdates = Partial<ListingFormData>;
 
 export interface PaperSession {
   userId: string;
+  sessionToken?: string;
   displayName: string;
   cashBalance: number;
   totalValue: number;
@@ -317,6 +318,41 @@ async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Pr
     throw new Error(parseApiError(body, res.status));
   }
   return res.json() as Promise<T>;
+}
+
+export const PAPER_SESSION_TOKEN_KEY = 'dcf-paper-session-token';
+
+export function storePaperSession(userId: string, sessionToken?: string) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem('dcf-paper-user-id', userId);
+  if (sessionToken) {
+    localStorage.setItem(PAPER_SESSION_TOKEN_KEY, sessionToken);
+  }
+}
+
+export function clearPaperSessionToken() {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(PAPER_SESSION_TOKEN_KEY);
+}
+
+function paperSessionHeaders(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  const token = localStorage.getItem(PAPER_SESSION_TOKEN_KEY);
+  return token ? { 'X-Paper-Session-Token': token } : {};
+}
+
+function paperApiFetch<T>(path: string, init?: RequestInit, authToken?: string): Promise<T> {
+  return apiFetch<T>(
+    path,
+    {
+      ...init,
+      headers: {
+        ...paperSessionHeaders(),
+        ...init?.headers,
+      },
+    },
+    authToken,
+  );
 }
 
 export function previewDexScreener(url: string) {
@@ -625,11 +661,14 @@ export function createPaperSession(displayName?: string) {
   return apiFetch<PaperSession>('/paper-trading/session', {
     method: 'POST',
     body: JSON.stringify({ displayName }),
+  }).then((session) => {
+    storePaperSession(session.userId, session.sessionToken);
+    return session;
   });
 }
 
-export function fetchPaperPortfolio(userId: string) {
-  return apiFetch<PaperPortfolio>(`/paper-trading/portfolio/${userId}`);
+export function fetchPaperPortfolio(userId: string, authToken?: string) {
+  return paperApiFetch<PaperPortfolio>(`/paper-trading/portfolio/${userId}`, undefined, authToken);
 }
 
 export interface PublicPortfolio {
@@ -773,45 +812,56 @@ export function previewPaperTrade(url: string) {
   });
 }
 
-export function migrateGuestPortfolio(guestUserId: string, targetUserId: string) {
+export function migrateGuestPortfolio(guestUserId: string, targetUserId: string, authToken: string) {
   return apiFetch<{ migrated: boolean; positionsMerged: number }>(
     '/paper-trading/migrate-guest',
     {
       method: 'POST',
       body: JSON.stringify({ guestUserId, targetUserId }),
     },
+    authToken,
   );
 }
 
-export function executePaperTrade(input: {
-  userId: string;
-  dexscreenerUrl: string;
-  side: 'BUY' | 'SELL';
-  amountUsd: number;
-  comment?: string;
-  catalyst?: string;
-  targetUsd?: number;
-  timeHorizon?: string;
-}) {
-  return apiFetch<{
+export function executePaperTrade(
+  input: {
+    userId: string;
+    dexscreenerUrl: string;
+    side: 'BUY' | 'SELL';
+    amountUsd: number;
+    comment?: string;
+    catalyst?: string;
+    targetUsd?: number;
+    timeHorizon?: string;
+  },
+  authToken?: string,
+) {
+  return paperApiFetch<{
     success: boolean;
     feedPostId: string;
     ticker: string;
     amountUsd: number;
     realizedPnlUsd?: number | null;
-  }>('/paper-trading/trade', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
+  }>(
+    '/paper-trading/trade',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    authToken,
+  );
 }
 
-export function closePaperPosition(input: {
-  userId: string;
-  projectId: string;
-  comment?: string;
-  sellPercent?: number;
-}) {
-  return apiFetch<{
+export function closePaperPosition(
+  input: {
+    userId: string;
+    projectId: string;
+    comment?: string;
+    sellPercent?: number;
+  },
+  authToken?: string,
+) {
+  return paperApiFetch<{
     success: boolean;
     ticker: string;
     proceedsUsd: number;
@@ -828,49 +878,67 @@ export function closePaperPosition(input: {
   }>('/paper-trading/close', {
     method: 'POST',
     body: JSON.stringify(input),
-  });
+  }, authToken);
 }
 
-export function swapPaperTokens(input: {
-  userId: string;
-  fromProjectId: string;
-  toDexscreenerUrl: string;
-  comment?: string;
-}) {
-  return apiFetch<{
+export function swapPaperTokens(
+  input: {
+    userId: string;
+    fromProjectId: string;
+    toDexscreenerUrl: string;
+    comment?: string;
+  },
+  authToken?: string,
+) {
+  return paperApiFetch<{
     sell: { ticker: string; proceedsUsd: number; realizedPnlUsd: number };
     buy: { ticker: string; amountUsd: number };
-  }>('/paper-trading/swap', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
+  }>(
+    '/paper-trading/swap',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    authToken,
+  );
 }
 
-export function fetchPaperLimitOrders(userId: string) {
-  return apiFetch<PaperLimitOrder[]>(`/paper-trading/limit-orders/${userId}`);
+export function fetchPaperLimitOrders(userId: string, authToken?: string) {
+  return paperApiFetch<PaperLimitOrder[]>(`/paper-trading/limit-orders/${userId}`, undefined, authToken);
 }
 
-export function createPaperLimitOrder(input: {
-  userId: string;
-  side: 'BUY' | 'SELL';
-  trigger: 'GTE' | 'LTE';
-  targetPriceUsd: number;
-  projectId?: string;
-  amountUsd?: number;
-  sellPercent?: number;
-  dexscreenerUrl?: string;
-}) {
-  return apiFetch<{ id: string; status: string }>('/paper-trading/limit-orders', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
+export function createPaperLimitOrder(
+  input: {
+    userId: string;
+    side: 'BUY' | 'SELL';
+    trigger: 'GTE' | 'LTE';
+    targetPriceUsd: number;
+    projectId?: string;
+    amountUsd?: number;
+    sellPercent?: number;
+    dexscreenerUrl?: string;
+  },
+  authToken?: string,
+) {
+  return paperApiFetch<{ id: string; status: string }>(
+    '/paper-trading/limit-orders',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    authToken,
+  );
 }
 
-export function cancelPaperLimitOrder(userId: string, orderId: string) {
-  return apiFetch<{ cancelled: boolean }>(`/paper-trading/limit-orders/${orderId}/cancel`, {
-    method: 'POST',
-    body: JSON.stringify({ userId }),
-  });
+export function cancelPaperLimitOrder(userId: string, orderId: string, authToken?: string) {
+  return paperApiFetch<{ cancelled: boolean }>(
+    `/paper-trading/limit-orders/${orderId}/cancel`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ userId }),
+    },
+    authToken,
+  );
 }
 
 export interface FeedPost {
@@ -1231,23 +1299,31 @@ export function confirmCryptoTopUp(paymentId: string, txSignature: string, token
   );
 }
 
-export function createResetCheckout(userId: string) {
-  return apiFetch<{ url: string; sessionId: string }>('/paper-trading/checkout/reset', {
-    method: 'POST',
-    body: JSON.stringify({ userId }),
-  });
+export function createResetCheckout(userId: string, authToken?: string) {
+  return paperApiFetch<{ url: string; sessionId: string }>(
+    '/paper-trading/checkout/reset',
+    {
+      method: 'POST',
+      body: JSON.stringify({ userId }),
+    },
+    authToken,
+  );
 }
 
-export function resetPaperPortfolio(userId: string) {
-  return apiFetch<{
+export function resetPaperPortfolio(userId: string, authToken?: string) {
+  return paperApiFetch<{
     success: boolean;
     resetFeeUsd: number;
     message: string;
     cashBalance: number;
-  }>('/paper-trading/reset', {
-    method: 'POST',
-    body: JSON.stringify({ userId }),
-  });
+  }>(
+    '/paper-trading/reset',
+    {
+      method: 'POST',
+      body: JSON.stringify({ userId }),
+    },
+    authToken,
+  );
 }
 
 export interface ProjectMetrics {
@@ -3692,10 +3768,14 @@ export function copilotHandsFree(prompt: string, token: string) {
   );
 }
 
+export type FounderMemoryGraph = import('@dcf/utils').FounderMemoryGraph;
+export type FounderMemoryGraphPatch = import('@dcf/utils').FounderMemoryGraphPatch;
+
 export interface ProjectMemory {
   welcomeMessage: string;
   project: { id: string; name: string; slug: string; lifecycleStage: string } | null;
   currentGoal: string;
+  memoryGraph?: FounderMemoryGraph;
   progressPercent: number;
   launchReadiness: number;
   buildStreakDays: number;
@@ -3793,6 +3873,18 @@ export function revokeFounderNode(nodeId: string, token: string) {
 
 export function fetchCopilotMemory(token: string) {
   return apiFetch<ProjectMemory>('/copilot/memory', undefined, token);
+}
+
+export function fetchCopilotMemoryGraph(token: string) {
+  return apiFetch<FounderMemoryGraph>('/copilot/memory-graph', undefined, token);
+}
+
+export function patchCopilotMemoryGraph(patch: FounderMemoryGraphPatch, token: string) {
+  return apiFetch<FounderMemoryGraph>(
+    '/copilot/memory-graph',
+    { method: 'POST', body: JSON.stringify(patch) },
+    token,
+  );
 }
 
 export function fetchCopilotStandup(token: string) {

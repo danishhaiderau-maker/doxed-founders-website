@@ -188,10 +188,17 @@ export class ShowcaseRuntimeService {
     try {
       await this.railwayUpsertVars(token, botServiceName, vars);
       if (settings.showcaseBotPublicUrl?.trim()) {
-        await this.railwayUpsertVars(token, apiServiceName, {
+        const apiVars: Record<string, string> = {
           TRADING_AGENT_BOT_URL: settings.showcaseBotPublicUrl.replace(/\/$/, ''),
           CONSERVATIVE_BTC_BOT_URL: settings.showcaseBotPublicUrl.replace(/\/$/, ''),
-        });
+        };
+        const botControlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
+        if (botControlSecret) apiVars.BOT_CONTROL_SECRET = botControlSecret;
+        const metricsSecret = this.config.get<string>('METRICS_SYNC_SECRET')?.trim();
+        if (metricsSecret) apiVars.METRICS_SYNC_SECRET = metricsSecret;
+        const githubSecret = this.config.get<string>('GITHUB_WEBHOOK_SECRET')?.trim();
+        if (githubSecret) apiVars.GITHUB_WEBHOOK_SECRET = githubSecret;
+        await this.railwayUpsertVars(token, apiServiceName, apiVars);
       }
       await this.prisma.platformSettings.update({
         where: { id: 'default' },
@@ -220,6 +227,11 @@ export class ShowcaseRuntimeService {
     settings: NonNullable<Awaited<ReturnType<typeof this.prisma.platformSettings.findUnique>>>,
   ) {
     const vars: Record<string, string> = { PORT: '5000' };
+
+    const botControlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
+    if (botControlSecret) {
+      vars.BOT_CONTROL_SECRET = botControlSecret;
+    }
 
     const exchangeJson = this.crypto.decrypt(settings.showcaseExchangeCredentialEnc);
     if (exchangeJson) {
