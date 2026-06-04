@@ -1,0 +1,47 @@
+---
+config:
+  theme: dark
+  flowchart:
+    curve: basis
+    padding: 20
+---
+flowchart LR
+  subgraph t1["① Triggers"]
+    GH["GitHub push"]
+    MAN["Manual sync"]
+    DEP["Deploy hook"]
+  end
+
+  subgraph t2["② Draft"]
+    SYNC["New commit"]
+    SUG["Suggested update"]
+  end
+
+  subgraph t3["③ Publish"]
+    WHO["Founder approves"]
+    PUB["Feed · X · Community"]
+  end
+
+  subgraph t4["④ Post on X"]
+    CHECK["X linked"]
+    COPY["Tweet text"]
+    TW["Live on X"]
+  end
+
+  GH --> SYNC
+  MAN --> SYNC
+  DEP --> SUG
+  SYNC --> SUG
+  SUG --> WHO
+  WHO --> PUB
+  PUB --> CHECK
+  CHECK --> COPY --> TW
+
+  classDef trigger fill:#1e40af,stroke:#60a5fa,color:#fff
+  classDef draft fill:#047857,stroke:#34d399,color:#fff
+  classDef publish fill:#9a3412,stroke:#fb923c,color:#fff
+  classDef xpost fill:#6b21a8,stroke:#c084fc,color:#fff
+  class GH,MAN,DEP trigger
+  class SYNC,SUG draft
+  class WHO,PUB publish
+  class CHECK,COPY,TW xpost

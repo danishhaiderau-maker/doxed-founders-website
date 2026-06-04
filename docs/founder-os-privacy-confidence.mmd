@@ -1,0 +1,55 @@
+---
+config:
+  theme: dark
+  flowchart:
+    curve: basis
+    padding: 28
+---
+flowchart TB
+  H(["Build in public — with confidence"])
+
+  subgraph private["Stays private — until you say otherwise"]
+    direction TB
+    P1["Goals, roadmap & founder notes"]
+    P2["API keys & integrations — sealed"]
+    P3["Copilot drafts & deep context"]
+    P4["Full memory stays on your devices"]
+  end
+
+  subgraph gate["Founder OS — you control the boundary"]
+    direction TB
+    G1["Review every suggested update"]
+    G2["Publish only what you approve"]
+    G3["Cloud holds encrypted copies — not readable as plaintext"]
+  end
+
+  subgraph ai["AI — your choice where it runs"]
+    direction LR
+    A1["Your machine"]
+    A2["Private confidential AI"]
+    A3["Your vendor · your key"]
+  end
+
+  subgraph public["What the world sees — build in public"]
+    direction TB
+    W1["Headlines & trader-friendly updates"]
+    W2["Feed · X · community — when you ship"]
+    W3["Public project page & progress you share"]
+  end
+
+  H --> private
+  private --> gate
+  gate --> public
+  private -.->|"optional"| ai
+  ai -.->|"never auto-posts secrets"| gate
+
+  classDef hero fill:#0f172a,stroke:#38bdf8,color:#f8fafc,stroke-width:3px
+  classDef priv fill:#065f46,stroke:#6ee7b7,color:#ecfdf5
+  classDef gate fill:#78350f,stroke:#fbbf24,color:#fffbeb
+  classDef ai fill:#4c1d95,stroke:#c4b5fd,color:#f5f3ff
+  classDef pub fill:#1e3a8a,stroke:#93c5fd,color:#eff6ff
+  class H hero
+  class P1,P2,P3,P4 priv
+  class G1,G2,G3 gate
+  class A1,A2,A3 ai
+  class W1,W2,W3 pub
