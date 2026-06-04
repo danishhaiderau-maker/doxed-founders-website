@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import { vaultFilePath } from './paths.js';
 import { parseTasksJson } from './schema.js';
+import type { VaultMergePatch } from '@dcf/utils';
 import { applyPushGoal, applyPushTask } from './vault-apply.js';
+import { applyVaultMergePatchToDisk } from './vault-merge-apply.js';
 import {
   readVaultVectorIndex,
   rebuildVaultVectorIndex,
@@ -108,6 +110,32 @@ export function executeSyncJobOnVault(
       const agent = String(payload.agent ?? 'vault-index') as LocalAgentKind;
       const result = runLocalAgent(vaultRoot, agent, payload);
       return { ...result };
+    }
+    case 'PULL_VAULT_MERGE': {
+      const patch = payload.mergePatch as VaultMergePatch | undefined;
+      if (!patch?.version) {
+        return { ok: false, error: 'Missing mergePatch in job payload' };
+      }
+      const primary =
+        payload.vaultPrimaryPlatform === 'desktop' || payload.vaultPrimaryPlatform === 'mobile'
+          ? payload.vaultPrimaryPlatform
+          : null;
+      const { applied, skipped } = applyVaultMergePatchToDisk(vaultRoot, patch, {
+        primaryPlatform: primary,
+      });
+      try {
+        rebuildVaultVectorIndex(vaultRoot);
+      } catch {
+        /* optional */
+      }
+      return {
+        ok: true,
+        applied: 'PULL_VAULT_MERGE',
+        filesApplied: applied,
+        filesSkipped: skipped,
+        vaultSyncVersion: payload.vaultSyncVersion,
+        chunks: readVaultVectorIndex(vaultRoot)?.chunks.length ?? 0,
+      };
     }
     default:
       return { ok: false, error: `Unknown sync job kind: ${kind}` };

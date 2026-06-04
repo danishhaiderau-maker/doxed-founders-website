@@ -94,7 +94,7 @@ export function MobileVaultPanel({ accessToken }: Props) {
       const message = e instanceof Error ? e.message : 'Import failed';
       if (/decrypt|operation/i.test(message)) {
         setErr(
-          'This backup was encrypted on another device (e.g. PC). Use Founder Node on desktop to edit that vault, or re-pair after Phase 4 two-way merge.',
+          'Encrypted backup is from another device key. Goals and tasks still merge automatically when both devices sync — use Restore for this phone’s relay only.',
         );
       } else {
         setErr(message);
@@ -106,10 +106,11 @@ export function MobileVaultPanel({ accessToken }: Props) {
 
   return (
     <div className="mt-4 rounded-lg border border-violet-500/35 bg-violet-950/20 p-4">
-      <h4 className="text-sm font-semibold text-violet-100">Android vault (Phase 3)</h4>
+      <h4 className="text-sm font-semibold text-violet-100">Android vault (Phase 4 merge)</h4>
       <p className="mt-1 text-xs text-violet-100/75">
-        Private <code className="text-violet-200">FounderVault/</code> files on this phone, encrypted before cloud
-        relay. APK size stays ~4–6 MB — vault engine + sync ship in the app; your notes load after pairing.
+        Private <code className="text-violet-200">FounderVault/</code> on this phone syncs with desktop via encrypted
+        relay plus plaintext merge patches (goals, tasks, roadmap). When your PC wakes, Founder Node applies phone
+        edits automatically.
       </p>
 
       {!inApk && (
@@ -192,7 +193,9 @@ export function MobileVaultPanel({ accessToken }: Props) {
                         {r.label ?? node?.label ?? r.nodeId}
                         {r.platform ? ` · ${r.platform}` : ''}
                         <span className="block text-zinc-600">
-                          {Math.round(r.blobBytes / 1024)} KB · {new Date(r.updatedAt).toLocaleString()}
+                          {Math.round(r.blobBytes / 1024)} KB
+                          {r.vaultSyncVersion != null ? ` · v${r.vaultSyncVersion}` : ''}
+                          {r.hasMergePatch ? ' · merge' : ''} · {new Date(r.updatedAt).toLocaleString()}
                         </span>
                       </span>
                       <button

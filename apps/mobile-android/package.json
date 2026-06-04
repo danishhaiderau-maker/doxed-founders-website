@@ -1,6 +1,6 @@
 {
   "name": "@dcf/mobile-android",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Doxxed Crypto Android app — loads doxxedcrypto.digital in a secure WebView",
   "scripts": {

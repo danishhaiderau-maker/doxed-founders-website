@@ -287,6 +287,7 @@ enum FounderNodeSyncJobKind {
   PUSH_TASK
   VAULT_SEARCH
   RUN_AGENT
+  PULL_VAULT_MERGE
 }
 
 enum FounderNodeSyncJobStatus {
@@ -429,6 +430,7 @@ model User {
   founderNodes              FounderNode[]
   founderNodePairings       FounderNodePairingCode[]
   founderNodeVaultRelays    FounderNodeVaultRelay[]
+  founderNodeVaultSyncAcks FounderNodeVaultSyncAck[]
   founderNodeInferenceJobs  FounderNodeInferenceJob[]
   founderNodeSyncJobs       FounderNodeSyncJob[]
   townHallPosts             TownHallPost[]
@@ -1622,6 +1624,8 @@ model FounderBuilderSettings {
   memoryGraph            Json?
   memoryStorageMode      MemoryStorageMode @default(PLATFORM)
   secretsStorageMode     SecretsStorageMode @default(PLATFORM_ENCRYPTED)
+  /** LWW tie-breaker for vault merge (desktop | mobile). */
+  vaultPrimaryPlatform   String?
   createdAt              DateTime   @default(now())
   updatedAt              DateTime   @updatedAt
 
@@ -1760,11 +1764,29 @@ model FounderNodeVaultRelay {
   label              String?
   platform           String?
   encryptedVaultBlob String   @db.Text
+  vaultSyncVersion   Int      @default(0)
+  mergePatch         Json?
+  fileManifest       Json?
   updatedAt          DateTime @updatedAt
   createdAt          DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
+}
+
+/** Per-device ack of applied merge from a peer relay (Phase 4). */
+model FounderNodeVaultSyncAck {
+  id               String   @id @default(cuid())
+  userId           String
+  nodeId           String
+  sourceNodeId     String
+  vaultSyncVersion Int
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, sourceNodeId])
   @@index([userId])
 }
 

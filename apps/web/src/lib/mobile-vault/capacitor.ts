@@ -1,6 +1,6 @@
 'use client';
 
-export const MOBILE_VAULT_APP_VERSION = '0.3.0';
+export const MOBILE_VAULT_APP_VERSION = '0.4.0';
 
 export function isCapacitorNative(): boolean {
   if (typeof window === 'undefined') return false;

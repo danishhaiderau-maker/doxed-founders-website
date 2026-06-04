@@ -12,6 +12,8 @@ import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderCopilotService } from '../events/founder-copilot.service';
+import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
+import type { VaultMergePatch } from '@dcf/utils';
 
 const PAIRING_TTL_MS = 30 * 60 * 1000;
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
@@ -22,6 +24,7 @@ export class FounderNodeService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => FounderCopilotService))
     private readonly copilot: FounderCopilotService,
+    private readonly vaultSync: FounderNodeVaultSyncService,
   ) {}
 
   async createPairingCode(userId: string, targetPlatform?: 'desktop' | 'mobile') {
@@ -62,6 +65,9 @@ export class FounderNodeService {
     });
     if (!node) throw new NotFoundException('Node not found');
     await this.prisma.founderNodeVaultRelay.deleteMany({ where: { nodeId: node.nodeId } });
+    await this.prisma.founderNodeVaultSyncAck.deleteMany({
+      where: { OR: [{ nodeId: node.nodeId }, { sourceNodeId: node.nodeId }] },
+    });
     await this.prisma.founderNode.delete({ where: { id: node.id } });
     return { success: true };
   }
@@ -137,7 +143,7 @@ export class FounderNodeService {
   }
 
   async heartbeat(nodeDbId: string, input: FounderNodeHeartbeat) {
-    await this.prisma.founderNode.update({
+    const node = await this.prisma.founderNode.update({
       where: { id: nodeDbId },
       data: {
         status: 'online',
@@ -154,6 +160,7 @@ export class FounderNodeService {
         ollamaModel: input.ollamaModel ?? null,
       },
     });
+    void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
     return { success: true, status: 'online' as const };
   }
 
@@ -193,6 +200,19 @@ export class FounderNodeService {
       });
     }
 
+    const mergePatch =
+      payload && typeof payload === 'object' && 'mergePatch' in payload
+        ? (payload as { mergePatch?: VaultMergePatch }).mergePatch
+        : undefined;
+    if (mergePatch?.version === 1) {
+      await this.vaultSync.recordRelayMerge(userId, node.nodeId, {
+        label: node.label,
+        platform: node.platform,
+        mergePatch,
+        fileManifest: mergePatch.fileManifest,
+      });
+    }
+
     return this.copilot.saveDeviceMemorySync(userId, {
       ...payload,
       deviceLabel: payload.deviceLabel ?? node.label ?? 'Founder Node',
@@ -211,6 +231,8 @@ export class FounderNodeService {
         platform: r.platform,
         updatedAt: r.updatedAt.toISOString(),
         blobBytes: r.encryptedVaultBlob.length,
+        vaultSyncVersion: r.vaultSyncVersion,
+        hasMergePatch: r.mergePatch != null,
       })),
     };
   }
