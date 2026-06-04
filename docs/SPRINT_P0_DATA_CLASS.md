@@ -18,4 +18,4 @@ Existing code paths already avoid returning raw `integrationCredential.token` to
 
 ## Next
 
-**Phala P1** — CVM sealed vault sync backup ([PHALA_ARCHITECTURE_ALIGNMENT.md](./PHALA_ARCHITECTURE_ALIGNMENT.md)).
+**Phala P2** — CVM-side credential unwrap ([PHALA_ARCHITECTURE_ALIGNMENT.md](./PHALA_ARCHITECTURE_ALIGNMENT.md)). P1 vault backup: [SPRINT_P1_PHALA_VAULT.md](./SPRINT_P1_PHALA_VAULT.md).

@@ -38,7 +38,7 @@ import { MessagesModule } from './messages/messages.module';
 import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.module';
 import { CredentialsModule } from './credentials/credentials.module';
 import { PrivacyModule } from './privacy/privacy.module';
-import { AirdropModule } from './airdrop/airdrop.module';
+import { VaultModule } from './vault/vault.module';
 
 @Module({
   imports: [
@@ -50,7 +50,6 @@ import { AirdropModule } from './airdrop/airdrop.module';
     PrismaModule,
     CredentialsModule,
     PrivacyModule,
-    AirdropModule,
     FounderMemoryGraphModule,
     PointsModule,
     NotificationsModule,
@@ -69,6 +68,7 @@ import { AirdropModule } from './airdrop/airdrop.module';
     PredictionMarketsModule,
     FounderNodeModule,
     AttestationModule,
+    VaultModule,
     TrustCenterModule,
     TownHallModule,
     TradingAgentsModule,

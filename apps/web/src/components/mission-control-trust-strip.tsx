@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { fetchAttestationDashboard } from '@/lib/api';
+import { fetchAttestationDashboard, fetchVaultCvmStatus } from '@/lib/api';
 import { AI_STACK_HREF } from '@/lib/copilot-ai-stack';
 
 type Props = {
@@ -28,12 +28,16 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
   const [teePending, setTeePending] = useState(false);
   const [lastAttested, setLastAttested] = useState<string | null>(null);
   const [phalaSealed, setPhalaSealed] = useState(false);
+  const [cvmBackupVerified, setCvmBackupVerified] = useState(false);
   const [secretsSummary, setSecretsSummary] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await fetchAttestationDashboard(accessToken);
+      const [d, cvm] = await Promise.all([
+        fetchAttestationDashboard(accessToken),
+        fetchVaultCvmStatus(accessToken).catch(() => null),
+      ]);
       setMemoryScore(d.memoryIntegrity.score);
       setMemoryStatus(d.memoryIntegrity.status);
       setMemoryMode(d.memoryIntegrity.mode);
@@ -47,6 +51,7 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
           : d.memoryIntegrity.lastVaultScanAt;
       setLastAttested(attestedAt);
       setPhalaSealed(Boolean(d.secretsStorage?.phalaInferenceOnly));
+      setCvmBackupVerified(cvm?.backupState === 'verified');
       setSecretsSummary(d.secretsStorage?.summary ?? null);
     } catch {
       setMemoryScore(null);
@@ -54,6 +59,7 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
       setTeeVerified(false);
       setTeePending(false);
       setPhalaSealed(false);
+      setCvmBackupVerified(false);
       setSecretsSummary(null);
     } finally {
       setLoading(false);
@@ -95,6 +101,11 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
             {phalaSealed && (
               <span className="rounded-full bg-violet-950/50 px-2 py-0.5 text-violet-200">
                 Phala inference-sealed
+              </span>
+            )}
+            {cvmBackupVerified && (
+              <span className="rounded-full bg-violet-950/50 px-2 py-0.5 text-violet-200">
+                CVM vault backup
               </span>
             )}
             {teeVerified ? (

@@ -126,6 +126,9 @@ export const API_ROUTE_CLASSIFICATION: ApiRouteClassification[] = [
   { path: 'GET /builder/settings', auth: 'jwt', allowedClasses: ['founder_private', 'sealed_credential'], notes: 'Status only — no raw keys' },
   { path: 'GET /copilot/memory-graph', auth: 'jwt', allowedClasses: ['founder_private'], notes: 'Owner memory graph' },
   { path: 'GET /attestation/dashboard', auth: 'jwt', allowedClasses: ['audit_telemetry', 'sealed_credential'], notes: 'Summaries only' },
+  { path: 'GET /vault/cvm-capabilities', auth: 'public', allowedClasses: ['audit_telemetry'], notes: 'Platform CVM config flags only' },
+  { path: 'GET /vault/cvm-status', auth: 'jwt', allowedClasses: ['founder_node_relay', 'audit_telemetry'], notes: 'Relay metadata + backup receipts' },
+  { path: 'POST /vault/cvm-backup-request', auth: 'jwt', allowedClasses: ['founder_node_relay', 'audit_telemetry'], notes: 'Encrypted blob hash to CVM — never plaintext vault' },
   { path: 'POST /founder-node/v1/*', auth: 'founder_node', allowedClasses: ['founder_node_relay'], notes: 'Node guard' },
 ];
 
