@@ -3,7 +3,7 @@
 **Audience:** Contributors, founders, security reviewers, and anyone reading the public GitHub repo.  
 **Safe to publish:** This document contains no secrets, API keys, or production credentials.
 
-Related docs: [PRIVACY_STACK.md](./PRIVACY_STACK.md) · [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md) · [PHALA_ARCHITECTURE_ALIGNMENT.md](./PHALA_ARCHITECTURE_ALIGNMENT.md) · [REPOSITORY_LAYOUT.md](./REPOSITORY_LAYOUT.md)
+Related docs: [**PRIVACY.md**](../PRIVACY.md) (GitHub front page) · [PRIVACY_STACK.md](./PRIVACY_STACK.md) · [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md) · [PHALA_ARCHITECTURE_ALIGNMENT.md](./PHALA_ARCHITECTURE_ALIGNMENT.md) · [REPOSITORY_LAYOUT.md](./REPOSITORY_LAYOUT.md)
 
 ---
 

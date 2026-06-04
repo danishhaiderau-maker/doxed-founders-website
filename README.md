@@ -4,8 +4,59 @@
 
 Curated crypto intelligence for retail who want **tech and accountable founders** — not anonymous pumps. We surface projects **building in public**, power **Founder OS** (AI-assisted shipping), and **Founder Node** (self-custody vault + optional local AI).
 
+---
+
+## Privacy & security — read this first
+
+> **Vault encrypted on our servers; readable only on your devices. Choose Phala or local Ollama when you want confidential AI — not just encrypted storage.**
+
+**Full guide (diagrams, disclaimers, protect PC/phone):** [**PRIVACY.md**](./PRIVACY.md) ← start here on GitHub
+
+```mermaid
+flowchart TB
+  subgraph yours["Your devices"]
+    PC["PC — Founder Node vault"]
+    PH["Phone — Founder OS app / web"]
+  end
+
+  subgraph dcf["Doxxed Crypto"]
+    API["API + encrypted vault blob"]
+    DB["Neon — cannot decrypt your notes"]
+  end
+
+  subgraph ai["AI — you choose"]
+    OLL["Ollama on PC — local"]
+    PHA["Phala TEE — confidential cloud"]
+    BYO["BYOK — OpenRouter / DeepSeek / …"]
+  end
+
+  PC -->|"AES-GCM ciphertext"| API
+  PH --> API
+  API --> DB
+  PC --> OLL
+  API --> PHA
+  API --> BYO
+```
+
+| Question | Answer |
+|----------|--------|
+| Can the **server** read my private vault notes? | **No** (encrypted relay when using Founder Node mode) |
+| Can my **PC** read vault files? | **Yes** — normal; vault lives on your machine |
+| Where is my **code**? | **GitHub** — not inside Founder Vault |
+| Strongest **cloud** AI privacy? | **Phala TEE** in Builder settings |
+| Strongest **local** AI privacy? | **Ollama** via Founder Node on PC |
+
+**Protect your devices:** lock screen, official [Founder Node releases](https://github.com/danishhaiderau-maker/doxed-founders-website/releases/latest) only, revoke old paired nodes in Settings, never share `node-config.json`. Details → [**PRIVACY.md**](./PRIVACY.md).
+
+→ **System architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)  
+→ **Privacy stack (Steps 1–5):** [docs/PRIVACY_STACK.md](docs/PRIVACY_STACK.md)
+
+---
+
+## Documentation
+
 → **Why we exist:** [docs/MISSION.md](docs/MISSION.md)  
-→ **Full documentation:** [docs/README.md](docs/README.md)  
+→ **All docs index:** [docs/README.md](docs/README.md)  
 → **External audit (ChatGPT-safe):** [AUDIT.md](AUDIT.md) · [docs/AUDIT_FOR_CHATGPT.md](docs/AUDIT_FOR_CHATGPT.md)  
 → **Public vs private files:** [docs/REPOSITORY_LAYOUT.md](docs/REPOSITORY_LAYOUT.md)
 
