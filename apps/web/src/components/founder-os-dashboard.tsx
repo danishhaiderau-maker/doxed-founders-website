@@ -9,6 +9,7 @@ import {
   LIFECYCLE_STAGES,
   resolveAiStackHealth,
   STAGE_COLOR_CLASSES,
+  isAgentRunActive,
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
@@ -155,6 +156,12 @@ export function FounderOsDashboardLayout({
   }, [load]);
 
   useEffect(() => {
+    if (!isAgentRunActive(activeAgentRun)) return;
+    const id = window.setInterval(() => void load(), 8000);
+    return () => window.clearInterval(id);
+  }, [activeAgentRun, load]);
+
+  useEffect(() => {
     if (!initialCopilotPrompt?.trim()) return;
     setQuickPrompt(initialCopilotPrompt);
   }, [initialCopilotPrompt]);
@@ -240,10 +247,18 @@ export function FounderOsDashboardLayout({
           : undefined;
       const result = await copilotMissionBuild(accessToken, worker ? { worker } : undefined);
       onMessage?.(result.message);
-      if (result.status === 'dispatched') {
-        await pollMissionBuildUntilDone(accessToken, result, (line) => onMessage?.(line));
-      }
       void load();
+      if (result.status === 'dispatched') {
+        setMissionBuildBusy(false);
+        void pollMissionBuildUntilDone(accessToken, result, (line) => {
+          onMessage?.(line);
+          void load();
+        }).then(() => {
+          void load();
+          onRefresh();
+        });
+        return;
+      }
       onRefresh();
     } catch (err) {
       onMessage?.(err instanceof Error ? err.message : 'Build failed');
@@ -251,6 +266,17 @@ export function FounderOsDashboardLayout({
       setMissionBuildBusy(false);
     }
   }
+
+  const runBuildButtonLabel = (() => {
+    if (missionBuildBusy) return 'Starting Cursor…';
+    if (isAgentRunActive(activeAgentRun)) {
+      const s = activeAgentRun!.status.toUpperCase();
+      return s === 'RUNNING' || s === 'CREATING' || s === 'WORKING'
+        ? 'Cursor working…'
+        : `Cursor: ${activeAgentRun!.status}`;
+    }
+    return 'Run build';
+  })();
 
   return (
     <div className="flex min-h-[calc(100vh-4rem)] flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
@@ -350,7 +376,7 @@ export function FounderOsDashboardLayout({
                     <strong className="font-medium text-zinc-400">Ask</strong> = GitHub + vault
                     status · <strong className="font-medium text-zinc-400">Resume</strong> = sync
                     briefing · <strong className="font-medium text-zinc-400">Run build</strong> =
-                    dispatch Cursor on code
+                    starts Cursor on your repo (can take several minutes)
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -367,13 +393,15 @@ export function FounderOsDashboardLayout({
                   </button>
                   <button
                     type="button"
-                    disabled={missionBuildBusy || resumeBusy}
+                    disabled={missionBuildBusy || resumeBusy || isAgentRunActive(activeAgentRun)}
                     onClick={() => void handleSidebarMissionBuild()}
                     className="rounded-xl border border-violet-500/40 px-4 py-2.5 text-left text-sm font-medium text-violet-200 hover:bg-violet-950/40 disabled:opacity-50"
                   >
-                    <span className="block">{missionBuildBusy ? 'Dispatching…' : 'Run build'}</span>
+                    <span className="block">{runBuildButtonLabel}</span>
                     <span className="block text-[10px] font-normal text-zinc-500">
-                      Cursor implements in repo
+                      {isAgentRunActive(activeAgentRun)
+                        ? 'Builder is coding — see status under your profile'
+                        : 'Cursor implements in repo'}
                     </span>
                   </button>
                 </div>

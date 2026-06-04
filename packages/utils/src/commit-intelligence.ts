@@ -8,6 +8,7 @@ export function isFounderOsSyncNoiseCommit(message: string): boolean {
   if (!msg) return true;
   return (
     /^chore\(founder-os\):\s*sync\b/i.test(msg) ||
+    /sync memory \(context \+ roadmap \+ tasks\)/i.test(msg) ||
     /^sync (project context|roadmap|tasks)\b/i.test(msg) ||
     /^chore:\s*sync (tasks|roadmap|context)/i.test(msg)
   );
