@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore: remove legacy Founder OS UI and local junk scripts
+Sprint 2: Founder Brain UX, Mission Control strip, Phala alignment doc
 
 ## Last Activity
 
