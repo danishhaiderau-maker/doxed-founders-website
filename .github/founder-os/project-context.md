@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+feat(mobile): Phase 1 Android APK download page and landing CTAs
 
 ## Last Activity
 
