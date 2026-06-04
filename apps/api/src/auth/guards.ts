@@ -24,6 +24,16 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     if (isPublic) {
       return true;
     }
+
+    // Desktop Founder Node uses `Authorization: FounderNode {nodeId}:{token}`.
+    // Route-level FounderNodeGuard validates that; skip JWT so we do not 401 before it runs.
+    const request = context.switchToHttp().getRequest<{ headers: Record<string, string | string[] | undefined> }>();
+    const raw = request.headers?.authorization;
+    const header = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+    if (header?.startsWith('FounderNode ')) {
+      return true;
+    }
+
     return super.canActivate(context);
   }
 }
