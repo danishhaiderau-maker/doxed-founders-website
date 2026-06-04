@@ -21,7 +21,7 @@ export default function MobileDownloadPage() {
 
       <div className="mx-auto w-full max-w-3xl space-y-10 px-4 py-10 sm:px-6">
         <section>
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Phase 1 — Android</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">Phase 3 — Android vault</p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Doxxed Crypto for Android</h1>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
             Official app for Discover, rankings, Trust Center, agents, paper trading, feed, and Founder OS — same
@@ -83,16 +83,16 @@ export default function MobileDownloadPage() {
             <li>Founder OS, Builder settings, Copilot (cloud AI / Phala when configured)</li>
           </ul>
           <p className="mt-4 text-xs text-zinc-500">
-            Coming later: full Founder Vault sync on phone (see{' '}
+            Pair mobile vault in Settings → Memory storage. Two-way PC↔phone merge is Phase 4 — see{' '}
             <a
               href="https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/MOBILE_VAULT_ROADMAP.md"
               className="text-cyan-300 underline"
               target="_blank"
               rel="noreferrer"
             >
-              mobile vault roadmap
+              roadmap
             </a>
-            ).
+            .
           </p>
         </section>
       </div>

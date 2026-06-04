@@ -57,7 +57,8 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils'],
+  transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils', '@dcf/founder-vault'],
+  serverExternalPackages: ['@capacitor/core', '@capacitor/filesystem', '@capacitor/preferences'],
   allowedDevOrigins,
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];

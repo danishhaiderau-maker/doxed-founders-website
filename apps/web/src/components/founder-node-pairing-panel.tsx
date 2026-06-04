@@ -70,17 +70,19 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     return () => clearInterval(interval);
   }, [active, refresh]);
 
-  async function generateCode() {
-    setBusy('code');
+  async function generateCode(target: 'desktop' | 'mobile') {
+    setBusy(target);
     setErr(null);
     setMsg(null);
     try {
-      const result = await createFounderNodePairingCode(accessToken);
+      const result = await createFounderNodePairingCode(accessToken, target);
       setPairingCode(result.code);
       setExpiresAt(result.expiresAt);
       const { mins, absolute } = formatExpiry(result.expiresAt);
       setMsg(
-        `Enter this one-time code in Founder Node within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}). After pairing succeeds, the code is cleared automatically.`,
+        target === 'mobile'
+          ? `Enter this code in the Doxxed Crypto Android app (Settings → vault) within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}).`
+          : `Enter this one-time code in Founder Node on desktop within ${mins} minute${mins === 1 ? '' : 's'} (by ${absolute}). After pairing succeeds, the code is cleared automatically.`,
       );
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not create pairing code');
@@ -171,11 +173,19 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
           <div className="mt-4 flex flex-wrap gap-2">
             <button
               type="button"
-              disabled={busy === 'code'}
-              onClick={generateCode}
+              disabled={busy === 'desktop'}
+              onClick={() => void generateCode('desktop')}
               className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
             >
-              {busy === 'code' ? 'Generating…' : 'Generate pairing code'}
+              {busy === 'desktop' ? 'Generating…' : 'Code for desktop'}
+            </button>
+            <button
+              type="button"
+              disabled={busy === 'mobile'}
+              onClick={() => void generateCode('mobile')}
+              className="rounded-lg border border-violet-500/50 bg-violet-950/40 px-3 py-1.5 text-xs font-medium text-violet-100 disabled:opacity-50"
+            >
+              {busy === 'mobile' ? 'Generating…' : 'Code for Android'}
             </button>
             {isPaired && (
               <button

@@ -24,19 +24,25 @@ export class FounderNodeService {
     private readonly copilot: FounderCopilotService,
   ) {}
 
-  async createPairingCode(userId: string) {
+  async createPairingCode(userId: string, targetPlatform?: 'desktop' | 'mobile') {
     await this.prisma.founderNodePairingCode.deleteMany({
       where: { userId, usedAt: null, expiresAt: { lt: new Date() } },
     });
 
     const code = this.generatePairingCode();
     const expiresAt = new Date(Date.now() + PAIRING_TTL_MS);
+    const normalizedTarget =
+      targetPlatform === 'mobile' || targetPlatform === 'desktop' ? targetPlatform : null;
 
     await this.prisma.founderNodePairingCode.create({
-      data: { userId, code, expiresAt },
+      data: { userId, code, expiresAt, targetPlatform: normalizedTarget },
     });
 
-    return { code, expiresAt: expiresAt.toISOString() };
+    return {
+      code,
+      expiresAt: expiresAt.toISOString(),
+      targetPlatform: normalizedTarget,
+    };
   }
 
   async getStatus(userId: string) {
@@ -55,6 +61,7 @@ export class FounderNodeService {
       where: { userId, nodeId },
     });
     if (!node) throw new NotFoundException('Node not found');
+    await this.prisma.founderNodeVaultRelay.deleteMany({ where: { nodeId: node.nodeId } });
     await this.prisma.founderNode.delete({ where: { id: node.id } });
     return { success: true };
   }
@@ -151,6 +158,9 @@ export class FounderNodeService {
   }
 
   async syncFromNode(userId: string, nodeDbId: string, payload: DeviceMemoryPayload) {
+    const node = await this.prisma.founderNode.findUnique({ where: { id: nodeDbId } });
+    if (!node) throw new NotFoundException('Node not found');
+
     await this.prisma.founderNode.update({
       where: { id: nodeDbId },
       data: {
@@ -160,10 +170,63 @@ export class FounderNodeService {
       },
     });
 
+    const encryptedVaultBlob =
+      payload && typeof payload === 'object' && 'encryptedVaultBlob' in payload
+        ? String((payload as { encryptedVaultBlob?: string }).encryptedVaultBlob ?? '').trim()
+        : '';
+
+    if (encryptedVaultBlob.length > 0) {
+      await this.prisma.founderNodeVaultRelay.upsert({
+        where: { nodeId: node.nodeId },
+        create: {
+          userId,
+          nodeId: node.nodeId,
+          label: node.label,
+          platform: node.platform,
+          encryptedVaultBlob,
+        },
+        update: {
+          label: node.label,
+          platform: node.platform,
+          encryptedVaultBlob,
+        },
+      });
+    }
+
     return this.copilot.saveDeviceMemorySync(userId, {
       ...payload,
-      deviceLabel: payload.deviceLabel ?? 'Founder Node',
+      deviceLabel: payload.deviceLabel ?? node.label ?? 'Founder Node',
     });
+  }
+
+  async listVaultRelays(userId: string) {
+    const rows = await this.prisma.founderNodeVaultRelay.findMany({
+      where: { userId },
+      orderBy: { updatedAt: 'desc' },
+    });
+    return {
+      relays: rows.map((r) => ({
+        nodeId: r.nodeId,
+        label: r.label,
+        platform: r.platform,
+        updatedAt: r.updatedAt.toISOString(),
+        blobBytes: r.encryptedVaultBlob.length,
+      })),
+    };
+  }
+
+  async pullVaultRelayForNode(userId: string, nodeId: string) {
+    const row = await this.prisma.founderNodeVaultRelay.findFirst({
+      where: { userId, nodeId },
+    });
+    if (!row) throw new NotFoundException('No vault relay for this device');
+    return {
+      nodeId: row.nodeId,
+      label: row.label,
+      platform: row.platform,
+      encryptedVaultBlob: row.encryptedVaultBlob,
+      updatedAt: row.updatedAt.toISOString(),
+    };
   }
 
   private generatePairingCode(): string {

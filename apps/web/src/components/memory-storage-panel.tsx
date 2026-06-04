@@ -13,6 +13,7 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { FounderNodePairingPanel } from '@/components/founder-node-pairing-panel';
+import { MobileVaultPanel } from '@/components/mobile-vault-panel';
 import { FounderVaultStatusBanner } from '@/components/founder-vault-status-banner';
 
 type Props = {
@@ -354,6 +355,8 @@ export function MemoryStoragePanel({ accessToken, currentMode, onModeChange, pha
           <FounderNodePairingPanel accessToken={accessToken} active={currentMode === 'FOUNDER_NODE'} />
         </>
       )}
+
+      <MobileVaultPanel accessToken={accessToken} />
 
       {msg && <p className="mt-3 text-xs text-emerald-300">{msg}</p>}
       {err && <p className="mt-3 text-xs text-red-300">{err}</p>}
