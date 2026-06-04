@@ -1,6 +1,6 @@
 # Doxxed Crypto — Android app
 
-Capacitor shell that loads [doxxedcrypto.digital](https://doxxedcrypto.digital) in a full-screen WebView (paper trading, scout votes, Founder OS, etc.).
+Capacitor shell for **phone-first** use: opens [Discover](https://doxxedcrypto.digital/discover?app=android) with explore, project rankings, Trust Center, agents, builder rewards, and community paper trading. Founder OS and build tools stay available via nav but are not the default focus. See [docs/MOBILE_APP.md](../../docs/MOBILE_APP.md).
 
 ## Build APK (Windows / macOS / Linux)
 

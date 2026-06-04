@@ -5,7 +5,8 @@ const config: CapacitorConfig = {
   appName: 'Doxxed Crypto',
   webDir: 'www',
   server: {
-    url: 'https://doxxedcrypto.digital',
+    // Phone-first: Discover, rankings, trust, agents, community trading
+    url: 'https://doxxedcrypto.digital/discover?app=android',
     cleartext: false,
     androidScheme: 'https',
   },

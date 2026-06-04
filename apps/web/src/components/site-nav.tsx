@@ -8,7 +8,6 @@ import { cn, resolveGamifiedRole } from '@dcf/utils';
 import { fetchAccountOverview, AccountOverview } from '@/lib/api';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
-import { BuilderRewardsFlash } from '@/components/builder-rewards/builder-rewards-flash';
 import { NotificationBell } from '@/components/notification-bell';
 import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { hubPageTitle, isHubWorkspacePath } from '@/components/hub-nav-config';
@@ -20,7 +19,6 @@ const PRIMARY_NAV = [
   { href: '/projects', label: 'Projects' },
   { href: '/trust-center', label: 'Trust Center' },
   { href: '/agent-hub', label: 'Agents' },
-  { href: '/builder-rewards', label: 'Builder Rewards' },
 ] as const;
 
 /** Row 2 — Trade & community */
@@ -89,8 +87,6 @@ function navActive(pathname: string, href: string) {
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
-  if (href === '/builder-rewards')
-    return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
   if (href === '/founder-den') {
     return (
       pathname.startsWith('/founder-den') ||
@@ -129,7 +125,6 @@ export function SiteNav() {
         <SiteNavInner />
       </Suspense>
       <EngagementFlashLayer />
-      <BuilderRewardsFlash />
     </>
   );
 }
