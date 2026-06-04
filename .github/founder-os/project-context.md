@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+docs: add front-page privacy guide with diagrams and device security
 
 ## Last Activity
 
-Just now
+9m ago
