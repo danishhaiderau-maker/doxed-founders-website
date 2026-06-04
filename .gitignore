@@ -76,5 +76,10 @@ apps/.env.prod.rotate
 *.paste.env
 railway-x-paste.env
 
+# Bot runtime data (never commit keys or trade logs)
+services/btc-conservative-agent/.env
+services/btc-conservative-agent/data/*
+!services/btc-conservative-agent/data/.gitkeep
+
 # Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
 # Audit export (code-only): ../doxedcryptofounder-audit/
