@@ -90,7 +90,7 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
   },
   {
     key: 'JATEVO',
-    label: 'Jatevo (multi-model gateway)',
+    label: 'Jatevo ($JTVO gateway)',
     connectMode: 'api_key',
     needsApiKey: true,
     defaultModel: 'auto',

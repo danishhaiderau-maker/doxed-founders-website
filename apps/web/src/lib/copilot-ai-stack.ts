@@ -18,7 +18,7 @@ export function shortProviderName(provider: { key: string; label: string }): str
     GEMINI: 'Gemini',
     PHALA: 'Phala TEE',
     OPENROUTER: 'OpenRouter',
-    JATEVO: 'Jatevo',
+    JATEVO: 'Jatevo ($JTVO)',
     OPENHANDS: 'OpenHands',
     OLLAMA_LOCAL: 'Ollama',
     RULE_BASED: 'Project memory',

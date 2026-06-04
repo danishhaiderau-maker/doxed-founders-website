@@ -33,7 +33,8 @@ export function PlatformSetupGuide() {
         <li>
           <p className="font-medium text-violet-200">3. AI on your stack — the “brain”</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Connect at least one <strong>LLM</strong> (OpenRouter, DeepSeek, Ollama via Node, Phala TEE). That
+            Connect at least one <strong>LLM</strong> (Jatevo $JTVO gateway, OpenRouter, DeepSeek, Ollama via Node,
+            Phala TEE). That
             model powers Copilot <strong>Ask</strong> and every{' '}
             <Link href="/founder-den?tab=agents" className="text-emerald-400 underline">
               project agent
