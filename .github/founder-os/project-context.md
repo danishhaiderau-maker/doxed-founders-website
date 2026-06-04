@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Ship Founder OS P0-P2: command center, timeline, deploy intel, desktop bridge
+chore(founder-os): sync tasks
 
 ## Last Activity
 
