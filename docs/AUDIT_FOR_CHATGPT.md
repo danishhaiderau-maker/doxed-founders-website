@@ -17,6 +17,8 @@ Use it with the code-only export produced by `npm run audit:export` (sibling fol
 - Optional showcase trading bot service (`services/btc-conservative-agent`)
 
 **Mission context:** [MISSION.md](./MISSION.md)  
+**North star (command center, not dashboard):** [FOUNDER_OS_NORTH_STAR.md](./FOUNDER_OS_NORTH_STAR.md)  
+**Command center architecture (Agent Bus, Queue, Attention, Timeline):** [FOUNDER_OS_COMMAND_CENTER_ARCHITECTURE.md](./FOUNDER_OS_COMMAND_CENTER_ARCHITECTURE.md)  
 **Architecture narrative:** [FOUNDER_OS_AUDIT.md](./FOUNDER_OS_AUDIT.md)
 
 ---

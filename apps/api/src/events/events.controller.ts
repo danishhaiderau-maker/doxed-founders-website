@@ -5,6 +5,7 @@ import { AuthUser } from '../auth/auth.types';
 import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
+import { FounderCommandCenterService } from './founder-command-center.service';
 
 @Controller()
 export class EventsController {
@@ -12,6 +13,7 @@ export class EventsController {
     private readonly events: EventsService,
     private readonly copilot: FounderCopilotService,
     private readonly autopilot: FounderAutopilotService,
+    private readonly commandCenter: FounderCommandCenterService,
   ) {}
 
   @Get('events')
@@ -27,6 +29,21 @@ export class EventsController {
   @Get('copilot/memory')
   memory(@CurrentUser() user: AuthUser) {
     return this.copilot.getProjectMemory(user.id);
+  }
+
+  @Get('copilot/mission-intelligence')
+  missionIntelligence(@CurrentUser() user: AuthUser) {
+    return this.copilot.computeMissionIntelligenceForUser(user.id);
+  }
+
+  @Get('copilot/founder-queue')
+  founderQueue(@CurrentUser() user: AuthUser) {
+    return this.commandCenter.getFounderQueue(user.id);
+  }
+
+  @Get('copilot/attention')
+  attentionCenter(@CurrentUser() user: AuthUser) {
+    return this.commandCenter.getAttentionCenter(user.id);
   }
 
   @Get('copilot/memory-graph')

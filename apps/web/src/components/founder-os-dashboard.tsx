@@ -12,6 +12,7 @@ import {
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
+import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
 import { MissionStatePanel } from '@/components/mission-state-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
@@ -25,7 +26,13 @@ import {
   fetchBuildRoom,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
+  fetchMissionIntelligence,
+  fetchFounderQueue,
+  fetchAttentionCenter,
   fetchPlatformSyncStatus,
+  type MissionIntelligence,
+  type FounderQueueItem,
+  type AttentionItem,
   updateBuilderSettings,
   FounderDashboard,
   ProjectMemory,
@@ -44,11 +51,11 @@ const SIDEBAR_NAV: NavItem[] = [
 ];
 
 const COPILOT_CHIPS = [
+  'What am I working on?',
   'What should I ship today?',
   'What broke yesterday?',
   'Continue last task',
-  'Create PR',
-  'Take full control and push all updates',
+  'Run platform autopilot sync',
 ];
 
 export type FounderOsDashboardProps = {
@@ -80,7 +87,7 @@ export function FounderOsDashboardLayout({
   tabContent,
   initialCopilotPrompt,
   onInitialCopilotPromptConsumed,
-  activeAgentTemplate,
+  activeAgentTemplate: _activeAgentTemplate,
 }: FounderOsDashboardProps) {
   const [buildRoom, setBuildRoom] = useState<BuildRoomData | null>(null);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
@@ -97,20 +104,34 @@ export function FounderOsDashboardLayout({
   const [syncStatus, setSyncStatus] = useState<Awaited<
     ReturnType<typeof fetchPlatformSyncStatus>
   > | null>(null);
+  const [missionIntel, setMissionIntel] = useState<MissionIntelligence | null>(null);
+  const [founderQueue, setFounderQueue] = useState<FounderQueueItem[]>([]);
+  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
+  const [attentionUrgent, setAttentionUrgent] = useState(0);
+  const [commandCenterLoading, setCommandCenterLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, account, platform] = await Promise.all([
+      const [br, mem, worker, account, platform, intel, queueRes, attentionRes] =
+        await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
         fetchBuilderWorkerStatus(accessToken).catch(() => null),
         fetchAccountOverview(accessToken).catch(() => null),
         fetchPlatformSyncStatus(accessToken).catch(() => null),
+        fetchMissionIntelligence(accessToken).catch(() => null),
+        fetchFounderQueue(accessToken).catch(() => null),
+        fetchAttentionCenter(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
       setWorkerStatus(worker);
       setSyncStatus(platform);
+      setMissionIntel(intel);
+      setFounderQueue(queueRes?.items ?? []);
+      setAttentionItems(attentionRes?.items ?? []);
+      setAttentionUrgent(attentionRes?.urgentCount ?? 0);
+      setCommandCenterLoading(false);
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
         setAvatarUrl(account.avatarUrl);
@@ -293,15 +314,18 @@ export function FounderOsDashboardLayout({
 
         <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
           {showMissionControl ? (
-            <div className="mx-auto flex max-w-5xl flex-col gap-6">
+            <div className="mx-auto flex max-w-[90rem] flex-col gap-6">
               <header className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">
-                    Mission Control
+                    Founder Command Center
                   </p>
                   <h1 className="mt-1 text-xl font-bold text-white sm:text-2xl">
-                    Run your startup from anywhere
+                    Think · plan · build · ship — in one tab
                   </h1>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Founder Brain routes research, build, and strategy — you stay in chat.
+                  </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -323,99 +347,128 @@ export function FounderOsDashboardLayout({
                 </div>
               </header>
 
-              <FounderOsReadinessPanel
-                accessToken={accessToken}
-                onRefresh={() => {
-                  void load();
-                  onRefresh();
-                }}
-              />
-
-              <MissionControlStatusStrip
-                accessToken={accessToken}
-                buildWorker={workerStatus?.buildWorker}
-                onRefresh={() => {
-                  void load();
-                  onRefresh();
-                }}
-              />
-
-              <MissionControlTrustStrip
-                accessToken={accessToken}
-                onRefresh={() => {
-                  void load();
-                  onRefresh();
-                }}
-              />
-
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {[
-                  { label: 'Open tasks', value: String(openTasks) },
-                  { label: 'Active agents', value: workerStatus?.buildWorker !== 'NONE' ? '1' : '0' },
-                  {
-                    label: 'Commits (7d)',
-                    value: String(buildRoom?.stats.commits ?? 0),
-                  },
-                  {
-                    label: 'Next milestone',
-                    value: memory?.suggestedNextStep?.slice(0, 24) ?? 'MVP',
-                  },
-                ].map((stat) => (
-                  <div
-                    key={stat.label}
-                    className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3 py-2.5"
-                  >
-                    <p className="text-[10px] uppercase tracking-wider text-zinc-600">{stat.label}</p>
-                    <p className="mt-0.5 truncate text-sm font-semibold text-white">{stat.value}</p>
+              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,32%)]">
+                <div className="flex min-w-0 flex-col gap-4">
+                  <FounderCopilotChat
+                    key={chatKey}
+                    accessToken={accessToken}
+                    variant="hero"
+                    memory={memory}
+                    initialPrompt={quickPrompt}
+                    agentTemplate={null}
+                    onInitialPromptConsumed={() => {
+                      setQuickPrompt(null);
+                      onInitialCopilotPromptConsumed?.();
+                    }}
+                    onResult={(a) => {
+                      onMessage?.(a);
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    {COPILOT_CHIPS.map((chip) => (
+                      <button
+                        key={chip}
+                        type="button"
+                        onClick={() => setQuickPrompt(chip)}
+                        className="rounded-full border border-zinc-700/80 bg-zinc-900/50 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-violet-500/50 hover:text-white"
+                      >
+                        {chip}
+                      </button>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
 
-              <MissionStatePanel
-                accessToken={accessToken}
-                initial={memory?.memoryGraph ?? null}
-                lastCommit={memory?.lastCommit}
-                openTaskCount={memory?.openTasks?.length ?? 0}
-                buildWorker={workerStatus?.buildWorker}
-                workerReady={workerStatus?.buildWorker !== 'NONE'}
-                repoFullName={memory?.repoFullName}
-                onSaved={() => void load()}
-                onBuildComplete={(msg) => {
-                  onMessage?.(msg);
-                  void load();
-                  onRefresh();
-                }}
-              />
+                <div className="flex flex-col gap-4">
+                  <FounderCommandCenterPanels
+                    queue={founderQueue}
+                    attention={attentionItems}
+                    urgentCount={attentionUrgent}
+                    loading={commandCenterLoading}
+                    onPrompt={(prompt) => {
+                      setQuickPrompt(prompt);
+                      setChatKey((k) => k + 1);
+                    }}
+                  />
 
-              <FounderCopilotChat
-                key={chatKey}
-                accessToken={accessToken}
-                variant="hero"
-                memory={memory}
-                initialPrompt={quickPrompt}
-                agentTemplate={activeAgentTemplate}
-                onInitialPromptConsumed={() => {
-                  setQuickPrompt(null);
-                  onInitialCopilotPromptConsumed?.();
-                }}
-                onResult={(a) => {
-                  onMessage?.(a);
-                  void load();
-                  onRefresh();
-                }}
-              />
+                  {missionIntel && (
+                    <div className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-4 text-sm text-zinc-200">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-300">
+                        Mission intelligence
+                      </p>
+                      <p className="mt-2 font-medium text-white">{missionIntel.currentInitiative}</p>
+                      <p className="mt-2 text-xs text-zinc-400">{missionIntel.impact}</p>
+                      {missionIntel.blocker && (
+                        <p className="mt-2 text-xs text-amber-200/90">Blocker: {missionIntel.blocker}</p>
+                      )}
+                      <p className="mt-2 text-xs text-emerald-200/90">
+                        Next: {missionIntel.recommendedNextStep}
+                      </p>
+                      <p className="mt-2 text-[10px] text-zinc-600">
+                        Confidence: {missionIntel.confidence} · {missionIntel.progressPercent}% progress
+                      </p>
+                    </div>
+                  )}
 
-              <div className="flex flex-wrap gap-2">
-                {COPILOT_CHIPS.map((chip) => (
-                  <button
-                    key={chip}
-                    type="button"
-                    onClick={() => setQuickPrompt(chip)}
-                    className="rounded-full border border-zinc-700/80 bg-zinc-900/50 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-violet-500/50 hover:text-white"
-                  >
-                    {chip}
-                  </button>
-                ))}
+                  <MissionStatePanel
+                    accessToken={accessToken}
+                    initial={memory?.memoryGraph ?? null}
+                    lastCommit={memory?.lastCommit}
+                    openTaskCount={memory?.openTasks?.length ?? 0}
+                    buildWorker={workerStatus?.buildWorker}
+                    workerReady={workerStatus?.buildWorker !== 'NONE'}
+                    repoFullName={memory?.repoFullName}
+                    onSaved={() => void load()}
+                    onBuildComplete={(msg) => {
+                      onMessage?.(msg);
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+
+                  <MissionControlStatusStrip
+                    accessToken={accessToken}
+                    buildWorker={workerStatus?.buildWorker}
+                    onRefresh={() => {
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { label: 'Open tasks', value: String(openTasks) },
+                      { label: 'Agents', value: workerStatus?.buildWorker !== 'NONE' ? '1' : '0' },
+                      { label: 'Commits (7d)', value: String(buildRoom?.stats.commits ?? 0) },
+                      { label: 'Readiness', value: `${readiness}%` },
+                    ].map((stat) => (
+                      <div
+                        key={stat.label}
+                        className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3 py-2.5"
+                      >
+                        <p className="text-[10px] uppercase tracking-wider text-zinc-600">{stat.label}</p>
+                        <p className="mt-0.5 truncate text-sm font-semibold text-white">{stat.value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <FounderOsReadinessPanel
+                    accessToken={accessToken}
+                    onRefresh={() => {
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+
+                  <MissionControlTrustStrip
+                    accessToken={accessToken}
+                    onRefresh={() => {
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+                </div>
               </div>
             </div>
           ) : (

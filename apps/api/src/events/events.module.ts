@@ -11,6 +11,7 @@ import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
+import { FounderCommandCenterService } from './founder-command-center.service';
 
 @Module({
   imports: [
@@ -28,7 +29,14 @@ import { FounderMetricsService } from './founder-metrics.service';
     FounderAutopilotService,
     FounderCopilotService,
     FounderMetricsService,
+    FounderCommandCenterService,
   ],
-  exports: [EventsService, FounderMetricsService, FounderCopilotService, FounderAutopilotService],
+  exports: [
+    EventsService,
+    FounderMetricsService,
+    FounderCopilotService,
+    FounderAutopilotService,
+    FounderCommandCenterService,
+  ],
 })
 export class EventsModule {}

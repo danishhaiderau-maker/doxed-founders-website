@@ -4301,6 +4301,35 @@ export function fetchCopilotMemory(token: string) {
   return apiFetch<ProjectMemory>('/copilot/memory', undefined, token);
 }
 
+export type MissionIntelligence = import('@dcf/utils').MissionIntelligence;
+
+export function fetchMissionIntelligence(token: string) {
+  return apiFetch<MissionIntelligence>('/copilot/mission-intelligence', undefined, token);
+}
+
+export type FounderQueueItem = import('@dcf/utils').FounderQueueItem;
+export type AttentionItem = import('@dcf/utils').AttentionItem;
+
+export type FounderQueueResponse = {
+  items: FounderQueueItem[];
+  count: number;
+  missionIntelligence: MissionIntelligence | null;
+};
+
+export type AttentionCenterResponse = {
+  items: AttentionItem[];
+  count: number;
+  urgentCount: number;
+};
+
+export function fetchFounderQueue(token: string) {
+  return apiFetch<FounderQueueResponse>('/copilot/founder-queue', undefined, token);
+}
+
+export function fetchAttentionCenter(token: string) {
+  return apiFetch<AttentionCenterResponse>('/copilot/attention', undefined, token);
+}
+
 export function fetchCopilotMemoryGraph(token: string) {
   return apiFetch<FounderMemoryGraph>('/copilot/memory-graph', undefined, token);
 }
