@@ -62,6 +62,7 @@ export default function PaperTradingPage() {
 function PaperTradingPageContent() {
   const searchParams = useSearchParams();
   const { data: session, status: authStatus } = useSession();
+  const authToken = session?.accessToken;
   const [userId, setUserId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [portfolio, setPortfolio] = useState<PaperPortfolio | null>(null);
@@ -116,11 +117,11 @@ function PaperTradingPageContent() {
   const chartChain = preview?.chainSlug ?? portfolio?.positions[0]?.chainSlug ?? null;
   const chartPair = preview?.pairAddress ?? null;
 
-  const refreshPortfolio = useCallback(async (id: string) => {
-    const data = await fetchPaperPortfolio(id);
+  const refreshPortfolio = useCallback(async (id: string, token?: string) => {
+    const data = await fetchPaperPortfolio(id, token);
     setPortfolio(data);
     try {
-      const orders = await fetchPaperLimitOrders(id);
+      const orders = await fetchPaperLimitOrders(id, token);
       setLimitOrders(orders);
     } catch {
       setLimitOrders([]);
@@ -146,7 +147,7 @@ function PaperTradingPageContent() {
         if (stored && stored !== authUserId && !migrationDone) {
           setMigrationDone(true);
           try {
-            const result = await migrateGuestPortfolio(stored, authUserId);
+            const result = await migrateGuestPortfolio(stored, authUserId, session!.accessToken!);
             if (result.migrated) {
               setGuestPortfolioNotice(
                 `Imported ${result.positionsMerged} position(s) from your guest session into this account.`,
@@ -166,21 +167,21 @@ function PaperTradingPageContent() {
         }
         setUserId(authUserId);
         localStorage.setItem(SESSION_KEY, authUserId);
-        await refreshPortfolio(authUserId);
+        await refreshPortfolio(authUserId, session?.accessToken);
         return;
       }
 
       const stored = localStorage.getItem(SESSION_KEY);
       if (stored) {
         setUserId(stored);
-        await refreshPortfolio(stored);
+        await refreshPortfolio(stored, authToken);
       }
     }
 
     bootstrap().catch(() => {
       setError('Could not load your portfolio. Try refreshing.');
     });
-  }, [authStatus, session?.user?.id, refreshPortfolio, migrationDone]);
+  }, [authStatus, session?.user?.id, session?.accessToken, refreshPortfolio, migrationDone]);
 
   useEffect(() => {
     fetchResetInfo()
@@ -319,7 +320,7 @@ function PaperTradingPageContent() {
         userId,
         projectId: pos.projectId,
         comment: comment?.trim() || undefined,
-      });
+      }, authToken);
       const pnlLabel =
         result.realizedPnlUsd >= 0
           ? `+${formatDdollar(result.realizedPnlUsd)}`
@@ -344,7 +345,7 @@ function PaperTradingPageContent() {
       }
       setLastFeedPostId(result.feedPostId);
       if (intelPosition?.ticker === pos.ticker) setIntelPosition(null);
-      await refreshPortfolio(userId);
+      await refreshPortfolio(userId, authToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not close position');
     } finally {
@@ -362,13 +363,13 @@ function PaperTradingPageContent() {
         fromProjectId: swapFrom.projectId,
         toDexscreenerUrl: swapTargetUrl.trim(),
         comment: `Swap ${swapFrom.ticker}`,
-      });
+      }, authToken);
       setToast(
         `Swapped ${result.sell.ticker} → ${result.buy.ticker} · ${formatDdollar(result.buy.amountUsd)} bought`,
       );
       setSwapFrom(null);
       setSwapTargetUrl('');
-      await refreshPortfolio(userId);
+      await refreshPortfolio(userId, authToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Swap failed');
     } finally {
@@ -400,10 +401,10 @@ function PaperTradingPageContent() {
           limitSide === 'BUY'
             ? dexUrl.trim() || pos?.dexscreenerUrl || undefined
             : undefined,
-      });
+      }, authToken);
       setToast(`Limit ${limitSide} order placed @ ${formatTokenPrice(Number(limitTargetPrice))}`);
       setLimitTargetPrice('');
-      await refreshPortfolio(userId);
+      await refreshPortfolio(userId, authToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not place limit order');
     } finally {
@@ -415,8 +416,8 @@ function PaperTradingPageContent() {
     if (!userId) return;
     setLoading(true);
     try {
-      await cancelPaperLimitOrder(userId, orderId);
-      await refreshPortfolio(userId);
+      await cancelPaperLimitOrder(userId, orderId, authToken);
+      await refreshPortfolio(userId, authToken);
       setToast('Limit order cancelled');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not cancel order');
@@ -439,7 +440,7 @@ function PaperTradingPageContent() {
         catalyst: tradeCatalyst.trim() || undefined,
         targetUsd: tradeTargetUsd.trim() ? Number(tradeTargetUsd) : undefined,
         timeHorizon: tradeTimeHorizon.trim() || undefined,
-      });
+      }, authToken);
       setLastFeedPostId(result.feedPostId);
       if (side === 'SELL' && result.realizedPnlUsd != null) {
         const pnlLabel =
@@ -454,7 +455,7 @@ function PaperTradingPageContent() {
       setTradeTimeHorizon('');
       setFounderDoxxedTick(false);
       setShowAccountabilityModal(false);
-      await refreshPortfolio(userId);
+      await refreshPortfolio(userId, authToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Trade failed');
     } finally {
@@ -482,14 +483,14 @@ function PaperTradingPageContent() {
     setError(null);
     try {
       if (resetInfo?.stripeEnabled) {
-        const checkout = await createResetCheckout(userId);
+        const checkout = await createResetCheckout(userId, authToken);
         window.location.href = checkout.url;
         return;
       }
-      const result = await resetPaperPortfolio(userId);
+      const result = await resetPaperPortfolio(userId, authToken);
       setShowBustModal(false);
       setBustDismissed(true);
-      await refreshPortfolio(userId);
+      await refreshPortfolio(userId, authToken);
       setGuestPortfolioNotice(result.message);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Reset failed');

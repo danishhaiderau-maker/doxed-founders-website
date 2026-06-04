@@ -113,16 +113,24 @@ try {
 
   const railwayPaste = [
     process.env.HELIUS_RPC_URL?.trim()
+      ? 'HELIUS_RPC_URL=(set in vault)'
+      : `SOLANA_RPC_URL=${rpcUrl}`,
+    finalTreasury ? 'PLATFORM_SOLANA_TREASURY=(treasury address saved to Neon)' : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const pastePath = path.join(getVaultDir(), 'railway-crypto-paste.env');
+  const pasteSecrets = [
+    process.env.HELIUS_RPC_URL?.trim()
       ? `HELIUS_RPC_URL=${process.env.HELIUS_RPC_URL.trim()}`
       : `SOLANA_RPC_URL=${rpcUrl}`,
     finalTreasury ? `PLATFORM_SOLANA_TREASURY=${finalTreasury}` : null,
   ]
     .filter(Boolean)
     .join('\n');
-
-  const pastePath = path.join(getVaultDir(), 'railway-crypto-paste.env');
-  fs.writeFileSync(pastePath, railwayPaste, 'utf8');
-  console.log('\nWrote Railway vars to vault/railway-crypto-paste.env');
+  fs.writeFileSync(pastePath, pasteSecrets, 'utf8');
+  console.log('\nWrote Railway vars to vault/railway-crypto-paste.env (secrets not printed)');
   console.log('Paste into Railway → API service → Variables → Raw Editor, then redeploy.\n');
   console.log(railwayPaste);
   console.log('\nAfter Railway redeploy, verify:');

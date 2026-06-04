@@ -59,7 +59,8 @@ const token = xSecrets.RAILWAY_TOKEN?.trim();
 const jwtSecret = vercel.JWT_SECRET;
 loadVaultEnv(root);
 
-if (!token || !process.env.DATABASE_URL || !jwtSecret) {  console.error('Missing RAILWAY_TOKEN, DATABASE_URL, or JWT_SECRET in vault');
+if (!token || !process.env.DATABASE_URL || !jwtSecret) {
+  console.error('Missing RAILWAY_TOKEN, DATABASE_URL, or JWT_SECRET in vault');
   process.exit(1);
 }
 
@@ -72,6 +73,9 @@ if (!row?.showcaseExchangeCredentialEnc) {
 }
 
 const vars = { PORT: '5000' };
+if (vercel.BOT_CONTROL_SECRET?.trim()) {
+  vars.BOT_CONTROL_SECRET = vercel.BOT_CONTROL_SECRET.trim();
+}
 const ex = JSON.parse(decryptSecret(row.showcaseExchangeCredentialEnc, jwtSecret));
 const provider = row.showcaseExchangeProvider ?? 'bybit';
 Object.assign(vars, exchangeCredentialsToEnvVars(provider, {

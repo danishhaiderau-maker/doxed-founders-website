@@ -317,12 +317,13 @@ model Watchlist {
 // ─── Paper Trading ─────────────────────────────────────────────────────────────
 
 model PaperPortfolio {
-  id           String   @id @default(cuid())
-  userId       String   @unique
-  cashBalance  Decimal  @default(10000)
-  totalValue   Decimal  @default(10000)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  sessionTokenHash String?
+  cashBalance      Decimal  @default(10000)
+  totalValue       Decimal  @default(10000)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   positions PaperPosition[]

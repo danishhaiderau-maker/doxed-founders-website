@@ -53,23 +53,30 @@ async function main() {
   console.log(JSON.stringify(counts, null, 2));
 
   const bcrypt = await import('bcrypt');
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? 'Admin123!';
-  const passwordHash = await bcrypt.hash(adminPassword, 12);
-  await prisma.user.upsert({
-    where: { email: 'admin@doxedcryptofounder.local' },
-    update: {
-      passwordHash,
-      role: 'ADMIN',
-      name: 'Platform Admin',
-    },
-    create: {
-      email: 'admin@doxedcryptofounder.local',
-      passwordHash,
-      role: 'ADMIN',
-      name: 'Platform Admin',
-    },
-  });
-  console.log('Admin user ready: admin@doxedcryptofounder.local');
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD?.trim();
+  if (!adminPassword) {
+    if (process.env.DATABASE_URL?.includes('neon') || process.env.NODE_ENV === 'production') {
+      throw new Error('Set SEED_ADMIN_PASSWORD before seeding production databases');
+    }
+    console.warn('SEED_ADMIN_PASSWORD not set — skipping admin user seed (dev only)');
+  } else {
+    const passwordHash = await bcrypt.hash(adminPassword, 12);
+    await prisma.user.upsert({
+      where: { email: 'admin@doxedcryptofounder.local' },
+      update: {
+        passwordHash,
+        role: 'ADMIN',
+        name: 'Platform Admin',
+      },
+      create: {
+        email: 'admin@doxedcryptofounder.local',
+        passwordHash,
+        role: 'ADMIN',
+        name: 'Platform Admin',
+      },
+    });
+    console.log('Admin user ready: admin@doxedcryptofounder.local');
+  }
 }
 
 main()

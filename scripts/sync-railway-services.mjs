@@ -47,6 +47,9 @@ const token =
   process.env.RAILWAY_TOKEN?.trim();
 const dbUrl = neon.DATABASE_URL || vercelCheck.DATABASE_URL;
 const jwtSecret = vercelCheck.JWT_SECRET?.trim();
+const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
+const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
+const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
 
 if (!token || !dbUrl) {
   console.error('Missing RAILWAY_TOKEN or DATABASE_URL in vault');
@@ -66,6 +69,9 @@ const apiVars = {
   PRISMA_DB_PUSH: 'true',
   PRISMA_SCHEMA: 'prisma/schema.prisma',
   CORS_ORIGINS: cors,
+  ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
+  ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
+  ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
 };
 
 const TARGET_SERVICES = new Set(['doxed-founders-website', 'btc-conservative-agent']);
@@ -91,7 +97,10 @@ for (const project of data.projects?.edges?.map((e) => e.node) ?? []) {
     const svc = svcEdge.node;
     if (!TARGET_SERVICES.has(svc.name)) continue;
 
-    const variables = svc.name === 'doxed-founders-website' ? apiVars : { PORT: '5000' };
+    const variables = svc.name === 'doxed-founders-website' ? apiVars : {
+      PORT: '5000',
+      ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
+    };
     console.log(`Sync ${project.name} / ${svc.name}…`);
     await gql(
       token,

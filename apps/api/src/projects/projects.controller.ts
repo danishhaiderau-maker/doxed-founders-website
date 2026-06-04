@@ -1,6 +1,7 @@
-import { Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/public.decorator';
+import { MetricsSyncGuard } from './metrics-sync.guard';
 import { MetricsSyncService } from './metrics-sync.service';
 import { PlatformAdoptionService } from './platform-adoption.service';
 import { ProjectsService } from './projects.service';
@@ -49,6 +50,7 @@ export class ProjectsController {
   }
 
   @Post('sync-metrics')
+  @UseGuards(MetricsSyncGuard)
   syncMetrics() {
     return this.metricsSync.syncStaleProjects();
   }

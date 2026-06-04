@@ -1600,6 +1600,8 @@ model FounderBuilderSettings {
   autopilotRedeployHosts Boolean    @default(false)
   controlPlaneMode       ControlPlaneMode @default(FULL_STACK)
   currentGoalFocus       String?
+  /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
+  memoryGraph            Json?
   memoryStorageMode      MemoryStorageMode @default(PLATFORM)
   createdAt              DateTime   @default(now())
   updatedAt              DateTime   @updatedAt

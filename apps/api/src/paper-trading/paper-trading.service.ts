@@ -34,6 +34,7 @@ import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
+import { createPaperSessionToken } from './paper-session.util';
 
 const STARTING_CASH = STARTING_CASH_USD;
 const MIN_SELL_USD = 0.01;
@@ -62,6 +63,7 @@ export class PaperTradingService {
 
   async createSession(displayName?: string) {
     const guestId = randomUUID().slice(0, 8);
+    const { token, hash } = createPaperSessionToken();
     const user = await this.prisma.user.create({
       data: {
         email: `paper-${guestId}@guest.local`,
@@ -70,6 +72,7 @@ export class PaperTradingService {
           create: {
             cashBalance: STARTING_CASH,
             totalValue: STARTING_CASH,
+            sessionTokenHash: hash,
           },
         },
       },
@@ -78,6 +81,7 @@ export class PaperTradingService {
 
     return {
       userId: user.id,
+      sessionToken: token,
       displayName: user.name,
       cashBalance: Number(user.paperPortfolio!.cashBalance),
       totalValue: Number(user.paperPortfolio!.totalValue),

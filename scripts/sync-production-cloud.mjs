@@ -137,6 +137,9 @@ async function main() {
   const dbUrl = neon.DATABASE_URL || vercelCheck.DATABASE_URL;
   const jwtSecret = vercelCheck.JWT_SECRET?.trim();
   const nextAuthSecret = vercelCheck.NEXTAUTH_SECRET?.trim() || jwtSecret;
+  const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
+  const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
+  const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
   const googleId = vercelCheck.GOOGLE_CLIENT_ID?.trim() || localEnv.GOOGLE_CLIENT_ID?.trim();
   const googleSecret = vercelCheck.GOOGLE_CLIENT_SECRET?.trim() || localEnv.GOOGLE_CLIENT_SECRET?.trim() || '';
 
@@ -198,6 +201,9 @@ async function main() {
       WEBAUTHN_RP_ID: 'doxxedcrypto.digital',
       TRADING_AGENT_BOT_URL: BTC_BOT_URL,
       CONSERVATIVE_BTC_BOT_URL: BTC_BOT_URL,
+      ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
+      ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
+      ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
     });
   } else {
     console.warn('\nSkip Railway API sync — set RAILWAY_TOKEN in vault/.env.x.secrets');
