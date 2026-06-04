@@ -162,7 +162,8 @@ async function main() {
   }
 
   const vercelVars = {
-    NEXT_PUBLIC_API_URL: apiUrl,
+    // Empty = browser uses same-origin /api (Vercel rewrite → Railway). Avoids CORS to *.railway.app.
+    NEXT_PUBLIC_API_URL: '',
     API_URL: apiUrl,
     NEXTAUTH_URL: SITE_URL,
     NEXTAUTH_SECRET: nextAuthSecret,

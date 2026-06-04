@@ -335,8 +335,16 @@ async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Pr
       },
     });
   } catch {
+    const target = describeApiTarget();
+    const onProdSite =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'doxxedcrypto.digital' ||
+        window.location.hostname === 'www.doxxedcrypto.digital' ||
+        window.location.hostname.endsWith('.vercel.app'));
     throw new Error(
-      `Cannot reach API at ${describeApiTarget()}. Run dev-lan.cmd and ensure the Nest API is on port 4000.`,
+      onProdSite
+        ? `Cannot reach API at ${target}. Refresh the page and try again. If it persists, check that Founder Node tray is open, then retry.`
+        : `Cannot reach API at ${target}. Run dev-lan.cmd and ensure the Nest API is on port 4000.`,
     );
   }
 
