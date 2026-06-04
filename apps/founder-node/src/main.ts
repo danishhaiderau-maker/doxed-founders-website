@@ -14,7 +14,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { configureSharedElectronUserData } from './app-paths';
-import { enforceSingleFounderNodeInstance, releaseGlobalInstanceLock } from './single-instance';
+import {
+  enforceSingleFounderNodeInstance,
+  ensureOnlyOneFounderNodeProcess,
+  releaseGlobalInstanceLock,
+} from './single-instance';
 import {
   defaultVaultRoot,
   ensureVault,
@@ -89,6 +93,9 @@ let lastSyncOkAt: Date | null = null;
 let lastSyncError: string | null = null;
 let consecutiveTransientFailures = 0;
 let syncPausedUntil = 0;
+let authRecoveryHandled = false;
+let lastAuthDialogAt = 0;
+const AUTH_DIALOG_COOLDOWN_MS = 5 * 60 * 1000;
 
 function notifyDesktop(title: string, body: string): void {
   if (!Notification.isSupported()) return;
@@ -97,6 +104,10 @@ function notifyDesktop(title: string, body: string): void {
   } catch {
     /* optional on some Linux setups */
   }
+}
+
+function resetAuthRecoveryState(): void {
+  authRecoveryHandled = false;
 }
 
 function formatLastSyncLine(): string {
@@ -156,26 +167,37 @@ function startSyncLoop(vaultRoot: string) {
 }
 
 function handleAuthFailure(vaultRoot: string): void {
+  if (authRecoveryHandled) return;
+  authRecoveryHandled = true;
+
+  lastSyncError = authFailureUserMessage();
+  stopBackgroundLoops(loops);
+  clearNodeConfig(vaultRoot);
+  syncCycleInFlight = false;
+  syncJobInFlight = false;
+  refreshTrayMenu(vaultRoot);
+
+  const showDialog =
+    app.isPackaged && Date.now() - lastAuthDialogAt >= AUTH_DIALOG_COOLDOWN_MS;
+
   void (async () => {
-    lastSyncError = authFailureUserMessage();
-    if (app.isPackaged) {
+    if (showDialog) {
+      lastAuthDialogAt = Date.now();
       const { response } = await dialog.showMessageBox({
         type: 'warning',
         title: 'Desktop link expired',
         message: 'Not a firewall issue — you need a new pairing code',
-        detail: `${lastSyncError}\n\nYour cloud account still shows as linked; paste a fresh code from Founder OS into this app.`,
-        buttons: ['Open pairing in browser', 'OK'],
+        detail: `${lastSyncError}\n\nYour cloud account still shows as linked. Use the pairing window (not extra browser tabs) — generate one code in Founder OS → Settings → Builder, paste it here.`,
+        buttons: ['OK', 'Open pairing in browser'],
         defaultId: 0,
+        cancelId: 0,
       });
-      if (response === 0) {
+      if (response === 1) {
         await shell.openExternal(SETTINGS_BUILDER_URL);
       }
-    } else {
+    } else if (!app.isPackaged) {
       notifyDesktop('Founder Node needs pairing', lastSyncError);
     }
-    stopBackgroundLoops(loops);
-    clearNodeConfig(vaultRoot);
-    refreshTrayMenu(vaultRoot);
     openPairWindow();
   })();
 }
@@ -495,6 +517,7 @@ function refreshTrayMenu(vaultRoot: string): void {
 
 if (gotSingleInstanceLock) {
   app.on('second-instance', () => {
+    ensureOnlyOneFounderNodeProcess();
     if (pairWindow && !pairWindow.isDestroyed()) {
       pairWindow.show();
       pairWindow.focus();
@@ -524,15 +547,10 @@ app.whenReady().then(() => {
   refreshTrayMenu(vaultRoot);
   tray.on('click', () => tray?.popUpContextMenu());
 
+  ensureOnlyOneFounderNodeProcess();
+
   const config = readNodeConfig(vaultRoot);
   if (!config) {
-    const hadCredentials = fs.existsSync(path.join(vaultRoot, 'node-config.json.bak'));
-    if (hadCredentials) {
-      notifyDesktop(
-        'Founder Node needs pairing again',
-        'Your desktop link expired (server rejected the old token). Generate a new code in Founder OS → Settings → Builder (Step 2) and enter it here.',
-      );
-    }
     if (isWindows() && app.isPackaged) {
       void tryAddWindowsFirewallRules().catch(console.warn);
     }
@@ -585,11 +603,12 @@ app.whenReady().then(() => {
         ollama: defaultOllamaConfig(),
       });
 
+      resetAuthRecoveryState();
       refreshTrayMenu(vaultRoot);
       startSyncLoop(vaultRoot);
       notifyDesktop(
         'Founder Node connected',
-        'Vault paired. Keep the tray app open. If sync fails, use tray → Allow through Windows Firewall.',
+        'Vault paired. Keep one tray app open — do not launch Founder Node again from the Start Menu.',
       );
       if (isWindows() && app.isPackaged) {
         void tryAddWindowsFirewallRules().catch(console.warn);

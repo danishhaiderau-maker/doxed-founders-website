@@ -61,6 +61,13 @@ export function releaseGlobalInstanceLock(): void {
 }
 
 /** Windows: main process has no `--type=` in command line (gpu/utility children do). */
+function parsePidList(out: string): number[] {
+  return out
+    .split(/\r?\n/)
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
 export function listMainFounderNodePids(): number[] {
   if (process.platform !== 'win32') return [];
   try {
@@ -74,10 +81,17 @@ export function listMainFounderNodePids(): number[] {
       windowsHide: true,
       timeout: 15_000,
     });
-    return out
-      .split(/\r?\n/)
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => Number.isFinite(n) && n > 0);
+    const mains = parsePidList(out);
+    if (mains.length > 0) return mains;
+  } catch {
+    /* fall through */
+  }
+  try {
+    const out = execSync(
+      'powershell -NoProfile -Command "Get-Process -Name \'Founder Node\' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"',
+      { encoding: 'utf8', windowsHide: true, timeout: 15_000 },
+    );
+    return parsePidList(out);
   } catch {
     return [];
   }
@@ -118,10 +132,16 @@ export function acquireGlobalInstanceLock(): GlobalLockResult {
   return existing ? 'stale-replaced' : 'acquired';
 }
 
+/** Kill duplicate tray apps (packaged builds). Safe to call on startup and second-instance. */
+export function ensureOnlyOneFounderNodeProcess(): number[] {
+  if (!app.isPackaged) return [];
+  return terminateOtherMainFounderNodeProcesses();
+}
+
 export function enforceSingleFounderNodeInstance(): boolean {
   if (!app.isPackaged) return true;
 
-  const killed = terminateOtherMainFounderNodeProcesses();
+  const killed = ensureOnlyOneFounderNodeProcess();
   if (killed.length) {
     console.log(`Founder Node: stopped ${killed.length} duplicate instance(s): ${killed.join(', ')}`);
   }
