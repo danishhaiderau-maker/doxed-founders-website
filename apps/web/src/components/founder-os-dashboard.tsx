@@ -99,6 +99,7 @@ export function FounderOsDashboardLayout({
     ReturnType<typeof fetchBuilderWorkerStatus>
   > | null>(null);
   const [quickPrompt, setQuickPrompt] = useState<string | null>(initialCopilotPrompt ?? null);
+  const [resumeBriefing, setResumeBriefing] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -182,7 +183,8 @@ export function FounderOsDashboardLayout({
     setResumeBusy(true);
     try {
       const result = await copilotResume(accessToken);
-      setQuickPrompt(result.message);
+      setResumeBriefing(result.message);
+      setQuickPrompt(null);
       setChatKey((k) => k + 1);
       onMessage?.(result.dispatchHint ?? result.message);
 
@@ -362,6 +364,8 @@ export function FounderOsDashboardLayout({
                     variant="hero"
                     memory={memory}
                     initialPrompt={quickPrompt}
+                    seedAssistantMessage={resumeBriefing}
+                    onSeedAssistantConsumed={() => setResumeBriefing(null)}
                     agentTemplate={null}
                     onInitialPromptConsumed={() => {
                       setQuickPrompt(null);

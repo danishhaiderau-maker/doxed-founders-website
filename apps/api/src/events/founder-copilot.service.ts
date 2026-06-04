@@ -50,7 +50,9 @@ import {
   classifyFounderBrainTask,
   detectContinueMissionIntent,
   formatMissionStateBlock,
+  formatResumeWorkBrief,
   resolveMissionBuildTask,
+  isStaleBoilerplateMissionTask,
   getFounderBrainRouteLabel,
   shouldDispatchBuilderForCodeAsk,
   isFounderRepoStatusPrompt,
@@ -646,29 +648,34 @@ export class FounderCopilotService {
   }
 
   async askContinueFromMissionState(userId: string) {
+    const memoryPre = await this.getProjectMemory(userId);
+    if (memoryPre.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional */
+      }
+    }
     const memory = await this.getProjectMemory(userId);
     const graph = memory.memoryGraph ?? (await this.memoryGraph.resolveForUser(userId));
     const founder = await this.prisma.founder.findUnique({ where: { userId } });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
-    const block = formatMissionStateBlock(graph, {
+    const intelligence = await this.computeMissionIntelligenceForUser(userId);
+    await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
+
+    const refreshedGraph = await this.memoryGraph.resolveForUser(userId);
+    const answer = formatResumeWorkBrief({
+      intelligence,
+      graph: refreshedGraph,
+      repoFullName: memory.repoFullName,
       lastCommit: memory.lastCommit,
-      openTaskCount: memory.openTasks.length,
+      vaultNote: this.buildVaultContextLines(memory).join('\n') || null,
+      launchReadiness: memory.launchReadiness,
     });
 
-    const systemPrompt = `${this.memoryGraph.getPrefix(graph)}You are Founder Copilot. The user wants to continue where they left off. Use Mission State as ground truth. Give a short, actionable plan (3–6 bullets max). Do not ask what they are building.`;
-    const brainTask = classifyFounderBrainTask(buildContinueFromMissionPrompt(graph));
-    const aiResult = await this.builder.tryCopilotChatCompletion(
-      userId,
-      systemPrompt,
-      buildContinueFromMissionPrompt(graph),
-      { founderBrainTask: brainTask },
-    );
-
+    const brainTask = classifyFounderBrainTask('continue where I left off');
     const routeLabel = getFounderBrainRouteLabel(brainTask);
-    const answer = aiResult.ok
-      ? `${block}\n\n---\n\n${aiResult.text}`
-      : `${block}\n\n**Do this next:** ${graph.next_action ?? graph.current_task ?? memory.suggestedNextStep}`;
 
     await this.events.emit({
       founderId: founder.id,
@@ -677,13 +684,13 @@ export class FounderCopilotService {
       type: FounderEventType.COPILOT_COMMAND,
       source: 'copilot',
       title: 'Continue mission state',
-      payload: { intent: 'continue', goal: graph.active_goal },
+      payload: { intent: 'continue', goal: refreshedGraph.active_goal },
     });
 
     return {
       answer,
-      answerProvider: aiResult.ok ? 'FOUNDER_BRAIN' : 'RULE_BASED',
-      routedAgent: aiResult.ok ? { template: brainTask, label: routeLabel } : undefined,
+      answerProvider: 'FOUNDER_BRAIN',
+      routedAgent: { template: brainTask, label: routeLabel },
       founderBrain: { task: brainTask, label: routeLabel },
       stats: {
         commits: 0,
@@ -696,11 +703,37 @@ export class FounderCopilotService {
     };
   }
 
+  private async reconcileMissionGraphWithIntelligence(
+    userId: string,
+    intel: Awaited<ReturnType<FounderCopilotService['computeMissionIntelligenceForUser']>>,
+  ) {
+    const graph = await this.memoryGraph.resolveForUser(userId);
+    const patch: FounderMemoryGraphPatch = {};
+    if (isStaleBoilerplateMissionTask(graph.current_task)) {
+      patch.current_task = intel.recommendedNextStep.slice(0, 200);
+    }
+    if (isStaleBoilerplateMissionTask(graph.next_action)) {
+      patch.next_action = intel.recommendedNextStep.slice(0, 200);
+    }
+    if (Object.keys(patch).length > 0) {
+      await this.memoryGraph.patchForUser(userId, patch);
+    }
+  }
+
   /** Sprint 7d — dispatch builder from Mission State (current task / next action). */
   async runMissionBuild(userId: string, input?: { worker?: 'CURSOR' | 'OPENHANDS' }) {
     const memory = await this.getProjectMemory(userId);
-    const graph = memory.memoryGraph ?? (await this.memoryGraph.resolveForUser(userId));
-    const { spec, taskLabel } = resolveMissionBuildTask(graph);
+    if (memory.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional */
+      }
+    }
+    const intelligence = await this.computeMissionIntelligenceForUser(userId);
+    await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
+    const graph = await this.memoryGraph.resolveForUser(userId);
+    const { spec, taskLabel } = resolveMissionBuildTask(graph, intelligence);
 
     if (!taskLabel.trim()) {
       throw new BadRequestException('Set a goal, task, or next action in Mission State first');
@@ -727,7 +760,7 @@ export class FounderCopilotService {
 
     const dispatch = await this.builder.executeBuildTask(userId, {
       spec,
-      cursorPrompt: `${githubPrefix}${buildContinueFromMissionPrompt(graph)}`,
+      cursorPrompt: `${githubPrefix}${buildContinueFromMissionPrompt(graph, intelligence)}`,
       repository: memory.repoFullName ?? undefined,
       worker: input?.worker,
     });
@@ -801,39 +834,59 @@ export class FounderCopilotService {
     );
   }
 
+  /** Resume = sync GitHub/vault + grounded briefing. Does not auto-dispatch Builder. */
   async resumeWork(userId: string) {
-    const build = await this.runMissionBuild(userId);
-    const graph = build.graph;
+    const memoryPre = await this.getProjectMemory(userId);
+    if (memoryPre.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional */
+      }
+    }
 
-    let message = formatMissionStateBlock(graph, {
-      lastCommit: build.memory.lastCommit,
-      openTaskCount: build.memory.openTasks.length,
+    const memory = await this.getProjectMemory(userId);
+    const intelligence = await this.computeMissionIntelligenceForUser(userId);
+    await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
+    const graph = await this.memoryGraph.resolveForUser(userId);
+
+    const message = formatResumeWorkBrief({
+      intelligence,
+      graph,
+      repoFullName: memory.repoFullName,
+      lastCommit: memory.lastCommit,
+      vaultNote: this.buildVaultContextLines(memory).join('\n') || null,
+      launchReadiness: memory.launchReadiness,
     });
 
-    if (build.status === 'dispatched') {
-      message = build.message;
-    } else if (build.status === 'error') {
-      message = `${message}\n\n${build.message}`;
-    } else if (build.status === 'queued') {
-      message = `${message}\n\n${build.message}`;
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (founder) {
+      await this.events.emit({
+        founderId: founder.id,
+        projectId: memory.project?.id,
+        userId,
+        type: FounderEventType.COPILOT_COMMAND,
+        source: 'copilot',
+        title: 'Resume work',
+        payload: { intent: 'resume', initiative: intelligence.currentInitiative },
+      });
     }
 
     return {
       message,
-      memory: build.memory,
-      worker: build.worker,
-      cursorCopy: build.memory.cursorCopy,
-      cursorCloudDispatch: build.cursorCloudDispatch,
-      openHandsDispatch: build.openHandsDispatch,
-      dispatchHint: build.agentUrl
-        ? `Remote agent running — ${build.agentUrl}`
-        : 'Connect Cursor or OpenHands in Settings, then use Run build on Mission State.',
+      memory: await this.getProjectMemory(userId),
+      worker: 'NONE' as const,
+      cursorCopy: memory.cursorCopy,
+      cursorCloudDispatch: null,
+      openHandsDispatch: null,
+      dispatchHint:
+        'Synced GitHub + vault. Use **Run build** when you want Cursor to implement — Resume does not start a code agent.',
       missionBuild: {
-        taskLabel: build.taskLabel,
-        status: build.status,
-        agentId: build.agentId,
-        runId: build.runId,
-        conversationId: build.conversationId,
+        taskLabel: intelligence.recommendedNextStep.slice(0, 120),
+        status: 'briefing',
+        agentId: null,
+        runId: null,
+        conversationId: null,
       },
     };
   }
@@ -1559,28 +1612,12 @@ export class FounderCopilotService {
       }
       case 'resume_work': {
         const result = await this.resumeWork(userId);
-        const cursorStarted =
-          result.cursorCloudDispatch &&
-          'agentUrl' in result.cursorCloudDispatch &&
-          Boolean(result.cursorCloudDispatch.agentUrl);
-        if (cursorStarted) {
-          return {
-            action,
-            answer: result.message,
-            memory: result.memory,
-            cursorCopy: result.cursorCopy,
-          };
-        }
-        const queued = await this.buildQueue.quickBuild(userId, {
-          prompt: result.memory.suggestedNextStep,
-          source: 'QUICK_BUILD',
-        });
         return {
           action,
-          answer: `${result.message} Task queued for your connected builder.`,
+          answer: result.message,
           memory: result.memory,
           cursorCopy: result.cursorCopy,
-          queued,
+          dispatchHint: result.dispatchHint,
         };
       }
       case 'cursor_dispatch': {

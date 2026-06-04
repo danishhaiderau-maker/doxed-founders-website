@@ -4486,7 +4486,7 @@ export function copilotResume(token: string) {
     dispatchHint?: string;
     missionBuild?: {
       taskLabel: string;
-      status: string;
+      status: 'briefing' | 'dispatched' | 'queued' | 'error' | string;
       agentId?: string | null;
       runId?: string | null;
       conversationId?: string | null;

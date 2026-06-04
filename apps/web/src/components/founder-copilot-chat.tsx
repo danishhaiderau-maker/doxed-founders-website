@@ -90,6 +90,9 @@ type FounderCopilotChatProps = {
   memory?: ProjectMemory | null;
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;
+  /** Injected assistant briefing (e.g. Resume Work) — not auto-submitted as user prompt. */
+  seedAssistantMessage?: string | null;
+  onSeedAssistantConsumed?: () => void;
   agentTemplate?: string | null;
 };
 
@@ -108,6 +111,8 @@ export function FounderCopilotChat({
   memory: memoryProp,
   initialPrompt,
   onInitialPromptConsumed,
+  seedAssistantMessage,
+  onSeedAssistantConsumed,
   agentTemplate,
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -130,6 +135,7 @@ export function FounderCopilotChat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const consumedPromptRef = useRef<string | null>(null);
+  const consumedSeedRef = useRef<string | null>(null);
 
   const memory = memoryProp ?? memoryLocal;
 
@@ -639,6 +645,17 @@ export function FounderCopilotChat({
     onInitialPromptConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot quick action from dashboard
   }, [initialPrompt, busy]);
+
+  useEffect(() => {
+    const seed = seedAssistantMessage?.trim();
+    if (!seed || consumedSeedRef.current === seed) return;
+    consumedSeedRef.current = seed;
+    const id = `seed-${Date.now()}`;
+    const row: ChatMessage = { id, role: 'assistant', content: seed, provider: 'FOUNDER_BRAIN' };
+    setMessages([row]);
+    saveMessages([row]);
+    onSeedAssistantConsumed?.();
+  }, [seedAssistantMessage, onSeedAssistantConsumed]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
