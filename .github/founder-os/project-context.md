@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ui): clarify Run build vs Cursor working; drop stale batch-sync hint
+docs(ui): clarify what to connect per AI provider (Ollama needs no key)
 
 ## Last Activity
 
