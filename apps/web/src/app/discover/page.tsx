@@ -8,6 +8,7 @@ import { DiscoverSidebar } from '@/components/discover/discover-sidebar';
 import { DiscoverTopProjectsTable } from '@/components/discover/discover-top-table';
 import { DiscoverBottomCtas } from '@/components/discover/discover-bottom-ctas';
 import { DiscoverRankingRules } from '@/components/discover/discover-ranking-rules';
+import { DiscoverVisibilityGuide } from '@/components/discover/discover-visibility-guide';
 import {
   fetchDiscoverUniverse,
   type DiscoverTimeframe,
@@ -101,6 +102,8 @@ export default function DiscoverPage() {
             <DiscoverTopProjectsTable projects={data.projects} />
           </div>
         )}
+
+        <DiscoverVisibilityGuide />
 
         <div className="mt-10">
           <DiscoverBottomCtas scoutCount={data?.metrics.scoutReviewsAwaiting ?? 0} />

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DISCOVER_RECENTLY_LISTED_FILTER_LABEL,
   DISCOVER_UNIVERSE_COLORS,
   layoutBubblePositions,
   type DiscoverTimeframe,
@@ -135,6 +136,12 @@ export function DiscoverUniverseMap({
             </span>
           );
         })}
+        <span className="flex items-center gap-1.5 text-violet-400/90">
+          <span className="rounded border border-violet-500/40 px-1.5 py-0.5 text-[9px]">
+            {DISCOVER_RECENTLY_LISTED_FILTER_LABEL}
+          </span>
+          tab = listed ≤14d (ring still follows stage)
+        </span>
         <span className="text-zinc-600">· badge = activity score (0–100)</span>
       </div>
 

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
-import type { DiscoverTimeframe, DiscoverUniverseStage } from '@dcf/utils';
+import type { DiscoverTimeframe, DiscoverUniverseStageFilter } from '@dcf/utils';
 import { Public } from '../auth/public.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
@@ -57,10 +57,21 @@ export class FounderDenController {
     @Query('timeframe') timeframe?: string,
   ) {
     return this.founderDen.getDiscoverUniverse({
-      stageFilter: (stageFilter as 'all' | DiscoverUniverseStage) || 'all',
+      stageFilter: (stageFilter as DiscoverUniverseStageFilter) || 'all',
       chainSlug: chainSlug || undefined,
       timeframe: (timeframe as DiscoverTimeframe) || '24h',
     });
+  }
+
+  @Get('discover/my-visibility')
+  myDiscoverVisibility(
+    @CurrentUser() user: AuthUser,
+    @Query('timeframe') timeframe?: string,
+  ) {
+    return this.founderDen.getMyDiscoverVisibility(
+      user.id,
+      (timeframe as DiscoverTimeframe) || '24h',
+    );
   }
 
   @Public()

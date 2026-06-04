@@ -44,10 +44,14 @@ import {
   FounderBrainContext,
   computeDiscoverActivityScore,
   computeDiscoverConvictionScore,
+  computeDiscoverVisibilityBreakdown,
+  DISCOVER_ACTIVITY_FACTORS,
   resolveDiscoverUniverseStage,
+  isDiscoverRecentlyListed,
   computeTrendDirection,
   type DiscoverTimeframe,
   type DiscoverUniverseStage,
+  type DiscoverUniverseStageFilter,
   timeframeToMs,
 } from '@dcf/utils';
 import {
@@ -1214,7 +1218,7 @@ export class FounderDenService {
   }
 
   async getDiscoverUniverse(options?: {
-    stageFilter?: DiscoverUniverseStage | 'all';
+    stageFilter?: DiscoverUniverseStageFilter;
     chainSlug?: string;
     timeframe?: DiscoverTimeframe;
   }) {
@@ -1230,14 +1234,21 @@ export class FounderDenService {
       projects = projects.filter((p) => p.chain.slug === options.chainSlug);
     }
     if (options?.stageFilter && options.stageFilter !== 'all') {
-      projects = projects.filter(
-        (p) =>
-          resolveDiscoverUniverseStage({
-            stageBucket: p.stageBucket,
-            createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
-            isLiveToken: p.isLiveToken,
-          }) === options.stageFilter,
-      );
+      if (options.stageFilter === 'recently_listed') {
+        projects = projects.filter((p) =>
+          isDiscoverRecentlyListed(
+            p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
+          ),
+        );
+      } else {
+        projects = projects.filter(
+          (p) =>
+            resolveDiscoverUniverseStage({
+              stageBucket: p.stageBucket,
+              isLiveToken: p.isLiveToken,
+            }) === options.stageFilter,
+        );
+      }
     }
 
     const projectIds = projects.map((p) => p.slug);
@@ -1358,11 +1369,13 @@ export class FounderDenService {
       const ddVolume = volumeMap[pid] ?? 0;
       const priorVol = priorVolumeMap[pid] ?? 0;
       const trend = computeTrendDirection(ddVolume, priorVol);
+      const createdAt =
+        p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string);
       const universeStage = resolveDiscoverUniverseStage({
         stageBucket: p.stageBucket,
-        createdAt: p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as string),
         isLiveToken: p.isLiveToken,
       });
+      const recentlyListed = isDiscoverRecentlyListed(createdAt);
       const activityScore = computeDiscoverActivityScore({
         buildPosts: buildMap[pid] ?? 0,
         githubEvents: githubMap[pid] ?? 0,
@@ -1384,6 +1397,7 @@ export class FounderDenService {
       return {
         ...p,
         universeStage,
+        recentlyListed,
         activityScore,
         convictionScore,
         ddInflow24h: ddInflow,
@@ -1457,6 +1471,101 @@ export class FounderDenService {
         mostFollowed,
         activeConversations,
       },
+    };
+  }
+
+  /** Founder-facing activity breakdown for Discover visibility (Sprint 7a). */
+  async getMyDiscoverVisibility(userId: string, timeframe: DiscoverTimeframe = '24h') {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: {
+        projects: {
+          where: { approved: true },
+          take: 1,
+          orderBy: { updatedAt: 'desc' },
+        },
+      },
+    });
+    if (!founder?.projects[0]) {
+      throw new NotFoundException('No approved project found for this founder');
+    }
+
+    const slug = founder.projects[0].slug;
+    const universe = await this.getDiscoverUniverse({ timeframe });
+    const project = universe.projects.find((p) => p.slug === slug);
+    if (!project) {
+      throw new NotFoundException('Project not visible on Discover yet');
+    }
+
+    const pid = (
+      await this.prisma.project.findUnique({
+        where: { slug },
+        select: { id: true },
+      })
+    )?.id;
+    const windowMs = timeframeToMs(timeframe);
+    const since = new Date(Date.now() - windowMs);
+
+    const [buildPosts, githubEvents, followers, threads] = await Promise.all([
+      pid
+        ? this.prisma.founderBuildPost.count({
+            where: { projectId: pid, publishedAt: { gte: since } },
+          })
+        : 0,
+      pid
+        ? this.prisma.founderEvent.count({
+            where: {
+              projectId: pid,
+              createdAt: { gte: since },
+              type: { in: [FounderEventType.GITHUB_COMMIT, FounderEventType.DEPLOY_SUCCESS] },
+            },
+          })
+        : 0,
+      pid
+        ? this.prisma.projectFollow.count({
+            where: { projectId: pid, createdAt: { gte: since } },
+          })
+        : 0,
+      pid
+        ? this.prisma.communityThread.count({
+            where: { projectId: pid, createdAt: { gte: since } },
+          })
+        : 0,
+    ]);
+
+    const breakdown = computeDiscoverVisibilityBreakdown({
+      buildPosts,
+      githubEvents,
+      tradesInflow: project.ddInflow24h,
+      tradesVolume: project.ddVolumeWindow,
+      followers,
+      scoutStake: project.scoutPoolUsd,
+      communitySignals: threads,
+      bubbleScore: project.bubbleScore,
+    });
+
+    return {
+      timeframe,
+      project: {
+        slug: project.slug,
+        name: project.name,
+        ticker: project.ticker,
+        stageBucket: project.stageBucket,
+        lifecycleStage: project.lifecycleStage,
+        universeStage: project.universeStage,
+        recentlyListed: project.recentlyListed,
+        activityScore: project.activityScore,
+        convictionScore: project.convictionScore,
+        bubbleScore: project.bubbleScore,
+      },
+      breakdown,
+      tips: breakdown.factors
+        .filter((f) => f.points < f.maxPoints * 0.5)
+        .slice(0, 3)
+        .map((f) => {
+          const meta = DISCOVER_ACTIVITY_FACTORS.find((d) => d.key === f.key);
+          return meta?.founderAction ?? f.label;
+        }),
     };
   }
 

@@ -91,4 +91,83 @@ export const DISCOVER_RANKING_RULES_INTRO =
   'Projects are sorted by activity score in your selected window (1h, 6h, 24h, or 7d). The number on each bubble is that score (0–100). More real traction in that window → higher score → larger bubble and higher placement.';
 
 export const DISCOVER_RING_LEGEND_NOTE =
-  'Outer ring color = project stage. Live tokens on-chain always use a green ring, even if listed recently.';
+  'Outer ring color = your real project stage (blue building, orange validation, green live). The Recently Listed tab only filters new listings — it does not change ring color.';
+
+export type DiscoverActivityBreakdownInput = {
+  buildPosts: number;
+  githubEvents: number;
+  tradesInflow: number;
+  tradesVolume: number;
+  followers: number;
+  scoutStake: number;
+  communitySignals: number;
+  bubbleScore: number;
+};
+
+export type DiscoverVisibilityFactorScore = {
+  key: string;
+  label: string;
+  points: number;
+  maxPoints: number;
+};
+
+/** Per-factor points for founder visibility panel (matches computeDiscoverActivityScore). */
+export function computeDiscoverVisibilityBreakdown(
+  input: DiscoverActivityBreakdownInput,
+): { activityScore: number; factors: DiscoverVisibilityFactorScore[] } {
+  const factors: DiscoverVisibilityFactorScore[] = [
+    {
+      key: 'build_posts',
+      label: 'Build-in-public posts',
+      points: Math.min(input.buildPosts * 8, 24),
+      maxPoints: 24,
+    },
+    {
+      key: 'github',
+      label: 'GitHub commits & deploys',
+      points: Math.min(input.githubEvents * 6, 18),
+      maxPoints: 18,
+    },
+    {
+      key: 'dd_inflow',
+      label: 'DDollar paper inflow',
+      points: Math.min(input.tradesInflow / 500, 20),
+      maxPoints: 20,
+    },
+    {
+      key: 'trade_volume',
+      label: 'DDollar trade volume',
+      points: Math.min(input.tradesVolume / 2000, 10),
+      maxPoints: 10,
+    },
+    {
+      key: 'followers',
+      label: 'New followers',
+      points: Math.min(input.followers * 4, 12),
+      maxPoints: 12,
+    },
+    {
+      key: 'scout_stake',
+      label: 'Scout market stake',
+      points: Math.min(input.scoutStake / 1000, 8),
+      maxPoints: 8,
+    },
+    {
+      key: 'community',
+      label: 'Community threads',
+      points: Math.min(input.communitySignals * 2, 8),
+      maxPoints: 8,
+    },
+    {
+      key: 'bubble_score',
+      label: 'Long-term bubble score',
+      points: Math.min(input.bubbleScore / 50, 10),
+      maxPoints: 10,
+    },
+  ];
+  const raw = factors.reduce((s, f) => s + f.points, 0);
+  return {
+    activityScore: Math.round(Math.min(100, Math.max(0, raw))),
+    factors,
+  };
+}

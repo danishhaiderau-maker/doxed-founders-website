@@ -100,6 +100,14 @@ export function DiscoverUniverseBubble({
         >
           {project.activityScore}
         </span>
+        {project.recentlyListed && (
+          <span
+            className="absolute -right-0.5 -top-0.5 rounded-full border border-violet-400/60 bg-violet-950 px-1 py-0.5 text-[7px] font-bold uppercase tracking-wide text-violet-200"
+            title="Listed on platform within the last 14 days"
+          >
+            New
+          </span>
+        )}
 
         {/* Hover preview card */}
         <div className="pointer-events-none absolute left-1/2 top-full z-50 mt-3 w-52 -translate-x-1/2 scale-95 rounded-xl border border-zinc-700/80 bg-zinc-950/95 p-3 opacity-0 shadow-2xl backdrop-blur-md transition group-hover:scale-100 group-hover:opacity-100">

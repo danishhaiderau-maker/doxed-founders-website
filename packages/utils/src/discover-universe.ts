@@ -1,8 +1,14 @@
 /** Discover V4 — Project Universe scoring & visual mapping */
 
-export type DiscoverUniverseStage = 'building' | 'validation' | 'live' | 'recently_listed';
+/** Bubble ring color — always matches project lifecycle stage bucket. */
+export type DiscoverUniverseStage = 'building' | 'validation' | 'live';
+
+/** Map filter includes recently listed (by age), not a ring color. */
+export type DiscoverUniverseStageFilter = DiscoverUniverseStage | 'all' | 'recently_listed';
 
 export type DiscoverTimeframe = '1h' | '6h' | '24h' | '7d';
+
+export const DISCOVER_RECENTLY_LISTED_DAYS = 14;
 
 export const DISCOVER_UNIVERSE_COLORS: Record<
   DiscoverUniverseStage,
@@ -11,13 +17,9 @@ export const DISCOVER_UNIVERSE_COLORS: Record<
   building: { color: '#3b82f6', border: '#60a5fa', glow: '#3b82f655', label: 'Building' },
   validation: { color: '#f97316', border: '#fb923c', glow: '#f9731655', label: 'Validation' },
   live: { color: '#22c55e', border: '#4ade80', glow: '#22c55e55', label: 'Live' },
-  recently_listed: {
-    color: '#a855f7',
-    border: '#c084fc',
-    glow: '#a855f755',
-    label: 'Recently Listed',
-  },
 };
+
+export const DISCOVER_RECENTLY_LISTED_FILTER_LABEL = 'Recently Listed';
 
 export function timeframeToMs(tf: DiscoverTimeframe): number {
   switch (tf) {
@@ -32,17 +34,23 @@ export function timeframeToMs(tf: DiscoverTimeframe): number {
   }
 }
 
+/** Ring color follows platform stage bucket — not listing age. */
 export function resolveDiscoverUniverseStage(input: {
   stageBucket: string;
-  createdAt: string | Date;
   isLiveToken?: boolean;
 }): DiscoverUniverseStage {
   if (input.isLiveToken || input.stageBucket === 'LIVE_TOKEN') return 'live';
-  const created = new Date(input.createdAt).getTime();
-  const daysSince = (Date.now() - created) / 86_400_000;
-  if (daysSince <= 14) return 'recently_listed';
   if (input.stageBucket === 'LAUNCH_READY') return 'validation';
   return 'building';
+}
+
+/** Tab filter: projects listed on the platform within the last N days. */
+export function isDiscoverRecentlyListed(
+  createdAt: string | Date,
+  maxDays = DISCOVER_RECENTLY_LISTED_DAYS,
+): boolean {
+  const days = (Date.now() - new Date(createdAt).getTime()) / 86_400_000;
+  return days >= 0 && days <= maxDays;
 }
 
 export type DiscoverActivityInput = {

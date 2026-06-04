@@ -7,6 +7,7 @@ import { FounderAgentsWorkforce } from '@/components/founder-agents-workforce';
 import { FounderSocialHub } from '@/components/founder-social-hub';
 import { FounderMissionControl } from '@/components/founder-mission-control';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
+import { DiscoverMyVisibilityPanel } from '@/components/discover/discover-my-visibility-panel';
 import {
   FounderDashboard,
   ProjectRoom,
@@ -220,6 +221,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
                 </p>
               </header>
               <BuilderSettingsPanel accessToken={session.accessToken} />
+              <DiscoverMyVisibilityPanel />
               {dashboard && (
                 <OsSection title="Account stats" subtitle="Ddollar and readiness">
                   <dl className="grid gap-2 text-sm">

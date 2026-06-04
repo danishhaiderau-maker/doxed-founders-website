@@ -61,6 +61,17 @@ async function run() {
     return res.ok && Array.isArray(body?.stream) && typeof body?.counts?.merged === 'number';
   });
 
+  await runCheck('discover-universe', async () => {
+    const { res, body } = await fetchJson('/api/founder-den/discover/universe?timeframe=24h');
+    return (
+      res.ok &&
+      Array.isArray(body?.projects) &&
+      (body.projects.length === 0 ||
+        (body.projects[0].universeStage &&
+          ['building', 'validation', 'live'].includes(body.projects[0].universeStage)))
+    );
+  });
+
   await runCheck('platform-pulse', async () => {
     const { res, body } = await fetchJson('/api/feed/pulse');
     return res.ok && Array.isArray(body);
