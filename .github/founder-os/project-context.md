@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(api): re-register AirdropModule for Builder Rewards routes
+chore: add founder node token bcrypt verify script
 
 ## Last Activity
 
