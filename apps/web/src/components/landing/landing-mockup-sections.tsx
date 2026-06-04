@@ -10,6 +10,7 @@ import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/lan
 import { LandingPlatformAdoption } from '@/components/landing/landing-platform-adoption';
 import { LandingValueGrid } from '@/components/landing/landing-value-grid';
 import type { PlatformStats } from '@/lib/api';
+import { AndroidAppDownloads } from '@/components/android-app-downloads';
 
 function formatStat(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -291,13 +292,7 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         >
           Open Mission Control →
         </Link>
-        <Link
-          href="/mobile"
-          className="rounded-xl border border-emerald-500/50 bg-emerald-950/35 px-5 py-2.5 text-sm font-semibold text-emerald-50 shadow-lg shadow-emerald-950/30 hover:bg-emerald-900/40"
-        >
-          Android app
-          <span className="mt-0.5 block text-[10px] font-normal text-emerald-200/70">Free APK · Discover &amp; trading</span>
-        </Link>
+        <AndroidAppDownloads variant="landing-cta" />
         <Link
           href="/list-your-project"
           className="rounded-xl border border-zinc-600 px-5 py-2.5 text-sm font-semibold text-white hover:border-zinc-500"

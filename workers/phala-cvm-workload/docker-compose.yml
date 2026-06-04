@@ -1,0 +1,9 @@
+# Phala Cloud: Create CVM → paste compose → set Encrypted Secrets (see README).
+# INGRESS: https://<app-id>-8080.<cluster>.phala.network
+services:
+  cvm:
+    build: .
+    ports:
+      - "8080:8787"
+    environment:
+      - PORT=8787

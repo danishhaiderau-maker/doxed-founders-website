@@ -94,7 +94,13 @@ function WidgetShell({
 
 function FeedRoleBadge({ category }: { category: UnifiedFeedItem['category'] }) {
   const label =
-    category === 'founder' ? 'Founder' : category === 'trading' ? 'Agent' : category === 'market' ? 'Market' : 'Admin';
+    category === 'trading'
+      ? 'Trade'
+      : category === 'market'
+        ? 'Market'
+        : category === 'founder'
+          ? 'Founder'
+          : 'Community';
   return (
     <span className="rounded bg-zinc-800 px-1 py-0.5 text-[8px] font-medium uppercase tracking-wide text-zinc-400">
       {label}
@@ -203,7 +209,7 @@ export function LandingHubPreviewWidgets({
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
       <WidgetShell
         title="Feed"
-        subtitle="All public updates in one place."
+        subtitle="Trades, predictions, and listings — not GitHub commits."
         headerClass="bg-amber-950/30"
         href="/feed"
         footerLabel="View all updates →"

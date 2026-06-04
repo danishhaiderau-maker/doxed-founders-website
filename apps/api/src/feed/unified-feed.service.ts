@@ -100,22 +100,24 @@ export class UnifiedFeedService {
       });
     }
 
-    const recentBuilds = await this.prisma.founderBuildPost.findMany({
-      orderBy: { publishedAt: 'desc' },
-      take: 2,
-      include: {
-        founder: { select: { slug: true, name: true } },
-        project: { select: { slug: true, ticker: true } },
+    const recentListings = await this.prisma.project.findMany({
+      where: {
+        approved: true,
+        source: ProjectSource.CURATED,
+        createdAt: { gte: weekAgo },
       },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+      select: { slug: true, name: true, ticker: true },
     });
-    for (const post of recentBuilds) {
+    for (const listing of recentListings) {
       items.push({
-        id: `pulse-build-${post.id}`,
+        id: `pulse-listing-${listing.slug}`,
         emoji: '🚀',
-        headline: `${post.founder.name} shipped${post.project ? ` ${post.project.ticker}` : ''}`,
-        detail: post.headline.slice(0, 72),
-        link: post.project ? `/project/${post.project.slug}` : `/founder/${post.founder.slug}`,
-        tier: 2,
+        headline: `New listing: ${listing.ticker}`,
+        detail: listing.name,
+        link: `/project/${listing.slug}`,
+        tier: 1,
       });
     }
 
@@ -142,7 +144,8 @@ export class UnifiedFeedService {
   async getUnifiedFeed(category: UnifiedFeedCategory = 'all', limit = 50) {
     const items: UnifiedFeedItem[] = [];
 
-    if (category === 'all' || category === 'founder' || category === 'community') {
+    // Main feed = trading + market only (no GitHub / build spam; Discover shows founder activity).
+    if (category === 'founder') {
       items.push(...(await this.loadFounderEvents()));
     }
 
@@ -154,7 +157,7 @@ export class UnifiedFeedService {
       items.push(...(await this.loadMarketEvents()));
     }
 
-    if (category === 'all' || category === 'community') {
+    if (category === 'community') {
       items.push(...(await this.loadCommunityEvents()));
     }
 
@@ -380,13 +383,13 @@ export class UnifiedFeedService {
       }),
     ]);
 
-    const buildItems: UnifiedFeedItem[] = buildPosts.map((p) => {
-      const eventType = p.githubUrl ? 'github_milestone' : 'build_update';
-      return {
+    const buildItems: UnifiedFeedItem[] = buildPosts
+      .filter((p) => !p.githubUrl?.trim())
+      .map((p) => ({
         id: `founder-build-${p.id}`,
-        tier: unifiedFeedTier(eventType),
+        tier: unifiedFeedTier('build_update'),
         category: 'founder',
-        eventType,
+        eventType: 'build_update',
         emoji: '🔨',
         headline: p.headline,
         detail: `${p.founder.name}${p.project ? ` · ${p.project.ticker}` : ''}`,
@@ -395,8 +398,7 @@ export class UnifiedFeedService {
         projectSlug: p.project?.slug,
         projectTicker: p.project?.ticker,
         founderSlug: p.founder.slug,
-      };
-    });
+      }));
 
     const videoItems: UnifiedFeedItem[] = videos.map((v) => ({
       id: `founder-video-${v.id}`,
@@ -440,16 +442,7 @@ export class UnifiedFeedService {
       where: {
         project: { approved: true },
         type: {
-          in: [
-            FounderEventType.GITHUB_COMMIT,
-            FounderEventType.GITHUB_PR_MERGED,
-            FounderEventType.DEPLOY_SUCCESS,
-            FounderEventType.DEPLOY_STARTED,
-            FounderEventType.BUILD_PUBLISHED,
-            FounderEventType.CURSOR_BUILD_SESSION,
-            FounderEventType.BUILD_QUEUE_CAPTURED,
-            FounderEventType.AGENT_RUN_COMPLETE,
-          ],
+          in: [FounderEventType.DEPLOY_SUCCESS, FounderEventType.DEPLOY_STARTED],
         },
       },
       orderBy: { createdAt: 'desc' },
@@ -504,6 +497,7 @@ export class UnifiedFeedService {
 
   private async loadMarketEvents(): Promise<UnifiedFeedItem[]> {
     const items: UnifiedFeedItem[] = [];
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
     const hotBuys = await this.hotBuy.listHotBuys(8);
     for (const hb of hotBuys) {
@@ -549,7 +543,95 @@ export class UnifiedFeedService {
       take: 20,
     });
 
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const newMarkets = await this.prisma.scoutMarket.findMany({
+      where: { createdAt: { gte: weekAgo } },
+      orderBy: { createdAt: 'desc' },
+      take: 8,
+      include: {
+        project: { select: { slug: true, name: true, ticker: true } },
+        creator: { select: { name: true, email: true } },
+      },
+    });
+    for (const market of newMarkets) {
+      const creator =
+        market.creator?.name ?? market.creator?.email?.split('@')[0] ?? 'A founder';
+      items.push({
+        id: `market-created-${market.id}`,
+        tier: unifiedFeedTier('scout_vote_opened'),
+        category: 'market',
+        eventType: 'scout_vote_opened',
+        emoji: '🔮',
+        headline: `New prediction market: ${market.project.ticker}`,
+        detail: `${creator} opened · ${market.question.slice(0, 96)}`,
+        at: market.createdAt.toISOString(),
+        link: '/predict',
+        projectSlug: market.project.slug,
+        projectTicker: market.project.ticker,
+      });
+    }
+
+    const recentStakes = await this.prisma.scoutMarketPosition.findMany({
+      where: {
+        createdAt: { gte: weekAgo },
+        amountUsd: { gt: 0 },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 15,
+      include: {
+        user: { select: { name: true, email: true } },
+        market: { include: { project: { select: { slug: true, ticker: true, name: true } } } },
+      },
+    });
+    for (const stake of recentStakes) {
+      const name = stake.user.name ?? stake.user.email.split('@')[0];
+      const amount = Number(stake.amountUsd);
+      items.push({
+        id: `market-stake-${stake.id}`,
+        tier: unifiedFeedTier('prediction_staked'),
+        category: 'market',
+        eventType: 'prediction_staked',
+        emoji: stake.side === 'YES' ? '✅' : '❌',
+        headline: `${name} staked ${formatUsd(amount, 0)} on ${stake.market.project.ticker}`,
+        detail: `${stake.side} · ${stake.market.project.name}`,
+        at: stake.createdAt.toISOString(),
+        link: '/predict',
+        projectSlug: stake.market.project.slug,
+        projectTicker: stake.market.project.ticker,
+        amountUsd: amount,
+        traderName: name,
+      });
+    }
+
+    const scoutListingVotes = await this.prisma.listingApplication.findMany({
+      where: {
+        status: ListingStatus.COMMUNITY_VOTING,
+        createdAt: { gte: weekAgo },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 6,
+      select: {
+        id: true,
+        projectName: true,
+        ticker: true,
+        createdAt: true,
+        _count: { select: { votes: true } },
+      },
+    });
+    for (const app of scoutListingVotes) {
+      items.push({
+        id: `market-scout-listing-${app.id}`,
+        tier: unifiedFeedTier('scout_vote_opened'),
+        category: 'market',
+        eventType: 'scout_vote_opened',
+        emoji: '🔭',
+        headline: `Scout vote: ${app.projectName} (${app.ticker})`,
+        detail: `${app._count.votes} vote${app._count.votes === 1 ? '' : 's'} · open on Trust Center`,
+        at: app.createdAt.toISOString(),
+        link: '/trust-center?tab=scout-voting',
+        projectTicker: app.ticker,
+      });
+    }
+
     const newListings = await this.prisma.project.findMany({
       where: {
         approved: true,
@@ -636,29 +718,6 @@ export class UnifiedFeedService {
   }
 
   private async loadCommunityEvents(): Promise<UnifiedFeedItem[]> {
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const follows = await this.prisma.projectFollow.findMany({
-      where: { createdAt: { gte: weekAgo } },
-      orderBy: { createdAt: 'desc' },
-      take: 20,
-      include: {
-        project: { select: { slug: true, name: true, ticker: true } },
-        user: { select: { id: true, name: true, email: true } },
-      },
-    });
-
-    return follows.map((f) => ({
-      id: `community-follow-${f.id}`,
-      tier: 3,
-      category: 'community',
-      eventType: 'project_followed',
-      emoji: '👥',
-      headline: `${f.user.name ?? f.user.email.split('@')[0]} followed ${f.project.ticker}`,
-      detail: f.project.name,
-      at: f.createdAt.toISOString(),
-      link: `/project/${f.project.slug}`,
-      projectSlug: f.project.slug,
-      projectTicker: f.project.ticker,
-    }));
+    return [];
   }
 }
