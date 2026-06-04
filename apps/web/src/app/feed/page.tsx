@@ -156,7 +156,7 @@ function FeedHubPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-bold tracking-tight">Platform Feed</h1>
             <p className="text-xs text-zinc-500">
-              Founder builds · paper trades · conviction · market pulse — one unified stream
+              Paper trades · prediction stakes · new listings — founder GitHub activity lives on Discover
             </p>
           </div>
           <SiteNav />

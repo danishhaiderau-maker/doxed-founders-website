@@ -13,7 +13,7 @@ type ReleaseAsset = {
 
 type Props = {
   /** Larger primary button (landing hero) */
-  variant?: 'default' | 'hero';
+  variant?: 'default' | 'hero' | 'landing-cta';
   showInstallGuide?: boolean;
 };
 
@@ -61,7 +61,20 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
   const primaryClass =
     variant === 'hero'
       ? 'inline-flex w-full max-w-md items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-3.5 text-base font-semibold text-white shadow-lg shadow-emerald-950/40 hover:bg-emerald-500 sm:w-auto'
-      : 'inline-flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500 sm:w-auto';
+      : variant === 'landing-cta'
+        ? 'inline-flex flex-col rounded-xl border border-emerald-500/50 bg-emerald-950/35 px-5 py-2.5 text-sm font-semibold text-emerald-50 shadow-lg shadow-emerald-950/30 hover:bg-emerald-900/40'
+        : 'inline-flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500 sm:w-auto';
+
+  if (variant === 'landing-cta') {
+    return (
+      <a href={primaryHref} download className={primaryClass}>
+        Download Android APK
+        <span className="mt-0.5 block text-[10px] font-normal text-emerald-200/70">
+          v{releaseVersion} · Discover &amp; trading on phone
+        </span>
+      </a>
+    );
+  }
 
   return (
     <div className="space-y-4">

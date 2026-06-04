@@ -45,8 +45,8 @@ ChatGPT’s “move only vault, agent memory, secrets into Phala CVM” is the r
 
 1. **Now** — Neon public data + encrypted credentials + Founder Node vault + memory graph (shipped).
 2. **Next** — Task-based router in API (`research` → DeepSeek, `code` → Cursor, etc.) without exposing vendor names in UI.
-3. **Now (P1)** — Phala CVM workload for sealed vault relay backup (`/vault/cvm-*`).
-4. **Now (P2)** — CVM-side credential unwrap (`/vault/cvm-seal-*`, audited fallback).
+3. **Now (P1)** — Phala CVM workload for sealed vault relay backup (`/vault/cvm-*`). Ops: [OPS_PHALA_CVM_RAILWAY.md](./OPS_PHALA_CVM_RAILWAY.md).
+4. **Now (P2)** — CVM-side credential unwrap (`/vault/cvm-seal-*`, audited fallback). Same ops doc for Railway env.
 5. **Then** — Agent run state, vault blob encryption keys entirely inside CVM.
 6. **Later** — Portable vault export; cross-device agent resume entirely inside TEE.
 

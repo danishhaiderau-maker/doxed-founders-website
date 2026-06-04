@@ -61,9 +61,9 @@ export const FEED_HUB_CATEGORIES: {
   label: string;
   subtitle: string;
 }[] = [
-  { id: 'all', label: 'All', subtitle: 'Platform-wide stream' },
+  { id: 'all', label: 'All', subtitle: 'Trades · predictions · listings' },
   { id: 'trading', label: 'Trading', subtitle: 'Paper trades & conviction' },
-  { id: 'founder', label: 'Founders', subtitle: 'Builds, deploys, GitHub' },
+  { id: 'founder', label: 'Founders', subtitle: 'Deploys & pinned updates only' },
   { id: 'market', label: 'Market', subtitle: 'Hot buys & listings' },
   { id: 'community', label: 'Community', subtitle: 'Votes, scouts, chat' },
 ];

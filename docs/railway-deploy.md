@@ -126,6 +126,26 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 | `GITHUB_OAUTH_CALLBACK_URL` | `{API_URL}/api/auth/github/callback` |
 | `GITHUB_WEBHOOK_SECRET` | Optional — GitHub repo push webhook for instant sync |
 
+### Phala CVM (optional — P1 vault backup + P2 unwrap)
+
+Set after deploying `workers/phala-cvm-workload` on Phala Cloud. See [OPS_PHALA_CVM_RAILWAY.md](./OPS_PHALA_CVM_RAILWAY.md).
+
+| Variable | Notes |
+| --- | --- |
+| `PHALA_CVM_BACKUP_URL` | Phala INGRESS base (no path) |
+| `PHALA_CVM_UNWRAP_URL` | Same base as backup |
+| `PHALA_API_KEY` | Redpill / Phala platform key |
+| `PHALA_CVM_API_KEY` | Bearer for CVM workload (matches Phala `CVM_WORKLOAD_AUTH_TOKEN`) |
+| `PHALA_INFERENCE_URL` | Default `https://api.redpill.ai/v1` |
+| `PHALA_MODEL` | e.g. `phala/deepseek-chat-v3-0324` |
+| `PHALA_CVM_WORKLOAD_ID` | Optional label in receipts |
+
+```bash
+npm run bootstrap:phala-cvm-env
+npm run apply:railway:phala-cvm
+npm run probe:phala-cvm
+```
+
 ## Failed deploy badges (22 / 15 / etc.)
 
 Railway counts **every failed attempt** in history. They do **not** mean the site is down. See [GitHub red ✗ on commits](#github-red--on-commits-not-an-outage-or-security-breach) above.

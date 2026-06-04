@@ -46,7 +46,7 @@ Merge the **unified platform feed** (`GET /feed/unified`) and **Social Convictio
 
 ## URL examples
 
-- `/feed` — all activity
-- `/feed?category=founder` — builds, deploys, GitHub
+- `/feed` — trading + market only (predictions, stakes, listings, paper trades)
+- `/feed?category=founder` — deploys & pinned updates (no GitHub commits)
 - `/feed?category=trading&tab=conviction` — conviction terminal slice
 - `/feed?category=trading&project=my-token` — project-scoped trades
