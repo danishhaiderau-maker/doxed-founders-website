@@ -42,13 +42,18 @@ export function maskEmail(email?: string | null): string {
 }
 
 /**
- * Public-facing account label: platform handle, trading name, or masked email.
+ * Public-facing account label — X @handle first when connected, else platform handle / name / email.
  */
 export function formatPublicAccountLabel(
   name?: string | null,
   email?: string | null,
   platformHandle?: string | null,
+  twitterHandle?: string | null,
+  options?: { hasTwitterConnected?: boolean },
 ): string {
+  const twitter = normalizeTwitterHandle(twitterHandle);
+  const connected = options?.hasTwitterConnected ?? Boolean(twitter);
+  if (twitter && connected) return `@${twitter}`;
   if (platformHandle?.trim()) return platformHandle.trim();
   if (hasTradingDisplayName(name, email)) {
     return name!.trim();

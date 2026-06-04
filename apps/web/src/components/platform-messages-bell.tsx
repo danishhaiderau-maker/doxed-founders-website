@@ -152,12 +152,12 @@ export function PlatformMessagesBell() {
           <div className="border-b border-zinc-800 px-3 py-2">
             <p className="text-sm font-semibold text-white">Platform messages</p>
             <p className="mt-0.5 text-[11px] text-zinc-500">
-              Message anyone if you have their user ID or platform handle.
+              Message traders by @X handle or messaging address.
             </p>
           </div>
 
           <form onSubmit={handleSend} className="border-b border-zinc-800 px-3 py-3">
-            <label className="text-[11px] font-medium text-zinc-400">Recipient user ID or handle</label>
+            <label className="text-[11px] font-medium text-zinc-400">Recipient @handle or address</label>
             <div className="mt-1 flex gap-1">
               <input
                 value={recipientQuery}
@@ -166,7 +166,7 @@ export function PlatformMessagesBell() {
                   setResolvedLabel(null);
                   setResolvedUserId(null);
                 }}
-                placeholder="Paste user ID (cuid) or handle"
+                placeholder="@trader or handle#TAG"
                 className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-black px-2 py-1.5 text-xs text-white"
               />
               <button

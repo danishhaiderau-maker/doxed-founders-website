@@ -11,6 +11,7 @@ import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
 import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { hubPageTitle, isHubWorkspacePath } from '@/components/hub-nav-config';
+import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 
 /** Row 1 — Explore */
 const PRIMARY_NAV = [
@@ -23,9 +24,10 @@ const PRIMARY_NAV = [
 
 /** Row 2 — Trade & community */
 const TRADING_NAV = [
-  { href: '/feed', label: 'Feed' },
+  { href: '/feed', label: 'Feed', feedBadge: true as const },
   { href: '/ddollar', label: 'DDollar' },
   { href: '/paper-trading', label: 'Trading Alpha' },
+  { href: '/leaderboard', label: 'Top Traders' },
   { href: '/watchlist', label: 'Watchlist', auth: true },
   { hrefKey: 'portfolio' as const, label: 'Portfolio', auth: true },
 ] as const;
@@ -126,9 +128,33 @@ export function SiteNav() {
   );
 }
 
+function NavLinkWithOptionalBadge({
+  href,
+  label,
+  className,
+  badge,
+}: {
+  href: string;
+  label: string;
+  className: string;
+  badge?: number;
+}) {
+  return (
+    <Link href={href} className={cn('relative rounded-lg px-2.5 py-1.5 transition', className)}>
+      {label}
+      {badge != null && badge > 0 && (
+        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-violet-500 px-1 text-[10px] font-bold text-white">
+          {badge > 9 ? '9+' : badge}
+        </span>
+      )}
+    </Link>
+  );
+}
+
 function SiteNavInner() {
   const pathname = usePathname();
   const { data: session } = useSession();
+  const { count: feedNewCount } = useFeedNewCount();
   const isAdmin = session?.user?.role === 'ADMIN';
   const [profileOpen, setProfileOpen] = useState(false);
   const [accountPreview, setAccountPreview] = useState<AccountOverview | null>(null);
@@ -227,14 +253,15 @@ function SiteNavInner() {
           if (!('href' in item)) return null;
           const href = item.href;
           const active = navActive(pathname, href);
+          const badge = 'feedBadge' in item && item.feedBadge ? feedNewCount : undefined;
           return (
-            <Link
+            <NavLinkWithOptionalBadge
               key={href}
               href={href}
-              className={cn('rounded-lg px-2.5 py-1.5 transition', tradingLinkClass(active))}
-            >
-              {item.label}
-            </Link>
+              label={item.label}
+              className={tradingLinkClass(active)}
+              badge={badge}
+            />
           );
         })}
       </div>

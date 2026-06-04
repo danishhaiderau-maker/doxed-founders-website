@@ -113,6 +113,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/feed', label: 'Feed', icon: '📰' },
       { href: '/ddollar', label: 'DDollar', icon: '💵' },
       { href: '/paper-trading', label: 'Trading Alpha', icon: '📈' },
+      { href: '/leaderboard', label: 'Top Traders', icon: '🏅' },
       { href: '/watchlist', label: 'Watchlist', icon: '★', auth: true },
       { href: '__portfolio__', label: 'Portfolio', icon: '💼', auth: true },
     ],

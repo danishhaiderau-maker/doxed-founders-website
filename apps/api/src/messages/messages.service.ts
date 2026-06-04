@@ -5,9 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { NotificationType } from '@prisma/client';
-import { formatPublicAccountLabel } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { buildUserIdentity, findUserByMessagingQuery, labelForUser } from '../account/user-identity.util';
 
 @Injectable()
 export class MessagesService {
@@ -30,9 +30,17 @@ export class MessagesService {
       throw new BadRequestException('Cannot message yourself');
     }
 
+    const userSelect = {
+      id: true,
+      name: true,
+      email: true,
+      platformHandle: true,
+      twitterHandle: true,
+      oauthAccounts: { select: { provider: true }, take: 3 },
+    } as const;
     const [from, to] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: fromUserId } }),
-      this.prisma.user.findUnique({ where: { id: toUserId } }),
+      this.prisma.user.findUnique({ where: { id: fromUserId }, select: userSelect }),
+      this.prisma.user.findUnique({ where: { id: toUserId }, select: userSelect }),
     ]);
     if (!from || !to) throw new NotFoundException('User not found');
 
@@ -55,7 +63,13 @@ export class MessagesService {
       },
     });
 
-    const senderLabel = formatPublicAccountLabel(from.name, from.email, from.platformHandle);
+    const senderLabel = labelForUser({
+      id: from.id,
+      name: from.name,
+      email: from.email,
+      platformHandle: from.platformHandle,
+      twitterHandle: from.twitterHandle,
+    });
 
     await this.notifications.notifyUser(toUserId, {
       type: NotificationType.PLATFORM_MESSAGE,
@@ -79,10 +93,26 @@ export class MessagesService {
       take: 200,
       include: {
         from: {
-          select: { id: true, name: true, email: true, platformHandle: true, role: true },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            role: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
         },
         to: {
-          select: { id: true, name: true, email: true, platformHandle: true, role: true },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            role: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
         },
         application: { select: { id: true, projectName: true, ticker: true } },
       },
@@ -110,7 +140,7 @@ export class MessagesService {
       ).length;
       threadMap.set(key, {
         otherUserId: other.id,
-        otherUserLabel: formatPublicAccountLabel(other.name, other.email, other.platformHandle),
+        otherUserLabel: labelForUser(other),
         lastBody: m.body,
         lastAt: m.createdAt.toISOString(),
         unreadCount: unread,
@@ -135,30 +165,35 @@ export class MessagesService {
   async resolveRecipient(
     requesterId: string,
     query: string,
-  ): Promise<{ userId: string; label: string; platformHandle: string | null }> {
+  ): Promise<{
+    userId: string;
+    label: string;
+    platformHandle: string | null;
+    messagingAddress: string;
+    twitterHandle: string | null;
+    twitterUrl: string | null;
+  }> {
     const q = query.trim();
-    if (q.length < 2) throw new BadRequestException('Enter a user ID or platform handle');
-
-    let user = await this.prisma.user.findUnique({
-      where: { id: q },
-      select: { id: true, name: true, email: true, platformHandle: true },
-    });
-    if (!user) {
-      user = await this.prisma.user.findUnique({
-        where: { platformHandle: q },
-        select: { id: true, name: true, email: true, platformHandle: true },
-      });
+    if (q.length < 2) {
+      throw new BadRequestException('Enter @handle, messaging address, platform handle, or user ID');
     }
-    if (!user) throw new NotFoundException('No user found for that ID or handle');
+
+    const user = await findUserByMessagingQuery(this.prisma, q);
+    if (!user) throw new NotFoundException('No user found for that address');
 
     if (user.id === requesterId) {
       throw new BadRequestException('Cannot message yourself');
     }
 
+    const { identity } = buildUserIdentity(user);
+
     return {
       userId: user.id,
-      label: formatPublicAccountLabel(user.name, user.email, user.platformHandle),
+      label: identity.primaryLabel,
       platformHandle: user.platformHandle,
+      messagingAddress: identity.messagingAddress,
+      twitterHandle: identity.twitterHandle,
+      twitterUrl: identity.twitterUrl,
     };
   }
 
@@ -173,7 +208,16 @@ export class MessagesService {
       orderBy: { createdAt: 'asc' },
       take: limit,
       include: {
-        from: { select: { id: true, name: true, email: true, platformHandle: true } },
+        from: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
+        },
       },
     });
 
@@ -190,11 +234,7 @@ export class MessagesService {
       createdAt: m.createdAt.toISOString(),
       readAt: m.readAt?.toISOString() ?? null,
       mine: m.fromUserId === userId,
-      fromLabel: formatPublicAccountLabel(
-        m.from.name,
-        m.from.email,
-        m.from.platformHandle,
-      ),
+      fromLabel: labelForUser(m.from),
       applicationId: m.applicationId,
     }));
   }

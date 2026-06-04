@@ -5,7 +5,6 @@ import {
 } from '@nestjs/common';
 import {
   slugify,
-  formatPublicAccountLabel,
   POINTS,
   STARTING_CASH_USD,
   RESTRICTED_CASH_THRESHOLD_USD,
@@ -35,6 +34,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 import { createPaperSessionToken } from './paper-session.util';
+import { buildUserIdentity, labelForUser } from '../account/user-identity.util';
 
 const STARTING_CASH = STARTING_CASH_USD;
 const MIN_SELL_USD = 0.01;
@@ -269,7 +269,16 @@ export class PaperTradingService {
       orderBy: { missedAlphaPct: 'desc' },
       take: Math.min(limit, 50),
       include: {
-        user: { select: { id: true, name: true, email: true, twitterHandle: true } },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
+        },
         project: { select: { ticker: true, name: true } },
       },
     });
@@ -277,7 +286,7 @@ export class PaperTradingService {
     return trades.map((t, index) => ({
       rank: index + 1,
       userId: t.userId,
-      displayName: formatPublicAccountLabel(t.user.name, t.user.email),
+      displayName: labelForUser(t.user),
       twitterHandle: t.user.twitterHandle,
       ticker: t.project.ticker,
       projectName: t.project.name,
@@ -708,12 +717,15 @@ export class PaperTradingService {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
+        id: true,
+        name: true,
+        email: true,
+        platformHandle: true,
         twitterHandle: true,
         createdAt: true,
         reputationPoints: true,
         contributorLevel: true,
-        email: true,
-        oauthAccounts: { select: { id: true }, take: 1 },
+        oauthAccounts: { select: { id: true, provider: true }, take: 3 },
         passwordHash: true,
         _count: { select: { followers: true } },
       },
@@ -762,15 +774,19 @@ export class PaperTradingService {
       );
     }
 
+    const identity = user
+      ? buildUserIdentity(user).identity
+      : null;
+
     return {
       userId: portfolio.userId,
-      displayName: formatPublicAccountLabel(
-        portfolio.accountName,
-        portfolio.accountEmail,
-      ),
+      displayName: identity?.primaryLabel ?? 'Trader',
+      messagingAddress: identity?.messagingAddress ?? null,
+      twitterHandle: identity?.twitterHandle ?? user?.twitterHandle ?? null,
+      twitterUrl: identity?.twitterUrl ?? null,
+      platformHandle: identity?.platformHandle ?? user?.platformHandle ?? null,
       reputationPoints: portfolio.reputationPoints,
       contributorLevel: portfolio.contributorLevel,
-      twitterHandle: user?.twitterHandle ?? null,
       cashBalance: portfolio.cashBalance,
       totalValue: portfolio.totalValue,
       pnl: portfolio.pnl,
@@ -1492,7 +1508,18 @@ export class PaperTradingService {
 
   async getLeaderboard(limit = 20) {
     const portfolios = await this.prisma.paperPortfolio.findMany({
-      include: { user: true },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
+        },
+      },
     });
 
     const ranked = await Promise.all(
@@ -1500,10 +1527,7 @@ export class PaperTradingService {
         const snapshot = await this.getPortfolio(portfolio.userId);
         return {
           userId: portfolio.userId,
-          displayName: formatPublicAccountLabel(
-            portfolio.user.name,
-            portfolio.user.email,
-          ),
+          displayName: labelForUser(portfolio.user),
           twitterHandle: portfolio.user.twitterHandle,
           totalValue: snapshot.totalValue,
           pnl: snapshot.pnl,
@@ -1552,7 +1576,18 @@ export class PaperTradingService {
 
   async getBustedTraders(limit = 30) {
     const portfolios = await this.prisma.paperPortfolio.findMany({
-      include: { user: true },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
+        },
+      },
     });
 
     const ranked = await Promise.all(
@@ -1560,10 +1595,7 @@ export class PaperTradingService {
         const snapshot = await this.getPortfolio(portfolio.userId);
         return {
           userId: portfolio.userId,
-          displayName: formatPublicAccountLabel(
-            portfolio.user.name,
-            portfolio.user.email,
-          ),
+          displayName: labelForUser(portfolio.user),
           twitterHandle: portfolio.user.twitterHandle,
           totalValue: snapshot.totalValue,
           pnl: snapshot.pnl,

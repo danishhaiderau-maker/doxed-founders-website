@@ -17,6 +17,7 @@ import {
   type FeedTerminalResponse,
   type FeedTerminalTab,
 } from '@/lib/api';
+import { markFeedSeen } from '@/hooks/use-feed-new-count';
 
 const VALID_TABS: FeedTerminalTab[] = [
   'all',
@@ -73,6 +74,10 @@ function FeedTerminalPage() {
   }, [load]);
 
   useEffect(() => {
+    markFeedSeen();
+  }, []);
+
+  useEffect(() => {
     if (tabParam && VALID_TABS.includes(tabParam)) setTab(tabParam);
   }, [tabParam]);
 
@@ -107,7 +112,7 @@ function FeedTerminalPage() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-xl font-bold tracking-tight">Social Conviction Terminal</h1>
             <p className="text-xs text-zinc-500">
-              Trades · conviction · regret · DDollar flow — not another chat room
+              Trades · conviction · regret · DDollar flow — tap Buy to mirror in Trading Alpha
             </p>
           </div>
           <SiteNav />

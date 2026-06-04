@@ -34,6 +34,7 @@ export function cn(...classes: (string | false | null | undefined)[]): string {
 export * from './founder-verification';
 export * from './gecko-terminal';
 export * from './display-name';
+export * from './public-identity';
 export * from './linkify';
 export * from './share';
 export * from './reputation-points';

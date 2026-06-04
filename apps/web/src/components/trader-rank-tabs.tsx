@@ -15,6 +15,9 @@ import {
 } from '@/lib/api';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import { TraderRankShareButton } from '@/components/trader-rank-share-button';
+import { CopyTraderButton } from '@/components/copy-trader-button';
+import { MessageTraderButton } from '@/components/message-trader-button';
+import { normalizeTwitterHandle } from '@dcf/utils';
 
 export type TraderRankTab = 'winners' | 'losers' | 'missed-alpha';
 
@@ -115,9 +118,19 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                 <tr key={entry.userId} className="border-t border-[var(--color-border)]">
                   <td className="px-4 py-3 font-semibold">#{entry.rank}</td>
                   <td className="px-4 py-3">
-                    <Link href={`/portfolio/${entry.userId}`} className="hover:text-[var(--color-accent)]">
+                    <Link href={`/portfolio/${entry.userId}`} className="font-medium hover:text-[var(--color-accent)]">
                       {entry.displayName}
                     </Link>
+                    {entry.twitterHandle && (
+                      <a
+                        href={`https://x.com/${normalizeTwitterHandle(entry.twitterHandle)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-2 text-xs text-sky-400 hover:underline"
+                      >
+                        @{normalizeTwitterHandle(entry.twitterHandle)}
+                      </a>
+                    )}
                   </td>
                   <td className="px-4 py-3">{formatUsd(entry.totalValue)}</td>
                   <td className={`px-4 py-3 ${entry.roi >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -147,6 +160,8 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                           });
                         }}
                       />
+                      {token && <MessageTraderButton userId={entry.userId} compact />}
+                      <CopyTraderButton userId={entry.userId} compact />
                     </div>
                   </td>
                 </tr>
@@ -176,9 +191,19 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                 <tr key={entry.userId} className="border-t border-[var(--color-border)]">
                   <td className="px-4 py-3 font-semibold">{entry.rank}</td>
                   <td className="px-4 py-3">
-                    <Link href={`/portfolio/${entry.userId}`} className="hover:text-emerald-400">
+                    <Link href={`/portfolio/${entry.userId}`} className="font-medium hover:text-emerald-400">
                       {entry.displayName}
                     </Link>
+                    {entry.twitterHandle && (
+                      <a
+                        href={`https://x.com/${normalizeTwitterHandle(entry.twitterHandle)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-2 text-xs text-sky-400 hover:underline"
+                      >
+                        @{normalizeTwitterHandle(entry.twitterHandle)}
+                      </a>
+                    )}
                     {entry.isBusted && (
                       <span className="ml-2 rounded bg-red-950/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-red-300">
                         Busted
@@ -215,6 +240,8 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                           });
                         }}
                       />
+                      {token && <MessageTraderButton userId={entry.userId} compact />}
+                      <CopyTraderButton userId={entry.userId} compact />
                     </div>
                   </td>
                 </tr>

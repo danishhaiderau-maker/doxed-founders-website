@@ -20,9 +20,9 @@ function LeaderboardInner() {
             <Link href="/paper-trading" className="text-xs text-[var(--color-muted)] hover:text-white">
               ← Paper Trading
             </Link>
-            <h1 className="mt-1 text-2xl font-bold">Trader rankings</h1>
+            <h1 className="mt-1 text-2xl font-bold">Top traders</h1>
             <p className="text-sm text-[var(--color-muted)]">
-              Top traders by return — click any name to see their full trading journey.
+              Ranked by paper returns — open any profile to follow, message, or copy their trades.
             </p>
           </div>
           <SiteNav />

@@ -130,7 +130,7 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props)
           </p>
         </div>
         <form onSubmit={handleComposeSend} className="p-4">
-          <label className="text-xs font-medium text-zinc-400">Recipient user ID or handle</label>
+          <label className="text-xs font-medium text-zinc-400">Recipient @handle or address</label>
           <div className="mt-1 flex flex-col gap-2 sm:flex-row">
             <input
               value={composeQuery}
@@ -154,7 +154,6 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props)
           {composeResolvedLabel && composeResolvedId && (
             <p className="mt-2 text-sm text-cyan-200">
               Messaging: <span className="font-semibold">{composeResolvedLabel}</span>
-              <span className="mt-1 block font-mono text-xs text-zinc-500">{composeResolvedId}</span>
             </p>
           )}
           <textarea

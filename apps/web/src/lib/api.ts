@@ -674,6 +674,10 @@ export function fetchPaperPortfolio(userId: string, authToken?: string) {
 export interface PublicPortfolio {
   userId: string;
   displayName: string;
+  messagingAddress?: string | null;
+  twitterHandle?: string | null;
+  twitterUrl?: string | null;
+  platformHandle?: string | null;
   reputationPoints: number;
   contributorLevel: number;
   cashBalance: number;
@@ -1099,6 +1103,8 @@ export interface FeedTerminalCard {
   followerSpike?: number;
   link?: string;
   feedPostId?: string;
+  dexscreenerUrl?: string | null;
+  traderTwitterHandle?: string | null;
 }
 
 export interface FeedTerminalResponse {
@@ -2676,6 +2682,9 @@ export interface AccountOverview {
   userId: string;
   username: string;
   platformHandle: string;
+  messagingAddress: string;
+  twitterHandle: string | null;
+  twitterUrl: string | null;
   canEditPlatformHandle: boolean;
   hasTwitterConnected: boolean;
   email: string;
