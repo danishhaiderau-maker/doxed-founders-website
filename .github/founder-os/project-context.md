@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(ship): stage A — disable API X-Powered-By, ZAP workflow, graph sync after GitHub
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
