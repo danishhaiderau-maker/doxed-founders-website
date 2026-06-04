@@ -66,6 +66,11 @@ async function run() {
     return res.ok && Array.isArray(body?.classes) && body?.audit?.compliant === true;
   });
 
+  await runCheck('vault-cvm-capabilities', async () => {
+    const { res, body } = await fetchJson('/api/vault/cvm-capabilities');
+    return res.ok && body?.version === 1 && typeof body?.platformCvmConfigured === 'boolean';
+  });
+
   await runCheck('discover-universe', async () => {
     const { res, body } = await fetchJson('/api/founder-den/discover/universe?timeframe=24h');
     return (

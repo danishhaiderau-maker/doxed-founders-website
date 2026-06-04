@@ -36,7 +36,7 @@ ChatGPT’s “move only vault, agent memory, secrets into Phala CVM” is the r
 | --- | --- | --- | --- |
 | P1 | Mission State (continue where I left off) | **Shipped (Sprint 3)** | Mission Control panel, resume + continue flows, after-build sync |
 | P0 | Split public/private with Phala TEE | **Shipped** | [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md), `/privacy/*`, `audit:data-classes` |
-| P1 vault | Founder Vault flagship in TEE | Partial (local vault + graph) | Phala Cloud CVM for sealed vault sync backup |
+| P1 vault | Founder Vault flagship in TEE | **Shipped (P1)** — [SPRINT_P1_PHALA_VAULT.md](./SPRINT_P1_PHALA_VAULT.md) | Phala P2: CVM-side credential unwrap |
 | P2 | Seal API keys in Phala, not DB | **Shipped (Sprint 6)** — audited unwrap + Phala inference-only tier | Phala CVM-side decrypt for platform keys |
 | P3 | “Founder Brain” task router | **Shipped (Sprint 4)** | Task classify + provider order in API; code asks dispatch Builder |
 | P4 | Attestation button on vault | **Shipped (Sprint 5)** | Mission Control trust strip + Settings `#founder-attestation` |
@@ -45,8 +45,9 @@ ChatGPT’s “move only vault, agent memory, secrets into Phala CVM” is the r
 
 1. **Now** — Neon public data + encrypted credentials + Founder Node vault + memory graph (shipped).
 2. **Next** — Task-based router in API (`research` → DeepSeek, `code` → Cursor, etc.) without exposing vendor names in UI.
-3. **Then** — Phala CVM workload for: credential unwrap, agent run state, vault blob encryption keys.
-4. **Later** — Portable vault export; cross-device agent resume entirely inside TEE.
+3. **Now (P1)** — Phala CVM workload for sealed vault relay backup (`/vault/cvm-*`).
+4. **Then (P2)** — CVM-side credential unwrap, agent run state, vault blob encryption keys.
+5. **Later** — Portable vault export; cross-device agent resume entirely inside TEE.
 
 ## Verdict
 

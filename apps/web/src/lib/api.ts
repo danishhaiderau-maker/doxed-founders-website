@@ -3815,6 +3815,34 @@ export function verifyPhalaAttestation(token: string, logId?: string) {
   }>('/attestation/phala/verify', { method: 'POST', body: JSON.stringify({ logId }) }, token);
 }
 
+export function fetchVaultCvmCapabilities() {
+  return apiFetch<import('@dcf/utils').PhalaCvmCapabilitiesPayload>('/vault/cvm-capabilities');
+}
+
+export function fetchVaultCvmStatus(token: string) {
+  return apiFetch<import('@dcf/utils').PhalaCvmVaultStatusPayload>('/vault/cvm-status', undefined, token);
+}
+
+export function requestVaultCvmBackup(token: string) {
+  return apiFetch<{
+    logId: string;
+    status: string;
+    verified: boolean;
+    summary: string | null;
+    mode: string;
+    platformCvmPushed: boolean;
+    cvmError: string | null;
+  }>('/vault/cvm-backup-request', { method: 'POST' }, token);
+}
+
+export function verifyVaultCvmBackup(token: string, logId?: string) {
+  return apiFetch<{
+    verified: boolean;
+    summary: string | null;
+    checks?: Array<{ name: string; ok: boolean; detail?: string }>;
+  }>('/vault/cvm-verify', { method: 'POST', body: JSON.stringify({ logId }) }, token);
+}
+
 export function connectAiProvider(provider: string, apiKey: string, token: string) {
   return apiFetch<{ success: boolean; accountName: string }>(
     '/builder/providers/connect',

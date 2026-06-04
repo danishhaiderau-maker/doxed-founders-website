@@ -30,7 +30,7 @@ export class DataClassificationService {
       prismaModels: PRISMA_MODEL_CLASSIFICATION,
       apiRoutes: API_ROUTE_CLASSIFICATION,
       audit,
-      nextPhase: 'Phala P1 — CVM sealed vault sync backup',
+      nextPhase: 'Phala P2 — CVM-side credential unwrap',
     };
   }
 
