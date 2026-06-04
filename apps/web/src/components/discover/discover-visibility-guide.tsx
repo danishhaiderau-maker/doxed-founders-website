@@ -5,7 +5,10 @@ import {
   DISCOVER_ACTIVITY_FACTORS,
   DISCOVER_BUBBLE_SCORE_FORMULA,
   DISCOVER_BUBBLE_SIZE_TIERS,
+  DISCOVER_RING_LEGEND_NOTE,
+  DISCOVER_UNIVERSE_COLORS,
   DISCOVER_VISIBILITY_SUMMARY,
+  type DiscoverUniverseStage,
 } from '@dcf/utils';
 
 export function DiscoverVisibilityGuide() {
@@ -31,6 +34,21 @@ export function DiscoverVisibilityGuide() {
             Sort order and sidebar slots favor projects with real DDollar flow, GitHub proof, and
             community signals in the timeframe you pick (1h–7d).
           </p>
+          <p className="mt-2 text-xs text-zinc-500">{DISCOVER_RING_LEGEND_NOTE}</p>
+          <ul className="mt-2 flex flex-wrap gap-3">
+            {(['building', 'validation', 'live'] as DiscoverUniverseStage[]).map((key) => {
+              const meta = DISCOVER_UNIVERSE_COLORS[key];
+              return (
+                <li key={key} className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                  <span
+                    className="h-3 w-3 rounded-full border-2"
+                    style={{ borderColor: meta.border }}
+                  />
+                  {meta.label}
+                </li>
+              );
+            })}
+          </ul>
         </div>
         <div className="rounded-xl border border-zinc-800/80 bg-black/30 px-4 py-3 text-xs text-zinc-400">
           <p className="font-semibold uppercase tracking-wider text-zinc-500">Bubble size tiers</p>

@@ -7,16 +7,12 @@ import {
   DISCOVER_RANKING_RULES_HEADLINE,
   DISCOVER_RANKING_RULES_INTRO,
   DISCOVER_RING_LEGEND_NOTE,
+  DISCOVER_RECENTLY_LISTED_FILTER_LABEL,
   DISCOVER_UNIVERSE_COLORS,
   type DiscoverUniverseStage,
 } from '@dcf/utils';
 
-const STAGE_ORDER: DiscoverUniverseStage[] = [
-  'building',
-  'validation',
-  'live',
-  'recently_listed',
-];
+const STAGE_ORDER: DiscoverUniverseStage[] = ['building', 'validation', 'live'];
 
 export function DiscoverRankingRules() {
   return (
@@ -73,6 +69,15 @@ export function DiscoverRankingRules() {
                 </li>
               );
             })}
+            <li className="flex items-center gap-2 text-xs text-zinc-400">
+              <span className="text-zinc-500" aria-hidden>
+                ○
+              </span>
+              <span>
+                Tab filter: <span className="font-medium text-zinc-200">{DISCOVER_RECENTLY_LISTED_FILTER_LABEL}</span>{' '}
+                (listing age, not ring color)
+              </span>
+            </li>
           </ul>
         </div>
 

@@ -1995,11 +1995,13 @@ export interface DiscoverProject {
   createdAt?: string;
 }
 
-export type DiscoverUniverseStageFilter = 'all' | 'building' | 'validation' | 'live' | 'recently_listed';
+export type DiscoverUniverseStage = 'building' | 'validation' | 'live';
+export type DiscoverUniverseStageFilter = DiscoverUniverseStage | 'all' | 'recently_listed';
 export type DiscoverTimeframe = '1h' | '6h' | '24h' | '7d';
 
 export interface DiscoverUniverseProject extends DiscoverProject {
-  universeStage: DiscoverUniverseStageFilter;
+  universeStage: DiscoverUniverseStage;
+  recentlyListed: boolean;
   activityScore: number;
   convictionScore: number;
   ddInflow24h: number;
@@ -2083,6 +2085,35 @@ export function fetchDiscoverUniverse(options?: {
   if (options?.timeframe) qs.set('timeframe', options.timeframe);
   const q = qs.toString();
   return apiFetch<DiscoverUniverseResponse>(`/founder-den/discover/universe${q ? `?${q}` : ''}`);
+}
+
+export interface DiscoverMyVisibilityResponse {
+  timeframe: DiscoverTimeframe;
+  project: {
+    slug: string;
+    name: string;
+    ticker: string;
+    stageBucket: string;
+    lifecycleStage: string;
+    universeStage: DiscoverUniverseStage;
+    recentlyListed: boolean;
+    activityScore: number;
+    convictionScore: number;
+    bubbleScore: number;
+  };
+  breakdown: {
+    activityScore: number;
+    factors: { key: string; label: string; points: number; maxPoints: number }[];
+  };
+  tips: string[];
+}
+
+export function fetchMyDiscoverVisibility(token: string, timeframe: DiscoverTimeframe = '24h') {
+  return apiFetch<DiscoverMyVisibilityResponse>(
+    `/founder-den/discover/my-visibility?timeframe=${timeframe}`,
+    undefined,
+    token,
+  );
 }
 
 export function fetchEcosystemPulse() {
