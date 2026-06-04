@@ -578,11 +578,17 @@ export function FounderOsDashboardLayout({
                   )}
                   <button
                     type="button"
-                    disabled={missionBuildBusy || workerStatus?.buildWorker === 'NONE'}
-                    onClick={() => void handleSidebarMissionBuild()}
+                    disabled={workerStatus?.buildWorker === 'NONE'}
+                    onClick={() => {
+                      setQuickPrompt(
+                        openBuilderTask?.title?.trim() ||
+                          'Implement the next task from the founder queue in the repo.',
+                      );
+                      setChatKey((k) => k + 1);
+                    }}
                     className="mt-3 w-full rounded-lg bg-violet-600/80 py-2 text-[11px] font-semibold text-white hover:bg-violet-600 disabled:opacity-40"
                   >
-                    {missionBuildBusy ? 'Running…' : 'Run current task'}
+                    Build in chat →
                   </button>
                   {workerStatus?.buildWorker === 'NONE' && (
                     <Link
