@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-den): provider-specific Ask/Build actions, drop Attention center
+fix(web): remove sidebar Run build, use Build in chat
 
 ## Last Activity
 
