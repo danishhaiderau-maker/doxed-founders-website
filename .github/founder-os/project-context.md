@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix voice mic with waveform UI and Founder OS readiness panel.
+chore(founder-os): sync tasks
 
 ## Last Activity
 
