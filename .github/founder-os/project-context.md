@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(founder-node): v0.5.3 firewall prompts, Linux builds, smoother updates
+chore(founder-os): sync tasks
 
 ## Last Activity
 
