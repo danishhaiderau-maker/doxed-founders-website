@@ -27,6 +27,8 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
   const [teeVerified, setTeeVerified] = useState(false);
   const [teePending, setTeePending] = useState(false);
   const [lastAttested, setLastAttested] = useState<string | null>(null);
+  const [phalaSealed, setPhalaSealed] = useState(false);
+  const [secretsSummary, setSecretsSummary] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,11 +46,15 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
           ? latest.createdAt
           : d.memoryIntegrity.lastVaultScanAt;
       setLastAttested(attestedAt);
+      setPhalaSealed(Boolean(d.secretsStorage?.phalaInferenceOnly));
+      setSecretsSummary(d.secretsStorage?.summary ?? null);
     } catch {
       setMemoryScore(null);
       setMemoryStatus(null);
       setTeeVerified(false);
       setTeePending(false);
+      setPhalaSealed(false);
+      setSecretsSummary(null);
     } finally {
       setLoading(false);
     }
@@ -86,6 +92,11 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
                 · {memoryMode.replace(/_/g, ' ')}
               </span>
             )}
+            {phalaSealed && (
+              <span className="rounded-full bg-violet-950/50 px-2 py-0.5 text-violet-200">
+                Phala inference-sealed
+              </span>
+            )}
             {teeVerified ? (
               <span className="rounded-full bg-emerald-600/20 px-2 py-0.5 font-medium text-emerald-300">
                 TEE verified
@@ -102,6 +113,11 @@ export function MissionControlTrustStrip({ accessToken, onRefresh }: Props) {
             <span className="text-zinc-600">
               · Last checked {formatRelative(lastAttested)}
             </span>
+            {secretsSummary && (
+              <span className="hidden text-zinc-600 lg:inline" title={secretsSummary}>
+                · Keys sealed at rest
+              </span>
+            )}
           </>
         )}
       </div>

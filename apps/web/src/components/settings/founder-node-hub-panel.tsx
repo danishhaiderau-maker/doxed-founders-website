@@ -7,6 +7,7 @@ import { FounderNodeDownloads } from '@/components/founder-node-downloads';
 import { MemoryStoragePanel } from '@/components/memory-storage-panel';
 import { FounderNodeV2Panel } from '@/components/settings/founder-node-v2-panel';
 import { AttestationDashboardPanel } from '@/components/settings/attestation-dashboard-panel';
+import { SealedSecretsPanel } from '@/components/settings/sealed-secrets-panel';
 import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
 import { PlatformSetupGuide } from '@/components/settings/platform-setup-guide';
 
@@ -129,10 +130,13 @@ export function FounderNodeHubPanel({
         <HubStep
           step={5}
           title="Privacy attestation"
-          summary="Cryptographic proof of vault integrity and Phala TEE inference receipts."
+          summary="Cryptographic proof of vault integrity, sealed API keys, and Phala TEE inference receipts."
           id="founder-attestation"
         >
-          <AttestationDashboardPanel embedded accessToken={accessToken} />
+          <div className="space-y-4">
+            <SealedSecretsPanel settings={settings} />
+            <AttestationDashboardPanel embedded accessToken={accessToken} />
+          </div>
         </HubStep>
       </div>
     </section>
