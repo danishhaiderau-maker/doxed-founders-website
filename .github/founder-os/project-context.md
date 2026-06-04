@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(founder-node): v0.5.4 pairing vs firewall, offline re-pair UX
+feat(mobile): Android app shell mode and simplified nav in WebView
 
 ## Last Activity
 
