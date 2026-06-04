@@ -1,6 +1,13 @@
 # DoxedCryptoFounder
 
-Curated crypto intelligence platform for serious blockchain businesses with public founders, documentation, and transparent teams.
+**Live:** [doxxedcrypto.digital](https://doxxedcrypto.digital)
+
+Curated crypto intelligence for retail who want **tech and accountable founders** — not anonymous pumps. We surface projects **building in public**, power **Founder OS** (AI-assisted shipping), and **Founder Node** (self-custody vault + optional local AI).
+
+→ **Why we exist:** [docs/MISSION.md](docs/MISSION.md)  
+→ **Full documentation:** [docs/README.md](docs/README.md)  
+→ **External audit (ChatGPT-safe):** [AUDIT.md](AUDIT.md) · [docs/AUDIT_FOR_CHATGPT.md](docs/AUDIT_FOR_CHATGPT.md)  
+→ **Public vs private files:** [docs/REPOSITORY_LAYOUT.md](docs/REPOSITORY_LAYOUT.md)
 
 ## Tech Stack
 
@@ -27,9 +34,21 @@ doxedcryptofounder/
     config/       # Shared configuration
     utils/        # Shared utilities
   prisma/         # Database schema & migrations
+  docs/           # Mission, privacy stack, audit guides (no secrets)
   docker/         # Docker configs
-  scripts/        # Utility scripts
+  scripts/        # Utility scripts (ops — not in audit export)
+  services/       # Showcase trading bot (btc-conservative-agent)
 ```
+
+## Repository zones
+
+| Zone | Location | Commit to git? |
+|------|----------|----------------|
+| **Public source** | This repo | Yes |
+| **Secrets vault** | `../doxedcryptofounder-secrets/vault/` | **Never** |
+| **Audit export** | `../doxedcryptofounder-audit/` (generated) | **Never** |
+
+After clone: `npm run secrets:link` · For reviewers: `npm run audit:export` — see [docs/REPOSITORY_LAYOUT.md](docs/REPOSITORY_LAYOUT.md).
 
 ## Quick Start
 
@@ -121,6 +140,15 @@ Railway uses `railway.toml`. Vercel uses `apps/web/vercel.json`.
 | `npm run db:verify` | Verify Phase 2 seed data |
 | `npm run dev:founder-node` | Start Founder Node desktop app (dev) |
 | `npm run pack:founder-node` | Build Founder Node installer (.exe / .dmg) |
+| `npm run audit:export` | Code-only bundle for ChatGPT / security audit |
+| `npm run secrets:link` | Link vault secrets for local dev |
+| `npm run sync:all` | Sync Neon + Railway + Vercel (requires vault) |
+
+## Mission (short)
+
+Crypto retail deserves better than scam founders and influencer-driven memecoins. **DoxxedCrypto.digital** connects people to **legit builders** — founders who ship in public, document their work, and earn trust through execution. We bring back **conviction over hype**, support **HODL culture** for real tech, and use **Founder OS + Founder Node + BYOK** so founders keep control of memory and AI keys while building visibly.
+
+Full narrative: [docs/MISSION.md](docs/MISSION.md).
 
 ## Supported Chains
 
