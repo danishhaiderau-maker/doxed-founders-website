@@ -1,0 +1,45 @@
+flowchart TB
+  subgraph triggers["What starts it"]
+    GH["GitHub push to main"]
+    MAN["Manual sync API"]
+    DEP["Deploy webhook"]
+  end
+
+  subgraph draft["Founder OS — draft"]
+    SYNC["Detect new commit SHA"]
+    SUG["Create suggested update"]
+    EVT["Emit build event"]
+  end
+
+  subgraph publish["Founder OS — publish"]
+    WHO["Founder publishes when ready"]
+    PUB["Publish to feed, X, community"]
+  end
+
+  subgraph x["Post to X"]
+    CHECK["X connected?"]
+    COPY["Build tweet text"]
+    API["OAuth1 or OAuth2"]
+    TW["Twitter API posts tweet"]
+  end
+
+  GH --> SYNC
+  MAN --> SYNC
+  DEP --> SUG
+  SYNC --> SUG
+  SUG --> EVT
+  EVT -.-> WHO
+  WHO --> PUB
+  PUB --> CHECK
+  CHECK --> COPY
+  COPY --> API
+  API --> TW
+
+  classDef trigger fill:#1d4ed8,stroke:#93c5fd,color:#fff
+  classDef draft fill:#065f46,stroke:#6ee7b7,color:#fff
+  classDef publish fill:#7c2d12,stroke:#fdba74,color:#fff
+  classDef xpost fill:#581c87,stroke:#d8b4fe,color:#fff
+  class GH,MAN,DEP trigger
+  class SYNC,SUG,EVT draft
+  class WHO,PUB publish
+  class CHECK,COPY,API,TW xpost

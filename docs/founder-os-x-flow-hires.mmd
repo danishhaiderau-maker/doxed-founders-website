@@ -1,0 +1,55 @@
+---
+config:
+  theme: dark
+  flowchart:
+    curve: basis
+    padding: 24
+---
+flowchart TB
+  T(["Founder OS → Post on X"])
+  T --> triggers
+
+  subgraph triggers["① What starts it"]
+    GH["GitHub push to main"]
+    MAN["Manual sync"]
+    DEP["Deploy webhook"]
+  end
+
+  subgraph draft["② Founder OS — draft"]
+    SYNC["Detect new commit"]
+    SUG["Create suggested update"]
+    EVT["Emit build event"]
+  end
+
+  subgraph publish["③ Founder OS — publish"]
+    WHO["Founder publishes when ready"]
+    PUB["Publish: feed · X · community"]
+  end
+
+  subgraph x["④ Post to X"]
+    CHECK["X connected?"]
+    COPY["Build tweet + #BuildInPublic"]
+    API["OAuth1 / OAuth2"]
+    TW["Twitter API → live tweet"]
+  end
+
+  GH --> SYNC
+  MAN --> SYNC
+  DEP --> SUG
+  SYNC --> SUG
+  SUG --> EVT
+  EVT -.-> WHO
+  WHO --> PUB
+  PUB --> CHECK
+  CHECK --> COPY --> API --> TW
+
+  classDef title fill:#0f172a,stroke:#38bdf8,color:#f8fafc,stroke-width:2px
+  classDef trigger fill:#1e40af,stroke:#60a5fa,color:#fff
+  classDef draft fill:#047857,stroke:#34d399,color:#fff
+  classDef publish fill:#9a3412,stroke:#fb923c,color:#fff
+  classDef xpost fill:#6b21a8,stroke:#c084fc,color:#fff
+  class T title
+  class GH,MAN,DEP trigger
+  class SYNC,SUG,EVT draft
+  class WHO,PUB publish
+  class CHECK,COPY,API,TW xpost
