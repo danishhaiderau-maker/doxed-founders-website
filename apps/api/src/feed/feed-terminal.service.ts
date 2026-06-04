@@ -7,12 +7,12 @@ import {
 import {
   computePostExitStory,
   feedCardMatchesTab,
-  formatPublicAccountLabel,
   type FeedTerminalCardKind,
   type FeedTerminalTab,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { HotBuyService } from './hot-buy.service';
+import { labelForUser } from '../account/user-identity.util';
 
 export type FeedTerminalCard = {
   id: string;
@@ -24,6 +24,8 @@ export type FeedTerminalCard = {
   projectTicker?: string;
   projectName?: string;
   projectLogoUrl?: string | null;
+  dexscreenerUrl?: string | null;
+  traderTwitterHandle?: string | null;
   amountUsd?: number;
   priceUsd?: number;
   currentPriceUsd?: number;
@@ -111,7 +113,16 @@ export class FeedTerminalService {
         orderBy: { createdAt: 'desc' },
         take: 60,
         include: {
-          user: { select: { id: true, name: true, email: true } },
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              platformHandle: true,
+              twitterHandle: true,
+              oauthAccounts: { select: { provider: true }, take: 3 },
+            },
+          },
           project: {
             include: { metrics: true, chain: { select: { slug: true } } },
           },
@@ -188,8 +199,7 @@ export class FeedTerminalService {
     const cards: FeedTerminalCard[] = [];
 
     for (const post of feedPosts) {
-      const traderName =
-        post.user.name ?? formatPublicAccountLabel(post.user.email);
+      const traderName = labelForUser(post.user);
       const currentPrice = post.project.metrics?.priceUsd
         ? Number(post.project.metrics.priceUsd)
         : Number(post.paperTrade.priceUsd);
@@ -204,6 +214,8 @@ export class FeedTerminalService {
         projectTicker: post.project.ticker,
         projectName: post.project.name,
         projectLogoUrl: post.project.logoUrl,
+        dexscreenerUrl: post.project.dexscreenerUrl,
+        traderTwitterHandle: post.user.twitterHandle,
         amountUsd,
         priceUsd,
         currentPriceUsd: currentPrice,
@@ -284,6 +296,10 @@ export class FeedTerminalService {
 
     for (const hb of hotBuys) {
       if (projectIdFilter && hb.projectId !== projectIdFilter) continue;
+      const hotProject = await this.prisma.project.findUnique({
+        where: { id: hb.projectId },
+        select: { dexscreenerUrl: true, logoUrl: true },
+      });
       cards.push({
         id: `hot-${hb.projectId}`,
         kind: 'HOT_BUY',
@@ -291,6 +307,8 @@ export class FeedTerminalService {
         projectSlug: hb.projectSlug,
         projectTicker: hb.projectTicker,
         projectName: hb.projectName,
+        projectLogoUrl: hotProject?.logoUrl,
+        dexscreenerUrl: hotProject?.dexscreenerUrl,
         reason: this.hotBuy.formatHotBuyDetail(hb),
         link: `/project/${hb.projectSlug}`,
         followerSpike: hb.buyerCount,
@@ -372,11 +390,18 @@ export class FeedTerminalService {
       topTraderRows.map(async (row) => {
         const user = await this.prisma.user.findUnique({
           where: { id: row.userId },
-          select: { name: true, email: true },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            platformHandle: true,
+            twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
+          },
         });
         return {
           userId: row.userId,
-          name: user?.name ?? formatPublicAccountLabel(user?.email ?? 'trader'),
+          name: user ? labelForUser(user) : 'Trader',
           pnlUsd: Number(row._sum.realizedPnlUsd ?? 0),
         };
       }),

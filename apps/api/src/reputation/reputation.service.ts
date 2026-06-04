@@ -1,10 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import {
-  computeAirdropAllocation,
-  contributorLevelFromPoints,
-  formatPublicAccountLabel,
-} from '@dcf/utils';
+import { computeAirdropAllocation, contributorLevelFromPoints } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import { labelForUser } from '../account/user-identity.util';
 
 export type ReputationLeaderboardEntry = {
   rank: number;
@@ -45,7 +42,9 @@ export class ReputationService {
         id: true,
         name: true,
         email: true,
+        platformHandle: true,
         twitterHandle: true,
+        oauthAccounts: { select: { provider: true }, take: 3 },
         reputationPoints: true,
         contributorLevel: true,
       },
@@ -62,7 +61,7 @@ export class ReputationService {
       return {
         rank: index + 1,
         userId: user.id,
-        displayName: formatPublicAccountLabel(user.name, user.email),
+        displayName: labelForUser(user),
         twitterHandle: user.twitterHandle,
         reputationPoints: user.reputationPoints,
         contributorLevel: user.contributorLevel,
@@ -87,7 +86,9 @@ export class ReputationService {
         id: true,
         name: true,
         email: true,
+        platformHandle: true,
         twitterHandle: true,
+        oauthAccounts: { select: { provider: true }, take: 3 },
         reputationPoints: true,
         contributorLevel: true,
         banned: true,
@@ -105,7 +106,7 @@ export class ReputationService {
 
     return {
       userId: user.id,
-      displayName: formatPublicAccountLabel(user.name, user.email),
+      displayName: labelForUser(user),
       twitterHandle: user.twitterHandle,
       reputationPoints: user.reputationPoints,
       contributorLevel:

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { HUB_NAV_ROWS } from '@/components/hub-nav-config';
 import { getActiveUserId } from '@/components/site-nav';
+import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 import { LandingHubPreviewWidgets } from '@/components/landing/landing-hub-preview-widgets';
 import type { PlatformStats } from '@/lib/api';
 
@@ -51,6 +52,7 @@ function NavPill({
 /** Three-row navigation table (Explore · Community · Build). */
 export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number }) {
   const { data: session } = useSession();
+  const { count: feedNewCount } = useFeedNewCount();
   const portfolioUserId = session?.user?.id ?? getActiveUserId(session?.user?.id);
 
   function resolveHref(item: (typeof HUB_NAV_ROWS)[number]['items'][number]) {
@@ -82,7 +84,13 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
               <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
                 {row.items.map((item) => {
                   const badge =
-                    item.label === 'Trust Center' && scoutPending > 0 ? String(scoutPending) : undefined;
+                    item.label === 'Feed' && feedNewCount > 0
+                      ? feedNewCount > 9
+                        ? '9+'
+                        : String(feedNewCount)
+                      : item.label === 'Trust Center' && scoutPending > 0
+                        ? String(scoutPending)
+                        : undefined;
                   return (
                     <NavPill
                       key={item.label}

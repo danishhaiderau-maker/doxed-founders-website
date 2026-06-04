@@ -6,7 +6,12 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { POINTS, generatePlatformHandle, isReservedPlatformHandle } from '@dcf/utils';
+import {
+  POINTS,
+  generatePlatformHandle,
+  isReservedPlatformHandle,
+  normalizeTwitterHandle,
+} from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { hashToken, randomToken } from '../security/security-crypto.util';
@@ -110,7 +115,7 @@ export class AuthService {
 
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {
     const email = this.resolveOAuthEmail(dto);
-    const twitterHandle = dto.twitterHandle?.replace(/^@/, '').trim() || undefined;
+    const twitterHandle = normalizeTwitterHandle(dto.twitterHandle) ?? undefined;
     const tokenData =
       dto.oauthAccessToken && dto.oauthAccessTokenSecret
         ? {

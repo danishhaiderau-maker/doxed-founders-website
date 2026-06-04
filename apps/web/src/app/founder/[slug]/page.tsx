@@ -95,8 +95,14 @@ export default function FounderDetailPage() {
                         </a>
                       )}
                       {founder.twitterUrl && (
-                        <a href={founder.twitterUrl} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-zinc-700 px-4 py-2 hover:border-emerald-500/50">
-                          X
+                        <a
+                          href={founder.twitterUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded-lg border border-sky-500/40 bg-sky-950/30 px-4 py-2 font-semibold text-sky-200 hover:border-sky-400/60"
+                        >
+                          𝕏{' '}
+                          {founder.twitterUrl.replace(/.*x\.com\//i, '@').replace(/.*twitter\.com\//i, '@')}
                         </a>
                       )}
                       {founder.githubUrl && (

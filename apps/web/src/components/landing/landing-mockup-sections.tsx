@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand } from '@/components/site-nav';
 import { NotificationBell } from '@/components/notification-bell';
+import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/landing-feature-hub';
 import { LandingPlatformAdoption } from '@/components/landing/landing-platform-adoption';
 import { LandingValueGrid } from '@/components/landing/landing-value-grid';
@@ -111,6 +112,7 @@ export function LandingHeader() {
       <div className="mx-auto flex w-full max-w-[88rem] items-center justify-between gap-3 px-4 py-3 lg:px-8">
         <SiteBrand className="text-sm font-bold tracking-tight uppercase" />
         <div className="flex items-center gap-2">
+          <PlatformMessagesBell />
           <NotificationBell />
           {session ? (
             <Link

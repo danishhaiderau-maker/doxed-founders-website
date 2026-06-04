@@ -12,6 +12,8 @@ import {
   formatTokenPrice,
 } from '@dcf/utils';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
+import { CopyTraderButton } from '@/components/copy-trader-button';
+import { buildPaperTradeDeepLink } from '@dcf/utils';
 import type { FeedTerminalCard } from '@/lib/api';
 import {
   feedCardAccentClasses,
@@ -109,6 +111,16 @@ export function FeedConvictionCard({ card }: { card: FeedTerminalCard }) {
                 {card.traderName}
               </Link>
             )}
+            {card.traderTwitterHandle && (
+              <a
+                href={`https://x.com/${card.traderTwitterHandle.replace(/^@/, '')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-medium text-sky-400 hover:underline"
+              >
+                @{card.traderTwitterHandle.replace(/^@/, '')}
+              </a>
+            )}
             {card.projectTicker && (
               <>
                 {card.traderName && <span className="text-zinc-500">·</span>}
@@ -192,7 +204,34 @@ export function FeedConvictionCard({ card }: { card: FeedTerminalCard }) {
               Avoided −{card.avoidedLossPct.toFixed(0)}%
             </p>
           )}
-          <ShareOnXButton text={shareText} url={shareUrl} label="Share" />
+          <div className="flex flex-col items-end gap-1.5">
+            <ShareOnXButton text={shareText} url={shareUrl} label="Share" />
+            {['BUY', 'THESIS', 'NEW_THESIS', 'HOT_BUY'].includes(card.kind) &&
+              card.projectTicker &&
+              (card.dexscreenerUrl || card.projectSlug) && (
+                <Link
+                  href={buildPaperTradeDeepLink({
+                    dexscreenerUrl: card.dexscreenerUrl ?? undefined,
+                    amountUsd: card.amountUsd,
+                    thesis: card.reason,
+                    side: 'BUY',
+                  })}
+                  className="rounded-lg border border-emerald-500/45 bg-emerald-950/40 px-2.5 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-950/60"
+                  title="Open Trading Alpha with this token prefilled"
+                >
+                  Buy ${card.projectTicker}
+                </Link>
+              )}
+            {card.traderId && card.kind === 'BUY' && (
+              <CopyTraderButton
+                userId={card.traderId}
+                dexscreenerUrl={card.dexscreenerUrl}
+                amountUsd={card.amountUsd}
+                thesis={card.reason}
+                compact
+              />
+            )}
+          </div>
         </div>
       </div>
     </article>

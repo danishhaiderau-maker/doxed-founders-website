@@ -16,6 +16,8 @@ import { ConnectedAccountsPanel } from '@/components/account/connected-accounts-
 import { AccountMessagesPanel } from '@/components/account/account-messages-panel';
 import { PlatformHandleEditor } from '@/components/account/platform-handle-editor';
 import { UserIdField } from '@/components/account/user-id-field';
+import { PublicMessagingAddress } from '@/components/account/public-messaging-address';
+import { TwitterIdentityLink } from '@/components/account/twitter-identity-link';
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
@@ -195,8 +197,14 @@ export function AccountHub({
                   )}
                 </div>
                 <p className="mt-1 text-sm text-zinc-500">{overview.email}</p>
+                <div className="mt-2">
+                  <TwitterIdentityLink
+                    handle={overview.twitterHandle}
+                    url={overview.twitterUrl}
+                  />
+                </div>
                 <p className="mt-1 text-xs text-zinc-400">
-                  Handle: <span className="text-cyan-300/90">{overview.platformHandle}</span>
+                  Platform handle: <span className="text-cyan-300/90">{overview.platformHandle}</span>
                 </p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Joined {formatDate(overview.joinedAt)}
@@ -215,9 +223,22 @@ export function AccountHub({
               </div>
             </div>
 
+            <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-6">
+              <h3 className="font-semibold text-white">Public messaging address</h3>
+              <PublicMessagingAddress
+                messagingAddress={overview.messagingAddress}
+                twitterUrl={overview.twitterUrl}
+                className="mt-3"
+              />
+            </div>
+
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
-              <h3 className="font-semibold text-white">User ID</h3>
-              <UserIdField userId={overview.userId} className="mt-3" />
+              <h3 className="font-semibold text-white">Technical user ID</h3>
+              <UserIdField
+                userId={overview.userId}
+                hint="Internal ID for support — others should use your @handle or messaging address above."
+                className="mt-3"
+              />
             </div>
 
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">

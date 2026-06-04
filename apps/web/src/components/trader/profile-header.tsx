@@ -1,8 +1,12 @@
 'use client';
 
+import Link from 'next/link';
 import { formatDdollar, formatPercent } from '@dcf/utils';
 import { FollowTraderButton } from '@/components/follow-trader-button';
 import { TraderRankShareButton } from '@/components/trader-rank-share-button';
+import { TwitterIdentityLink } from '@/components/account/twitter-identity-link';
+import { CopyTraderButton } from '@/components/copy-trader-button';
+import { MessageTraderButton } from '@/components/message-trader-button';
 import type { PublicPortfolio } from '@/lib/api';
 
 type Props = {
@@ -20,15 +24,28 @@ export function TraderProfileHeader({
   accessToken,
   onFollowChange,
 }: Props) {
+  const topPosition = portfolio.positions[0];
+
   return (
     <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-muted)]">
             Trader profile
           </p>
           <h2 className="mt-1 text-2xl font-bold">{portfolio.displayName}</h2>
-          <p className="mt-1 text-sm text-[var(--color-muted)]">
+          {portfolio.messagingAddress && (
+            <p className="mt-1 font-mono text-xs text-zinc-500">{portfolio.messagingAddress}</p>
+          )}
+          <div className="mt-2">
+            <TwitterIdentityLink handle={portfolio.twitterHandle} url={portfolio.twitterUrl} />
+          </div>
+          {portfolio.platformHandle && portfolio.twitterHandle && (
+            <p className="mt-1 text-xs text-zinc-500">
+              Platform handle: <span className="text-zinc-400">{portfolio.platformHandle}</span>
+            </p>
+          )}
+          <p className="mt-2 text-sm text-[var(--color-muted)]">
             Paper trading journey · decision record, not just returns
           </p>
         </div>
@@ -42,14 +59,33 @@ export function TraderProfileHeader({
             isLoser={portfolio.pnl < 0}
             isBusted={portfolio.totalValue < 1000}
           />
-          {!isSelf && accessToken && (
-            <FollowTraderButton
-              userId={portfolio.userId}
-              token={accessToken}
-              initiallyFollowing={following}
-              size="md"
-              onChange={onFollowChange}
-            />
+          {!isSelf && (
+            <>
+              <Link
+                href="/leaderboard"
+                className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-300 hover:text-white"
+              >
+                Rankings
+              </Link>
+              {accessToken && (
+                <>
+                  <FollowTraderButton
+                    userId={portfolio.userId}
+                    token={accessToken}
+                    initiallyFollowing={following}
+                    size="md"
+                    onChange={onFollowChange}
+                  />
+                  <MessageTraderButton userId={portfolio.userId} />
+                </>
+              )}
+              <CopyTraderButton
+                userId={portfolio.userId}
+                dexscreenerUrl={topPosition?.dexscreenerUrl}
+                amountUsd={topPosition?.marketValue}
+                thesis={topPosition?.convictionThesis}
+              />
+            </>
           )}
         </div>
       </div>

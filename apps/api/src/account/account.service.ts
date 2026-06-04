@@ -4,13 +4,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  formatPublicAccountLabel,
   mergeNotificationPreferences,
   pointActionLabel,
   resolveGamifiedRole,
   userHasTwitterConnected,
   type NotificationPreferenceGroups,
 } from '@dcf/utils';
+import { buildUserIdentity, labelForUser } from './user-identity.util';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReputationService } from '../reputation/reputation.service';
@@ -20,6 +20,9 @@ export type AccountOverview = {
   userId: string;
   username: string;
   platformHandle: string;
+  messagingAddress: string;
+  twitterHandle: string | null;
+  twitterUrl: string | null;
   canEditPlatformHandle: boolean;
   hasTwitterConnected: boolean;
   email: string;
@@ -152,10 +155,22 @@ export class AccountService {
       }
     }
 
+    const { identity } = buildUserIdentity({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      platformHandle,
+      twitterHandle: user.twitterHandle,
+      oauthAccounts: user.oauthAccounts,
+    });
+
     return {
       userId: user.id,
-      username: formatPublicAccountLabel(user.name, user.email, platformHandle),
+      username: identity.primaryLabel,
       platformHandle,
+      messagingAddress: identity.messagingAddress,
+      twitterHandle: identity.twitterHandle,
+      twitterUrl: identity.twitterUrl,
       canEditPlatformHandle: user.role !== 'ADMIN',
       hasTwitterConnected: hasTwitter,
       email: user.email,
@@ -290,7 +305,9 @@ export class AccountService {
             id: true,
             name: true,
             email: true,
+            platformHandle: true,
             twitterHandle: true,
+            oauthAccounts: { select: { provider: true }, take: 3 },
             reputationPoints: true,
             contributorLevel: true,
             founder: { select: { slug: true, name: true } },
@@ -302,7 +319,7 @@ export class AccountService {
 
     return rows.map((row) => ({
       userId: row.following.id,
-      displayName: formatPublicAccountLabel(row.following.name, row.following.email),
+      displayName: labelForUser(row.following),
       twitterHandle: row.following.twitterHandle,
       reputationPoints: row.following.reputationPoints,
       contributorLevel: row.following.contributorLevel,

@@ -211,6 +211,40 @@ function PaperTradingPageContent() {
 
   useEffect(() => {
     const dex = searchParams.get('dex');
+    const amount = searchParams.get('amount');
+    const thesis = searchParams.get('thesis');
+    const catalyst = searchParams.get('catalyst');
+    const sideParam = searchParams.get('side');
+    const copyFrom = searchParams.get('copyFrom');
+
+    if (amount) setAmountUsd(amount);
+    if (thesis) setTradeComment(thesis);
+    if (catalyst) setTradeCatalyst(catalyst);
+    if (sideParam === 'SELL' || sideParam === 'BUY') setSide(sideParam);
+
+    async function prefillFromTrader(targetUserId: string) {
+      try {
+        const { fetchPublicPortfolio } = await import('@/lib/api');
+        const pub = await fetchPublicPortfolio(targetUserId);
+        const pos = pub.positions[0];
+        if (!pos?.dexscreenerUrl) return;
+        setDexUrl(pos.dexscreenerUrl);
+        const data = await previewPaperTrade(pos.dexscreenerUrl);
+        setPreview(data);
+        setActiveChartUrl(data.dexscreenerUrl);
+        if (!amount && pos.marketValue) setAmountUsd(String(Math.max(50, Math.round(pos.marketValue))));
+        if (!thesis && pos.convictionThesis) setTradeComment(pos.convictionThesis);
+        if (!catalyst && pos.convictionCatalyst) setTradeCatalyst(pos.convictionCatalyst);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (copyFrom && userId && !dex) {
+      void prefillFromTrader(copyFrom);
+      return;
+    }
+
     if (dex && userId) {
       setDexUrl(dex);
       previewPaperTrade(dex)
