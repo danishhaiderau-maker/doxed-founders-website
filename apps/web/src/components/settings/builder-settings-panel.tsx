@@ -230,8 +230,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       p.key !== 'CURSOR' &&
       p.key !== 'OLLAMA_LOCAL' &&
       p.key !== 'PHALA' &&
-      p.key !== 'OPENROUTER' &&
-      p.key !== 'JATEVO',
+      p.key !== 'OPENROUTER',
   );
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
@@ -363,13 +362,15 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
             {settings.providers
               .filter(
                 (p) =>
-                  p.connected &&
                   p.key !== 'RULE_BASED' &&
+                  p.key !== 'CURSOR' &&
+                  p.key !== 'OPENHANDS' &&
                   (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
               )
               .map((p) => (
-                <option key={p.key} value={p.key}>
+                <option key={p.key} value={p.key} disabled={!p.connected}>
                   {p.label}
+                  {p.connected ? '' : ' (connect in Step 3)'}
                 </option>
               ))}
             <option value="RULE_BASED">Project memory only</option>

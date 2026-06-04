@@ -1,6 +1,27 @@
 'use client';
 
+import { AI_PROVIDERS } from '@dcf/utils';
 import type { BuilderSettings } from '@/lib/api';
+
+function mergeBrainProviders(settings: BuilderSettings) {
+  const fromApi = new Map(settings.providers.map((p) => [p.key, p]));
+  return AI_PROVIDERS.filter(
+    (cfg) =>
+      cfg.key !== 'RULE_BASED' &&
+      cfg.key !== 'CURSOR' &&
+      cfg.key !== 'OPENHANDS' &&
+      (cfg.connectMode === 'api_key' || cfg.connectMode === 'founder_node'),
+  ).map((cfg) => {
+    const api = fromApi.get(cfg.key);
+    return {
+      key: cfg.key,
+      label: cfg.label,
+      connected: api?.connected ?? false,
+      connectMode: cfg.connectMode,
+      credentialProvider: cfg.credentialProvider,
+    };
+  });
+}
 
 type Props = {
   settings: BuilderSettings;
@@ -58,13 +79,7 @@ export function FounderNodeAiSection({
   const phalaStatus = settings.phalaPrivateAi;
   const nodeAi = settings.founderNodeAi;
 
-  const brainProviders = settings.providers.filter(
-    (p) =>
-      p.key !== 'RULE_BASED' &&
-      p.key !== 'CURSOR' &&
-      p.key !== 'OPENHANDS' &&
-      (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
-  );
+  const brainProviders = mergeBrainProviders(settings);
 
   const activeBrain = brainProviders.find((p) => p.key === settings.defaultProvider);
   const brainReady = settings.defaultBrainConnected ?? Boolean(activeBrain?.connected);
@@ -155,7 +170,7 @@ export function FounderNodeAiSection({
       <div className="flex flex-wrap gap-2">
         {jatevoProvider?.connected && (
           <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100">
-            Jatevo connected
+            Jatevo ($JTVO) connected
           </span>
         )}
         {openRouterProvider?.connected && (
@@ -177,9 +192,12 @@ export function FounderNodeAiSection({
 
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
-          <p className="font-medium text-white">Jatevo</p>
+          <p className="font-medium text-white">
+            Jatevo <span className="text-amber-300/90">($JTVO)</span>
+          </p>
           <p className="mt-1 text-xs text-zinc-500">
-            One gateway key — multi-model routing. Quota tied to $JTVO on{' '}
+            <strong className="text-amber-200/90">This is the $JTVO subsidized gateway</strong> — one key,
+            multi-model routing. Get <code className="text-amber-200/80">sk-clb-…</code> on{' '}
             <a href="https://jatevo.ai" className="text-amber-300 underline" target="_blank" rel="noreferrer">
               jatevo.ai
             </a>

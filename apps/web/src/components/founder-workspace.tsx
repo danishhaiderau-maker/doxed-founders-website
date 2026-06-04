@@ -217,7 +217,8 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
                 </p>
                 <h1 className="mt-1 text-2xl font-bold text-white">Integrations & AI stack</h1>
                 <p className="mt-1 text-sm text-zinc-500">
-                  GitHub, Cursor, DeepSeek, OpenHands, Founder Node — all configuration lives here.
+                  GitHub, Jatevo ($JTVO), OpenRouter, DeepSeek, Cursor, OpenHands, Founder Node — all
+                  configuration lives here.
                 </p>
               </header>
               <BuilderSettingsPanel accessToken={session.accessToken} />
