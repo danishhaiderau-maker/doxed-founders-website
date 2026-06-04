@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix Founder Brain: GitHub-grounded status answers, not Builder/Researcher
+chore(founder-os): sync tasks
 
 ## Last Activity
 
