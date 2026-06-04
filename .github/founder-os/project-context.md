@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(founder-os): Sprint 1 Founder Memory Graph for all AI routes
+chore: remove legacy Founder OS UI and local junk scripts
 
 ## Last Activity
 
