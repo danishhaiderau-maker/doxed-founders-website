@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (4 recent commits)
+Define your next milestone
 
 ## Progress
 
