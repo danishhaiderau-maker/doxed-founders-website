@@ -47,7 +47,7 @@ Everything in `docs/` is **safe to commit** — no production secrets.
 | Doc | Description |
 |-----|-------------|
 | [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md) | Production checklist |
-| [railway-deploy.md](./railway-deploy.md) | Railway API |
+| [railway-deploy.md](./railway-deploy.md) | Railway API · **GitHub red ✗ ≠ outage** |
 | [vercel-deploy.md](./vercel-deploy.md) | Vercel web |
 
 ---

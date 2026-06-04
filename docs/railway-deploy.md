@@ -1,5 +1,65 @@
 # Railway deploy checklist
 
+## GitHub red ✗ on commits (not an outage or security breach)
+
+Public repo readers often see a **red X** next to commits on `master`. That is **Railway reporting a failed or cancelled deploy** to GitHub — not proof that the site was hacked, and not always proof that production is down.
+
+| What you see on GitHub | What it usually means |
+|------------------------|------------------------|
+| Red ✗ on latest commit | A **deploy attempt** for a linked Railway service failed or was cancelled |
+| Blue “master isn’t protected” | Optional branch-hardening suggestion — unrelated to deploy health |
+| Green ✓ on an older commit | Production may still be running that **last successful** deploy |
+
+### Not a security incident
+
+- Failed statuses do **not** mean secrets leaked in git.
+- `docs/` and other safe commits can still show ✗ if Railway redeploys a **secondary service** (e.g. showcase bot) and that deploy fails.
+- Treat ✗ as **CI/deploy telemetry**, not an intrusion alert.
+
+### Typical status names (Railway → GitHub)
+
+| Context | Common message |
+|---------|----------------|
+| `giving-spirit - doxed-founders-website` | Deployment failed / cancelled |
+| `giving-spirit - btc-conservative-agent` | Deployment failed (often missing `BYBIT_*` env or boot crash before `/health`) |
+
+Click the ✗ on the commit → open the Railway link → read **deploy logs** for that service only.
+
+### Is production actually down?
+
+Railway keeps the **last successful deployment** serving traffic when a newer attempt fails.
+
+```bash
+npm run housekeeping
+# or
+curl https://doxxedcrypto.digital/api/health
+curl https://doxxedcrypto.digital/api/health/live
+```
+
+If those return OK, founders can still use the product; GitHub is showing a **failed retry**, not a live outage.
+
+### Why docs-only pushes can still show ✗
+
+| Service | Auto-deploy on `master` push? |
+|---------|-------------------------------|
+| **doxed-founders-website** (API) | Often limited by `watchPatterns` in root `railway.toml` (API paths only) |
+| **btc-conservative-agent** | Usually **every push** unless you add watch paths or disable auto-deploy |
+
+A markdown-only commit can trigger the **bot** service, which **requires** valid `BYBIT_API_KEY` / `BYBIT_SECRET` before Flask starts — so `/health` never answers and Railway marks the commit failed.
+
+**Mitigations (operators):**
+
+1. Add `watchPatterns` under `services/btc-conservative-agent/railway.toml` so only bot code changes redeploy the bot.
+2. Or disable auto-deploy for the bot; deploy manually when `bot.py` changes.
+3. Delete duplicate Railway services (`@dcf/api`, `@dcf/web`) — see [Dashboard cleanup](#dashboard-cleanup-do-this-once) below.
+4. Optionally turn off “wait for CI / deployment status” anxiety: protect `master` for process safety, not because ✗ equals breach.
+
+### Related: scheduled GitHub Actions
+
+Workflows like **X social daily sync** run on a **cron** schedule. Their failure is separate from your commit (usually missing `API_URL` / `ADMIN_SYNC_JWT` repo secrets). See [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md).
+
+---
+
 ## Which service to use
 
 | Service | Status | Action |
@@ -68,7 +128,7 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 
 ## Failed deploy badges (22 / 15 / etc.)
 
-Railway counts **every failed attempt** in history. They do **not** mean the site is down.
+Railway counts **every failed attempt** in history. They do **not** mean the site is down. See [GitHub red ✗ on commits](#github-red--on-commits-not-an-outage-or-security-breach) above.
 
 - If the service shows **Online** (green) and `/api/health` returns OK, production is on the **last successful** deployment.
 - Failed deploys on **`@dcf/web`** are expected — delete that service (web is on Vercel).

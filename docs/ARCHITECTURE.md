@@ -323,6 +323,8 @@ npm run smoke:test           # production health (set API_URL)
 
 Guide: [AUDIT_FOR_CHATGPT.md](./AUDIT_FOR_CHATGPT.md)
 
+**GitHub red ✗ on commits:** Railway deploy status, not a security breach. A failed badge does not always mean production is down — see [railway-deploy.md — GitHub red ✗](./railway-deploy.md#github-red--on-commits-not-an-outage-or-security-breach).
+
 ---
 
 ## Further reading
