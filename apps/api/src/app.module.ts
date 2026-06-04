@@ -39,6 +39,7 @@ import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.
 import { CredentialsModule } from './credentials/credentials.module';
 import { PrivacyModule } from './privacy/privacy.module';
 import { VaultModule } from './vault/vault.module';
+import { AirdropModule } from './airdrop/airdrop.module';
 
 @Module({
   imports: [
@@ -83,6 +84,7 @@ import { VaultModule } from './vault/vault.module';
     ProjectsModule,
     WatchlistModule,
     ReputationModule,
+    AirdropModule,
   ],
   providers: [
     {
