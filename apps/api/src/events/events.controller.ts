@@ -67,6 +67,14 @@ export class EventsController {
     return this.copilot.resumeWork(user.id);
   }
 
+  @Post('copilot/mission-build')
+  missionBuild(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { worker?: 'CURSOR' | 'OPENHANDS' },
+  ) {
+    return this.copilot.runMissionBuild(user.id, body);
+  }
+
   @Post('copilot/ask')
   ask(@CurrentUser() user: AuthUser, @Body() body: { prompt: string; agentTemplate?: string }) {
     return this.copilot.ask(user.id, body.prompt, { agentTemplate: body.agentTemplate });

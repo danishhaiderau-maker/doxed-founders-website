@@ -1,15 +1,26 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import type { FounderMemoryGraph, FounderMemoryGraphPatch } from '@dcf/utils';
-import { fetchCopilotMemoryGraph, patchCopilotMemoryGraph } from '@/lib/api';
+import { AI_STACK_HREF } from '@/lib/copilot-ai-stack';
+import {
+  copilotMissionBuild,
+  fetchCopilotMemoryGraph,
+  patchCopilotMemoryGraph,
+} from '@/lib/api';
+import { pollMissionBuildUntilDone } from '@/lib/mission-build-runner';
 
 type Props = {
   accessToken: string;
   initial?: FounderMemoryGraph | null;
   lastCommit?: string | null;
   openTaskCount?: number;
+  buildWorker?: string;
+  workerReady?: boolean;
+  repoFullName?: string | null;
   onSaved?: () => void;
+  onBuildComplete?: (message: string) => void;
 };
 
 export function MissionStatePanel({
@@ -17,11 +28,18 @@ export function MissionStatePanel({
   initial,
   lastCommit,
   openTaskCount = 0,
+  buildWorker = 'NONE',
+  workerReady = false,
+  repoFullName,
   onSaved,
+  onBuildComplete,
 }: Props) {
   const [graph, setGraph] = useState<FounderMemoryGraph | null>(initial ?? null);
   const [draft, setDraft] = useState<FounderMemoryGraphPatch>({});
   const [busy, setBusy] = useState(false);
+  const [buildBusy, setBuildBusy] = useState(false);
+  const [buildLine, setBuildLine] = useState<string | null>(null);
+  const [buildAgentUrl, setBuildAgentUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
 
@@ -57,6 +75,47 @@ export function MissionStatePanel({
       setBusy(false);
     }
   }
+
+  async function runBuild() {
+    setBuildBusy(true);
+    setBuildLine(null);
+    setBuildAgentUrl(null);
+    setErr(null);
+    try {
+      const preferred =
+        buildWorker === 'CURSOR' || buildWorker === 'OPENHANDS' ? buildWorker : undefined;
+      const result = await copilotMissionBuild(
+        accessToken,
+        preferred ? { worker: preferred } : undefined,
+      );
+      setGraph(result.graph);
+      setBuildLine(result.message);
+      if (result.agentUrl) setBuildAgentUrl(result.agentUrl);
+
+      if (result.status === 'dispatched') {
+        let lastLine = result.message;
+        const updated = await pollMissionBuildUntilDone(accessToken, result, (line) => {
+          lastLine = line;
+          setBuildLine(line);
+        });
+        if (updated) setGraph(updated);
+        onSaved?.();
+        onBuildComplete?.(lastLine);
+      } else {
+        onBuildComplete?.(result.message);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Build failed';
+      setErr(msg);
+      onBuildComplete?.(msg);
+    } finally {
+      setBuildBusy(false);
+    }
+  }
+
+  const canRunBuild = Boolean(
+    graph?.current_task?.trim() || graph?.next_action?.trim() || graph?.active_goal?.trim(),
+  );
 
   if (!graph) {
     return (
@@ -108,10 +167,24 @@ export function MissionStatePanel({
             Mission State
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Resume Work and Continue last task read this first — then GitHub and builder agents.
+            Run build dispatches your current task to Cursor or OpenHands, then updates state when the
+            run finishes.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={buildBusy || !canRunBuild}
+            onClick={() => void runBuild()}
+            className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-40"
+            title={
+              workerReady
+                ? `Dispatch via ${buildWorker}`
+                : 'Connect Cursor or OpenHands in Settings'
+            }
+          >
+            {buildBusy ? 'Building…' : '▶ Run build'}
+          </button>
           <button
             type="button"
             onClick={() => setEditing((e) => !e)}
@@ -131,6 +204,35 @@ export function MissionStatePanel({
           )}
         </div>
       </div>
+
+      {!workerReady && (
+        <p className="mt-2 text-xs text-amber-200/90">
+          Connect a builder worker in{' '}
+          <Link href={AI_STACK_HREF} className="text-violet-400 hover:underline">
+            Settings → AI stack
+          </Link>{' '}
+          to run builds remotely.
+        </p>
+      )}
+
+      {buildLine && (
+        <p className="mt-2 rounded-lg border border-violet-500/20 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
+          {buildLine}
+          {buildAgentUrl && (
+            <>
+              {' '}
+              <a
+                href={buildAgentUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-violet-300 hover:underline"
+              >
+                Open agent →
+              </a>
+            </>
+          )}
+        </p>
+      )}
 
       <dl className="mt-4 grid gap-2 rounded-xl border border-zinc-800/80 bg-black/30 px-4 py-3 text-sm sm:grid-cols-2">
         <div className="sm:col-span-2">
@@ -165,16 +267,22 @@ export function MissionStatePanel({
           <div className="sm:col-span-2 flex flex-wrap gap-3 text-xs text-zinc-500">
             {graph.current_branch && <span>Branch: {graph.current_branch}</span>}
             {graph.current_pr && (
-              <a href={graph.current_pr} className="text-cyan-400 hover:underline" target="_blank" rel="noreferrer">
+              <a
+                href={graph.current_pr}
+                className="text-cyan-400 hover:underline"
+                target="_blank"
+                rel="noreferrer"
+              >
                 PR linked
               </a>
             )}
           </div>
         )}
-        {(lastCommit || openTaskCount > 0) && (
+        {(lastCommit || openTaskCount > 0 || repoFullName) && (
           <div className="sm:col-span-2 text-[10px] text-zinc-600">
-            {lastCommit ? `Last commit on record · ` : ''}
-            {openTaskCount > 0 ? `${openTaskCount} open queue items` : ''}
+            {repoFullName ? `Repo: ${repoFullName}` : ''}
+            {lastCommit ? `${repoFullName ? ' · ' : ''}Last commit on record` : ''}
+            {openTaskCount > 0 ? ` · ${openTaskCount} open queue items` : ''}
           </div>
         )}
       </dl>

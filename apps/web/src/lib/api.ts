@@ -3974,12 +3974,59 @@ export function fetchCopilotStandup(token: string) {
   return apiFetch<{ standup: string; memory: ProjectMemory }>('/copilot/standup', undefined, token);
 }
 
+export type CopilotMissionBuildResult = {
+  graph: FounderMemoryGraph;
+  taskLabel: string;
+  spec: string;
+  memory: ProjectMemory;
+  worker: string;
+  status: string;
+  message: string;
+  agentUrl?: string | null;
+  agentId?: string | null;
+  runId?: string | null;
+  conversationId?: string | null;
+  mode?: 'create' | 'follow_up' | null;
+  queuedMessage?: string | null;
+  cursorCloudDispatch?: {
+    agentUrl?: string;
+    agentId?: string;
+    runId?: string;
+    status?: string;
+    mode?: 'create' | 'follow_up';
+    error?: string;
+  } | null;
+  openHandsDispatch?: {
+    conversationUrl?: string | null;
+    status?: string;
+    error?: string;
+  } | null;
+};
+
+export function copilotMissionBuild(
+  token: string,
+  body?: { worker?: 'CURSOR' | 'OPENHANDS' },
+) {
+  return apiFetch<CopilotMissionBuildResult>(
+    '/copilot/mission-build',
+    { method: 'POST', body: JSON.stringify(body ?? {}) },
+    token,
+  );
+}
+
 export function copilotResume(token: string) {
   return apiFetch<{
     message: string;
     memory: ProjectMemory;
     cursorCopy: string;
     dispatchHint?: string;
+    missionBuild?: {
+      taskLabel: string;
+      status: string;
+      agentId?: string | null;
+      runId?: string | null;
+      conversationId?: string | null;
+    };
     cursorCloudDispatch?: {
       agentUrl?: string;
       agentId?: string;

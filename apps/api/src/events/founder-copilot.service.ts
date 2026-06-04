@@ -46,6 +46,7 @@ import {
   classifyFounderBrainTask,
   detectContinueMissionIntent,
   formatMissionStateBlock,
+  resolveMissionBuildTask,
   getFounderBrainRouteLabel,
   shouldDispatchBuilderForCodeAsk,
   type DeviceMemoryPayload,
@@ -443,9 +444,19 @@ export class FounderCopilotService {
     };
   }
 
-  async resumeWork(userId: string) {
+  /** Sprint 7d — dispatch builder from Mission State (current task / next action). */
+  async runMissionBuild(userId: string, input?: { worker?: 'CURSOR' | 'OPENHANDS' }) {
     const memory = await this.getProjectMemory(userId);
     const graph = memory.memoryGraph ?? (await this.memoryGraph.resolveForUser(userId));
+    const { spec, taskLabel } = resolveMissionBuildTask(graph);
+
+    if (!taskLabel.trim()) {
+      throw new BadRequestException('Set a goal, task, or next action in Mission State first');
+    }
+
+    if (!graph.current_task?.trim() && graph.next_action?.trim()) {
+      await this.memoryGraph.patchForUser(userId, { current_task: graph.next_action.trim() });
+    }
 
     if (memory.repoFullName) {
       try {
@@ -455,77 +466,123 @@ export class FounderCopilotService {
       }
     }
 
-    const prompt =
-      graph.next_action?.trim() ||
-      graph.current_task?.trim() ||
-      memory.suggestedNextStep;
-    await this.events.emit({
-      founderId: (await this.prisma.founder.findUnique({ where: { userId } }))!.id,
-      projectId: memory.project?.id,
-      userId,
-      type: FounderEventType.COPILOT_COMMAND,
-      source: 'copilot',
-      title: 'Resume work',
-      payload: { action: 'resume', suggestedNext: prompt },
-    });
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
 
     const githubPrefix = memory.repoFullName
       ? `Read ${FOUNDER_OS_MEMORY_DIR}/ in repo ${memory.repoFullName} first.\n\n`
       : '';
 
     const dispatch = await this.builder.executeBuildTask(userId, {
-      spec: graph.active_goal || memory.currentGoal,
+      spec,
       cursorPrompt: `${githubPrefix}${buildContinueFromMissionPrompt(graph)}`,
       repository: memory.repoFullName ?? undefined,
+      worker: input?.worker,
     });
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: memory.project?.id,
+      userId,
+      type: FounderEventType.COPILOT_COMMAND,
+      source: 'mission_build',
+      title: 'Mission build',
+      payload: {
+        action: 'mission_build',
+        task: taskLabel,
+        worker: dispatch.worker,
+        status: dispatch.status,
+      },
+    });
+
+    const refreshedGraph = await this.memoryGraph.resolveForUser(userId);
+
+    return {
+      graph: refreshedGraph,
+      taskLabel,
+      spec,
+      memory,
+      worker: dispatch.worker,
+      status: dispatch.status,
+      agentUrl: dispatch.agentUrl ?? null,
+      message: this.formatMissionBuildMessage(memory, dispatch, taskLabel),
+      cursorCloudDispatch:
+        dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR'
+          ? (dispatch.cursorCloud ?? null)
+          : dispatch.status === 'error' && dispatch.worker === 'CURSOR'
+            ? { error: dispatch.error ?? 'Dispatch failed' }
+            : null,
+      openHandsDispatch:
+        dispatch.status === 'dispatched' && dispatch.worker === 'OPENHANDS'
+          ? (dispatch.openHands ?? null)
+          : dispatch.status === 'error' && dispatch.worker === 'OPENHANDS'
+            ? { error: dispatch.error ?? 'Dispatch failed' }
+            : null,
+      agentId: dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR' ? dispatch.agentId : null,
+      runId: dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR' ? dispatch.runId : null,
+      conversationId:
+        dispatch.status === 'dispatched' && dispatch.worker === 'OPENHANDS'
+          ? dispatch.conversationId ?? null
+          : null,
+      mode: dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR' ? dispatch.mode : null,
+      queuedMessage: dispatch.status === 'queued' ? dispatch.message : null,
+    };
+  }
+
+  private formatMissionBuildMessage(
+    memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>,
+    dispatch: Awaited<ReturnType<BuilderService['executeBuildTask']>>,
+    taskLabel: string,
+  ): string {
+    if (dispatch.status === 'dispatched') {
+      if (dispatch.worker === 'CURSOR') {
+        return `Builder agent ${dispatch.mode === 'follow_up' ? 'resumed' : 'started'} on ${memory.repoFullName ?? 'your repo'} — ${taskLabel}`;
+      }
+      return `OpenHands dispatched — ${taskLabel}`;
+    }
+    if (dispatch.status === 'error') {
+      return `Build could not start: ${dispatch.error ?? 'unknown error'}`;
+    }
+    return (
+      dispatch.message ??
+      'Connect Cursor or OpenHands in Settings → Builder to run this task remotely.'
+    );
+  }
+
+  async resumeWork(userId: string) {
+    const build = await this.runMissionBuild(userId);
+    const graph = build.graph;
 
     let message = formatMissionStateBlock(graph, {
-      lastCommit: memory.lastCommit,
-      openTaskCount: memory.openTasks.length,
+      lastCommit: build.memory.lastCommit,
+      openTaskCount: build.memory.openTasks.length,
     });
 
-    let cursorCloudDispatch:
-      | Awaited<ReturnType<BuilderService['dispatchCursorBuildTask']>>
-      | { error: string }
-      | null = null;
-    let openHandsDispatch:
-      | Awaited<ReturnType<BuilderService['dispatchOpenHandsBuildTask']>>
-      | { error: string }
-      | null = null;
-
-    if (dispatch.status === 'dispatched') {
-      message =
-        dispatch.worker === 'CURSOR'
-          ? `Builder agent ${dispatch.mode === 'follow_up' ? 'resumed' : 'started'} on ${memory.repoFullName ?? 'your repo'}.`
-          : `Builder agent dispatched — ${prompt}`;
-      if (dispatch.worker === 'CURSOR' && dispatch.cursorCloud) {
-        cursorCloudDispatch = dispatch.cursorCloud;
-      } else if (dispatch.worker === 'OPENHANDS' && dispatch.openHands) {
-        openHandsDispatch = dispatch.openHands;
-      }
-    } else if (dispatch.status === 'error') {
-      message = `${message}\n\nDispatch note: ${dispatch.error}`;
-      if (dispatch.worker === 'CURSOR') {
-        cursorCloudDispatch = { error: dispatch.error ?? 'Dispatch failed' };
-      } else if (dispatch.worker === 'OPENHANDS') {
-        openHandsDispatch = { error: dispatch.error ?? 'Dispatch failed' };
-      }
-    } else if (dispatch.status === 'queued') {
-      message = `${message}\n\n${dispatch.message ?? 'Queued locally — connect a builder in Settings for remote execution.'}`;
+    if (build.status === 'dispatched') {
+      message = build.message;
+    } else if (build.status === 'error') {
+      message = `${message}\n\n${build.message}`;
+    } else if (build.status === 'queued') {
+      message = `${message}\n\n${build.message}`;
     }
-
-    const agentUrl = dispatch.agentUrl ?? null;
 
     return {
       message,
-      memory,
-      worker: dispatch.worker,
-      cursorCopy: memory.cursorCopy,
-      cursorCloudDispatch,
-      openHandsDispatch,
-      dispatchHint: agentUrl
-        ? `Remote agent running — ${agentUrl}`
-        : 'Use Execute Task in Copilot to dispatch when a builder worker is connected.',
+      memory: build.memory,
+      worker: build.worker,
+      cursorCopy: build.memory.cursorCopy,
+      cursorCloudDispatch: build.cursorCloudDispatch,
+      openHandsDispatch: build.openHandsDispatch,
+      dispatchHint: build.agentUrl
+        ? `Remote agent running — ${build.agentUrl}`
+        : 'Connect Cursor or OpenHands in Settings, then use Run build on Mission State.',
+      missionBuild: {
+        taskLabel: build.taskLabel,
+        status: build.status,
+        agentId: build.agentId,
+        runId: build.runId,
+        conversationId: build.conversationId,
+      },
     };
   }
 
