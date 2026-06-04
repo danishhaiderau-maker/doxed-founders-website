@@ -9,6 +9,7 @@ import {
   type MessageThread,
   type PlatformMessageItem,
 } from '@/lib/api';
+import { dispatchInboxRefresh } from '@/lib/inbox-refresh';
 type Props = {
   accessToken: string;
   initialOtherUserId?: string | null;
@@ -46,6 +47,7 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props)
         setMessages(data);
         setErr(null);
         await loadThreads();
+        dispatchInboxRefresh();
       } catch (e) {
         setErr(e instanceof Error ? e.message : 'Could not load conversation');
       }
