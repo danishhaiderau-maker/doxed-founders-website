@@ -18,20 +18,23 @@ function formatStat(value: number) {
 
 const WHY_DOXXED = [
   {
-    title: 'Scam culture',
-    body: 'Anonymous founders and meme-coin launches — same risk as wiring a stranger online.',
+    title: 'The problem',
+    body:
+      'Anonymous founders, influencer pumps, and memecoin cycles extract liquidity from retail. Honest builders get lost in the same noise as the next shitcoin.',
     border: 'border-red-500/35',
     accent: 'text-red-300',
   },
   {
-    title: 'Broken incentives',
-    body: 'Retail chases memes. Builders get ignored.',
+    title: 'Why now',
+    body:
+      'Crypto needs a trust layer again — public identity, documented shipping, and community validation before capital moves. Not hype charts. Execution.',
     border: 'border-amber-500/35',
     accent: 'text-amber-300',
   },
   {
-    title: 'Our solution',
-    body: 'Trade doxxed founders. Reward conviction. Bring back HODL culture.',
+    title: 'What we do',
+    body:
+      'Curate doxxed & build-in-public founders. Proof of conviction for traders. Founder OS + Founder Node with bring-your-own keys. Fund shippers, not spectacles.',
     border: 'border-emerald-500/35',
     accent: 'text-emerald-300',
   },
@@ -286,7 +289,10 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
       {/* Row 4: Why Doxxed exists */}
       <section>
         <Card className="p-4 lg:p-5">
-          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Why Doxxed exists</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Why DoxxedCrypto.digital exists</p>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
+            We are here for tech, HODL conviction, and founders who ship in public — making crypto investing relevant again by backing builders who deliver, not influencers who pump.
+          </p>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             {WHY_DOXXED.map((card) => (
               <div
@@ -309,7 +315,7 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           </p>
           <FounderNodeVisual />
           <p className="mt-3 max-w-sm text-center text-[11px] leading-relaxed text-zinc-500">
-            Your vault stays on your machine. Founder OS coordinates build feed, scouts, and launch — you keep the keys.
+            Your vault stays on your machine. Bring your own AI keys. Founder OS coordinates build feed, scouts, and launch — you keep memory and inference under your control.
           </p>
         </Card>
         <FounderNodeProductCard />

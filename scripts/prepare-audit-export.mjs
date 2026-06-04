@@ -10,7 +10,7 @@ const DEST = getAuditExportRoot();
 
 /** Top-level files/dirs copied into the audit bundle. */
 const INCLUDE_TOP = new Set(['apps', 'packages', 'prisma', '.github', 'docs', 'services']);
-const INCLUDE_ROOT_FILES = new Set(['package.json', 'tsconfig.base.json']);
+const INCLUDE_ROOT_FILES = new Set(['package.json', 'tsconfig.base.json', 'AUDIT.md']);
 
 const SKIP_DIRS = new Set([
   'node_modules',
@@ -123,26 +123,34 @@ function writeScopeDoc() {
 =====================================
 Generated: ${new Date().toISOString()}
 
+START HERE (included in docs/):
+  - docs/AUDIT_FOR_CHATGPT.md  — review checklist, no secrets
+  - docs/MISSION.md            — product mission & Founder OS / Node / BYOK
+  - docs/REPOSITORY_LAYOUT.md  — public vs private boundaries
+  - AUDIT.md (repo root)       — entry pointer
+
 This bundle contains application source only. It intentionally excludes:
 - All .env and secret files (stored in ../doxedcryptofounder-secrets/)
-- node_modules, build artifacts
+- node_modules, build artifacts, scripts/ (production sync ops)
 - Production credentials (Railway, Vercel, Neon, X OAuth)
 
 Review focus:
-1. apps/api/src — NestJS API, auth, founder-os, builder, events, founder-den
+1. apps/api/src — NestJS API, auth, founder-os, paper-trading, admin-control
 2. apps/web/src — Next.js UI, auth-options, API client
-3. prisma/schema.prisma — data model (Phase 6 Raise Room, Phase 7 Scout Markets / Founder Brain)
-4. packages/utils — business logic (ai-providers desk workflow, scout-markets, founder-brain)
-5. Integration credentials encrypted at rest (AES-256-GCM) — verify key handling
+3. prisma/schema.prisma — data model
+4. packages/utils — business logic
+5. services/btc-conservative-agent — showcase bot (BOT_CONTROL_SECRET on POST routes)
+6. Integration credentials encrypted at rest (AES-256-GCM) — verify key handling
 
-Phases in this export:
-- Phase 6: Raise Room (1% allocation burn, participant export, EVM wallet verify)
-- Phase 7: Scout prediction markets, Founder Brain Q&A
-- OpenHands remote agent (URL + API key) — desk copy-paste providers removed
+Security areas (2026):
+- Paper trading session tokens (paper-session.util.ts)
+- GitHub webhook signature required in production
+- POST /projects/sync-metrics requires METRICS_SYNC_SECRET in production
+- Bot POST routes require BOT_CONTROL_SECRET
 
 Main app repo: github.com/danishhaiderau-maker/doxed-founders-website
 
-Included in this bundle: apps (api, web, founder-node), packages, prisma schema, docs, services (no runtime data/).
+Included: apps (api, web, founder-node), packages, prisma schema, docs, services (no runtime data/).
 
 Scheduled GitHub Actions (X daily sync, engagement lottery) are NOT exported here.
 They belong on doxed-founders-website only — that repo includes scripts/ and GitHub secrets

@@ -18,6 +18,25 @@ Complete five-step privacy architecture for doxxed founders.
 4. Rebuild **vector index** on Founder Node v0.4.0+ (Step 4)
 5. **Verify TEE** and **scan vault integrity** in attestation dashboard (Step 5)
 
+## Secrets vault
+
+Local secrets live in `../doxedcryptofounder-secrets/vault/` (never commit). Relink after clone:
+
+```bash
+npm run secrets:link
+```
+
+## Audit export (ChatGPT / external review)
+
+Safe, code-only snapshot — **no `.env`, no tokens**:
+
+```bash
+npm run audit:export
+```
+
+Output: `../doxedcryptofounder-audit/` + `AUDIT_SCOPE.txt`.  
+Guide: [docs/AUDIT_FOR_CHATGPT.md](./AUDIT_FOR_CHATGPT.md) · Entry: [AUDIT.md](../AUDIT.md)
+
 ## Production ops
 
 | Task | Command |
