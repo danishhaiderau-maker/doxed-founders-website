@@ -504,6 +504,60 @@ export function fetchTrustCenterOverview() {
   return apiFetch<TrustCenterOverview>('/trust-center/overview');
 }
 
+export interface PrivacyDataClassesResponse {
+  version: number;
+  hybridModel: {
+    publicLayer: string;
+    privateLayer: string;
+    teeLayer: string;
+  };
+  classes: Array<{
+    id: string;
+    label: string;
+    storage: string;
+    description: string;
+    neverInBrowser: string[];
+  }>;
+  audit: {
+    modelCount: number;
+    routeCount: number;
+    compliant: boolean;
+    findings: Array<{ severity: string; code: string; message: string }>;
+  };
+  nextPhase: string;
+}
+
+export function fetchPrivacyDataClasses() {
+  return apiFetch<PrivacyDataClassesResponse>('/privacy/data-classes');
+}
+
+export interface PrivacyMyBoundariesResponse {
+  yourData: {
+    memory: { mode: string; class: string; note: string };
+    secrets: {
+      mode: string;
+      modeLabel: string;
+      class: string;
+      credentialCount: number;
+      phalaInferenceOnly: boolean;
+      note: string;
+    };
+    founderNode: {
+      class: string;
+      nodeId: string;
+      label: string;
+      status: string;
+      vaultHealthy: boolean;
+      lastSeenAt: string | null;
+    } | null;
+  };
+  publicProduct: { class: string; note: string };
+}
+
+export function fetchPrivacyMyBoundaries(token: string) {
+  return apiFetch<PrivacyMyBoundariesResponse>('/privacy/my-boundaries', undefined, token);
+}
+
 export function fetchTrustInvestigations(status?: string) {
   const q = status ? `?status=${encodeURIComponent(status)}` : '';
   return apiFetch<TrustInvestigation[]>(`/trust-center/investigations${q}`);

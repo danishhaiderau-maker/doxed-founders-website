@@ -35,7 +35,7 @@ ChatGPT’s “move only vault, agent memory, secrets into Phala CVM” is the r
 | Priority | Proposal | Status | Next step |
 | --- | --- | --- | --- |
 | P1 | Mission State (continue where I left off) | **Shipped (Sprint 3)** | Mission Control panel, resume + continue flows, after-build sync |
-| P0 | Split public/private with Phala TEE | Partial | Document data classes; audit tables for sensitive fields |
+| P0 | Split public/private with Phala TEE | **Shipped** | [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md), `/privacy/*`, `audit:data-classes` |
 | P1 vault | Founder Vault flagship in TEE | Partial (local vault + graph) | Phala Cloud CVM for sealed vault sync backup |
 | P2 | Seal API keys in Phala, not DB | **Shipped (Sprint 6)** — audited unwrap + Phala inference-only tier | Phala CVM-side decrypt for platform keys |
 | P3 | “Founder Brain” task router | **Shipped (Sprint 4)** | Task classify + provider order in API; code asks dispatch Builder |

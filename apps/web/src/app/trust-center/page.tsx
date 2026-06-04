@@ -6,6 +6,7 @@ import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { contributorLevelLabel, trustWeightLabel, VALIDATION_LABELS } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
+import { PrivacyDataClassOverview } from '@/components/privacy/privacy-data-class-overview';
 import {
   ScoutListing,
   TrustCenterOverview,
@@ -188,6 +189,8 @@ function TrustCenterInner() {
             </div>
           </div>
         )}
+
+        {tab === 'overview' && <PrivacyDataClassOverview />}
 
         {tab === 'scout-voting' && (
           <div className="space-y-4">

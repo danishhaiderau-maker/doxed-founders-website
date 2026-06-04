@@ -17,6 +17,8 @@
 
 ## Data classes
 
+Full registry: [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md) · API `GET /privacy/data-classes`
+
 | Class | Storage | Unwrap |
 | --- | --- | --- |
 | Public product (Neon) | Projects, feed, rankings | N/A |
