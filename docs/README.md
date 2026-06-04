@@ -2,12 +2,15 @@
 
 Everything in `docs/` is **safe to commit** — no production secrets.
 
+**Privacy & security (repo front page):** [**../PRIVACY.md**](../PRIVACY.md) — diagrams, disclaimers, protect PC/phone, encryption, Phala vs Ollama.
+
 ---
 
 ## Start here
 
 | Doc | Audience | Description |
 |-----|----------|-------------|
+| [../PRIVACY.md](../PRIVACY.md) | Everyone | **How vault encryption works** — visible on GitHub README |
 | [MISSION.md](./MISSION.md) | Everyone | Why DoxxedCrypto.digital exists, culture, Founder OS & Node, BYOK |
 | [REPOSITORY_LAYOUT.md](./REPOSITORY_LAYOUT.md) | Developers & auditors | Public git vs private vault vs audit export |
 | [AUDIT_FOR_CHATGPT.md](./AUDIT_FOR_CHATGPT.md) | ChatGPT / security reviewers | How to audit without secrets |
