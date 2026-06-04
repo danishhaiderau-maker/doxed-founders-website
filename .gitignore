@@ -11,6 +11,11 @@ build/
 .turbo/
 *.tsbuildinfo
 apps/founder-node/release/
+.tools/
+apps/mobile-android/android/.gradle/
+apps/mobile-android/android/app/build/
+apps/mobile-android/android/build/
+apps/mobile-android/release/
 
 # Environment
 .env
