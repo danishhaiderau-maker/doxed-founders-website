@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+chore(founder-os): sync roadmap
 
 ## Last Activity
 
