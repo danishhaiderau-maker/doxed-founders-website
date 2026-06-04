@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(ops): automate Phala CVM deploy and Railway step1 orchestrator
+chore(founder-os): sync tasks
 
 ## Last Activity
 
