@@ -5,6 +5,7 @@ import { getVaultDir } from './secrets-vault-path.mjs';
 /** Load env from vault first, then repo .env (gitignored). Never logs values. */
 export function loadVaultEnv(repoRoot) {
   const candidates = [
+    path.join(getVaultDir(), '.env.neon'),
     path.join(getVaultDir(), '.env'),
     path.join(repoRoot, '.env'),
   ];
