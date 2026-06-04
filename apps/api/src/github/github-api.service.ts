@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export type GitHubCommit = { sha: string; message: string; date: string };
 export type GitHubPullRequest = { title: string; url: string; state: string; number: number };
 export type GitHubIssueResult = { number: number; url: string; title: string };
+export type GitHubRepoFileInput = { path: string; content: string };
 
 @Injectable()
 export class GitHubApiService {
@@ -207,6 +208,95 @@ export class GitHubApiService {
 
     const payload = (await res.json()) as { content?: { sha?: string } };
     return { created: !sha, sha: payload.content?.sha };
+  }
+
+  async upsertRepoFiles(
+    userId: string,
+    repo: string,
+    files: GitHubRepoFileInput[],
+    message: string,
+  ): Promise<{ committed: boolean; sha?: string; changed: number }> {
+    const token = await this.getToken(userId);
+    if (!token) {
+      throw new BadRequestException('Connect a GitHub personal access token in Builder settings to sync memory files');
+    }
+    if (files.length === 0) return { committed: false, changed: 0 };
+
+    const branch = await this.getDefaultBranch(userId, repo);
+    const refRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, {
+      headers: this.headers(token),
+    });
+    if (!refRes.ok) {
+      const err = (await refRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not resolve ${branch} for ${repo}`);
+    }
+    const ref = (await refRes.json()) as { object?: { sha?: string } };
+    const parentSha = ref.object?.sha;
+    if (!parentSha) throw new BadRequestException(`Could not resolve ${branch} HEAD for ${repo}`);
+
+    const commitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits/${parentSha}`, {
+      headers: this.headers(token),
+    });
+    if (!commitRes.ok) {
+      const err = (await commitRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not read ${branch} commit for ${repo}`);
+    }
+    const parentCommit = (await commitRes.json()) as { tree?: { sha?: string } };
+    const baseTreeSha = parentCommit.tree?.sha;
+    if (!baseTreeSha) throw new BadRequestException(`Could not resolve ${branch} tree for ${repo}`);
+
+    const tree = await Promise.all(
+      files.map(async (file) => {
+        const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs`, {
+          method: 'POST',
+          headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
+        });
+        if (!blobRes.ok) {
+          const err = (await blobRes.json().catch(() => ({}))) as { message?: string };
+          throw new BadRequestException(err.message ?? `Could not create blob for ${file.path}`);
+        }
+        const blob = (await blobRes.json()) as { sha?: string };
+        if (!blob.sha) throw new BadRequestException(`GitHub returned no blob SHA for ${file.path}`);
+        return { path: file.path, mode: '100644', type: 'blob', sha: blob.sha };
+      }),
+    );
+
+    const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees`, {
+      method: 'POST',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_tree: baseTreeSha, tree }),
+    });
+    if (!treeRes.ok) {
+      const err = (await treeRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not create memory sync tree for ${repo}`);
+    }
+    const newTree = (await treeRes.json()) as { sha?: string };
+    if (!newTree.sha) throw new BadRequestException(`GitHub returned no tree SHA for ${repo}`);
+
+    const newCommitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits`, {
+      method: 'POST',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, tree: newTree.sha, parents: [parentSha] }),
+    });
+    if (!newCommitRes.ok) {
+      const err = (await newCommitRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not create memory sync commit for ${repo}`);
+    }
+    const newCommit = (await newCommitRes.json()) as { sha?: string };
+    if (!newCommit.sha) throw new BadRequestException(`GitHub returned no commit SHA for ${repo}`);
+
+    const updateRefRes = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+      method: 'PATCH',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: newCommit.sha, force: false }),
+    });
+    if (!updateRefRes.ok) {
+      const err = (await updateRefRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? `Could not update ${branch} for ${repo}`);
+    }
+
+    return { committed: true, sha: newCommit.sha, changed: files.length };
   }
 
   async createUserRepo(

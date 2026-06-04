@@ -16,6 +16,8 @@ import {
 import { GitHubApiService } from '../github/github-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+type MemoryFile = { path: string; content: string };
+
 @Injectable()
 export class FounderOsMemoryService {
   private readonly logger = new Logger(FounderOsMemoryService.name);
@@ -73,7 +75,10 @@ export class FounderOsMemoryService {
       where: { founderId: founder.id },
       orderBy: { createdAt: 'desc' },
     });
-    const commits = await this.github.listCommits(userId, resolved, 1);
+    const commits = await this.github.listCommits(userId, resolved, 20);
+    const latestProductCommit = commits.find(
+      (commit) => !commit.message.startsWith('chore(founder-os): sync'),
+    );
 
     const currentGoal =
       settings?.currentGoalFocus?.trim() ||
@@ -94,7 +99,7 @@ export class FounderOsMemoryService {
       projectName: project?.name ?? founder.name,
       currentGoal,
       progressPercent,
-      lastCommit: commits[0]?.message ?? null,
+      lastCommit: latestProductCommit?.message ?? null,
       lastActivity: lastEvent ? formatRelativeTime(lastEvent.createdAt) : null,
     });
 
@@ -105,7 +110,7 @@ export class FounderOsMemoryService {
       })),
     );
 
-    const tasksJson = buildTasksJsonFile({
+    let tasksJson = buildTasksJsonFile({
       currentGoal,
       tasks: openQueue.map((t) => ({
         id: t.id,
@@ -121,27 +126,39 @@ export class FounderOsMemoryService {
       return { synced: false as const, reason: 'no_token' as const };
     }
 
-    await this.github.upsertRepoFile(
-      userId,
-      resolved,
-      FOUNDER_OS_MEMORY_FILES.projectContext,
-      projectContext,
-      'chore(founder-os): sync project context',
+    const [existingProjectContext, existingRoadmap, existingTasksRaw] = await Promise.all([
+      this.github.getRepoFile(userId, resolved, FOUNDER_OS_MEMORY_FILES.projectContext),
+      this.github.getRepoFile(userId, resolved, FOUNDER_OS_MEMORY_FILES.roadmap),
+      this.github.getRepoFile(userId, resolved, FOUNDER_OS_MEMORY_FILES.tasks),
+    ]);
+
+    const existingTasks = existingTasksRaw ? parseTasksJson(existingTasksRaw) : null;
+    if (existingTasks && this.sameTasksPayload(existingTasks, tasksJson)) {
+      tasksJson = { ...tasksJson, updatedAt: existingTasks.updatedAt };
+    }
+
+    const desiredFiles: MemoryFile[] = [
+      { path: FOUNDER_OS_MEMORY_FILES.projectContext, content: projectContext },
+      { path: FOUNDER_OS_MEMORY_FILES.roadmap, content: roadmap },
+      { path: FOUNDER_OS_MEMORY_FILES.tasks, content: `${JSON.stringify(tasksJson, null, 2)}\n` },
+    ];
+    const existingByPath = new Map<string, string | null>([
+      [FOUNDER_OS_MEMORY_FILES.projectContext, existingProjectContext],
+      [FOUNDER_OS_MEMORY_FILES.roadmap, existingRoadmap],
+      [FOUNDER_OS_MEMORY_FILES.tasks, existingTasksRaw],
+    ]);
+    const changedFiles = desiredFiles.filter((file) =>
+      this.memoryFileChanged(file, existingByPath.get(file.path) ?? null),
     );
-    await this.github.upsertRepoFile(
-      userId,
-      resolved,
-      FOUNDER_OS_MEMORY_FILES.roadmap,
-      roadmap,
-      'chore(founder-os): sync roadmap',
-    );
-    await this.github.upsertRepoFile(
-      userId,
-      resolved,
-      FOUNDER_OS_MEMORY_FILES.tasks,
-      `${JSON.stringify(tasksJson, null, 2)}\n`,
-      'chore(founder-os): sync tasks',
-    );
+
+    if (changedFiles.length > 0) {
+      await this.github.upsertRepoFiles(
+        userId,
+        resolved,
+        changedFiles,
+        'chore(founder-os): sync memory (context + roadmap + tasks)',
+      );
+    }
 
     const decisions = await this.github.getRepoFile(userId, resolved, FOUNDER_OS_MEMORY_FILES.decisions);
     if (!decisions) {
@@ -165,8 +182,37 @@ export class FounderOsMemoryService {
       );
     }
 
-    this.logger.log(`Synced Founder OS memory to ${resolved}`);
-    return { synced: true as const, repo: resolved };
+    if (changedFiles.length === 0) {
+      this.logger.log(`Founder OS memory unchanged for ${resolved}`);
+      return { synced: false as const, reason: 'unchanged' as const, repo: resolved };
+    }
+
+    this.logger.log(`Synced ${changedFiles.length} Founder OS memory file(s) to ${resolved}`);
+    return { synced: true as const, repo: resolved, changed: changedFiles.length };
+  }
+
+  private sameTasksPayload(
+    a: NonNullable<ReturnType<typeof parseTasksJson>>,
+    b: ReturnType<typeof buildTasksJsonFile>,
+  ): boolean {
+    return (
+      a.currentGoal === b.currentGoal &&
+      JSON.stringify(a.tasks) === JSON.stringify(b.tasks)
+    );
+  }
+
+  private memoryFileChanged(file: MemoryFile, existing: string | null): boolean {
+    if (existing == null) return true;
+    if (file.path === FOUNDER_OS_MEMORY_FILES.projectContext) {
+      return this.normalizeProjectContext(existing) !== this.normalizeProjectContext(file.content);
+    }
+    return existing.trimEnd() !== file.content.trimEnd();
+  }
+
+  private normalizeProjectContext(content: string): string {
+    return content
+      .replace(/## Last Activity\n\n[\s\S]*?(?=\n## |\n*$)/, '## Last Activity\n\n_ignored for idempotency_')
+      .trimEnd();
   }
 
   async readRepoMemory(userId: string, repo?: string | null) {
