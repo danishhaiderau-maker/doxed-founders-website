@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(mobile): Phase 1 Android APK download page and landing CTAs
+Fix unread message badge on landing and site header.
 
 ## Last Activity
 
