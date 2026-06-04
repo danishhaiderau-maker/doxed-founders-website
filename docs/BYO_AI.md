@@ -32,6 +32,14 @@ Copilot and Quick Build route through OpenRouter when selected. Keys are encrypt
 
 See [JATEVO_BYOK.md](./JATEVO_BYOK.md) for endpoints, errors, and env overrides.
 
+## What you connect (no guesswork)
+
+| Provider | API key? | What you do in Settings → Step 3 |
+|----------|----------|----------------------------------|
+| Jatevo / OpenRouter / OpenAI / DeepSeek / etc. | **Yes** | Paste key in that provider’s card → **Connect & activate** |
+| **Ollama (local)** | **No** | Install [Ollama](https://ollama.com) on your PC, pair Founder Node (Step 2), wait for **Ollama ready**, set **Default brain** → Ollama — **do not** use `http://127.0.0.1:11434` in the browser (cloud cannot reach your laptop) |
+| Phala TEE | Yes (+ optional inference URL) | Phala card → Connect |
+
 ## Ollama via Founder Node (recommended local path)
 
 ```text

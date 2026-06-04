@@ -116,7 +116,7 @@ export function FounderNodeHubPanel({
         <HubStep
           step={3}
           title="AI on your stack"
-          summary="Your connected LLM is the brain for Copilot Ask and all project agents — Cursor is only for coding."
+          summary="Connect cloud keys (Jatevo, OpenRouter, DeepSeek…) or local Ollama via Founder Node — Step 3 has the full walkthrough."
         >
           <FounderNodeAiSection {...aiSection} settings={settings} />
         </HubStep>
