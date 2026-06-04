@@ -1,5 +1,6 @@
 /** Build copy for multi-destination publish (no LLM). */
 
+import { buildFounderUpdateSystemPrompt } from './founder-update-pipeline';
 import { DDOLLAR_CURRENCY_NAME, formatDdollar } from './ddollar';
 import type { ControlPlaneReadiness } from './control-plane';
 import { translateCommitForTraders } from './github-translate';
@@ -305,39 +306,12 @@ export function buildFounderUpdateFallback(input: {
   };
 }
 
-/** System prompt for Social Hub — LLM must return HEADLINE / BODY / X_HOOK blocks. */
+/** System prompt for Social Hub — delegates to Founder Update Pipeline prompts. */
 export function buildSocialDraftSystemPrompt(
   codeAgent?: string | null,
   options?: { forcedLlm?: 'DEEPSEEK' | 'OPENAI' | 'ANTHROPIC' | 'GEMINI' | 'OPENROUTER' | 'PHALA' },
 ): string {
-  const lens =
-    codeAgent === 'CURSOR'
-      ? [
-          'You are drafting as the founder’s Cursor coding agent who shipped the commits listed under LAST 24 HOURS.',
-          'Use GitHub truth, Mission Control memory, hybrid control plane, and deploy checks.',
-          'Never claim “no work” if commits are listed. Never recycle old feed headlines.',
-        ].join(' ')
-      : codeAgent === 'OPENHANDS'
-        ? 'You interpret the founder’s repo as their OpenHands agent. Use every section; only last-24h commits count as “today”.'
-        : options?.forcedLlm === 'DEEPSEEK'
-          ? 'You are DeepSeek drafting a founder build-in-public update. Be precise, warm, and trader-friendly.'
-          : 'You are an elite crypto founder marketing writer. Use every context section.';
-
-  return [
-    lens,
-    'Audience: crypto traders and community members — NOT developers. Use layman terms.',
-    'Deep dive ONLY on work from the LAST 24 HOURS section (commits, tasks, deploys). Ignore stale headlines.',
-    'Explain WHAT changed, WHY traders should care, WHO benefits, and what trust gap closed.',
-    'Cite at least 2 real commit subjects or SHAs from LAST 24 HOURS. Name the project using PROJECT DISPLAY NAME (includes $TICKER when provided).',
-    'If PLATFORM CLOSING is provided, weave its spirit into the final paragraph (do not paste verbatim unless it fits).',
-    'Never repeat bullet lines like "Day N — 8 commits" unless that exact count is in LAST 24 HOURS.',
-    'Never invent outages, hacks, or scanner failures.',
-    '',
-    'Return exactly:',
-    'HEADLINE: (one punchy line, max 120 chars, trader-friendly)',
-    'BODY: (4–6 short paragraphs: today’s wins, plain-English per theme, infra/memory snapshot, what’s next)',
-    'X_HOOK: (under 220 chars, exciting, no hashtag spam)',
-  ].join('\n');
+  return buildFounderUpdateSystemPrompt(codeAgent, options);
 }
 
 export function parseSocialDraftLlmResponse(text: string): {

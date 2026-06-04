@@ -55,6 +55,7 @@ export * from './github-translate';
 export * from './quality-rewards';
 export * from './conviction-share';
 export * from './publish-everywhere';
+export * from './founder-update-pipeline';
 export * from './cursor-build-room';
 export * from './integration-providers';
 export * from './integration-connect-guide';

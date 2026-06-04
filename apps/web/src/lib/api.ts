@@ -3910,20 +3910,48 @@ export function fetchEventActivity(token: string) {
   return apiFetch<EventActivityFeed>('/events/activity', undefined, token);
 }
 
-export function fetchCopilotSocialDraft(provider: string | undefined, token: string) {
-  return apiFetch<{
-    headline: string;
-    body: string;
-    xHook: string;
-    provider: string;
-    llmProvider?: string;
-    llmErrors?: string[];
-    fallback?: boolean;
-    projectDisplayName?: string;
-    platformClosing?: string;
-  }>(
+export type CopilotSocialDraftResult = {
+  headline: string;
+  body: string;
+  displayBody?: string;
+  xHook: string;
+  whatShipped?: string;
+  whyItMatters?: string;
+  whatUsersNotice?: string;
+  whatsNext?: string;
+  developerSummary?: string;
+  traderSummary?: string;
+  tweetVersion?: string;
+  feedVersion?: string;
+  impactLevel?: 'LOW' | 'MEDIUM' | 'HIGH';
+  launchReadinessDelta?: number;
+  audience?: 'trader' | 'developer';
+  provider: string;
+  llmProvider?: string;
+  llmErrors?: string[];
+  fallback?: boolean;
+  projectDisplayName?: string;
+  platformClosing?: string;
+};
+
+export function fetchCopilotSocialDraft(
+  provider: string | undefined,
+  token: string,
+  options?: {
+    audience?: 'trader' | 'developer';
+    achievement?: { title: string; detail: string; kind?: string };
+  },
+) {
+  return apiFetch<CopilotSocialDraftResult>(
     '/copilot/social-draft',
-    { method: 'POST', body: JSON.stringify({ provider: provider ?? undefined }) },
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: provider ?? undefined,
+        audience: options?.audience,
+        achievement: options?.achievement,
+      }),
+    },
     token,
   );
 }
