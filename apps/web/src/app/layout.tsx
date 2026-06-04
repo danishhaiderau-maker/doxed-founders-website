@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 import { AuthProvider } from '@/components/auth-provider';
 import { NotificationFlashProvider } from '@/components/notification-flash';
 import { ShareFooterProvider } from '@/components/share-footer-provider';
+import { MobileAppBootstrap } from '@/components/mobile-app-bootstrap';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -26,7 +28,12 @@ export default function RootLayout({
       <body>
         <AuthProvider>
           <ShareFooterProvider>
-            <NotificationFlashProvider>{children}</NotificationFlashProvider>
+            <NotificationFlashProvider>
+              <Suspense fallback={null}>
+                <MobileAppBootstrap />
+              </Suspense>
+              {children}
+            </NotificationFlashProvider>
           </ShareFooterProvider>
         </AuthProvider>
       </body>

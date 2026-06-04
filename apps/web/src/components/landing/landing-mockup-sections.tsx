@@ -286,16 +286,6 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
             {pendingReviews} project{pendingReviews === 1 ? '' : 's'} awaiting review
           </span>
         </Link>
-        <a
-          href="/downloads/doxxedcrypto-android.apk"
-          download="doxxedcrypto-android.apk"
-          className="rounded-xl border border-emerald-500/45 bg-emerald-950/30 px-5 py-2.5 text-sm font-semibold text-emerald-50 shadow-lg shadow-emerald-950/25 hover:border-emerald-400/60 hover:bg-emerald-900/35"
-        >
-          Android app
-          <span className="mt-0.5 block text-[10px] font-normal text-emerald-200/75">
-            Download APK · opens doxxedcrypto.digital
-          </span>
-        </a>
       </section>
 
       {/* Navigation hub — 3-row table directly under CTAs */}
