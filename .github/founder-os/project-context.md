@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Sprint 4: Founder Brain task router in API
 
 ## Last Activity
 
