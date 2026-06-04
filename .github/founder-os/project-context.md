@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-os): status Ask routing, batched memory sync, stale goals
+chore(founder-os): sync tasks
 
 ## Last Activity
 
