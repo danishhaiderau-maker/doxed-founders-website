@@ -5046,15 +5046,19 @@ def api_state():
         logger.error(f"/api/state error: {str(e)}")
         return jsonify({})
 
+_startup_complete = False
+
 @app.route('/health')
 def health():
+    """Railway healthcheck — must respond before long Bybit/candle bootstrap finishes."""
     return jsonify({
-        "status": "alive",
+        "status": "alive" if _startup_complete else "starting",
+        "ready": _startup_complete,
         "last_heartbeat": last_heartbeat,
         "time_since_heartbeat": time.time() - last_heartbeat,
         "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", "")
-    })
+        "execution_reason": state.get("execution_reason", ""),
+    }), 200
 
 @app.route('/debug_state')
 def get_debug_state():
@@ -5850,7 +5854,9 @@ def rotate_log(file):
         os.rename(file, f"{file}.{next_index}")
 
 def run_flask():
-    app.run(host='0.0.0.0', port=5000, use_reloader=False)
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info(f"[HTTP] Listening on 0.0.0.0:{port} (health=/health)")
+    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 def is_ai_active():
     return state.get("ai_enabled", False) and bool(DEEPSEEK_API_KEY)
@@ -6057,13 +6063,16 @@ def apply_trade_pnl(trade_row):
             )
 
 def main():
-    global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
+    global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute, _startup_complete
     logger.info(f"[AI INIT] KEY PRESENT: {bool(os.getenv('DEEPSEEK_API_KEY'))}")
+    validate_startup()
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(0.8)
+    logger.info("[STARTUP] HTTP server up — Railway /health available during bootstrap")
     logger.info("[STARTUP] WIPING OLD DATA FOR FRESH RUN")
     reset_all_csv()
     reset_runtime_state()
     update_logger_level()
-    validate_startup()
     startup_hard_fix_ai_threshold()
     load_persistent_config()
     bot_start_time = time.time()
@@ -6150,8 +6159,7 @@ def main():
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
+    _startup_complete = True
     fetch_ohlcv()
     if HEDGE_MODE:
         try:
