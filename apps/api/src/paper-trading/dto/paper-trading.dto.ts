@@ -56,6 +56,13 @@ export class PaperTradeDto {
   @Min(0)
   targetUsd?: number;
 
+  /** Protective stop (USD per token) — stored on position for verified exit scoring. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  stopUsd?: number;
+
   @IsOptional()
   @IsString()
   @MaxLength(80)

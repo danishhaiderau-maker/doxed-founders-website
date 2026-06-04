@@ -66,7 +66,7 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
               : 'border border-[var(--color-border)] text-[var(--color-muted)] hover:text-white'
           }`}
         >
-          Top traders
+          Top traders (verified score)
         </button>
         <button
           type="button"
@@ -101,7 +101,9 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
               <tr>
                 <th className="px-4 py-3 font-medium">#</th>
                 <th className="px-4 py-3 font-medium">Trader</th>
-                <th className="px-4 py-3 font-medium">Portfolio</th>
+                <th className="px-4 py-3 font-medium">Score</th>
+                <th className="px-4 py-3 font-medium">Verified</th>
+                <th className="px-4 py-3 font-medium">Win %</th>
                 <th className="px-4 py-3 font-medium">ROI</th>
                 <th className="px-4 py-3 font-medium" />
               </tr>
@@ -109,7 +111,7 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
             <tbody>
               {winners.length === 0 && !error && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-[var(--color-muted)]">
+                  <td colSpan={7} className="px-4 py-8 text-center text-[var(--color-muted)]">
                     No ranked traders yet.
                   </td>
                 </tr>
@@ -132,7 +134,20 @@ export function TraderRankTabs({ initialTab = 'winners', compact = false }: Prop
                       </a>
                     )}
                   </td>
-                  <td className="px-4 py-3">{formatUsd(entry.totalValue)}</td>
+                  <td className="px-4 py-3 font-semibold text-emerald-400">
+                    {entry.traderScore ?? '—'}
+                  </td>
+                  <td className="px-4 py-3 text-zinc-400">
+                    {entry.verifiedTrades ?? 0}
+                    {entry.profitFactor != null && (
+                      <span className="ml-1 text-[10px] text-zinc-500">
+                        PF {entry.profitFactor.toFixed(1)}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-zinc-300">
+                    {entry.winRatePct != null ? `${entry.winRatePct}%` : '—'}
+                  </td>
                   <td className={`px-4 py-3 ${entry.roi >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {formatPercent(entry.roi)}
                   </td>
