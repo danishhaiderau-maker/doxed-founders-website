@@ -33,6 +33,9 @@ Canonical split between **public product data** (Neon) and **private founder dat
 | `GET /privacy/audit` | Public | Static + runtime counts (no secrets) |
 | `GET /privacy/my-boundaries` | JWT | What applies to the signed-in founder |
 
-## Phala P1 (shipped)
+## Phala CVM (shipped)
 
-CVM sealed vault relay backup — see [SPRINT_P1_PHALA_VAULT.md](./SPRINT_P1_PHALA_VAULT.md). Next: Phala P2 CVM credential unwrap.
+- **P1** — CVM sealed vault relay backup — [SPRINT_P1_PHALA_VAULT.md](./SPRINT_P1_PHALA_VAULT.md)
+- **P2** — CVM credential unwrap — [SPRINT_P2_PHALA_SEAL.md](./SPRINT_P2_PHALA_SEAL.md)
+
+Overview: [ARCHITECTURE.md](./ARCHITECTURE.md)
