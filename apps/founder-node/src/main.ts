@@ -8,6 +8,7 @@ import {
   Notification,
   powerMonitor,
   shell,
+  dialog,
 } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -155,15 +156,28 @@ function startSyncLoop(vaultRoot: string) {
 }
 
 function handleAuthFailure(vaultRoot: string): void {
-  stopBackgroundLoops(loops);
-  clearNodeConfig(vaultRoot);
-  lastSyncError = authFailureUserMessage();
-  refreshTrayMenu(vaultRoot);
-  notifyDesktop(
-    'Founder Node needs pairing',
-    'Your link expired or was replaced. Generate a new code on the website and pair again.',
-  );
-  openPairWindow();
+  void (async () => {
+    lastSyncError = authFailureUserMessage();
+    if (app.isPackaged) {
+      const { response } = await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Desktop link expired',
+        message: 'Not a firewall issue — you need a new pairing code',
+        detail: `${lastSyncError}\n\nYour cloud account still shows as linked; paste a fresh code from Founder OS into this app.`,
+        buttons: ['Open pairing in browser', 'OK'],
+        defaultId: 0,
+      });
+      if (response === 0) {
+        await shell.openExternal(SETTINGS_BUILDER_URL);
+      }
+    } else {
+      notifyDesktop('Founder Node needs pairing', lastSyncError);
+    }
+    stopBackgroundLoops(loops);
+    clearNodeConfig(vaultRoot);
+    refreshTrayMenu(vaultRoot);
+    openPairWindow();
+  })();
 }
 
 function handleSyncCycleError(vaultRoot: string, err: unknown): void {
@@ -180,7 +194,7 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
     consecutiveTransientFailures += 1;
     syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
     checkForUpdatesAfterSyncFailure();
-    if (consecutiveTransientFailures >= 2) {
+    if (consecutiveTransientFailures >= 1) {
       notifyDesktop(
         'Founder Node cannot reach Founder OS',
         isWindows()
@@ -197,7 +211,21 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
   }
 
   consecutiveTransientFailures += 1;
+  syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
   checkForUpdatesAfterSyncFailure();
+  if (consecutiveTransientFailures >= 2) {
+    notifyDesktop(
+      'Founder Node cannot reach Founder OS',
+      isWindows()
+        ? 'Tray → Allow through Windows Firewall, then Sync now.'
+        : 'Check network, then tray → Sync now.',
+    );
+    void promptFirewallBlocked({
+      consecutiveFailures: consecutiveTransientFailures,
+      lastError: lastSyncError,
+      onRetrySync: () => runSyncCycle(vaultRoot).catch(console.error),
+    });
+  }
 }
 
 async function resolveOllamaConfig(vaultRoot: string) {
@@ -502,8 +530,11 @@ app.whenReady().then(() => {
     if (hadCredentials) {
       notifyDesktop(
         'Founder Node needs pairing again',
-        'Your desktop link expired. Generate a new code in Founder OS → Settings → Builder (Step 2) and enter it here.',
+        'Your desktop link expired (server rejected the old token). Generate a new code in Founder OS → Settings → Builder (Step 2) and enter it here.',
       );
+    }
+    if (isWindows() && app.isPackaged) {
+      void tryAddWindowsFirewallRules().catch(console.warn);
     }
     openPairWindow();
   } else {

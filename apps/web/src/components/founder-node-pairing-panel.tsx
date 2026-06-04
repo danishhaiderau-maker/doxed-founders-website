@@ -104,7 +104,9 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     }
   }
 
-  const showPairingFlow = !isPaired || showNewPairing;
+  /** When cloud is paired but desktop is offline, always surface the pairing code flow. */
+  const desktopNeedsRePair = isPaired && !anyOnline;
+  const showPairingFlow = !isPaired || showNewPairing || desktopNeedsRePair;
 
   return (
     <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-4">
@@ -236,15 +238,25 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                   <span className="ml-2 text-zinc-500">
                     — last heartbeat {formatLastSeen(node.lastSeenAt)}
                     {node.lastSeenAt
-                      ? ' · open tray app or re-pair if sync fails (401)'
+                      ? ' · tray lost its link — generate a new code above and paste in Founder Node'
                       : ' · start Founder Node tray app'}
                   </span>
                 )}
                 {node.ramGb != null && (
                   <span className="ml-2 text-zinc-500">{node.ramGb} GB RAM</span>
                 )}
-                <span className={`ml-2 ${node.vaultHealthy ? 'text-emerald-400' : 'text-red-400'}`}>
-                  Vault {node.vaultHealthy ? 'healthy' : 'issue'}
+                <span
+                  className={`ml-2 ${
+                    node.status === 'online' && node.vaultHealthy
+                      ? 'text-emerald-400'
+                      : node.status === 'online'
+                        ? 'text-amber-400'
+                        : 'text-zinc-500'
+                  }`}
+                >
+                  {node.status === 'online'
+                    ? `Vault ${node.vaultHealthy ? 'healthy' : 'issue'}`
+                    : 'Vault on PC · sync offline'}
                 </span>
               </div>
               <button
