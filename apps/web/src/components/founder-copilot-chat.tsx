@@ -34,6 +34,7 @@ import {
 } from '@/lib/builder-run-live';
 import { formatThinkingInChat, revealTextInChat } from '@/lib/copilot-inline-stream';
 import { useVoiceInput } from '@/hooks/use-voice-input';
+import { VoiceWaveform } from '@/components/voice-waveform';
 import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import {
   AI_STACK_HREF,
@@ -168,7 +169,21 @@ export function FounderCopilotChat({
   const onTranscript = useCallback((text: string) => {
     setPrompt(text);
   }, []);
-  const { listening, starting, phase, supported, toggle, stop } = useVoiceInput(onTranscript);
+  const {
+    listening,
+    starting,
+    phase,
+    supported,
+    audioLevel,
+    voiceError,
+    clearVoiceError,
+    toggle,
+    stop,
+  } = useVoiceInput(onTranscript);
+
+  useEffect(() => {
+    if (voiceError) setError(voiceError);
+  }, [voiceError]);
 
   useEffect(() => {
     setMessages(loadMessages());
@@ -848,34 +863,43 @@ export function FounderCopilotChat({
             <button
               type="button"
               onClick={() => {
+                clearVoiceError();
+                setError(null);
                 if (!supported) {
-                  setError('Voice not supported in this browser — type your message');
+                  setError(
+                    'Voice needs Chrome or Edge on desktop with microphone permission (HTTPS). You can still type your message.',
+                  );
                   return;
                 }
                 toggle(prompt);
               }}
-              className={`rounded-lg px-2.5 py-1.5 text-sm font-medium ${
+              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium ${
                 listening
                   ? 'bg-red-600 text-white ring-2 ring-red-500/50'
                   : starting
-                    ? 'bg-amber-600/90 text-white'
+                    ? 'bg-amber-600/90 text-white ring-2 ring-amber-500/40'
                     : 'text-zinc-500 hover:bg-zinc-900 hover:text-white'
               }`}
               title={
                 listening
                   ? 'Stop recording'
                   : starting
-                    ? 'Starting microphone…'
-                    : 'Voice input'
+                    ? 'Starting microphone… allow if prompted'
+                    : 'Voice input (speech to text)'
               }
             >
-              {listening ? '⏹ Stop' : starting ? '…' : '🎤'}
+              {listening ? '⏹ Stop' : starting ? 'Starting…' : '🎤'}
+              <VoiceWaveform phase={phase} level={audioLevel} />
             </button>
             {starting && (
-              <span className="text-[10px] text-amber-200 animate-pulse">Starting mic… allow if prompted</span>
+              <span className="text-[10px] text-amber-200 animate-pulse">
+                Allow microphone when your browser asks…
+              </span>
             )}
             {listening && (
-              <span className="text-[10px] font-medium text-red-200">Speak now — tap Stop or type to end</span>
+              <span className="text-[10px] font-medium text-red-200">
+                Listening — speak now; words appear in the box above
+              </span>
             )}
             {!stack.canAsk && !stack.canBuild && (
               <Link

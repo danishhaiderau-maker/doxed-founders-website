@@ -13,6 +13,7 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { MissionStatePanel } from '@/components/mission-state-panel';
+import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
 import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
@@ -321,6 +322,14 @@ export function FounderOsDashboardLayout({
                   </button>
                 </div>
               </header>
+
+              <FounderOsReadinessPanel
+                accessToken={accessToken}
+                onRefresh={() => {
+                  void load();
+                  onRefresh();
+                }}
+              />
 
               <MissionControlStatusStrip
                 accessToken={accessToken}
