@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(secrets): Sprint 6 sealed credentials with audited unwrap and Phala inference-only tier
+chore(founder-os): sync tasks
 
 ## Last Activity
 
