@@ -25,7 +25,6 @@ import {
   type OpenHandsRunSnapshot,
 } from '@/lib/builder-run-live';
 import { formatThinkingInChat, revealTextInChat } from '@/lib/copilot-inline-stream';
-import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import {
@@ -587,12 +586,24 @@ export function FounderCopilotChat({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <p className="text-sm font-semibold text-zinc-100">Founder AI Team</p>
-            {!isHero && (
-              <p className="truncate text-xs text-zinc-500">
-                {memory?.project?.name ?? 'Project'} ·{' '}
-                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Settings'}
-              </p>
-            )}
+            <p className="truncate text-xs text-zinc-500">
+              {isHero ? (
+                <>
+                  <span className="text-violet-300">Founder Brain</span>
+                  {stack.canBuild ? (
+                    <>
+                      {' '}
+                      · <span className="text-emerald-300">Builder Agent</span>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {memory?.project?.name ?? 'Project'} ·{' '}
+                  {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Settings'}
+                </>
+              )}
+            </p>
           </div>
           {messages.length > 0 && (
             <button
@@ -607,19 +618,11 @@ export function FounderCopilotChat({
         <FounderAiTeamStrip agents={aiTeam} />
       </header>
 
-      {!isHero && (
-        <div className="border-b border-zinc-800 px-3 py-2 space-y-2">
-          <HybridControlPlane
-            accessToken={accessToken}
-            onMessage={onResult}
-            onRefresh={() => void loadMeta()}
-            autoRunWhenAutopilot={false}
-          />
-          {workspaceStrip && (
-            <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 px-3 py-2 text-[11px] leading-relaxed text-zinc-400 whitespace-pre-wrap">
-              {workspaceStrip}
-            </p>
-          )}
+      {!isHero && workspaceStrip && (
+        <div className="border-b border-zinc-800 px-3 py-2">
+          <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 px-3 py-2 text-[11px] leading-relaxed text-zinc-400 whitespace-pre-wrap">
+            {workspaceStrip}
+          </p>
         </div>
       )}
 
@@ -663,7 +666,7 @@ export function FounderCopilotChat({
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-500">
               {sendMode === 'build'
                 ? `Running ${thinkingLabel ?? stack.buildLabel} on your repo…`
-                : `${thinkingLabel ?? askProviderLabel} · streaming answer…`}
+                : `${thinkingLabel ?? stack.askLabel} · streaming answer…`}
             </div>
           </div>
         )}
@@ -697,7 +700,7 @@ export function FounderCopilotChat({
       )}
 
       <div className="border-t border-zinc-800 bg-[#0a0a0c] p-3">
-        {chatProviderOptions.length > 1 && sendMode === 'ask' && (
+        {!isHero && chatProviderOptions.length > 1 && sendMode === 'ask' && (
           <div className="mb-2">
             <label className="text-[10px] text-zinc-500">Chat with</label>
             <select
@@ -721,7 +724,7 @@ export function FounderCopilotChat({
             </select>
           </div>
         )}
-        {stack.buildWorkers.length > 1 && sendMode === 'build' && (
+        {!isHero && stack.buildWorkers.length > 1 && sendMode === 'build' && (
           <div className="mb-2">
             <label className="text-[10px] text-zinc-500">Code with</label>
             <select
@@ -740,6 +743,14 @@ export function FounderCopilotChat({
               ))}
             </select>
           </div>
+        )}
+        {isHero && (chatProviderOptions.length > 1 || stack.buildWorkers.length > 1) && (
+          <p className="mb-2 text-[10px] text-zinc-600">
+            Routing is automatic.{' '}
+            <Link href={AI_STACK_HREF} className="text-violet-400 hover:underline">
+              Advanced → Settings
+            </Link>
+          </p>
         )}
         {showModeToggle && (
           <div className="mb-2 flex rounded-lg border border-zinc-800 p-0.5 text-[11px]">

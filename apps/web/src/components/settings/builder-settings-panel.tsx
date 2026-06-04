@@ -16,6 +16,7 @@ import {
 } from '@/lib/api';
 import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
 import { GitHubPatConnectGuide } from '@/components/settings/github-pat-connect-guide';
+import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
@@ -264,6 +265,22 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           onSaveSettings: saveSettings,
         }}
       />
+
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <h2 className="text-lg font-semibold text-white">Autopilot & production sync</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Push schema to Neon, redeploy Vercel and Railway, and sync GitHub — without cluttering Mission
+          Control.
+        </p>
+        <div className="mt-4">
+          <HybridControlPlane
+            accessToken={accessToken}
+            onMessage={setMsg}
+            onRefresh={load}
+            autoRunWhenAutopilot={false}
+          />
+        </div>
+      </section>
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
         <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
