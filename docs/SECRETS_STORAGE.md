@@ -27,8 +27,17 @@ Full registry: [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md) · API `GET /p
 | GitHub PAT | `gitHubConnection.accessTokenEncrypted` | GitHub API service (encrypt at connect) |
 | Founder Vault blobs | Founder Node disk + optional encrypted relay | Never decrypted on API |
 
-## Next (P2+)
+## CVM unwrap (P2)
 
-- Phala CVM-side unwrap for platform keys.
+| Endpoint | Description |
+| --- | --- |
+| `GET /vault/cvm-seal-capabilities` | Public — `PHALA_CVM_UNWRAP_URL` configured |
+| `GET /vault/cvm-seal-status` | JWT — readiness checks for signed-in founder |
+| `GET /builder/secrets-status` | Adds `cvmUnwrapReady`, `activeUnwrapPath` |
+
+When `PHALA_CVM_UNWRAP_URL` is set, `SealedCredentialsService.unwrap` tries CVM HTTP first, then falls back to local AES. See [SPRINT_P2_PHALA_SEAL.md](./SPRINT_P2_PHALA_SEAL.md).
+
+## Next
+
 - Migrate GitHub PAT into sealed integration row with `github_token` purpose.
-- User-selectable `secretsStorageMode = PHALA_SEALED` for future non-Phala sealed tiers.
+- User-selectable `secretsStorageMode = PHALA_SEALED` toggle in Settings UI.

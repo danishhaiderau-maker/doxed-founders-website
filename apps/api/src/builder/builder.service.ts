@@ -81,6 +81,14 @@ export class BuilderService {
     return this.sealed.getStatus(userId);
   }
 
+  private async secretsStorageModeFor(userId: string): Promise<SecretsStorageMode | undefined> {
+    const row = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { secretsStorageMode: true },
+    });
+    return row?.secretsStorageMode;
+  }
+
   async getSettings(userId: string) {
     await this.reconcileDefaultBrain(userId);
     const settings = await this.ensureSettings(userId);
@@ -264,10 +272,15 @@ export class BuilderService {
 
     const verified = await this.verifyAiKey(provider, key);
     const encrypted = this.sealed.encryptForStore(key);
-    const sealedMeta = this.sealed.sealMetadata(provider, {
-      accountName: verified.accountName,
-      model: cfg.defaultModel,
-    });
+    const storageMode = await this.secretsStorageModeFor(userId);
+    const sealedMeta = this.sealed.sealMetadata(
+      provider,
+      {
+        accountName: verified.accountName,
+        model: cfg.defaultModel,
+      },
+      storageMode,
+    );
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider } },
@@ -314,11 +327,16 @@ export class BuilderService {
 
     await this.verifyOllamaUrl(url);
 
-    const ollamaMeta = this.sealed.sealMetadata('ollama', {
-      accountName: 'Ollama (direct URL)',
-      baseUrl: url,
-      model: model?.trim() || 'llama3.2',
-    });
+    const storageMode = await this.secretsStorageModeFor(userId);
+    const ollamaMeta = this.sealed.sealMetadata(
+      'ollama',
+      {
+        accountName: 'Ollama (direct URL)',
+        baseUrl: url,
+        model: model?.trim() || 'llama3.2',
+      },
+      storageMode,
+    );
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'ollama' } },
       create: {
@@ -375,11 +393,16 @@ export class BuilderService {
     if (!verified.ok) throw new BadRequestException(verified.reason);
 
     const encrypted = this.sealed.encryptForStore(key);
-    const metadata = this.sealed.sealMetadata('phala', {
-      accountName: 'Phala Private AI',
-      inferenceUrl: normalizedUrl,
-      model: resolvedModel,
-    } satisfies PhalaCredentialMeta);
+    const storageMode = await this.secretsStorageModeFor(userId);
+    const metadata = this.sealed.sealMetadata(
+      'phala',
+      {
+        accountName: 'Phala Private AI',
+        inferenceUrl: normalizedUrl,
+        model: resolvedModel,
+      } satisfies PhalaCredentialMeta,
+      storageMode,
+    );
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'phala' } },
@@ -432,11 +455,16 @@ export class BuilderService {
     const verified = await verifyOpenHandsConnection(url, key);
     const encrypted = this.sealed.encryptForStore(key);
     const normalized = url.replace(/\/+$/, '');
-    const openHandsMeta = this.sealed.sealMetadata('openhands', {
-      baseUrl: normalized,
-      accountName: verified.accountName,
-      apiVersion: verified.apiVersion,
-    });
+    const storageMode = await this.secretsStorageModeFor(userId);
+    const openHandsMeta = this.sealed.sealMetadata(
+      'openhands',
+      {
+        baseUrl: normalized,
+        accountName: verified.accountName,
+        apiVersion: verified.apiVersion,
+      },
+      storageMode,
+    );
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'openhands' } },
@@ -488,12 +516,17 @@ export class BuilderService {
       where: { userId_provider: { userId, provider: 'cursor' } },
     });
     const prevMeta = (existing?.metadata as CursorCredentialMeta | null) ?? {};
-    const cursorMeta = this.sealed.sealMetadata('cursor', {
-      accountName: verified.accountName,
-      agentId: prevMeta.agentId ?? null,
-      agentRepoUrl: prevMeta.agentRepoUrl ?? null,
-      latestRunId: prevMeta.latestRunId ?? null,
-    });
+    const storageMode = await this.secretsStorageModeFor(userId);
+    const cursorMeta = this.sealed.sealMetadata(
+      'cursor',
+      {
+        accountName: verified.accountName,
+        agentId: prevMeta.agentId ?? null,
+        agentRepoUrl: prevMeta.agentRepoUrl ?? null,
+        latestRunId: prevMeta.latestRunId ?? null,
+      },
+      storageMode,
+    );
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'cursor' } },

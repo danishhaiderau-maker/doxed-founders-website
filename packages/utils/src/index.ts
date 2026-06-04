@@ -78,6 +78,7 @@ export * from './mission-state';
 export * from './founder-brain-router';
 export * from './secrets-storage';
 export * from './phala-cvm-vault';
+export * from './phala-cvm-seal';
 export * from './openhands';
 export * from './cursor-cloud';
 export * from './workspace-activity';

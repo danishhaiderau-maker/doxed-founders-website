@@ -71,6 +71,15 @@ async function run() {
     return res.ok && body?.version === 1 && typeof body?.platformCvmConfigured === 'boolean';
   });
 
+  await runCheck('vault-cvm-seal-capabilities', async () => {
+    const { res, body } = await fetchJson('/api/vault/cvm-seal-capabilities');
+    return (
+      res.ok &&
+      body?.version === 1 &&
+      typeof body?.platformCvmUnwrapConfigured === 'boolean'
+    );
+  });
+
   await runCheck('discover-universe', async () => {
     const { res, body } = await fetchJson('/api/founder-den/discover/universe?timeframe=24h');
     return (

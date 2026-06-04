@@ -20,6 +20,7 @@ import {
   normalizePhalaBaseUrl,
   type PhalaCredentialMeta,
 } from '../builder/phala.client';
+import { CvmSealService } from '../credentials/cvm-seal.service';
 import { SealedCredentialsService } from '../credentials/sealed-credentials.service';
 import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -34,8 +35,17 @@ export class VaultCvmService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sealed: SealedCredentialsService,
+    private readonly cvmSeal: CvmSealService,
     private readonly founderNodeSync: FounderNodeSyncService,
   ) {}
+
+  getSealCapabilities() {
+    return this.cvmSeal.getCapabilities();
+  }
+
+  getSealStatus(userId: string) {
+    return this.cvmSeal.getSealStatus(userId);
+  }
 
   getCapabilities(): PhalaCvmCapabilitiesPayload {
     const platform = readPhalaCvmPlatformConfig();

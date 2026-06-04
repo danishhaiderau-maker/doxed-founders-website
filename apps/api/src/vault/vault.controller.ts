@@ -14,6 +14,17 @@ export class VaultController {
     return this.vaultCvm.getCapabilities();
   }
 
+  @Public()
+  @Get('cvm-seal-capabilities')
+  sealCapabilities() {
+    return this.vaultCvm.getSealCapabilities();
+  }
+
+  @Get('cvm-seal-status')
+  sealStatus(@CurrentUser() user: AuthUser) {
+    return this.vaultCvm.getSealStatus(user.id);
+  }
+
   @Get('cvm-status')
   cvmStatus(@CurrentUser() user: AuthUser) {
     return this.vaultCvm.getStatus(user.id);

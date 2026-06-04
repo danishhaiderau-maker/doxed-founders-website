@@ -6,7 +6,10 @@ import { useEffect, useState } from 'react';
 import {
   AIRDROP_POOL_USD,
   AIRDROP_SUPPLY_PERCENT,
+  AIRDROP_TOKEN_POOL,
   BUILDER_REWARDS_SNAPSHOT_WEIGHTS,
+  LAUNCH_FDV_USD,
+  TOKEN_SUPPLY,
   formatTokenAmount,
   formatUsd,
 } from '@dcf/utils';
@@ -50,6 +53,24 @@ function statusBadge(status: BuilderRewardsEntry['status']) {
   }
 }
 
+function PoolEstimateDisclaimer({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      className={`rounded-lg border border-zinc-700/80 bg-zinc-950/60 ${compact ? 'p-2.5 text-[10px]' : 'p-3 text-[11px]'} leading-relaxed text-zinc-500`}
+    >
+      <p className="font-semibold text-zinc-400">Illustrative pool math — not a guarantee</p>
+      <p className="mt-1">
+        Dollar and token figures below use a <strong className="text-zinc-300">hypothetical example only</strong>:
+        {formatUsd(LAUNCH_FDV_USD, 0)} fully diluted valuation at launch ($1 per token on{' '}
+        {TOKEN_SUPPLY.toLocaleString()} total supply), with {AIRDROP_SUPPLY_PERCENT}% of supply reserved for the
+        community pool ({formatTokenAmount(AIRDROP_TOKEN_POOL)} tokens ≈ {formatUsd(AIRDROP_POOL_USD, 0)} at that
+        example price). Real launch market cap, token price, pool size, and your allocation can differ and may
+        change before any snapshot or distribution.
+      </p>
+    </div>
+  );
+}
+
 function RulesBlock() {
   return (
     <div className="space-y-6">
@@ -58,10 +79,11 @@ function RulesBlock() {
         <h2 className="mt-2 text-2xl font-bold text-white">How Builder Rewards Works</h2>
         <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400">
           Builder Rewards is not an airdrop farm page. It measures building, trading, scouting, community
-          participation, and reputation — then estimates your share of the future {AIRDROP_SUPPLY_PERCENT}%
-          community pool (~{formatUsd(AIRDROP_POOL_USD, 0)} at launch).{' '}
-          <strong className="text-zinc-200">DDollar alone does not decide your rank.</strong>
+          participation, and reputation — then shows an <strong className="text-zinc-200">illustrative</strong>{' '}
+          share of the future {AIRDROP_SUPPLY_PERCENT}% community pool under example launch assumptions (see
+          disclaimer below). <strong className="text-zinc-200">DDollar alone does not decide your rank.</strong>
         </p>
+        <PoolEstimateDisclaimer />
         <ul className="mt-4 grid gap-2 text-xs text-zinc-400 sm:grid-cols-2">
           <li>• Points from founder updates, GitHub/build feed, milestones</li>
           <li>• Scout stakes, reviews, and fraud signals</li>
@@ -117,8 +139,9 @@ function RulesBlock() {
 
       <section className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4">
         <p className="text-xs leading-relaxed text-amber-100/90">
-          <strong className="text-amber-200">Estimated share is not a guarantee.</strong> Builder Rewards are
-          based on contribution. DDollar alone does not guarantee rewards. Final allocation may consider activity,
+          <strong className="text-amber-200">Estimated share is not a guarantee.</strong> Percentages and token
+          amounts are scenario math from today&apos;s leaderboard — not promised allocations. Builder Rewards are
+          based on contribution; DDollar alone does not guarantee rewards. Final allocation may consider activity,
           reputation, builder and scout participation, sybil detection, and community contribution. Rules may
           evolve to protect the ecosystem.
         </p>
@@ -127,9 +150,17 @@ function RulesBlock() {
       <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
         <h3 className="text-sm font-semibold text-white">Future snapshot weights (guidance)</h3>
         <div className="mt-3 flex flex-wrap gap-2 text-[10px]">
-          {Object.entries(BUILDER_REWARDS_SNAPSHOT_WEIGHTS).map(([k, v]) => (
+          {(
+            [
+              ['ddollar', 'DDollar earned'],
+              ['builderActivity', 'Builder activity'],
+              ['reputation', 'Reputation'],
+              ['scoutAccuracy', 'Scout accuracy'],
+              ['communityActivity', 'Community'],
+            ] as const
+          ).map(([k, label]) => (
             <span key={k} className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-400">
-              {k.replace(/([A-Z])/g, ' $1')}: {(v * 100).toFixed(0)}%
+              {label}: {(BUILDER_REWARDS_SNAPSHOT_WEIGHTS[k] * 100).toFixed(0)}%
             </span>
           ))}
         </div>
@@ -208,9 +239,11 @@ export function BuilderRewardsPage() {
         <div className="rounded-xl border border-violet-500/30 bg-violet-950/20 p-4">
           <p className="text-xs text-violet-200/90">Your position</p>
           <p className="mt-1 text-lg font-bold text-white">
-            #{me.rank} · {me.tierLabel} · Score {me.builderScore.toLocaleString()} · Est. share{' '}
-            {me.rewardSharePercent.toFixed(2)}% (~{formatTokenAmount(me.estimatedTokens)} tokens)
+            #{me.rank} · {me.tierLabel} · Score {me.builderScore.toLocaleString()} · Illustrative pool share{' '}
+            {me.rewardSharePercent.toFixed(2)}% (~{formatTokenAmount(me.estimatedTokens)} tokens ·{' '}
+            {formatUsd(me.estimatedUsd, 0)} at example FDV)
           </p>
+          <PoolEstimateDisclaimer compact />
         </div>
       )}
 
@@ -240,7 +273,7 @@ export function BuilderRewardsPage() {
                     <th className="px-3 py-2">Activity</th>
                     <th className="px-3 py-2">Scout</th>
                     <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2">Est. share</th>
+                    <th className="px-3 py-2">Illustrative share*</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -288,7 +321,7 @@ export function BuilderRewardsPage() {
                       <td className="px-3 py-2 text-emerald-300/90">
                         {row.rewardSharePercent.toFixed(2)}%
                         <span className="block text-[10px] text-zinc-500">
-                          ~{formatTokenAmount(row.estimatedTokens)}
+                          ~{formatTokenAmount(row.estimatedTokens)} · {formatUsd(row.estimatedUsd, 0)}
                         </span>
                       </td>
                     </tr>
@@ -296,7 +329,10 @@ export function BuilderRewardsPage() {
                 </tbody>
               </table>
             </div>
-            <p className="mt-2 text-[10px] text-zinc-600">{board.rules.snapshotNote}</p>
+            <p className="mt-3 text-[10px] text-zinc-600">
+              *Illustrative share of the example {AIRDROP_SUPPLY_PERCENT}% pool ({formatUsd(AIRDROP_POOL_USD, 0)} at{' '}
+              {formatUsd(LAUNCH_FDV_USD, 0)} FDV). Not a guaranteed allocation. {board.rules.snapshotNote}
+            </p>
           </>
         )}
       </section>
