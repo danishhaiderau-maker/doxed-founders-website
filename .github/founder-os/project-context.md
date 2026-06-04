@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(scripts): load Neon DATABASE_URL from vault for production scripts
+feat(founder-os): Sprint 1 Founder Memory Graph for all AI routes
 
 ## Last Activity
 
