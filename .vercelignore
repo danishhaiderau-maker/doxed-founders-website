@@ -3,6 +3,9 @@ apps/founder-node/release/
 apps/founder-node/build/
 
 # Local / debug artifacts
+.tools/
+apps/mobile-android/
+services/btc-conservative-agent/data/
 .dev-pids/
 .selfhost-pids/
 *.log
