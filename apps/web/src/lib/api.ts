@@ -4243,12 +4243,30 @@ export interface FounderNodeStatusRow {
   appVersion: string | null;
 }
 
-export function createFounderNodePairingCode(token: string) {
-  return apiFetch<{ code: string; expiresAt: string }>(
+export function createFounderNodePairingCode(
+  token: string,
+  targetPlatform?: 'desktop' | 'mobile',
+) {
+  return apiFetch<{ code: string; expiresAt: string; targetPlatform?: string | null }>(
     '/founder-node/pairing-code',
-    { method: 'POST' },
+    {
+      method: 'POST',
+      body: JSON.stringify(targetPlatform ? { targetPlatform } : {}),
+    },
     token,
   );
+}
+
+export interface FounderNodeVaultRelayRow {
+  nodeId: string;
+  label: string | null;
+  platform: string | null;
+  updatedAt: string;
+  blobBytes: number;
+}
+
+export function fetchFounderNodeVaultRelays(token: string) {
+  return apiFetch<{ relays: FounderNodeVaultRelayRow[] }>('/founder-node/vault-relays', undefined, token);
 }
 
 export function fetchFounderNodeStatus(token: string) {

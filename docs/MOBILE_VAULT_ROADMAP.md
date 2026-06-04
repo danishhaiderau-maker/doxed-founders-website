@@ -1,6 +1,6 @@
 # Mobile app & vault sync — roadmap
 
-**Status (June 2026):** Android APK ships as a **WebView** to [doxxedcrypto.digital](https://doxxedcrypto.digital). **Founder Vault on the phone** (local files + PC sync) is **planned**, not yet in the APK.
+**Status (June 2026):** Android **v0.3.0** ships WebView + **on-device Founder Vault** (Capacitor Filesystem/Preferences), dual pairing codes, and encrypted per-node relay. **Phase 4** (PC offline catch-up / two-way merge) is next.
 
 **Privacy context:** [PRIVACY.md](../PRIVACY.md) · **Current APK scope:** [MOBILE_APP.md](./MOBILE_APP.md)
 

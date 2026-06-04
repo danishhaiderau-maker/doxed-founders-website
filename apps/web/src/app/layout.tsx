@@ -4,6 +4,7 @@ import { AuthProvider } from '@/components/auth-provider';
 import { NotificationFlashProvider } from '@/components/notification-flash';
 import { ShareFooterProvider } from '@/components/share-footer-provider';
 import { MobileAppBootstrap } from '@/components/mobile-app-bootstrap';
+import { MobileVaultBootstrap } from '@/components/mobile-vault-bootstrap';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -31,6 +32,7 @@ export default function RootLayout({
             <NotificationFlashProvider>
               <Suspense fallback={null}>
                 <MobileAppBootstrap />
+                <MobileVaultBootstrap />
               </Suspense>
               {children}
             </NotificationFlashProvider>

@@ -428,6 +428,7 @@ model User {
   projectMemorySync    ProjectMemoryDeviceSync?
   founderNodes              FounderNode[]
   founderNodePairings       FounderNodePairingCode[]
+  founderNodeVaultRelays    FounderNodeVaultRelay[]
   founderNodeInferenceJobs  FounderNodeInferenceJob[]
   founderNodeSyncJobs       FounderNodeSyncJob[]
   townHallPosts             TownHallPost[]
@@ -1737,17 +1738,34 @@ model FounderNodeInferenceJob {
 
 /** Short-lived pairing code shown in Founder OS settings. */
 model FounderNodePairingCode {
-  id        String    @id @default(cuid())
-  userId    String
-  code      String    @unique
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime  @default(now())
+  id             String    @id @default(cuid())
+  userId         String
+  code           String    @unique
+  targetPlatform String?
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+/** Per-device encrypted vault blob relay (mobile + desktop nodes). */
+model FounderNodeVaultRelay {
+  id                 String   @id @default(cuid())
+  userId             String
+  nodeId             String   @unique
+  label              String?
+  platform           String?
+  encryptedVaultBlob String   @db.Text
+  updatedAt          DateTime @updatedAt
+  createdAt          DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model FounderEvent {

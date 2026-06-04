@@ -2,7 +2,7 @@
 
 The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypto.digital). It opens **Discover** with `?app=android` so navigation emphasizes what works well on a phone.
 
-**File size (~3.9–4.5 MB) is expected.** The APK does not contain the Next.js site, AI models, or `~/FounderVault/` data — only the Android wrapper. Updates to Founder OS, Copilot, mic, and sync ship on **Vercel** when you deploy the website; users get them on next app open without reinstalling the APK (unless native Capacitor plugins change).
+**File size (~5–8 MB debug)** is expected: WebView shell + Capacitor plugins (filesystem, preferences). It still does **not** bundle the website or your notes — vault files appear **after pairing** under app-private storage. Website features ship on **Vercel**; reinstall the APK when native plugins change (v0.2 → v0.3).
 
 ## Download (Phase 1)
 
@@ -14,7 +14,9 @@ The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypt
 
 Build locally: `npm run pack:android` (writes `apps/web/public/downloads/doxxedcrypto-android.apk`).
 
-**Roadmap (vault on phone, PC sync, release phases):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)
+**v0.3.0+:** On-device `FounderVault/` via Capacitor (pair with **Code for Android** in Settings). APK stays small; vault files sync encrypted after login.
+
+**Roadmap (PC↔phone merge):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)
 
 ## In scope (default mobile experience)
 

@@ -28,8 +28,21 @@ export class FounderNodeController {
   ) {}
 
   @Post('pairing-code')
-  createPairingCode(@CurrentUser() user: AuthUser) {
-    return this.nodes.createPairingCode(user.id);
+  createPairingCode(
+    @CurrentUser() user: AuthUser,
+    @Body() body?: { targetPlatform?: 'desktop' | 'mobile' },
+  ) {
+    return this.nodes.createPairingCode(user.id, body?.targetPlatform);
+  }
+
+  @Get('vault-relays')
+  vaultRelays(@CurrentUser() user: AuthUser) {
+    return this.nodes.listVaultRelays(user.id);
+  }
+
+  @Get('vault-relays/:nodeId')
+  vaultRelayForNode(@CurrentUser() user: AuthUser, @Param('nodeId') nodeId: string) {
+    return this.nodes.pullVaultRelayForNode(user.id, nodeId);
   }
 
   @Get('status')
