@@ -37,6 +37,7 @@ import {
   type MissionIntelligence,
   type FounderQueueItem,
   type FounderAgentRunRecord,
+  updateBuilderSettings,
   FounderDashboard,
   ProjectMemory,
   ProjectRoom,
