@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Sprint 4: Founder Brain task router in API
+feat(secrets): Sprint 6 sealed credentials with audited unwrap and Phala inference-only tier
 
 ## Last Activity
 
