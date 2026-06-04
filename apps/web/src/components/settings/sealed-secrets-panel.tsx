@@ -1,6 +1,7 @@
 'use client';
 
 import type { BuilderSettings } from '@/lib/api';
+import { PrivacyMyBoundariesPanel } from '@/components/privacy/privacy-my-boundaries-panel';
 
 type Props = {
   settings: BuilderSettings;
@@ -44,8 +45,11 @@ export function SealedSecretsPanel({ settings }: Props) {
         </ul>
       )}
       <p className="mt-3 text-[10px] text-zinc-600">
-        Raw keys never leave the server encrypted blob. See docs/SECRETS_STORAGE.md.
+        Raw keys never leave the server encrypted blob. See docs/DATA_CLASSIFICATION.md.
       </p>
+      <div className="mt-4">
+        <PrivacyMyBoundariesPanel />
+      </div>
     </div>
   );
 }

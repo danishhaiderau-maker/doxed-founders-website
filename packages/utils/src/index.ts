@@ -97,4 +97,5 @@ export * from './llm-tokens';
 export * from './feed-terminal';
 export * from './feed-hub';
 export * from './founder-event-feed';
+export * from './data-classification';
 export * from './task-router';

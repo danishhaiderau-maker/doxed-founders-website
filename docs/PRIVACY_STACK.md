@@ -26,6 +26,13 @@ Local secrets live in `../doxedcryptofounder-secrets/vault/` (never commit). Rel
 npm run secrets:link
 ```
 
+## Data classes (P0)
+
+Public vs private split for Neon + Founder Node — see [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md).
+
+- API: `GET /api/privacy/data-classes`, `GET /api/privacy/audit`
+- CLI: `npm run audit:data-classes`
+
 ## Audit export (ChatGPT / external review)
 
 Safe, code-only snapshot — **no `.env`, no tokens**:

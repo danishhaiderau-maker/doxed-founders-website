@@ -14,6 +14,7 @@
     "pack:founder-node:win": "node scripts/pack-founder-node.mjs --win",
     "pack:founder-node:mac": "node scripts/pack-founder-node.mjs --mac",
     "pack:founder-node:all": "node scripts/pack-founder-node.mjs --all",
+    "pack:android": "node scripts/pack-android-app.mjs",
     "build:founder-vault": "npm run build --workspace=@dcf/founder-vault",
     "dev:web": "turbo run dev --filter=@dcf/web",
     "dev:api": "turbo run dev --filter=@dcf/api",
@@ -84,7 +85,8 @@
     "stop:dev": "powershell -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
     "secrets:link": "powershell -ExecutionPolicy Bypass -File scripts/link-secrets.ps1",
     "secrets:strip": "powershell -ExecutionPolicy Bypass -File scripts/strip-repo-secrets.ps1",
-    "audit:export": "node scripts/prepare-audit-export.mjs"
+    "audit:export": "node scripts/prepare-audit-export.mjs",
+    "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs"
   },
   "devDependencies": {
     "prisma": "^6.8.2",

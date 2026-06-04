@@ -61,6 +61,11 @@ async function run() {
     return res.ok && Array.isArray(body?.stream) && typeof body?.counts?.merged === 'number';
   });
 
+  await runCheck('privacy-data-classes', async () => {
+    const { res, body } = await fetchJson('/api/privacy/data-classes');
+    return res.ok && Array.isArray(body?.classes) && body?.audit?.compliant === true;
+  });
+
   await runCheck('discover-universe', async () => {
     const { res, body } = await fetchJson('/api/founder-den/discover/universe?timeframe=24h');
     return (
