@@ -49,6 +49,13 @@ import {
   classifySyncFailure,
   transientRetryDelayMs,
 } from './connection-health';
+import {
+  isWindows,
+  promptFirewallBlocked,
+  resetFirewallPromptCooldown,
+  tryAddWindowsFirewallRules,
+  openWindowsFirewallSettings,
+} from './firewall-helper';
 import { createLoopHandles, stopBackgroundLoops, type BackgroundLoopHandles } from './background-loops';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
@@ -173,6 +180,19 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
     consecutiveTransientFailures += 1;
     syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
     checkForUpdatesAfterSyncFailure();
+    if (consecutiveTransientFailures >= 2) {
+      notifyDesktop(
+        'Founder Node cannot reach Founder OS',
+        isWindows()
+          ? 'Open the tray menu → Allow through Windows Firewall, then Sync now.'
+          : 'Check your network, then tray → Sync now.',
+      );
+      void promptFirewallBlocked({
+        consecutiveFailures: consecutiveTransientFailures,
+        lastError: lastSyncError,
+        onRetrySync: () => runSyncCycle(vaultRoot).catch(console.error),
+      });
+    }
     return;
   }
 
@@ -264,6 +284,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     lastSyncError = null;
     consecutiveTransientFailures = 0;
     syncPausedUntil = 0;
+    resetFirewallPromptCooldown();
     refreshTrayMenu(vaultRoot);
 
     try {
@@ -391,6 +412,26 @@ function buildTrayMenu(vaultRoot: string) {
         checkForUpdates({ silent: false }).catch(console.error);
       },
     },
+    ...(isWindows() && config
+      ? [
+          {
+            label: 'Allow through Windows Firewall…',
+            click: () => {
+              void (async () => {
+                const result = await tryAddWindowsFirewallRules();
+                notifyDesktop('Firewall', result.detail);
+                await runSyncCycle(vaultRoot);
+              })();
+            },
+          },
+          {
+            label: 'Open Windows Firewall settings…',
+            click: () => {
+              void openWindowsFirewallSettings();
+            },
+          },
+        ]
+      : []),
     {
       label: 'Repair connection (new pairing code)…',
       click: () => {
@@ -517,8 +558,11 @@ app.whenReady().then(() => {
       startSyncLoop(vaultRoot);
       notifyDesktop(
         'Founder Node connected',
-        'Vault paired. This app runs in the system tray — keep it open so Founder OS shows online.',
+        'Vault paired. Keep the tray app open. If sync fails, use tray → Allow through Windows Firewall.',
       );
+      if (isWindows() && app.isPackaged) {
+        void tryAddWindowsFirewallRules().catch(console.warn);
+      }
     },
   );
 });

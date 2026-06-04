@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build Founder Node desktop installers (.exe on Windows, .dmg on macOS).
- * Usage: node scripts/pack-founder-node.mjs [--win] [--mac] [--all]
+ * Usage: node scripts/pack-founder-node.mjs [--win] [--mac] [--linux] [--all]
  */
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -34,17 +34,19 @@ run('node', ['scripts/prepare-founder-node-pack.mjs']);
 
 const platformArgs = [];
 if (args.includes('--all')) {
-  platformArgs.push('--win', '--mac');
+  platformArgs.push('--win', '--mac', '--linux');
 } else if (args.includes('--win')) {
   platformArgs.push('--win');
 } else if (args.includes('--mac')) {
   platformArgs.push('--mac');
+} else if (args.includes('--linux')) {
+  platformArgs.push('--linux', 'AppImage');
 } else if (process.platform === 'win32') {
   platformArgs.push('--win');
 } else if (process.platform === 'darwin') {
   platformArgs.push('--mac');
 } else {
-  platformArgs.push('--linux');
+  platformArgs.push('--linux', 'AppImage');
 }
 
 run('npx', ['electron-builder', ...platformArgs], {

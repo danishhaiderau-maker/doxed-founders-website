@@ -1,6 +1,6 @@
 {
   "name": "@dcf/founder-node",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "Founder Node — local vault + metadata sync for Founder OS",
   "author": "Doxxed Crypto",
@@ -13,6 +13,7 @@
     "pack": "electron-builder",
     "pack:win": "electron-builder --win",
     "pack:mac": "electron-builder --mac",
+    "pack:linux": "electron-builder --linux",
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
@@ -69,6 +70,14 @@
     },
     "dmg": {
       "title": "Founder Node ${version}"
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "executableName": "founder-node",
+      "synopsis": "Founder Node — local vault sync for Founder OS",
+      "description": "Desktop tray app for Founder Vault pairing and sync with Doxxed Crypto Founder OS."
     },
     "nsis": {
       "oneClick": true,

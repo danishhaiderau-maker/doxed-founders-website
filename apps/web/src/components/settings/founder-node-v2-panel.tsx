@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 
-/** Founder Node v0.5.2+ recommended for auto-reconnect, faster heartbeat, start-at-login */
+/** Founder Node v0.5.3+ — firewall prompts, hourly updates, Linux AppImage */
 function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   if (!version?.trim()) return true;
   const parts = version
@@ -15,7 +15,7 @@ function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   const [major = 0, minor = 0, patch = 0] = parts;
   if (major !== 0) return major < 0;
   if (minor < 5) return true;
-  if (minor === 5 && patch < 2) return true;
+  if (minor === 5 && patch < 3) return true;
   return false;
 }
 
@@ -163,10 +163,10 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to v0.5.2+</p>
+          <p className="font-medium">Update Founder Node to v0.5.3+</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing auto-reconnect, faster sync, and start-at-login.
-            In Step 1 use <strong className="text-cyan-200">Check for updates</strong> in the tray menu (or download the latest installer), install, then leave the tray app open.
+            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing one-click Windows firewall fix, hourly auto-updates, and Linux downloads.
+            Tray menu → <strong className="text-cyan-200">Check for updates</strong> (or download from Step 1), install, then leave the tray app open.
           </p>
         </div>
       )}
@@ -190,7 +190,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
           <p className="mt-2 text-xs leading-relaxed text-zinc-300">
             <strong className="text-white">Paired</strong> means this browser account is linked to your machine (one-time
             setup). <strong className="text-white">Online</strong> means the Founder Node tray app is running on your PC
-            and sending a heartbeat to Founder OS — about every 45 seconds when v0.5.2+ is running. The website cannot index your vault by
+            and sending a heartbeat to Founder OS — about every 45 seconds when v0.5.3+ is running. The website cannot index your vault by
             itself; <strong className="text-white">Rebuild vector index</strong> is disabled until the tray app is online.
           </p>
           <p className="mt-2 text-[11px] text-zinc-500">
@@ -234,10 +234,11 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
               entering your code. After pairing, only the tray app needs to stay open — not the popup window.
             </p>
             <p>
-              <strong className="text-zinc-400">Still offline?</strong> Check Windows Firewall allowed Founder Node,
-              sign in to the same Founder OS account you paired with, and confirm Step 2 uses{' '}
-              <strong className="text-zinc-300">Founder Vault (Founder Node)</strong>. Restart the tray app, then Sync
-              now again.
+              <strong className="text-zinc-400">Still offline?</strong> On Windows, the tray app should pop up{' '}
+              <strong className="text-zinc-300">Allow Founder Node</strong> if the firewall blocked sync — or use tray →{' '}
+              <strong className="text-zinc-300">Allow through Windows Firewall</strong>. Confirm the same Founder OS
+              account, Step 2 = <strong className="text-zinc-300">Founder Vault (Founder Node)</strong>, then tray →{' '}
+              <strong className="text-zinc-300">Sync now</strong>.
             </p>
           </div>
         </div>
