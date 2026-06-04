@@ -1,21 +1,25 @@
 'use client';
 
 import Link from 'next/link';
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { PushNotificationPrompt } from '@/components/push-notification-prompt';
+import { FeedHubCategoryTabs } from '@/components/feed/feed-hub-category-tabs';
+import { FeedHubPulseStrip } from '@/components/feed/feed-hub-pulse-strip';
+import { FeedHubStream } from '@/components/feed/feed-hub-stream';
 import { FeedTerminalTabs } from '@/components/feed/feed-terminal-tabs';
 import { FeedProjectBubbleStrip } from '@/components/feed/feed-project-bubble-strip';
 import { FeedDdFlowBar } from '@/components/feed/feed-dd-flow-bar';
-import { FeedConvictionCard } from '@/components/feed/feed-conviction-card';
 import { FeedTerminalSidebar } from '@/components/feed/feed-terminal-sidebar';
 import {
   fetchDiscoverUniverse,
-  fetchFeedTerminal,
+  fetchFeedHub,
   type DiscoverUniverseResponse,
-  type FeedTerminalResponse,
+  type FeedHubResponse,
+  type FeedTerminalCard,
   type FeedTerminalTab,
+  type UnifiedFeedCategory,
 } from '@/lib/api';
 import { markFeedSeen } from '@/hooks/use-feed-new-count';
 
@@ -28,35 +32,59 @@ const VALID_TABS: FeedTerminalTab[] = [
   'activity',
 ];
 
+const VALID_CATEGORIES: UnifiedFeedCategory[] = [
+  'all',
+  'trading',
+  'founder',
+  'market',
+  'community',
+];
+
+function showTerminalTabs(category: UnifiedFeedCategory) {
+  return category === 'all' || category === 'trading';
+}
+
 export default function FeedPage() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-[#050508]" />}>
-      <FeedTerminalPage />
+      <FeedHubPage />
     </Suspense>
   );
 }
 
-function FeedTerminalPage() {
+function FeedHubPage() {
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab') as FeedTerminalTab | null;
+  const categoryParam = searchParams.get('category') as UnifiedFeedCategory | null;
   const projectParam = searchParams.get('project');
 
+  const [category, setCategory] = useState<UnifiedFeedCategory>(
+    categoryParam && VALID_CATEGORIES.includes(categoryParam) ? categoryParam : 'all',
+  );
   const [tab, setTab] = useState<FeedTerminalTab>(
     tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'all',
   );
   const [projectSlug, setProjectSlug] = useState<string | null>(projectParam);
-  const [terminal, setTerminal] = useState<FeedTerminalResponse | null>(null);
+  const [hub, setHub] = useState<FeedHubResponse | null>(null);
   const [universe, setUniverse] = useState<DiscoverUniverseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const terminalCardsById = useMemo(() => {
+    const map = new Map<string, FeedTerminalCard>();
+    for (const card of hub?.terminal?.cards ?? []) {
+      map.set(card.id, card);
+    }
+    return map;
+  }, [hub?.terminal?.cards]);
+
   const load = useCallback(async () => {
     try {
-      const [term, uni] = await Promise.all([
-        fetchFeedTerminal(tab, projectSlug ?? undefined),
+      const [hubRes, uni] = await Promise.all([
+        fetchFeedHub(category, tab, projectSlug ?? undefined),
         fetchDiscoverUniverse({ timeframe: '24h' }),
       ]);
-      setTerminal(term);
+      setHub(hubRes);
       setUniverse(uni);
       setError(null);
     } catch (err) {
@@ -64,7 +92,7 @@ function FeedTerminalPage() {
     } finally {
       setLoading(false);
     }
-  }, [tab, projectSlug]);
+  }, [category, tab, projectSlug]);
 
   useEffect(() => {
     setLoading(true);
@@ -82,26 +110,42 @@ function FeedTerminalPage() {
   }, [tabParam]);
 
   useEffect(() => {
+    if (categoryParam && VALID_CATEGORIES.includes(categoryParam)) setCategory(categoryParam);
+  }, [categoryParam]);
+
+  useEffect(() => {
     setProjectSlug(projectParam);
   }, [projectParam]);
 
-  function updateUrl(nextTab: FeedTerminalTab, nextProject: string | null) {
+  function updateUrl(
+    nextCategory: UnifiedFeedCategory,
+    nextTab: FeedTerminalTab,
+    nextProject: string | null,
+  ) {
     const qs = new URLSearchParams();
-    if (nextTab !== 'all') qs.set('tab', nextTab);
+    if (nextCategory !== 'all') qs.set('category', nextCategory);
+    if (showTerminalTabs(nextCategory) && nextTab !== 'all') qs.set('tab', nextTab);
     if (nextProject) qs.set('project', nextProject);
     const q = qs.toString();
     window.history.replaceState(null, '', q ? `/feed?${q}` : '/feed');
   }
 
+  function handleCategoryChange(next: UnifiedFeedCategory) {
+    setCategory(next);
+    updateUrl(next, tab, projectSlug);
+  }
+
   function handleTabChange(next: FeedTerminalTab) {
     setTab(next);
-    updateUrl(next, projectSlug);
+    updateUrl(category, next, projectSlug);
   }
 
   function handleProjectSelect(slug: string | null) {
     setProjectSlug(slug);
-    updateUrl(tab, slug);
+    updateUrl(category, tab, slug);
   }
+
+  const showTerminal = showTerminalTabs(category);
 
   return (
     <div className="min-h-screen bg-[#050508]">
@@ -110,9 +154,9 @@ function FeedTerminalPage() {
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-xl font-bold tracking-tight">Social Conviction Terminal</h1>
+            <h1 className="mt-1 text-xl font-bold tracking-tight">Platform Feed</h1>
             <p className="text-xs text-zinc-500">
-              Trades · conviction · regret · DDollar flow — tap Buy to mirror in Trading Alpha
+              Founder builds · paper trades · conviction · market pulse — one unified stream
             </p>
           </div>
           <SiteNav />
@@ -120,9 +164,19 @@ function FeedTerminalPage() {
       </header>
 
       <main className="mx-auto w-full max-w-[90rem] px-4 py-6 sm:px-6 lg:px-10">
-        <FeedTerminalTabs active={tab} onChange={handleTabChange} />
+        <FeedHubCategoryTabs active={category} onChange={handleCategoryChange} />
 
-        {universe && (
+        {hub?.pulse && hub.pulse.length > 0 && (
+          <FeedHubPulseStrip pulse={hub.pulse} />
+        )}
+
+        {showTerminal && (
+          <div className="mt-5">
+            <FeedTerminalTabs active={tab} onChange={handleTabChange} />
+          </div>
+        )}
+
+        {universe && showTerminal && (
           <div className="mt-5 space-y-4">
             <FeedProjectBubbleStrip
               projects={universe.projects}
@@ -141,29 +195,35 @@ function FeedTerminalPage() {
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_280px]">
           <div className="space-y-3">
-            {loading && !terminal && (
+            {loading && !hub && (
               <div className="rounded-xl border border-zinc-800 p-12 text-center text-zinc-500">
-                Loading conviction feed…
+                Loading platform feed…
               </div>
             )}
-            {terminal?.cards.length === 0 && !loading && (
+            {hub?.stream.length === 0 && !loading && (
               <div className="rounded-xl border border-dashed border-zinc-800 p-12 text-center text-zinc-500">
-                No {tab === 'all' ? '' : tab} activity yet.{' '}
-                <Link href="/paper-trading" className="text-violet-400 hover:underline">
-                  Open Trading Alpha →
-                </Link>
+                No activity in this view yet.{' '}
+                {category === 'trading' || category === 'all' ? (
+                  <Link href="/paper-trading" className="text-violet-400 hover:underline">
+                    Open Trading Alpha →
+                  </Link>
+                ) : (
+                  <Link href="/founder-den" className="text-amber-300 hover:underline">
+                    Founder Den →
+                  </Link>
+                )}
               </div>
             )}
-            {terminal?.cards.map((card) => (
-              <FeedConvictionCard key={card.id} card={card} />
-            ))}
+            {hub && hub.stream.length > 0 && (
+              <FeedHubStream stream={hub.stream} terminalCardsById={terminalCardsById} />
+            )}
           </div>
 
-          {terminal && universe && (
+          {hub?.terminal && universe && showTerminal && (
             <FeedTerminalSidebar
-              terminal={terminal}
+              terminal={hub.terminal}
               trending={universe.sidebar.trending}
-              scoutPending={terminal.scoutPending}
+              scoutPending={hub.terminal.scoutPending}
             />
           )}
         </div>

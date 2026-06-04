@@ -67,6 +67,11 @@ export class PaperTradeDto {
   @IsString()
   @MaxLength(80)
   timeHorizon?: string;
+
+  /** Trader you copied — links your buy to their future conviction alerts. */
+  @IsOptional()
+  @IsString()
+  copyFromUserId?: string;
 }
 
 export class PreviewPaperTradeDto {

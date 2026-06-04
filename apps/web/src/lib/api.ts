@@ -866,6 +866,7 @@ export function executePaperTrade(
     targetUsd?: number;
     stopUsd?: number;
     timeHorizon?: string;
+    copyFromUserId?: string;
   },
   authToken?: string,
 ) {
@@ -1168,6 +1169,50 @@ export function fetchFeedTerminal(tab: FeedTerminalTab = 'all', projectSlug?: st
   qs.set('tab', tab);
   if (projectSlug) qs.set('project', projectSlug);
   return apiFetch<FeedTerminalResponse>(`/feed/terminal?${qs.toString()}`);
+}
+
+export type FeedHubUnifiedEntry = {
+  kind: 'unified';
+  at: string;
+  item: UnifiedFeedItem;
+};
+
+export type FeedHubTerminalEntry = {
+  kind: 'terminal';
+  at: string;
+  card: FeedTerminalCard;
+};
+
+export type FeedHubEntry = FeedHubUnifiedEntry | FeedHubTerminalEntry;
+
+export interface FeedHubResponse {
+  category: UnifiedFeedCategory;
+  terminalTab: FeedTerminalTab;
+  projectSlug: string | null;
+  pulse: PlatformPulseItem[];
+  hotQuestions: HotPredictionItem[];
+  scoutListings: ScoutListingFeedItem[];
+  stream: FeedHubEntry[];
+  terminal: FeedTerminalResponse | null;
+  counts: {
+    unified: number;
+    terminal: number;
+    merged: number;
+  };
+}
+
+export function fetchFeedHub(
+  category: UnifiedFeedCategory = 'all',
+  terminalTab: FeedTerminalTab = 'all',
+  projectSlug?: string,
+  limit = 50,
+) {
+  const qs = new URLSearchParams();
+  qs.set('category', category);
+  qs.set('tab', terminalTab);
+  if (projectSlug) qs.set('project', projectSlug);
+  qs.set('limit', String(limit));
+  return apiFetch<FeedHubResponse>(`/feed/hub?${qs.toString()}`);
 }
 
 export function fetchEngagementFlashes(since?: string) {

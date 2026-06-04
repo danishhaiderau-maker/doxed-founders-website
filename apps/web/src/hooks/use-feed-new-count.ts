@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { fetchFeedTerminal } from '@/lib/api';
+import { fetchFeedHub } from '@/lib/api';
 
 const STORAGE_KEY = 'dcf-feed-last-seen-at';
 
@@ -15,10 +15,10 @@ export function useFeedNewCount(pollMs = 60_000) {
 
   const load = useCallback(async () => {
     try {
-      const terminal = await fetchFeedTerminal('all');
+      const hub = await fetchFeedHub('all', 'all', undefined, 80);
       const lastSeenRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
       const lastSeen = lastSeenRaw ? new Date(lastSeenRaw).getTime() : 0;
-      const fresh = terminal.cards.filter((c) => new Date(c.at).getTime() > lastSeen).length;
+      const fresh = hub.stream.filter((e) => new Date(e.at).getTime() > lastSeen).length;
       setCount(fresh);
     } catch {
       setCount(0);

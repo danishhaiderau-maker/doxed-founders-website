@@ -30,7 +30,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from '../feed/feed.service';
 import { HotBuyService } from '../feed/hot-buy.service';
 import { PointsService } from '../points/points.service';
-import { NotificationsService } from '../notifications/notifications.service';
+import { HighValueInsightsService } from '../notifications/high-value-insights.service';
 import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 import { createPaperSessionToken } from './paper-session.util';
@@ -58,7 +58,7 @@ export class PaperTradingService {
     private readonly hotBuy: HotBuyService,
     private readonly analytics: AnalyticsService,
     private readonly points: PointsService,
-    private readonly notifications: NotificationsService,
+    private readonly insights: HighValueInsightsService,
     private readonly socialSignals: SocialSignalsService,
     private readonly traderVerification: TraderVerificationService,
   ) {}
@@ -492,6 +492,7 @@ export class PaperTradingService {
     targetUsd?: number;
     stopUsd?: number;
     timeHorizon?: string;
+    inspiredByUserId?: string;
     marketPreview?: {
       priceUsd?: string;
       marketCap?: number;
@@ -650,6 +651,10 @@ export class PaperTradingService {
       const trade = await tx.paperTrade.create({
         data: {
           userId: input.userId,
+          inspiredByUserId:
+            input.side === PaperTradeSide.BUY && input.inspiredByUserId
+              ? input.inspiredByUserId
+              : undefined,
           projectId: project.id,
           side: input.side,
           quantity: new Prisma.Decimal(quantity),
@@ -1489,6 +1494,15 @@ export class PaperTradingService {
       realizedPnlUsd = Math.round((price - avgBuy) * quantity * 100) / 100;
     }
 
+    let inspiredByUserId: string | undefined;
+    if (dto.side === PaperTradeSide.BUY && dto.copyFromUserId?.trim()) {
+      const sourceId = dto.copyFromUserId.trim();
+      if (sourceId === dto.userId) {
+        throw new BadRequestException('Cannot copy trade from yourself');
+      }
+      inspiredByUserId = sourceId;
+    }
+
     const result = await this.executeTradeInternal({
       userId: dto.userId,
       projectId: project.id,
@@ -1502,6 +1516,7 @@ export class PaperTradingService {
       targetUsd: dto.targetUsd,
       stopUsd: dto.stopUsd,
       timeHorizon: dto.timeHorizon,
+      inspiredByUserId,
       marketPreview: preview.marketPreview,
     });
 
@@ -1526,7 +1541,7 @@ export class PaperTradingService {
 
     if (dto.side === PaperTradeSide.BUY) {
       this.hotBuy.checkAfterBuy(project.id).catch(() => undefined);
-      void this.notifications.notifyFollowersOfTraderBuy(dto.userId, {
+      void this.insights.notifyVerifiedTraderBuy(dto.userId, {
         ticker: project.ticker,
         amountUsd: result.amountUsd,
         projectSlug: project.slug,

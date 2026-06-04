@@ -33,6 +33,10 @@ export class HotBuyService {
     const snapshot = await this.computeHotBuy(projectId);
     if (!snapshot || snapshot.pctOfActive < HOT_BUY_THRESHOLD) return;
 
+    const xBuyers = (snapshot.recentBuyers ?? []).filter((b) => b.twitterHandle?.trim());
+    const minXBuyers = 2;
+    if (xBuyers.length < minXBuyers && snapshot.topTraderCount < 3) return;
+
     const recent = await this.prisma.notification.findFirst({
       where: {
         type: NotificationType.TRENDING_BUYS,
@@ -43,16 +47,28 @@ export class HotBuyService {
     if (recent) return;
 
     const buyerNames = (snapshot.recentBuyers ?? []).map((b) => b.displayName);
+    const xHandles = xBuyers
+      .map((b) => (b.twitterHandle ? `@${b.twitterHandle.replace(/^@/, '')}` : null))
+      .filter((h): h is string => Boolean(h));
     const pctLabel = `${Math.round(snapshot.pctOfActive * 100)}%`;
-    const title = snapshot.topTraderCount >= 3 ? 'Top traders buying' : 'Hot buy';
+    const title =
+      xBuyers.length >= minXBuyers
+        ? 'Verified X traders converging'
+        : snapshot.topTraderCount >= 3
+          ? 'Top traders buying'
+          : 'Hot buy';
     const headline = this.formatHotBuyHeadline(snapshot);
     const detail = this.formatHotBuyDetail(snapshot);
+    const xLine =
+      xHandles.length >= 2
+        ? ` X profiles: ${xHandles.slice(0, 4).join(', ')}${xHandles.length > 4 ? ' + more' : ''}.`
+        : '';
     const body =
       snapshot.topTraderCount >= 3
-        ? `${headline} — ${detail}.`
+        ? `${headline} — ${detail}.${xLine}`
         : buyerNames.length > 0
-          ? `${headline} (${pctLabel} of active) — ${buyerNames.slice(0, 5).join(', ')}${buyerNames.length > 5 ? ' + more' : ''}.`
-          : `${headline} (${pctLabel} of active).`;
+          ? `${headline} (${pctLabel} of active) — ${buyerNames.slice(0, 5).join(', ')}${buyerNames.length > 5 ? ' + more' : ''}.${xLine}`
+          : `${headline} (${pctLabel} of active).${xLine}`;
 
     const metadata: NotificationBuyerMeta = {
       projectSlug: snapshot.projectSlug,
@@ -60,13 +76,58 @@ export class HotBuyService {
       buyers: snapshot.recentBuyers,
     };
 
+    const xBuyerIds = xBuyers
+      .map((b) => b.userId)
+      .filter((id): id is string => Boolean(id));
+    const recipientIds = await this.hotBuyRecipientIds(snapshot.projectId, xBuyerIds);
+
     await this.notifications.notifyMarketAlert({
       type: NotificationType.TRENDING_BUYS,
       title: `🔥 ${title}: ${snapshot.projectTicker}`,
       body,
       link: `/project/${snapshot.projectSlug}`,
       metadata,
+      recipientIds,
     });
+  }
+
+  /** Users who follow the project, watchlist it, trade it, or follow converging X buyers. */
+  private async hotBuyRecipientIds(projectId: string, xBuyerUserIds: string[]): Promise<string[]> {
+    const since = new Date(Date.now() - 30 * 86400000);
+    const [projectFollowers, watchlisted, recentTraders, xTraderFollowers] = await Promise.all([
+      this.prisma.projectFollow.findMany({
+        where: { projectId },
+        select: { userId: true },
+        take: 50,
+      }),
+      this.prisma.watchlist.findMany({
+        where: { projectId },
+        select: { userId: true },
+        take: 50,
+      }),
+      this.prisma.paperTrade.findMany({
+        where: { projectId, createdAt: { gte: since } },
+        select: { userId: true },
+        distinct: ['userId'],
+        take: 40,
+      }),
+      xBuyerUserIds.length > 0
+        ? this.prisma.userFollow.findMany({
+            where: { followingId: { in: xBuyerUserIds } },
+            select: { followerId: true },
+            take: 60,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const ids = new Set<string>();
+    for (const row of projectFollowers) ids.add(row.userId);
+    for (const row of watchlisted) ids.add(row.userId);
+    for (const row of recentTraders) ids.add(row.userId);
+    for (const row of xTraderFollowers) ids.add(row.followerId);
+    for (const buyerId of xBuyerUserIds) ids.delete(buyerId);
+
+    return [...ids].slice(0, 80);
   }
 
   async listHotBuys(limit = 5): Promise<HotBuySnapshot[]> {
