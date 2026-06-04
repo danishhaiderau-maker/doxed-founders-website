@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Redesign Feed as Money Feed: filter build noise, trading tape, money-weighted bubbles
 
 ## Last Activity
 
