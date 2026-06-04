@@ -46,10 +46,14 @@ const token =
   xSecrets.RAILWAY_API_TOKEN?.trim() ||
   process.env.RAILWAY_TOKEN?.trim();
 const dbUrl = neon.DATABASE_URL || vercelCheck.DATABASE_URL;
-const jwtSecret = vercelCheck.JWT_SECRET || 'rhTQ807wvteYvFpgBhz0mwwD2y6EaH0JNKGRwPbbEDs=';
+const jwtSecret = vercelCheck.JWT_SECRET?.trim();
 
 if (!token || !dbUrl) {
   console.error('Missing RAILWAY_TOKEN or DATABASE_URL in vault');
+  process.exit(1);
+}
+if (!jwtSecret || jwtSecret.length < 32) {
+  console.error('Missing JWT_SECRET (32+ chars) in vault/.env.vercel.check');
   process.exit(1);
 }
 

@@ -135,14 +135,19 @@ async function main() {
 
   const apiUrl = xSecrets.API_URL?.trim() || RAILWAY_API;
   const dbUrl = neon.DATABASE_URL || vercelCheck.DATABASE_URL;
-  const jwtSecret = vercelCheck.JWT_SECRET || 'rhTQ807wvteYvFpgBhz0mwwD2y6EaH0JNKGRwPbbEDs=';
+  const jwtSecret = vercelCheck.JWT_SECRET?.trim();
   const nextAuthSecret = vercelCheck.NEXTAUTH_SECRET?.trim() || jwtSecret;
-  const googleId =
-    vercelCheck.GOOGLE_CLIENT_ID?.trim() ||
-    localEnv.GOOGLE_CLIENT_ID?.trim() ||
-    '84665204636-sl9vqeu6eqr0gg3nrgo490vvvfagsfb0.apps.googleusercontent.com';
-  const googleSecret =
-    vercelCheck.GOOGLE_CLIENT_SECRET?.trim() || localEnv.GOOGLE_CLIENT_SECRET?.trim() || '';
+  const googleId = vercelCheck.GOOGLE_CLIENT_ID?.trim() || localEnv.GOOGLE_CLIENT_ID?.trim();
+  const googleSecret = vercelCheck.GOOGLE_CLIENT_SECRET?.trim() || localEnv.GOOGLE_CLIENT_SECRET?.trim() || '';
+
+  if (!dbUrl) {
+    console.error('Missing DATABASE_URL in vault/.env.neon or .env.vercel.check');
+    process.exit(1);
+  }
+  if (!jwtSecret || jwtSecret.length < 32) {
+    console.error('Missing JWT_SECRET (32+ chars) in vault/.env.vercel.check');
+    process.exit(1);
+  }
 
   console.log('\n=== Sync production cloud ===\n');
 
@@ -193,7 +198,6 @@ async function main() {
       WEBAUTHN_RP_ID: 'doxxedcrypto.digital',
       TRADING_AGENT_BOT_URL: BTC_BOT_URL,
       CONSERVATIVE_BTC_BOT_URL: BTC_BOT_URL,
-      RAILWAY_TOKEN: railwayToken,
     });
   } else {
     console.warn('\nSkip Railway API sync — set RAILWAY_TOKEN in vault/.env.x.secrets');
