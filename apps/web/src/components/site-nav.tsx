@@ -19,6 +19,7 @@ const PRIMARY_NAV = [
   { href: '/projects', label: 'Projects' },
   { href: '/trust-center', label: 'Trust Center' },
   { href: '/agent-hub', label: 'Agents' },
+  { href: '/mobile', label: 'Android app' },
 ] as const;
 
 /** Row 2 — Trade & community */
@@ -87,6 +88,7 @@ function navActive(pathname: string, href: string) {
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
+  if (href === '/mobile') return pathname === '/mobile';
   if (href === '/founder-den') {
     return (
       pathname.startsWith('/founder-den') ||
