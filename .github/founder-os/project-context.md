@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(copilot): hero Ask mode and GitHub mission context in Mission Control
+chore(founder-os): sync tasks
 
 ## Last Activity
 
