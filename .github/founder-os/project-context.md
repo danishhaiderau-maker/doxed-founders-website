@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): restore updateBuilderSettings import
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
