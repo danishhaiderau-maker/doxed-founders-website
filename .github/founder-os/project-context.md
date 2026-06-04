@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (2 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (2 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(ui): clarify Run build vs Cursor working; drop stale batch-sync hint
 
 ## Last Activity
 
