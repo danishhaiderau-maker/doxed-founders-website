@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-docs: add front-page privacy guide with diagrams and device security
+docs: mobile vault sync roadmap and APK release phases
 
 ## Last Activity
 
-9m ago
+Just now
