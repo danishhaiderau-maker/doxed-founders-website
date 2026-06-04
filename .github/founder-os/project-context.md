@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: mobile vault sync roadmap and APK release phases
+chore(founder-os): sync tasks
 
 ## Last Activity
 
