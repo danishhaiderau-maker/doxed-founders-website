@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(founder-den): quickstart guide and filter stale OWASP next steps
 
 ## Last Activity
 
