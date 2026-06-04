@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(feed): Sprint 7b unified feed hub and Platform Feed terminal
+chore(founder-os): sync tasks
 
 ## Last Activity
 
