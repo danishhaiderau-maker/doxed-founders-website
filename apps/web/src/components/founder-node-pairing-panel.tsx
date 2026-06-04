@@ -54,7 +54,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
         setMsg(
           online
             ? 'Vault connected on your desktop. The pairing code stays hidden until you disconnect or pair another device.'
-            : 'Account linked in the cloud, but your PC is not heartbeating. Use Pair another desktop device below, generate a new code, and enter it in the Founder Node tray app (old tokens stop working after re-pair or 401).',
+            : 'Account linked in the cloud, but your PC is not heartbeating. Open Founder Node from the Start Menu (tray icon), click Sync now, or generate a new code below and enter it in the tray app. Your old desktop token only stops working after you pair again with a new code — generating a code alone does not break the link.',
         );
       }
       setErr(null);

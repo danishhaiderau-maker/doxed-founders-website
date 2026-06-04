@@ -77,6 +77,12 @@ export function isFounderNodeAuthError(err: unknown): boolean {
   return /\((401|403)\)/.test(msg) || /unauthorized/i.test(msg);
 }
 
+export function throwIfFounderNodeAuthResponse(status: number, text: string): void {
+  if (status === 401 || status === 403) {
+    throw new Error(`Request failed (${status}): ${text.slice(0, 200)}`);
+  }
+}
+
 export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeHeartbeat {
   const ramGb = Math.round(os.totalmem() / 1e9);
   return {

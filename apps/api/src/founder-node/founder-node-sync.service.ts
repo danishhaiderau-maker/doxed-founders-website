@@ -7,7 +7,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
-const ONLINE_WINDOW_MS = 3 * 60 * 1000;
+const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 const JOB_TTL_MS = 5 * 60 * 1000;
 const STALE_PROCESSING_MS = 90_000;
 const POLL_MS = 400;

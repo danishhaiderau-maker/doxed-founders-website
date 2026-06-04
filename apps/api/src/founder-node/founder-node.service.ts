@@ -13,8 +13,8 @@ import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderCopilotService } from '../events/founder-copilot.service';
 
-const PAIRING_TTL_MS = 15 * 60 * 1000;
-const ONLINE_WINDOW_MS = 3 * 60 * 1000;
+const PAIRING_TTL_MS = 30 * 60 * 1000;
+const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class FounderNodeService {

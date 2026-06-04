@@ -4,6 +4,7 @@ import {
   rebuildVaultVectorIndex,
 } from '@dcf/founder-vault';
 import { readNodeConfig } from './vault-manager';
+import { throwIfFounderNodeAuthResponse } from './sync-client';
 
 const MAX_JOBS_PER_CYCLE = 5;
 
@@ -22,6 +23,7 @@ export async function fetchPendingSyncJob(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    throwIfFounderNodeAuthResponse(res.status, text);
     console.warn(`Sync job poll failed (${res.status}): ${text.slice(0, 200)}`);
     return null;
   }

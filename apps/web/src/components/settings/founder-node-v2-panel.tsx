@@ -3,14 +3,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 
-/** Founder Node v0.5.0+ required for sync jobs / vector rebuild */
+/** Founder Node v0.5.2+ recommended for auto-reconnect, faster heartbeat, start-at-login */
 function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   if (!version?.trim()) return true;
-  const m = version.trim().match(/^v?(\d+)\.(\d+)/i);
-  if (!m) return true;
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
-  return major < 0 || (major === 0 && minor < 5);
+  const parts = version
+    .trim()
+    .replace(/^v/i, '')
+    .split('.')
+    .map((n) => Number(n));
+  if (parts.some((n) => Number.isNaN(n))) return true;
+  const [major = 0, minor = 0, patch = 0] = parts;
+  if (major !== 0) return major < 0;
+  if (minor < 5) return true;
+  if (minor === 5 && patch < 2) return true;
+  return false;
 }
 
 function formatLastSeen(iso: string | null | undefined): string {
@@ -157,11 +163,10 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to v0.5.0+</p>
+          <p className="font-medium">Update Founder Node to v0.5.2+</p>
           <p className="mt-1 text-xs text-zinc-400">
-            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} cannot process sync jobs. Download the latest
-            installer in <strong className="text-cyan-200">Step 1 above</strong>, install it, then restart and retry
-            Rebuild vector index.
+            Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing auto-reconnect, faster sync, and start-at-login.
+            In Step 1 use <strong className="text-cyan-200">Check for updates</strong> in the tray menu (or download the latest installer), install, then leave the tray app open.
           </p>
         </div>
       )}
@@ -185,7 +190,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
           <p className="mt-2 text-xs leading-relaxed text-zinc-300">
             <strong className="text-white">Paired</strong> means this browser account is linked to your machine (one-time
             setup). <strong className="text-white">Online</strong> means the Founder Node tray app is running on your PC
-            and sending a heartbeat to Founder OS — usually every ~60 seconds. The website cannot index your vault by
+            and sending a heartbeat to Founder OS — about every 45 seconds when v0.5.2+ is running. The website cannot index your vault by
             itself; <strong className="text-white">Rebuild vector index</strong> is disabled until the tray app is online.
           </p>
           <p className="mt-2 text-[11px] text-zinc-500">
