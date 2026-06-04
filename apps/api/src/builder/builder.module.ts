@@ -3,11 +3,18 @@ import { AttestationModule } from '../attestation/attestation.module';
 import { FounderNodeModule } from '../founder-node/founder-node.module';
 import { GitHubModule } from '../github/github.module';
 import { ProjectsModule } from '../projects/projects.module';
+import { FounderMemoryGraphModule } from '../founder-memory/founder-memory-graph.module';
 import { BuilderController } from './builder.controller';
 import { BuilderService } from './builder.service';
 
 @Module({
-  imports: [GitHubModule, forwardRef(() => FounderNodeModule), AttestationModule, ProjectsModule],
+  imports: [
+    GitHubModule,
+    forwardRef(() => FounderNodeModule),
+    AttestationModule,
+    ProjectsModule,
+    FounderMemoryGraphModule,
+  ],
   controllers: [BuilderController],
   providers: [BuilderService],
   exports: [BuilderService],

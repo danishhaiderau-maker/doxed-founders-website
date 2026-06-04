@@ -54,6 +54,8 @@ import { FounderOsService } from '../founder-os/founder-os.service';
 import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
+import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
+import type { FounderMemoryGraphPatch } from '@dcf/utils';
 
 @Injectable()
 export class FounderCopilotService {
@@ -64,6 +66,7 @@ export class FounderCopilotService {
     private readonly builder: BuilderService,
     private readonly github: GitHubApiService,
     private readonly memory: FounderOsMemoryService,
+    private readonly memoryGraph: FounderMemoryGraphService,
     @Inject(forwardRef(() => BuildQueueService))
     private readonly buildQueue: BuildQueueService,
     @Inject(forwardRef(() => FounderOsService))
@@ -71,6 +74,31 @@ export class FounderCopilotService {
     @Inject(forwardRef(() => FounderAutopilotService))
     private readonly autopilot: FounderAutopilotService,
   ) {}
+
+  async getMemoryGraph(userId: string) {
+    return this.memoryGraph.resolveForUser(userId);
+  }
+
+  async patchMemoryGraph(userId: string, body: Record<string, unknown>) {
+    const patch: FounderMemoryGraphPatch = {};
+    const keys = [
+      'project',
+      'active_goal',
+      'current_task',
+      'blocked_by',
+      'next_action',
+      'current_branch',
+      'current_pr',
+      'hypothesis',
+      'experiment_status',
+    ] as const;
+    for (const k of keys) {
+      if (body[k] !== undefined) {
+        (patch as Record<string, unknown>)[k] = body[k];
+      }
+    }
+    return this.memoryGraph.patchForUser(userId, patch);
+  }
 
   async getProjectMemory(userId: string) {
     void this.founderOs.autoSyncGitHubCommits(userId).catch(() => undefined);
@@ -290,6 +318,7 @@ export class FounderCopilotService {
           }
         : null,
       connectedNodes,
+      memoryGraph: await this.memoryGraph.resolveForUser(userId),
     };
   }
 
@@ -446,6 +475,11 @@ export class FounderCopilotService {
       } catch {
         /* still dispatch with live GitHub activity fetch */
       }
+
+      await this.memoryGraph.patchForUser(userId, {
+        current_task: taskPrompt.slice(0, 500),
+        current_branch: memory.currentBranch ?? undefined,
+      });
 
       const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
         spec: taskPrompt,
@@ -657,8 +691,10 @@ export class FounderCopilotService {
       workspaceActivity,
     });
 
-    const systemPrompt =
-      'You are Founder Copilot — persistent project memory for crypto founders. Answer from the supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown. Do not invent security incidents or claim secrets are exposed unless the user asks about security; generic hardening tips are fine but say they are preventive, not scan results. API keys and tokens stay server-side on Doxxed Crypto — never ask users to paste secrets in chat.';
+    const memoryGraph = await this.memoryGraph.resolveForUser(userId);
+    const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
+
+    const systemPrompt = `${memoryPrefix}You are Founder Copilot — persistent project memory for crypto founders. Answer from the Founder Memory Graph and supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown. Do not invent security incidents or claim secrets are exposed unless the user asks about security; generic hardening tips are fine but say they are preventive, not scan results. API keys and tokens stay server-side on Doxxed Crypto — never ask users to paste secrets in chat.`;
 
     const aiResult = await this.builder.tryCopilotChatCompletion(
       userId,

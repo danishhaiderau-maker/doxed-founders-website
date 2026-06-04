@@ -12,6 +12,7 @@ import {
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
+import { FounderMemoryGraphStrip } from '@/components/founder-memory-graph-strip';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
@@ -287,12 +288,11 @@ export function FounderOsDashboardLayout({
                 ))}
               </div>
 
-              <section className="rounded-2xl border border-violet-500/20 bg-zinc-900/20 p-4 sm:p-5">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                  Current goal
-                </p>
-                <p className="mt-1 text-lg font-semibold text-white">{currentGoal}</p>
-              </section>
+              <FounderMemoryGraphStrip
+                accessToken={accessToken}
+                initial={memory?.memoryGraph ?? null}
+                onSaved={() => void load()}
+              />
 
               <FounderCopilotChat
                 key={chatKey}
