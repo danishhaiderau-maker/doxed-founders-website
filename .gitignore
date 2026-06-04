@@ -81,5 +81,12 @@ services/btc-conservative-agent/.env
 services/btc-conservative-agent/data/*
 !services/btc-conservative-agent/data/.gitkeep
 
+# Local-only dev scripts (personal machine launchers / probes)
+scripts/win1.ps1
+scripts/win2.ps1
+scripts/_test.py
+scripts/_*.mjs
+scripts/run_sim.py
+
 # Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
 # Audit export (code-only): ../doxedcryptofounder-audit/
