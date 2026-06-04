@@ -82,8 +82,11 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
     input.commits.length > 0
       ? 1 - signalCommits.length / input.commits.length
       : 0;
+  const batchedSyncAlreadyLive = input.commits.some((c) =>
+    /sync memory \(context \+ roadmap \+ tasks\)/i.test(c.message),
+  );
   const syncHygieneStep =
-    syncNoiseRatio >= 0.4 && input.commits.length >= 6
+    !batchedSyncAlreadyLive && syncNoiseRatio >= 0.4 && input.commits.length >= 6
       ? 'Batch Founder OS sync (context + roadmap + tasks) into one commit; skip when unchanged'
       : null;
 
