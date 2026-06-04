@@ -18,6 +18,7 @@ import { MissionControlTrustStrip } from '@/components/mission-control-trust-str
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
+  copilotMissionBuild,
   copilotResume,
   fetchAccountOverview,
   fetchBuildRoom,
@@ -29,6 +30,8 @@ import {
   ProjectMemory,
   ProjectRoom,
 } from '@/lib/api';
+import { pollMissionBuildUntilDone } from '@/lib/mission-build-runner';
+import { AI_STACK_HREF } from '@/lib/copilot-ai-stack';
 
 type NavItem = { id: WorkspaceTab; label: string; icon: string };
 
@@ -89,6 +92,7 @@ export function FounderOsDashboardLayout({
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [roleLabel, setRoleLabel] = useState<string>('Founder');
   const [resumeBusy, setResumeBusy] = useState(false);
+  const [missionBuildBusy, setMissionBuildBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<Awaited<
     ReturnType<typeof fetchPlatformSyncStatus>
   > | null>(null);
@@ -152,12 +156,64 @@ export function FounderOsDashboardLayout({
       setQuickPrompt(result.message);
       setChatKey((k) => k + 1);
       onMessage?.(result.dispatchHint ?? result.message);
+
+      const mb = result.missionBuild;
+      if (mb?.status === 'dispatched' && mb.agentId && mb.runId) {
+        await pollMissionBuildUntilDone(
+          accessToken,
+          {
+            graph: result.memory.memoryGraph!,
+            taskLabel: mb.taskLabel,
+            status: mb.status,
+            worker: 'CURSOR',
+            message: result.message,
+            agentId: mb.agentId,
+            runId: mb.runId,
+          },
+          (line) => onMessage?.(line),
+        );
+      } else if (mb?.status === 'dispatched' && mb.conversationId) {
+        await pollMissionBuildUntilDone(
+          accessToken,
+          {
+            graph: result.memory.memoryGraph!,
+            taskLabel: mb.taskLabel,
+            status: mb.status,
+            worker: 'OPENHANDS',
+            message: result.message,
+            conversationId: mb.conversationId,
+          },
+          (line) => onMessage?.(line),
+        );
+      }
+
       void load();
       onRefresh();
     } catch (err) {
       onMessage?.(err instanceof Error ? err.message : 'Resume failed');
     } finally {
       setResumeBusy(false);
+    }
+  }
+
+  async function handleSidebarMissionBuild() {
+    setMissionBuildBusy(true);
+    try {
+      const worker =
+        workerStatus?.buildWorker === 'CURSOR' || workerStatus?.buildWorker === 'OPENHANDS'
+          ? workerStatus.buildWorker
+          : undefined;
+      const result = await copilotMissionBuild(accessToken, worker ? { worker } : undefined);
+      onMessage?.(result.message);
+      if (result.status === 'dispatched') {
+        await pollMissionBuildUntilDone(accessToken, result, (line) => onMessage?.(line));
+      }
+      void load();
+      onRefresh();
+    } catch (err) {
+      onMessage?.(err instanceof Error ? err.message : 'Build failed');
+    } finally {
+      setMissionBuildBusy(false);
     }
   }
 
@@ -246,14 +302,24 @@ export function FounderOsDashboardLayout({
                     Run your startup from anywhere
                   </h1>
                 </div>
-                <button
-                  type="button"
-                  disabled={resumeBusy}
-                  onClick={() => void handleResumeWork()}
-                  className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
-                >
-                  {resumeBusy ? 'Loading…' : '▶ Resume Work'}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={resumeBusy || missionBuildBusy}
+                    onClick={() => void handleResumeWork()}
+                    className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                  >
+                    {resumeBusy ? 'Resuming…' : '▶ Resume Work'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={missionBuildBusy || resumeBusy}
+                    onClick={() => void handleSidebarMissionBuild()}
+                    className="rounded-xl border border-violet-500/40 px-4 py-2.5 text-sm font-medium text-violet-200 hover:bg-violet-950/40 disabled:opacity-50"
+                  >
+                    {missionBuildBusy ? 'Building…' : 'Run build'}
+                  </button>
+                </div>
               </header>
 
               <MissionControlStatusStrip
@@ -301,7 +367,15 @@ export function FounderOsDashboardLayout({
                 initial={memory?.memoryGraph ?? null}
                 lastCommit={memory?.lastCommit}
                 openTaskCount={memory?.openTasks?.length ?? 0}
+                buildWorker={workerStatus?.buildWorker}
+                workerReady={workerStatus?.buildWorker !== 'NONE'}
+                repoFullName={memory?.repoFullName}
                 onSaved={() => void load()}
+                onBuildComplete={(msg) => {
+                  onMessage?.(msg);
+                  void load();
+                  onRefresh();
+                }}
               />
 
               <FounderCopilotChat
@@ -380,6 +454,22 @@ export function FounderOsDashboardLayout({
                     >
                       View run →
                     </a>
+                  )}
+                  <button
+                    type="button"
+                    disabled={missionBuildBusy || workerStatus?.buildWorker === 'NONE'}
+                    onClick={() => void handleSidebarMissionBuild()}
+                    className="mt-3 w-full rounded-lg bg-violet-600/80 py-2 text-[11px] font-semibold text-white hover:bg-violet-600 disabled:opacity-40"
+                  >
+                    {missionBuildBusy ? 'Running…' : 'Run current task'}
+                  </button>
+                  {workerStatus?.buildWorker === 'NONE' && (
+                    <Link
+                      href={AI_STACK_HREF}
+                      className="mt-2 block text-center text-[10px] text-zinc-500 hover:text-violet-300"
+                    >
+                      Connect builder →
+                    </Link>
                   )}
                 </div>
                 <button

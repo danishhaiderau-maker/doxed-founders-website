@@ -45,6 +45,20 @@ export function formatMissionStateBlock(
   return lines.join('\n');
 }
 
+/** Spec + label for one-click builder dispatch from Mission State (Sprint 7d). */
+export function resolveMissionBuildTask(graph: FounderMemoryGraph): {
+  spec: string;
+  taskLabel: string;
+} {
+  const taskLabel =
+    graph.current_task?.trim() ||
+    graph.next_action?.trim() ||
+    graph.active_goal?.trim() ||
+    'Continue project work';
+  const spec = graph.next_action?.trim() || taskLabel;
+  return { spec, taskLabel };
+}
+
 /** Copilot instruction when user continues work — graph leads, infra hints follow. */
 export function buildContinueFromMissionPrompt(graph: FounderMemoryGraph): string {
   const parts = [
