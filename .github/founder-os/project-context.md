@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Sprint 3: Mission State for resume and continue flows
+chore(founder-os): sync tasks
 
 ## Last Activity
 
