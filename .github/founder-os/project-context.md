@@ -16,4 +16,4 @@ chore(founder-os): sync tasks
 
 ## Last Activity
 
-2m ago
+Just now
