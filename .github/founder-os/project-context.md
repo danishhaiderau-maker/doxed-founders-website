@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+fix(settings): surface Jatevo (\) in brain dropdown and LLM list
 
 ## Last Activity
 
