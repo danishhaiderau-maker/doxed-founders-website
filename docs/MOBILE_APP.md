@@ -2,6 +2,8 @@
 
 The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypto.digital). It opens **Discover** with `?app=android` so navigation emphasizes what works well on a phone.
 
+**Roadmap (vault on phone, PC sync, release phases):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)
+
 ## In scope (default mobile experience)
 
 | Area | Routes |
