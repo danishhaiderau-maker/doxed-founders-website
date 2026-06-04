@@ -1434,6 +1434,67 @@ export function fetchAirdropRunwayMe(token: string) {
   >('/airdrop/runway/me', undefined, token);
 }
 
+export type BuilderRewardsEntry = {
+  rank: number;
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  twitterConnected: boolean;
+  tier: 'bronze' | 'silver' | 'gold' | 'platinum' | 'legend' | 'genesis';
+  tierLabel: string;
+  builderScore: number;
+  reputationPoints: number;
+  activityScore: number;
+  builderActivityScore: number;
+  scoutScore: number;
+  tradingScore: number;
+  contributionScore: number;
+  status: 'active' | 'warming' | 'at_risk' | 'decaying';
+  xTrust: 'eligible' | 'review' | 'not_connected';
+  lastActiveAt: string | null;
+  idleDays: number | null;
+  weeklyDecayPercent: number;
+  ddollarBalanceUsd: number | null;
+  rewardSharePercent: number;
+  estimatedTokens: number;
+  estimatedUsd: number;
+};
+
+export type BuilderRewardsResponse = {
+  entries: BuilderRewardsEntry[];
+  totalListed: number;
+  twitterConnectedCount: number;
+  totalBuilderScore: number;
+  rules: {
+    twitterSignInRequired: boolean;
+    inactivityDays: number;
+    weeklyDecayPercent: number;
+    blueTickBonusPercent: number;
+    snapshotWeights: Record<string, number>;
+    snapshotNote: string;
+    blueTickNote: string;
+    principle: string;
+  };
+};
+
+export function fetchBuilderRewardsLeaderboard(limit = 100) {
+  return apiFetch<BuilderRewardsResponse>(`/builder-rewards/leaderboard?limit=${limit}`);
+}
+
+export function fetchBuilderRewardsMe(token: string) {
+  return apiFetch<
+    BuilderRewardsEntry & {
+      rank: number | null;
+      displayName: string;
+      twitterConnected: boolean;
+      needsTwitter: boolean;
+      activeDaysEstimate: number;
+      warning: { level: 'warn' | 'critical'; message: string } | null;
+      rules: BuilderRewardsResponse['rules'];
+    }
+  >('/builder-rewards/me', undefined, token);
+}
+
 export function fetchBustedTraders() {
   return apiFetch<BustedTraderEntry[]>('/paper-trading/busted');
 }

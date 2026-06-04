@@ -43,6 +43,7 @@ export * from './listing-voting';
 export * from './trust-weight';
 export * from './missed-alpha';
 export * from './airdrop';
+export * from './builder-rewards';
 export * from './airdrop-runway';
 export * from './token-price';
 export * from './token-input';
