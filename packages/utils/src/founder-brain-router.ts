@@ -59,9 +59,13 @@ export function isFounderRepoStatusPrompt(prompt: string): boolean {
   if (/\b(implement|refactor|fix bug|write code|create pr|open pr|patch)\b/.test(t)) return false;
   return (
     /what (am i|are we|were we|is|are) (working|building|shipping)/.test(t) ||
+    /what'?s? (the )?(status|progress|launch readiness)/.test(t) ||
+    /^(status|progress)\b/.test(t) ||
     /what (have i|did i|have we) (ship|shipped|done)/.test(t) ||
     /what (changed|shipped).{0,30}(today|this week|last 24|yesterday|recently)/.test(t) ||
     /what should (i|we) (work on|ship|build) next/.test(t) ||
+    /(tell|show) me what.{0,50}(working|shipping|shipped|status)/.test(t) ||
+    /can you (tell|check|see|look).{0,60}(working|repo|repository|github|status|commits?)/.test(t) ||
     /check (my |our )?(git\s*hub|repo|repository)/.test(t) ||
     /(see|look at|check|review).{0,48}(repo|repository|github|commits?)/.test(t) ||
     /currently working on/.test(t) ||
