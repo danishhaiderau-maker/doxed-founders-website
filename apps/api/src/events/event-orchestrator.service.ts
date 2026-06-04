@@ -61,12 +61,23 @@ export class EventOrchestratorService {
   private async onBuildSignal(event: FounderEvent) {
     const payload = event.payload as { suggestionId?: string; autoPublish?: boolean };
     if (event.userId) {
-      await this.notifications.notifyUser(event.userId, {
-        type: NotificationType.FOUNDER_EVENT,
-        title: event.title,
-        body: 'Review the suggested update in Founder Copilot — publish everywhere when ready.',
-        link: '/founder-den?tab=build',
+      const duplicateWindow = new Date(Date.now() - 4 * 60 * 60 * 1000);
+      const recent = await this.prisma.notification.findFirst({
+        where: {
+          userId: event.userId,
+          type: NotificationType.FOUNDER_EVENT,
+          title: event.title,
+          createdAt: { gte: duplicateWindow },
+        },
       });
+      if (!recent) {
+        await this.notifications.notifyUser(event.userId, {
+          type: NotificationType.FOUNDER_EVENT,
+          title: event.title,
+          body: 'Review the suggested update in Founder Copilot — publish everywhere when ready.',
+          link: '/founder-den?tab=build',
+        });
+      }
     }
 
     if (payload.autoPublish && payload.suggestionId && event.userId) {

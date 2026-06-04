@@ -47,6 +47,7 @@ export * from './token-price';
 export * from './token-input';
 export * from './risk-score';
 export * from './founder-presence';
+export * from './founder-build-calendar';
 export * from './virtual-economy';
 export * from './engagement-rewards';
 export * from './founder-os';

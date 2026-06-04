@@ -25,6 +25,10 @@ import {
   getRepoStarterTemplate,
   REPO_STARTER_TEMPLATES,
 } from '@dcf/utils';
+import {
+  publicBuildDayNumberForFounder,
+  updateFounderBuildStreak,
+} from './founder-build-streak.helper';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -373,7 +377,7 @@ export class FounderOsService {
       throw new BadRequestException(`Need ${CURSOR_BUILD_SESSION_CREDITS} Founder Credits for a build room session`);
     }
 
-    const dayNumber = (founder.buildStreakDays || 0) + 1;
+    const dayNumber = publicBuildDayNumberForFounder(founder);
     const suggested = buildSuggestionFromBuildPrompt(input.prompt, dayNumber);
 
     const updated = await this.prisma.founder.update({
@@ -486,7 +490,7 @@ export class FounderOsService {
 
     if (dest.buildFeed) {
       try {
-        const dayNumber = (founder.buildStreakDays || 0) + 1;
+        const dayNumber = publicBuildDayNumberForFounder(founder);
         const post = await this.prisma.founderBuildPost.create({
           data: {
             founderId: founder.id,
@@ -501,7 +505,7 @@ export class FounderOsService {
           },
         });
         buildPostId = post.id;
-        await this.updateBuildStreak(founder.id);
+        await updateFounderBuildStreak(this.prisma, founder.id);
         await this.points.award(userId, POINTS.FOUNDER_BUILD_POST, 'FOUNDER_BUILD_POST');
         results.buildFeed = { ok: true, buildPostId: post.id };
       } catch (err) {
@@ -662,31 +666,6 @@ export class FounderOsService {
     });
 
     return { success: true, suggestionId: record.id };
-  }
-
-  private async updateBuildStreak(founderId: string) {
-    const founder = await this.prisma.founder.findUnique({ where: { id: founderId } });
-    if (!founder) return 0;
-
-    const now = new Date();
-    const last = founder.lastBuildPostAt;
-    let streak = founder.buildStreakDays;
-    if (!last) {
-      streak = 1;
-    } else {
-      const daysSince = Math.floor((now.getTime() - last.getTime()) / 86400000);
-      streak = daysSince <= 7 ? streak + 1 : 1;
-    }
-
-    await this.prisma.founder.update({
-      where: { id: founderId },
-      data: {
-        buildStreakDays: streak,
-        lastBuildPostAt: now,
-        publicBuildingSince: founder.publicBuildingSince ?? now,
-      },
-    });
-    return streak;
   }
 
   async markCommentHelpful(founderUserId: string, projectId: string, commentId: string) {

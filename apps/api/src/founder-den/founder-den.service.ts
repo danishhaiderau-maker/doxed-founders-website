@@ -50,6 +50,10 @@ import {
   type DiscoverUniverseStage,
   timeframeToMs,
 } from '@dcf/utils';
+import {
+  publicBuildDayNumberForFounder,
+  updateFounderBuildStreak,
+} from '../founder-os/founder-build-streak.helper';
 import { PrismaService } from '../prisma/prisma.service';
 import { resolveSolanaTreasuryAddress } from '../payments/platform-treasury';
 import { PointsService } from '../points/points.service';
@@ -426,14 +430,14 @@ export class FounderDenService {
       data: {
         founderId: founder.id,
         projectId: dto.projectId,
-        dayNumber: dto.dayNumber,
+        dayNumber: dto.dayNumber ?? publicBuildDayNumberForFounder(founder),
         headline: dto.headline.trim(),
         body: dto.body.trim(),
         githubUrl: dto.githubUrl?.trim(),
       },
     });
 
-    const streak = await this.updateBuildStreak(founder.id);
+    const streak = await updateFounderBuildStreak(this.prisma, founder.id);
     await this.syncPresenceLevel(founder.id);
     await this.points.award(userId, POINTS.FOUNDER_BUILD_POST, 'FOUNDER_BUILD_POST');
 
@@ -1739,31 +1743,6 @@ export class FounderDenService {
       where: { id: founderId },
       data: { presenceLevel: level, reputationScore: reputation.total },
     });
-  }
-
-  private async updateBuildStreak(founderId: string) {
-    const founder = await this.prisma.founder.findUnique({ where: { id: founderId } });
-    if (!founder) return 0;
-
-    const now = new Date();
-    const last = founder.lastBuildPostAt;
-    let streak = founder.buildStreakDays;
-    if (!last) {
-      streak = 1;
-    } else {
-      const daysSince = Math.floor((now.getTime() - last.getTime()) / 86400000);
-      streak = daysSince <= 7 ? streak + 1 : 1;
-    }
-
-    await this.prisma.founder.update({
-      where: { id: founderId },
-      data: {
-        buildStreakDays: streak,
-        lastBuildPostAt: now,
-        publicBuildingSince: founder.publicBuildingSince ?? now,
-      },
-    });
-    return streak;
   }
 
   private buildHeatmap(posts: { publishedAt: Date }[]) {

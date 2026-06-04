@@ -5,6 +5,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { EventsService } from '../events/events.service';
 import { FounderOsMemoryService } from '../github/founder-os-memory.service';
+import {
+  publicBuildDayNumberForFounder,
+  repairFounderBuildStreakIfInflated,
+} from './founder-build-streak.helper';
 
 const USER_STALE_MS = 5 * 60 * 1000;
 const BACKGROUND_INTERVAL_MS = 15 * 60 * 1000;
@@ -118,7 +122,9 @@ export class GithubAutoSyncService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const dayNumber = (founder.buildStreakDays || 0) + 1;
+    await repairFounderBuildStreakIfInflated(this.prisma, founder);
+    const founderFresh = await this.prisma.founder.findUnique({ where: { id: founder.id } });
+    const dayNumber = publicBuildDayNumberForFounder(founderFresh ?? founder);
     const suggested = buildSuggestedUpdateFromCommits(commits, dayNumber);
 
     const record = await this.prisma.suggestedBuildUpdate.create({
