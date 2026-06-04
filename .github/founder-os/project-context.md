@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore: improve audit export bundle and add BTC bot start script
+fix(scripts): load Neon DATABASE_URL from vault for production scripts
 
 ## Last Activity
 
