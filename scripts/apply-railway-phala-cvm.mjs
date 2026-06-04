@@ -35,8 +35,11 @@ if (!base) {
 
 const apiKey = merged.PHALA_CVM_API_KEY?.trim() || merged.PHALA_API_KEY?.trim();
 if (!apiKey) {
-  console.error('Set PHALA_CVM_API_KEY or PHALA_API_KEY in vault/.env.phala');
+  console.error('Set PHALA_CVM_API_KEY (and optionally PHALA_API_KEY for inference) in vault/.env.phala');
   process.exit(1);
+}
+if (!merged.PHALA_API_KEY?.trim()) {
+  console.warn('PHALA_API_KEY empty — CVM paths will work; Phala Private AI inference needs phak_ key.');
 }
 
 const vars = {

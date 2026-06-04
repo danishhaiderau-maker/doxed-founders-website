@@ -37,6 +37,10 @@ export function loadPhalaCvmEnv() {
     ...phala,
     JWT_SECRET: phala.JWT_SECRET || vercel.JWT_SECRET || '',
     RAILWAY_TOKEN: phala.RAILWAY_TOKEN || x.RAILWAY_TOKEN || process.env.RAILWAY_TOKEN || '',
+    PHALA_CLOUD_API_KEY:
+      phala.PHALA_CLOUD_API_KEY ||
+      process.env.PHALA_CLOUD_API_KEY ||
+      '',
   };
 
   return { merged, phalaPath, hasPhalaFile: existsSync(phalaPath) };
