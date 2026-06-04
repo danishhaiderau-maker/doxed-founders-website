@@ -29,6 +29,7 @@ import {
   mergeWorkforceAgentWithLlm,
   processCommandBar,
   runWorkforceAgent,
+  isFounderRepoStatusPrompt,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -607,8 +608,11 @@ export class BuildQueueService {
     }
 
     const ideaId = await this.createFromOrchestratorOutput(userId, template, prompt, output);
+    const runtimeOutput = isFounderRepoStatusPrompt(prompt)
+      ? { ...output, githubIssues: [] }
+      : output;
     const runtime = ideaId
-      ? await this.executeWorkforceRuntime(userId, template, ideaId, output)
+      ? await this.executeWorkforceRuntime(userId, template, ideaId, runtimeOutput)
       : emptyWorkforceRuntime(template);
 
     if (ideaId) {

@@ -79,7 +79,9 @@ export function shouldPreferGithubGroundedBrainAnswer(
   prompt: string,
   commitsWithSignal: number,
 ): boolean {
-  return isFounderRepoStatusPrompt(prompt) && commitsWithSignal >= 3;
+  if (!isFounderRepoStatusPrompt(prompt)) return false;
+  // Status questions must not fall through to LLM paraphrase of stale tasks.json.
+  return commitsWithSignal >= 1;
 }
 
 const TASK_PROVIDER_PREFERENCE: Record<Exclude<FounderBrainTask, 'general'>, AiProviderKey[]> = {
