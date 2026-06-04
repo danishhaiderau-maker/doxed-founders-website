@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-den): quickstart guide and filter stale OWASP next steps
+fix(btc-bot): pass Railway healthcheck during long startup
 
 ## Last Activity
 
