@@ -1,3 +1,5 @@
+import { isFounderRepoStatusPrompt } from '@dcf/utils';
+
 export const AI_STACK_HREF = '/settings/builder';
 
 export type ProviderRow = {
@@ -126,6 +128,16 @@ export type CopilotSendMode = 'ask' | 'build';
 export function defaultSendMode(stack: CopilotStackSummary): CopilotSendMode {
   if (stack.canBuild && !stack.canAsk) return 'build';
   return 'ask';
+}
+
+/** Status / repo questions belong on Ask (Founder Brain), not Builder Agent. */
+export function resolveCopilotSendMode(
+  prompt: string,
+  stack: CopilotStackSummary,
+  requested?: CopilotSendMode,
+): CopilotSendMode {
+  if (isFounderRepoStatusPrompt(prompt)) return stack.canAsk ? 'ask' : defaultSendMode(stack);
+  return requested ?? defaultSendMode(stack);
 }
 
 export function primaryButtonLabel(mode: CopilotSendMode, _stack: CopilotStackSummary): string {

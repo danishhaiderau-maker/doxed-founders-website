@@ -46,6 +46,7 @@ import {
   primaryButtonLabel,
   ProviderRow,
   resolveAiTeamCards,
+  resolveCopilotSendMode,
   resolveCopilotStack,
   shortProviderName,
 } from '@/lib/copilot-ai-stack';
@@ -356,7 +357,10 @@ export function FounderCopilotChat({
       stop();
       setError(null);
 
-      const setupGap = copilotSetupGapMessage(mode, stack);
+      const effectiveMode = resolveCopilotSendMode(q, stack, mode);
+      if (effectiveMode !== mode) setSendMode('ask');
+
+      const setupGap = copilotSetupGapMessage(effectiveMode, stack);
       if (setupGap) {
         const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: q };
         setMessages((prev) => [
@@ -414,7 +418,7 @@ export function FounderCopilotChat({
         return;
       }
 
-      const useBuild = mode === 'build' && stack.canBuild;
+      const useBuild = effectiveMode === 'build' && stack.canBuild;
 
       try {
         if (useBuild) {

@@ -1,5 +1,6 @@
 import type { FounderMemoryGraph } from './founder-memory-graph';
 import {
+  filterCommitsForIntelligence,
   groupCommitsByInitiative,
   summarizeShippedOutcomes,
   type CommitSignal,
@@ -43,8 +44,9 @@ export type FounderBrainContextInput = {
 };
 
 export function deriveMissionIntelligence(input: FounderBrainContextInput): MissionIntelligence {
-  const themes = groupCommitsByInitiative(input.commits);
-  const shippedRecently = summarizeShippedOutcomes(input.commits, 8);
+  const signalCommits = filterCommitsForIntelligence(input.commits);
+  const themes = groupCommitsByInitiative(signalCommits);
+  const shippedRecently = summarizeShippedOutcomes(signalCommits, 8);
   const topTheme = themes[0];
 
   const graph = input.memoryGraph;
@@ -52,7 +54,9 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
     ? `${topTheme.label} (${topTheme.commitCount} recent commits)`
     : null;
 
+  const githubSignalsStrong = signalCommits.length >= 3 && Boolean(topTheme);
   const currentInitiative =
+    (githubSignalsStrong && initiativeFromCommits) ||
     graph?.current_sprint?.trim() ||
     initiativeFromCommits ||
     input.roadmapInProgress ||
@@ -74,16 +78,35 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
       ? `Recent work advances ${topTheme?.label ?? 'the product'} — latest: ${shippedRecently[0]!.slice(0, 100)}`
       : `Launch readiness ${input.launchReadiness}% — connect repo activity for sharper signals`;
 
+  const syncNoiseRatio =
+    input.commits.length > 0
+      ? 1 - signalCommits.length / input.commits.length
+      : 0;
+  const syncHygieneStep =
+    syncNoiseRatio >= 0.4 && input.commits.length >= 6
+      ? 'Batch Founder OS sync (context + roadmap + tasks) into one commit; skip when unchanged'
+      : null;
+
   const recommendedNextStep =
+    syncHygieneStep ||
+    (openPrs.length > 0
+      ? `Review open PR #${openPrs[0]!.number}: ${openPrs[0]!.title.slice(0, 80)}`
+      : null) ||
     graph?.next_action?.trim() ||
-    input.openTasks[0] ||
+    (githubSignalsStrong ? null : input.openTasks[0]) ||
     input.suggestedNextStep ||
     (mergedRecently.length > 0
       ? `Review merged PR and deploy: ${mergedRecently[0]!.title.slice(0, 80)}`
       : 'Ship the top open task and sync GitHub');
 
+  const resolvedNextStep =
+    recommendedNextStep ??
+    (shippedRecently[0]
+      ? `Continue ${topTheme?.label ?? 'the product'} — latest ship: ${shippedRecently[0]!.slice(0, 80)}`
+      : 'Sync GitHub and ship the next feature commit');
+
   const signalCount =
-    input.commits.length +
+    signalCommits.length +
     input.pullRequests.length +
     input.recentDeploys.length +
     (graph?.current_task ? 1 : 0);
@@ -96,7 +119,7 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
     progressPercent: input.progressPercent,
     blocker,
     impact,
-    recommendedNextStep,
+    recommendedNextStep: resolvedNextStep,
     confidence,
     themes: themes.slice(0, 6),
     shippedRecently,
@@ -198,7 +221,9 @@ export function formatFounderBrainContextForPrompt(
     '',
     '## Response rules',
     '- Answer as a command center: initiative, what changed, why it matters, blockers, next step.',
-    '- Never reply with only task.json titles or generic "define milestone" unless no GitHub data exists.',
+    '- Prefer **Recent commits**, **Initiative themes**, and **What shipped recently** over repo tasks.json / roadmap boilerplate.',
+    '- Ignore chore(founder-os): sync * commits when describing current work — call out sync noise as hygiene if >40% of commits.',
+    '- Never reply with only task.json titles or generic "define milestone" when GitHub commit data exists.',
     '- Name real initiatives (Feed, Discover, Founder OS, Vault, Builder, Predictions) when commits support them.',
   );
 

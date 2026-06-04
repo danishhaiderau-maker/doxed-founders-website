@@ -53,6 +53,9 @@ import {
   resolveMissionBuildTask,
   getFounderBrainRouteLabel,
   shouldDispatchBuilderForCodeAsk,
+  isFounderRepoStatusPrompt,
+  shouldPreferGithubGroundedBrainAnswer,
+  filterCommitsForIntelligence,
   deriveMissionIntelligence,
   formatFounderBrainContextForPrompt,
   formatRuleBasedBrainAnswer,
@@ -952,9 +955,11 @@ export class FounderCopilotService {
       return this.dispatchCursorFromCopilot(userId, text);
     }
 
-    const intent = detectWorkforceIntent(text, options?.agentTemplate);
-    if (intent) {
-      return this.askViaOrchestrator(userId, text, intent);
+    if (!isFounderRepoStatusPrompt(text)) {
+      const intent = detectWorkforceIntent(text, options?.agentTemplate);
+      if (intent) {
+        return this.askViaOrchestrator(userId, text, intent);
+      }
     }
 
     if (detectContinueMissionIntent(text)) {
@@ -1109,20 +1114,24 @@ export class FounderCopilotService {
       ...extras,
     };
 
+    const signalCommits = filterCommitsForIntelligence(brainInput.commits);
     const intelligence = deriveMissionIntelligence(brainInput);
     const contextBlock = formatFounderBrainContextForPrompt(brainInput, intelligence);
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 
     const systemPrompt = `${memoryPrefix}You are Founder Brain — the command center for crypto founders. Use the assembled context below (commits, PRs, deployments, initiatives, mission graph). Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
 
-    const aiResult = await this.builder.tryCopilotChatCompletion(
-      userId,
-      systemPrompt,
-      `${prompt}\n\n---\n${contextBlock}`,
-      { founderBrainTask: brainTask },
-    );
-
     const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
+    const preferGrounded = shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length);
+
+    const aiResult = preferGrounded
+      ? ({ ok: false as const, llmErrors: ['github_grounded_status'] })
+      : await this.builder.tryCopilotChatCompletion(
+          userId,
+          systemPrompt,
+          `${prompt}\n\n---\n${contextBlock}`,
+          { founderBrainTask: brainTask },
+        );
 
     await this.events.emit({
       founderId: founder.id,
@@ -1138,13 +1147,16 @@ export class FounderCopilotService {
     let answerProvider: string = 'RULE_BASED';
     let llmErrors: string[] | undefined;
 
-    if (aiResult.ok) {
+    if (preferGrounded) {
+      answer = ruleBased;
+      answerProvider = 'FOUNDER_BRAIN';
+    } else if (aiResult.ok) {
       answer = aiResult.text;
       answerProvider = 'FOUNDER_BRAIN';
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
       answer = ruleBased;
-      answerProvider = 'RULE_BASED';
+      answerProvider = preferGrounded ? 'FOUNDER_BRAIN' : 'RULE_BASED';
     }
 
     const routeLabel = getFounderBrainRouteLabel(brainTask);
