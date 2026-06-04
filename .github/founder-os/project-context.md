@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs(ui): clarify what to connect per AI provider (Ollama needs no key)
+fix(copilot): one answer for status asks; no Cursor/Researcher side effects
 
 ## Last Activity
 
