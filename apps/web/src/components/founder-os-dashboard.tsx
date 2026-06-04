@@ -12,7 +12,7 @@ import {
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
-import { FounderMemoryGraphStrip } from '@/components/founder-memory-graph-strip';
+import { MissionStatePanel } from '@/components/mission-state-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
@@ -287,9 +287,11 @@ export function FounderOsDashboardLayout({
                 ))}
               </div>
 
-              <FounderMemoryGraphStrip
+              <MissionStatePanel
                 accessToken={accessToken}
                 initial={memory?.memoryGraph ?? null}
+                lastCommit={memory?.lastCommit}
+                openTaskCount={memory?.openTasks?.length ?? 0}
                 onSaved={() => void load()}
               />
 

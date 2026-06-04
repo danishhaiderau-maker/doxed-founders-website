@@ -3887,6 +3887,23 @@ export function patchCopilotMemoryGraph(patch: FounderMemoryGraphPatch, token: s
   );
 }
 
+export function applyCopilotMemoryGraphAfterBuild(
+  body: {
+    task: string;
+    status: string;
+    result?: string | null;
+    branch?: string | null;
+    prUrl?: string | null;
+  },
+  token: string,
+) {
+  return apiFetch<FounderMemoryGraph>(
+    '/copilot/memory-graph/after-build',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export function fetchCopilotStandup(token: string) {
   return apiFetch<{ standup: string; memory: ProjectMemory }>('/copilot/standup', undefined, token);
 }

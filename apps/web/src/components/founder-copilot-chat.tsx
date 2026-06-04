@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   copilotAsk,
+  applyCopilotMemoryGraphAfterBuild,
   executeBuildTask,
   fetchBuilderCursorRun,
   fetchBuilderOpenHandsRun,
@@ -12,10 +13,17 @@ import {
   fetchCopilotMemory,
   fetchWorkspaceActivity,
   ProjectMemory,
+  patchCopilotMemoryGraph,
   runCopilotAutopilot,
   syncGitHubCommits,
+  updateBuilderSettings,
 } from '@/lib/api';
-import { formatWorkspaceActivityForChat } from '@dcf/utils';
+import {
+  detectContinueMissionIntent,
+  formatWorkspaceActivityForChat,
+  isBuilderRunFailureStatus,
+  isBuilderRunSuccessStatus,
+} from '@dcf/utils';
 import {
   formatBuilderRunInChat,
   formatOpenHandsRunInChat,
@@ -40,7 +48,6 @@ import {
   resolveCopilotStack,
   shortProviderName,
 } from '@/lib/copilot-ai-stack';
-import { updateBuilderSettings } from '@/lib/api';
 
 type ChatMessage = {
   id: string;
@@ -227,10 +234,28 @@ export function FounderCopilotChat({
     setSendMode(defaultSendMode(stack));
   }, [stack.canAsk, stack.canBuild]);
 
+  const syncMissionAfterBuild = useCallback(
+    async (task: string, snap: BuilderRunSnapshot) => {
+      const status = snap.status;
+      if (!isBuilderRunFailureStatus(status) && !isBuilderRunSuccessStatus(status)) return;
+      const branch = snap.git?.branches?.[0]?.branch ?? null;
+      const prUrl = snap.git?.branches?.[0]?.prUrl ?? null;
+      try {
+        await applyCopilotMemoryGraphAfterBuild(
+          { task, status, result: snap.result ?? null, branch, prUrl },
+          accessToken,
+        );
+      } catch {
+        /* non-fatal */
+      }
+    },
+    [accessToken],
+  );
+
   const pollCursorIntoMessage = useCallback(
     async (assistantId: string, agentId: string, runId: string, task: string, mode?: string) => {
       const workerLabel = stack.buildLabel;
-      await pollCursorRunInChat(agentId, runId, accessToken, fetchBuilderCursorRun, (snap) => {
+      const final = await pollCursorRunInChat(agentId, runId, accessToken, fetchBuilderCursorRun, (snap) => {
         patchMessage(assistantId, {
           content: formatBuilderRunInChat({
             workerLabel,
@@ -241,23 +266,40 @@ export function FounderCopilotChat({
           }),
         });
       });
+      await syncMissionAfterBuild(task, final as BuilderRunSnapshot);
     },
-    [accessToken, memory?.repoFullName, patchMessage, stack.buildLabel],
+    [accessToken, memory?.repoFullName, patchMessage, stack.buildLabel, syncMissionAfterBuild],
   );
 
   const pollOpenHandsIntoMessage = useCallback(
     async (assistantId: string, conversationId: string, task: string) => {
       const workerLabel = stack.buildLabel;
-      await pollOpenHandsRunInChat(conversationId, accessToken, fetchBuilderOpenHandsRun, (snap) => {
-        patchMessage(assistantId, {
-          content: formatOpenHandsRunInChat({
-            workerLabel,
-            task,
-            repo: memory?.repoFullName,
-            snapshot: snap as OpenHandsRunSnapshot,
-          }),
-        });
-      });
+      const final = await pollOpenHandsRunInChat(
+        conversationId,
+        accessToken,
+        fetchBuilderOpenHandsRun,
+        (snap) => {
+          patchMessage(assistantId, {
+            content: formatOpenHandsRunInChat({
+              workerLabel,
+              task,
+              repo: memory?.repoFullName,
+              snapshot: snap as OpenHandsRunSnapshot,
+            }),
+          });
+        },
+      );
+      const status = final.status;
+      if (isBuilderRunFailureStatus(status) || isBuilderRunSuccessStatus(status)) {
+        try {
+          await applyCopilotMemoryGraphAfterBuild(
+            { task, status, result: final.result ?? null },
+            accessToken,
+          );
+        } catch {
+          /* non-fatal */
+        }
+      }
     },
     [accessToken, memory?.repoFullName, patchMessage, stack.buildLabel],
   );
@@ -332,6 +374,7 @@ export function FounderCopilotChat({
       try {
         if (useBuild) {
           setThinkingLabel(stack.buildLabel);
+          void patchCopilotMemoryGraph({ current_task: q }, accessToken).catch(() => undefined);
           const workerKey =
             preferredBuildWorker && stack.buildWorkers.some((w) => w.key === preferredBuildWorker)
               ? preferredBuildWorker
@@ -680,9 +723,11 @@ export function FounderCopilotChat({
                   const mode =
                     /take full control|sync everything|push all updates/i.test(chip)
                       ? 'ask'
-                      : /continue|create pr|finish|implement|fix|ship/i.test(chip) && stack.canBuild
-                        ? 'build'
-                        : 'ask';
+                      : detectContinueMissionIntent(chip)
+                        ? 'ask'
+                        : /create pr|finish|implement|fix|ship/i.test(chip) && stack.canBuild
+                          ? 'build'
+                          : 'ask';
                   if (mode === 'build') setSendMode('build');
                   void submit(chip, mode);
                 }}

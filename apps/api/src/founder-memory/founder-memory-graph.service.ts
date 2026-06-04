@@ -2,9 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { BuildQueueStatus, RoadmapStatus } from '@prisma/client';
 import {
   buildMemoryPrefix,
+  deriveMissionPatchAfterBuild,
   extractVaultRelaySummary,
   mergeFounderMemoryGraph,
   parseFounderMemoryGraph,
+  type AfterBuildPatchInput,
   type DeviceMemoryMetadataPayload,
   type DeviceMemoryPayload,
   type FounderMemoryGraph,
@@ -61,6 +63,13 @@ export class FounderMemoryGraphService {
     });
 
     return merged;
+  }
+
+  async applyAfterBuild(userId: string, input: Omit<AfterBuildPatchInput, 'previous'>) {
+    const previous = await this.resolveForUser(userId);
+    const patch = deriveMissionPatchAfterBuild({ ...input, previous });
+    if (!Object.keys(patch).length) return previous;
+    return this.patchForUser(userId, patch);
   }
 
   private async collectHints(userId: string) {
@@ -149,15 +158,17 @@ export class FounderMemoryGraphService {
       connectedNodes,
     });
 
+    const sprintItem = project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS);
     const goalFromVault = vaultRelay?.currentGoal?.trim();
     const activeGoal =
       settings?.currentGoalFocus?.trim() ||
       goalFromVault ||
       ideas[0]?.title ||
-      project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS)?.title ||
+      sprintItem?.title ||
       project?.roadmapItems[0]?.title ||
       'Define your next milestone';
 
+    const currentSprint = sprintItem?.title ?? null;
     const currentTask = tasks[0]?.title ?? ideas[0]?.title ?? null;
     const nextAction =
       tasks[1]?.title ??
@@ -167,6 +178,7 @@ export class FounderMemoryGraphService {
     return {
       projectName: project?.name ?? founder?.name ?? 'My startup',
       activeGoal,
+      currentSprint,
       currentTask,
       nextAction,
       currentBranch,

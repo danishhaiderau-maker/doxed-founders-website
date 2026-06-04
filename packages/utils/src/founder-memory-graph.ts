@@ -6,6 +6,8 @@ export type FounderMemoryGraph = {
   version: 1;
   project: string;
   active_goal: string;
+  /** Current sprint or milestone slice (Mission State). */
+  current_sprint: string | null;
   current_task: string | null;
   blocked_by: string | null;
   next_action: string | null;
@@ -23,6 +25,7 @@ export type FounderMemoryGraphPatch = Partial<
 export type FounderMemoryGraphHints = {
   projectName?: string;
   activeGoal?: string;
+  currentSprint?: string | null;
   currentTask?: string | null;
   nextAction?: string | null;
   blockedBy?: string | null;
@@ -55,6 +58,7 @@ export function parseFounderMemoryGraph(raw: unknown): FounderMemoryGraph | null
     version: 1,
     project,
     active_goal: activeGoal,
+    current_sprint: pickString(o, ['current_sprint', 'currentSprint']),
     current_task: pickString(o, ['current_task', 'currentTask']),
     blocked_by: pickString(o, ['blocked_by', 'blockedBy']),
     next_action: pickString(o, ['next_action', 'nextAction']),
@@ -76,6 +80,7 @@ export function emptyFounderMemoryGraph(projectName: string, activeGoal: string)
     version: 1,
     project: projectName,
     active_goal: activeGoal,
+    current_sprint: null,
     current_task: null,
     blocked_by: null,
     next_action: null,
@@ -106,6 +111,12 @@ export function mergeFounderMemoryGraph(
     ...base,
     project,
     active_goal: activeGoal,
+    current_sprint:
+      patch?.current_sprint !== undefined
+        ? patch.current_sprint
+        : hints.currentSprint !== undefined
+          ? hints.currentSprint
+          : base.current_sprint,
     current_task:
       patch?.current_task !== undefined
         ? patch.current_task
@@ -152,6 +163,7 @@ export function buildMemoryPrefix(graph: FounderMemoryGraph): string {
     `Project: ${graph.project}`,
     `Active goal: ${graph.active_goal}`,
   ];
+  if (graph.current_sprint) lines.push(`Current sprint: ${graph.current_sprint}`);
   if (graph.current_task) lines.push(`Current task: ${graph.current_task}`);
   if (graph.blocked_by) lines.push(`Blocked by: ${graph.blocked_by}`);
   if (graph.next_action) lines.push(`Next action: ${graph.next_action}`);
