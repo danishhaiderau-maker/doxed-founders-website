@@ -70,7 +70,7 @@ export class FeedHubService {
     const tape = terminal
       .filter((c) => isMoneyFeedTerminalKind(c.kind))
       .filter((c) => ['BUY', 'SELL', 'ADD', 'REDUCE', 'THESIS', 'HOT_BUY'].includes(c.kind))
-      .slice(0, 24);
+      .slice(0, 80);
 
     const listings = moneyUnified
       .filter((i) => i.eventType === 'listing_live')

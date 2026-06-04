@@ -2,18 +2,10 @@
 
 import Link from 'next/link';
 import type { FeedHubResponse } from '@/lib/api';
-import { FeedLiveTape } from './feed-live-tape';
-
 type Sections = NonNullable<FeedHubResponse['sections']>;
 
-export function FeedMoneySections({
-  sections,
-  showTape = true,
-}: {
-  sections: Sections;
-  showTape?: boolean;
-}) {
-  const { topMovers, tape, predictions, listings, smartMoney } = sections;
+export function FeedMoneySections({ sections }: { sections: Sections }) {
+  const { topMovers, predictions, listings, smartMoney } = sections;
 
   return (
     <div className="space-y-6">
@@ -36,8 +28,6 @@ export function FeedMoneySections({
           }))}
         />
       </section>
-
-      {showTape && tape.length > 0 && <FeedLiveTape cards={tape} />}
 
       {predictions.length > 0 && (
         <section>
