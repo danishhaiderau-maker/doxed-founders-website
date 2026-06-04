@@ -9,7 +9,7 @@ import { repoRoot, getAuditExportRoot, getSecretsVaultRoot } from './secrets-vau
 const DEST = getAuditExportRoot();
 
 /** Top-level files/dirs copied into the audit bundle. */
-const INCLUDE_TOP = new Set(['apps', 'packages', 'prisma', '.github']);
+const INCLUDE_TOP = new Set(['apps', 'packages', 'prisma', '.github', 'docs', 'services']);
 const INCLUDE_ROOT_FILES = new Set(['package.json', 'tsconfig.base.json']);
 
 const SKIP_DIRS = new Set([
@@ -18,6 +18,7 @@ const SKIP_DIRS = new Set([
   'out',
   'dist',
   'build',
+  'release',
   '.turbo',
   '.git',
   '.vercel',
@@ -25,6 +26,7 @@ const SKIP_DIRS = new Set([
   'docker',
   'scripts',
   'config',
+  'data',
   '.selfhost-pids',
   '.dev-pids',
 ]);
@@ -138,8 +140,9 @@ Phases in this export:
 - Phase 7: Scout prediction markets, Founder Brain Q&A
 - OpenHands remote agent (URL + API key) — desk copy-paste providers removed
 
-Public audit repo: github.com/danishhaiderau-maker/doxed-founders-audit
 Main app repo: github.com/danishhaiderau-maker/doxed-founders-website
+
+Included in this bundle: apps (api, web, founder-node), packages, prisma schema, docs, services (no runtime data/).
 
 Scheduled GitHub Actions (X daily sync, engagement lottery) are NOT exported here.
 They belong on doxed-founders-website only — that repo includes scripts/ and GitHub secrets
