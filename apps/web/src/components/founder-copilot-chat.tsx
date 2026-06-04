@@ -88,6 +88,10 @@ type FounderCopilotChatProps = {
   onResult?: (answer: string) => void;
   variant?: 'default' | 'hero' | 'embedded';
   memory?: ProjectMemory | null;
+  missionInitiative?: string | null;
+  missionNextStep?: string | null;
+  /** Hero Mission Control defaults to Ask so status questions do not dispatch Builder. */
+  defaultSendMode?: CopilotSendMode;
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;
   /** Injected assistant briefing (e.g. Resume Work) — not auto-submitted as user prompt. */
@@ -109,6 +113,9 @@ export function FounderCopilotChat({
   onResult,
   variant = 'default',
   memory: memoryProp,
+  missionInitiative,
+  missionNextStep,
+  defaultSendMode: defaultSendModeProp,
   initialPrompt,
   onInitialPromptConsumed,
   seedAssistantMessage,
@@ -126,7 +133,7 @@ export function FounderCopilotChat({
     cursor: boolean;
     openHands: boolean;
   }>({ cursor: false, openHands: false });
-  const [sendMode, setSendMode] = useState<CopilotSendMode>('ask');
+  const [sendMode, setSendMode] = useState<CopilotSendMode>(defaultSendModeProp ?? 'ask');
   const [preferredChatKey, setPreferredChatKey] = useState<string | null>(null);
   const [preferredBuildWorker, setPreferredBuildWorker] = useState<'CURSOR' | 'OPENHANDS' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -253,8 +260,12 @@ export function FounderCopilotChat({
   }, [loadMeta]);
 
   useEffect(() => {
+    if (defaultSendModeProp) {
+      setSendMode(defaultSendModeProp);
+      return;
+    }
     setSendMode(defaultSendMode(stack));
-  }, [stack.canAsk, stack.canBuild]);
+  }, [stack.canAsk, stack.canBuild, defaultSendModeProp]);
 
   const syncMissionAfterBuild = useCallback(
     async (task: string, snap: BuilderRunSnapshot) => {
@@ -744,7 +755,24 @@ export function FounderCopilotChat({
                 Founder Brain gives tailored answers — not generic rule-based replies.
               </p>
             )}
-            <p>Type a goal below. Pick <strong className="text-violet-300">Ask</strong> to think, or{' '}
+            {isHero && missionInitiative && (
+              <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2 text-left text-xs text-zinc-300">
+                <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                  From GitHub
+                </span>
+                <br />
+                {missionInitiative}
+                {missionNextStep ? (
+                  <>
+                    <br />
+                    <span className="mt-1 inline-block text-emerald-300/90">
+                      Next: {missionNextStep}
+                    </span>
+                  </>
+                ) : null}
+              </p>
+            )}
+            <p>Type a goal below. Pick <strong className="text-violet-300">Ask</strong> for status, or{' '}
             <strong className="text-emerald-300">Build</strong> to ship code — all in this chat.</p>
           </div>
         )}

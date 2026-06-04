@@ -165,6 +165,10 @@ export function FounderOsDashboardLayout({
   const readiness = memory?.launchReadiness ?? room?.launchReadiness ?? dashboard?.launchReadiness ?? 0;
   const openTasks = buildRoom?.grouped.tasks.filter((t) => t.status !== 'DONE').length ?? 0;
   const currentGoal = memory?.currentGoal ?? 'Set your current goal in Settings';
+  const displayInitiative =
+    missionIntel?.currentInitiative?.trim() || currentGoal;
+  const displayNextStep =
+    missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
   const openBuilderTask = buildRoom?.grouped.tasks.find((t) => t.status !== 'DONE');
 
   const aiStackHealth = useMemo(
@@ -298,8 +302,18 @@ export function FounderOsDashboardLayout({
                   />
                 </div>
               </div>
-              <p className="mt-3 text-[10px] text-zinc-600">Current goal</p>
-              <p className="mt-0.5 text-xs leading-snug text-zinc-300 line-clamp-3">{currentGoal}</p>
+              <p className="mt-3 text-[10px] text-zinc-600">
+                {missionIntel ? 'Current initiative (GitHub)' : 'Current goal'}
+              </p>
+              <p className="mt-0.5 text-xs leading-snug text-zinc-300 line-clamp-4">{displayInitiative}</p>
+              {displayNextStep && (
+                <>
+                  <p className="mt-2 text-[10px] text-zinc-600">Start here</p>
+                  <p className="mt-0.5 text-[11px] leading-snug text-emerald-300/90 line-clamp-3">
+                    {displayNextStep}
+                  </p>
+                </>
+              )}
             </div>
           )}
 
@@ -332,8 +346,11 @@ export function FounderOsDashboardLayout({
                   <h1 className="mt-1 text-xl font-bold text-white sm:text-2xl">
                     Think · plan · build · ship — in one tab
                   </h1>
-                  <p className="mt-1 text-xs text-zinc-500">
-                    Founder Brain routes research, build, and strategy — you stay in chat.
+                  <p className="mt-1 max-w-xl text-xs text-zinc-500">
+                    <strong className="font-medium text-zinc-400">Ask</strong> = GitHub + vault
+                    status · <strong className="font-medium text-zinc-400">Resume</strong> = sync
+                    briefing · <strong className="font-medium text-zinc-400">Run build</strong> =
+                    dispatch Cursor on code
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -341,17 +358,23 @@ export function FounderOsDashboardLayout({
                     type="button"
                     disabled={resumeBusy || missionBuildBusy}
                     onClick={() => void handleResumeWork()}
-                    className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                    className="rounded-xl bg-violet-600 px-5 py-2.5 text-left text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
                   >
-                    {resumeBusy ? 'Resuming…' : '▶ Resume Work'}
+                    <span className="block">{resumeBusy ? 'Syncing…' : '▶ Resume'}</span>
+                    <span className="block text-[10px] font-normal text-violet-200/80">
+                      GitHub + vault · no auto-build
+                    </span>
                   </button>
                   <button
                     type="button"
                     disabled={missionBuildBusy || resumeBusy}
                     onClick={() => void handleSidebarMissionBuild()}
-                    className="rounded-xl border border-violet-500/40 px-4 py-2.5 text-sm font-medium text-violet-200 hover:bg-violet-950/40 disabled:opacity-50"
+                    className="rounded-xl border border-violet-500/40 px-4 py-2.5 text-left text-sm font-medium text-violet-200 hover:bg-violet-950/40 disabled:opacity-50"
                   >
-                    {missionBuildBusy ? 'Building…' : 'Run build'}
+                    <span className="block">{missionBuildBusy ? 'Dispatching…' : 'Run build'}</span>
+                    <span className="block text-[10px] font-normal text-zinc-500">
+                      Cursor implements in repo
+                    </span>
                   </button>
                 </div>
               </header>
@@ -363,6 +386,9 @@ export function FounderOsDashboardLayout({
                     accessToken={accessToken}
                     variant="hero"
                     memory={memory}
+                    missionInitiative={displayInitiative}
+                    missionNextStep={displayNextStep}
+                    defaultSendMode="ask"
                     initialPrompt={quickPrompt}
                     seedAssistantMessage={resumeBriefing}
                     onSeedAssistantConsumed={() => setResumeBriefing(null)}
