@@ -2,6 +2,8 @@
 
 The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypto.digital). It opens **Discover** with `?app=android` so navigation emphasizes what works well on a phone.
 
+**File size (~3.9–4.5 MB) is expected.** The APK does not contain the Next.js site, AI models, or `~/FounderVault/` data — only the Android wrapper. Updates to Founder OS, Copilot, mic, and sync ship on **Vercel** when you deploy the website; users get them on next app open without reinstalling the APK (unless native Capacitor plugins change).
+
 ## Download (Phase 1)
 
 | Channel | URL |

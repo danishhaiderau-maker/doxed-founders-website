@@ -117,7 +117,7 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
       <p className="text-xs text-zinc-500">
         {loading
           ? 'Checking GitHub release…'
-          : `Direct install from doxxedcrypto.digital. Debug build — enable “Install unknown apps” if prompted.`}
+          : `~4 MB WebView shell — full platform loads online after install. Debug build; enable “Install unknown apps” if prompted.`}
       </p>
 
       {showInstallGuide && (

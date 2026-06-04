@@ -55,6 +55,26 @@ export default function MobileDownloadPage() {
           </Link>
         </section>
 
+        <section className="rounded-2xl border border-amber-500/20 bg-amber-950/10 p-6 text-sm text-zinc-300">
+          <h2 className="text-base font-semibold text-amber-100">Why is the APK only ~4&nbsp;MB?</h2>
+          <p className="mt-2 leading-relaxed text-zinc-400">
+            That size is <strong className="text-white">correct</strong>. The install file is a thin{' '}
+            <strong className="text-white">WebView shell</strong> (icon + launcher + secure browser). It does{' '}
+            <strong className="text-white">not</strong> bundle the whole website, LLMs, Founder Node, or your vault
+            files — those load from{' '}
+            <a href="https://doxxedcrypto.digital" className="text-cyan-300 underline">
+              doxxedcrypto.digital
+            </a>{' '}
+            after you open the app (same as mobile Chrome, with an app icon).
+          </p>
+          <p className="mt-3 text-xs text-zinc-500">
+            Founder OS <strong className="text-zinc-400">settings you see inside the app</strong> (pairing, AI stack,
+            cloud sync) are the live website — not extra code inside the APK.{' '}
+            <strong className="text-zinc-400">Local vault files on the phone</strong> are Phase&nbsp;3 and will increase
+            APK size when we ship native sync.
+          </p>
+        </section>
+
         <section className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-6 text-sm text-zinc-400">
           <h2 className="text-base font-semibold text-white">What the Android app includes today</h2>
           <ul className="mt-3 list-disc space-y-1 pl-5">
