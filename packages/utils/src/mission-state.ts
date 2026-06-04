@@ -1,4 +1,18 @@
 import type { FounderMemoryGraph, FounderMemoryGraphPatch } from './founder-memory-graph';
+import type { MissionIntelligence } from './founder-brain-context';
+
+/** Stale vault/tasks.json items that should not drive Resume or auto-build. */
+export function isStaleBoilerplateMissionTask(title: string | null | undefined): boolean {
+  if (!title?.trim()) return false;
+  const t = title.trim().toLowerCase();
+  return (
+    /security hardening|owasp|burp suite|hsts header/.test(t) ||
+    /define (mvp|your next milestone)/.test(t) ||
+    /deploy verification.*(dns|ssl|page load)/.test(t) ||
+    /^list acceptance criteria/.test(t) ||
+    /^map user stories/.test(t)
+  );
+}
 
 export function detectContinueMissionIntent(text: string): boolean {
   return /continue\s+(where\s+i\s+left\s+off|last\s+task)|resume\s+(work|where)|pick\s+up\s+where/i.test(
@@ -46,29 +60,107 @@ export function formatMissionStateBlock(
 }
 
 /** Spec + label for one-click builder dispatch from Mission State (Sprint 7d). */
-export function resolveMissionBuildTask(graph: FounderMemoryGraph): {
+export function resolveMissionBuildTask(
+  graph: FounderMemoryGraph,
+  intel?: Pick<MissionIntelligence, 'recommendedNextStep' | 'currentInitiative'> | null,
+): {
   spec: string;
   taskLabel: string;
 } {
-  const taskLabel =
-    graph.current_task?.trim() ||
-    graph.next_action?.trim() ||
-    graph.active_goal?.trim() ||
-    'Continue project work';
-  const spec = graph.next_action?.trim() || taskLabel;
+  const graphTask = graph.current_task?.trim() || '';
+  const graphNext = graph.next_action?.trim() || '';
+  const useIntel =
+    intel?.recommendedNextStep?.trim() &&
+    (isStaleBoilerplateMissionTask(graphTask) || isStaleBoilerplateMissionTask(graphNext));
+
+  const taskLabel = useIntel
+    ? intel!.recommendedNextStep.trim()
+    : graphTask ||
+      graphNext ||
+      intel?.recommendedNextStep?.trim() ||
+      graph.active_goal?.trim() ||
+      'Continue project work';
+  const spec = useIntel
+    ? intel!.recommendedNextStep.trim()
+    : graphNext || taskLabel;
   return { spec, taskLabel };
 }
 
+/** Resume Work briefing — GitHub + vault snapshot, no fabricated scans. */
+export function formatResumeWorkBrief(input: {
+  intelligence: MissionIntelligence;
+  graph: FounderMemoryGraph;
+  repoFullName?: string | null;
+  lastCommit?: string | null;
+  vaultNote?: string | null;
+  launchReadiness?: number;
+}): string {
+  const { intelligence: intel, graph } = input;
+  const lines = [
+    '**Resumed — synced GitHub + Mission State**',
+    '',
+    `_Does not auto-start Builder. Use **Run build** when you want Cursor to implement code._`,
+    '',
+    `**Current initiative:** ${intel.currentInitiative}`,
+    `**Progress:** ${intel.progressPercent}% · Launch readiness ${input.launchReadiness ?? '—'}%`,
+    '',
+  ];
+
+  if (intel.shippedRecently.length > 0) {
+    lines.push(
+      '**What you shipped recently (from commits, not tasks.json):**',
+      ...intel.shippedRecently.slice(0, 6).map((s) => `• ${s}`),
+      '',
+    );
+  }
+
+  if (intel.themes.length > 0) {
+    lines.push(
+      `**Active workstreams:** ${intel.themes.slice(0, 4).map((t) => `${t.label} (${t.commitCount})`).join(' · ')}`,
+      '',
+    );
+  }
+
+  if (intel.blocker) lines.push(`**Blocker:** ${intel.blocker}`, '');
+  lines.push(`**Start here:** ${intel.recommendedNextStep}`, '');
+
+  if (graph.current_task && !isStaleBoilerplateMissionTask(graph.current_task)) {
+    lines.push(`**Mission graph task:** ${graph.current_task}`);
+  } else if (graph.current_task) {
+    lines.push(`_Vault task "${graph.current_task.slice(0, 80)}" looks stale — updated recommendation above._`);
+  }
+
+  if (input.lastCommit) {
+    lines.push(`**Latest commit:** ${input.lastCommit.split('\n')[0]?.slice(0, 120)}`);
+  }
+  if (input.repoFullName) lines.push(`**Repo:** \`${input.repoFullName}\``);
+  if (input.vaultNote) lines.push('', input.vaultNote);
+
+  lines.push(
+    '',
+    '_Tip: Ask “What am I working on?” for a fresh Brain read · Use Build only for implementation._',
+  );
+
+  return lines.filter(Boolean).join('\n');
+}
+
 /** Copilot instruction when user continues work — graph leads, infra hints follow. */
-export function buildContinueFromMissionPrompt(graph: FounderMemoryGraph): string {
+export function buildContinueFromMissionPrompt(
+  graph: FounderMemoryGraph,
+  intel?: Pick<MissionIntelligence, 'currentInitiative' | 'recommendedNextStep' | 'blocker'> | null,
+): string {
   const parts = [
-    'Continue where I left off using this Mission State as ground truth.',
+    'Continue where I left off. Use GitHub commits and mission intelligence as ground truth — ignore stale tasks.json security/MVP boilerplate unless commits support it.',
     `Goal: ${graph.active_goal}`,
   ];
+  if (intel?.currentInitiative) parts.push(`Initiative (from GitHub): ${intel.currentInitiative}`);
   if (graph.current_sprint) parts.push(`Sprint: ${graph.current_sprint}`);
-  if (graph.current_task) parts.push(`Current task: ${graph.current_task}`);
-  if (graph.blocked_by) parts.push(`Blocked by: ${graph.blocked_by}`);
-  if (graph.next_action) parts.push(`Do next: ${graph.next_action}`);
+  if (graph.current_task && !isStaleBoilerplateMissionTask(graph.current_task)) {
+    parts.push(`Current task: ${graph.current_task}`);
+  }
+  if (intel?.blocker) parts.push(`Blocker: ${intel.blocker}`);
+  else if (graph.blocked_by) parts.push(`Blocked by: ${graph.blocked_by}`);
+  parts.push(`Do next: ${intel?.recommendedNextStep ?? graph.next_action ?? graph.current_task ?? 'Sync GitHub'}`);
   if (graph.current_pr) parts.push(`PR: ${graph.current_pr}`);
   if (graph.current_branch) parts.push(`Branch: ${graph.current_branch}`);
   return parts.join('\n');
