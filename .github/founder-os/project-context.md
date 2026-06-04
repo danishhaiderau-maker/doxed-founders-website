@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Make Live Trading Tape hero: top of feed, 50vh, 80 rows.
 
 ## Last Activity
 
