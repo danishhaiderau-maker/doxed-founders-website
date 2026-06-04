@@ -14,15 +14,17 @@ function HubStep({
   step,
   title,
   summary,
+  id,
   children,
 }: {
   step: number;
   title: string;
   summary: string;
+  id?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-cyan-500/20 bg-zinc-950/40 p-5">
+    <div id={id} className="rounded-xl border border-cyan-500/20 bg-zinc-950/40 p-5 scroll-mt-24">
       <div className="flex items-start gap-3">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-cyan-500/25 text-sm font-bold text-cyan-100">
           {step}
@@ -128,6 +130,7 @@ export function FounderNodeHubPanel({
           step={5}
           title="Privacy attestation"
           summary="Cryptographic proof of vault integrity and Phala TEE inference receipts."
+          id="founder-attestation"
         >
           <AttestationDashboardPanel embedded accessToken={accessToken} />
         </HubStep>

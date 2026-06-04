@@ -14,6 +14,7 @@ import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { MissionStatePanel } from '@/components/mission-state-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
+import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
@@ -258,6 +259,14 @@ export function FounderOsDashboardLayout({
               <MissionControlStatusStrip
                 accessToken={accessToken}
                 buildWorker={workerStatus?.buildWorker}
+                onRefresh={() => {
+                  void load();
+                  onRefresh();
+                }}
+              />
+
+              <MissionControlTrustStrip
+                accessToken={accessToken}
                 onRefresh={() => {
                   void load();
                   onRefresh();
