@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+feat(ai): add Jatevo BYOK gateway for Founder Brain and Copilot
 
 ## Last Activity
 
