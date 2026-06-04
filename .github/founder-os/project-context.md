@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Wire P1 stage 2: Agent Bus handoffs and queue control actions.
 
 ## Last Activity
 
