@@ -18,6 +18,7 @@ type Props = {
   setPhalaModel: (v: string) => void;
   connecting: string | null;
   onConnectOpenRouter: () => void;
+  onConnectJatevo: () => void;
   onConnectOllama: () => void;
   onConnectPhala: () => void;
   onDisconnectPhala: () => void;
@@ -44,12 +45,14 @@ export function FounderNodeAiSection({
   setPhalaModel,
   connecting,
   onConnectOpenRouter,
+  onConnectJatevo,
   onConnectOllama,
   onConnectPhala,
   onDisconnectPhala,
   onSaveSettings,
 }: Props) {
   const openRouterProvider = settings.providers.find((p) => p.key === 'OPENROUTER');
+  const jatevoProvider = settings.providers.find((p) => p.key === 'JATEVO');
   const ollamaLocalProvider = settings.providers.find((p) => p.key === 'OLLAMA_LOCAL');
   const phalaProvider = settings.providers.find((p) => p.key === 'PHALA');
   const phalaStatus = settings.phalaPrivateAi;
@@ -76,7 +79,7 @@ export function FounderNodeAiSection({
           <li>
             <strong className="text-zinc-200">Brain (this section):</strong> the LLM you connect here powers
             Copilot <em>Ask</em>, Founder Brain, and every project agent (community replies, marketing drafts,
-            research). Connect OpenRouter, Ollama, or Phala — not Cursor.
+            research). Connect Jatevo, OpenRouter, Ollama, or Phala — not Cursor.
           </li>
           <li>
             <strong className="text-zinc-200">Code (Remote builder agents below):</strong> Cursor / OpenHands
@@ -133,7 +136,7 @@ export function FounderNodeAiSection({
           <input
             defaultValue={settings.preferredModel ?? ''}
             onBlur={(e) => onSaveSettings({ preferredModel: e.target.value || undefined })}
-            placeholder="gpt-4o-mini, llama3.2, phala/deepseek…"
+            placeholder="auto, gpt-4o-mini, qwen3.5-plus, llama3.2…"
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
           />
         </label>
@@ -150,6 +153,11 @@ export function FounderNodeAiSection({
       </label>
 
       <div className="flex flex-wrap gap-2">
+        {jatevoProvider?.connected && (
+          <span className="rounded-full bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100">
+            Jatevo connected
+          </span>
+        )}
         {openRouterProvider?.connected && (
           <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-semibold text-emerald-200">
             OpenRouter connected
@@ -167,7 +175,35 @@ export function FounderNodeAiSection({
         )}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-4">
+          <p className="font-medium text-white">Jatevo</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            One gateway key — multi-model routing. Quota tied to $JTVO on{' '}
+            <a href="https://jatevo.ai" className="text-amber-300 underline" target="_blank" rel="noreferrer">
+              jatevo.ai
+            </a>
+            .
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            <input
+              type="password"
+              value={apiKeyInput.jatevo ?? ''}
+              onChange={(e) => setApiKeyInput({ ...apiKeyInput, jatevo: e.target.value })}
+              placeholder="sk-clb-…"
+              className="rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+            />
+            <button
+              type="button"
+              disabled={connecting === 'jatevo'}
+              onClick={onConnectJatevo}
+              className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {jatevoProvider?.connected ? 'Update key' : 'Connect & activate'}
+            </button>
+          </div>
+        </div>
+
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
           <p className="font-medium text-white">OpenRouter</p>
           <p className="mt-1 text-xs text-zinc-500">One key — Claude, GPT, DeepSeek, and more.</p>

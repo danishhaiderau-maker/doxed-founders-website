@@ -18,6 +18,7 @@ export function shortProviderName(provider: { key: string; label: string }): str
     GEMINI: 'Gemini',
     PHALA: 'Phala TEE',
     OPENROUTER: 'OpenRouter',
+    JATEVO: 'Jatevo',
     OPENHANDS: 'OpenHands',
     OLLAMA_LOCAL: 'Ollama',
     RULE_BASED: 'Project memory',
@@ -183,12 +184,20 @@ export function resolveAiTeamCards(
   const researchConnected = providers.some(
     (p) =>
       p.connected &&
-      ['DEEPSEEK', 'OPENROUTER', 'PHALA', 'OPENAI', 'ANTHROPIC', 'GEMINI', 'OLLAMA_LOCAL'].includes(
-        p.key,
-      ),
+      [
+        'DEEPSEEK',
+        'JATEVO',
+        'OPENROUTER',
+        'PHALA',
+        'OPENAI',
+        'ANTHROPIC',
+        'GEMINI',
+        'OLLAMA_LOCAL',
+      ].includes(p.key),
   );
   const contentConnected = providers.some(
-    (p) => p.connected && ['OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER'].includes(p.key),
+    (p) =>
+      p.connected && ['OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER', 'JATEVO'].includes(p.key),
   );
 
   return [

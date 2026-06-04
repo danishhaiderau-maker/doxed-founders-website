@@ -7,6 +7,7 @@ export type AiProviderKey =
   | 'GEMINI'
   | 'DEEPSEEK'
   | 'OPENROUTER'
+  | 'JATEVO'
   | 'OLLAMA_LOCAL'
   | 'PHALA'
   | 'OPENHANDS'
@@ -86,6 +87,16 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     billTip:
       'One API key — route Copilot and Quick Build to Claude, GPT, Llama, DeepSeek, and more. Billed on your OpenRouter account.',
     credentialProvider: 'openrouter',
+  },
+  {
+    key: 'JATEVO',
+    label: 'Jatevo (multi-model gateway)',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    defaultModel: 'auto',
+    billTip:
+      'OpenAI-compatible gateway — GPT, Qwen, Kimi, GLM, and more. Daily quota scales with $JTVO holdings on your Jatevo account.',
+    credentialProvider: 'jatevo',
   },
   {
     key: 'OLLAMA_LOCAL',
