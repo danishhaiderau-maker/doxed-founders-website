@@ -37,6 +37,9 @@ export type FounderBrainContextInput = {
   weeklySummary?: string;
   workspaceActivityBlock?: string | null;
   vaultNote?: string | null;
+  timelineExcerpt?: string | null;
+  deployIntelligenceExcerpt?: string | null;
+  desktopBridgeBlock?: string | null;
 };
 
 export function deriveMissionIntelligence(input: FounderBrainContextInput): MissionIntelligence {
@@ -183,6 +186,13 @@ export function formatFounderBrainContextForPrompt(
   }
   if (input.vaultNote) sections.push('', input.vaultNote);
   if (input.weeklySummary) sections.push('', '## Weekly summary', input.weeklySummary);
+  if (input.timelineExcerpt) {
+    sections.push('', '## Project timeline (narrative)', input.timelineExcerpt);
+  }
+  if (input.deployIntelligenceExcerpt) {
+    sections.push('', '## Deployment intelligence', input.deployIntelligenceExcerpt);
+  }
+  if (input.desktopBridgeBlock) sections.push('', input.desktopBridgeBlock);
 
   sections.push(
     '',

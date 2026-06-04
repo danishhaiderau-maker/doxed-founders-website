@@ -347,8 +347,8 @@ Next: smoke /discover, publish founder update
 - [x] Mission Intelligence v1  
 - [x] Money Feed separation  
 - [x] Command Center layout 70/30  
-- [ ] LLM + GitHub required in onboarding copy  
-- [ ] Feed leak audit on project pages  
+- [x] LLM + GitHub required in onboarding copy  
+- [x] Feed leak audit on project pages  
 
 ### P1 — Feel like command center
 
@@ -360,10 +360,10 @@ Next: smoke /discover, publish founder update
 
 ### P2 — Feel like operating system
 
-1. **Project Timeline** — API + Brain context  
-2. **Deployment Intelligence** — outcome cards on deploy  
-3. **Desktop Bridge** — metadata-only IDE sync  
-4. **Agent Bus v2** — persisted messages + custom rules  
+1. **Project Timeline** — API + Brain context ✅ v1  
+2. **Deployment Intelligence** — outcome cards on deploy ✅ v1 heuristic  
+3. **Desktop Bridge** — metadata-only IDE sync ✅ v1 (heartbeat `desktopBridge`)  
+4. **Agent Bus v2** — persisted messages + custom rules (partial: dedupe shipped in P1.5)  
 
 ---
 

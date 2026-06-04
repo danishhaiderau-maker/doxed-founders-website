@@ -717,6 +717,12 @@ export function FounderCopilotChat({
       >
         {messages.length === 0 && !busy && (
           <div className="mx-auto max-w-lg space-y-2 text-center text-sm text-zinc-500">
+            {isHero && !stack.canAsk && (
+              <p className="rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-left text-xs text-amber-100/90">
+                Connect <strong>GitHub</strong> and a <strong>chat LLM</strong> in Settings → Builder so
+                Founder Brain gives tailored answers — not generic rule-based replies.
+              </p>
+            )}
             <p>Type a goal below. Pick <strong className="text-violet-300">Ask</strong> to think, or{' '}
             <strong className="text-emerald-300">Build</strong> to ship code — all in this chat.</p>
           </div>

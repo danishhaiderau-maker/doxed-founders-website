@@ -152,6 +152,12 @@ export function FounderOsReadinessPanel({ accessToken, onRefresh }: Props) {
         </span>
       </div>
 
+      {onboarding?.brainHint && !onboarding.brainReady && (
+        <p className="mt-3 rounded-lg border border-amber-500/25 bg-amber-950/20 px-3 py-2 text-xs text-amber-100/90">
+          {onboarding.brainHint}
+        </p>
+      )}
+
       {incomplete.length > 0 && (
         <ul className="mt-3 space-y-1.5 border-t border-zinc-800/60 pt-3">
           {incomplete.map((step) => (

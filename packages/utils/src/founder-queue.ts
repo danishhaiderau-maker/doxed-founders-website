@@ -15,6 +15,7 @@ export type FounderQueueAction =
   | 'open_url'
   | 'publish'
   | 'dispatch_build'
+  | 'merge_pr'
   | 'sync'
   | 'settings'
   | 'chat_prompt';

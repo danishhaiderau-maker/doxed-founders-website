@@ -1,4 +1,4 @@
-import type { DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
+import type { DesktopBridgeInput, DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
 
 export const FOUNDER_VAULT_SCHEMA_VERSION = 1 as const;
 export const FOUNDER_NODE_APP_VERSION = '0.5.5';
@@ -35,6 +35,8 @@ export type FounderNodeHeartbeat = {
   ollamaEnabled?: boolean;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  /** Metadata-only IDE context (branch, file names, task label — no file contents). */
+  desktopBridge?: DesktopBridgeInput;
 };
 
 export type FounderNodeOllamaConfig = {

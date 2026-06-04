@@ -60,6 +60,7 @@ import {
 } from '@dcf/utils';
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
+import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -75,6 +76,7 @@ export class BuilderService {
     private readonly attestation: AttestationService,
     private readonly adoption: PlatformAdoptionService,
     private readonly memoryGraph: FounderMemoryGraphService,
+    private readonly agentRuns: FounderAgentRunService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -712,6 +714,14 @@ export class BuilderService {
     if (worker === 'CURSOR') {
       try {
         const result = await this.dispatchCursorBuildTask(userId, input);
+        await this.agentRuns.start(userId, {
+          worker: 'CURSOR',
+          status: 'CREATING',
+          task: input.spec,
+          repository: input.repository ?? null,
+          agentId: result.agentId,
+          runId: result.runId,
+        });
         return {
           worker,
           status: 'dispatched' as const,
@@ -733,6 +743,13 @@ export class BuilderService {
     if (worker === 'OPENHANDS') {
       try {
         const result = await this.dispatchOpenHandsBuildTask(userId, input);
+        await this.agentRuns.start(userId, {
+          worker: 'OPENHANDS',
+          status: 'WORKING',
+          task: input.spec,
+          repository: input.repository ?? null,
+          conversationId: result.conversationId,
+        });
         return {
           worker,
           status: 'dispatched' as const,
@@ -779,6 +796,7 @@ export class BuilderService {
       }),
     );
     const cursorMeta = await this.getCursorMeta(userId);
+    const activeRun = await this.agentRuns.getActive(userId);
     return {
       buildWorker: worker,
       buildWorkerOptions,
@@ -788,6 +806,7 @@ export class BuilderService {
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       latestRunId: cursorMeta?.latestRunId ?? null,
       cursorAgentId: cursorMeta?.agentId ?? null,
+      activeAgentRun: activeRun,
     };
   }
 

@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderCopilotService } from '../events/founder-copilot.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
+import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
 import type { VaultMergePatch } from '@dcf/utils';
 
 const PAIRING_TTL_MS = 30 * 60 * 1000;
@@ -25,6 +26,7 @@ export class FounderNodeService {
     @Inject(forwardRef(() => FounderCopilotService))
     private readonly copilot: FounderCopilotService,
     private readonly vaultSync: FounderNodeVaultSyncService,
+    private readonly desktopBridge: DesktopBridgeService,
   ) {}
 
   async createPairingCode(userId: string, targetPlatform?: 'desktop' | 'mobile') {
@@ -161,6 +163,14 @@ export class FounderNodeService {
       },
     });
     void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
+    if (input.desktopBridge) {
+      void this.desktopBridge.saveFromHeartbeat(
+        node.userId,
+        node.nodeId,
+        input.label,
+        input.desktopBridge,
+      );
+    }
     return { success: true, status: 'online' as const };
   }
 

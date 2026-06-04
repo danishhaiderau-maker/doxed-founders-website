@@ -100,3 +100,10 @@ export function planAgentBusHandoffs(input: AgentBusInput): AgentBusHandoff[] {
 
   return out;
 }
+
+/** P1.5 — idempotent handoff key for dedupe (24h window). */
+export function agentBusHandoffFingerprint(h: AgentBusHandoff): string {
+  const spec = h.payload.spec?.trim().slice(0, 240) ?? '';
+  const prompt = h.payload.prompt?.trim().slice(0, 240) ?? '';
+  return `${h.to}:${h.kind}:${h.title.trim().toLowerCase().slice(0, 80)}:${spec}:${prompt}`;
+}

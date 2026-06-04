@@ -51,6 +51,26 @@ export class EventsController {
     return this.commandCenter.executeQueueAction(user.id, body.itemId?.trim() ?? '');
   }
 
+  @Get('copilot/active-agent-run')
+  activeAgentRun(@CurrentUser() user: AuthUser) {
+    return this.commandCenter.getActiveAgentRun(user.id);
+  }
+
+  @Get('copilot/project-timeline')
+  projectTimeline(@CurrentUser() user: AuthUser) {
+    return this.copilot.getProjectTimelineForUser(user.id, 30);
+  }
+
+  @Get('copilot/deploy-intelligence')
+  deployIntelligence(@CurrentUser() user: AuthUser) {
+    return this.copilot.getDeployIntelligenceForUser(user.id, 30);
+  }
+
+  @Get('copilot/desktop-bridge')
+  desktopBridge(@CurrentUser() user: AuthUser) {
+    return this.copilot.getDesktopBridgeForUser(user.id);
+  }
+
   @Get('copilot/memory-graph')
   memoryGraph(@CurrentUser() user: AuthUser) {
     return this.copilot.getMemoryGraph(user.id);
