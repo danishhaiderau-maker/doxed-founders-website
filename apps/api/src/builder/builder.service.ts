@@ -50,6 +50,7 @@ import {
   parseOpenAiStyleUsage,
 } from '@dcf/utils';
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
+import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -64,6 +65,7 @@ export class BuilderService {
     private readonly founderNodeSync: FounderNodeSyncService,
     private readonly attestation: AttestationService,
     private readonly adoption: PlatformAdoptionService,
+    private readonly memoryGraph: FounderMemoryGraphService,
   ) {}
 
   async getSettings(userId: string) {
@@ -809,13 +811,24 @@ export class BuilderService {
     userId: string,
     system: string,
     userPrompt: string,
-    options?: { forceProvider?: AiProvider },
+    options?: { forceProvider?: AiProvider; skipMemoryPrefix?: boolean },
   ): Promise<
     | { ok: true; text: string; provider: AiProvider }
     | { ok: false; llmErrors: string[] }
   > {
+    let effectiveSystem = system;
+    if (!options?.skipMemoryPrefix && !system.includes('Founder Memory Graph')) {
+      const prefix = await this.memoryGraph.getPrefixForUser(userId);
+      effectiveSystem = `${prefix}${system}`;
+    }
+
     if (options?.forceProvider) {
-      return this.tryCopilotChatCompletionForced(userId, system, userPrompt, options.forceProvider);
+      return this.tryCopilotChatCompletionForced(
+        userId,
+        effectiveSystem,
+        userPrompt,
+        options.forceProvider,
+      );
     }
 
     const settings = await this.ensureSettings(userId);
@@ -826,7 +839,7 @@ export class BuilderService {
     if (settings.defaultProvider === AiProvider.OLLAMA_LOCAL) {
       const nodeResult = await this.founderNodeInference.runViaFounderNode(
         userId,
-        system,
+        effectiveSystem,
         userPrompt,
         settings.preferredModel,
       );
@@ -834,7 +847,7 @@ export class BuilderService {
         await this.logAiTokenUsage(
           userId,
           AiProvider.OLLAMA_LOCAL,
-          system,
+          effectiveSystem,
           userPrompt,
           nodeResult.text,
           'copilot',
@@ -843,12 +856,17 @@ export class BuilderService {
       }
       llmErrors.push(...nodeResult.errors);
 
-      const direct = await this.tryDirectOllama(userId, system, userPrompt, settings.preferredModel);
+      const direct = await this.tryDirectOllama(
+        userId,
+        effectiveSystem,
+        userPrompt,
+        settings.preferredModel,
+      );
       if (direct.ok) {
         await this.logAiTokenUsage(
           userId,
           AiProvider.OLLAMA_LOCAL,
-          system,
+          effectiveSystem,
           userPrompt,
           direct.text,
           'copilot',
@@ -866,7 +884,7 @@ export class BuilderService {
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model: settings.preferredModel ?? phala.model,
-            system,
+            system: effectiveSystem,
             userPrompt,
           });
           if (chat?.text) {
@@ -874,7 +892,7 @@ export class BuilderService {
             await this.logAiTokenUsage(
               userId,
               AiProvider.PHALA,
-              system,
+              effectiveSystem,
               userPrompt,
               chat.text,
               'copilot',
@@ -924,12 +942,19 @@ export class BuilderService {
             apiKey: phala.apiKey,
             inferenceUrl: phala.inferenceUrl,
             model,
-            system,
+            system: effectiveSystem,
             userPrompt,
           });
           if (chat?.text) {
             await this.recordPhalaChat(userId, chat);
-            await this.logAiTokenUsage(userId, provider, system, userPrompt, chat.text, 'copilot');
+            await this.logAiTokenUsage(
+              userId,
+              provider,
+              effectiveSystem,
+              userPrompt,
+              chat.text,
+              'copilot',
+            );
             return { ok: true, text: chat.text, provider };
           }
           llmErrors.push(`${provider}: empty response`);
@@ -953,12 +978,18 @@ export class BuilderService {
           : cfg.defaultModel ?? undefined;
 
       try {
-        const result = await this.completionWithProvider(provider, apiKey, system, userPrompt, model);
+        const result = await this.completionWithProvider(
+          provider,
+          apiKey,
+          effectiveSystem,
+          userPrompt,
+          model,
+        );
         if (result?.text?.trim()) {
           await this.logAiTokenUsage(
             userId,
             provider,
-            system,
+            effectiveSystem,
             userPrompt,
             result.text.trim(),
             'copilot',

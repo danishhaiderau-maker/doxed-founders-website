@@ -35,6 +35,7 @@ import { TownHallModule } from './town-hall/town-hall.module';
 import { TradingAgentsModule } from './trading-agents/trading-agents.module';
 import { AdminControlModule } from './admin-control/admin-control.module';
 import { MessagesModule } from './messages/messages.module';
+import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { MessagesModule } from './messages/messages.module';
     }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
     PrismaModule,
+    FounderMemoryGraphModule,
     PointsModule,
     NotificationsModule,
     FounderUpdatesModule,

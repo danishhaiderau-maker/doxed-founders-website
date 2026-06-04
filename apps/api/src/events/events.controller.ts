@@ -29,6 +29,19 @@ export class EventsController {
     return this.copilot.getProjectMemory(user.id);
   }
 
+  @Get('copilot/memory-graph')
+  memoryGraph(@CurrentUser() user: AuthUser) {
+    return this.copilot.getMemoryGraph(user.id);
+  }
+
+  @Post('copilot/memory-graph')
+  patchMemoryGraph(
+    @CurrentUser() user: AuthUser,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.copilot.patchMemoryGraph(user.id, body);
+  }
+
   @Get('copilot/standup')
   standup(@CurrentUser() user: AuthUser) {
     return this.copilot.getDailyStandup(user.id);

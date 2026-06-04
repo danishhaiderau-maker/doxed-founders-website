@@ -4,6 +4,7 @@ import { BuilderModule } from '../builder/builder.module';
 import { GitHubModule } from '../github/github.module';
 import { BuildQueueModule } from '../build-queue/build-queue.module';
 import { FounderOsModule } from '../founder-os/founder-os.module';
+import { FounderMemoryGraphModule } from '../founder-memory/founder-memory-graph.module';
 import { EventOrchestratorService } from './event-orchestrator.service';
 import { EventsController } from './events.controller';
 import { EventsService } from './events.service';
@@ -18,6 +19,7 @@ import { FounderMetricsService } from './founder-metrics.service';
     GitHubModule,
     forwardRef(() => BuildQueueModule),
     forwardRef(() => FounderOsModule),
+    FounderMemoryGraphModule,
   ],
   controllers: [EventsController],
   providers: [
