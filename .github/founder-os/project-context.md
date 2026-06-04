@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-fix(founder): use calendar days for build Day labels and streaks
+chore: exclude local tools from Vercel upload
 
 ## Last Activity
 
