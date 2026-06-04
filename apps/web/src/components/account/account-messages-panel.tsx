@@ -9,15 +9,13 @@ import {
   type MessageThread,
   type PlatformMessageItem,
 } from '@/lib/api';
-import { UserIdField } from '@/components/account/user-id-field';
-
 type Props = {
   accessToken: string;
   initialOtherUserId?: string | null;
   myUserId?: string | null;
 };
 
-export function AccountMessagesPanel({ accessToken, initialOtherUserId, myUserId }: Props) {
+export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props) {
   const [threads, setThreads] = useState<MessageThread[]>([]);
   const [activeId, setActiveId] = useState<string | null>(initialOtherUserId ?? null);
   const [messages, setMessages] = useState<PlatformMessageItem[]>([]);
@@ -123,18 +121,12 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId, myUserId
 
   return (
     <section className="space-y-4">
-      {myUserId && (
-        <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-4">
-          <h3 className="text-sm font-semibold text-white">Your user ID</h3>
-          <UserIdField userId={myUserId} className="mt-2" />
-        </div>
-      )}
 
       <div className="rounded-xl border border-zinc-800 bg-zinc-950/60">
         <div className="border-b border-zinc-800 px-4 py-3">
           <h3 className="font-semibold text-white">New message</h3>
           <p className="mt-1 text-xs text-zinc-500">
-            Paste any member&apos;s user ID (from their Account page) or their platform handle, then send.
+            Message by @X handle, messaging address (e.g. @trader#A7F2), platform handle, or technical user ID.
           </p>
         </div>
         <form onSubmit={handleComposeSend} className="p-4">
@@ -147,7 +139,7 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId, myUserId
                 setComposeResolvedId(null);
                 setComposeResolvedLabel(null);
               }}
-              placeholder="e.g. clxyz… or Crimson Falcon · Kenya"
+              placeholder="e.g. @yourhandle or Cheetah · Kenya"
               className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
             />
             <button
@@ -206,7 +198,6 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId, myUserId
                       }`}
                     >
                       <p className="font-semibold text-white">{t.otherUserLabel}</p>
-                      <p className="mt-0.5 font-mono text-[10px] text-zinc-600">{t.otherUserId}</p>
                       <p className="mt-0.5 line-clamp-2 text-zinc-500">{t.lastBody}</p>
                       {t.unreadCount > 0 && (
                         <span className="mt-1 inline-block rounded-full bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
@@ -229,7 +220,6 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId, myUserId
               <>
                 <div className="border-b border-zinc-800 px-4 py-2">
                   <p className="text-sm font-semibold text-white">{activeThread?.otherUserLabel}</p>
-                  <p className="font-mono text-[10px] text-zinc-500">{activeId}</p>
                   {activeThread?.applicationLabel && (
                     <p className="text-[11px] text-violet-300">Re: {activeThread.applicationLabel}</p>
                   )}
