@@ -81,8 +81,20 @@ export class EventsController {
   }
 
   @Post('copilot/social-draft')
-  socialDraft(@CurrentUser() user: AuthUser, @Body() body: { provider?: string }) {
-    return this.copilot.draftSocialUpdate(user.id, { provider: body.provider });
+  socialDraft(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      provider?: string;
+      audience?: 'trader' | 'developer';
+      achievement?: { title: string; detail: string; kind?: string };
+    },
+  ) {
+    return this.copilot.draftSocialUpdate(user.id, {
+      provider: body.provider,
+      audience: body.audience,
+      achievement: body.achievement,
+    });
   }
 
   @Post('copilot/hands-free')

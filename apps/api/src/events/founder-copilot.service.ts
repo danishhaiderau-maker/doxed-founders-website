@@ -29,7 +29,11 @@ import {
   formatAutopilotInfrastructureBlock,
   formatCommitsByDay,
   formatLastCommitDetail,
-  parseSocialDraftLlmResponse,
+  composeFounderUpdateFeedBody,
+  formatFounderUpdateContextBlock,
+  founderUpdateFromLegacyFallback,
+  parseFounderUpdateLlmResponse,
+  pickFounderUpdateDisplayBody,
   computeProjectProgress,
   detectAutopilotIntent,
   detectHandsFreeAction,
@@ -1353,7 +1357,11 @@ export class FounderCopilotService {
 
   async draftSocialUpdate(
     userId: string,
-    options?: { provider?: string },
+    options?: {
+      provider?: string;
+      audience?: 'trader' | 'developer';
+      achievement?: { title: string; detail: string; kind?: string };
+    },
   ) {
     const providerKey = options?.provider?.trim().toUpperCase();
     const codeAgent =
@@ -1386,56 +1394,111 @@ export class FounderCopilotService {
     );
 
     const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const audience = options?.audience === 'developer' ? 'developer' : 'trader';
 
     const workspaceActivity = memory.repoFullName
       ? await this.builder.getWorkspaceActivity(userId, memory.repoFullName)
       : null;
 
+    const commits30Raw = memory.repoFullName
+      ? await this.github.listCommitsOnRef(userId, memory.repoFullName, 30)
+      : [];
+
     const commits24h =
       workspaceActivity?.commitsLast24h?.length
         ? workspaceActivity.commitsLast24h
         : memory.repoFullName
-          ? filterCommitsSince(
-              await this.github.listCommitsOnRef(userId, memory.repoFullName, 40),
-              24 * 60 * 60 * 1000,
-            )
+          ? filterCommitsSince(commits30Raw, 24 * 60 * 60 * 1000)
           : [];
 
-    const [openIdeas, infraSnapshot, paperPortfolio, doneTasks24h, deployEvents24h, platformRow] =
-      await Promise.all([
-        this.prisma.buildQueueItem.findMany({
-          where: {
-            founderId: founder.id,
-            kind: 'IDEA',
-            status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
-          },
-          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
-          take: 5,
-        }),
-        this.autopilot.buildDraftInfrastructureSnapshot(userId).catch(() => null),
-        this.prisma.paperPortfolio.findUnique({ where: { userId }, select: { cashBalance: true } }),
-        this.prisma.buildQueueItem.findMany({
-          where: {
-            founderId: founder.id,
-            status: BuildQueueStatus.DONE,
-            updatedAt: { gte: since24h },
-          },
-          orderBy: { updatedAt: 'desc' },
-          take: 8,
-          select: { title: true },
-        }),
-        this.prisma.founderEvent.findMany({
-          where: {
-            founderId: founder.id,
-            type: FounderEventType.DEPLOY_SUCCESS,
-            createdAt: { gte: since24h },
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 5,
-          select: { title: true, payload: true },
-        }),
-        this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
-      ]);
+    const pullRequests = memory.repoFullName
+      ? (await this.github.listPullRequests(userId, memory.repoFullName)).slice(0, 10)
+      : [];
+
+    const projectId = project?.id;
+
+    const [
+      openIdeas,
+      openTasks,
+      infraSnapshot,
+      paperPortfolio,
+      doneTasks24h,
+      deployEvents24h,
+      platformRow,
+      recentBuildPosts,
+      communityComments,
+      recentPaperTrades,
+    ] = await Promise.all([
+      this.prisma.buildQueueItem.findMany({
+        where: {
+          founderId: founder.id,
+          kind: 'IDEA',
+          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        take: 5,
+      }),
+      this.prisma.buildQueueItem.findMany({
+        where: {
+          founderId: founder.id,
+          kind: 'TASK',
+          status: { notIn: [BuildQueueStatus.DISMISSED, BuildQueueStatus.DONE] },
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        take: 10,
+        select: { title: true },
+      }),
+      this.autopilot.buildDraftInfrastructureSnapshot(userId).catch(() => null),
+      this.prisma.paperPortfolio.findUnique({ where: { userId }, select: { cashBalance: true } }),
+      this.prisma.buildQueueItem.findMany({
+        where: {
+          founderId: founder.id,
+          status: BuildQueueStatus.DONE,
+          updatedAt: { gte: since24h },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 8,
+        select: { title: true },
+      }),
+      this.prisma.founderEvent.findMany({
+        where: {
+          founderId: founder.id,
+          type: FounderEventType.DEPLOY_SUCCESS,
+          createdAt: { gte: since24h },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { title: true, payload: true },
+      }),
+      this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
+      this.prisma.founderUpdate.findMany({
+        where: { founderId: founder.id },
+        orderBy: { publishedAt: 'desc' },
+        take: 3,
+        select: { headline: true, summary: true },
+      }),
+      projectId
+        ? this.prisma.communityComment.findMany({
+            where: {
+              thread: { projectId },
+              createdAt: { gte: since7d },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 8,
+            select: {
+              body: true,
+              thread: { select: { channel: true, title: true } },
+            },
+          })
+        : Promise.resolve([]),
+      this.prisma.paperTrade.findMany({
+        where: { userId, createdAt: { gte: since7d } },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { side: true, totalUsd: true, project: { select: { ticker: true } } },
+      }),
+    ]);
 
     const platformClosing =
       platformRow?.globalShareFooter?.trim() || PLATFORM_X_SHARE_FOOTER;
@@ -1523,46 +1586,79 @@ export class FounderCopilotService {
       ...deployEvents24h.map((e) => e.title),
     ];
 
+    const projectDescription = [project?.description?.trim(), project?.summary?.trim()]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const roadmapLines =
+      project?.roadmapItems.map(
+        (r) => `${r.title} [${r.status.replace(/_/g, ' ')}]`,
+      ) ?? [];
+
+    const commitsLast30Block = formatCommitsByDay(commits30Raw, { maxDays: 14, maxPerDay: 4 });
+    const commitsLast24hBlock = formatCommitsLast24hForTraders(commits24h, projectDisplayName);
+
+    const contextLayer = formatFounderUpdateContextBlock({
+      projectDisplayName,
+      projectTicker,
+      projectDescription: projectDescription || undefined,
+      currentGoal: memory.currentGoal,
+      suggestedNext: memory.suggestedNextStep,
+      launchReadiness: memory.launchReadiness,
+      progressPercent: memory.progressPercent,
+      roadmapLines,
+      commitsLast30: commitsLast30Block,
+      commitsLast24h: commitsLast24hBlock,
+      openTasks: openTasks.map((t) => t.title),
+      recentDeployments: deployEvents24h.map((e) => e.title),
+      founderNotes: recentBuildPosts.map(
+        (p) => `${p.headline}: ${(p.summary ?? '').slice(0, 160)}`,
+      ),
+      communityActivity: communityComments.map(
+        (c) =>
+          `[${c.thread.channel}] ${c.thread.title}: ${c.body.slice(0, 100)}`,
+      ),
+      ddollarActivity: [
+        paperPortfolio
+          ? `Paper wallet balance: ${Number(paperPortfolio.cashBalance).toFixed(0)} DDollar`
+          : null,
+        ...recentPaperTrades.map(
+          (t) =>
+            `${t.side} $${t.project.ticker} · $${Number(t.totalUsd).toFixed(0)} paper`,
+        ),
+      ].filter((line): line is string => Boolean(line)),
+      recentPullRequests: pullRequests.map(
+        (pr) => `#${pr.number} [${pr.state}] ${pr.title}`,
+      ),
+      missionControlMemory: contextBlock,
+      accountBlock,
+      infraBlock,
+      achievementSeed: options?.achievement,
+    });
+
     const userPrompt = [
       `PROJECT DISPLAY NAME: ${projectDisplayName}`,
-      projectTicker ? `DEXSCREENER / LISTING TICKER: ${projectTicker}` : '',
+      projectTicker ? `TICKER: ${projectTicker}` : '',
       memory.repoFullName ? `GITHUB REPO: ${memory.repoFullName}` : 'GITHUB: not linked',
-      codeAgent ? `Draft voice: ${codeAgent} (code-aware, plain English).` : '',
-      forceProvider ? `Use ${forceProvider} for this draft.` : '',
+      codeAgent ? `Draft voice: ${codeAgent}` : '',
+      forceProvider ? `LLM: ${forceProvider}` : '',
+      `Audience emphasis: ${audience}`,
       '',
-      '=== LAST 24 HOURS (primary source — only describe work evidenced here) ===',
-      formatCommitsLast24hForTraders(commits24h, projectDisplayName),
-      completedTasks.length > 0
-        ? ['', '=== Mission Control tasks completed (24h) ===', ...completedTasks.map((t) => `- ${t}`)]
-        : [],
-      '',
-      '=== Founder account / profile ===',
-      accountBlock,
-      '',
-      '=== Hybrid control plane (Vercel / Railway / Neon / GitHub) ===',
-      infraBlock,
+      contextLayer,
       '',
       '=== Last commit detail ===',
       formatLastCommitDetail(lastCommit),
-      '',
-      '=== Older context (7d — background only, do not treat as “today”) ===',
-      formatCommitsByDay(
-        commits24h.length > 0
-          ? commits24h
-          : memory.repoFullName
-            ? await this.github.listCommitsOnRef(userId, memory.repoFullName, 20)
-            : [],
-        { maxDays: 7, maxPerDay: 4 },
-      ),
+      completedTasks.length > 0
+        ? ['', '=== Tasks/deploys completed (24h) ===', ...completedTasks.map((t) => `- ${t}`)]
+        : [],
       '',
       '=== Missing-link narrative ===',
       missingLinkHints,
       '',
-      '=== Mission Control memory ===',
-      contextBlock,
-      '',
-      '=== PLATFORM CLOSING (admin default — weave into final paragraph) ===',
+      '=== PLATFORM CLOSING ===',
       platformClosing,
+      '',
+      'Explain what was actually shipped. Do not output commit-count headlines.',
     ]
       .flat()
       .filter(Boolean)
@@ -1577,23 +1673,44 @@ export class FounderCopilotService {
     const displayProvider =
       codeAgent ?? (forceProvider ? String(forceProvider) : aiResult.ok ? aiResult.provider : 'RULE_BASED');
 
-    if (aiResult.ok) {
-      const parsed = parseSocialDraftLlmResponse(aiResult.text);
-      const bodyWithClosing = platformClosing
-        ? `${parsed.body.trim()}\n\n---\n${platformClosing}`
-        : parsed.body;
+    const mapParsedToResponse = (
+      parsed: ReturnType<typeof parseFounderUpdateLlmResponse>,
+      meta: { llmProvider: string; fallback?: boolean; llmErrors?: string[] },
+    ) => {
+      const feedBody = composeFounderUpdateFeedBody(parsed, platformClosing);
+      const displayBody = pickFounderUpdateDisplayBody(parsed, audience);
       return {
         headline: parsed.headline,
-        body: bodyWithClosing,
-        xHook: parsed.xHook,
+        body: feedBody,
+        displayBody,
+        xHook: parsed.tweetVersion,
+        whatShipped: parsed.whatShipped,
+        whyItMatters: parsed.whyItMatters,
+        whatUsersNotice: parsed.whatUsersNotice,
+        whatsNext: parsed.whatsNext,
+        developerSummary: parsed.developerSummary,
+        traderSummary: parsed.traderSummary,
+        tweetVersion: parsed.tweetVersion,
+        feedVersion: parsed.feedVersion,
+        impactLevel: parsed.impactLevel,
+        launchReadinessDelta: parsed.launchReadinessDelta,
+        audience,
         provider: displayProvider,
-        llmProvider: aiResult.provider,
+        llmProvider: meta.llmProvider,
         projectDisplayName,
         platformClosing,
+        fallback: meta.fallback,
+        llmErrors: meta.llmErrors,
       };
+    };
+
+    if (aiResult.ok) {
+      return mapParsedToResponse(parseFounderUpdateLlmResponse(aiResult.text), {
+        llmProvider: aiResult.provider,
+      });
     }
 
-    const fallback = buildFounderUpdateFallback({
+    const legacy = buildFounderUpdateFallback({
       projectDisplayName,
       commits24h,
       currentGoal: memory.currentGoal,
@@ -1604,17 +1721,11 @@ export class FounderCopilotService {
       platformClosing,
     });
 
-    return {
-      headline: fallback.headline,
-      body: fallback.body,
-      xHook: fallback.xHook,
-      provider: displayProvider,
-      llmProvider: 'RULE_BASED' as const,
-      llmErrors: aiResult.llmErrors,
+    return mapParsedToResponse(founderUpdateFromLegacyFallback(legacy), {
+      llmProvider: 'RULE_BASED',
       fallback: true,
-      projectDisplayName,
-      platformClosing,
-    };
+      llmErrors: aiResult.llmErrors,
+    });
   }
 
   async getDeviceMemorySync(userId: string) {
