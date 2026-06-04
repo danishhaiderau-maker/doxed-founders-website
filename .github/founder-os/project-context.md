@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore: exclude local tools from Vercel upload
+chore(founder-os): sync tasks
 
 ## Last Activity
 
