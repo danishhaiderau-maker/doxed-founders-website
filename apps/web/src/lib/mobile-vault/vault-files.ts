@@ -126,7 +126,14 @@ export async function buildEncryptedSyncPayloadAsync(
     privateNotes: extended.privateNotes,
   });
   const encryptedVaultBlob = await encryptVaultJson(sensitive, key);
-  return buildVaultMetadataSyncPayload(snapshot, encryptedVaultBlob);
+  const base = buildVaultMetadataSyncPayload(snapshot, encryptedVaultBlob);
+  const { buildMobileVaultMergePatch } = await import('./merge-patch');
+  base.mergePatch = await buildMobileVaultMergePatch({
+    nodeId,
+    platform: 'android',
+    label,
+  });
+  return base;
 }
 
 export async function applyEncryptedVaultToDevice(

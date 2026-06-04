@@ -38,7 +38,13 @@ import {
 import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
 import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
-import { FOUNDER_NODE_APP_VERSION, buildVaultEncryptedBlob, deriveVaultKey, encryptVaultJson } from '@dcf/founder-vault';
+import {
+  FOUNDER_NODE_APP_VERSION,
+  buildVaultEncryptedBlob,
+  deriveVaultKey,
+  encryptVaultJson,
+} from '@dcf/founder-vault';
+import { buildMergePatchForSync, pullPendingVaultMerges } from './vault-sync-pull';
 import { cleanupLegacyPortableInstallers } from './legacy-cleanup';
 import {
   bindUpdateTray,
@@ -314,6 +320,12 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   const metadataPayload = buildVaultEncryptedBlob(snapshot, (json) =>
     encryptVaultJson(json, vaultKey),
   );
+  metadataPayload.mergePatch = buildMergePatchForSync(
+    vaultRoot,
+    config.nodeId,
+    config.label,
+    process.platform,
+  );
 
   const ollama = await resolveOllamaConfig(vaultRoot);
 
@@ -329,6 +341,11 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     });
 
     await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
+
+    const merged = await pullPendingVaultMerges(vaultRoot);
+    if (merged > 0) {
+      notifyDesktop('Founder Vault synced', `Applied ${merged} update(s) from your other device.`);
+    }
 
     lastSyncOkAt = new Date();
     lastSyncError = null;

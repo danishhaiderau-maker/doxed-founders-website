@@ -18,6 +18,7 @@ import { FounderNodeGuard, type FounderNodeRequestUser } from './founder-node.gu
 import { FounderNodeInferenceService } from './founder-node-inference.service';
 import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeService } from './founder-node.service';
+import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 
 @Controller('founder-node')
 export class FounderNodeController {
@@ -25,6 +26,7 @@ export class FounderNodeController {
     private readonly nodes: FounderNodeService,
     private readonly inference: FounderNodeInferenceService,
     private readonly syncJobs: FounderNodeSyncService,
+    private readonly vaultSync: FounderNodeVaultSyncService,
   ) {}
 
   @Post('pairing-code')
@@ -160,5 +162,41 @@ export class FounderNodeController {
     @Body() body: { result?: Record<string, unknown>; error?: string },
   ) {
     return this.syncJobs.completeJob(req.founderNode.nodeId, jobId, body);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('vault-sync/plan')
+  vaultSyncPlan(@Req() req: { founderNode: FounderNodeRequestUser }) {
+    return this.vaultSync.getVaultSyncPlan(req.founderNode.userId, req.founderNode.nodeId);
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Get('vault-sync/merge/:sourceNodeId')
+  vaultSyncMerge(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('sourceNodeId') sourceNodeId: string,
+  ) {
+    return this.vaultSync.getMergePatch(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+      sourceNodeId,
+    );
+  }
+
+  @UseGuards(FounderNodeGuard)
+  @Post('vault-sync/ack')
+  vaultSyncAck(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Body() body: { sourceNodeId: string; vaultSyncVersion: number },
+  ) {
+    if (!body.sourceNodeId?.trim() || !body.vaultSyncVersion) {
+      throw new BadRequestException('sourceNodeId and vaultSyncVersion required');
+    }
+    return this.vaultSync.ackMerge(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+      body.sourceNodeId.trim(),
+      body.vaultSyncVersion,
+    );
   }
 }

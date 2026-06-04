@@ -4263,6 +4263,8 @@ export interface FounderNodeVaultRelayRow {
   platform: string | null;
   updatedAt: string;
   blobBytes: number;
+  vaultSyncVersion?: number;
+  hasMergePatch?: boolean;
 }
 
 export function fetchFounderNodeVaultRelays(token: string) {

@@ -5,6 +5,7 @@ import {
   MemoryStorageMode,
   Prisma,
 } from '@prisma/client';
+import type { VaultMergePatch } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
@@ -94,6 +95,63 @@ export class FounderNodeSyncService {
     const result = await this.waitForJob(job.id, BLOCKING_JOB_TIMEOUT_MS);
     if (!result.ok) throw new BadRequestException(result.error);
     return result.result;
+  }
+
+  async enqueuePullVaultMerge(
+    userId: string,
+    targetNodeId: string,
+    input: {
+      sourceNodeId: string;
+      vaultSyncVersion: number;
+      mergePatch: VaultMergePatch;
+    },
+  ) {
+    const node = await this.prisma.founderNode.findFirst({
+      where: { userId, nodeId: targetNodeId },
+    });
+    if (!node) return null;
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    const primary = settings?.vaultPrimaryPlatform;
+    const vaultPrimaryPlatform =
+      primary === 'desktop' || primary === 'mobile' ? primary : null;
+
+    const existing = await this.prisma.founderNodeSyncJob.findFirst({
+      where: {
+        userId,
+        nodeId: targetNodeId,
+        kind: FounderNodeSyncJobKind.PULL_VAULT_MERGE,
+        status: { in: [FounderNodeSyncJobStatus.PENDING, FounderNodeSyncJobStatus.PROCESSING] },
+      },
+    });
+    const payload = {
+      ...input,
+      vaultPrimaryPlatform,
+    } as unknown as Record<string, unknown>;
+    if (existing) {
+      const prev = existing.payload as { sourceNodeId?: string; vaultSyncVersion?: number };
+      if (
+        prev.sourceNodeId === input.sourceNodeId &&
+        (prev.vaultSyncVersion ?? 0) >= input.vaultSyncVersion
+      ) {
+        return existing;
+      }
+      await this.prisma.founderNodeSyncJob.update({
+        where: { id: existing.id },
+        data: { payload: payload as Prisma.InputJsonValue, expiresAt: new Date(Date.now() + JOB_TTL_MS) },
+      });
+      return existing;
+    }
+
+    return this.prisma.founderNodeSyncJob.create({
+      data: {
+        userId,
+        nodeId: targetNodeId,
+        kind: FounderNodeSyncJobKind.PULL_VAULT_MERGE,
+        payload: payload as Prisma.InputJsonValue,
+        expiresAt: new Date(Date.now() + JOB_TTL_MS),
+      },
+    });
   }
 
   async maybeEnqueueGoalPush(userId: string, goal: string | null | undefined) {
@@ -191,6 +249,30 @@ export class FounderNodeSyncService {
         typeof (result as { chunks?: unknown }).chunks === 'number'
           ? (result as { chunks: number }).chunks
           : undefined;
+      const appliedMerge =
+        job.kind === FounderNodeSyncJobKind.PULL_VAULT_MERGE &&
+        (result as { ok?: boolean }).ok === true;
+      const payload = job.payload as { sourceNodeId?: string; vaultSyncVersion?: number };
+      if (appliedMerge && payload.sourceNodeId && payload.vaultSyncVersion) {
+        await this.prisma.founderNodeVaultSyncAck.upsert({
+          where: {
+            nodeId_sourceNodeId: {
+              nodeId: node.nodeId,
+              sourceNodeId: payload.sourceNodeId,
+            },
+          },
+          create: {
+            userId: node.userId,
+            nodeId: node.nodeId,
+            sourceNodeId: payload.sourceNodeId,
+            vaultSyncVersion: payload.vaultSyncVersion,
+          },
+          update: {
+            vaultSyncVersion: payload.vaultSyncVersion,
+            updatedAt: new Date(),
+          },
+        });
+      }
       await this.prisma.founderNode.update({
         where: { id: node.id },
         data: {

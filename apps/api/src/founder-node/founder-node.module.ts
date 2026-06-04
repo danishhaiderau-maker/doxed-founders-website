@@ -4,12 +4,24 @@ import { FounderNodeController } from './founder-node.controller';
 import { FounderNodeGuard } from './founder-node.guard';
 import { FounderNodeInferenceService } from './founder-node-inference.service';
 import { FounderNodeSyncService } from './founder-node-sync.service';
+import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { FounderNodeService } from './founder-node.service';
 
 @Module({
   imports: [forwardRef(() => EventsModule)],
   controllers: [FounderNodeController],
-  providers: [FounderNodeService, FounderNodeGuard, FounderNodeInferenceService, FounderNodeSyncService],
-  exports: [FounderNodeService, FounderNodeInferenceService, FounderNodeSyncService],
+  providers: [
+    FounderNodeService,
+    FounderNodeGuard,
+    FounderNodeInferenceService,
+    FounderNodeSyncService,
+    FounderNodeVaultSyncService,
+  ],
+  exports: [
+    FounderNodeService,
+    FounderNodeInferenceService,
+    FounderNodeSyncService,
+    FounderNodeVaultSyncService,
+  ],
 })
 export class FounderNodeModule {}

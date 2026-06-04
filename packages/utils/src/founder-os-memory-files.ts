@@ -1,3 +1,5 @@
+import type { VaultMergePatch } from './vault-merge.js';
+
 export const FOUNDER_OS_MEMORY_DIR = '.github/founder-os';
 
 export const FOUNDER_OS_MEMORY_FILES = {
@@ -59,6 +61,8 @@ export type DeviceMemoryMetadataPayload = {
   tasksRemaining: number;
   metadataOnly: true;
   encryptedVaultBlob?: string;
+  /** Plaintext LWW merge patch for cross-device sync (Phase 4). */
+  mergePatch?: VaultMergePatch;
 };
 
 export function stripDeviceMemoryToMetadata(

@@ -1,6 +1,6 @@
 # Mobile app & vault sync — roadmap
 
-**Status (June 2026):** Android **v0.3.0** ships WebView + **on-device Founder Vault** (Capacitor Filesystem/Preferences), dual pairing codes, and encrypted per-node relay. **Phase 4** (PC offline catch-up / two-way merge) is next.
+**Status (June 2026):** Android **v0.4.0** ships on-device vault + **Phase 4 bidirectional merge** (LWW patches for goals/tasks/roadmap; desktop pull jobs + mobile auto-pull). Encrypted blobs remain per-device; merge patches sync cross-device without sharing keys.
 
 **Privacy context:** [PRIVACY.md](../PRIVACY.md) · **Current APK scope:** [MOBILE_APP.md](./MOBILE_APP.md)
 
@@ -128,17 +128,17 @@ gantt
 
 ---
 
-## Phase 4 — **Offline catch-up** (your sleeping-PC model)
+## Phase 4 — **Offline catch-up** (shipped)
 
-**Effort:** ~2–4 weeks after Phase 3
+**Live:** `vaultSyncVersion` + `mergePatch` on relay; `GET /founder-node/vault-sync/plan`; desktop `PULL_VAULT_MERGE` jobs; mobile auto-pull every sync cycle; optional `vaultPrimaryPlatform` on builder settings.
 
-1. API: vault snapshot `version` / `updatedAt` per founder (not last-writer-only).
-2. PC wakes → pull jobs: apply mobile changes to `~/FounderVault/`.
-3. Phone detects PC online (heartbeat) → pull desktop snapshot if newer.
-4. Conflict policy: per-file timestamp or “primary device” setting.
-5. Optional: push notification “Desktop synced 12 new tasks.”
+1. Per-device relay version + plaintext LWW merge patch (not full decrypt across devices).
+2. PC wakes → sync jobs + plan pull apply mobile changes to `~/FounderVault/`.
+3. Phone pulls desktop patch when relay version is newer (ack per peer).
+4. Tie-break: file `mtime` in manifest; optional primary device `desktop` | `mobile`.
+5. Desktop tray notification when merges apply after wake.
 
-**When to push:** Do not market “always identical vault” until this phase is tested.
+**Tag:** `android-app-v0.4.0` + Founder Node build with `vault-sync-pull`.
 
 ---
 

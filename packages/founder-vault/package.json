@@ -20,6 +20,10 @@
     "./paths": {
       "types": "./dist/paths.d.ts",
       "default": "./dist/paths.js"
+    },
+    "./vault-merge-apply": {
+      "types": "./dist/vault-merge-apply.d.ts",
+      "default": "./dist/vault-merge-apply.js"
     }
   },
   "scripts": {

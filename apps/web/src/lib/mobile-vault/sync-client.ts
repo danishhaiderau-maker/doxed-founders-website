@@ -74,6 +74,60 @@ export async function syncMobileVault(
   }
 }
 
+export async function fetchVaultSyncPlan(nodeId: string, nodeToken: string) {
+  const res = await fetch(apiBase('/founder-node/vault-sync/plan'), {
+    headers: { Authorization: founderNodeAuthHeader(nodeId, nodeToken) },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Vault sync plan failed (${res.status}): ${text.slice(0, 120)}`);
+  }
+  return res.json() as Promise<{
+    pulls: Array<{
+      sourceNodeId: string;
+      sourceLabel: string | null;
+      vaultSyncVersion: number;
+      updatedAt: string;
+    }>;
+    vaultPrimaryPlatform?: 'desktop' | 'mobile' | null;
+  }>;
+}
+
+export async function fetchVaultMergePatch(
+  nodeId: string,
+  nodeToken: string,
+  sourceNodeId: string,
+) {
+  const res = await fetch(
+    apiBase(`/founder-node/vault-sync/merge/${encodeURIComponent(sourceNodeId)}`),
+    { headers: { Authorization: founderNodeAuthHeader(nodeId, nodeToken) } },
+  );
+  if (!res.ok) throw new Error(`Merge fetch failed (${res.status})`);
+  return res.json() as Promise<{
+    mergePatch: import('@dcf/utils').VaultMergePatch | null;
+    vaultSyncVersion: number;
+    vaultPrimaryPlatform?: 'desktop' | 'mobile' | null;
+    alreadyApplied?: boolean;
+  }>;
+}
+
+export async function ackVaultMerge(
+  nodeId: string,
+  nodeToken: string,
+  sourceNodeId: string,
+  vaultSyncVersion: number,
+): Promise<void> {
+  const res = await fetch(apiBase('/founder-node/vault-sync/ack'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: founderNodeAuthHeader(nodeId, nodeToken),
+    },
+    body: JSON.stringify({ sourceNodeId, vaultSyncVersion }),
+  });
+  if (!res.ok) throw new Error(`Vault merge ack failed (${res.status})`);
+}
+
 export async function fetchVaultRelayForNode(
   nodeId: string,
   accessToken: string,

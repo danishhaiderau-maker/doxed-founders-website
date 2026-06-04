@@ -9,7 +9,16 @@ import {
   writeMobileNodeConfig,
 } from './storage';
 import { applyEncryptedVaultToDevice, buildEncryptedSyncPayloadAsync, ensureMobileVault } from './vault-files';
-import { fetchVaultRelayForNode, pairMobileNode, sendMobileHeartbeat, syncMobileVault } from './sync-client';
+import {
+  ackVaultMerge,
+  fetchVaultMergePatch,
+  fetchVaultSyncPlan,
+  fetchVaultRelayForNode,
+  pairMobileNode,
+  sendMobileHeartbeat,
+  syncMobileVault,
+} from './sync-client';
+import { applyVaultMergePatchOnDevice } from './merge-apply';
 
 const SYNC_INTERVAL_MS = 45_000;
 const API_BASE = 'https://doxxedcrypto.digital';
@@ -64,7 +73,29 @@ async function runSyncCycle(): Promise<void> {
       vaultPath: 'FounderVault',
     });
     await syncMobileVault(config.nodeId, config.nodeToken, payload);
-    emit({ lastSyncAt: new Date().toISOString(), syncing: false });
+
+    const plan = await fetchVaultSyncPlan(config.nodeId, config.nodeToken);
+    let mergedCount = 0;
+    for (const pull of plan.pulls ?? []) {
+      const body = await fetchVaultMergePatch(config.nodeId, config.nodeToken, pull.sourceNodeId);
+      if (body.alreadyApplied || !body.mergePatch) continue;
+      await applyVaultMergePatchOnDevice(body.mergePatch, {
+        primaryPlatform: body.vaultPrimaryPlatform ?? plan.vaultPrimaryPlatform ?? 'mobile',
+      });
+      await ackVaultMerge(
+        config.nodeId,
+        config.nodeToken,
+        pull.sourceNodeId,
+        body.vaultSyncVersion ?? pull.vaultSyncVersion,
+      );
+      mergedCount += 1;
+    }
+
+    emit({
+      lastSyncAt: new Date().toISOString(),
+      syncing: false,
+      lastError: mergedCount > 0 ? null : status.lastError,
+    });
   } catch (e) {
     emit({
       syncing: false,
