@@ -1,5 +1,18 @@
+function isProductionWebHost(hostname: string): boolean {
+  return (
+    hostname === 'doxxedcrypto.digital' ||
+    hostname === 'www.doxxedcrypto.digital' ||
+    hostname.endsWith('.vercel.app')
+  );
+}
+
 /** Client API base. Empty = same-origin `/api` (proxied to Nest via next.config rewrites). */
 export function getPublicApiBase(): string {
+  // Browser on production must use same-origin /api — direct Railway URLs fail CORS from the dashboard.
+  if (typeof window !== 'undefined' && isProductionWebHost(window.location.hostname)) {
+    return '';
+  }
+
   const raw = process.env.NEXT_PUBLIC_API_URL;
   if (raw === '') return '';
   if (raw?.trim()) return raw.trim().replace(/\/$/, '');
