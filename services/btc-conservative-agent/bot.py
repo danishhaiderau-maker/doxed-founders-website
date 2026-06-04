@@ -6096,20 +6096,28 @@ def main():
     last_heartbeat = time.time()
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
-    if not api_key or len(api_key) < 10:
-        raise RuntimeError("BYBIT_API_KEY invalid or missing")
-    if not secret or len(secret) < 10:
-        raise RuntimeError("BYBIT_SECRET invalid or missing")
-    try:
-        balance = bybit_private.fetch_balance()
-        logger.info(f"API keys validated - Balance: {balance}")
-        if state.get("live_armed"):
-            state["account_balance"] = balance.get('total', {}).get('USDT', STARTING_BALANCE) if isinstance(balance, dict) else STARTING_BALANCE
-        else:
-            state["account_balance"] = STARTING_BALANCE
-    except Exception as e:
-        logger.error(f"API key test failed: {e}")
+    if not api_key or len(api_key) < 10 or not secret or len(secret) < 10:
+        logger.error(
+            "[STARTUP] BYBIT_API_KEY/BYBIT_SECRET missing or invalid — staying up for /health; trading paused"
+        )
+        set_execution_paused("MISSING_BYBIT_KEYS")
         state["account_balance"] = STARTING_BALANCE
+    else:
+        try:
+            balance = bybit_private.fetch_balance()
+            logger.info(f"API keys validated - Balance: {balance}")
+            if state.get("live_armed"):
+                state["account_balance"] = (
+                    balance.get('total', {}).get('USDT', STARTING_BALANCE)
+                    if isinstance(balance, dict)
+                    else STARTING_BALANCE
+                )
+            else:
+                state["account_balance"] = STARTING_BALANCE
+        except Exception as e:
+            logger.error(f"API key test failed: {e}")
+            set_execution_paused("BYBIT_API_ERROR")
+            state["account_balance"] = STARTING_BALANCE
     if not DEEPSEEK_API_KEY:
         logger.warning("AI disabled: DEEPSEEK_API_KEY missing")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
@@ -6199,4 +6207,10 @@ def main():
             time.sleep(5)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"[FATAL STARTUP] Process staying alive for health/debug: {e}")
+        logger.critical(traceback.format_exc())
+        while not shutdown_event.is_set():
+            time.sleep(60)

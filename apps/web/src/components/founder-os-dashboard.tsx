@@ -17,7 +17,6 @@ import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
 import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
-import { MissionStatePanel } from '@/components/mission-state-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
 import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
@@ -497,22 +496,6 @@ export function FounderOsDashboardLayout({
                       </p>
                     </div>
                   )}
-
-                  <MissionStatePanel
-                    accessToken={accessToken}
-                    initial={memory?.memoryGraph ?? null}
-                    lastCommit={memory?.lastCommit}
-                    openTaskCount={memory?.openTasks?.length ?? 0}
-                    buildWorker={workerStatus?.buildWorker}
-                    workerReady={workerStatus?.buildWorker !== 'NONE'}
-                    repoFullName={memory?.repoFullName}
-                    onSaved={() => void load()}
-                    onBuildComplete={(msg) => {
-                      onMessage?.(msg);
-                      void load();
-                      onRefresh();
-                    }}
-                  />
 
                   <MissionControlStatusStrip
                     accessToken={accessToken}
