@@ -161,9 +161,15 @@ async function main() {
     process.exit(1);
   }
 
+  // Browser must use same-origin /api (Vercel rewrite → Railway). Remove legacy direct Railway URL.
+  const rmPublicApi = spawnSync(
+    'vercel',
+    ['env', 'rm', 'NEXT_PUBLIC_API_URL', 'production', '--yes'],
+    { cwd: join(root, 'apps', 'web'), shell: process.platform === 'win32', stdio: 'inherit' },
+  );
+  if (rmPublicApi.status === 0) console.log('Removed NEXT_PUBLIC_API_URL from Vercel production');
+
   const vercelVars = {
-    // Empty = browser uses same-origin /api (Vercel rewrite → Railway). Avoids CORS to *.railway.app.
-    NEXT_PUBLIC_API_URL: '',
     API_URL: apiUrl,
     NEXTAUTH_URL: SITE_URL,
     NEXTAUTH_SECRET: nextAuthSecret,
