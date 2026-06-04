@@ -48,7 +48,9 @@ Changes implemented:
 
 The cloud agent image used for this pass did not include OWASP ZAP, Burp Suite, Docker, or `zap-baseline.py`; only Java and curl were available during the latest recheck. Because of that, this pass used non-invasive live header checks and repository review instead of an authenticated ZAP/Burp crawl.
 
-Recommended follow-up from a security workstation or CI runner:
+A scheduled/manual GitHub Actions workflow has been added at `.github/workflows/security-zap-baseline.yml` to run a passive ZAP baseline against the live site and upload HTML/Markdown/JSON reports as artifacts.
+
+Manual follow-up from a security workstation remains available:
 
 ```bash
 docker run --rm -t ghcr.io/zaproxy/zaproxy:stable \

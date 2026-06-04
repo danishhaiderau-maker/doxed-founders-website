@@ -1,0 +1,44 @@
+name: Security ZAP Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Live site URL to scan"
+        required: true
+        default: "https://doxxedcrypto.digital"
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  zap-baseline:
+    name: OWASP ZAP passive baseline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run passive baseline scan
+        shell: bash
+        run: |
+          TARGET_URL="${{ github.event.inputs.target_url || 'https://doxxedcrypto.digital' }}"
+          mkdir -p zap-reports
+          docker run --rm \
+            -v "$PWD/zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "$TARGET_URL" \
+              -r zap-baseline.html \
+              -w zap-baseline.md \
+              -J zap-baseline.json \
+            || true
+
+      - name: Upload ZAP reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-report
+          path: |
+            zap-reports/zap-baseline.html
+            zap-reports/zap-baseline.md
+            zap-reports/zap-baseline.json
+          if-no-files-found: error
