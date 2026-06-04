@@ -13,6 +13,7 @@ import { FeedProjectBubbleStrip } from '@/components/feed/feed-project-bubble-st
 import { FeedDdFlowBar } from '@/components/feed/feed-dd-flow-bar';
 import { FeedTerminalSidebar } from '@/components/feed/feed-terminal-sidebar';
 import { FeedMoneySections } from '@/components/feed/feed-money-sections';
+import { FeedLiveTape } from '@/components/feed/feed-live-tape';
 import {
   fetchDiscoverUniverse,
   fetchFeedHub,
@@ -70,6 +71,7 @@ function FeedHubPage() {
   const [universe, setUniverse] = useState<DiscoverUniverseResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tapeCards, setTapeCards] = useState<FeedTerminalCard[]>([]);
 
   const terminalCardsById = useMemo(() => {
     const map = new Map<string, FeedTerminalCard>();
@@ -81,12 +83,14 @@ function FeedHubPage() {
 
   const load = useCallback(async () => {
     try {
-      const [hubRes, uni] = await Promise.all([
+      const [hubRes, uni, tapeHub] = await Promise.all([
         fetchFeedHub(category, tab, projectSlug ?? undefined),
         fetchDiscoverUniverse({ timeframe: '24h', bubbleMode: 'feed' }),
+        fetchFeedHub('all', 'trades', projectSlug ?? undefined, 80),
       ]);
       setHub(hubRes);
       setUniverse(uni);
+      setTapeCards(tapeHub.sections?.tape ?? hubRes.sections?.tape ?? []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load feed');
@@ -164,11 +168,17 @@ function FeedHubPage() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[90rem] px-4 py-6 sm:px-6 lg:px-10">
+      <main className="mx-auto w-full max-w-[90rem] px-4 py-4 sm:px-6 lg:px-10">
+        <div className="mb-5">
+          <FeedLiveTape cards={tapeCards} variant="hero" loading={loading && tapeCards.length === 0} />
+        </div>
+
         <FeedHubCategoryTabs active={category} onChange={handleCategoryChange} />
 
         {hub?.pulse && hub.pulse.length > 0 && (
-          <FeedHubPulseStrip pulse={hub.pulse} />
+          <div className="mt-4">
+            <FeedHubPulseStrip pulse={hub.pulse} />
+          </div>
         )}
 
         {showTerminal && (
@@ -192,7 +202,7 @@ function FeedHubPage() {
         )}
 
         {hub?.sections && category === 'all' && showTerminal && (
-          <div className="mt-6">
+          <div className="mt-5">
             <FeedMoneySections sections={hub.sections} />
           </div>
         )}
