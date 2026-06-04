@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: explain GitHub red X vs outage; limit bot Railway watch paths
+chore(founder-os): sync tasks
 
 ## Last Activity
 
