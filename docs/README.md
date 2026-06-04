@@ -31,7 +31,11 @@ Everything in `docs/` is **safe to commit** — no production secrets.
 
 | Doc | Description |
 |-----|-------------|
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | **System architecture** — diagrams, data flow, how privacy is preserved (public-safe) |
 | [FOUNDER_OS_AUDIT.md](./FOUNDER_OS_AUDIT.md) | Architecture & security narrative (May 2026) |
+| [DATA_CLASSIFICATION.md](./DATA_CLASSIFICATION.md) | Public vs private data classes (P0) |
+| [PHALA_ARCHITECTURE_ALIGNMENT.md](./PHALA_ARCHITECTURE_ALIGNMENT.md) | Hybrid Phala / Neon roadmap |
+| [SECRETS_STORAGE.md](./SECRETS_STORAGE.md) | Sealed credentials & CVM unwrap |
 | [HYBRID_CONTROL_PLANE.md](./HYBRID_CONTROL_PLANE.md) | Control plane / Autopilot |
 | [PROJECT_AGENT_ARCHITECTURE.md](./PROJECT_AGENT_ARCHITECTURE.md) | Project agents, vault, BYOK brain |
 | [FOUNDER_COPILOT_SETUP.md](./FOUNDER_COPILOT_SETUP.md) | Copilot setup |
