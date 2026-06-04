@@ -255,6 +255,26 @@ export interface PaperLimitOrder {
   createdAt: string;
 }
 
+export interface TraderVerifiedStatsPayload {
+  verifiedTrades: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+  winRatePct: number;
+  profitFactor: number | null;
+  averageRR: number | null;
+  averageWinUsd: number;
+  averageLossUsd: number;
+  netPnlUsd: number;
+  roiPct: number;
+  roi30dPct: number | null;
+  maxDrawdownPct: number;
+  consistencyScore: number;
+  traderScore: number;
+  targetHitRatePct: number | null;
+  stopHitRatePct: number | null;
+}
+
 export interface LeaderboardEntry {
   rank: number;
   userId: string;
@@ -263,6 +283,13 @@ export interface LeaderboardEntry {
   totalValue: number;
   pnl: number;
   roi: number;
+  traderScore?: number;
+  verifiedTrades?: number;
+  winRatePct?: number;
+  profitFactor?: number | null;
+  averageRR?: number | null;
+  roi30dPct?: number | null;
+  maxDrawdownPct?: number;
   period: string;
 }
 
@@ -689,6 +716,7 @@ export interface PublicPortfolio {
   followersCount: number;
   trustScore: number;
   convictionScore: number;
+  verifiedStats?: TraderVerifiedStatsPayload;
   journeyDays: number;
   hasOlderHistory: boolean;
   olderTradeCount: number;
@@ -836,6 +864,7 @@ export function executePaperTrade(
     comment?: string;
     catalyst?: string;
     targetUsd?: number;
+    stopUsd?: number;
     timeHorizon?: string;
   },
   authToken?: string,

@@ -35,6 +35,7 @@ import { SocialSignalsService } from '../x-social/social-signals.service';
 import { PaperTradeDto } from './dto/paper-trading.dto';
 import { createPaperSessionToken } from './paper-session.util';
 import { buildUserIdentity, labelForUser } from '../account/user-identity.util';
+import { TraderVerificationService } from './trader-verification.service';
 
 const STARTING_CASH = STARTING_CASH_USD;
 const MIN_SELL_USD = 0.01;
@@ -59,6 +60,7 @@ export class PaperTradingService {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly socialSignals: SocialSignalsService,
+    private readonly traderVerification: TraderVerificationService,
   ) {}
 
   async createSession(displayName?: string) {
@@ -488,6 +490,7 @@ export class PaperTradingService {
     comment?: string;
     catalyst?: string;
     targetUsd?: number;
+    stopUsd?: number;
     timeHorizon?: string;
     marketPreview?: {
       priceUsd?: string;
@@ -557,8 +560,13 @@ export class PaperTradingService {
         const newQty = prevQty + quantity;
         const newAvg = newQty > 0 ? (prevQty * prevAvg + amountUsd) / newQty : price;
 
-        const convictionFields =
-          input.comment?.trim() ||
+        const stopPrice = this.traderVerification.resolveStopForEntry(
+          price,
+          input.stopUsd,
+        );
+        const convictionFields = {
+          convictionStopUsd: new Prisma.Decimal(stopPrice),
+          ...(input.comment?.trim() ||
           input.catalyst?.trim() ||
           input.targetUsd ||
           input.timeHorizon?.trim()
@@ -571,7 +579,8 @@ export class PaperTradingService {
                 convictionTimeHorizon: input.timeHorizon?.trim() || undefined,
                 convictionRecordedAt: new Date(),
               }
-            : {};
+            : {}),
+        };
 
         await tx.paperPosition.upsert({
           where: {
@@ -613,6 +622,31 @@ export class PaperTradingService {
         data: { cashBalance: { increment: cashDelta } },
       });
 
+      let sellVerification:
+        | ReturnType<TraderVerificationService['snapshotSellVerification']>
+        | undefined;
+      if (input.side === PaperTradeSide.SELL && input.realizedPnlUsd != null) {
+        const entry = existingPosition
+          ? Number(existingPosition.avgBuyPrice)
+          : price;
+        const takeProfitUsd = existingPosition?.convictionTargetUsd
+          ? Number(existingPosition.convictionTargetUsd)
+          : input.targetUsd ?? null;
+        const stopLossUsd = existingPosition?.convictionStopUsd
+          ? Number(existingPosition.convictionStopUsd)
+          : this.traderVerification.resolveStopForEntry(entry, input.stopUsd);
+        const investedUsd = entry * quantity;
+        sellVerification = this.traderVerification.snapshotSellVerification({
+          entryPriceUsd: entry,
+          exitPriceUsd: price,
+          investedUsd,
+          realizedPnlUsd: input.realizedPnlUsd,
+          takeProfitUsd,
+          stopLossUsd,
+          peakPriceUsd: input.peakPriceUsd ?? null,
+        });
+      }
+
       const trade = await tx.paperTrade.create({
         data: {
           userId: input.userId,
@@ -632,6 +666,7 @@ export class PaperTradingService {
           convictionScore: input.convictionScore ?? undefined,
           peakPriceUsd:
             input.peakPriceUsd != null ? new Prisma.Decimal(input.peakPriceUsd) : undefined,
+          ...(sellVerification ?? {}),
           ...(input.side === PaperTradeSide.SELL
             ? {
                 postExitPeakPriceUsd: new Prisma.Decimal(price),
@@ -778,6 +813,11 @@ export class PaperTradingService {
       ? buildUserIdentity(user).identity
       : null;
 
+    const verifiedStats = await this.traderVerification.buildVerifiedStats(
+      userId,
+      portfolio.roi,
+    );
+
     return {
       userId: portfolio.userId,
       displayName: identity?.primaryLabel ?? 'Trader',
@@ -796,6 +836,7 @@ export class PaperTradingService {
       followersCount: user?._count.followers ?? 0,
       trustScore,
       convictionScore,
+      verifiedStats,
       journeyDays: JOURNEY_DEFAULT_DAYS,
       hasOlderHistory: olderTradeCount > 0,
       olderTradeCount,
@@ -1459,6 +1500,7 @@ export class PaperTradingService {
       comment: dto.comment,
       catalyst: dto.catalyst,
       targetUsd: dto.targetUsd,
+      stopUsd: dto.stopUsd,
       timeHorizon: dto.timeHorizon,
       marketPreview: preview.marketPreview,
     });
@@ -1525,6 +1567,10 @@ export class PaperTradingService {
     const ranked = await Promise.all(
       portfolios.map(async (portfolio) => {
         const snapshot = await this.getPortfolio(portfolio.userId);
+        const verifiedStats = await this.traderVerification.buildVerifiedStats(
+          portfolio.userId,
+          snapshot.roi,
+        );
         return {
           userId: portfolio.userId,
           displayName: labelForUser(portfolio.user),
@@ -1532,17 +1578,35 @@ export class PaperTradingService {
           totalValue: snapshot.totalValue,
           pnl: snapshot.pnl,
           roi: snapshot.roi,
+          verifiedStats,
         };
       }),
     );
 
-    ranked.sort((a, b) => b.totalValue - a.totalValue);
+    ranked.sort(
+      (a, b) =>
+        b.verifiedStats.traderScore - a.verifiedStats.traderScore ||
+        b.roi - a.roi ||
+        b.totalValue - a.totalValue,
+    );
 
     void this.syncLeaderboardEntries(ranked.slice(0, 100));
 
     return ranked.slice(0, limit).map((entry, index) => ({
       rank: index + 1,
-      ...entry,
+      userId: entry.userId,
+      displayName: entry.displayName,
+      twitterHandle: entry.twitterHandle,
+      totalValue: entry.totalValue,
+      pnl: entry.pnl,
+      roi: entry.roi,
+      traderScore: entry.verifiedStats.traderScore,
+      verifiedTrades: entry.verifiedStats.verifiedTrades,
+      winRatePct: entry.verifiedStats.winRatePct,
+      profitFactor: entry.verifiedStats.profitFactor,
+      averageRR: entry.verifiedStats.averageRR,
+      roi30dPct: entry.verifiedStats.roi30dPct,
+      maxDrawdownPct: entry.verifiedStats.maxDrawdownPct,
       period: LeaderboardPeriod.ALL_TIME,
     }));
   }

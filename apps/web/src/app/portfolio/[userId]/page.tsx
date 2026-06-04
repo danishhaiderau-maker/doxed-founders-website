@@ -10,6 +10,7 @@ import { useShareOrigin } from '@/components/share-on-x-button';
 import { CoinIntelligencePanel, type CoinIntelData } from '@/components/coin-intelligence-panel';
 import { SharePortfolio } from '@/components/share-portfolio';
 import { TraderProfileHeader } from '@/components/trader/profile-header';
+import { TraderVerifiedStatsPanel } from '@/components/trader/verified-stats-panel';
 import { TraderOpenPositionCard } from '@/components/trader/open-position-card';
 import { TradeJourneyCard } from '@/components/trader/trade-journey-card';
 import { TradingTimeline } from '@/components/trader/trading-timeline';
@@ -126,6 +127,13 @@ export default function PublicPortfolioPage() {
               accessToken={session?.accessToken}
               onFollowChange={setFollowing}
             />
+
+            {portfolio.verifiedStats && (
+              <TraderVerifiedStatsPanel
+                stats={portfolio.verifiedStats}
+                portfolioRoi={portfolio.roi}
+              />
+            )}
 
             <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
               <h3 className="font-semibold">Open positions</h3>

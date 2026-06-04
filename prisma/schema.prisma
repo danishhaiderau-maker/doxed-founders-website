@@ -737,6 +737,7 @@ model PaperPosition {
   convictionThesis    String?  @db.Text
   convictionCatalyst  String?
   convictionTargetUsd Decimal? @db.Decimal(24, 12)
+  convictionStopUsd   Decimal? @db.Decimal(24, 12)
   convictionTimeHorizon String?
   convictionRecordedAt DateTime?
   peakPriceUsd       Decimal? @db.Decimal(24, 12)
@@ -763,6 +764,11 @@ model PaperTrade {
   whatIfHeldPct  Decimal?       @db.Decimal(8, 2)
   missedAlphaPct Decimal?       @db.Decimal(8, 2)
   convictionScore Int?
+  verifiedOutcome String?
+  entryPriceSnapshot Decimal?  @db.Decimal(24, 12)
+  takeProfitSnapshot Decimal?  @db.Decimal(24, 12)
+  stopLossSnapshot   Decimal?  @db.Decimal(24, 12)
+  achievedRR         Decimal?  @db.Decimal(8, 4)
   peakPriceUsd   Decimal?       @db.Decimal(24, 12)
   postExitPeakPriceUsd   Decimal? @db.Decimal(24, 12)
   postExitTroughPriceUsd Decimal? @db.Decimal(24, 12)

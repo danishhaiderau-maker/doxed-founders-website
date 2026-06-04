@@ -72,6 +72,7 @@ function PaperTradingPageContent() {
   const [tradeComment, setTradeComment] = useState('');
   const [tradeCatalyst, setTradeCatalyst] = useState('');
   const [tradeTargetUsd, setTradeTargetUsd] = useState('');
+  const [tradeStopUsd, setTradeStopUsd] = useState('');
   const [tradeTimeHorizon, setTradeTimeHorizon] = useState('');
   const [lastFeedPostId, setLastFeedPostId] = useState<string | null>(null);
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
@@ -473,6 +474,7 @@ function PaperTradingPageContent() {
         comment: buildTradeComment(),
         catalyst: tradeCatalyst.trim() || undefined,
         targetUsd: tradeTargetUsd.trim() ? Number(tradeTargetUsd) : undefined,
+        stopUsd: tradeStopUsd.trim() ? Number(tradeStopUsd) : undefined,
         timeHorizon: tradeTimeHorizon.trim() || undefined,
       }, authToken);
       setLastFeedPostId(result.feedPostId);
@@ -486,6 +488,7 @@ function PaperTradingPageContent() {
       setTradeComment('');
       setTradeCatalyst('');
       setTradeTargetUsd('');
+      setTradeStopUsd('');
       setTradeTimeHorizon('');
       setFounderDoxxedTick(false);
       setShowAccountabilityModal(false);
@@ -1305,6 +1308,8 @@ function PaperTradingPageContent() {
           onCatalystChange={setTradeCatalyst}
           targetUsd={tradeTargetUsd}
           onTargetUsdChange={setTradeTargetUsd}
+          stopUsd={tradeStopUsd}
+          onStopUsdChange={setTradeStopUsd}
           timeHorizon={tradeTimeHorizon}
           onTimeHorizonChange={setTradeTimeHorizon}
           founderDoxxedTick={founderDoxxedTick}

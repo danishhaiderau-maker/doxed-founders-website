@@ -24,6 +24,8 @@ type TradeAccountabilityModalProps = {
   onCatalystChange: (v: string) => void;
   targetUsd: string;
   onTargetUsdChange: (v: string) => void;
+  stopUsd: string;
+  onStopUsdChange: (v: string) => void;
   timeHorizon: string;
   onTimeHorizonChange: (v: string) => void;
   founderDoxxedTick: boolean;
@@ -59,6 +61,8 @@ export function TradeAccountabilityModal({
   onCatalystChange,
   targetUsd,
   onTargetUsdChange,
+  stopUsd,
+  onStopUsdChange,
   timeHorizon,
   onTimeHorizonChange,
   founderDoxxedTick,
@@ -260,7 +264,7 @@ export function TradeAccountabilityModal({
                 />
               </label>
               <label className="block">
-                <span className="text-xs font-medium text-zinc-400">Price target (USD)</span>
+                <span className="text-xs font-medium text-zinc-400">Take profit (USD)</span>
                 <input
                   type="number"
                   min={0}
@@ -270,6 +274,21 @@ export function TradeAccountabilityModal({
                   placeholder="0.000001"
                   className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
                 />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-400">Stop loss (USD)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={stopUsd}
+                  onChange={(e) => onStopUsdChange(e.target.value)}
+                  placeholder={price > 0 ? (price * 0.92).toPrecision(6) : 'Optional — default 8% below entry'}
+                  className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-500/50"
+                />
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  Stored on your position for verified win/loss scoring at exit.
+                </p>
               </label>
             </div>
             <label className="mt-3 block">

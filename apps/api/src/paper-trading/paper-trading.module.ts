@@ -10,6 +10,7 @@ import { PaperLimitOrderService } from './paper-limit-order.service';
 import { PaperTradingCryptoService } from './paper-trading-crypto.service';
 import { PaperTradingStripeService } from './paper-trading-stripe.service';
 import { PaperTradingService } from './paper-trading.service';
+import { TraderVerificationService } from './trader-verification.service';
 
 @Module({
   imports: [DexscreenerModule, FeedModule, PointsModule, XSocialModule, NotificationsModule],
@@ -19,6 +20,8 @@ import { PaperTradingService } from './paper-trading.service';
     PaperLimitOrderService,
     PaperTradingStripeService,
     PaperTradingCryptoService,
+    TraderVerificationService,
   ],
+  exports: [TraderVerificationService],
 })
 export class PaperTradingModule {}
