@@ -84,6 +84,7 @@ export * from './openhands';
 export * from './cursor-cloud';
 export * from './workspace-activity';
 export * from './unified-feed';
+export * from './money-feed';
 export * from './gamified-roles';
 export * from './notification-preferences';
 export * from './prediction-markets';

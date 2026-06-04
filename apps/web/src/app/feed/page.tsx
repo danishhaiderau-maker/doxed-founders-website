@@ -12,6 +12,7 @@ import { FeedTerminalTabs } from '@/components/feed/feed-terminal-tabs';
 import { FeedProjectBubbleStrip } from '@/components/feed/feed-project-bubble-strip';
 import { FeedDdFlowBar } from '@/components/feed/feed-dd-flow-bar';
 import { FeedTerminalSidebar } from '@/components/feed/feed-terminal-sidebar';
+import { FeedMoneySections } from '@/components/feed/feed-money-sections';
 import {
   fetchDiscoverUniverse,
   fetchFeedHub,
@@ -29,7 +30,7 @@ const VALID_TABS: FeedTerminalTab[] = [
   'conviction',
   'movers',
   'regret',
-  'activity',
+  'listings',
 ];
 
 const VALID_CATEGORIES: UnifiedFeedCategory[] = [
@@ -82,7 +83,7 @@ function FeedHubPage() {
     try {
       const [hubRes, uni] = await Promise.all([
         fetchFeedHub(category, tab, projectSlug ?? undefined),
-        fetchDiscoverUniverse({ timeframe: '24h' }),
+        fetchDiscoverUniverse({ timeframe: '24h', bubbleMode: 'feed' }),
       ]);
       setHub(hubRes);
       setUniverse(uni);
@@ -154,9 +155,9 @@ function FeedHubPage() {
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-xl font-bold tracking-tight">Platform Feed</h1>
+            <h1 className="mt-1 text-xl font-bold tracking-tight">Money Feed</h1>
             <p className="text-xs text-zinc-500">
-              Paper trades · prediction stakes · new listings — founder GitHub activity lives on Discover
+              Conviction · flow · listings · markets — builds & commits live on Discover & Founder OS
             </p>
           </div>
           <SiteNav />
@@ -178,12 +179,21 @@ function FeedHubPage() {
 
         {universe && showTerminal && (
           <div className="mt-5 space-y-4">
+            <p className="text-[10px] uppercase tracking-wider text-zinc-600">
+              Activity bubbles · size = trading volume + watchlists + votes (not GitHub commits)
+            </p>
             <FeedProjectBubbleStrip
               projects={universe.projects}
               selectedSlug={projectSlug}
               onSelect={handleProjectSelect}
             />
             <FeedDdFlowBar sidebar={universe.sidebar} />
+          </div>
+        )}
+
+        {hub?.sections && category === 'all' && showTerminal && (
+          <div className="mt-6">
+            <FeedMoneySections sections={hub.sections} />
           </div>
         )}
 
@@ -215,7 +225,12 @@ function FeedHubPage() {
               </div>
             )}
             {hub && hub.stream.length > 0 && (
-              <FeedHubStream stream={hub.stream} terminalCardsById={terminalCardsById} />
+              <>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  {category === 'founder' ? 'Founder milestones' : 'Live stream'}
+                </h3>
+                <FeedHubStream stream={hub.stream} terminalCardsById={terminalCardsById} />
+              </>
             )}
           </div>
 

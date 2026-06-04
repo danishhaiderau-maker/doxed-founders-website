@@ -1,4 +1,5 @@
 import type { UnifiedFeedItem } from './unified-feed';
+import { isMajorShipHeadline } from './money-feed.js';
 import { unifiedFeedTier } from './unified-feed';
 
 /** Map platform FounderEvent rows into unified feed items (Sprint 7b). */
@@ -65,6 +66,14 @@ function mapFounderEventType(
         detail: `${founderName}${tag} merged a PR`,
       };
     case 'DEPLOY_SUCCESS':
+      if (isMajorShipHeadline(title)) {
+        return {
+          eventType: 'project_shipped',
+          emoji: '🚀',
+          headline: title,
+          detail: `${founderName}${tag} · major ship`,
+        };
+      }
       return {
         eventType: 'deployment',
         emoji: '🚀',
