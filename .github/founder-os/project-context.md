@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Ship Android v0.3.0 with on-device Founder Vault sync (Phase 2–3).
+chore(founder-os): sync tasks
 
 ## Last Activity
 
