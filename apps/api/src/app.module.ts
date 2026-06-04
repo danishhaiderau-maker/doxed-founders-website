@@ -38,6 +38,7 @@ import { MessagesModule } from './messages/messages.module';
 import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.module';
 import { CredentialsModule } from './credentials/credentials.module';
 import { PrivacyModule } from './privacy/privacy.module';
+import { AirdropModule } from './airdrop/airdrop.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { PrivacyModule } from './privacy/privacy.module';
     PrismaModule,
     CredentialsModule,
     PrivacyModule,
+    AirdropModule,
     FounderMemoryGraphModule,
     PointsModule,
     NotificationsModule,

@@ -1382,6 +1382,58 @@ export function fetchReputationMe(token: string) {
   return apiFetch<ReputationMe>('/reputation/me', undefined, token);
 }
 
+export type AirdropRunwayEntry = {
+  rank: number;
+  userId: string;
+  displayName: string;
+  twitterHandle: string | null;
+  twitterConnected: boolean;
+  reputationPoints: number;
+  activityScore: number;
+  humanScore: number;
+  runwayScore: number;
+  status: 'active' | 'warming' | 'at_risk' | 'decaying';
+  xEligibility: 'eligible' | 'review' | 'not_connected';
+  lastActiveAt: string | null;
+  idleDays: number | null;
+  projectedDecayDdollar: number;
+  airdropPoolPercent: number;
+  estimatedTokens: number;
+  estimatedUsd: number;
+};
+
+export type AirdropRunwayResponse = {
+  entries: AirdropRunwayEntry[];
+  totalListed: number;
+  twitterConnectedCount: number;
+  totalPoints: number;
+  rules: {
+    twitterSignInRequired: boolean;
+    inactivityWarnDays: number;
+    decayDdollarPerDay: number;
+    snapshotNote: string;
+    blueTickNote: string;
+  };
+};
+
+export function fetchAirdropRunway(limit = 100) {
+  return apiFetch<AirdropRunwayResponse>(`/airdrop/runway?limit=${limit}`);
+}
+
+export function fetchAirdropRunwayMe(token: string) {
+  return apiFetch<
+    AirdropRunwayEntry & {
+      rank: number | null;
+      displayName: string;
+      twitterConnected: boolean;
+      needsTwitter: boolean;
+      cashBalanceUsd: number | null;
+      warning: { level: 'warn' | 'critical'; message: string } | null;
+      rules: AirdropRunwayResponse['rules'];
+    }
+  >('/airdrop/runway/me', undefined, token);
+}
+
 export function fetchBustedTraders() {
   return apiFetch<BustedTraderEntry[]>('/paper-trading/busted');
 }

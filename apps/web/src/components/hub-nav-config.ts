@@ -25,6 +25,7 @@ const HUB_PREFIXES = [
   '/founder/',
   '/project/',
   '/scout-votes',
+  '/airdrop',
 ] as const;
 
 export function isHubWorkspacePath(pathname: string): boolean {
@@ -44,6 +45,7 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/trust-center')) return 'Trust Center';
   if (pathname.startsWith('/scout-votes')) return 'Scout Voting';
   if (pathname.startsWith('/agent-hub') || pathname.startsWith('/agents')) return 'Agents';
+  if (pathname.startsWith('/airdrop')) return 'Airdrop Runway';
   if (pathname.startsWith('/feed') || pathname.startsWith('/build-feed') || pathname.startsWith('/town-hall'))
     return 'Feed';
   if (pathname.startsWith('/ddollar')) return 'DDollar';
@@ -87,7 +89,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     id: 'explore',
     rowNumber: 'Row 1',
     label: 'Explore',
-    subtitle: 'Find projects · Trust · Agents',
+    subtitle: 'Discover · Trust · Agents · Airdrop runway',
     sidebarDescription: 'Find curated projects, trust signals, and agent tools.',
     borderClass: 'border-zinc-600/40',
     labelClass: 'text-zinc-300',
@@ -97,6 +99,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/projects', label: 'Projects', icon: '📦' },
       { href: '/trust-center', label: 'Trust Center', icon: '🛡' },
       { href: '/agent-hub', label: 'Agents', icon: '🤖' },
+      { href: '/airdrop', label: 'Airdrop Runway', icon: '🪂' },
     ],
   },
   {
