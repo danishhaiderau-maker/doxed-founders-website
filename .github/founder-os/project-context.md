@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync roadmap
+feat(privacy): P0 data-class audit and public/private split
 
 ## Last Activity
 
