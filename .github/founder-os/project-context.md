@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore: add founder node token bcrypt verify script
+chore(sync): remove legacy NEXT_PUBLIC_API_URL on production deploy
 
 ## Last Activity
 
