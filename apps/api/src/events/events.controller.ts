@@ -42,6 +42,21 @@ export class EventsController {
     return this.copilot.patchMemoryGraph(user.id, body);
   }
 
+  @Post('copilot/memory-graph/after-build')
+  memoryGraphAfterBuild(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      task: string;
+      status: string;
+      result?: string | null;
+      branch?: string | null;
+      prUrl?: string | null;
+    },
+  ) {
+    return this.copilot.applyMemoryGraphAfterBuild(user.id, body);
+  }
+
   @Get('copilot/standup')
   standup(@CurrentUser() user: AuthUser) {
     return this.copilot.getDailyStandup(user.id);

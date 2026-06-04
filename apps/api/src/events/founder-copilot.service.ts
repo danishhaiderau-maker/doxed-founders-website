@@ -42,6 +42,9 @@ import {
   stripDeviceMemoryToMetadata,
   isMetadataOnlyPayload,
   extractVaultRelaySummary,
+  buildContinueFromMissionPrompt,
+  detectContinueMissionIntent,
+  formatMissionStateBlock,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
 } from '@dcf/utils';
@@ -84,6 +87,7 @@ export class FounderCopilotService {
     const keys = [
       'project',
       'active_goal',
+      'current_sprint',
       'current_task',
       'blocked_by',
       'next_action',
@@ -98,6 +102,28 @@ export class FounderCopilotService {
       }
     }
     return this.memoryGraph.patchForUser(userId, patch);
+  }
+
+  async applyMemoryGraphAfterBuild(
+    userId: string,
+    body: {
+      task: string;
+      status: string;
+      result?: string | null;
+      branch?: string | null;
+      prUrl?: string | null;
+    },
+  ) {
+    if (!body.task?.trim() || !body.status?.trim()) {
+      throw new BadRequestException('task and status required');
+    }
+    return this.memoryGraph.applyAfterBuild(userId, {
+      task: body.task.trim(),
+      status: body.status.trim(),
+      result: body.result ?? null,
+      branch: body.branch ?? null,
+      prUrl: body.prUrl ?? null,
+    });
   }
 
   async getProjectMemory(userId: string) {
@@ -363,8 +389,55 @@ export class FounderCopilotService {
     return { standup, memory };
   }
 
+  async askContinueFromMissionState(userId: string) {
+    const memory = await this.getProjectMemory(userId);
+    const graph = memory.memoryGraph ?? (await this.memoryGraph.resolveForUser(userId));
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const block = formatMissionStateBlock(graph, {
+      lastCommit: memory.lastCommit,
+      openTaskCount: memory.openTasks.length,
+    });
+
+    const systemPrompt = `${this.memoryGraph.getPrefix(graph)}You are Founder Copilot. The user wants to continue where they left off. Use Mission State as ground truth. Give a short, actionable plan (3–6 bullets max). Do not ask what they are building.`;
+    const aiResult = await this.builder.tryCopilotChatCompletion(
+      userId,
+      systemPrompt,
+      buildContinueFromMissionPrompt(graph),
+    );
+
+    const answer = aiResult.ok
+      ? `${block}\n\n---\n\n${aiResult.text}`
+      : `${block}\n\n**Do this next:** ${graph.next_action ?? graph.current_task ?? memory.suggestedNextStep}`;
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: memory.project?.id,
+      userId,
+      type: FounderEventType.COPILOT_COMMAND,
+      source: 'copilot',
+      title: 'Continue mission state',
+      payload: { intent: 'continue', goal: graph.active_goal },
+    });
+
+    return {
+      answer,
+      answerProvider: aiResult.ok ? aiResult.provider : 'RULE_BASED',
+      stats: {
+        commits: 0,
+        deploys: 0,
+        followers: memory.community.followers,
+        featureRequests: memory.community.featureRequests,
+        launchReadiness: memory.launchReadiness,
+        buildStreak: memory.buildStreakDays,
+      },
+    };
+  }
+
   async resumeWork(userId: string) {
     const memory = await this.getProjectMemory(userId);
+    const graph = memory.memoryGraph ?? (await this.memoryGraph.resolveForUser(userId));
 
     if (memory.repoFullName) {
       try {
@@ -374,7 +447,10 @@ export class FounderCopilotService {
       }
     }
 
-    const prompt = memory.suggestedNextStep;
+    const prompt =
+      graph.next_action?.trim() ||
+      graph.current_task?.trim() ||
+      memory.suggestedNextStep;
     await this.events.emit({
       founderId: (await this.prisma.founder.findUnique({ where: { userId } }))!.id,
       projectId: memory.project?.id,
@@ -390,12 +466,15 @@ export class FounderCopilotService {
       : '';
 
     const dispatch = await this.builder.executeBuildTask(userId, {
-      spec: memory.currentGoal,
-      cursorPrompt: `${githubPrefix}${prompt}`,
+      spec: graph.active_goal || memory.currentGoal,
+      cursorPrompt: `${githubPrefix}${buildContinueFromMissionPrompt(graph)}`,
       repository: memory.repoFullName ?? undefined,
     });
 
-    let message = `Last commit: ${memory.lastCommit?.split('\n')[0]?.slice(0, 80) ?? 'None'}\nOpen tasks: ${memory.openTasks.length}\nRecommended: ${prompt}\nEstimated time: ~2 hours`;
+    let message = formatMissionStateBlock(graph, {
+      lastCommit: memory.lastCommit,
+      openTaskCount: memory.openTasks.length,
+    });
 
     let cursorCloudDispatch:
       | Awaited<ReturnType<BuilderService['dispatchCursorBuildTask']>>
@@ -562,6 +641,10 @@ export class FounderCopilotService {
     const intent = detectWorkforceIntent(text, options?.agentTemplate);
     if (intent) {
       return this.askViaOrchestrator(userId, text, intent);
+    }
+
+    if (detectContinueMissionIntent(text)) {
+      return this.askContinueFromMissionState(userId);
     }
 
     const memory = await this.getProjectMemory(userId);
