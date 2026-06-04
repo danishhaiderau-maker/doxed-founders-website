@@ -13,6 +13,7 @@
     "pack:founder-node": "node scripts/pack-founder-node.mjs",
     "pack:founder-node:win": "node scripts/pack-founder-node.mjs --win",
     "pack:founder-node:mac": "node scripts/pack-founder-node.mjs --mac",
+    "pack:founder-node:linux": "node scripts/pack-founder-node.mjs --linux",
     "pack:founder-node:all": "node scripts/pack-founder-node.mjs --all",
     "pack:android": "node scripts/pack-android-app.mjs",
     "build:founder-vault": "npm run build --workspace=@dcf/founder-vault",

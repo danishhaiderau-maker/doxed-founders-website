@@ -1,7 +1,7 @@
 import type { DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
 
 export const FOUNDER_VAULT_SCHEMA_VERSION = 1 as const;
-export const FOUNDER_NODE_APP_VERSION = '0.5.2';
+export const FOUNDER_NODE_APP_VERSION = '0.5.3';
 
 export type FounderVaultMeta = {
   version: typeof FOUNDER_VAULT_SCHEMA_VERSION;

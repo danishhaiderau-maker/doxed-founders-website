@@ -20,7 +20,10 @@ jobs:
             pack_cmd: npx electron-builder --win nsis --x64 --publish never
           - os: macos-latest
             platform: mac
-            pack_cmd: npx electron-builder --mac dmg --arm64 --publish never
+            pack_cmd: npx electron-builder --mac dmg --arm64 --x64 --publish never
+          - os: ubuntu-latest
+            platform: linux
+            pack_cmd: npx electron-builder --linux AppImage --x64 --publish never
 
     runs-on: ${{ matrix.os }}
 
@@ -73,12 +76,12 @@ jobs:
         run: |
           set -e
           shopt -s nullglob 2>/dev/null || true
-          files=(apps/founder-node/release/*.exe apps/founder-node/release/*.dmg)
+          files=(apps/founder-node/release/*.exe apps/founder-node/release/*.dmg apps/founder-node/release/*.AppImage)
           if [ ${#files[@]} -eq 0 ]; then
-            files=(apps/founder-node/release/**/*.exe apps/founder-node/release/**/*.dmg)
+            files=(apps/founder-node/release/**/*.exe apps/founder-node/release/**/*.dmg apps/founder-node/release/**/*.AppImage)
           fi
           if [ ${#files[@]} -eq 0 ]; then
-            echo "No .exe or .dmg produced"
+            echo "No installer produced (.exe, .dmg, .AppImage)"
             find apps/founder-node/release -type f 2>/dev/null || true
             exit 1
           fi
@@ -91,6 +94,7 @@ jobs:
           path: |
             apps/founder-node/release/*.exe
             apps/founder-node/release/*.dmg
+            apps/founder-node/release/*.AppImage
           if-no-files-found: error
 
       - name: Upload pack debug logs on failure
@@ -121,10 +125,18 @@ jobs:
           name: founder-node-mac
           path: release/mac
 
+      - name: Download Linux installer
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: founder-node-linux
+          path: release/linux
+
       - name: List release assets
         run: |
           echo "Windows:" && ls -la release/win/ 2>/dev/null || echo "(none)"
           echo "macOS:" && ls -la release/mac/ 2>/dev/null || echo "(none)"
+          echo "Linux:" && ls -la release/linux/ 2>/dev/null || echo "(none)"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -140,3 +152,5 @@ jobs:
             release/win/*.dmg
             release/mac/*.exe
             release/mac/*.dmg
+            release/linux/*.AppImage
+            release/linux/*.deb
