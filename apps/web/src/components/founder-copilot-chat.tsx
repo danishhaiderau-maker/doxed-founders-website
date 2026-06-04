@@ -24,6 +24,7 @@ import {
   isBuilderRunFailureStatus,
   isBuilderRunSuccessStatus,
   isFounderRepoStatusPrompt,
+  isStaleBoilerplateMissionTask,
 } from '@dcf/utils';
 import {
   formatBuilderRunInChat,
@@ -756,6 +757,15 @@ export function FounderCopilotChat({
                 Founder Brain gives tailored answers — not generic rule-based replies.
               </p>
             )}
+            {isHero && (
+              <p className="rounded-lg border border-cyan-500/20 bg-cyan-950/10 px-3 py-2 text-left text-xs text-zinc-400">
+                <strong className="text-cyan-300">Try first:</strong> leave mode on{' '}
+                <strong className="text-violet-300">Ask</strong> and send{' '}
+                <strong className="text-zinc-200">What&apos;s the status?</strong> — Founder Brain
+                answers from GitHub commits, not old task lists. Use <strong className="text-zinc-200">Build</strong>{' '}
+                only when you want Cursor to change code.
+              </p>
+            )}
             {isHero && missionInitiative && (
               <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2 text-left text-xs text-zinc-300">
                 <span className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -763,7 +773,7 @@ export function FounderCopilotChat({
                 </span>
                 <br />
                 {missionInitiative}
-                {missionNextStep ? (
+                {missionNextStep && !isStaleBoilerplateMissionTask(missionNextStep) ? (
                   <>
                     <br />
                     <span className="mt-1 inline-block text-emerald-300/90">

@@ -1,4 +1,5 @@
 import type { FounderMemoryGraph } from './founder-memory-graph';
+import { isStaleBoilerplateMissionTask } from './mission-state';
 import {
   filterCommitsForIntelligence,
   groupCommitsByInitiative,
@@ -90,16 +91,23 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
       ? 'Batch Founder OS sync (context + roadmap + tasks) into one commit; skip when unchanged'
       : null;
 
+  const freshOpenTask = input.openTasks.find((t) => !isStaleBoilerplateMissionTask(t));
+  const graphNext = graph?.next_action?.trim();
+  const suggested = input.suggestedNextStep?.trim();
+
   const recommendedNextStep =
     syncHygieneStep ||
     (openPrs.length > 0
       ? `Review open PR #${openPrs[0]!.number}: ${openPrs[0]!.title.slice(0, 80)}`
       : null) ||
-    graph?.next_action?.trim() ||
-    (githubSignalsStrong ? null : input.openTasks[0]) ||
-    input.suggestedNextStep ||
+    (graphNext && !isStaleBoilerplateMissionTask(graphNext) ? graphNext : null) ||
+    (githubSignalsStrong ? null : freshOpenTask) ||
+    (suggested && !isStaleBoilerplateMissionTask(suggested) ? suggested : null) ||
     (mergedRecently.length > 0
       ? `Review merged PR and deploy: ${mergedRecently[0]!.title.slice(0, 80)}`
+      : null) ||
+    (shippedRecently[0]
+      ? `Publish or ship next: ${shippedRecently[0]!.slice(0, 80)}`
       : 'Ship the top open task and sync GitHub');
 
   const resolvedNextStep =
