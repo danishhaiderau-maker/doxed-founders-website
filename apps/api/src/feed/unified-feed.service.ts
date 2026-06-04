@@ -1,9 +1,16 @@
 import { Injectable } from '@nestjs/common';
-import { ListingStatus, ScoutMarketStatus, SimulatedRaiseStatus, ProjectSource } from '@prisma/client';
+import {
+  FounderEventType,
+  ListingStatus,
+  ScoutMarketStatus,
+  SimulatedRaiseStatus,
+  ProjectSource,
+} from '@prisma/client';
 import {
   PlatformPulseItem,
   UnifiedFeedCategory,
   UnifiedFeedItem,
+  founderEventToUnifiedItem,
   sortUnifiedFeedItems,
   unifiedFeedTier,
   computePredictionHeatScore,
@@ -424,7 +431,46 @@ export class UnifiedFeedService {
       sourceUrl: u.sourceUrl ?? undefined,
     }));
 
-    return [...pinnedItems, ...buildItems, ...videoItems];
+    const platformEvents = await this.loadFounderPlatformEvents();
+    return [...pinnedItems, ...platformEvents, ...buildItems, ...videoItems];
+  }
+
+  private async loadFounderPlatformEvents(): Promise<UnifiedFeedItem[]> {
+    const events = await this.prisma.founderEvent.findMany({
+      where: {
+        project: { approved: true },
+        type: {
+          in: [
+            FounderEventType.GITHUB_COMMIT,
+            FounderEventType.GITHUB_PR_MERGED,
+            FounderEventType.DEPLOY_SUCCESS,
+            FounderEventType.DEPLOY_STARTED,
+            FounderEventType.BUILD_PUBLISHED,
+            FounderEventType.CURSOR_BUILD_SESSION,
+            FounderEventType.BUILD_QUEUE_CAPTURED,
+            FounderEventType.AGENT_RUN_COMPLETE,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      include: {
+        founder: { select: { slug: true, name: true } },
+        project: { select: { slug: true, name: true, ticker: true } },
+      },
+    });
+
+    return events.map((e) =>
+      founderEventToUnifiedItem({
+        id: e.id,
+        type: e.type,
+        title: e.title,
+        createdAt: e.createdAt,
+        founder: e.founder,
+        project: e.project,
+        payload: e.payload as Record<string, unknown> | null,
+      }),
+    );
   }
 
   private async loadTradingEvents(): Promise<UnifiedFeedItem[]> {

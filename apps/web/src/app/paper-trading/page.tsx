@@ -113,6 +113,7 @@ function PaperTradingPageContent() {
   const [limitSide, setLimitSide] = useState<'BUY' | 'SELL'>('SELL');
   const [limitTrigger, setLimitTrigger] = useState<'GTE' | 'LTE'>('GTE');
   const [limitProjectId, setLimitProjectId] = useState<string | null>(null);
+  const [copyFromUserId, setCopyFromUserId] = useState<string | null>(null);
 
   const chartUrl = activeChartUrl ?? preview?.dexscreenerUrl ?? null;
   const chartChain = preview?.chainSlug ?? portfolio?.positions[0]?.chainSlug ?? null;
@@ -242,6 +243,7 @@ function PaperTradingPageContent() {
     }
 
     if (copyFrom && userId && !dex) {
+      setCopyFromUserId(copyFrom);
       void prefillFromTrader(copyFrom);
       return;
     }
@@ -476,6 +478,7 @@ function PaperTradingPageContent() {
         targetUsd: tradeTargetUsd.trim() ? Number(tradeTargetUsd) : undefined,
         stopUsd: tradeStopUsd.trim() ? Number(tradeStopUsd) : undefined,
         timeHorizon: tradeTimeHorizon.trim() || undefined,
+        copyFromUserId: copyFromUserId ?? undefined,
       }, authToken);
       setLastFeedPostId(result.feedPostId);
       if (side === 'SELL' && result.realizedPnlUsd != null) {
@@ -659,6 +662,23 @@ function PaperTradingPageContent() {
       </header>
 
       <div className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-5">
+        {copyFromUserId && (
+          <div className="lg:col-span-5 rounded-xl border border-violet-500/40 bg-violet-950/25 px-4 py-3 text-sm text-violet-100">
+            <p className="font-semibold text-violet-50">Copying a verified trader</p>
+            <p className="mt-1 text-violet-200/90">
+              Your buy is linked to their profile. When they open a conviction trade (verified X, $150+),
+              you&apos;ll get a <strong className="font-medium text-white">Doxxed Insights</strong> platform
+              message and a notification — not every trade on the site.
+            </p>
+            <button
+              type="button"
+              onClick={() => setCopyFromUserId(null)}
+              className="mt-2 text-xs text-violet-300 underline hover:text-white"
+            >
+              Clear copy link
+            </button>
+          </div>
+        )}
         {guestPortfolioNotice && (
           <div
             className={`lg:col-span-5 rounded-xl border px-4 py-3 text-sm ${

@@ -94,4 +94,6 @@ export * from './discover-universe';
 export * from './discover-visibility';
 export * from './llm-tokens';
 export * from './feed-terminal';
+export * from './feed-hub';
+export * from './founder-event-feed';
 export * from './task-router';

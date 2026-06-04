@@ -26,6 +26,7 @@ import {
   ScoutMarketStatus,
 } from '@prisma/client';
 import { EventsService } from '../events/events.service';
+import { HighValueInsightsService } from '../notifications/high-value-insights.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PointsService } from '../points/points.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -62,6 +63,7 @@ export class PredictionMarketsService {
     private readonly points: PointsService,
     private readonly events: EventsService,
     private readonly notifications: NotificationsService,
+    private readonly insights: HighValueInsightsService,
   ) {}
 
   private mapMarket(
@@ -117,20 +119,9 @@ export class PredictionMarketsService {
     };
   }
 
-  private async notifyNewPredictions(projectId: string, count: number) {
-    if (count <= 0) return;
-    const project = await this.prisma.project.findUnique({
-      where: { id: projectId },
-      select: { name: true, ticker: true, slug: true },
-    });
-    if (!project) return;
-
-    await this.notifications.notifyAllUsers({
-      type: NotificationType.SYSTEM,
-      title: `New predictions: ${project.ticker}`,
-      body: `${count} AI question${count === 1 ? '' : 's'} just opened — stake paper dollars on /predict`,
-      link: '/predict',
-    });
+  /** AI-seeded markets do not broadcast — human markets use HighValueInsightsService. */
+  private async notifyNewPredictions(_projectId: string, _count: number) {
+    return;
   }
 
   async settleExpiredMarkets() {
@@ -381,7 +372,11 @@ export class PredictionMarketsService {
       },
     });
 
-    await this.notifyNewPredictions(project.id, 1);
+    void this.insights.notifyHumanPredictionMarket(userId, {
+      question,
+      ticker: project.ticker,
+      projectSlug: project.slug,
+    });
 
     return this.mapMarket(market, userId);
   }

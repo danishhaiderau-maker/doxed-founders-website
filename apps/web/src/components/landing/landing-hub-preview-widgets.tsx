@@ -16,7 +16,7 @@ import {
   fetchNotifications,
   fetchTrustCenterOverview,
   fetchTrustCommunityReviews,
-  fetchUnifiedFeed,
+  fetchFeedHub,
 } from '@/lib/api';
 import { LandingAiStackPreview } from '@/components/landing/landing-ai-stack-preview';
 
@@ -142,7 +142,7 @@ export function LandingHubPreviewWidgets({
     async function load() {
       try {
         const [feedRes, trust, reviews] = await Promise.all([
-          fetchUnifiedFeed('all'),
+          fetchFeedHub('all', 'all', undefined, 20),
           fetchTrustCenterOverview(),
           fetchTrustCommunityReviews(),
         ]);
@@ -158,7 +158,10 @@ export function LandingHubPreviewWidgets({
         }
         if (!cancelled) {
           setData({
-            feed: feedRes.items.slice(0, 4),
+            feed: feedRes.stream
+              .filter((e): e is { kind: 'unified'; at: string; item: UnifiedFeedItem } => e.kind === 'unified')
+              .map((e) => e.item)
+              .slice(0, 4),
             trust,
             reviewCount: reviews.length,
             overview,

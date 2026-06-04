@@ -56,6 +56,11 @@ async function run() {
     return res.ok && Array.isArray(body?.items);
   });
 
+  await runCheck('feed-hub', async () => {
+    const { res, body } = await fetchJson('/api/feed/hub?category=all&limit=10');
+    return res.ok && Array.isArray(body?.stream) && typeof body?.counts?.merged === 'number';
+  });
+
   await runCheck('platform-pulse', async () => {
     const { res, body } = await fetchJson('/api/feed/pulse');
     return res.ok && Array.isArray(body);

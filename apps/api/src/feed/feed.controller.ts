@@ -8,7 +8,8 @@ import { FeedService } from './feed.service';
 import { FeedShareService } from './feed-share.service';
 import { UnifiedFeedService } from './unified-feed.service';
 import { FeedTerminalService } from './feed-terminal.service';
-import type { FeedTerminalTab } from '@dcf/utils';
+import { FeedHubService } from './feed-hub.service';
+import type { FeedTerminalTab, UnifiedFeedCategory } from '@dcf/utils';
 
 @SkipThrottle()
 @Controller('feed')
@@ -18,7 +19,20 @@ export class FeedController {
     private readonly unifiedFeed: UnifiedFeedService,
     private readonly feedShare: FeedShareService,
     private readonly feedTerminal: FeedTerminalService,
+    private readonly feedHub: FeedHubService,
   ) {}
+
+  @Public()
+  @Get('hub')
+  hub(
+    @Query('category') category?: UnifiedFeedCategory,
+    @Query('tab') tab?: FeedTerminalTab,
+    @Query('project') projectSlug?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsedLimit = limit ? Math.min(100, Math.max(10, parseInt(limit, 10) || 50)) : 50;
+    return this.feedHub.getHub(category ?? 'all', tab ?? 'all', projectSlug || undefined, parsedLimit);
+  }
 
   @Public()
   @Get('terminal')

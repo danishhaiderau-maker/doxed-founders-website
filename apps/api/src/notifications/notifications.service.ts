@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { formatPublicAccountLabel, mergeNotificationPreferences } from '@dcf/utils';
+import { mergeNotificationPreferences } from '@dcf/utils';
 import { NotificationType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -109,11 +109,20 @@ export class NotificationsService {
     body: string;
     link?: string;
     metadata?: Record<string, unknown>;
+    /** When set, only these users receive the alert (avoids platform-wide spam). */
+    recipientIds?: string[];
   }) {
-    const users = await this.prisma.user.findMany({
-      where: { banned: false },
-      select: { id: true, notificationPrefs: true },
-    });
+    if (input.recipientIds && input.recipientIds.length === 0) return 0;
+
+    const users = input.recipientIds?.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: input.recipientIds }, banned: false },
+          select: { id: true, notificationPrefs: true },
+        })
+      : await this.prisma.user.findMany({
+          where: { banned: false },
+          select: { id: true, notificationPrefs: true },
+        });
 
     let sent = 0;
     for (const user of users) {
@@ -150,53 +159,15 @@ export class NotificationsService {
     });
   }
 
-  /** Notify users following a trader when they open a conviction buy (amount threshold avoids spam). */
+  /**
+   * @deprecated Use HighValueInsightsService.notifyVerifiedTraderBuy — kept for callers migrating.
+   */
   async notifyFollowersOfTraderBuy(
     traderUserId: string,
     input: { ticker: string; amountUsd: number; projectSlug?: string },
   ) {
-    if (input.amountUsd < 100) return 0;
-
-    const [trader, followers] = await Promise.all([
-      this.prisma.user.findUnique({
-        where: { id: traderUserId },
-        select: { name: true, email: true },
-      }),
-      this.prisma.userFollow.findMany({
-        where: { followingId: traderUserId },
-        select: {
-          follower: { select: { id: true, notificationPrefs: true } },
-        },
-      }),
-    ]);
-
-    if (!trader || followers.length === 0) return 0;
-
-    const label = formatPublicAccountLabel(trader.name, trader.email);
-    const link = input.projectSlug ? `/project/${input.projectSlug}` : '/paper-trading';
-    let sent = 0;
-
-    for (const row of followers) {
-      const prefs = mergeNotificationPreferences(
-        row.follower.notificationPrefs as Parameters<typeof mergeNotificationPreferences>[0],
-      );
-      if (!prefs.following.followedTraderBought) continue;
-
-      await this.notifyUser(row.follower.id, {
-        type: NotificationType.TRADER_WIN,
-        title: `${label} opened conviction trade`,
-        body: `Bought $${Math.round(input.amountUsd).toLocaleString()} of ${input.ticker}`,
-        link,
-        metadata: {
-          traderUserId,
-          displayName: label,
-          ticker: input.ticker,
-          amountUsd: input.amountUsd,
-        },
-      });
-      sent += 1;
-    }
-
-    return sent;
+    void traderUserId;
+    void input;
+    return 0;
   }
 }

@@ -17,7 +17,6 @@ import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 const PRIMARY_NAV = [
   { href: '/discover', label: 'Discover' },
   { href: '/projects', label: 'Projects' },
-  { href: '/leaderboard', label: 'Rankings' },
   { href: '/trust-center', label: 'Trust Center' },
   { href: '/agent-hub', label: 'Agents' },
 ] as const;

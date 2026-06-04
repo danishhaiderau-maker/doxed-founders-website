@@ -377,6 +377,7 @@ model User {
   watchlists           Watchlist[]
   paperPortfolio       PaperPortfolio?
   paperTrades          PaperTrade[]
+  inspiredPaperTrades  PaperTrade[] @relation("PaperTradeInspiredBy")
   paperLimitOrders     PaperLimitOrder[]
   feedPosts            FeedPost[]
   feedComments         FeedComment[]
@@ -761,6 +762,7 @@ model PaperPosition {
 model PaperTrade {
   id             String         @id @default(cuid())
   userId         String
+  inspiredByUserId String?
   projectId      String
   side           PaperTradeSide
   quantity       Decimal        @db.Decimal(24, 12)
@@ -781,11 +783,13 @@ model PaperTrade {
   postExitUpdatedAt      DateTime?
   createdAt      DateTime       @default(now())
 
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  feedPost FeedPost?
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inspiredByUser User?    @relation("PaperTradeInspiredBy", fields: [inspiredByUserId], references: [id], onDelete: SetNull)
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  feedPost       FeedPost?
 
   @@index([userId])
+  @@index([inspiredByUserId])
   @@index([projectId])
   @@index([createdAt])
 }
