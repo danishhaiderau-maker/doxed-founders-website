@@ -1,5 +1,6 @@
 import { founderNodeAuthHeader } from '@dcf/founder-vault';
 import { ollamaChat, type OllamaConfig } from './ollama-client';
+import { throwIfFounderNodeAuthResponse } from './sync-client';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -22,7 +23,11 @@ export async function fetchPendingInferenceJob(
     headers: { Authorization: founderNodeAuthHeader(nodeId, nodeToken) },
   });
   if (res.status === 404) return null;
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throwIfFounderNodeAuthResponse(res.status, text);
+    return null;
+  }
   const body = (await res.json().catch(() => null)) as PendingJob | null;
   if (!body?.id) return null;
   return body;

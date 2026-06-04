@@ -317,7 +317,7 @@ export class FounderOsService {
     const founderActive = Boolean(founder);
     const nodeOnline =
       Boolean(founderNode?.lastSeenAt) &&
-      Date.now() - (founderNode!.lastSeenAt?.getTime() ?? 0) < 180_000;
+      Date.now() - (founderNode!.lastSeenAt?.getTime() ?? 0) < 300_000;
 
     const steps = [
       {

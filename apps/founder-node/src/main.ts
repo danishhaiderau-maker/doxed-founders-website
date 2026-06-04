@@ -1,4 +1,14 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, Notification } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  nativeImage,
+  ipcMain,
+  Notification,
+  powerMonitor,
+  shell,
+} from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +27,6 @@ import {
 import {
   defaultHeartbeat,
   pairNode,
-  isFounderNodeAuthError,
   sendHeartbeat,
   syncVaultMetadata,
 } from './sync-client';
@@ -29,16 +38,25 @@ import { cleanupLegacyPortableInstallers } from './legacy-cleanup';
 import {
   bindUpdateTray,
   checkForUpdates,
+  checkForUpdatesAfterSyncFailure,
   downloadAndInstallUpdate,
   getPendingUpdate,
   setUpdateMenuRefresh,
   startAutoUpdateChecks,
 } from './update-manager';
+import {
+  authFailureUserMessage,
+  classifySyncFailure,
+  transientRetryDelayMs,
+} from './connection-health';
+import { createLoopHandles, stopBackgroundLoops, type BackgroundLoopHandles } from './background-loops';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
-const SYNC_INTERVAL_MS = 60_000;
+const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
+const SYNC_INTERVAL_MS = 45_000;
 const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
+const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
 
 configureSharedElectronUserData();
 
@@ -56,12 +74,13 @@ if (!gotSingleInstanceLock) {
 
 let tray: Tray | null = null;
 let pairWindow: BrowserWindow | null = null;
-let syncTimer: ReturnType<typeof setInterval> | null = null;
-let inferenceTimer: ReturnType<typeof setInterval> | null = null;
-let syncJobTimer: ReturnType<typeof setInterval> | null = null;
+const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
+let syncCycleInFlight = false;
 let lastSyncOkAt: Date | null = null;
 let lastSyncError: string | null = null;
+let consecutiveTransientFailures = 0;
+let syncPausedUntil = 0;
 
 function notifyDesktop(title: string, body: string): void {
   if (!Notification.isSupported()) return;
@@ -98,17 +117,67 @@ function loadAppIcon() {
   return nativeImage.createEmpty();
 }
 
+function scheduleStartupSyncBursts(vaultRoot: string) {
+  for (const delay of STARTUP_SYNC_DELAYS_MS) {
+    const timer = setTimeout(() => {
+      runSyncCycle(vaultRoot).catch(console.error);
+    }, delay);
+    loops.startupTimers.push(timer);
+  }
+}
+
 function startSyncLoop(vaultRoot: string) {
-  if (syncTimer) return;
-  runSyncCycle(vaultRoot).catch(console.error);
-  syncTimer = setInterval(() => runSyncCycle(vaultRoot).catch(console.error), SYNC_INTERVAL_MS);
-  if (!inferenceTimer) {
-    inferenceTimer = setInterval(() => runInferenceCycle(vaultRoot).catch(console.error), INFERENCE_POLL_MS);
+  stopBackgroundLoops(loops);
+  syncPausedUntil = 0;
+  consecutiveTransientFailures = 0;
+  scheduleStartupSyncBursts(vaultRoot);
+  loops.syncTimer = setInterval(() => runSyncCycle(vaultRoot).catch(console.error), SYNC_INTERVAL_MS);
+  if (!loops.inferenceTimer) {
+    loops.inferenceTimer = setInterval(
+      () => runInferenceCycle(vaultRoot).catch(console.error),
+      INFERENCE_POLL_MS,
+    );
   }
-  if (!syncJobTimer) {
+  if (!loops.syncJobTimer) {
     runSyncJobCycle(vaultRoot).catch(console.error);
-    syncJobTimer = setInterval(() => runSyncJobCycle(vaultRoot).catch(console.error), SYNC_JOB_POLL_MS);
+    loops.syncJobTimer = setInterval(
+      () => runSyncJobCycle(vaultRoot).catch(console.error),
+      SYNC_JOB_POLL_MS,
+    );
   }
+}
+
+function handleAuthFailure(vaultRoot: string): void {
+  stopBackgroundLoops(loops);
+  clearNodeConfig(vaultRoot);
+  lastSyncError = authFailureUserMessage();
+  refreshTrayMenu(vaultRoot);
+  notifyDesktop(
+    'Founder Node needs pairing',
+    'Your link expired or was replaced. Generate a new code on the website and pair again.',
+  );
+  openPairWindow();
+}
+
+function handleSyncCycleError(vaultRoot: string, err: unknown): void {
+  const kind = classifySyncFailure(err);
+  if (kind === 'auth') {
+    handleAuthFailure(vaultRoot);
+    return;
+  }
+
+  lastSyncError = err instanceof Error ? err.message : String(err);
+  refreshTrayMenu(vaultRoot);
+
+  if (kind === 'transient') {
+    consecutiveTransientFailures += 1;
+    syncPausedUntil = Date.now() + transientRetryDelayMs(consecutiveTransientFailures);
+    checkForUpdatesAfterSyncFailure();
+    return;
+  }
+
+  consecutiveTransientFailures += 1;
+  checkForUpdatesAfterSyncFailure();
 }
 
 async function resolveOllamaConfig(vaultRoot: string) {
@@ -134,7 +203,15 @@ async function runInferenceCycle(vaultRoot: string): Promise<void> {
   const ollama = await resolveOllamaConfig(vaultRoot);
   if (!ollama) return;
 
-  await processPendingInference(config.apiBaseUrl, config.nodeId, config.nodeToken, ollama);
+  try {
+    await processPendingInference(config.apiBaseUrl, config.nodeId, config.nodeToken, ollama);
+  } catch (err) {
+    if (classifySyncFailure(err) === 'auth') {
+      handleAuthFailure(vaultRoot);
+      return;
+    }
+    console.warn('Inference poll:', err);
+  }
 }
 
 async function runSyncJobCycle(vaultRoot: string): Promise<void> {
@@ -144,15 +221,23 @@ async function runSyncJobCycle(vaultRoot: string): Promise<void> {
   syncJobInFlight = true;
   try {
     await processPendingSyncJobs(vaultRoot);
+  } catch (err) {
+    if (classifySyncFailure(err) === 'auth') {
+      handleAuthFailure(vaultRoot);
+      return;
+    }
+    console.warn('Sync job cycle:', err);
   } finally {
     syncJobInFlight = false;
   }
 }
 
 async function runSyncCycle(vaultRoot: string): Promise<void> {
+  if (syncCycleInFlight || Date.now() < syncPausedUntil) return;
   const config = readNodeConfig(vaultRoot);
   if (!config) return;
 
+  syncCycleInFlight = true;
   const snapshot = buildSnapshotFromVault(vaultRoot, config.label);
   const disk = vaultDiskStats(vaultRoot);
   const vaultKey = deriveVaultKey(config.nodeToken, config.nodeId);
@@ -177,6 +262,8 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
 
     lastSyncOkAt = new Date();
     lastSyncError = null;
+    consecutiveTransientFailures = 0;
+    syncPausedUntil = 0;
     refreshTrayMenu(vaultRoot);
 
     try {
@@ -185,26 +272,10 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       console.warn('Vector index rebuild skipped:', err);
     }
   } catch (err) {
-    lastSyncError = err instanceof Error ? err.message : String(err);
-    console.error('Founder Node sync cycle failed:', lastSyncError);
-    if (isFounderNodeAuthError(err)) {
-      if (syncTimer) {
-        clearInterval(syncTimer);
-        syncTimer = null;
-      }
-      clearNodeConfig(vaultRoot);
-      lastSyncError =
-        'Session expired on the server — enter a new pairing code from Founder OS (Settings → Builder).';
-      refreshTrayMenu(vaultRoot);
-      notifyDesktop(
-        'Founder Node needs pairing',
-        'Your link expired. Generate a new code on the website and pair again.',
-      );
-      openPairWindow();
-      return;
-    }
-    refreshTrayMenu(vaultRoot);
-    throw err;
+    console.error('Founder Node sync cycle failed:', err);
+    handleSyncCycleError(vaultRoot, err);
+  } finally {
+    syncCycleInFlight = false;
   }
 }
 
@@ -242,7 +313,8 @@ function openPairWindow(): void {
   code { background: #27272a; padding: 2px 6px; border-radius: 4px; }
 </style></head><body>
   <h1>Pair this machine</h1>
-  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Node</strong>, then enter it here.</p>
+  <p>Generate a code in <strong>Founder OS → Settings → Builder</strong>, choose <strong>Founder Vault (Founder Node)</strong>, then enter it here.</p>
+  <p style="margin-top:12px"><button type="button" id="openWeb" style="width:100%;padding:10px;border-radius:8px;border:1px solid #3f3f46;background:#27272a;color:#e4e4e7;cursor:pointer;font-weight:600">Open pairing page in browser</button></p>
   <label>Founder OS URL</label>
   <input id="api" value="${DEFAULT_API}" />
   <label>Pairing code</label>
@@ -253,6 +325,7 @@ function openPairWindow(): void {
   <div id="msg"></div>
   <script>
     const { ipcRenderer } = require('electron');
+    document.getElementById('openWeb').onclick = () => ipcRenderer.invoke('open-settings');
     document.getElementById('pair').onclick = async () => {
       const btn = document.getElementById('pair');
       const msg = document.getElementById('msg');
@@ -319,8 +392,17 @@ function buildTrayMenu(vaultRoot: string) {
       },
     },
     {
-      label: 'Pair with Founder OS…',
-      click: () => openPairWindow(),
+      label: 'Repair connection (new pairing code)…',
+      click: () => {
+        void shell.openExternal(SETTINGS_BUILDER_URL);
+        openPairWindow();
+      },
+    },
+    {
+      label: 'Open Founder OS Settings…',
+      click: () => {
+        void shell.openExternal(SETTINGS_BUILDER_URL);
+      },
     },
     {
       label: 'Sync now',
@@ -387,8 +469,25 @@ app.whenReady().then(() => {
     startSyncLoop(vaultRoot);
   }
 
+  if (app.isPackaged) {
+    app.setLoginItemSettings({
+      openAtLogin: true,
+      openAsHidden: true,
+      name: 'Founder Node',
+    });
+  }
+
   startAutoUpdateChecks();
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
+
+  powerMonitor.on('resume', () => {
+    syncPausedUntil = 0;
+    runSyncCycle(vaultRoot).catch(console.error);
+  });
+
+  ipcMain.handle('open-settings', async () => {
+    await shell.openExternal(SETTINGS_BUILDER_URL);
+  });
 
   ipcMain.handle(
     'pair',
@@ -429,9 +528,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  if (syncTimer) clearInterval(syncTimer);
-  if (inferenceTimer) clearInterval(inferenceTimer);
-  if (syncJobTimer) clearInterval(syncJobTimer);
+  stopBackgroundLoops(loops);
   tray?.destroy();
   tray = null;
   releaseGlobalInstanceLock();

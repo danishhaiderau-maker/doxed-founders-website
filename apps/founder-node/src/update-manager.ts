@@ -8,7 +8,8 @@ import { semverGt } from './semver';
 
 const GITHUB_RELEASES =
   'https://api.github.com/repos/danishhaiderau-maker/doxed-founders-website/releases?per_page=30';
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
+const STARTUP_CHECK_DELAYS_MS = [5_000, 120_000];
 
 export type UpdateInfo = {
   version: string;
@@ -158,14 +159,22 @@ export async function downloadAndInstallUpdate(info: UpdateInfo = pendingUpdate!
 export function startAutoUpdateChecks(): void {
   if (!app.isPackaged) return;
 
-  setTimeout(() => {
-    checkForUpdates({ silent: true }).catch(console.warn);
-  }, 15_000);
+  for (const delay of STARTUP_CHECK_DELAYS_MS) {
+    setTimeout(() => {
+      checkForUpdates({ silent: true }).catch(console.warn);
+    }, delay);
+  }
 
   if (updateCheckTimer) return;
   updateCheckTimer = setInterval(() => {
     checkForUpdates({ silent: true }).catch(console.warn);
   }, CHECK_INTERVAL_MS);
+}
+
+/** Run a silent update check when sync is failing (may fix offline bugs in older builds). */
+export function checkForUpdatesAfterSyncFailure(): void {
+  if (!app.isPackaged || checkInFlight) return;
+  checkForUpdates({ silent: true }).catch(console.warn);
 }
 
 export function getPendingUpdate(): UpdateInfo | null {
