@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-**Security Hardening** – Run OWASP ZAP or Burp Suite scan on the live site; enforce HTTPS with HSTS; review API keys and
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+docs: add public system architecture with privacy diagrams
 
 ## Last Activity
 
