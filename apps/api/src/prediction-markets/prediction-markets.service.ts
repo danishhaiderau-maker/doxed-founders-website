@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  buildOracleLeaderboard,
   computeParimutuelPayout,
   computeScoutConviction,
   formatPublicAccountLabel,
@@ -500,5 +501,71 @@ export class PredictionMarketsService {
       totalPoolUsd: yesPool + noPool,
       heatLabel: predictionHeatLabel(yesPool + noPool, market.positions.length + (existing ? 0 : 1)),
     };
+  }
+
+  /** Oracle Rank — risk-adjusted forecasting from resolved markets only. */
+  async oracleLeaderboard(limit = 30) {
+    await this.settleExpiredMarkets();
+
+    const resolved = await this.prisma.scoutMarket.findMany({
+      where: { status: ScoutMarketStatus.RESOLVED, outcome: { not: null } },
+      include: {
+        positions: {
+          where: { amountUsd: { gt: 0 } },
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                platformHandle: true,
+                twitterHandle: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 200,
+    });
+
+    const rows: Parameters<typeof buildOracleLeaderboard>[0] = [];
+
+    for (const market of resolved) {
+      const yesPool = Number(market.yesPoolUsd);
+      const noPool = Number(market.noPoolUsd);
+      const total = yesPool + noPool;
+      const yesWins = market.outcome === true;
+      const winningSide = yesWins ? 'YES' : 'NO';
+      const winningPool = yesWins ? yesPool : noPool;
+
+      for (const pos of market.positions) {
+        const stake = Number(pos.amountUsd);
+        if (stake <= 0) continue;
+        const won = pos.side === winningSide;
+        const sidePool = pos.side === 'YES' ? yesPool : noPool;
+        const implied =
+          total > 0 ? sidePool / total : 0.5;
+        const payout = won
+          ? computeParimutuelPayout(stake, winningPool, total)
+          : 0;
+
+        rows.push({
+          userId: pos.userId,
+          displayName: formatPublicAccountLabel(
+            pos.user.name,
+            pos.user.email,
+            pos.user.platformHandle,
+            pos.user.twitterHandle,
+          ),
+          won,
+          stakeUsd: stake,
+          impliedWinProbability: implied,
+          payoutUsd: payout,
+        });
+      }
+    }
+
+    return buildOracleLeaderboard(rows).slice(0, limit);
   }
 }

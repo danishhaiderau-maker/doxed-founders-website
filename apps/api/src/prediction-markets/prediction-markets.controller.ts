@@ -26,6 +26,12 @@ export class PredictionMarketsController {
   }
 
   @Public()
+  @Get('oracle-leaderboard')
+  oracleLeaderboard() {
+    return this.markets.oracleLeaderboard(50);
+  }
+
+  @Public()
   @UseGuards(OptionalJwtAuthGuard)
   @Get('project/:slug')
   forProject(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {
