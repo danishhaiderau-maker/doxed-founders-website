@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Sprint 2: Founder Brain UX, Mission Control strip, Phala alignment doc
+chore(founder-os): sync tasks
 
 ## Last Activity
 
