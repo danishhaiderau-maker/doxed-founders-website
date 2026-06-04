@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-Remove hardcoded JWT fallback and stop pushing Railway token to API runtime
+chore: improve audit export bundle and add BTC bot start script
 
 ## Last Activity
 
