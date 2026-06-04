@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: add public system architecture with privacy diagrams
+docs: explain GitHub red X vs outage; limit bot Railway watch paths
 
 ## Last Activity
 
