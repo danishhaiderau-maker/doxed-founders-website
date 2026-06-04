@@ -46,6 +46,11 @@ export class EventsController {
     return this.commandCenter.getAttentionCenter(user.id);
   }
 
+  @Post('copilot/queue-action')
+  queueAction(@CurrentUser() user: AuthUser, @Body() body: { itemId: string }) {
+    return this.commandCenter.executeQueueAction(user.id, body.itemId?.trim() ?? '');
+  }
+
   @Get('copilot/memory-graph')
   memoryGraph(@CurrentUser() user: AuthUser) {
     return this.copilot.getMemoryGraph(user.id);

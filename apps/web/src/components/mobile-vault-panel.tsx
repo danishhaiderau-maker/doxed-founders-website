@@ -52,7 +52,24 @@ export function MobileVaultPanel({ accessToken }: Props) {
     })();
   }, [accessToken, inApk, vaultStatus.lastSyncAt]);
 
-  if (!readMobileAppMode()) return null;
+  if (!readMobileAppMode()) {
+    return (
+      <div className="mt-4 rounded-lg border border-violet-500/25 bg-violet-950/15 p-4">
+        <h4 className="text-sm font-semibold text-violet-100">Android vault (install APK)</h4>
+        <p className="mt-1 text-xs text-violet-100/75">
+          On-device vault sync runs inside the Android app, not in the browser. On your computer, open{' '}
+          <a href="/settings/builder" className="text-violet-200 underline">
+            Founder Node settings
+          </a>{' '}
+          → Step 2 → <strong className="text-white">Code for Android</strong>. On your phone, install from{' '}
+          <a href="/mobile" className="text-violet-200 underline">
+            /mobile
+          </a>{' '}
+          and paste the code under Android vault.
+        </p>
+      </div>
+    );
+  }
 
   async function generateMobileCode() {
     setBusy(true);

@@ -70,6 +70,7 @@ import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
+import { FounderCommandCenterService } from './founder-command-center.service';
 import type { FounderMemoryGraphPatch } from '@dcf/utils';
 
 @Injectable()
@@ -88,6 +89,8 @@ export class FounderCopilotService {
     private readonly founderOs: FounderOsService,
     @Inject(forwardRef(() => FounderAutopilotService))
     private readonly autopilot: FounderAutopilotService,
+    @Inject(forwardRef(() => FounderCommandCenterService))
+    private readonly commandCenter: FounderCommandCenterService,
   ) {}
 
   async getMemoryGraph(userId: string) {
@@ -129,13 +132,23 @@ export class FounderCopilotService {
     if (!body.task?.trim() || !body.status?.trim()) {
       throw new BadRequestException('task and status required');
     }
-    return this.memoryGraph.applyAfterBuild(userId, {
+    const graph = await this.memoryGraph.applyAfterBuild(userId, {
       task: body.task.trim(),
       status: body.status.trim(),
       result: body.result ?? null,
       branch: body.branch ?? null,
       prUrl: body.prUrl ?? null,
     });
+
+    const agentBus = await this.commandCenter.onBuildFinished(userId, {
+      task: body.task.trim(),
+      status: body.status.trim(),
+      result: body.result ?? null,
+      branch: body.branch ?? null,
+      prUrl: body.prUrl ?? null,
+    });
+
+    return { graph, agentBus };
   }
 
   async getProjectMemory(userId: string) {

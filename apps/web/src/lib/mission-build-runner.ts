@@ -36,7 +36,7 @@ function prFromCursor(snap: BuilderRunSnapshot) {
 async function syncAfterCursor(task: string, snap: BuilderRunSnapshot, token: string) {
   const status = snap.status;
   if (!isBuilderRunFailureStatus(status) && !isBuilderRunSuccessStatus(status)) return null;
-  return applyCopilotMemoryGraphAfterBuild(
+  const res = await applyCopilotMemoryGraphAfterBuild(
     {
       task,
       status,
@@ -46,15 +46,17 @@ async function syncAfterCursor(task: string, snap: BuilderRunSnapshot, token: st
     },
     token,
   );
+  return res.graph;
 }
 
 async function syncAfterOpenHands(task: string, snap: OpenHandsRunSnapshot, token: string) {
   const status = snap.status;
   if (!isBuilderRunFailureStatus(status) && !isBuilderRunSuccessStatus(status)) return null;
-  return applyCopilotMemoryGraphAfterBuild(
+  const res = await applyCopilotMemoryGraphAfterBuild(
     { task, status, result: snap.result ?? null },
     token,
   );
+  return res.graph;
 }
 
 /** Poll remote builder until terminal, then patch Mission State (Sprint 7d). */

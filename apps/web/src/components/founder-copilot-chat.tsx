@@ -256,10 +256,28 @@ export function FounderCopilotChat({
       const branch = snap.git?.branches?.[0]?.branch ?? null;
       const prUrl = snap.git?.branches?.[0]?.prUrl ?? null;
       try {
-        await applyCopilotMemoryGraphAfterBuild(
+        const res = await applyCopilotMemoryGraphAfterBuild(
           { task, status, result: snap.result ?? null, branch, prUrl },
           accessToken,
         );
+        const bus = res.agentBus;
+        if (bus && bus.applied > 0) {
+          const lines = bus.handoffs
+            .filter((h) => bus.handoffIds.includes(h.id))
+            .map((h) => `• ${h.title}`)
+            .slice(0, 3);
+          if (lines.length > 0) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `bus-${Date.now()}`,
+                role: 'assistant',
+                content: `**Agent Bus** queued ${bus.applied} follow-up(s):\n${lines.join('\n')}`,
+                provider: 'FOUNDER_OS',
+              },
+            ]);
+          }
+        }
       } catch {
         /* non-fatal */
       }
@@ -307,10 +325,22 @@ export function FounderCopilotChat({
       const status = final.status;
       if (isBuilderRunFailureStatus(status) || isBuilderRunSuccessStatus(status)) {
         try {
-          await applyCopilotMemoryGraphAfterBuild(
+          const res = await applyCopilotMemoryGraphAfterBuild(
             { task, status, result: final.result ?? null },
             accessToken,
           );
+          const bus = res.agentBus;
+          if (bus && bus.applied > 0) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `bus-${Date.now()}`,
+                role: 'assistant',
+                content: `**Agent Bus** — ${bus.applied} follow-up(s) queued from this build.`,
+                provider: 'FOUNDER_OS',
+              },
+            ]);
+          }
         } catch {
           /* non-fatal */
         }

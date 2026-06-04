@@ -4330,6 +4330,35 @@ export function fetchAttentionCenter(token: string) {
   return apiFetch<AttentionCenterResponse>('/copilot/attention', undefined, token);
 }
 
+export type AgentBusRunResult = {
+  handoffs: import('@dcf/utils').AgentBusHandoff[];
+  applied: number;
+  handoffIds: string[];
+  contentDraftId?: string;
+};
+
+export type QueueActionResult = {
+  action: 'publish' | 'dispatch_build' | 'sync';
+  message: string;
+  published?: number;
+  errors?: string[];
+  worker?: string;
+  status?: string;
+  agentUrl?: string | null;
+  agentId?: string | null;
+  runId?: string | null;
+  conversationId?: string | null;
+  steps?: { step: string; ok: boolean; detail: string }[];
+};
+
+export function executeFounderQueueAction(itemId: string, token: string) {
+  return apiFetch<QueueActionResult>(
+    '/copilot/queue-action',
+    { method: 'POST', body: JSON.stringify({ itemId }) },
+    token,
+  );
+}
+
 export function fetchCopilotMemoryGraph(token: string) {
   return apiFetch<FounderMemoryGraph>('/copilot/memory-graph', undefined, token);
 }
@@ -4352,7 +4381,7 @@ export function applyCopilotMemoryGraphAfterBuild(
   },
   token: string,
 ) {
-  return apiFetch<FounderMemoryGraph>(
+  return apiFetch<{ graph: FounderMemoryGraph; agentBus: AgentBusRunResult | null }>(
     '/copilot/memory-graph/after-build',
     { method: 'POST', body: JSON.stringify(body) },
     token,
