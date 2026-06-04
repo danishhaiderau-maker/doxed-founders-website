@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+fix(founder): use calendar days for build Day labels and streaks
 
 ## Last Activity
 
