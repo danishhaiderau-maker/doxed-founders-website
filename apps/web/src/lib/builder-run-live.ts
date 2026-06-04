@@ -24,6 +24,17 @@ export type OpenHandsRunSnapshot = {
   conversationUrl?: string | null;
 };
 
+function branchFromSnapshot(snapshot: BuilderRunSnapshot): string | null {
+  const b = snapshot.git?.branches?.[0];
+  return b?.branch?.trim() ?? null;
+}
+
+function prFromSnapshot(snapshot: BuilderRunSnapshot): string | null {
+  const b = snapshot.git?.branches?.[0];
+  return b?.prUrl?.trim() ?? null;
+}
+
+/** In-chat Builder Agent card — Cursor/OpenHands run inside Founder OS (Sprint 2). */
 export function formatBuilderRunInChat(input: {
   workerLabel: string;
   task: string;
@@ -31,33 +42,31 @@ export function formatBuilderRunInChat(input: {
   snapshot: BuilderRunSnapshot;
   mode?: string;
 }): string {
-  const { workerLabel, task, repo, snapshot, mode } = input;
+  const { task, repo, snapshot, mode } = input;
+  const branch = branchFromSnapshot(snapshot);
+  const prUrl = prFromSnapshot(snapshot);
+  const recentCount = snapshot.workspaceActivity
+    ? snapshot.workspaceActivity.commitsLast2h.length +
+      snapshot.workspaceActivity.cursorBranchCommits.length
+    : 0;
+  const filesHint = recentCount > 0 ? `${recentCount} recent commit(s) on repo` : null;
+
   const lines: string[] = [
-    `**${workerLabel}** · ${mode === 'follow_up' ? 'continuing on repo' : 'coding on your repo'}`,
-    repo ? `Repository: \`${repo}\`` : '',
-    '',
-    `**Your task**`,
-    task.trim().slice(0, 1200),
+    '**Builder Agent**',
+    mode === 'follow_up' ? '_Continuing on your repo_' : '_Coding on your repo_',
     '',
     `**Status:** ${snapshot.status}`,
+    repo ? `**Repository:** \`${repo}\`` : '',
+    branch ? `**Branch:** \`${branch}\`` : '',
+    prUrl ? `**PR:** ${prUrl}` : '',
+    filesHint ? `**Activity:** ${filesHint}` : '',
+    '',
+    '**Task**',
+    task.trim().slice(0, 1200),
   ].filter(Boolean);
 
   if (snapshot.result?.trim()) {
-    lines.push('', '**Agent output**', snapshot.result.trim());
-  }
-
-  const branches = snapshot.git?.branches ?? [];
-  if (branches.length > 0) {
-    lines.push('', '**Git**');
-    for (const b of branches) {
-      const ref = [b.repoUrl, b.branch].filter(Boolean).join(' · ');
-      if (b.prUrl) lines.push(`- PR: ${b.prUrl}`);
-      else if (ref) lines.push(`- ${ref}`);
-    }
-  }
-
-  if (snapshot.agentUrl) {
-    lines.push('', `[Open this agent in Cursor](${snapshot.agentUrl}) — same session, full diff view.`);
+    lines.push('', '**Latest output**', snapshot.result.trim().slice(0, 3500));
   }
 
   if (snapshot.platformReconciliation?.trim()) {
@@ -72,11 +81,15 @@ export function formatBuilderRunInChat(input: {
     lines.push(
       '',
       snapshot.status === 'FINISHED'
-        ? '_Run finished — review the branch/PR, commit from GitHub, then publish from Founder OS._'
-        : '_Run ended — details below._',
+        ? '_Finished — review PR/branch above, then publish from Founder OS._'
+        : '_Run ended — see output above._',
     );
   } else {
-    lines.push('', '_Live output streams in this chat — synced with GitHub on each refresh._');
+    lines.push('', '_Working… updates stream here every few seconds._');
+  }
+
+  if (snapshot.agentUrl) {
+    lines.push('', `_Optional:_ [Open full session in Cursor](${snapshot.agentUrl})`);
   }
 
   return lines.join('\n');
@@ -88,12 +101,12 @@ export function formatOpenHandsRunInChat(input: {
   repo?: string | null;
   snapshot: OpenHandsRunSnapshot;
 }): string {
-  const { workerLabel, task, repo, snapshot } = input;
+  const { task, repo, snapshot } = input;
   const lines: string[] = [
-    `**${workerLabel}** · coding on your repo`,
-    repo ? `Repository: \`${repo}\`` : '',
+    '**Builder Agent** · OpenHands',
+    repo ? `**Repository:** \`${repo}\`` : '',
     '',
-    `**Your task**`,
+    '**Task**',
     task.trim().slice(0, 1200),
     '',
     `**Status:** ${snapshot.status}`,

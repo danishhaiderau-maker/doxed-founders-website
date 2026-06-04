@@ -13,7 +13,7 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderMemoryGraphStrip } from '@/components/founder-memory-graph-strip';
-import { HybridControlPlane } from '@/components/hybrid-control-plane';
+import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
@@ -255,14 +255,13 @@ export function FounderOsDashboardLayout({
                 </button>
               </header>
 
-              <HybridControlPlane
+              <MissionControlStatusStrip
                 accessToken={accessToken}
-                onMessage={onMessage}
+                buildWorker={workerStatus?.buildWorker}
                 onRefresh={() => {
                   void load();
                   onRefresh();
                 }}
-                autoRunWhenAutopilot
               />
 
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

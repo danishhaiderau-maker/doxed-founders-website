@@ -81,24 +81,20 @@ export function resolveCopilotStack(
   buildWorker: string,
   connections?: { cursor?: boolean; openHands?: boolean },
 ): CopilotStackSummary {
-  const { connected: chatProviders, defaultChat } = listChatProviders(providers, defaultProvider);
+  const { connected: chatProviders } = listChatProviders(providers, defaultProvider);
   const buildWorkers = listBuildWorkers(connections ?? {});
   const activeBuild =
     buildWorkers.find((w) => w.key === buildWorker) ?? buildWorkers[0] ?? null;
   const canAsk = chatProviders.length > 0;
   const canBuild = buildWorkers.length > 0;
-  const askLabel = defaultChat ? shortProviderName(defaultChat) : 'Project memory';
-  const buildLabel = activeBuild?.label ?? (buildWorkerDisplayName(buildWorker) || 'Builder');
+  const askLabel = canAsk ? 'Founder Brain' : 'Project memory';
+  const buildLabel = canBuild ? 'Builder Agent' : buildWorkerDisplayName(buildWorker) || 'Builder';
 
   const parts: string[] = [];
-  if (canAsk) {
-    const names = chatProviders.map((p) => shortProviderName(p)).join(', ');
-    parts.push(`Answers: ${names}`);
-  } else parts.push('Answers: project memory (connect an LLM in AI Stack)');
-  if (canBuild) {
-    const codeNames = buildWorkers.map((w) => w.label).join(', ');
-    parts.push(`Codes: ${codeNames} (live in this chat)`);
-  } else parts.push('Codes: connect Cursor or OpenHands in AI Stack');
+  if (canAsk) parts.push('Ask → Founder Brain');
+  else parts.push('Ask → connect LLM in Settings');
+  if (canBuild) parts.push('Build → Builder Agent (live in chat)');
+  else parts.push('Build → connect Cursor in Settings');
 
   return {
     canAsk,
@@ -113,11 +109,11 @@ export function resolveCopilotStack(
 }
 
 export function formatMessageProviderLabel(provider?: string, routedAgent?: string): string {
-  if (routedAgent) return `${routedAgent} · streamed inline`;
-  if (!provider) return 'Copilot';
-  if (provider === 'BUILDER') return 'Builder agent · streamed in chat';
-  if (provider === 'CURSOR') return 'Cursor · streamed in chat';
-  if (provider === 'OPENHANDS') return 'OpenHands · streamed in chat';
+  if (routedAgent) return `${routedAgent} · Founder OS`;
+  if (!provider) return 'Founder Brain';
+  if (provider === 'BUILDER') return 'Builder Agent · in chat';
+  if (provider === 'CURSOR') return 'Builder Agent · in chat';
+  if (provider === 'OPENHANDS') return 'Builder Agent · in chat';
   if (provider === 'RULE_BASED') return 'Project memory · streamed inline';
   if (provider === 'FOUNDER_OS') return 'Founder OS · autopilot';
   if (provider.startsWith('WORKER:')) return provider.replace('WORKER:', '') + ' · streamed inline';
@@ -178,12 +174,6 @@ export function resolveAiTeamCards(
         p.key,
       ),
   );
-  const researchLabel =
-    stack.chatProviders.find((p) => p.key === 'DEEPSEEK')?.label ??
-    stack.chatProviders[0]?.label ??
-    'Not connected';
-
-  const builder = stack.buildWorkers[0];
   const contentConnected = providers.some(
     (p) => p.connected && ['OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER'].includes(p.key),
   );
@@ -195,15 +185,15 @@ export function resolveAiTeamCards(
       role: 'Analysis · tokenomics · strategy',
       status: researchConnected ? 'ready' : 'needs_setup',
       statusLabel: researchConnected ? 'Connected' : 'Connect LLM',
-      providerLabel: researchConnected ? researchLabel : undefined,
+      providerLabel: researchConnected ? 'Founder Brain' : undefined,
     },
     {
       id: 'builder',
       label: 'Builder Agent',
       role: 'Code · PRs · fixes · deploy',
       status: stack.canBuild ? 'ready' : 'needs_setup',
-      statusLabel: stack.canBuild ? builder?.label ?? 'Ready' : 'Connect Cursor',
-      providerLabel: builder?.label,
+      statusLabel: stack.canBuild ? 'Ready' : 'Connect in Settings',
+      providerLabel: stack.canBuild ? 'Builder Agent' : undefined,
     },
     {
       id: 'content',
