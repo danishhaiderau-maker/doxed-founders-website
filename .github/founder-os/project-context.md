@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Remove hardcoded JWT fallback and stop pushing Railway token to API runtime
 
 ## Last Activity
 
