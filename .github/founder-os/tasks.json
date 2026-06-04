@@ -1,8 +1,15 @@
 {
   "version": 1,
-  "updatedAt": "2026-06-04T15:23:38.743Z",
+  "updatedAt": "2026-06-04T15:25:23.609Z",
   "currentGoal": "Define your next milestone",
   "tasks": [
+    {
+      "id": "cmpznb2gp0053mq0d5n08vtkw",
+      "title": "**Complete Security Hardening** – Run OWASP ZAP scan on live site (doxxedcrypto.digital), enforce HSTS header, rotate an",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
     {
       "id": "cmpxtzlvs000tmr0d4859h8et",
       "title": "**Security Hardening** – Run OWASP ZAP or Burp Suite scan on the live site; enforce HTTPS with HSTS; review API keys and",
@@ -27,6 +34,13 @@
     {
       "id": "cmpsfyt37004pn1546t03ed7z",
       "title": "Define MVP user stories",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
+      "id": "cmpznb2gp0052mq0dne0xlmbd",
+      "title": "**Define MVP User Stories** – Create 6-8 core user stories for the Founder Copilot (e.g., \"As a founder, I can search cr",
       "status": "QUEUED",
       "kind": "TASK",
       "done": false
@@ -60,6 +74,13 @@
       "done": false
     },
     {
+      "id": "cmpznb2gp0051mq0dj6ig0w4x",
+      "title": "**Build GitHub Project Board** – Create columns: Backlog, P0 Sprint, P1 Sprint, Done; populate with user stories",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
       "id": "cmpxtzm7g001bmr0dwh962aai",
       "title": "**Comms Timeline** – Draft and schedule a launch announcement for Doxxed Founder Copilot (Day 1); follow up with a \"What",
       "status": "QUEUED",
@@ -88,6 +109,13 @@
       "done": false
     },
     {
+      "id": "cmpznb2il005fmq0d2qni04yr",
+      "title": "**Prioritize P0 Sprint** – Select 3-4 user stories for immediate development (core research + content generation)",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
       "id": "cmpxtzm7l001dmr0dnp6n8vfg",
       "title": "**MVP User Story Mapping** – Create a GitHub project board with \"Backlog,\" \"P0 Sprint,\" \"P1 Sprint,\" and \"Done\" columns;",
       "status": "QUEUED",
@@ -111,34 +139,6 @@
     {
       "id": "cmpsfyt37004on154x626ucef",
       "title": "Map to Founder OS publish cadence",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpxtzlvs0015mr0dwqt4qw07",
-      "title": "**Stakeholder README Update** – Add a \"Prioritization Rationale\" section to the repo README, explaining P0 vs P1 decisio",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpww2r6303w7pm0d8t6awykb",
-      "title": "Create a GitHub project board with columns for \"Backlog,\" \"P0 Sprint,\" \"P1 Sprint,\" and \"Done\" to track progress.",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpxtzlvs0010mr0dds721dpk",
-      "title": "**Monitoring Setup** – Configure uptime monitoring (e.g., UptimeRobot) and error tracking (e.g., Sentry) for the live si",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpww2r7t03w9pm0dvet1ymab",
-      "title": "Document the prioritization rationale in a README section for stakeholder transparency.",
       "status": "QUEUED",
       "kind": "TASK",
       "done": false
