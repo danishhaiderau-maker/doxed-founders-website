@@ -32,6 +32,7 @@ function formatLastSeen(iso: string | null | undefined): string {
 export function FounderNodePairingPanel({ accessToken, active }: Props) {
   const [nodes, setNodes] = useState<FounderNodeStatusRow[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [pairingTarget, setPairingTarget] = useState<'desktop' | 'mobile' | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [showNewPairing, setShowNewPairing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -48,6 +49,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
       setNodes(list);
       if (list.length > 0) {
         setPairingCode(null);
+        setPairingTarget(null);
         setExpiresAt(null);
         setShowNewPairing(false);
         const online = list.some((n) => n.status === 'online');
@@ -77,6 +79,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
     try {
       const result = await createFounderNodePairingCode(accessToken, target);
       setPairingCode(result.code);
+      setPairingTarget(target);
       setExpiresAt(result.expiresAt);
       const { mins, absolute } = formatExpiry(result.expiresAt);
       setMsg(
@@ -129,8 +132,43 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
 
       {isPaired && !showNewPairing && anyOnline && (
         <div className="mt-3 rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200">
-          ✓ Vault connected — pairing code hidden. The pairing popup may close; the tray app must keep running
-          (icon near the clock).
+          ✓ Desktop vault connected — desktop pairing code hidden. Tray app must keep running (icon near the clock).
+        </div>
+      )}
+
+      {isPaired && !showNewPairing && (
+        <div className="mt-3 rounded-lg border border-violet-500/35 bg-violet-950/25 p-3">
+          <p className="text-xs font-semibold text-violet-100">Pair Android phone</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-violet-100/80">
+            Install the APK from{' '}
+            <a href="/mobile" className="text-violet-200 underline">
+              doxxedcrypto.digital/mobile
+            </a>
+            , open <strong className="text-white">Founder Node</strong> in the app (or{' '}
+            <a href="/settings/builder" className="text-violet-200 underline">
+              /settings/builder
+            </a>
+            ), paste the code below under <strong className="text-white">Android vault</strong>.
+          </p>
+          <button
+            type="button"
+            disabled={busy === 'mobile'}
+            onClick={() => void generateCode('mobile')}
+            className="mt-3 rounded-lg border border-violet-400/50 bg-violet-800/40 px-3 py-1.5 text-xs font-medium text-violet-50 disabled:opacity-50"
+          >
+            {busy === 'mobile' ? 'Generating…' : 'Code for Android'}
+          </button>
+          {pairingCode && pairingTarget === 'mobile' && (
+            <div className="mt-3 rounded-lg border border-violet-400/40 bg-black/30 p-3 text-center">
+              <p className="text-xs text-zinc-400">Enter in Android app → Founder Node → Android vault</p>
+              <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-violet-200">{pairingCode}</p>
+              {expiresAt && (
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  Valid for {formatExpiry(expiresAt).mins} min (until {formatExpiry(expiresAt).absolute})
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -193,6 +231,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
                 onClick={() => {
                   setShowNewPairing(false);
                   setPairingCode(null);
+                  setPairingTarget(null);
                   setExpiresAt(null);
                 }}
                 className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400"
@@ -202,9 +241,9 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
             )}
           </div>
 
-          {pairingCode && (
+          {pairingCode && pairingTarget === 'desktop' && (
             <div className="mt-3 rounded-lg border border-cyan-400/40 bg-black/30 p-3 text-center">
-              <p className="text-xs text-zinc-400">One-time pairing code</p>
+              <p className="text-xs text-zinc-400">Paste in Founder Node tray app (desktop)</p>
               <p className="mt-1 font-mono text-2xl font-bold tracking-[0.3em] text-cyan-300">
                 {pairingCode}
               </p>
@@ -224,7 +263,7 @@ export function FounderNodePairingPanel({ accessToken, active }: Props) {
           onClick={() => setShowNewPairing(true)}
           className="mt-3 text-[11px] text-cyan-400/90 underline hover:text-cyan-300"
         >
-          Pair another desktop device
+          Pair another desktop device (new PC code)
         </button>
       )}
 

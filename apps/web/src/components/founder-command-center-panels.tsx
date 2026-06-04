@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useState } from 'react';
 import type { AttentionItem, FounderQueueItem } from '@dcf/utils';
 
 type Props = {
@@ -8,6 +9,7 @@ type Props = {
   attention: AttentionItem[];
   urgentCount: number;
   onPrompt?: (prompt: string) => void;
+  onQueueAction?: (itemId: string) => Promise<{ message: string } | void>;
   loading?: boolean;
 };
 
@@ -22,10 +24,27 @@ export function FounderCommandCenterPanels({
   attention,
   urgentCount,
   onPrompt,
+  onQueueAction,
   loading,
 }: Props) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionNote, setActionNote] = useState<string | null>(null);
   const topAttention = attention.slice(0, 5);
   const topQueue = queue.slice(0, 6);
+
+  async function runControlAction(item: FounderQueueItem) {
+    if (!onQueueAction) return;
+    setBusyId(item.id);
+    setActionNote(null);
+    try {
+      const result = await onQueueAction(item.id);
+      if (result?.message) setActionNote(result.message);
+    } catch (err) {
+      setActionNote(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -48,7 +67,13 @@ export function FounderCommandCenterPanels({
           <ul className="mt-3 space-y-2">
             {topAttention.map((item) => (
               <li key={item.id}>
-                <AttentionRow item={item} onPrompt={onPrompt} />
+                <AttentionRow
+                  item={item}
+                  queueItem={queue.find((q) => item.id === `att-${q.id}`)}
+                  onPrompt={onPrompt}
+                  onQueueAction={onQueueAction ? runControlAction : undefined}
+                  busy={busyId != null}
+                />
               </li>
             ))}
           </ul>
@@ -62,6 +87,11 @@ export function FounderCommandCenterPanels({
             <span className="ml-2 text-violet-400">Needs you ({queue.length})</span>
           )}
         </p>
+        {actionNote && (
+          <p className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-950/20 px-2 py-1.5 text-[11px] text-emerald-200/90">
+            {actionNote}
+          </p>
+        )}
         {loading && !topQueue.length ? (
           <p className="mt-3 text-xs text-zinc-600">Loading…</p>
         ) : topQueue.length === 0 ? (
@@ -70,7 +100,12 @@ export function FounderCommandCenterPanels({
           <ul className="mt-3 space-y-2">
             {topQueue.map((item) => (
               <li key={item.id}>
-                <QueueRow item={item} onPrompt={onPrompt} />
+                <QueueRow
+                  item={item}
+                  onPrompt={onPrompt}
+                  onQueueAction={onQueueAction ? () => runControlAction(item) : undefined}
+                  busy={busyId === item.id}
+                />
               </li>
             ))}
           </ul>
@@ -80,13 +115,40 @@ export function FounderCommandCenterPanels({
   );
 }
 
+function isControlAction(item: FounderQueueItem) {
+  return (
+    item.action === 'publish' ||
+    item.action === 'dispatch_build' ||
+    item.action === 'sync'
+  );
+}
+
 function AttentionRow({
   item,
+  queueItem,
   onPrompt,
+  onQueueAction,
+  busy,
 }: {
   item: AttentionItem;
+  queueItem?: FounderQueueItem;
   onPrompt?: (prompt: string) => void;
+  onQueueAction?: (item: FounderQueueItem) => void;
+  busy?: boolean;
 }) {
+  if (queueItem && isControlAction(queueItem) && onQueueAction) {
+    return (
+      <QueueRow
+        item={queueItem}
+        onPrompt={onPrompt}
+        onQueueAction={() => onQueueAction(queueItem)}
+        busy={busy}
+        variant="attention"
+        severity={item.severity}
+      />
+    );
+  }
+
   const inner = (
     <>
       <span className="shrink-0 text-[10px] font-bold uppercase text-violet-300">{item.verb}</span>
@@ -107,7 +169,7 @@ function AttentionRow({
   }
 
   if (item.href) {
-    const href = item.href.startsWith('http') ? item.href : item.href;
+    const href = item.href;
     if (href.startsWith('http')) {
       return (
         <a
@@ -140,20 +202,36 @@ function AttentionRow({
 function QueueRow({
   item,
   onPrompt,
+  onQueueAction,
+  busy,
+  variant = 'queue',
+  severity = 'normal',
 }: {
   item: FounderQueueItem;
   onPrompt?: (prompt: string) => void;
+  onQueueAction?: () => void;
+  busy?: boolean;
+  variant?: 'queue' | 'attention';
+  severity?: AttentionItem['severity'];
 }) {
   const actionLabel =
     item.action === 'open_url'
       ? 'Open'
       : item.action === 'publish'
-        ? 'Publish'
+        ? busy
+          ? 'Publishing…'
+          : 'Publish'
         : item.action === 'dispatch_build'
-          ? 'Build'
-          : item.action === 'settings'
-            ? 'Settings'
-            : 'Run';
+          ? busy
+            ? 'Running…'
+            : 'Build'
+          : item.action === 'sync'
+            ? busy
+              ? 'Syncing…'
+              : 'Sync'
+            : item.action === 'settings'
+              ? 'Settings'
+              : 'Run';
 
   const content = (
     <div className="min-w-0 flex-1">
@@ -162,7 +240,21 @@ function QueueRow({
     </div>
   );
 
-  if (item.prompt && onPrompt) {
+  const rowClass =
+    variant === 'attention'
+      ? `flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left transition hover:border-violet-500/40 disabled:opacity-50 ${severityClass(severity)}`
+      : 'flex w-full items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2 text-left transition hover:border-violet-500/30 disabled:opacity-50';
+
+  if (isControlAction(item) && onQueueAction) {
+    return (
+      <button type="button" disabled={busy} onClick={() => void onQueueAction()} className={rowClass}>
+        {content}
+        <span className="shrink-0 text-[10px] font-semibold text-violet-400">{actionLabel}</span>
+      </button>
+    );
+  }
+
+  if (item.prompt && onPrompt && item.action !== 'publish' && item.action !== 'sync') {
     return (
       <button
         type="button"

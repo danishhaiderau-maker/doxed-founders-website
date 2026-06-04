@@ -1,25 +1,45 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import {
   BuildQueueItemKind,
   BuildQueueStatus,
   FounderEventType,
+  NotificationType,
   ScoutMarketStatus,
   SuggestedUpdateStatus,
 } from '@prisma/client';
 import {
   founderQueueToAttention,
+  isBuilderRunFailureStatus,
+  isBuilderRunSuccessStatus,
   sortAttentionItems,
   sortFounderQueue,
   type AttentionItem,
   type FounderQueueItem,
   planAgentBusHandoffs,
   type AgentBusHandoff,
+  type WorkforceAgentOutput,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from '../builder/builder.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
 import { FounderCopilotService } from './founder-copilot.service';
+import { FounderOsService } from '../founder-os/founder-os.service';
+import { FounderAutopilotService } from './founder-autopilot.service';
+import { NotificationsService } from '../notifications/notifications.service';
+
+export type AgentBusRunResult = {
+  handoffs: AgentBusHandoff[];
+  applied: number;
+  handoffIds: string[];
+  contentDraftId?: string;
+};
 
 @Injectable()
 export class FounderCommandCenterService {
@@ -27,8 +47,15 @@ export class FounderCommandCenterService {
     private readonly prisma: PrismaService,
     private readonly github: GitHubApiService,
     private readonly builder: BuilderService,
+    private readonly notifications: NotificationsService,
+    @Inject(forwardRef(() => BuildQueueService))
     private readonly buildQueue: BuildQueueService,
+    @Inject(forwardRef(() => FounderCopilotService))
     private readonly copilot: FounderCopilotService,
+    @Inject(forwardRef(() => FounderOsService))
+    private readonly founderOs: FounderOsService,
+    @Inject(forwardRef(() => FounderAutopilotService))
+    private readonly autopilot: FounderAutopilotService,
   ) {}
 
   async getFounderQueue(userId: string) {
@@ -65,6 +92,18 @@ export class FounderCommandCenterService {
       orderBy: { createdAt: 'asc' },
       take: 5,
     });
+    if (pendingUpdates.length > 1) {
+      items.push({
+        id: 'publish-all-pending',
+        kind: 'PUBLISH_UPDATE',
+        priority: 2,
+        title: `Publish ${pendingUpdates.length} pending updates`,
+        detail: 'Ship to feed, X, and community',
+        action: 'publish',
+        targetId: 'all',
+        href: '/founder-den?tab=social',
+      });
+    }
     for (const u of pendingUpdates) {
       items.push({
         id: `pub-${u.id}`,
@@ -73,8 +112,8 @@ export class FounderCommandCenterService {
         title: `Publish: ${u.headline.slice(0, 72)}`,
         detail: 'Ship to feed, X, and community',
         action: 'publish',
+        targetId: u.id,
         href: '/founder-den?tab=social',
-        prompt: 'Publish all pending build updates',
       });
     }
 
@@ -108,6 +147,7 @@ export class FounderCommandCenterService {
         title: t.title.slice(0, 80),
         detail: 'From build queue',
         action: 'dispatch_build',
+        targetId: t.id,
         prompt: t.spec ?? t.title,
       });
     }
@@ -174,10 +214,9 @@ export class FounderCommandCenterService {
         id: 'deploy-check',
         kind: 'DEPLOY_CHECK',
         priority: 1,
-        title: 'Check deployment status',
+        title: 'Run platform autopilot sync',
         detail: failedDeploy.title,
-        action: 'settings',
-        href: '/settings/builder',
+        action: 'sync',
         prompt: 'Run platform autopilot sync and verify Vercel/Railway',
       });
     }
@@ -203,7 +242,83 @@ export class FounderCommandCenterService {
     };
   }
 
-  /** Preview handoffs from a completed workforce/build event (v1 — execution in follow-up). */
+  /** Agent Bus v1 — plan + apply handoffs (P1 stage 2). */
+  async runAgentBus(
+    userId: string,
+    input: {
+      kind: 'RESEARCH_COMPLETED' | 'BUILD_COMPLETED' | 'BUILD_FAILED';
+      title: string;
+      detail: string;
+      sourceTask?: string;
+      buildStatus?: string;
+      prUrl?: string | null;
+      result?: string | null;
+    },
+  ): Promise<AgentBusRunResult | null> {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { where: { approved: true }, take: 1 } },
+    });
+    if (!founder) return null;
+
+    const handoffs = planAgentBusHandoffs({
+      kind: input.kind,
+      founderId: founder.id,
+      projectId: founder.projects[0]?.id,
+      title: input.title,
+      detail: input.detail,
+      sourceTask: input.sourceTask,
+      researchSummary: input.kind === 'RESEARCH_COMPLETED' ? input.detail : undefined,
+      buildOutput:
+        input.kind !== 'RESEARCH_COMPLETED'
+          ? { status: input.buildStatus ?? 'UNKNOWN', prUrl: input.prUrl, result: input.result }
+          : undefined,
+    });
+
+    if (handoffs.length === 0) return { handoffs: [], applied: 0, handoffIds: [] };
+
+    return this.applyAgentBusHandoffs(userId, handoffs, founder.id, founder.projects[0]?.id);
+  }
+
+  async onWorkforceComplete(
+    userId: string,
+    template: string,
+    prompt: string,
+    output: WorkforceAgentOutput,
+  ) {
+    if (template !== 'RESEARCHER') return null;
+    return this.runAgentBus(userId, {
+      kind: 'RESEARCH_COMPLETED',
+      title: output.title,
+      detail: output.summary,
+      sourceTask: prompt,
+    });
+  }
+
+  async onBuildFinished(
+    userId: string,
+    body: {
+      task: string;
+      status: string;
+      result?: string | null;
+      branch?: string | null;
+      prUrl?: string | null;
+    },
+  ) {
+    if (!isBuilderRunFailureStatus(body.status) && !isBuilderRunSuccessStatus(body.status)) {
+      return null;
+    }
+    return this.runAgentBus(userId, {
+      kind: isBuilderRunFailureStatus(body.status) ? 'BUILD_FAILED' : 'BUILD_COMPLETED',
+      title: body.task,
+      detail: body.result?.trim() || body.status,
+      sourceTask: body.task,
+      buildStatus: body.status,
+      prUrl: body.prUrl,
+      result: body.result,
+    });
+  }
+
   async previewAgentBusHandoffs(
     userId: string,
     input: {
@@ -235,20 +350,184 @@ export class FounderCommandCenterService {
     return { handoffs, count: handoffs.length };
   }
 
-  /** Apply v1 bus handoffs — enqueue build ideas / queue items. */
-  async applyAgentBusHandoffs(userId: string, handoffs: AgentBusHandoff[]) {
-    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+  async applyAgentBusHandoffs(
+    userId: string,
+    handoffs: AgentBusHandoff[],
+    founderId?: string,
+    projectId?: string | null,
+  ): Promise<AgentBusRunResult> {
+    const founder =
+      founderId != null
+        ? { id: founderId }
+        : await this.prisma.founder.findUnique({ where: { userId } });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
+    const project =
+      projectId !== undefined
+        ? projectId
+        : (
+            await this.prisma.founder.findUnique({
+              where: { userId },
+              include: { projects: { where: { approved: true }, take: 1 } },
+            })
+          )?.projects[0]?.id;
+
     const applied: string[] = [];
+    let contentDraftId: string | undefined;
+
     for (const h of handoffs) {
       if (h.to === 'builder' && h.payload.spec) {
         await this.buildQueue.quickBuild(userId, {
           prompt: h.payload.spec ?? `${h.title}. ${h.detail}`.slice(0, 1200),
         });
         applied.push(h.id);
+        await this.notifications.notifyUser(userId, {
+          type: NotificationType.BUILD_QUEUE,
+          title: 'Build queued from research',
+          body: h.title.slice(0, 120),
+          link: '/founder-den?tab=build',
+        });
+      }
+
+      if (h.to === 'content') {
+        const headline = h.title.slice(0, 120);
+        const trader = (h.payload.prompt ?? h.detail).slice(0, 500);
+        const body = `${h.detail}\n\n${h.payload.prompt ?? ''}`.trim().slice(0, 4000);
+        const draft = await this.prisma.suggestedBuildUpdate.create({
+          data: {
+            founderId: founder.id,
+            projectId: project ?? undefined,
+            headline,
+            body: body || headline,
+            devSummary: h.detail.slice(0, 2000),
+            traderSummary: trader || headline,
+            source: 'agent_bus',
+          },
+        });
+        contentDraftId = draft.id;
+        applied.push(h.id);
+        await this.notifications.notifyUser(userId, {
+          type: NotificationType.BUILD_QUEUE,
+          title: 'Draft update ready',
+          body: headline,
+          link: '/founder-den?tab=social',
+        });
+      }
+
+      if (h.to === 'founder_queue') {
+        applied.push(h.id);
+        await this.notifications.notifyUser(userId, {
+          type: NotificationType.AGENT_RESULT,
+          title: h.title.slice(0, 80),
+          body: h.detail.slice(0, 180),
+          link: '/founder-den?tab=activity',
+        });
       }
     }
-    return { applied: applied.length, handoffIds: applied };
+
+    return {
+      handoffs,
+      applied: applied.length,
+      handoffIds: applied,
+      contentDraftId,
+    };
+  }
+
+  /** Control action from Founder Queue row (P1 stage 2). */
+  async executeQueueAction(userId: string, itemId: string) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    if (itemId === 'publish-all-pending' || itemId.startsWith('pub-')) {
+      const targetId = itemId === 'publish-all-pending' ? 'all' : itemId.slice(4);
+      const pending = await this.prisma.suggestedBuildUpdate.findMany({
+        where: {
+          founderId: founder.id,
+          status: SuggestedUpdateStatus.PENDING,
+          ...(targetId !== 'all' ? { id: targetId } : {}),
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (pending.length === 0) throw new NotFoundException('No pending updates');
+
+      const published: string[] = [];
+      const errors: string[] = [];
+      for (const s of pending) {
+        try {
+          await this.founderOs.publishSuggestedUpdate(userId, s.id, {
+            buildFeed: true,
+            x: true,
+            community: true,
+          });
+          published.push(s.id);
+        } catch (err) {
+          errors.push(err instanceof Error ? err.message : 'Publish failed');
+        }
+      }
+
+      return {
+        action: 'publish' as const,
+        published: published.length,
+        errors: errors.length > 0 ? errors : undefined,
+        message:
+          published.length > 0
+            ? `Published ${published.length} update(s) to feed, X, and community.`
+            : 'Publish failed — check Social Hub connections.',
+      };
+    }
+
+    if (itemId === 'run-build-mission') {
+      const result = await this.copilot.runMissionBuild(userId);
+      return {
+        action: 'dispatch_build' as const,
+        message: result.message ?? 'Mission build dispatched.',
+        worker: result.worker,
+        status: result.status,
+        agentUrl: result.agentUrl,
+        agentId: result.agentId,
+        runId: result.runId,
+        conversationId: result.conversationId,
+      };
+    }
+
+    if (itemId.startsWith('task-')) {
+      const taskId = itemId.slice(5);
+      const task = await this.prisma.buildQueueItem.findFirst({
+        where: { id: taskId, founderId: founder.id },
+      });
+      if (!task) throw new NotFoundException('Task not found');
+
+      const memory = await this.copilot.getProjectMemory(userId);
+      const dispatch = await this.builder.executeBuildTask(userId, {
+        spec: task.spec ?? task.title,
+        cursorPrompt: task.cursorPrompt ?? task.spec ?? task.title,
+        repository: memory.repoFullName ?? undefined,
+      });
+
+      return {
+        action: 'dispatch_build' as const,
+        message:
+          dispatch.status === 'dispatched'
+            ? `Builder started: ${task.title.slice(0, 60)}`
+            : dispatch.status === 'error'
+              ? dispatch.error ?? 'Builder dispatch failed'
+              : 'Connect Cursor or OpenHands in Settings → Builder',
+        dispatch,
+      };
+    }
+
+    if (itemId === 'deploy-check') {
+      const result = await this.autopilot.runAutopilot(
+        userId,
+        'Take full control — sync everything on Vercel, Railway, Neon, and GitHub',
+      );
+      return {
+        action: 'sync' as const,
+        message: result.answer,
+        steps: result.steps,
+      };
+    }
+
+    throw new NotFoundException(`Unknown queue item: ${itemId}`);
   }
 }

@@ -28,6 +28,8 @@ export type FounderQueueItem = {
   action: FounderQueueAction;
   href?: string;
   prompt?: string;
+  /** Entity id for control actions (suggestion id, task id, etc.) */
+  targetId?: string;
   createdAt?: string;
 };
 

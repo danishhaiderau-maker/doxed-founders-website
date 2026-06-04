@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import {
   BuildQueueItemKind,
@@ -33,6 +35,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from '../builder/builder.service';
 import { EventsService } from '../events/events.service';
+import { FounderCommandCenterService } from '../events/founder-command-center.service';
 
 function labelFromTemplate(template: string) {
   return WORKFORCE_TEMPLATES.find((t) => t.key === template)?.label ?? template.replace(/_/g, ' ');
@@ -71,6 +74,8 @@ export class BuildQueueService {
     private readonly github: GitHubApiService,
     private readonly builder: BuilderService,
     private readonly events: EventsService,
+    @Inject(forwardRef(() => FounderCommandCenterService))
+    private readonly commandCenter: FounderCommandCenterService,
   ) {}
 
   private orchestratorFingerprint(template: string, prompt: string) {
@@ -607,10 +612,19 @@ export class BuildQueueService {
       : emptyWorkforceRuntime(template);
 
     if (ideaId) {
-      await this.emitWorkforceComplete(userId, founder.id, project?.id, template, output, runtime, {
-        orchestrator: true,
-        ideaId,
-      });
+      await this.emitWorkforceComplete(
+        userId,
+        founder.id,
+        project?.id,
+        template,
+        prompt,
+        output,
+        runtime,
+        {
+          orchestrator: true,
+          ideaId,
+        },
+      );
     }
 
     return {
@@ -728,6 +742,7 @@ export class BuildQueueService {
     founderId: string,
     projectId: string | undefined,
     template: string,
+    prompt: string,
     output: WorkforceAgentOutput,
     runtime: WorkforceRuntimeResult,
     payload: Record<string, unknown>,
@@ -762,6 +777,8 @@ export class BuildQueueService {
       body: actionParts.join(' · '),
       link: '/founder-den?tab=build',
     });
+
+    void this.commandCenter.onWorkforceComplete(userId, template, prompt, output).catch(() => undefined);
   }
 
   async createFromOrchestratorOutput(
@@ -934,10 +951,20 @@ export class BuildQueueService {
     const runtime = await this.executeWorkforceRuntime(userId, template, ideaId, output);
     const founder = await this.requireFounder(userId);
     const project = founder.projects[0];
-    await this.emitWorkforceComplete(userId, founder.id, project?.id, template, output, runtime, {
-      ...meta,
-      ideaId,
-    }, 'agent');
+    await this.emitWorkforceComplete(
+      userId,
+      founder.id,
+      project?.id,
+      template,
+      output.summary.slice(0, 500),
+      output,
+      runtime,
+      {
+        ...meta,
+        ideaId,
+      },
+      'agent',
+    );
     return runtime;
   }
 

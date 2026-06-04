@@ -29,6 +29,7 @@ import {
   fetchMissionIntelligence,
   fetchFounderQueue,
   fetchAttentionCenter,
+  executeFounderQueueAction,
   fetchPlatformSyncStatus,
   type MissionIntelligence,
   type FounderQueueItem,
@@ -389,6 +390,13 @@ export function FounderOsDashboardLayout({
                     onPrompt={(prompt) => {
                       setQuickPrompt(prompt);
                       setChatKey((k) => k + 1);
+                    }}
+                    onQueueAction={async (itemId) => {
+                      const result = await executeFounderQueueAction(itemId, accessToken);
+                      onMessage?.(result.message);
+                      void load();
+                      onRefresh();
+                      return { message: result.message };
                     }}
                   />
 
