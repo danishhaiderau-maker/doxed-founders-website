@@ -230,7 +230,8 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       p.key !== 'CURSOR' &&
       p.key !== 'OLLAMA_LOCAL' &&
       p.key !== 'PHALA' &&
-      p.key !== 'OPENROUTER',
+      p.key !== 'OPENROUTER' &&
+      p.key !== 'JATEVO',
   );
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
@@ -259,6 +260,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           setPhalaModel,
           connecting,
           onConnectOpenRouter: () => handleConnectProvider('openrouter'),
+          onConnectJatevo: () => handleConnectProvider('jatevo'),
           onConnectOllama: handleConnectOllamaDirect,
           onConnectPhala: handleConnectPhala,
           onDisconnectPhala: () => handleDisconnect('phala'),

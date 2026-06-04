@@ -9,6 +9,7 @@ After Step 1 (Founder Vault), founders pick **who runs inference** for Copilot a
 | Provider | How it connects | Best for |
 |----------|-----------------|----------|
 | **OpenRouter** | API key in Builder settings | One key, many models (Claude, GPT, Llama, DeepSeek…) |
+| **Jatevo** | API key in Builder settings (Step 3) | One gateway — multi-model routing; $JTVO quota on your account |
 | **Ollama (Founder Node)** | Founder Node tray app + local Ollama | Zero cloud inference — prompts stay on desktop |
 | **Ollama (direct URL)** | Self-hosted Ollama URL | VPS / homelab with Ollama exposed to API |
 | **OpenAI, Anthropic, Gemini, DeepSeek** | Existing BYOK keys | Direct billing to each vendor |
@@ -21,6 +22,15 @@ After Step 1 (Founder Vault), founders pick **who runs inference** for Copilot a
 4. Optional: set **Preferred model** (e.g. `anthropic/claude-3.5-haiku`, `openrouter/auto`)
 
 Copilot and Quick Build route through OpenRouter when selected. Keys are encrypted at rest on the API — never sent to the browser after save.
+
+## Jatevo setup
+
+1. Settings → Builder → **Step 3 — AI on your stack**
+2. Paste your key from [jatevo.ai](https://jatevo.ai) (`sk-clb-…`)
+3. Set **Default provider** → **Jatevo (multi-model gateway)**
+4. Optional: **Preferred model** — `auto` or a model from Jatevo’s catalog
+
+See [JATEVO_BYOK.md](./JATEVO_BYOK.md) for endpoints, errors, and env overrides.
 
 ## Ollama via Founder Node (recommended local path)
 
@@ -58,8 +68,8 @@ When you ask Copilot a question:
 1. **Priority prompts** (pressing issue, standup) → rule-based, no LLM
 2. **Default provider** (if connected):
    - `OLLAMA_LOCAL` → Founder Node job queue, then direct Ollama URL fallback
-   - `OPENROUTER` / BYOK keys → cloud completion
-3. **Fallback chain**: OpenRouter → DeepSeek → OpenAI → Anthropic → Gemini (any connected key)
+   - `OPENROUTER` / `JATEVO` / BYOK keys → cloud completion
+3. **Fallback chain**: Jatevo → OpenRouter → DeepSeek → OpenAI → Anthropic → Gemini (any connected key)
 4. **Last resort**: rule-based answer from GitHub / vault metadata
 
 ## Privacy messaging

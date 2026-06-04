@@ -79,14 +79,15 @@ export function shouldPreferGithubGroundedBrainAnswer(
 }
 
 const TASK_PROVIDER_PREFERENCE: Record<Exclude<FounderBrainTask, 'general'>, AiProviderKey[]> = {
-  research: ['DEEPSEEK', 'PHALA', 'OPENROUTER', 'GEMINI', 'OPENAI', 'ANTHROPIC'],
-  writing: ['ANTHROPIC', 'OPENAI', 'OPENROUTER', 'DEEPSEEK', 'GEMINI', 'PHALA'],
-  strategy: ['OPENAI', 'ANTHROPIC', 'DEEPSEEK', 'OPENROUTER', 'GEMINI', 'PHALA'],
-  code: ['DEEPSEEK', 'OPENAI', 'ANTHROPIC', 'OPENROUTER', 'GEMINI', 'PHALA'],
+  research: ['DEEPSEEK', 'JATEVO', 'PHALA', 'OPENROUTER', 'GEMINI', 'OPENAI', 'ANTHROPIC'],
+  writing: ['ANTHROPIC', 'OPENAI', 'OPENROUTER', 'JATEVO', 'DEEPSEEK', 'GEMINI', 'PHALA'],
+  strategy: ['JATEVO', 'OPENAI', 'ANTHROPIC', 'DEEPSEEK', 'OPENROUTER', 'GEMINI', 'PHALA'],
+  code: ['DEEPSEEK', 'JATEVO', 'OPENAI', 'ANTHROPIC', 'OPENROUTER', 'GEMINI', 'PHALA'],
 };
 
 const GLOBAL_LLM_FALLBACK: AiProviderKey[] = [
   'PHALA',
+  'JATEVO',
   'OPENROUTER',
   'DEEPSEEK',
   'OPENAI',

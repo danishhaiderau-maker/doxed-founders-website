@@ -50,6 +50,7 @@ import {
   verifyPhalaConnection,
   type PhalaChatResult,
 } from './phala.client';
+import { callJatevoChat, verifyJatevoConnection } from './jatevo.client';
 import {
   estimateLlmTokensFromText,
   parseAnthropicUsage,
@@ -1221,6 +1222,8 @@ export class BuilderService {
         return this.callDeepSeek(apiKey, system, userPrompt, model);
       case AiProvider.OPENROUTER:
         return this.callOpenRouter(apiKey, system, userPrompt, model);
+      case AiProvider.JATEVO:
+        return this.callJatevo(apiKey, system, userPrompt, model);
       default:
         return null;
     }
@@ -1391,6 +1394,7 @@ export class BuilderService {
 
   private readonly brainProviderPriority: AiProvider[] = [
     AiProvider.PHALA,
+    AiProvider.JATEVO,
     AiProvider.OPENROUTER,
     AiProvider.DEEPSEEK,
     AiProvider.OPENAI,
@@ -1494,7 +1498,9 @@ export class BuilderService {
     const creds = await this.prisma.integrationCredential.findMany({
       where: {
         userId,
-        provider: { in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'] },
+        provider: {
+          in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'jatevo', 'phala'],
+        },
       },
       select: { provider: true, token: true },
     });
@@ -1562,6 +1568,11 @@ export class BuilderService {
         });
         if (!res.ok) throw new BadRequestException('Invalid OpenRouter API key');
         return { accountName: 'OpenRouter account' };
+      }
+      case 'jatevo': {
+        const verified = await verifyJatevoConnection(key);
+        if (!verified.ok) throw new BadRequestException(verified.reason);
+        return { accountName: verified.accountName };
       }
       case 'phala': {
         const verified = await verifyPhalaConnection({ apiKey: key });
@@ -1681,6 +1692,15 @@ export class BuilderService {
     const text = data.choices?.[0]?.message?.content;
     if (!text) return null;
     return { text, usage: parseOpenAiStyleUsage(data) };
+  }
+
+  private async callJatevo(key: string, system: string, user: string, model?: string) {
+    return callJatevoChat({
+      apiKey: key,
+      system,
+      userPrompt: user,
+      model,
+    });
   }
 
   private async callOpenRouter(key: string, system: string, user: string, model?: string) {
