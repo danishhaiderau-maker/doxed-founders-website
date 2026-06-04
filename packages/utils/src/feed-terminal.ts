@@ -1,6 +1,6 @@
 /** Social Conviction Terminal — tab filters & card kinds */
 
-export type FeedTerminalTab = 'all' | 'trades' | 'conviction' | 'movers' | 'regret' | 'activity';
+export type FeedTerminalTab = 'all' | 'trades' | 'conviction' | 'movers' | 'regret' | 'listings';
 
 export type FeedTerminalCardKind =
   | 'BUY'
@@ -22,7 +22,7 @@ const TRADES = new Set<FeedTerminalCardKind>(['BUY', 'SELL', 'ADD', 'REDUCE']);
 const CONVICTION = new Set<FeedTerminalCardKind>(['THESIS', 'NEW_THESIS', 'HOT_BUY']);
 const MOVERS = new Set<FeedTerminalCardKind>(['HOT_BUY', 'FOLLOWER_SPIKE']);
 const REGRET = new Set<FeedTerminalCardKind>(['MISSED_ALPHA', 'SMART_EXIT', 'LOSS']);
-const ACTIVITY = new Set<FeedTerminalCardKind>(['LISTING', 'VALIDATION', 'MAJOR_UPDATE']);
+const LISTINGS = new Set<FeedTerminalCardKind>(['LISTING', 'FOLLOWER_SPIKE', 'HOT_BUY']);
 
 export function feedCardMatchesTab(kind: FeedTerminalCardKind, tab: FeedTerminalTab): boolean {
   if (tab === 'all') return true;
@@ -30,7 +30,7 @@ export function feedCardMatchesTab(kind: FeedTerminalCardKind, tab: FeedTerminal
   if (tab === 'conviction') return CONVICTION.has(kind);
   if (tab === 'movers') return MOVERS.has(kind);
   if (tab === 'regret') return REGRET.has(kind);
-  if (tab === 'activity') return ACTIVITY.has(kind);
+  if (tab === 'listings') return LISTINGS.has(kind);
   return true;
 }
 
@@ -40,12 +40,12 @@ export const FEED_TERMINAL_TABS: {
   icon: string;
   subtitle: string;
 }[] = [
-  { id: 'all', label: 'All Activity', icon: '🔥', subtitle: 'Everything' },
-  { id: 'trades', label: 'Trades', icon: '💰', subtitle: 'Buys & Sells' },
-  { id: 'conviction', label: 'Conviction', icon: '🧠', subtitle: 'Thesis & Calls' },
-  { id: 'movers', label: 'Movers', icon: '📈', subtitle: 'Top Trending' },
-  { id: 'regret', label: 'Regret', icon: '😅', subtitle: 'Missed Alpha' },
-  { id: 'activity', label: 'Activity', icon: '⚡', subtitle: 'Updates' },
+  { id: 'all', label: 'Live Tape', icon: '🔥', subtitle: 'All money events' },
+  { id: 'trades', label: 'Trades', icon: '💰', subtitle: 'Buy · sell · add · reduce' },
+  { id: 'conviction', label: 'Conviction', icon: '🧠', subtitle: 'Thesis & hot buys' },
+  { id: 'movers', label: 'Movers', icon: '📈', subtitle: 'Flow & followers' },
+  { id: 'regret', label: 'Exits', icon: '😅', subtitle: 'Smart exit & regret' },
+  { id: 'listings', label: 'Listings', icon: '🚀', subtitle: 'New projects' },
 ];
 
 export function feedCardKindLabel(kind: FeedTerminalCardKind): string {

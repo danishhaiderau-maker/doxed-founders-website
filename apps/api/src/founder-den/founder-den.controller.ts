@@ -55,11 +55,13 @@ export class FounderDenController {
     @Query('stageFilter') stageFilter?: string,
     @Query('chainSlug') chainSlug?: string,
     @Query('timeframe') timeframe?: string,
+    @Query('bubbleMode') bubbleMode?: string,
   ) {
     return this.founderDen.getDiscoverUniverse({
       stageFilter: (stageFilter as DiscoverUniverseStageFilter) || 'all',
       chainSlug: chainSlug || undefined,
       timeframe: (timeframe as DiscoverTimeframe) || '24h',
+      bubbleMode: bubbleMode === 'feed' ? 'feed' : 'discover',
     });
   }
 

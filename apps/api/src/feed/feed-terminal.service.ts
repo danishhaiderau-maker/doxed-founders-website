@@ -99,7 +99,6 @@ export class FeedTerminalService {
       hotBuys,
       followerSpikes,
       listings,
-      buildPosts,
       trades24h,
       tradesPrior24h,
       newTraders24h,
@@ -147,18 +146,6 @@ export class FeedTerminalService {
         take: 6,
         select: { id: true, slug: true, name: true, ticker: true, logoUrl: true, createdAt: true },
       }),
-      this.prisma.founderBuildPost.findMany({
-        where: {
-          publishedAt: { gte: weekAgo },
-          ...(projectIdFilter ? { projectId: projectIdFilter } : {}),
-        },
-        orderBy: { publishedAt: 'desc' },
-        take: 10,
-        include: {
-          founder: { select: { name: true } },
-          project: { select: { slug: true, name: true, ticker: true, logoUrl: true } },
-        },
-      }),
       this.prisma.paperTrade.groupBy({
         by: ['side'],
         where: { createdAt: { gte: dayAgo } },
@@ -197,8 +184,12 @@ export class FeedTerminalService {
     ]);
 
     const cards: FeedTerminalCard[] = [];
+    const priorBuyByUserProject = new Set<string>();
+    const postsChronological = [...feedPosts].sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+    );
 
-    for (const post of feedPosts) {
+    for (const post of postsChronological) {
       const traderName = labelForUser(post.user);
       const currentPrice = post.project.metrics?.priceUsd
         ? Number(post.project.metrics.priceUsd)
@@ -225,6 +216,8 @@ export class FeedTerminalService {
         feedPostId: post.id,
       };
 
+      const positionKey = `${post.userId}:${post.projectId}`;
+
       if (trade.side === PaperTradeSide.BUY) {
         if (post.initialComment) {
           cards.push({
@@ -234,9 +227,11 @@ export class FeedTerminalService {
             ...base,
           });
         }
+        const kind = priorBuyByUserProject.has(positionKey) ? 'ADD' : 'BUY';
+        priorBuyByUserProject.add(positionKey);
         cards.push({
-          id: `buy-${post.id}`,
-          kind: 'BUY',
+          id: `${kind.toLowerCase()}-${post.id}`,
+          kind,
           convictionLabel: post.initialComment ? 'High Conviction' : undefined,
           ...base,
         });
@@ -283,9 +278,10 @@ export class FeedTerminalService {
             ...base,
           });
         } else {
+          const kind = priorBuyByUserProject.has(positionKey) ? 'REDUCE' : 'SELL';
           cards.push({
-            id: `sell-${post.id}`,
-            kind: 'SELL',
+            id: `${kind.toLowerCase()}-${post.id}`,
+            kind,
             pnlPct,
             pnlUsd: realizedPnl,
             ...base,
@@ -352,22 +348,6 @@ export class FeedTerminalService {
       });
     }
 
-    for (const bp of buildPosts) {
-      if (!bp.project) continue;
-      cards.push({
-        id: `build-${bp.id}`,
-        kind: 'MAJOR_UPDATE',
-        at: bp.publishedAt.toISOString(),
-        traderName: bp.founder.name,
-        projectSlug: bp.project.slug,
-        projectTicker: bp.project.ticker,
-        projectName: bp.project.name,
-        projectLogoUrl: bp.project.logoUrl,
-        reason: bp.headline,
-        link: `/project/${bp.project.slug}`,
-      });
-    }
-
     cards.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 
     const filtered = cards.filter((c) => {
@@ -419,17 +399,6 @@ export class FeedTerminalService {
         latestMessage: latest.slice(0, 80),
       });
     }
-    for (const bp of buildPosts.slice(0, 5)) {
-      if (!bp.project || chatMap.has(bp.project.slug)) continue;
-      chatMap.set(bp.project.slug, {
-        slug: bp.project.slug,
-        ticker: bp.project.ticker,
-        name: bp.project.name,
-        activeCount: 1,
-        latestMessage: bp.headline.slice(0, 80),
-      });
-    }
-
     return {
       tab,
       projectSlug: projectSlug ?? null,

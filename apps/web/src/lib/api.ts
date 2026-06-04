@@ -1154,7 +1154,7 @@ export function fetchUnifiedFeed(category: UnifiedFeedCategory = 'all') {
   }>(`/feed/unified?category=${category}`);
 }
 
-export type FeedTerminalTab = 'all' | 'trades' | 'conviction' | 'movers' | 'regret' | 'activity';
+export type FeedTerminalTab = 'all' | 'trades' | 'conviction' | 'movers' | 'regret' | 'listings';
 
 export type FeedTerminalCardKind =
   | 'BUY'
@@ -1247,6 +1247,20 @@ export type FeedHubTerminalEntry = {
 
 export type FeedHubEntry = FeedHubUnifiedEntry | FeedHubTerminalEntry;
 
+export interface FeedHubMoneySections {
+  topMovers: {
+    mostBought: { ticker: string; usd: number }[];
+    mostSold: { ticker: string; usd: number }[];
+    mostWatchlisted: { ticker: string; detail: string; slug?: string }[];
+    mostDiscussed: { ticker: string; trader?: string }[];
+  };
+  tape: FeedTerminalCard[];
+  predictions: UnifiedFeedItem[];
+  listings: UnifiedFeedItem[];
+  smartMoney: { userId: string; name: string; pnlUsd: number }[];
+  milestones: UnifiedFeedItem[];
+}
+
 export interface FeedHubResponse {
   category: UnifiedFeedCategory;
   terminalTab: FeedTerminalTab;
@@ -1255,6 +1269,7 @@ export interface FeedHubResponse {
   hotQuestions: HotPredictionItem[];
   scoutListings: ScoutListingFeedItem[];
   stream: FeedHubEntry[];
+  sections?: FeedHubMoneySections;
   terminal: FeedTerminalResponse | null;
   counts: {
     unified: number;
@@ -2253,11 +2268,14 @@ export function fetchDiscoverUniverse(options?: {
   stageFilter?: DiscoverUniverseStageFilter;
   chainSlug?: string;
   timeframe?: DiscoverTimeframe;
+  /** Use money-weighted bubble scores on Feed (not GitHub-heavy Discover scoring). */
+  bubbleMode?: 'discover' | 'feed';
 }) {
   const qs = new URLSearchParams();
   if (options?.stageFilter && options.stageFilter !== 'all') qs.set('stageFilter', options.stageFilter);
   if (options?.chainSlug) qs.set('chainSlug', options.chainSlug);
   if (options?.timeframe) qs.set('timeframe', options.timeframe);
+  if (options?.bubbleMode === 'feed') qs.set('bubbleMode', 'feed');
   const q = qs.toString();
   return apiFetch<DiscoverUniverseResponse>(`/founder-den/discover/universe${q ? `?${q}` : ''}`);
 }

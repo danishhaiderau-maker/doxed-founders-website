@@ -43,6 +43,7 @@ import {
   FOUNDER_BRAIN_SYSTEM,
   FounderBrainContext,
   computeDiscoverActivityScore,
+  computeFeedBubbleActivityScore,
   computeDiscoverConvictionScore,
   computeDiscoverVisibilityBreakdown,
   DISCOVER_ACTIVITY_FACTORS,
@@ -1221,6 +1222,7 @@ export class FounderDenService {
     stageFilter?: DiscoverUniverseStageFilter;
     chainSlug?: string;
     timeframe?: DiscoverTimeframe;
+    bubbleMode?: 'discover' | 'feed';
   }) {
     const timeframe = options?.timeframe ?? '24h';
     const windowMs = timeframeToMs(timeframe);
@@ -1376,16 +1378,31 @@ export class FounderDenService {
         isLiveToken: p.isLiveToken,
       });
       const recentlyListed = isDiscoverRecentlyListed(createdAt);
-      const activityScore = computeDiscoverActivityScore({
-        buildPosts: buildMap[pid] ?? 0,
-        githubEvents: githubMap[pid] ?? 0,
-        tradesInflow: ddInflow,
-        tradesVolume: ddVolume,
-        followers: followMap[pid] ?? 0,
-        scoutStake: scoutStakeMap[pid] ?? 0,
-        communitySignals: threadMap[pid] ?? 0,
-        bubbleScore: p.bubbleScore,
-      });
+      const feedBubble =
+        options?.bubbleMode === 'feed'
+          ? computeFeedBubbleActivityScore({
+              tradesVolume: ddVolume,
+              tradesInflow: ddInflow,
+              comments: threadMap[pid] ?? 0,
+              predictionVotes: scoutStakeMap[pid] ?? 0,
+              watchlists: followMap[pid] ?? 0,
+              shares: 0,
+              mentions: 0,
+              founderMilestones: buildMap[pid] ?? 0,
+            })
+          : null;
+      const activityScore =
+        feedBubble ??
+        computeDiscoverActivityScore({
+          buildPosts: buildMap[pid] ?? 0,
+          githubEvents: githubMap[pid] ?? 0,
+          tradesInflow: ddInflow,
+          tradesVolume: ddVolume,
+          followers: followMap[pid] ?? 0,
+          scoutStake: scoutStakeMap[pid] ?? 0,
+          communitySignals: threadMap[pid] ?? 0,
+          bubbleScore: p.bubbleScore,
+        });
       const convictionScore = computeDiscoverConvictionScore({
         launchReadiness: p.launchReadiness,
         demandPct: p.demandPct,

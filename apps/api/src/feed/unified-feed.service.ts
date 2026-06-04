@@ -18,6 +18,7 @@ import {
   sortPredictionMarketsByHeat,
   HotPredictionItem,
   EngagementFlash,
+  isMajorShipHeadline,
 } from '@dcf/utils';
 import { formatUsd } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -144,9 +145,9 @@ export class UnifiedFeedService {
   async getUnifiedFeed(category: UnifiedFeedCategory = 'all', limit = 50) {
     const items: UnifiedFeedItem[] = [];
 
-    // Main feed = trading + market only (no GitHub / build spam; Discover shows founder activity).
+    // Money Feed: trading + market only. Founder tab = major milestones (no commits).
     if (category === 'founder') {
-      items.push(...(await this.loadFounderEvents()));
+      items.push(...(await this.loadFounderMilestones()));
     }
 
     if (category === 'all' || category === 'trading') {
@@ -349,48 +350,45 @@ export class UnifiedFeedService {
       .slice(0, 5);
   }
 
-  private async loadFounderEvents(): Promise<UnifiedFeedItem[]> {
-    const take = 25;
-    const now = new Date();
-    const [buildPosts, videos, pinnedUpdates] = await Promise.all([
+  /** Major founder milestones only — ships & verification (no commits / agent noise). */
+  private async loadFounderMilestones(): Promise<UnifiedFeedItem[]> {
+    const weekAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+
+    const [shipPosts, platformEvents, verifications] = await Promise.all([
       this.prisma.founderBuildPost.findMany({
+        where: { publishedAt: { gte: weekAgo } },
         orderBy: { publishedAt: 'desc' },
-        take,
+        take: 30,
         include: {
           founder: { select: { slug: true, name: true } },
-          project: { select: { slug: true, name: true, ticker: true } },
+          project: { select: { slug: true, name: true, ticker: true, createdAt: true } },
         },
       }),
-      this.prisma.founderVideo.findMany({
-        orderBy: { publishedAt: 'desc' },
+      this.loadFounderPlatformEvents(),
+      this.prisma.founderVerification.findMany({
+        where: { verified: true, verifiedAt: { gte: weekAgo } },
+        orderBy: { verifiedAt: 'desc' },
         take: 10,
         include: {
-          founder: { select: { slug: true, name: true } },
-          project: { select: { slug: true, name: true, ticker: true } },
-        },
-      }),
-      this.prisma.founderUpdate.findMany({
-        where: {
-          pinned: true,
-          OR: [{ pinnedUntil: null }, { pinnedUntil: { gt: now } }],
-        },
-        orderBy: { publishedAt: 'desc' },
-        take: 12,
-        include: {
-          founder: { select: { slug: true, name: true, twitterUrl: true } },
-          project: { select: { slug: true, name: true, ticker: true } },
+          founder: {
+            select: {
+              slug: true,
+              name: true,
+              projects: { where: { approved: true }, take: 1, select: { slug: true, ticker: true, name: true } },
+            },
+          },
         },
       }),
     ]);
 
-    const buildItems: UnifiedFeedItem[] = buildPosts
-      .filter((p) => !p.githubUrl?.trim())
+    const shipItems: UnifiedFeedItem[] = shipPosts
+      .filter((p) => isMajorShipHeadline(p.headline))
       .map((p) => ({
-        id: `founder-build-${p.id}`,
-        tier: unifiedFeedTier('build_update'),
-        category: 'founder',
-        eventType: 'build_update',
-        emoji: '🔨',
+        id: `founder-ship-${p.id}`,
+        tier: 1 as const,
+        category: 'founder' as const,
+        eventType: 'project_shipped',
+        emoji: '🚀',
         headline: p.headline,
         detail: `${p.founder.name}${p.project ? ` · ${p.project.ticker}` : ''}`,
         at: p.publishedAt.toISOString(),
@@ -400,50 +398,33 @@ export class UnifiedFeedService {
         founderSlug: p.founder.slug,
       }));
 
-    const videoItems: UnifiedFeedItem[] = videos.map((v) => ({
-      id: `founder-video-${v.id}`,
-      tier: unifiedFeedTier('founder_video'),
-      category: 'founder',
-      eventType: 'founder_video',
-      emoji: '🎥',
-      headline: v.title,
-      detail: `${v.founder.name} uploaded intro video`,
-      at: v.publishedAt.toISOString(),
-      link: v.project ? `/project/${v.project.slug}` : `/founder/${v.founder.slug}`,
-      projectSlug: v.project?.slug,
-      founderSlug: v.founder.slug,
-    }));
+    const verifyItems: UnifiedFeedItem[] = verifications.map((v) => {
+      const project = v.founder.projects[0];
+      return {
+        id: `founder-verified-${v.id}`,
+        tier: 1 as const,
+        category: 'founder' as const,
+        eventType: 'founder_verified',
+        emoji: '✅',
+        headline: `Founder verified: ${v.founder.name}`,
+        detail: project ? `${project.name} (${project.ticker})` : 'Identity verified',
+        at: (v.verifiedAt ?? new Date()).toISOString(),
+        link: project ? `/project/${project.slug}` : `/founder/${v.founder.slug}`,
+        projectSlug: project?.slug,
+        projectTicker: project?.ticker,
+        founderSlug: v.founder.slug,
+      };
+    });
 
-    const pinnedItems: UnifiedFeedItem[] = pinnedUpdates
-      .filter((u) => u.founder)
-      .map((u) => ({
-      id: `founder-x-${u.id}`,
-      tier: unifiedFeedTier('founder_x_update'),
-      category: 'founder' as const,
-      eventType: 'founder_x_update',
-      emoji: '📌',
-      headline: u.headline,
-      detail: `${u.founder!.name}${u.project ? ` · ${u.project.ticker}` : ''} · synced from X`,
-      at: u.publishedAt.toISOString(),
-      link: u.project ? `/project/${u.project.slug}` : `/founder/${u.founder!.slug}`,
-      projectSlug: u.project?.slug,
-      projectTicker: u.project?.ticker,
-      founderSlug: u.founder!.slug,
-      pinned: true,
-      sourceUrl: u.sourceUrl ?? undefined,
-    }));
-
-    const platformEvents = await this.loadFounderPlatformEvents();
-    return [...pinnedItems, ...platformEvents, ...buildItems, ...videoItems];
+    const majorDeploys = platformEvents.filter((e) => e.eventType === 'project_shipped');
+    return [...shipItems, ...majorDeploys, ...verifyItems];
   }
 
   private async loadFounderPlatformEvents(): Promise<UnifiedFeedItem[]> {
     const events = await this.prisma.founderEvent.findMany({
       where: {
         project: { approved: true },
-        type: {
-          in: [FounderEventType.DEPLOY_SUCCESS, FounderEventType.DEPLOY_STARTED],
-        },
+        type: FounderEventType.DEPLOY_SUCCESS,
       },
       orderBy: { createdAt: 'desc' },
       take: 20,
@@ -453,36 +434,66 @@ export class UnifiedFeedService {
       },
     });
 
-    return events.map((e) =>
-      founderEventToUnifiedItem({
-        id: e.id,
-        type: e.type,
-        title: e.title,
-        createdAt: e.createdAt,
-        founder: e.founder,
-        project: e.project,
-        payload: e.payload as Record<string, unknown> | null,
-      }),
-    );
+    return events
+      .map((e) =>
+        founderEventToUnifiedItem({
+          id: e.id,
+          type: e.type,
+          title: e.title,
+          createdAt: e.createdAt,
+          founder: e.founder,
+          project: e.project,
+          payload: e.payload as Record<string, unknown> | null,
+        }),
+      )
+      .filter((item) => item.eventType === 'project_shipped');
   }
 
   private async loadTradingEvents(): Promise<UnifiedFeedItem[]> {
     const { posts } = await this.feed.getFeed('recent');
-    return posts.map((post) => {
-      const eventType =
-        post.side === 'BUY'
-          ? post.initialComment
-            ? 'conviction_posted'
-            : 'position_opened'
-          : 'position_closed';
+    const chronological = [...posts].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
+    const priorBuyKey = new Set<string>();
+
+    const items = chronological.map((post) => {
+      const key = `${post.trader.id}:${post.project.id}`;
+      let eventType: string;
+      if (post.side === 'BUY') {
+        if (post.initialComment) {
+          eventType = 'conviction_posted';
+        } else if (priorBuyKey.has(key)) {
+          eventType = 'position_added';
+        } else {
+          eventType = 'position_opened';
+          priorBuyKey.add(key);
+        }
+      } else {
+        eventType = priorBuyKey.has(key) ? 'position_reduced' : 'position_closed';
+      }
+
+      const isBuy = post.side === 'BUY';
+      const verb =
+        eventType === 'conviction_posted'
+          ? 'conviction buy'
+          : eventType === 'position_added'
+            ? 'added to'
+            : eventType === 'position_opened'
+              ? 'opened'
+              : eventType === 'position_reduced'
+                ? 'reduced'
+                : 'closed';
+
       return {
         id: `trade-${post.id}`,
-        tier: unifiedFeedTier(eventType),
-        category: 'trading',
+        tier: unifiedFeedTier(
+          eventType === 'conviction_posted' ? 'conviction_posted' : 'position_opened',
+        ),
+        category: 'trading' as const,
         eventType,
-        emoji: post.side === 'BUY' ? '📈' : '📉',
-        headline: `${post.trader.name} ${post.side === 'BUY' ? 'opened' : 'closed'} ${post.project.ticker}`,
-        detail: post.initialComment?.slice(0, 120) ?? `${formatUsd(post.amountUsd, 0)} paper trade`,
+        emoji: isBuy ? '🟢' : '🔴',
+        headline: `${post.trader.name} ${verb} ${post.project.ticker}`,
+        detail: post.initialComment?.slice(0, 120) ?? `${formatUsd(post.amountUsd, 0)} paper`,
         at: typeof post.createdAt === 'string' ? post.createdAt : new Date(post.createdAt).toISOString(),
         link: `/portfolio/${post.trader.id}`,
         tradePostId: post.id,
@@ -493,6 +504,7 @@ export class UnifiedFeedService {
         amountUsd: post.amountUsd,
       };
     });
+    return items.reverse();
   }
 
   private async loadMarketEvents(): Promise<UnifiedFeedItem[]> {
@@ -687,6 +699,70 @@ export class UnifiedFeedService {
         projectSlug: vote.project.slug,
         projectTicker: vote.project.ticker,
         amountUsd: pool,
+      });
+    }
+
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const watchlistSpikes = await this.prisma.projectFollow.groupBy({
+      by: ['projectId'],
+      where: { createdAt: { gte: dayAgo } },
+      _count: { id: true },
+      orderBy: { _count: { id: 'desc' } },
+      take: 6,
+    });
+    for (const spike of watchlistSpikes) {
+      if (spike._count.id < 8) continue;
+      const project = await this.prisma.project.findUnique({
+        where: { id: spike.projectId },
+        select: { slug: true, name: true, ticker: true },
+      });
+      if (!project) continue;
+      items.push({
+        id: `market-watchlist-${spike.projectId}`,
+        tier: unifiedFeedTier('watchlist_surge'),
+        category: 'market',
+        eventType: 'watchlist_surge',
+        emoji: '🔥',
+        headline: `Watchlist alert: ${project.ticker}`,
+        detail: `+${spike._count.id} watchlists today`,
+        at: new Date().toISOString(),
+        link: `/project/${project.slug}`,
+        projectSlug: project.slug,
+        projectTicker: project.ticker,
+      });
+    }
+
+    const resolvedMarkets = await this.prisma.scoutMarket.findMany({
+      where: {
+        status: ScoutMarketStatus.RESOLVED,
+        updatedAt: { gte: weekAgo },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 8,
+      include: {
+        project: { select: { slug: true, name: true, ticker: true } },
+        positions: true,
+      },
+    });
+    for (const market of resolvedMarkets) {
+      const yesPool = Number(market.yesPoolUsd);
+      const noPool = Number(market.noPoolUsd);
+      const total = yesPool + noPool;
+      const yesPct = total > 0 ? Math.round((yesPool / total) * 100) : 50;
+      const winning = yesPool >= noPool ? 'YES' : 'NO';
+      items.push({
+        id: `market-resolved-${market.id}`,
+        tier: 1,
+        category: 'market',
+        eventType: 'prediction_resolved',
+        emoji: '🏆',
+        headline: `Market resolved: ${market.project.ticker}`,
+        detail: `${winning} (${winning === 'YES' ? yesPct : 100 - yesPct}%) · ${formatUsd(total, 0)} pool · ${market.question.slice(0, 72)}`,
+        at: market.updatedAt.toISOString(),
+        link: '/predict',
+        projectSlug: market.project.slug,
+        projectTicker: market.project.ticker,
+        amountUsd: total,
       });
     }
 
