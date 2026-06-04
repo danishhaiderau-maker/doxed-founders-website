@@ -264,13 +264,156 @@ export class GitHubApiService {
     return Buffer.from(data.content, 'base64').toString('utf8');
   }
 
+  private normalizeRepoFileContent(content: string): string {
+    return content.replace(/\r\n/g, '\n').trimEnd();
+  }
+
+  /** Write multiple memory files in one commit when possible; skip unchanged blobs. */
+  async upsertRepoFilesBatch(
+    userId: string,
+    repo: string,
+    files: { path: string; content: string }[],
+    message: string,
+  ): Promise<{ updated: number; skipped: number }> {
+    const pending: { path: string; content: string }[] = [];
+    let skipped = 0;
+
+    for (const file of files) {
+      const existing = await this.getRepoFile(userId, repo, file.path);
+      if (
+        existing != null &&
+        this.normalizeRepoFileContent(existing) === this.normalizeRepoFileContent(file.content)
+      ) {
+        skipped += 1;
+        continue;
+      }
+      pending.push(file);
+    }
+
+    if (pending.length === 0) {
+      return { updated: 0, skipped };
+    }
+
+    if (pending.length === 1) {
+      const one = pending[0]!;
+      await this.upsertRepoFile(userId, repo, one.path, one.content, message);
+      return { updated: 1, skipped };
+    }
+
+    const token = await this.getToken(userId);
+    if (!token) {
+      throw new BadRequestException('Connect a GitHub personal access token in Builder settings to sync memory files');
+    }
+
+    const repoRes = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: this.headers(token),
+    });
+    if (!repoRes.ok) {
+      throw new BadRequestException('Could not read repository metadata from GitHub');
+    }
+    const repoMeta = (await repoRes.json()) as { default_branch?: string };
+    const branch = repoMeta.default_branch ?? 'master';
+
+    const refRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${branch}`, {
+      headers: this.headers(token),
+    });
+    if (!refRes.ok) {
+      throw new BadRequestException('Could not read default branch ref from GitHub');
+    }
+    const refPayload = (await refRes.json()) as { object?: { sha?: string } };
+    const baseCommitSha = refPayload.object?.sha;
+    if (!baseCommitSha) {
+      throw new BadRequestException('Could not resolve base commit for memory sync');
+    }
+
+    const commitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits/${baseCommitSha}`, {
+      headers: this.headers(token),
+    });
+    if (!commitRes.ok) {
+      throw new BadRequestException('Could not read base commit for memory sync');
+    }
+    const baseCommit = (await commitRes.json()) as { tree?: { sha?: string } };
+    const baseTreeSha = baseCommit.tree?.sha;
+    if (!baseTreeSha) {
+      throw new BadRequestException('Could not read base tree for memory sync');
+    }
+
+    const treeItems: { path: string; mode: '100644'; type: 'blob'; sha: string }[] = [];
+    for (const file of pending) {
+      const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs`, {
+        method: 'POST',
+        headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: file.content,
+          encoding: 'utf-8',
+        }),
+      });
+      if (!blobRes.ok) {
+        const err = (await blobRes.json().catch(() => ({}))) as { message?: string };
+        throw new BadRequestException(err.message ?? `Could not create blob for ${file.path}`);
+      }
+      const blob = (await blobRes.json()) as { sha?: string };
+      if (!blob.sha) {
+        throw new BadRequestException(`Could not create blob for ${file.path}`);
+      }
+      treeItems.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha });
+    }
+
+    const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees`, {
+      method: 'POST',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: treeItems,
+      }),
+    });
+    if (!treeRes.ok) {
+      const err = (await treeRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? 'Could not create Git tree for memory sync');
+    }
+    const treePayload = (await treeRes.json()) as { sha?: string };
+    if (!treePayload.sha) {
+      throw new BadRequestException('Could not create Git tree for memory sync');
+    }
+
+    const newCommitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits`, {
+      method: 'POST',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        tree: treePayload.sha,
+        parents: [baseCommitSha],
+      }),
+    });
+    if (!newCommitRes.ok) {
+      const err = (await newCommitRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? 'Could not create commit for memory sync');
+    }
+    const newCommit = (await newCommitRes.json()) as { sha?: string };
+    if (!newCommit.sha) {
+      throw new BadRequestException('Could not create commit for memory sync');
+    }
+
+    const updateRefRes = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${branch}`, {
+      method: 'PATCH',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: newCommit.sha, force: false }),
+    });
+    if (!updateRefRes.ok) {
+      const err = (await updateRefRes.json().catch(() => ({}))) as { message?: string };
+      throw new BadRequestException(err.message ?? 'Could not update branch ref for memory sync');
+    }
+
+    return { updated: pending.length, skipped };
+  }
+
   async upsertRepoFile(
     userId: string,
     repo: string,
     path: string,
     content: string,
     message: string,
-  ): Promise<{ created: boolean; sha?: string }> {
+  ): Promise<{ created: boolean; sha?: string; skipped?: boolean }> {
     const token = await this.getToken(userId);
     if (!token) {
       throw new BadRequestException('Connect a GitHub personal access token in Builder settings to sync memory files');
@@ -281,9 +424,20 @@ export class GitHubApiService {
       headers: this.headers(token),
     });
     let sha: string | undefined;
+    let existingContent: string | null = null;
     if (existingRes.ok) {
-      const existing = (await existingRes.json()) as { sha?: string };
+      const existing = (await existingRes.json()) as { sha?: string; content?: string; encoding?: string };
       sha = existing.sha;
+      if (existing.content && existing.encoding === 'base64') {
+        existingContent = Buffer.from(existing.content, 'base64').toString('utf8');
+      }
+    }
+
+    if (
+      existingContent != null &&
+      this.normalizeRepoFileContent(existingContent) === this.normalizeRepoFileContent(content)
+    ) {
+      return { created: false, sha, skipped: true };
     }
 
     const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encoded}`, {

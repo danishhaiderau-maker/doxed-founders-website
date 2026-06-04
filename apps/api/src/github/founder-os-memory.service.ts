@@ -121,27 +121,22 @@ export class FounderOsMemoryService {
       return { synced: false as const, reason: 'no_token' as const };
     }
 
-    await this.github.upsertRepoFile(
+    const tasksContent = `${JSON.stringify(tasksJson, null, 2)}\n`;
+    const memoryFiles = [
+      { path: FOUNDER_OS_MEMORY_FILES.projectContext, content: projectContext },
+      { path: FOUNDER_OS_MEMORY_FILES.roadmap, content: roadmap },
+      { path: FOUNDER_OS_MEMORY_FILES.tasks, content: tasksContent },
+    ];
+
+    const batch = await this.github.upsertRepoFilesBatch(
       userId,
       resolved,
-      FOUNDER_OS_MEMORY_FILES.projectContext,
-      projectContext,
-      'chore(founder-os): sync project context',
+      memoryFiles,
+      'chore(founder-os): sync memory (context + roadmap + tasks)',
     );
-    await this.github.upsertRepoFile(
-      userId,
-      resolved,
-      FOUNDER_OS_MEMORY_FILES.roadmap,
-      roadmap,
-      'chore(founder-os): sync roadmap',
-    );
-    await this.github.upsertRepoFile(
-      userId,
-      resolved,
-      FOUNDER_OS_MEMORY_FILES.tasks,
-      `${JSON.stringify(tasksJson, null, 2)}\n`,
-      'chore(founder-os): sync tasks',
-    );
+    if (batch.updated === 0 && batch.skipped === memoryFiles.length) {
+      return { synced: true as const, repo: resolved, unchanged: true as const };
+    }
 
     const decisions = await this.github.getRepoFile(userId, resolved, FOUNDER_OS_MEMORY_FILES.decisions);
     if (!decisions) {

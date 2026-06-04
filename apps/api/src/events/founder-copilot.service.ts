@@ -715,6 +715,9 @@ export class FounderCopilotService {
     if (isStaleBoilerplateMissionTask(graph.next_action)) {
       patch.next_action = intel.recommendedNextStep.slice(0, 200);
     }
+    if (isStaleBoilerplateMissionTask(graph.active_goal) && intel.currentInitiative?.trim()) {
+      patch.active_goal = intel.currentInitiative.slice(0, 200);
+    }
     if (Object.keys(patch).length > 0) {
       await this.memoryGraph.patchForUser(userId, patch);
     }
@@ -1169,6 +1172,9 @@ export class FounderCopilotService {
 
     const signalCommits = filterCommitsForIntelligence(brainInput.commits);
     const intelligence = deriveMissionIntelligence(brainInput);
+    if (isFounderRepoStatusPrompt(text)) {
+      await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
+    }
     const contextBlock = formatFounderBrainContextForPrompt(brainInput, intelligence);
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 
