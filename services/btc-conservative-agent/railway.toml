@@ -7,7 +7,7 @@ watchPatterns = [
 [deploy]
 startCommand = "python bot.py"
 healthcheckPath = "/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 
 [deploy.multiRegionConfig]
