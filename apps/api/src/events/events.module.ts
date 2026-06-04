@@ -12,6 +12,8 @@ import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
+import { FounderAgentRunModule } from '../founder-agent-run/founder-agent-run.module';
+import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
 
 @Module({
   imports: [
@@ -21,6 +23,8 @@ import { FounderCommandCenterService } from './founder-command-center.service';
     forwardRef(() => BuildQueueModule),
     forwardRef(() => FounderOsModule),
     FounderMemoryGraphModule,
+    FounderAgentRunModule,
+    DesktopBridgeModule,
   ],
   controllers: [EventsController],
   providers: [

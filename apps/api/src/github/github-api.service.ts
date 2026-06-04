@@ -176,6 +176,36 @@ export class GitHubApiService {
     };
   }
 
+  async mergePullRequest(
+    userId: string,
+    repo: string,
+    prNumber: number,
+    mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash',
+  ): Promise<{ merged: boolean; message: string; sha?: string }> {
+    const token = await this.getToken(userId);
+    if (!token) {
+      throw new BadRequestException('Connect a GitHub personal access token in Builder settings');
+    }
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/merge`, {
+      method: 'PUT',
+      headers: { ...this.headers(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ merge_method: mergeMethod }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      merged?: boolean;
+      message?: string;
+      sha?: string;
+    };
+    if (!res.ok) {
+      throw new BadRequestException(body.message ?? `Could not merge PR #${prNumber}`);
+    }
+    return {
+      merged: Boolean(body.merged),
+      message: body.message ?? `Merged PR #${prNumber}`,
+      sha: body.sha,
+    };
+  }
+
   async listPullRequests(userId: string, repo: string): Promise<GitHubPullRequest[]> {
     const token = await this.getToken(userId);
     const res = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&per_page=15`, {

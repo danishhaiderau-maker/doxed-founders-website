@@ -1,12 +1,15 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import {
   FOUNDER_NODE_APP_VERSION,
   founderNodeAuthHeader,
+  parseTasksJson,
+  vaultFilePath,
   type FounderNodeHeartbeat,
   type FounderNodePairRequest,
   type FounderNodePairResponse,
 } from '@dcf/founder-vault';
-import type { DeviceMemoryMetadataPayload } from '@dcf/utils';
+import type { DesktopBridgeInput, DeviceMemoryMetadataPayload } from '@dcf/utils';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -83,8 +86,28 @@ export function throwIfFounderNodeAuthResponse(status: number, text: string): vo
   }
 }
 
+export function buildDesktopBridgeFromVault(vaultRoot: string): DesktopBridgeInput | undefined {
+  try {
+    const tasksPath = vaultFilePath(vaultRoot, 'tasks');
+    const raw = fs.existsSync(tasksPath) ? fs.readFileSync(tasksPath, 'utf8') : '';
+    const tasks = parseTasksJson(raw);
+    const openTask = tasks?.tasks.find((t) => t.status !== 'done' && t.status !== 'DONE');
+    const fileCount = fs.existsSync(vaultRoot)
+      ? fs.readdirSync(vaultRoot).filter((f) => f.endsWith('.md') || f.endsWith('.json')).length
+      : 0;
+    return {
+      taskLabel: openTask?.title ?? tasks?.currentGoal ?? undefined,
+      editSummary: fileCount > 0 ? `${fileCount} vault files tracked` : undefined,
+      agentStatus: 'founder_node_online',
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeHeartbeat {
   const ramGb = Math.round(os.totalmem() / 1e9);
+  const desktopBridge = buildDesktopBridgeFromVault(vaultPath);
   return {
     nodeId: '',
     label,
@@ -93,5 +116,6 @@ export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeH
     ramGb,
     vaultHealthy: true,
     vaultPath,
+    ...(desktopBridge ? { desktopBridge } : {}),
   };
 }

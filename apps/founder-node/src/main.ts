@@ -330,14 +330,21 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   const ollama = await resolveOllamaConfig(vaultRoot);
 
   try {
+    const hb = defaultHeartbeat(config.label, vaultRoot);
     await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
-      ...defaultHeartbeat(config.label, vaultRoot),
+      ...hb,
       nodeId: config.nodeId,
       storageGb: disk.storageGb,
       storageFreeGb: disk.storageFreeGb,
       ollamaEnabled: Boolean(ollama),
       ollamaBaseUrl: ollama?.baseUrl,
       ollamaModel: ollama?.model,
+      desktopBridge: {
+        ...hb.desktopBridge,
+        openFilePaths: metadataPayload.mergePatch?.fileManifest
+          ? Object.keys(metadataPayload.mergePatch.fileManifest).slice(0, 12)
+          : hb.desktopBridge?.openFilePaths,
+      },
     });
 
     await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);

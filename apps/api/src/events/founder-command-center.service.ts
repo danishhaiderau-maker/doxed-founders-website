@@ -22,9 +22,12 @@ import {
   type AttentionItem,
   type FounderQueueItem,
   planAgentBusHandoffs,
+  agentBusHandoffFingerprint,
   type AgentBusHandoff,
   type WorkforceAgentOutput,
+  isAgentRunActive,
 } from '@dcf/utils';
+import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { BuilderService } from '../builder/builder.service';
@@ -38,6 +41,7 @@ export type AgentBusRunResult = {
   handoffs: AgentBusHandoff[];
   applied: number;
   handoffIds: string[];
+  skipped?: number;
   contentDraftId?: string;
 };
 
@@ -56,7 +60,13 @@ export class FounderCommandCenterService {
     private readonly founderOs: FounderOsService,
     @Inject(forwardRef(() => FounderAutopilotService))
     private readonly autopilot: FounderAutopilotService,
+    private readonly agentRuns: FounderAgentRunService,
   ) {}
+
+  async getActiveAgentRun(userId: string) {
+    const run = await this.agentRuns.getActive(userId);
+    return { run, active: isAgentRunActive(run) };
+  }
 
   async getFounderQueue(userId: string) {
     const founder = await this.prisma.founder.findUnique({
@@ -80,7 +90,8 @@ export class FounderCommandCenterService {
           priority: 1,
           title: `Review PR #${pr.number}: ${pr.title.slice(0, 80)}`,
           detail: pr.url,
-          action: 'open_url',
+          action: 'merge_pr',
+          targetId: String(pr.number),
           href: pr.url,
           prompt: `Review PR #${pr.number} and suggest next steps`,
         });
@@ -373,9 +384,15 @@ export class FounderCommandCenterService {
           )?.projects[0]?.id;
 
     const applied: string[] = [];
+    const skipped: string[] = [];
     let contentDraftId: string | undefined;
 
     for (const h of handoffs) {
+      if (await this.shouldSkipBusHandoff(founder.id, h)) {
+        skipped.push(h.id);
+        continue;
+      }
+
       if (h.to === 'builder' && h.payload.spec) {
         await this.buildQueue.quickBuild(userId, {
           prompt: h.payload.spec ?? `${h.title}. ${h.detail}`.slice(0, 1200),
@@ -429,8 +446,41 @@ export class FounderCommandCenterService {
       handoffs,
       applied: applied.length,
       handoffIds: applied,
+      skipped: skipped.length,
       contentDraftId,
     };
+  }
+
+  private async shouldSkipBusHandoff(founderId: string, h: AgentBusHandoff): Promise<boolean> {
+    const fp = agentBusHandoffFingerprint(h);
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    if (h.to === 'builder' && h.payload.spec) {
+      const recent = await this.prisma.buildQueueItem.findFirst({
+        where: {
+          founderId,
+          kind: BuildQueueItemKind.IDEA,
+          createdAt: { gte: dayAgo },
+          title: { contains: h.title.slice(0, 40), mode: 'insensitive' },
+        },
+      });
+      if (recent) return true;
+    }
+
+    if (h.to === 'content') {
+      const recent = await this.prisma.suggestedBuildUpdate.findFirst({
+        where: {
+          founderId,
+          source: 'agent_bus',
+          createdAt: { gte: dayAgo },
+          headline: h.title.slice(0, 120),
+        },
+      });
+      if (recent) return true;
+    }
+
+    void fp;
+    return false;
   }
 
   /** Control action from Founder Queue row (P1 stage 2). */
@@ -503,6 +553,28 @@ export class FounderCommandCenterService {
         cursorPrompt: task.cursorPrompt ?? task.spec ?? task.title,
         repository: memory.repoFullName ?? undefined,
       });
+      if (dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR' && dispatch.agentId && dispatch.runId) {
+        await this.agentRuns.start(userId, {
+          worker: 'CURSOR',
+          status: 'CREATING',
+          task: task.spec ?? task.title,
+          repository: memory.repoFullName,
+          agentId: dispatch.agentId,
+          runId: dispatch.runId,
+        });
+      } else if (
+        dispatch.status === 'dispatched' &&
+        dispatch.worker === 'OPENHANDS' &&
+        dispatch.conversationId
+      ) {
+        await this.agentRuns.start(userId, {
+          worker: 'OPENHANDS',
+          status: 'WORKING',
+          task: task.spec ?? task.title,
+          repository: memory.repoFullName,
+          conversationId: dispatch.conversationId,
+        });
+      }
 
       return {
         action: 'dispatch_build' as const,
@@ -513,6 +585,21 @@ export class FounderCommandCenterService {
               ? dispatch.error ?? 'Builder dispatch failed'
               : 'Connect Cursor or OpenHands in Settings → Builder',
         dispatch,
+      };
+    }
+
+    if (itemId.startsWith('pr-')) {
+      const prNumber = Number(itemId.slice(3));
+      if (!Number.isFinite(prNumber)) throw new NotFoundException('Invalid PR item');
+      const memory = await this.copilot.getProjectMemory(userId);
+      const repo = memory.repoFullName;
+      if (!repo) throw new ForbiddenException('Connect a GitHub repository first');
+      const result = await this.github.mergePullRequest(userId, repo, prNumber);
+      return {
+        action: 'merge_pr' as const,
+        message: result.message,
+        merged: result.merged,
+        prNumber,
       };
     }
 

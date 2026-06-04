@@ -504,7 +504,7 @@ export default function ProjectDetailPage() {
               <p className="mb-4 text-sm text-[var(--color-muted)]">
                 {project.listingKind === 'paper_track'
                   ? 'Live market data and paper trades — founder tools unlock after verified listing.'
-                  : 'Videos, build logs, roadmap, demand testing, and simulated raise — all in one place.'}
+                  : 'Ship logs and roadmap for this project. Money Feed shows trades & conviction only — build noise stays in Founder OS.'}
               </p>
               <ProjectRoomPanel slug={slug} />
             </section>

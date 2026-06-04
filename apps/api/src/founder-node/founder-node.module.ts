@@ -6,9 +6,10 @@ import { FounderNodeInferenceService } from './founder-node-inference.service';
 import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { FounderNodeService } from './founder-node.service';
+import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
 
 @Module({
-  imports: [forwardRef(() => EventsModule)],
+  imports: [forwardRef(() => EventsModule), DesktopBridgeModule],
   controllers: [FounderNodeController],
   providers: [
     FounderNodeService,

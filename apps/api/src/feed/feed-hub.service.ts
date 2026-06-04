@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   filterFounderMilestoneItems,
   filterMoneyFeedUnifiedItems,
+  filterUnifiedFeedForProjectSlug,
   isMoneyFeedTerminalKind,
   mergeFeedHubEntries,
   type FeedTerminalTab,
@@ -31,14 +32,18 @@ export class FeedHubService {
         : Promise.resolve(null),
     ]);
 
-    const stream = mergeFeedHubEntries(unifiedRes.items, terminalRes?.cards ?? [], {
+    const unifiedForHub = projectSlug
+      ? filterUnifiedFeedForProjectSlug(unifiedRes.items, projectSlug)
+      : unifiedRes.items;
+
+    const stream = mergeFeedHubEntries(unifiedForHub, terminalRes?.cards ?? [], {
       category,
       terminalTab,
       limit,
     });
 
     const sections = this.buildMoneyFeedSections(
-      unifiedRes.items,
+      unifiedForHub,
       terminalRes?.cards ?? [],
       terminalRes?.topTraders ?? [],
     );

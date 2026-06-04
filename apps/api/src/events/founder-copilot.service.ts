@@ -56,10 +56,20 @@ import {
   deriveMissionIntelligence,
   formatFounderBrainContextForPrompt,
   formatRuleBasedBrainAnswer,
+  buildProjectTimeline,
+  formatProjectTimelineExcerpt,
+  buildDeployIntelligenceCard,
+  formatDeployIntelligenceExcerpt,
+  formatDesktopBridgeForPrompt,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
   type FounderBrainContextInput,
+  type ProjectTimelineEntry,
+  type DeployIntelligenceCard,
+  isBuilderRunFailureStatus,
+  isBuilderRunSuccessStatus,
 } from '@dcf/utils';
+import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
 import { BuilderService } from '../builder/builder.service';
@@ -71,6 +81,7 @@ import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderMetricsService } from './founder-metrics.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
+import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import type { FounderMemoryGraphPatch } from '@dcf/utils';
 
 @Injectable()
@@ -91,6 +102,8 @@ export class FounderCopilotService {
     private readonly autopilot: FounderAutopilotService,
     @Inject(forwardRef(() => FounderCommandCenterService))
     private readonly commandCenter: FounderCommandCenterService,
+    private readonly agentRuns: FounderAgentRunService,
+    private readonly desktopBridge: DesktopBridgeService,
   ) {}
 
   async getMemoryGraph(userId: string) {
@@ -140,15 +153,35 @@ export class FounderCopilotService {
       prUrl: body.prUrl ?? null,
     });
 
+    const status = body.status.trim();
+    const terminal =
+      isBuilderRunFailureStatus(status) || isBuilderRunSuccessStatus(status);
+    if (terminal) {
+      await this.agentRuns.patch(userId, {
+        status,
+        branch: body.branch ?? null,
+        prUrl: body.prUrl ?? null,
+        terminal: true,
+      });
+    } else {
+      await this.agentRuns.patch(userId, {
+        status,
+        branch: body.branch ?? null,
+        prUrl: body.prUrl ?? null,
+      });
+    }
+
     const agentBus = await this.commandCenter.onBuildFinished(userId, {
       task: body.task.trim(),
-      status: body.status.trim(),
+      status,
       result: body.result ?? null,
       branch: body.branch ?? null,
       prUrl: body.prUrl ?? null,
     });
 
-    return { graph, agentBus };
+    const activeRun = await this.agentRuns.getActive(userId);
+
+    return { graph, agentBus, activeRun };
   }
 
   async getProjectMemory(userId: string) {
@@ -414,6 +447,7 @@ export class FounderCopilotService {
     const inProgressRoadmap = project?.roadmapItems?.find(
       (r) => r.status === RoadmapStatus.IN_PROGRESS,
     );
+    const extras = await this.assembleBrainContextExtras(userId, repo);
 
     const brainInput: FounderBrainContextInput = {
       projectName: project?.name ?? founder.name,
@@ -439,9 +473,132 @@ export class FounderCopilotService {
         ? formatWorkspaceActivityForPrompt(workspaceActivity)
         : null,
       vaultNote,
+      ...extras,
     };
 
     return deriveMissionIntelligence(brainInput);
+  }
+
+  /** P2 — unified project narrative for command center + Brain. */
+  async getProjectTimelineForUser(userId: string, days = 30) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const since = new Date(Date.now() - Math.min(90, Math.max(7, days)) * 86400000);
+    const memory = await this.getProjectMemory(userId);
+    const repo = memory.repoFullName;
+
+    const [events, buildPosts, founderUpdates, commits] = await Promise.all([
+      this.prisma.founderEvent.findMany({
+        where: { founderId: founder.id, createdAt: { gte: since } },
+        orderBy: { createdAt: 'desc' },
+        take: 80,
+      }),
+      this.prisma.founderBuildPost.findMany({
+        where: { founderId: founder.id, publishedAt: { gte: since } },
+        orderBy: { publishedAt: 'desc' },
+        take: 20,
+        select: { id: true, headline: true, publishedAt: true },
+      }),
+      this.prisma.founderUpdate.findMany({
+        where: { founderId: founder.id, publishedAt: { gte: since } },
+        orderBy: { publishedAt: 'desc' },
+        take: 15,
+        select: { id: true, headline: true, publishedAt: true },
+      }),
+      repo ? this.github.listCommits(userId, repo, 60) : Promise.resolve([]),
+    ]);
+
+    const entries = buildProjectTimeline({
+      events,
+      commits: commits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
+      buildPosts,
+      founderUpdates,
+    });
+
+    return {
+      days,
+      entries: entries.slice(0, 40),
+      count: entries.length,
+    };
+  }
+
+  /** P2 — deploy outcome cards (heuristic, no LLM). */
+  async getDeployIntelligenceForUser(userId: string, days = 30) {
+    const founder = await this.prisma.founder.findUnique({ where: { userId } });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const since = new Date(Date.now() - Math.min(90, Math.max(7, days)) * 86400000);
+    const memory = await this.getProjectMemory(userId);
+    const repo = memory.repoFullName;
+
+    const [deployEvents, commits] = await Promise.all([
+      this.prisma.founderEvent.findMany({
+        where: {
+          founderId: founder.id,
+          type: FounderEventType.DEPLOY_SUCCESS,
+          createdAt: { gte: since },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 12,
+      }),
+      repo ? this.github.listCommits(userId, repo, 50) : Promise.resolve([]),
+    ]);
+
+    const commitSignals = commits.map((c) => ({
+      sha: c.sha,
+      message: c.message,
+      date: c.date,
+    }));
+
+    const cards: DeployIntelligenceCard[] = deployEvents.map((e, idx) => {
+      const nextDeployAt =
+        deployEvents[idx - 1]?.createdAt ?? new Date();
+      const sinceDeploy = commitSignals.filter((c) => {
+        if (!c.date) return true;
+        const t = new Date(c.date).getTime();
+        return t >= e.createdAt.getTime() && t < nextDeployAt.getTime();
+      });
+      const payload =
+        e.payload && typeof e.payload === 'object' && !Array.isArray(e.payload)
+          ? (e.payload as Record<string, unknown>)
+          : {};
+      const provider =
+        typeof payload.provider === 'string' ? payload.provider : null;
+      return buildDeployIntelligenceCard({
+        id: e.id,
+        at: e.createdAt.toISOString(),
+        title: e.title,
+        provider,
+        commitsSinceDeploy: sinceDeploy.length ? sinceDeploy : commitSignals.slice(0, 8),
+      });
+    });
+
+    return { days, cards, count: cards.length };
+  }
+
+  async getDesktopBridgeForUser(userId: string) {
+    const snapshots = await this.desktopBridge.listForUser(userId);
+    const latest = snapshots[0] ?? null;
+    return { latest, nodes: snapshots };
+  }
+
+  private async assembleBrainContextExtras(userId: string, repo: string | null) {
+    const [timelineRes, deployRes, desktopLatest] = await Promise.all([
+      this.getProjectTimelineForUser(userId, 30).catch(() => ({
+        entries: [] as ProjectTimelineEntry[],
+      })),
+      this.getDeployIntelligenceForUser(userId, 30).catch(() => ({
+        cards: [] as DeployIntelligenceCard[],
+      })),
+      this.desktopBridge.getLatest(userId),
+    ]);
+
+    return {
+      timelineExcerpt: formatProjectTimelineExcerpt(timelineRes.entries, 14),
+      deployIntelligenceExcerpt: formatDeployIntelligenceExcerpt(deployRes.cards, 4),
+      desktopBridgeBlock: formatDesktopBridgeForPrompt(desktopLatest),
+    };
   }
 
   async getDailyStandup(userId: string) {
@@ -922,6 +1079,7 @@ export class FounderCopilotService {
 
     const inProgressRoadmap = project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS);
     const vaultNote = this.buildVaultContextLines(refreshedMemory).join('\n') || null;
+    const extras = await this.assembleBrainContextExtras(userId, refreshedMemory.repoFullName);
 
     const brainInput: FounderBrainContextInput = {
       projectName: project?.name ?? founder.name,
@@ -948,6 +1106,7 @@ export class FounderCopilotService {
         ? formatWorkspaceActivityForPrompt(workspaceActivity)
         : null,
       vaultNote,
+      ...extras,
     };
 
     const intelligence = deriveMissionIntelligence(brainInput);

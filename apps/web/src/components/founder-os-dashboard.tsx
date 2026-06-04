@@ -13,6 +13,7 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
+import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { MissionStatePanel } from '@/components/mission-state-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
@@ -30,10 +31,12 @@ import {
   fetchFounderQueue,
   fetchAttentionCenter,
   executeFounderQueueAction,
+  fetchActiveAgentRun,
   fetchPlatformSyncStatus,
   type MissionIntelligence,
   type FounderQueueItem,
   type AttentionItem,
+  type FounderAgentRunRecord,
   updateBuilderSettings,
   FounderDashboard,
   ProjectMemory,
@@ -110,10 +113,11 @@ export function FounderOsDashboardLayout({
   const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
   const [attentionUrgent, setAttentionUrgent] = useState(0);
   const [commandCenterLoading, setCommandCenterLoading] = useState(true);
+  const [activeAgentRun, setActiveAgentRun] = useState<FounderAgentRunRecord | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, account, platform, intel, queueRes, attentionRes] =
+      const [br, mem, worker, account, platform, intel, queueRes, attentionRes, agentRunRes] =
         await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
@@ -123,6 +127,7 @@ export function FounderOsDashboardLayout({
         fetchMissionIntelligence(accessToken).catch(() => null),
         fetchFounderQueue(accessToken).catch(() => null),
         fetchAttentionCenter(accessToken).catch(() => null),
+        fetchActiveAgentRun(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
@@ -132,6 +137,7 @@ export function FounderOsDashboardLayout({
       setFounderQueue(queueRes?.items ?? []);
       setAttentionItems(attentionRes?.items ?? []);
       setAttentionUrgent(attentionRes?.urgentCount ?? 0);
+      setActiveAgentRun(agentRunRes?.active ? agentRunRes.run : null);
       setCommandCenterLoading(false);
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
@@ -400,6 +406,8 @@ export function FounderOsDashboardLayout({
                     }}
                   />
 
+                  <FounderProjectTimelinePanel accessToken={accessToken} />
+
                   {missionIntel && (
                     <div className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-4 text-sm text-zinc-200">
                       <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-300">
@@ -500,20 +508,32 @@ export function FounderOsDashboardLayout({
                     <p className="text-sm font-medium text-white">Builder Agent</p>
                     <span
                       className={`text-[10px] font-semibold ${
-                        workerStatus?.buildWorker !== 'NONE' ? 'text-emerald-400' : 'text-zinc-600'
+                        activeAgentRun
+                          ? 'text-amber-300'
+                          : workerStatus?.buildWorker !== 'NONE'
+                            ? 'text-emerald-400'
+                            : 'text-zinc-600'
                       }`}
                     >
-                      {openBuilderTask && workerStatus?.buildWorker !== 'NONE'
-                        ? 'Working'
-                        : workerStatus?.buildWorker !== 'NONE'
-                          ? 'Ready'
-                          : 'Offline'}
+                      {activeAgentRun
+                        ? 'Running'
+                        : openBuilderTask && workerStatus?.buildWorker !== 'NONE'
+                          ? 'Working'
+                          : workerStatus?.buildWorker !== 'NONE'
+                            ? 'Ready'
+                            : 'Offline'}
                     </span>
                   </div>
-                  {openBuilderTask && (
+                  {activeAgentRun ? (
                     <p className="mt-2 text-xs text-zinc-400">
-                      {openBuilderTask.title.slice(0, 56)}
+                      {activeAgentRun.task.slice(0, 56)} · {activeAgentRun.status}
                     </p>
+                  ) : (
+                    openBuilderTask && (
+                      <p className="mt-2 text-xs text-zinc-400">
+                        {openBuilderTask.title.slice(0, 56)}
+                      </p>
+                    )
                   )}
                   {workerStatus?.cursorAgentUrl && (
                     <a

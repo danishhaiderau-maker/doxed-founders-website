@@ -2594,7 +2594,7 @@ export function runCursorBuildRoom(
 }
 
 export interface FounderOnboardingStep {
-  id: 'founder' | 'github' | 'ai_stack' | 'goal' | 'founder_node';
+  id: 'founder' | 'github' | 'llm' | 'builder_worker' | 'ai_stack' | 'goal' | 'founder_node';
   label: string;
   complete: boolean;
   optional?: boolean;
@@ -2604,6 +2604,11 @@ export interface FounderOnboardingStep {
 
 export interface FounderOnboardingStatus {
   steps: FounderOnboardingStep[];
+  brainReady?: boolean;
+  brainHint?: string | null;
+  githubConnected?: boolean;
+  llmConnected?: boolean;
+  builderConnected?: boolean;
   requiredComplete: boolean;
   allComplete: boolean;
   githubLastSyncedAt: string | null;
@@ -4337,10 +4342,51 @@ export type AgentBusRunResult = {
   contentDraftId?: string;
 };
 
+export type FounderAgentRunRecord = import('@dcf/utils').FounderAgentRunRecord;
+
+export function fetchActiveAgentRun(token: string) {
+  return apiFetch<{ run: FounderAgentRunRecord | null; active: boolean }>(
+    '/copilot/active-agent-run',
+    undefined,
+    token,
+  );
+}
+
+export type ProjectTimelineResponse = {
+  days: number;
+  entries: import('@dcf/utils').ProjectTimelineEntry[];
+  count: number;
+};
+
+export type DeployIntelligenceResponse = {
+  days: number;
+  cards: import('@dcf/utils').DeployIntelligenceCard[];
+  count: number;
+};
+
+export type DesktopBridgeResponse = {
+  latest: import('@dcf/utils').DesktopBridgeSnapshot | null;
+  nodes: import('@dcf/utils').DesktopBridgeSnapshot[];
+};
+
+export function fetchProjectTimeline(token: string) {
+  return apiFetch<ProjectTimelineResponse>('/copilot/project-timeline', undefined, token);
+}
+
+export function fetchDeployIntelligence(token: string) {
+  return apiFetch<DeployIntelligenceResponse>('/copilot/deploy-intelligence', undefined, token);
+}
+
+export function fetchDesktopBridge(token: string) {
+  return apiFetch<DesktopBridgeResponse>('/copilot/desktop-bridge', undefined, token);
+}
+
 export type QueueActionResult = {
-  action: 'publish' | 'dispatch_build' | 'sync';
+  action: 'publish' | 'dispatch_build' | 'merge_pr' | 'sync';
   message: string;
   published?: number;
+  merged?: boolean;
+  prNumber?: number;
   errors?: string[];
   worker?: string;
   status?: string;

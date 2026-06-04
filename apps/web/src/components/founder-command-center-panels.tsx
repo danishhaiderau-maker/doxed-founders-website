@@ -119,6 +119,7 @@ function isControlAction(item: FounderQueueItem) {
   return (
     item.action === 'publish' ||
     item.action === 'dispatch_build' ||
+    item.action === 'merge_pr' ||
     item.action === 'sync'
   );
 }
@@ -225,7 +226,11 @@ function QueueRow({
           ? busy
             ? 'Running…'
             : 'Build'
-          : item.action === 'sync'
+          : item.action === 'merge_pr'
+            ? busy
+              ? 'Merging…'
+              : 'Merge'
+            : item.action === 'sync'
             ? busy
               ? 'Syncing…'
               : 'Sync'

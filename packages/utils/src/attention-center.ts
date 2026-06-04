@@ -13,7 +13,7 @@ export type AttentionItem = {
 
 export function founderQueueToAttention(item: FounderQueueItem): AttentionItem {
   const verbMap: Record<string, string> = {
-    REVIEW_PR: 'Review PR',
+    REVIEW_PR: 'Merge PR',
     PUBLISH_UPDATE: 'Publish',
     RUN_BUILD: 'Run build',
     SYNC_GITHUB: 'Sync',

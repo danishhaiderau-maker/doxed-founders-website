@@ -334,10 +334,20 @@ export class FounderOsService {
         href: '/founder-den?tab=build',
       },
       {
-        id: 'ai_stack',
-        label: 'Connect AI Stack (LLM or Cursor)',
-        complete: llmConnected || cursorConnected,
-        detail: settings?.defaultProvider !== 'RULE_BASED' ? settings?.defaultProvider : null,
+        id: 'llm',
+        label: 'Connect chat LLM (required for Founder Brain)',
+        complete: llmConnected,
+        detail: llmConnected
+          ? 'Tailored answers enabled'
+          : 'Without an LLM, Copilot uses generic rule-based replies',
+        href: '/settings/builder',
+      },
+      {
+        id: 'builder_worker',
+        label: 'Connect Builder (Cursor or OpenHands)',
+        complete: cursorConnected,
+        optional: true,
+        detail: cursorConnected ? 'Remote code agent ready' : 'Optional for in-browser builds',
         href: '/settings/builder',
       },
       {
@@ -357,13 +367,25 @@ export class FounderOsService {
     ];
 
     const requiredComplete = steps.filter((s) => !('optional' in s && s.optional)).every((s) => s.complete);
+    const brainReady = githubConnected && llmConnected;
 
     return {
       steps,
       requiredComplete,
       allComplete: steps.every((s) => s.complete),
+      brainReady,
+      githubConnected,
+      llmConnected,
+      builderConnected: cursorConnected,
       githubLastSyncedAt: gh?.lastSyncedAt?.toISOString() ?? null,
       projectName: founder?.projects[0]?.name ?? null,
+      brainHint: brainReady
+        ? null
+        : !githubConnected && !llmConnected
+          ? 'Connect GitHub and a chat LLM in Settings → Builder for a real command center (not generic templates).'
+          : !githubConnected
+            ? 'Connect your GitHub repo so Founder Brain sees commits, PRs, and can run builds.'
+            : 'Connect DeepSeek, OpenAI, or Claude so Founder Brain gives tailored answers — not rule-based fallbacks.',
     };
   }
 
