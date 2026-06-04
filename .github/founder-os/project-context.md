@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+Clarify Android APK size: WebView shell loads site online.
 
 ## Last Activity
 
