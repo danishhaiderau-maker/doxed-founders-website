@@ -48,6 +48,9 @@ import {
   estimateLlmTokensFromText,
   parseAnthropicUsage,
   parseOpenAiStyleUsage,
+  buildFounderBrainProviderOrder,
+  classifyFounderBrainTask,
+  type FounderBrainTask,
 } from '@dcf/utils';
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
@@ -811,9 +814,13 @@ export class BuilderService {
     userId: string,
     system: string,
     userPrompt: string,
-    options?: { forceProvider?: AiProvider; skipMemoryPrefix?: boolean },
+    options?: {
+      forceProvider?: AiProvider;
+      skipMemoryPrefix?: boolean;
+      founderBrainTask?: FounderBrainTask;
+    },
   ): Promise<
-    | { ok: true; text: string; provider: AiProvider }
+    | { ok: true; text: string; provider: AiProvider; founderBrainTask: FounderBrainTask }
     | { ok: false; llmErrors: string[] }
   > {
     let effectiveSystem = system;
@@ -823,17 +830,31 @@ export class BuilderService {
     }
 
     if (options?.forceProvider) {
-      return this.tryCopilotChatCompletionForced(
+      const forced = await this.tryCopilotChatCompletionForced(
         userId,
         effectiveSystem,
         userPrompt,
         options.forceProvider,
       );
+      if (forced.ok) {
+        return {
+          ...forced,
+          founderBrainTask: options.founderBrainTask ?? classifyFounderBrainTask(userPrompt),
+        };
+      }
+      return forced;
     }
+
+    const founderBrainTask =
+      options?.founderBrainTask ?? classifyFounderBrainTask(userPrompt);
 
     const settings = await this.ensureSettings(userId);
     const usable = await this.listUsableLlmCredentialProviders(userId);
-    const order: AiProvider[] = [];
+    const routedKeys = buildFounderBrainProviderOrder(
+      founderBrainTask,
+      settings.defaultProvider as import('@dcf/utils').AiProviderKey,
+    );
+    const order = routedKeys as AiProvider[];
     const llmErrors: string[] = [];
 
     if (settings.defaultProvider === AiProvider.OLLAMA_LOCAL) {
@@ -852,7 +873,7 @@ export class BuilderService {
           nodeResult.text,
           'copilot',
         );
-        return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL };
+        return { ok: true, text: nodeResult.text, provider: AiProvider.OLLAMA_LOCAL, founderBrainTask };
       }
       llmErrors.push(...nodeResult.errors);
 
@@ -871,7 +892,7 @@ export class BuilderService {
           direct.text,
           'copilot',
         );
-        return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL };
+        return { ok: true, text: direct.text, provider: AiProvider.OLLAMA_LOCAL, founderBrainTask };
       }
       if (direct.error) llmErrors.push(direct.error);
     }
@@ -897,7 +918,7 @@ export class BuilderService {
               chat.text,
               'copilot',
             );
-            return { ok: true, text: chat.text, provider: AiProvider.PHALA };
+            return { ok: true, text: chat.text, provider: AiProvider.PHALA, founderBrainTask };
           }
           llmErrors.push('PHALA: empty response');
         } catch (err) {
@@ -906,25 +927,6 @@ export class BuilderService {
       } else {
         llmErrors.push('PHALA: connect Phala Private AI or enable platform credits');
       }
-    }
-
-    if (
-      settings.defaultProvider !== AiProvider.RULE_BASED &&
-      !isRemoteAgentProvider(settings.defaultProvider) &&
-      !isFounderNodeAiProvider(settings.defaultProvider)
-    ) {
-      order.push(settings.defaultProvider);
-    }
-
-    for (const key of [
-      AiProvider.PHALA,
-      AiProvider.OPENROUTER,
-      AiProvider.DEEPSEEK,
-      AiProvider.OPENAI,
-      AiProvider.ANTHROPIC,
-      AiProvider.GEMINI,
-    ]) {
-      if (!order.includes(key)) order.push(key);
     }
 
     for (const provider of order) {
@@ -955,7 +957,7 @@ export class BuilderService {
               chat.text,
               'copilot',
             );
-            return { ok: true, text: chat.text, provider };
+            return { ok: true, text: chat.text, provider, founderBrainTask };
           }
           llmErrors.push(`${provider}: empty response`);
         } catch (err) {
@@ -995,7 +997,7 @@ export class BuilderService {
             'copilot',
             result.usage,
           );
-          return { ok: true, text: result.text.trim(), provider };
+          return { ok: true, text: result.text.trim(), provider, founderBrainTask };
         }
         llmErrors.push(`${provider}: empty response`);
       } catch (err) {

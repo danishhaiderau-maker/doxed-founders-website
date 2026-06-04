@@ -490,21 +490,20 @@ export function FounderCopilotChat({
           const routedLabel = agentTemplate
             ? providers.find((p) => p.key === agentTemplate)?.label
             : undefined;
-          setThinkingLabel(routedLabel ?? askProviderLabel);
+          setThinkingLabel('Founder Brain');
           setMessages((prev) => [
             ...prev,
             {
               id: assistantId,
               role: 'assistant',
-              content: formatThinkingInChat(askProviderLabel, routedLabel),
-              provider: activeChatProvider,
+              content: formatThinkingInChat('Founder Brain', routedLabel),
+              provider: 'FOUNDER_BRAIN',
             },
           ]);
 
           const result = await copilotAsk(q, accessToken, agentTemplate);
-          const providerKey = result.routedAgent
-            ? `WORKER:${result.routedAgent.label}`
-            : (result.answerProvider ?? activeChatProvider);
+          const providerKey = result.answerProvider ?? activeChatProvider;
+          const brainRouteLabel = result.routedAgent?.label ?? result.founderBrain?.label;
           const cursorDispatched =
             Boolean(result.runtime?.cursorDispatched) &&
             Boolean(result.runtime?.cursorAgentId) &&
@@ -512,7 +511,7 @@ export function FounderCopilotChat({
 
           const providerMeta = {
             provider: providerKey,
-            routedAgent: result.routedAgent?.label,
+            routedAgent: brainRouteLabel,
             runtimeTools: result.runtime?.toolsUsed,
             builderAgentUrl: null,
           };
