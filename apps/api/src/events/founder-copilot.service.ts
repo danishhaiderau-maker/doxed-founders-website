@@ -43,8 +43,11 @@ import {
   isMetadataOnlyPayload,
   extractVaultRelaySummary,
   buildContinueFromMissionPrompt,
+  classifyFounderBrainTask,
   detectContinueMissionIntent,
   formatMissionStateBlock,
+  getFounderBrainRouteLabel,
+  shouldDispatchBuilderForCodeAsk,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
 } from '@dcf/utils';
@@ -401,12 +404,15 @@ export class FounderCopilotService {
     });
 
     const systemPrompt = `${this.memoryGraph.getPrefix(graph)}You are Founder Copilot. The user wants to continue where they left off. Use Mission State as ground truth. Give a short, actionable plan (3–6 bullets max). Do not ask what they are building.`;
+    const brainTask = classifyFounderBrainTask(buildContinueFromMissionPrompt(graph));
     const aiResult = await this.builder.tryCopilotChatCompletion(
       userId,
       systemPrompt,
       buildContinueFromMissionPrompt(graph),
+      { founderBrainTask: brainTask },
     );
 
+    const routeLabel = getFounderBrainRouteLabel(brainTask);
     const answer = aiResult.ok
       ? `${block}\n\n---\n\n${aiResult.text}`
       : `${block}\n\n**Do this next:** ${graph.next_action ?? graph.current_task ?? memory.suggestedNextStep}`;
@@ -423,7 +429,9 @@ export class FounderCopilotService {
 
     return {
       answer,
-      answerProvider: aiResult.ok ? aiResult.provider : 'RULE_BASED',
+      answerProvider: aiResult.ok ? 'FOUNDER_BRAIN' : 'RULE_BASED',
+      routedAgent: aiResult.ok ? { template: brainTask, label: routeLabel } : undefined,
+      founderBrain: { task: brainTask, label: routeLabel },
       stats: {
         commits: 0,
         deploys: 0,
@@ -647,6 +655,19 @@ export class FounderCopilotService {
       return this.askContinueFromMissionState(userId);
     }
 
+    const brainTask = classifyFounderBrainTask(text);
+    if (shouldDispatchBuilderForCodeAsk(text, brainTask)) {
+      const cursorCred = await this.prisma.integrationCredential.findFirst({
+        where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+      });
+      const openHandsCred = await this.prisma.integrationCredential.findFirst({
+        where: { userId, provider: 'openhands', verifiedAt: { not: null } },
+      });
+      if (cursorCred || openHandsCred) {
+        return this.dispatchCursorFromCopilot(userId, text);
+      }
+    }
+
     const memory = await this.getProjectMemory(userId);
 
     if (memory.repoFullName) {
@@ -783,6 +804,7 @@ export class FounderCopilotService {
       userId,
       systemPrompt,
       `${prompt}\n\n---\n${contextBlock}`,
+      { founderBrainTask: brainTask },
     );
 
     const ruleBased = this.buildRuleBasedCopilotAnswer({
@@ -808,18 +830,24 @@ export class FounderCopilotService {
 
     if (aiResult.ok) {
       answer = aiResult.text;
-      answerProvider = aiResult.provider;
+      answerProvider = 'FOUNDER_BRAIN';
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
       answer = ruleBased;
       answerProvider = 'RULE_BASED';
     }
 
+    const routeLabel = getFounderBrainRouteLabel(brainTask);
+
     return {
       answer,
       answerProvider,
       llmErrors,
       summary,
+      routedAgent: aiResult.ok
+        ? { template: brainTask, label: routeLabel }
+        : undefined,
+      founderBrain: { task: brainTask, label: routeLabel },
       stats: {
         commits: commitCount,
         deploys: deployCount,

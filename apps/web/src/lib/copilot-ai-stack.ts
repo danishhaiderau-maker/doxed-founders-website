@@ -111,6 +111,7 @@ export function resolveCopilotStack(
 export function formatMessageProviderLabel(provider?: string, routedAgent?: string): string {
   if (routedAgent) return `${routedAgent} · Founder OS`;
   if (!provider) return 'Founder Brain';
+  if (provider === 'FOUNDER_BRAIN') return routedAgent ?? 'Founder Brain';
   if (provider === 'BUILDER') return 'Builder Agent · in chat';
   if (provider === 'CURSOR') return 'Builder Agent · in chat';
   if (provider === 'OPENHANDS') return 'Builder Agent · in chat';

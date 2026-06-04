@@ -3738,6 +3738,7 @@ export function copilotAsk(prompt: string, token: string, agentTemplate?: string
     answer: string;
     answerProvider?: string;
     llmErrors?: string[];
+    founderBrain?: { task: string; label: string };
     routedAgent?: { template: string; label: string };
     orchestrator?: { title: string; tasks: string[]; taskCount: number };
     runtime?: {

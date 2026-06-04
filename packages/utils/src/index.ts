@@ -69,6 +69,7 @@ export * from './scout-markets';
 export * from './founder-brain';
 export * from './founder-memory-graph';
 export * from './mission-state';
+export * from './founder-brain-router';
 export * from './openhands';
 export * from './cursor-cloud';
 export * from './workspace-activity';
