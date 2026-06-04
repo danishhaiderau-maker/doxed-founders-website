@@ -305,6 +305,12 @@ enum MemoryStorageMode {
   FOUNDER_NODE
 }
 
+/** Sprint 6 — how integration API keys are sealed (display + Phala inference-only tier). */
+enum SecretsStorageMode {
+  PLATFORM_ENCRYPTED
+  PHALA_SEALED
+}
+
 /** Hybrid control plane entry: minimal Cursor path vs full stack orchestration. */
 enum ControlPlaneMode {
   CURSOR_FIRST
@@ -1610,6 +1616,7 @@ model FounderBuilderSettings {
   /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
   memoryGraph            Json?
   memoryStorageMode      MemoryStorageMode @default(PLATFORM)
+  secretsStorageMode     SecretsStorageMode @default(PLATFORM_ENCRYPTED)
   createdAt              DateTime   @default(now())
   updatedAt              DateTime   @updatedAt
 

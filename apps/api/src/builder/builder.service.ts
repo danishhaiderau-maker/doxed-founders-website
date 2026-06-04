@@ -1,5 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { AiProvider, ControlPlaneMode, MemoryStorageMode, Prisma } from '@prisma/client';
+import {
+  AiProvider,
+  ControlPlaneMode,
+  MemoryStorageMode,
+  Prisma,
+  SecretsStorageMode,
+} from '@prisma/client';
 import {
   AI_PROVIDERS,
   QUICK_BUILD_AI_SYSTEM,
@@ -14,7 +20,7 @@ import {
   resolveBuildWorker,
   type BuildWorkerKey,
 } from '@dcf/utils';
-import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
+import { SealedCredentialsService } from '../credentials/sealed-credentials.service';
 import { FounderNodeInferenceService } from '../founder-node/founder-node-inference.service';
 import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
 import { AttestationService } from '../attestation/attestation.service';
@@ -61,7 +67,7 @@ type LlmUsage = { promptTokens: number; completionTokens: number };
 export class BuilderService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly crypto: CredentialsCryptoService,
+    private readonly sealed: SealedCredentialsService,
     private readonly github: GitHubApiService,
     private readonly workspaceActivity: WorkspaceActivityService,
     private readonly founderNodeInference: FounderNodeInferenceService,
@@ -70,6 +76,10 @@ export class BuilderService {
     private readonly adoption: PlatformAdoptionService,
     private readonly memoryGraph: FounderMemoryGraphService,
   ) {}
+
+  async getSecretsStatus(userId: string) {
+    return this.sealed.getStatus(userId);
+  }
 
   async getSettings(userId: string) {
     await this.reconcileDefaultBrain(userId);
@@ -80,6 +90,7 @@ export class BuilderService {
     const cursorMeta = await this.getCursorMeta(userId);
     const ollamaStatus = await this.founderNodeInference.getOllamaStatus(userId);
     const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
+    const secretsStatus = await this.sealed.getStatus(userId);
     const founderNodeV2 = await this.founderNodeSync.getV2Status(userId);
     const githubConn = await this.prisma.gitHubConnection.findUnique({
       where: { userId },
@@ -109,6 +120,8 @@ export class BuilderService {
       controlPlaneMode: settings.controlPlaneMode,
       currentGoalFocus: settings.currentGoalFocus,
       memoryStorageMode: settings.memoryStorageMode,
+      secretsStorageMode: settings.secretsStorageMode,
+      secretsStatus,
       openHandsBaseUrl: openHandsMeta?.baseUrl ?? null,
       cursorAgentUrl: cursorMeta?.agentId ? `https://cursor.com/agents/${cursorMeta.agentId}` : null,
       founderNodeAi: ollamaStatus,
@@ -143,6 +156,7 @@ export class BuilderService {
       controlPlaneMode?: ControlPlaneMode;
       currentGoalFocus?: string;
       memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC' | 'FOUNDER_NODE';
+      secretsStorageMode?: SecretsStorageMode;
     },
   ) {
     if (input.defaultProvider) {
@@ -193,6 +207,7 @@ export class BuilderService {
         controlPlaneMode: input.controlPlaneMode ?? ControlPlaneMode.FULL_STACK,
         currentGoalFocus: input.currentGoalFocus,
         memoryStorageMode: input.memoryStorageMode ?? MemoryStorageMode.PLATFORM,
+        secretsStorageMode: input.secretsStorageMode ?? SecretsStorageMode.PLATFORM_ENCRYPTED,
       },
       update: {
         ...(input.defaultProvider !== undefined ? { defaultProvider: input.defaultProvider } : {}),
@@ -215,6 +230,9 @@ export class BuilderService {
         ...(input.currentGoalFocus !== undefined ? { currentGoalFocus: input.currentGoalFocus } : {}),
         ...(input.memoryStorageMode !== undefined
           ? { memoryStorageMode: input.memoryStorageMode as MemoryStorageMode }
+          : {}),
+        ...(input.secretsStorageMode !== undefined
+          ? { secretsStorageMode: input.secretsStorageMode }
           : {}),
       },
     });
@@ -245,7 +263,11 @@ export class BuilderService {
     if (!key) throw new BadRequestException('API key required');
 
     const verified = await this.verifyAiKey(provider, key);
-    const encrypted = this.crypto.encrypt(key);
+    const encrypted = this.sealed.encryptForStore(key);
+    const sealedMeta = this.sealed.sealMetadata(provider, {
+      accountName: verified.accountName,
+      model: cfg.defaultModel,
+    });
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider } },
@@ -253,15 +275,16 @@ export class BuilderService {
         userId,
         provider,
         token: encrypted,
-        metadata: { accountName: verified.accountName, model: cfg.defaultModel } as Prisma.InputJsonValue,
+        metadata: sealedMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
       update: {
         token: encrypted,
-        metadata: { accountName: verified.accountName, model: cfg.defaultModel } as Prisma.InputJsonValue,
+        metadata: sealedMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
     });
+    await this.sealed.audit(userId, provider, 'store', 'connect_verify');
 
     await this.prisma.connectedAppStatus.upsert({
       where: { userId_provider: { userId, provider } },
@@ -291,28 +314,26 @@ export class BuilderService {
 
     await this.verifyOllamaUrl(url);
 
+    const ollamaMeta = this.sealed.sealMetadata('ollama', {
+      accountName: 'Ollama (direct URL)',
+      baseUrl: url,
+      model: model?.trim() || 'llama3.2',
+    });
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'ollama' } },
       create: {
         userId,
         provider: 'ollama',
-        token: this.crypto.encrypt('local'),
-        metadata: {
-          accountName: 'Ollama (direct URL)',
-          baseUrl: url,
-          model: model?.trim() || 'llama3.2',
-        } as Prisma.InputJsonValue,
+        token: this.sealed.encryptForStore('local'),
+        metadata: ollamaMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
       update: {
-        metadata: {
-          accountName: 'Ollama (direct URL)',
-          baseUrl: url,
-          model: model?.trim() || 'llama3.2',
-        } as Prisma.InputJsonValue,
+        metadata: ollamaMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
     });
+    await this.sealed.audit(userId, 'ollama', 'store', 'connect_verify');
 
     await this.prisma.connectedAppStatus.upsert({
       where: { userId_provider: { userId, provider: 'ollama' } },
@@ -353,12 +374,12 @@ export class BuilderService {
     const verified = await verifyPhalaConnection({ apiKey: key, inferenceUrl: normalizedUrl });
     if (!verified.ok) throw new BadRequestException(verified.reason);
 
-    const encrypted = this.crypto.encrypt(key);
-    const metadata: PhalaCredentialMeta = {
+    const encrypted = this.sealed.encryptForStore(key);
+    const metadata = this.sealed.sealMetadata('phala', {
       accountName: 'Phala Private AI',
       inferenceUrl: normalizedUrl,
       model: resolvedModel,
-    };
+    } satisfies PhalaCredentialMeta);
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'phala' } },
@@ -375,6 +396,7 @@ export class BuilderService {
         verifiedAt: new Date(),
       },
     });
+    await this.sealed.audit(userId, 'phala', 'store', 'connect_verify');
 
     await this.prisma.connectedAppStatus.upsert({
       where: { userId_provider: { userId, provider: 'phala' } },
@@ -408,8 +430,13 @@ export class BuilderService {
     if (!url || !key) throw new BadRequestException('OpenHands base URL and API key required');
 
     const verified = await verifyOpenHandsConnection(url, key);
-    const encrypted = this.crypto.encrypt(key);
+    const encrypted = this.sealed.encryptForStore(key);
     const normalized = url.replace(/\/+$/, '');
+    const openHandsMeta = this.sealed.sealMetadata('openhands', {
+      baseUrl: normalized,
+      accountName: verified.accountName,
+      apiVersion: verified.apiVersion,
+    });
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'openhands' } },
@@ -417,23 +444,16 @@ export class BuilderService {
         userId,
         provider: 'openhands',
         token: encrypted,
-        metadata: {
-          baseUrl: normalized,
-          accountName: verified.accountName,
-          apiVersion: verified.apiVersion,
-        } as Prisma.InputJsonValue,
+        metadata: openHandsMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
       update: {
         token: encrypted,
-        metadata: {
-          baseUrl: normalized,
-          accountName: verified.accountName,
-          apiVersion: verified.apiVersion,
-        } as Prisma.InputJsonValue,
+        metadata: openHandsMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
     });
+    await this.sealed.audit(userId, 'openhands', 'store', 'connect_verify');
 
     await this.prisma.connectedAppStatus.upsert({
       where: { userId_provider: { userId, provider: 'openhands' } },
@@ -463,11 +483,17 @@ export class BuilderService {
     if (!key) throw new BadRequestException('Cursor API key required');
 
     const verified = await verifyCursorCloudConnection(key);
-    const encrypted = this.crypto.encrypt(key);
+    const encrypted = this.sealed.encryptForStore(key);
     const existing = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'cursor' } },
     });
     const prevMeta = (existing?.metadata as CursorCredentialMeta | null) ?? {};
+    const cursorMeta = this.sealed.sealMetadata('cursor', {
+      accountName: verified.accountName,
+      agentId: prevMeta.agentId ?? null,
+      agentRepoUrl: prevMeta.agentRepoUrl ?? null,
+      latestRunId: prevMeta.latestRunId ?? null,
+    });
 
     await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: 'cursor' } },
@@ -475,25 +501,16 @@ export class BuilderService {
         userId,
         provider: 'cursor',
         token: encrypted,
-        metadata: {
-          accountName: verified.accountName,
-          agentId: prevMeta.agentId ?? null,
-          agentRepoUrl: prevMeta.agentRepoUrl ?? null,
-          latestRunId: prevMeta.latestRunId ?? null,
-        } as Prisma.InputJsonValue,
+        metadata: cursorMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
       update: {
         token: encrypted,
-        metadata: {
-          accountName: verified.accountName,
-          agentId: prevMeta.agentId ?? null,
-          agentRepoUrl: prevMeta.agentRepoUrl ?? null,
-          latestRunId: prevMeta.latestRunId ?? null,
-        } as Prisma.InputJsonValue,
+        metadata: cursorMeta as Prisma.InputJsonValue,
         verifiedAt: new Date(),
       },
     });
+    await this.sealed.audit(userId, 'cursor', 'store', 'connect_verify');
 
     await this.prisma.connectedAppStatus.upsert({
       where: { userId_provider: { userId, provider: 'cursor' } },
@@ -533,7 +550,7 @@ export class BuilderService {
     }
 
     const meta = (cred.metadata as CursorCredentialMeta | null) ?? {};
-    const apiKey = this.crypto.decrypt(cred.token);
+    const apiKey = await this.sealed.unwrap(userId, 'cursor', 'cursor_dispatch');
     if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
 
     const activity = await this.workspaceActivity.getActivity(userId, input.repository);
@@ -598,7 +615,7 @@ export class BuilderService {
     }
     const meta = cred.metadata as OpenHandsCredentialMeta | null;
     if (!meta?.baseUrl) throw new BadRequestException('OpenHands base URL missing — reconnect');
-    const apiKey = this.crypto.decrypt(cred.token);
+    const apiKey = await this.sealed.unwrap(userId, 'openhands', 'openhands_dispatch');
     if (!apiKey) throw new BadRequestException('OpenHands API key invalid — reconnect');
     const snap = await fetchOpenHandsConversationSnapshot(
       meta.baseUrl,
@@ -624,7 +641,7 @@ export class BuilderService {
     if (!cred?.token) {
       throw new BadRequestException('Connect Cursor in AI Stack first');
     }
-    const apiKey = this.crypto.decrypt(cred.token);
+    const apiKey = await this.sealed.unwrap(userId, 'cursor', 'cursor_dispatch');
     if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
     const run = await fetchCursorRun(apiKey, agentId, runId);
     const terminal = isCursorRunTerminal(run.status);
@@ -755,7 +772,7 @@ export class BuilderService {
     const meta = cred.metadata as OpenHandsCredentialMeta | null;
     if (!meta?.baseUrl) throw new BadRequestException('OpenHands base URL missing — reconnect');
 
-    const apiKey = this.crypto.decrypt(cred.token);
+    const apiKey = await this.sealed.unwrap(userId, 'openhands', 'openhands_dispatch');
     if (!apiKey) throw new BadRequestException('OpenHands API key invalid — reconnect');
 
     const taskPrompt = buildOpenHandsTaskMessage(input.spec, input.cursorPrompt);
@@ -971,7 +988,7 @@ export class BuilderService {
       const cred = await this.prisma.integrationCredential.findUnique({
         where: { userId_provider: { userId, provider: cfg.credentialProvider } },
       });
-      const apiKey = this.crypto.decrypt(cred?.token);
+      const apiKey = await this.sealed.unwrap(userId, cfg.credentialProvider, 'copilot_llm');
       if (!apiKey) continue;
 
       const model =
@@ -1103,7 +1120,7 @@ export class BuilderService {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: cfg.credentialProvider } },
     });
-    const apiKey = this.crypto.decrypt(cred?.token);
+    const apiKey = await this.sealed.unwrap(userId, cfg.credentialProvider, 'copilot_llm');
     if (!apiKey) return { ok: false, llmErrors: [`${forceProvider}: invalid credential`] };
 
     const model =
@@ -1275,11 +1292,7 @@ export class BuilderService {
 
   private async getPhalaPrivateAiStatus(userId: string) {
     const meta = await this.getPhalaMeta(userId);
-    const cred = await this.prisma.integrationCredential.findUnique({
-      where: { userId_provider: { userId, provider: 'phala' } },
-      select: { token: true },
-    });
-    const userKey = Boolean(cred?.token && this.crypto.decrypt(cred.token));
+    const userKey = await this.sealed.hasCredential(userId, 'phala');
     const platformAvailable = this.platformPhalaAvailable();
     return {
       ready: userKey || platformAvailable,
@@ -1304,7 +1317,7 @@ export class BuilderService {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'phala' } },
     });
-    const userKey = this.crypto.decrypt(cred?.token);
+    const userKey = await this.sealed.unwrapPhala(userId, 'phala_inference');
     const meta = (cred?.metadata as PhalaCredentialMeta | null) ?? null;
     if (userKey) {
       return {
@@ -1435,7 +1448,7 @@ export class BuilderService {
     });
     const out = new Set<string>();
     for (const c of creds) {
-      if (this.crypto.decrypt(c.token)) out.add(c.provider);
+      if (c.token?.trim()) out.add(c.provider);
     }
     return out;
   }

@@ -36,6 +36,7 @@ import { TradingAgentsModule } from './trading-agents/trading-agents.module';
 import { AdminControlModule } from './admin-control/admin-control.module';
 import { MessagesModule } from './messages/messages.module';
 import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.module';
+import { CredentialsModule } from './credentials/credentials.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { FounderMemoryGraphModule } from './founder-memory/founder-memory-graph.
     }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
     PrismaModule,
+    CredentialsModule,
     FounderMemoryGraphModule,
     PointsModule,
     NotificationsModule,

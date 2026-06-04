@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { MemoryStorageMode, Prisma } from '@prisma/client';
 import { extractVaultRelaySummary, type DeviceMemoryMetadataPayload } from '@dcf/utils';
-import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
+import { SealedCredentialsService } from '../credentials/sealed-credentials.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderNodeSyncService } from '../founder-node/founder-node-sync.service';
 import {
@@ -20,7 +20,7 @@ import {
 export class AttestationService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly crypto: CredentialsCryptoService,
+    private readonly sealed: SealedCredentialsService,
     private readonly founderNodeSync: FounderNodeSyncService,
   ) {}
 
@@ -94,6 +94,7 @@ export class AttestationService {
 
     const phalaVerified = recentPhala.filter((r) => r.verified).length;
     const phalaTotal = recentPhala.length;
+    const secrets = await this.sealed.getStatus(userId);
 
     return {
       memoryIntegrity: {
@@ -105,6 +106,15 @@ export class AttestationService {
         lastVaultScanAt: recentVault?.createdAt.toISOString() ?? null,
         relay,
         nodeV2,
+      },
+      secretsStorage: {
+        mode: secrets.mode,
+        modeLabel: secrets.modeLabel,
+        phalaInferenceOnly: secrets.phalaInferenceOnly,
+        credentialCount: secrets.credentialCount,
+        recentAccessCount: secrets.recentAccessCount,
+        lastAccessAt: secrets.lastAccessAt,
+        summary: secrets.summary,
       },
       phalaTee: {
         recentCount: phalaTotal,
@@ -275,7 +285,7 @@ export class AttestationService {
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'phala' } },
     });
-    const userKey = this.crypto.decrypt(cred?.token);
+    const userKey = await this.sealed.unwrapPhala(userId, 'phala_attestation');
     const meta = (cred?.metadata as PhalaCredentialMeta | null) ?? null;
     if (userKey) {
       return {

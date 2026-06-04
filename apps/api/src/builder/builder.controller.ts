@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
-import { AiProvider, ControlPlaneMode, MemoryStorageMode } from '@prisma/client';
+import { AiProvider, ControlPlaneMode, MemoryStorageMode, SecretsStorageMode } from '@prisma/client';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { GitHubApiService } from '../github/github-api.service';
@@ -17,6 +17,11 @@ export class BuilderController {
     return this.builder.getSettings(user.id);
   }
 
+  @Get('secrets-status')
+  secretsStatus(@CurrentUser() user: AuthUser) {
+    return this.builder.getSecretsStatus(user.id);
+  }
+
   @Patch('settings')
   updateSettings(
     @CurrentUser() user: AuthUser,
@@ -31,6 +36,7 @@ export class BuilderController {
       controlPlaneMode?: ControlPlaneMode;
       currentGoalFocus?: string;
       memoryStorageMode?: MemoryStorageMode;
+      secretsStorageMode?: SecretsStorageMode;
     },
   ) {
     return this.builder.updateSettings(user.id, body);

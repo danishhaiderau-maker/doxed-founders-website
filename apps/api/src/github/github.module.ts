@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
-import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { FounderOsMemoryService } from './founder-os-memory.service';
 import { GitHubApiService } from './github-api.service';
 import { GitHubOAuthService } from './github-oauth.service';
@@ -14,7 +13,6 @@ import { WorkspaceActivityService } from './workspace-activity.service';
     }),
   ],
   providers: [
-    CredentialsCryptoService,
     GitHubApiService,
     FounderOsMemoryService,
     GitHubOAuthService,
@@ -22,7 +20,6 @@ import { WorkspaceActivityService } from './workspace-activity.service';
   ],
   exports: [
     GitHubApiService,
-    CredentialsCryptoService,
     FounderOsMemoryService,
     GitHubOAuthService,
     WorkspaceActivityService,
