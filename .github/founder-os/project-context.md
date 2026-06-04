@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(copilot): one answer for status asks; no Cursor/Researcher side effects
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
