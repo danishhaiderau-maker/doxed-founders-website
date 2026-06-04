@@ -1,7 +1,11 @@
-/** Community airdrop runway — eligibility, activity, and inactivity decay rules. */
+import { BUILDER_REWARDS_INACTIVITY_DAYS, daysSince } from './builder-rewards';
 
-export const AIRDROP_INACTIVITY_WARN_DAYS = 21;
-export const AIRDROP_INACTIVITY_DECAY_DDOLLAR_PER_DAY = 200;
+export { daysSince };
+
+/** @deprecated Use BUILDER_REWARDS_* from builder-rewards.ts — kept for API compat. */
+export const AIRDROP_INACTIVITY_WARN_DAYS = BUILDER_REWARDS_INACTIVITY_DAYS;
+/** Legacy constant — Builder Rewards uses weekly score decay instead. */
+export const AIRDROP_INACTIVITY_DECAY_DDOLLAR_PER_DAY = 0;
 export const AIRDROP_ACTIVITY_WINDOW_DAYS = 14;
 
 export type AirdropRunwayStatus =
@@ -23,13 +27,6 @@ export type AirdropRunwayInput = {
   xPremiumHistory?: boolean;
 };
 
-export function daysSince(iso: string | null | undefined, nowMs = Date.now()): number | null {
-  if (!iso) return null;
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return null;
-  return Math.floor((nowMs - t) / (24 * 60 * 60 * 1000));
-}
-
 export function computeAirdropRunwayStatus(input: {
   lastActiveAt: string | null;
   activityScore: number;
@@ -42,9 +39,8 @@ export function computeAirdropRunwayStatus(input: {
   return 'warming';
 }
 
-export function computeInactivityDecayDdollar(idleDays: number | null): number {
-  if (idleDays == null || idleDays < AIRDROP_INACTIVITY_WARN_DAYS) return 0;
-  return (idleDays - AIRDROP_INACTIVITY_WARN_DAYS + 1) * AIRDROP_INACTIVITY_DECAY_DDOLLAR_PER_DAY;
+export function computeInactivityDecayDdollar(_idleDays: number | null): number {
+  return 0;
 }
 
 /** 0–100 human-likelihood score from activity patterns (not identity verification). */
