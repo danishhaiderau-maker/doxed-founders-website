@@ -190,7 +190,7 @@ export class FounderCopilotService {
   }
 
   async getProjectMemory(userId: string) {
-    void this.founderOs.autoSyncGitHubCommits(userId).catch(() => undefined);
+    // GitHub sync runs on resume/webhook/background — not every dashboard poll (avoids chore commit spam).
 
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
