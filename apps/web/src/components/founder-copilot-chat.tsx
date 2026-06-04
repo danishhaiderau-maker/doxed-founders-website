@@ -642,18 +642,14 @@ export function FounderCopilotChat({
       <header className="border-b border-zinc-800 px-4 py-3 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-zinc-100">Founder AI Team</p>
+            <p className="text-sm font-semibold text-zinc-100">
+              {isHero ? 'Founder Command Center' : 'Founder AI Team'}
+            </p>
             <p className="truncate text-xs text-zinc-500">
               {isHero ? (
-                <>
-                  <span className="text-violet-300">Founder Brain</span>
-                  {stack.canBuild ? (
-                    <>
-                      {' '}
-                      · <span className="text-emerald-300">Builder Agent</span>
-                    </>
-                  ) : null}
-                </>
+                <span className="text-violet-300">
+                  Founder Brain — routes build, research, and strategy automatically
+                </span>
               ) : (
                 <>
                   {memory?.project?.name ?? 'Project'} ·{' '}
@@ -672,7 +668,7 @@ export function FounderCopilotChat({
             </button>
           )}
         </div>
-        <FounderAiTeamStrip agents={aiTeam} />
+        {!isHero && <FounderAiTeamStrip agents={aiTeam} />}
       </header>
 
       {!isHero && workspaceStrip && (

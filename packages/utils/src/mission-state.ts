@@ -117,3 +117,25 @@ export function deriveMissionPatchAfterBuild(input: AfterBuildPatchInput): Found
 
   return patch;
 }
+
+/** Display block for dynamic mission intelligence (command center sidebar). */
+export function formatMissionIntelligenceBlock(intel: {
+  currentInitiative: string;
+  progressPercent: number;
+  blocker: string | null;
+  impact: string;
+  recommendedNextStep: string;
+  confidence: string;
+}): string {
+  const lines = [
+    '**Mission intelligence**',
+    '',
+    `**Initiative:** ${intel.currentInitiative}`,
+    `**Progress:** ${intel.progressPercent}%`,
+    intel.blocker ? `**Blocker:** ${intel.blocker}` : '**Blocker:** —',
+    `**Impact:** ${intel.impact}`,
+    `**Next step:** ${intel.recommendedNextStep}`,
+    `_Confidence: ${intel.confidence}_`,
+  ];
+  return lines.join('\n');
+}

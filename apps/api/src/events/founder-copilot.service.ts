@@ -53,8 +53,12 @@ import {
   resolveMissionBuildTask,
   getFounderBrainRouteLabel,
   shouldDispatchBuilderForCodeAsk,
+  deriveMissionIntelligence,
+  formatFounderBrainContextForPrompt,
+  formatRuleBasedBrainAnswer,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
+  type FounderBrainContextInput,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuildQueueService } from '../build-queue/build-queue.service';
@@ -354,6 +358,77 @@ export class FounderCopilotService {
       connectedNodes,
       memoryGraph: await this.memoryGraph.resolveForUser(userId),
     };
+  }
+
+  /** Dynamic mission signals for command center + Founder Brain (P0). */
+  async computeMissionIntelligenceForUser(userId: string) {
+    const memory = await this.getProjectMemory(userId);
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: {
+        projects: {
+          where: { approved: true },
+          take: 1,
+          include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
+        },
+      },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+    const project = founder.projects[0];
+    const repo = memory.repoFullName;
+    const weekAgo = new Date(Date.now() - 7 * 86400000);
+
+    const [commits, pullRequests, deployEvents, githubMemory] = await Promise.all([
+      repo ? this.github.listCommits(userId, repo, 40) : Promise.resolve([]),
+      repo ? this.github.listPullRequests(userId, repo) : Promise.resolve([]),
+      this.prisma.founderEvent.findMany({
+        where: {
+          founderId: founder.id,
+          type: { in: [FounderEventType.DEPLOY_SUCCESS, FounderEventType.DEPLOY_STARTED] },
+          createdAt: { gte: weekAgo },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 8,
+      }),
+      repo ? this.memory.readRepoMemory(userId, repo) : Promise.resolve(null),
+    ]);
+
+    const workspaceActivity = repo
+      ? await this.builder.getWorkspaceActivity(userId, repo).catch(() => null)
+      : null;
+
+    const vaultNote = this.buildVaultContextLines(memory).join('\n') || null;
+    const inProgressRoadmap = project?.roadmapItems?.find(
+      (r) => r.status === RoadmapStatus.IN_PROGRESS,
+    );
+
+    const brainInput: FounderBrainContextInput = {
+      projectName: project?.name ?? founder.name,
+      projectDescription: githubMemory?.projectContext?.slice(0, 400) ?? null,
+      repoFullName: repo,
+      currentGoal: memory.currentGoal,
+      progressPercent: memory.progressPercent,
+      launchReadiness: memory.launchReadiness,
+      suggestedNextStep: memory.suggestedNextStep,
+      openTasks: memory.openTasks.map((t) => t.title),
+      roadmapInProgress: inProgressRoadmap?.title ?? null,
+      memoryGraph: memory.memoryGraph,
+      commits: commits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
+      pullRequests,
+      recentDeploys: deployEvents.map((e) => ({
+        title: e.title,
+        at: e.createdAt.toISOString(),
+      })),
+      projectContextExcerpt: githubMemory?.projectContext ?? null,
+      roadmapExcerpt: githubMemory?.roadmap ?? null,
+      repoTasks: githubMemory?.openTasksFromRepo?.map((t) => t.title),
+      workspaceActivityBlock: workspaceActivity
+        ? formatWorkspaceActivityForPrompt(workspaceActivity)
+        : null,
+      vaultNote,
+    };
+
+    return deriveMissionIntelligence(brainInput);
   }
 
   async getDailyStandup(userId: string) {
@@ -809,57 +884,64 @@ export class FounderCopilotService {
       recentHeadlines: founder.buildPosts.map((p) => p.headline),
     });
 
-    if (this.isPriorityCopilotPrompt(prompt)) {
-      const priorityAnswer = this.buildRuleBasedCopilotAnswer({
-        memory: refreshedMemory,
-        githubMemory,
-        recentCommits,
-        prompt,
-      });
+    const [deepCommits, pullRequests, deployEvents, workspaceActivity, memoryGraph] =
+      await Promise.all([
+        refreshedMemory.repoFullName
+          ? this.github.listCommits(userId, refreshedMemory.repoFullName, 40)
+          : Promise.resolve(recentCommits),
+        refreshedMemory.repoFullName
+          ? this.github.listPullRequests(userId, refreshedMemory.repoFullName)
+          : Promise.resolve([]),
+        this.prisma.founderEvent.findMany({
+          where: {
+            founderId: founder.id,
+            type: { in: [FounderEventType.DEPLOY_SUCCESS, FounderEventType.DEPLOY_STARTED] },
+            createdAt: { gte: weekAgo },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 8,
+        }),
+        refreshedMemory.repoFullName
+          ? this.builder.getWorkspaceActivity(userId, refreshedMemory.repoFullName)
+          : Promise.resolve(null),
+        this.memoryGraph.resolveForUser(userId),
+      ]);
 
-      await this.events.emit({
-        founderId: founder.id,
-        projectId: project?.id,
-        userId,
-        type: FounderEventType.COPILOT_COMMAND,
-        source: 'copilot',
-        title: prompt.slice(0, 80),
-        payload: { intent: 'ask', mode: 'priority' },
-      });
+    const inProgressRoadmap = project?.roadmapItems.find((r) => r.status === RoadmapStatus.IN_PROGRESS);
+    const vaultNote = this.buildVaultContextLines(refreshedMemory).join('\n') || null;
 
-      return {
-        answer: priorityAnswer,
-        answerProvider: 'RULE_BASED',
-        summary,
-        stats: {
-          commits: commitCount,
-          deploys: deployCount,
-          followers: followerCount,
-          featureRequests,
-          launchReadiness: readiness.score,
-          buildStreak: founder.buildStreakDays,
-        },
-      };
-    }
+    const brainInput: FounderBrainContextInput = {
+      projectName: project?.name ?? founder.name,
+      projectDescription: githubMemory?.projectContext?.slice(0, 400) ?? null,
+      repoFullName: refreshedMemory.repoFullName,
+      currentGoal: refreshedMemory.currentGoal,
+      progressPercent: refreshedMemory.progressPercent,
+      launchReadiness: refreshedMemory.launchReadiness,
+      suggestedNextStep: refreshedMemory.suggestedNextStep,
+      openTasks: refreshedMemory.openTasks.map((t) => t.title),
+      roadmapInProgress: inProgressRoadmap?.title ?? null,
+      memoryGraph,
+      commits: deepCommits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
+      pullRequests,
+      recentDeploys: deployEvents.map((e) => ({
+        title: e.title,
+        at: e.createdAt.toISOString(),
+      })),
+      projectContextExcerpt: githubMemory?.projectContext ?? null,
+      roadmapExcerpt: githubMemory?.roadmap ?? null,
+      repoTasks: githubMemory?.openTasksFromRepo?.map((t) => t.title),
+      weeklySummary: summary.body,
+      workspaceActivityBlock: workspaceActivity
+        ? formatWorkspaceActivityForPrompt(workspaceActivity)
+        : null,
+      vaultNote,
+    };
 
-    const workspaceActivity = refreshedMemory.repoFullName
-      ? await this.builder.getWorkspaceActivity(userId, refreshedMemory.repoFullName)
-      : null;
-
-    const contextBlock = this.buildCopilotContextBlock({
-      memory: refreshedMemory,
-      githubMemory,
-      recentCommits,
-      openIdeas,
-      project,
-      summaryBody: summary.body,
-      workspaceActivity,
-    });
-
-    const memoryGraph = await this.memoryGraph.resolveForUser(userId);
+    const intelligence = deriveMissionIntelligence(brainInput);
+    const contextBlock = formatFounderBrainContextForPrompt(brainInput, intelligence);
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 
-    const systemPrompt = `${memoryPrefix}You are Founder Copilot — persistent project memory for crypto founders. Answer from the Founder Memory Graph and supplied GitHub/repo context. Never ask what they are building if context exists. Be specific about current goal, last commits, open tasks, and next step. Reply in plain markdown. Do not invent security incidents or claim secrets are exposed unless the user asks about security; generic hardening tips are fine but say they are preventive, not scan results. API keys and tokens stay server-side on Doxxed Crypto — never ask users to paste secrets in chat.`;
+    const systemPrompt = `${memoryPrefix}You are Founder Brain — the command center for crypto founders. Use the assembled context below (commits, PRs, deployments, initiatives, mission graph). Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
 
     const aiResult = await this.builder.tryCopilotChatCompletion(
       userId,
@@ -868,12 +950,7 @@ export class FounderCopilotService {
       { founderBrainTask: brainTask },
     );
 
-    const ruleBased = this.buildRuleBasedCopilotAnswer({
-      memory: refreshedMemory,
-      githubMemory,
-      recentCommits,
-      prompt,
-    });
+    const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
 
     await this.events.emit({
       founderId: founder.id,

@@ -1,5 +1,9 @@
 import type { WorkspaceActivity } from '@dcf/utils';
-import { formatWorkspaceActivityForChat } from '@dcf/utils';
+import {
+  buildAgentRuntimeSteps,
+  formatAgentRuntimeStepsBlock,
+  formatWorkspaceActivityForChat,
+} from '@dcf/utils';
 
 export type BuilderRunSnapshot = {
   id: string;
@@ -51,9 +55,19 @@ export function formatBuilderRunInChat(input: {
     : 0;
   const filesHint = recentCount > 0 ? `${recentCount} recent commit(s) on repo` : null;
 
+  const worker = input.workerLabel.toLowerCase().includes('openhands') ? 'OPENHANDS' : 'CURSOR';
+  const runtimeSteps = buildAgentRuntimeSteps({
+    worker,
+    status: snapshot.status,
+    prUrl,
+    branch,
+  });
+
   const lines: string[] = [
     '**Builder Agent**',
     mode === 'follow_up' ? '_Continuing on your repo_' : '_Coding on your repo_',
+    '',
+    formatAgentRuntimeStepsBlock(runtimeSteps),
     '',
     `**Status:** ${snapshot.status}`,
     repo ? `**Repository:** \`${repo}\`` : '',
@@ -88,8 +102,8 @@ export function formatBuilderRunInChat(input: {
     lines.push('', '_Working… updates stream here every few seconds._');
   }
 
-  if (snapshot.agentUrl) {
-    lines.push('', `_Optional:_ [Open full session in Cursor](${snapshot.agentUrl})`);
+  if (snapshot.agentUrl && !snapshot.terminal) {
+    lines.push('', `_Advanced:_ [Cursor session](${snapshot.agentUrl}) (optional)`);
   }
 
   return lines.join('\n');
@@ -102,9 +116,18 @@ export function formatOpenHandsRunInChat(input: {
   snapshot: OpenHandsRunSnapshot;
 }): string {
   const { task, repo, snapshot } = input;
+  const runtimeSteps = buildAgentRuntimeSteps({
+    worker: 'OPENHANDS',
+    status: snapshot.status,
+    prUrl: null,
+    branch: null,
+  });
+
   const lines: string[] = [
     '**Builder Agent** · OpenHands',
     repo ? `**Repository:** \`${repo}\`` : '',
+    '',
+    formatAgentRuntimeStepsBlock(runtimeSteps),
     '',
     '**Task**',
     task.trim().slice(0, 1200),
