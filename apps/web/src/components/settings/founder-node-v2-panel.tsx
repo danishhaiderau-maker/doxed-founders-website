@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BuilderSettings } from '@/lib/api';
 
-/** Founder Node v0.5.4+ — clearer pairing vs firewall, hourly updates, Linux AppImage */
+/** Founder Node v0.5.5+ — single instance, one pairing dialog, hourly updates */
 function founderNodeNeedsUpdate(version: string | null | undefined): boolean {
   if (!version?.trim()) return true;
   const parts = version
@@ -163,7 +163,7 @@ export function FounderNodeV2Panel({ accessToken, settings, onRefresh, embedded 
 
       {v2?.paired && v2.online && founderNodeNeedsUpdate(v2.appVersion) && (
         <div className="mt-4 rounded-xl border border-amber-500/35 bg-amber-950/25 p-4 text-sm text-amber-100">
-          <p className="font-medium">Update Founder Node to v0.5.4+</p>
+          <p className="font-medium">Update Founder Node to v0.5.5+</p>
           <p className="mt-1 text-xs text-zinc-400">
             Your tray app{v2.appVersion ? ` (v${v2.appVersion})` : ''} is missing one-click Windows firewall fix, hourly auto-updates, and Linux downloads.
             Tray menu → <strong className="text-cyan-200">Check for updates</strong> (or download from Step 1), install, then leave the tray app open.
