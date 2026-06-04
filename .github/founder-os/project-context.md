@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(btc-bot): pass Railway healthcheck during long startup
+chore(founder-os): sync tasks
 
 ## Last Activity
 
