@@ -23,29 +23,31 @@ import { MissionControlTrustStrip } from '@/components/mission-control-trust-str
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
-  copilotMissionBuild,
   copilotResume,
   fetchAccountOverview,
   fetchBuildRoom,
+  fetchBuilderSettings,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
   fetchMissionIntelligence,
   fetchFounderQueue,
-  fetchAttentionCenter,
   executeFounderQueueAction,
   fetchActiveAgentRun,
   fetchPlatformSyncStatus,
   type MissionIntelligence,
   type FounderQueueItem,
-  type AttentionItem,
   type FounderAgentRunRecord,
-  updateBuilderSettings,
   FounderDashboard,
   ProjectMemory,
   ProjectRoom,
 } from '@/lib/api';
 import { pollMissionBuildUntilDone } from '@/lib/mission-build-runner';
-import { AI_STACK_HREF } from '@/lib/copilot-ai-stack';
+import {
+  AI_STACK_HREF,
+  buildCopilotUsageLines,
+  listCopilotActions,
+  type ProviderRow,
+} from '@/lib/copilot-ai-stack';
 
 type NavItem = { id: WorkspaceTab; label: string; icon: string };
 
@@ -108,39 +110,40 @@ export function FounderOsDashboardLayout({
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [roleLabel, setRoleLabel] = useState<string>('Founder');
   const [resumeBusy, setResumeBusy] = useState(false);
-  const [missionBuildBusy, setMissionBuildBusy] = useState(false);
+  const [aiProviders, setAiProviders] = useState<ProviderRow[]>([]);
+  const [defaultAiProvider, setDefaultAiProvider] = useState('RULE_BASED');
   const [syncStatus, setSyncStatus] = useState<Awaited<
     ReturnType<typeof fetchPlatformSyncStatus>
   > | null>(null);
   const [missionIntel, setMissionIntel] = useState<MissionIntelligence | null>(null);
   const [founderQueue, setFounderQueue] = useState<FounderQueueItem[]>([]);
-  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
-  const [attentionUrgent, setAttentionUrgent] = useState(0);
   const [commandCenterLoading, setCommandCenterLoading] = useState(true);
   const [activeAgentRun, setActiveAgentRun] = useState<FounderAgentRunRecord | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, account, platform, intel, queueRes, attentionRes, agentRunRes] =
+      const [br, mem, worker, builder, account, platform, intel, queueRes, agentRunRes] =
         await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
         fetchBuilderWorkerStatus(accessToken).catch(() => null),
+        fetchBuilderSettings(accessToken).catch(() => null),
         fetchAccountOverview(accessToken).catch(() => null),
         fetchPlatformSyncStatus(accessToken).catch(() => null),
         fetchMissionIntelligence(accessToken).catch(() => null),
         fetchFounderQueue(accessToken).catch(() => null),
-        fetchAttentionCenter(accessToken).catch(() => null),
         fetchActiveAgentRun(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
       setWorkerStatus(worker);
+      if (builder) {
+        setAiProviders(builder.providers);
+        setDefaultAiProvider(builder.defaultProvider);
+      }
       setSyncStatus(platform);
       setMissionIntel(intel);
       setFounderQueue(queueRes?.items ?? []);
-      setAttentionItems(attentionRes?.items ?? []);
-      setAttentionUrgent(attentionRes?.urgentCount ?? 0);
       setActiveAgentRun(agentRunRes?.active ? agentRunRes.run : null);
       setCommandCenterLoading(false);
       if (account) {
@@ -180,7 +183,13 @@ export function FounderOsDashboardLayout({
     missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
   const displayNextStep =
     rawNextStep && !isStaleBoilerplateMissionTask(rawNextStep) ? rawNextStep : null;
-  const openBuilderTask = buildRoom?.grouped.tasks.find((t) => t.status !== 'DONE');
+  const copilotUsageLines = useMemo(() => {
+    const actions = listCopilotActions(aiProviders, defaultAiProvider, {
+      cursor: workerStatus?.connections?.cursor,
+      openHands: workerStatus?.connections?.openHands,
+    });
+    return buildCopilotUsageLines(actions, defaultAiProvider);
+  }, [aiProviders, defaultAiProvider, workerStatus]);
 
   const aiStackHealth = useMemo(
     () =>
@@ -241,46 +250,6 @@ export function FounderOsDashboardLayout({
       setResumeBusy(false);
     }
   }
-
-  async function handleSidebarMissionBuild() {
-    setMissionBuildBusy(true);
-    try {
-      const worker =
-        workerStatus?.buildWorker === 'CURSOR' || workerStatus?.buildWorker === 'OPENHANDS'
-          ? workerStatus.buildWorker
-          : undefined;
-      const result = await copilotMissionBuild(accessToken, worker ? { worker } : undefined);
-      onMessage?.(result.message);
-      void load();
-      if (result.status === 'dispatched') {
-        setMissionBuildBusy(false);
-        void pollMissionBuildUntilDone(accessToken, result, (line) => {
-          onMessage?.(line);
-          void load();
-        }).then(() => {
-          void load();
-          onRefresh();
-        });
-        return;
-      }
-      onRefresh();
-    } catch (err) {
-      onMessage?.(err instanceof Error ? err.message : 'Build failed');
-    } finally {
-      setMissionBuildBusy(false);
-    }
-  }
-
-  const runBuildButtonLabel = (() => {
-    if (missionBuildBusy) return 'Starting Cursor…';
-    if (isAgentRunActive(activeAgentRun)) {
-      const s = activeAgentRun!.status.toUpperCase();
-      return s === 'RUNNING' || s === 'CREATING' || s === 'WORKING'
-        ? 'Cursor working…'
-        : `Cursor: ${activeAgentRun!.status}`;
-    }
-    return 'Run build';
-  })();
 
   return (
     <div className="flex min-h-[calc(100vh-4rem)] flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
@@ -377,16 +346,16 @@ export function FounderOsDashboardLayout({
                     Think · plan · build · ship — in one tab
                   </h1>
                   <p className="mt-1 max-w-xl text-xs text-zinc-500">
-                    <strong className="font-medium text-zinc-400">Ask</strong> = GitHub + vault
-                    status · <strong className="font-medium text-zinc-400">Resume</strong> = sync
-                    briefing · <strong className="font-medium text-zinc-400">Run build</strong> =
-                    starts Cursor on your repo (can take several minutes)
+                    <strong className="font-medium text-zinc-400">Resume</strong> syncs GitHub + vault.
+                    Under the chat, pick <strong className="font-medium text-zinc-400">Ask [your LLM]</strong>{' '}
+                    for status and planning, or <strong className="font-medium text-zinc-400">Build with Cursor</strong>{' '}
+                    (or OpenHands) to edit the repo.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    disabled={resumeBusy || missionBuildBusy}
+                    disabled={resumeBusy}
                     onClick={() => void handleResumeWork()}
                     className="rounded-xl bg-violet-600 px-5 py-2.5 text-left text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
                   >
@@ -397,21 +366,30 @@ export function FounderOsDashboardLayout({
                   </button>
                   <button
                     type="button"
-                    disabled={missionBuildBusy || resumeBusy || isAgentRunActive(activeAgentRun)}
-                    onClick={() => void handleSidebarMissionBuild()}
-                    className="rounded-xl border border-violet-500/40 px-4 py-2.5 text-left text-sm font-medium text-violet-200 hover:bg-violet-950/40 disabled:opacity-50"
+                    disabled={resumeBusy}
+                    onClick={() => {
+                      setQuickPrompt("What's the status?");
+                      setChatKey((k) => k + 1);
+                    }}
+                    className="rounded-xl border border-cyan-500/40 px-4 py-2.5 text-left text-sm font-medium text-cyan-200 hover:bg-cyan-950/30 disabled:opacity-50"
                   >
-                    <span className="block">{runBuildButtonLabel}</span>
+                    <span className="block">What&apos;s the status?</span>
                     <span className="block text-[10px] font-normal text-zinc-500">
-                      {isAgentRunActive(activeAgentRun)
-                        ? 'Builder is coding — see status under your profile'
-                        : 'Cursor implements in repo'}
+                      Uses your selected Ask model
                     </span>
                   </button>
+                  <Link
+                    href={AI_STACK_HREF}
+                    className="rounded-xl border border-zinc-700 px-4 py-2.5 text-left text-sm text-zinc-400 hover:border-violet-500/40 hover:text-zinc-200"
+                  >
+                    <span className="block">AI stack</span>
+                    <span className="block text-[10px] text-zinc-600">Connect Ollama, DeepSeek, Cursor…</span>
+                  </Link>
                 </div>
               </header>
 
               <FounderMissionControlQuickstart
+                usageLines={copilotUsageLines}
                 onTryStatus={() => {
                   setQuickPrompt("What's the status?");
                   setChatKey((k) => k + 1);
@@ -460,8 +438,6 @@ export function FounderOsDashboardLayout({
                 <div className="flex flex-col gap-4">
                   <FounderCommandCenterPanels
                     queue={founderQueue}
-                    attention={attentionItems}
-                    urgentCount={attentionUrgent}
                     loading={commandCenterLoading}
                     onPrompt={(prompt) => {
                       setQuickPrompt(prompt);

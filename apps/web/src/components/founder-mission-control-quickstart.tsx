@@ -1,13 +1,21 @@
 'use client';
 
+import type { CopilotUsageLine } from '@/lib/copilot-ai-stack';
+
 type Props = {
   onTryStatus: () => void;
   onTryResume: () => void;
+  usageLines?: CopilotUsageLine[];
   compact?: boolean;
 };
 
 /** Onboarding strip for new builders at /founder-den Mission Control. */
-export function FounderMissionControlQuickstart({ onTryStatus, onTryResume, compact }: Props) {
+export function FounderMissionControlQuickstart({
+  onTryStatus,
+  onTryResume,
+  usageLines,
+  compact,
+}: Props) {
   return (
     <div
       className={`rounded-xl border border-cyan-500/25 bg-cyan-950/15 ${
@@ -15,33 +23,35 @@ export function FounderMissionControlQuickstart({ onTryStatus, onTryResume, comp
       }`}
     >
       <p className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300/90">
-        New here? Start in 30 seconds
+        How to use Mission Control
       </p>
       {!compact && (
         <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
-          Founder OS is a <strong className="font-medium text-zinc-300">command center</strong>, not a
-          generic chatbot. It reads your <strong className="font-medium text-zinc-300">GitHub repo</strong>{' '}
-          and <strong className="font-medium text-zinc-300">Founder Vault</strong> — then routes questions
-          to Founder Brain (status) or Cursor (code) only when you ask.
+          Pick your connected model under the chat (e.g. Ollama, DeepSeek, Cursor). Instructions below
+          match <strong className="font-medium text-zinc-300">your</strong> AI stack.
         </p>
       )}
       <ol className={`mt-2 space-y-1 text-xs text-zinc-400 ${compact ? '' : 'list-decimal pl-4'}`}>
+        {(usageLines ?? [
+          { title: 'Resume', detail: 'Sync GitHub + vault briefing (no code changes).' },
+          {
+            title: "What's the status?",
+            detail: 'GitHub-grounded — use an Ask model in chat.',
+          },
+        ]).map((line) => (
+          <li key={line.title}>
+            <strong className="text-zinc-300">{line.title}</strong>
+            {line.detail ? ` — ${line.detail}` : ''}
+          </li>
+        ))}
         <li>
-          <strong className="text-zinc-300">Resume</strong> — sync GitHub + vault briefing (no auto-build).
-        </li>
-        <li>
-          <strong className="text-zinc-300">Ask</strong> — try:{' '}
           <button
             type="button"
             onClick={onTryStatus}
             className="font-medium text-cyan-300 underline decoration-cyan-500/50 hover:text-cyan-200"
           >
-            What&apos;s the status?
-          </button>{' '}
-          (GitHub-grounded answer; stay on <span className="text-violet-300">Ask</span>, not Build).
-        </li>
-        <li>
-          <strong className="text-zinc-300">Run build</strong> — only when you want Cursor to edit the repo.
+            Try: What&apos;s the status?
+          </button>
         </li>
       </ol>
       <div className="mt-3 flex flex-wrap gap-2">
