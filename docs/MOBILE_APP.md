@@ -2,6 +2,16 @@
 
 The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypto.digital). It opens **Discover** with `?app=android` so navigation emphasizes what works well on a phone.
 
+## Download (Phase 1)
+
+| Channel | URL |
+|---------|-----|
+| **Website (primary)** | [doxxedcrypto.digital/mobile](https://doxxedcrypto.digital/mobile) |
+| **Direct APK** | [doxxedcrypto.digital/downloads/doxxedcrypto-android.apk](https://doxxedcrypto.digital/downloads/doxxedcrypto-android.apk) |
+| **GitHub release** | Tag `android-app-v*` → [Releases](https://github.com/danishhaiderau-maker/doxed-founders-website/releases) |
+
+Build locally: `npm run pack:android` (writes `apps/web/public/downloads/doxxedcrypto-android.apk`).
+
 **Roadmap (vault on phone, PC sync, release phases):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)
 
 ## In scope (default mobile experience)
