@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(mobile-vault): API vault sync pull and merge apply for Android Phase 2-3
+chore(founder-os): sync tasks
 
 ## Last Activity
 
