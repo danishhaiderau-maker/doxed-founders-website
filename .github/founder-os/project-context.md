@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-chore(sync): remove legacy NEXT_PUBLIC_API_URL on production deploy
+chore(founder-os): sync tasks
 
 ## Last Activity
 
