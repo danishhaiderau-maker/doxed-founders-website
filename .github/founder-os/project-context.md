@@ -12,7 +12,7 @@
 
 ## Last Commit
 
-feat(mobile): Android app shell mode and simplified nav in WebView
+fix(api): re-register AirdropModule for Builder Rewards routes
 
 ## Last Activity
 
