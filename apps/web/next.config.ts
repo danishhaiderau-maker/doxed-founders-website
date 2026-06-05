@@ -59,6 +59,13 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils', '@dcf/founder-vault'],
   serverExternalPackages: ['@capacitor/core', '@capacitor/filesystem', '@capacitor/preferences'],
+  // Default static stale time is 300s — edge can serve old HTML while new JS hydrates (flash on hard refresh).
+  experimental: {
+    staleTimes: {
+      dynamic: 0,
+      static: 30,
+    },
+  },
   allowedDevOrigins,
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];
