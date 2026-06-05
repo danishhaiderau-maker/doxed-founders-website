@@ -33,7 +33,7 @@ function detectMobileOs(): 'android' | 'ios' | 'desktop' {
 
 export function AndroidAppDownloads({ variant = 'default', showInstallGuide = false }: Props) {
   const [githubApkUrl, setGithubApkUrl] = useState<string | null>(null);
-  const [releaseVersion, setReleaseVersion] = useState<string>('0.4.0');
+  const [releaseVersion, setReleaseVersion] = useState<string>('0.4.1');
   const [loading, setLoading] = useState(true);
 
   const mobileOs = useMemo(() => detectMobileOs(), []);
@@ -129,10 +129,14 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
               Open the file → allow install from this source if Android asks (
               <strong className="text-white">Settings → Security → Unknown apps</strong>).
             </li>
+            <li>
+              <strong className="text-white">Android 8+ recommended.</strong> On Android 6–7, update{' '}
+              <strong className="text-white">Android System WebView</strong> and Chrome from Play Store first.
+            </li>
             <li>Launch <strong className="text-white">Doxxed Crypto</strong> — opens Discover, trading, agents, and Founder OS.</li>
             <li>
               Sign in for Mission Control. For <strong className="text-white">private vault</strong>, pair{' '}
-              <strong className="text-white">Founder Node on PC</strong> (mobile vault sync is on the roadmap).
+              <strong className="text-white">Founder Node on PC</strong> and use <strong className="text-white">Code for Android</strong> in settings.
             </li>
           </ol>
           <p className="mt-3 text-[11px] text-zinc-500">
