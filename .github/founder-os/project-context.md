@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix Android 6 white screen: WebView compat gate, APK v0.4.1.
+chore(founder-os): sync tasks
 
 ## Last Activity
 
