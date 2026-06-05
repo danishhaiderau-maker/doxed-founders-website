@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+feat(stage-b): automate founder publish + update ship checklist
 
 ## Last Activity
 
