@@ -57,7 +57,21 @@ function acceptAndroidLicenses() {
   }
 }
 
+function resolveSdkRoot() {
+  const fromEnv = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  if (fs.existsSync(localSdk)) return localSdk;
+  return null;
+}
+
 function ensureLocalSdk() {
+  const sdkRoot = resolveSdkRoot();
+  if (sdkRoot && fs.existsSync(path.join(sdkRoot, 'platforms', 'android-35'))) {
+    process.env.ANDROID_HOME = sdkRoot;
+    process.env.ANDROID_SDK_ROOT = sdkRoot;
+    return;
+  }
+
   const sdkmanager =
     process.platform === 'win32'
       ? path.join(localSdk, 'cmdline-tools', 'latest', 'bin', 'sdkmanager.bat')
@@ -68,6 +82,10 @@ function ensureLocalSdk() {
     return;
   }
   if (fs.existsSync(sdkmanager)) return;
+  if (sdkRoot) {
+    console.warn(`ANDROID_HOME=${sdkRoot} but platform android-35 missing — install via sdkmanager on CI.`);
+    return;
+  }
   const bootstrap =
     process.platform === 'win32'
       ? path.join(root, 'scripts/bootstrap-android-sdk.ps1')
