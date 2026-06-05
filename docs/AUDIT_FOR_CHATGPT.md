@@ -229,6 +229,27 @@ If I attach a zip from npm run audit:export, scope your review to AUDIT_SCOPE.tx
 
 ---
 
+## Security scrub verification
+
+| Field | Value |
+|-------|-------|
+| **Date** | 2026-06-05 |
+| **Export** | `../doxedcryptofounder-audit/` (808 files) |
+| **Zip** | `docs/exports/doxedcryptofounder-audit-2026-06-05.zip` (~19.7 MB) |
+| **Script** | `scripts/prepare-audit-export.mjs` (`npm run audit:export`) |
+| **Result** | **Clean** — safe to share with ChatGPT |
+
+**Checked (export folder + zip, identical trees):**
+
+- Sensitive filenames: no `.env*`, `*.pem`, `*.key`, `google-keys.txt`, or vault credential files
+- Excluded paths: no `scripts/`, `docker/`, `node_modules/`, lockfiles, or cron workflows (`x-social-daily.yml`, `engagement-lottery-daily.yml`)
+- Secret patterns: no `DATABASE_URL`/`JWT_SECRET`/`NEXTAUTH_SECRET` literals, `postgresql://` creds, `sk-`, `ghp_`/`gho_`, `npg_`, `Bearer` tokens, Stripe/Railway/Twitter token values, or private keys
+- Informational only: `process.env.JWT_SECRET` / `DATABASE_URL` / `NEXTAUTH_SECRET` references in source; public `console.neon.tech` URLs in integration guides; dev placeholder `dev-secret-change-in-production` (not a production value)
+
+**Remediation:** none required.
+
+---
+
 ## Document history
 
 | Date | Change |
@@ -236,5 +257,6 @@ If I attach a zip from npm run audit:export, scope your review to AUDIT_SCOPE.tx
 | 2026-06 | Initial auditable guide; aligns with paper session tokens, bot control secret, sync-metrics guard |
 | 2026-06 | Download bundle section — local zip path, ChatGPT attach steps
 | 2026-06 | Command Center audit section — Sprints A–F links, prompt, code map |
+| 2026-06-05 | Security scrub verification — export + zip scanned; clean |
 
 For human-maintained security notes, see [FOUNDER_OS_AUDIT.md](./FOUNDER_OS_AUDIT.md).
