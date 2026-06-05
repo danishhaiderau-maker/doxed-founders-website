@@ -2,6 +2,8 @@
 
 Curated crypto intelligence platform for serious blockchain businesses with public founders, documentation, and transparent teams.
 
+Just a dog's crypto.
+
 ## Tech Stack
 
 | Layer | Technology |
