@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { FounderEventType, Prisma } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventOrchestratorService } from './event-orchestrator.service';
 
@@ -29,21 +30,35 @@ export class EventsService {
       if (existing) return { eventId: existing.id, duplicate: true };
     }
 
-    const event = await this.prisma.founderEvent.create({
-      data: {
-        founderId: input.founderId,
-        projectId: input.projectId,
-        userId: input.userId,
-        type: input.type,
-        source: input.source,
-        title: input.title,
-        payload: (input.payload ?? {}) as Prisma.InputJsonValue,
-        dedupeKey: input.dedupeKey,
-      },
-    });
+    try {
+      const event = await this.prisma.founderEvent.create({
+        data: {
+          founderId: input.founderId,
+          projectId: input.projectId,
+          userId: input.userId,
+          type: input.type,
+          source: input.source,
+          title: input.title,
+          payload: (input.payload ?? {}) as Prisma.InputJsonValue,
+          dedupeKey: input.dedupeKey,
+        },
+      });
 
-    await this.orchestrator.process(event);
-    return { eventId: event.id, duplicate: false };
+      await this.orchestrator.process(event);
+      return { eventId: event.id, duplicate: false };
+    } catch (err) {
+      if (
+        err instanceof PrismaClientKnownRequestError &&
+        err.code === 'P2002' &&
+        input.dedupeKey
+      ) {
+        const existing = await this.prisma.founderEvent.findUnique({
+          where: { dedupeKey: input.dedupeKey },
+        });
+        if (existing) return { eventId: existing.id, duplicate: true };
+      }
+      throw err;
+    }
   }
 
   async listForUser(userId: string, limit = 30) {

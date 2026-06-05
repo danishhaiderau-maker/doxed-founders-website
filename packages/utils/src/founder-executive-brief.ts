@@ -106,6 +106,17 @@ export function enrichFounderQueueItems(items: FounderQueueItem[], now = Date.no
   return items.map((item) => enrichFounderQueueItem(item, now));
 }
 
+/** Titles that are user/copilot chatter — not real product highlights. */
+export function isFounderEventBriefNoise(title: string): boolean {
+  const t = title.trim();
+  if (!t) return true;
+  if (/^what('s| is| am i| are we| should i| broke)/i.test(t)) return true;
+  if (/^(status|progress|continue|resume|run platform)/i.test(t)) return true;
+  if (/^cursor:/i.test(t)) return true;
+  if (/^chore\(founder-os\):\s*sync/i.test(t)) return true;
+  return false;
+}
+
 /** Proactive one-liners for chat / brief (Chief of Staff). */
 export function buildProactiveNudges(
   items: FounderQueueItem[],
@@ -116,7 +127,8 @@ export function buildProactiveNudges(
     (a, b) => (b.urgencyScore ?? 0) - (a.urgencyScore ?? 0),
   );
 
-  for (const item of scored.slice(0, 4)) {
+  const seenPublish = new Set<string>();
+  for (const item of scored.slice(0, 6)) {
     if (item.kind === 'REVIEW_PR' && (item.urgencyScore ?? 0) >= 72) {
       const days =
         item.createdAt != null
@@ -128,6 +140,9 @@ export function buildProactiveNudges(
           : `${item.title} — review when you have a minute.`,
       );
     } else if (item.kind === 'PUBLISH_UPDATE') {
+      const key = item.title.trim().toLowerCase();
+      if (seenPublish.has(key)) continue;
+      seenPublish.add(key);
       nudges.push(`Ship ready: ${item.title}. Publish to Feed and X?`);
     } else if (item.kind === 'DEPLOY_CHECK') {
       nudges.push('Deployment health needs attention — run platform autopilot sync.');

@@ -153,20 +153,24 @@ export class FounderAutopilotService {
 
     try {
       const gh = await this.founderOs.syncGitHubCommits(userId);
+      const ghDetail =
+        gh?.synced && gh.unchanged
+          ? `GitHub up to date (${gh.commits?.length ?? 0} commits checked)`
+          : gh?.synced
+            ? `Synced ${gh.commits?.length ?? 0} commit(s) from repo`
+            : gh?.reason ?? 'GitHub sync skipped';
       steps.push({
         step: 'github_sync',
-        ok: Boolean(gh?.synced),
-        detail: gh?.synced
-          ? gh.unchanged
-            ? `GitHub up to date (${gh.commits?.length ?? 0} commits checked)`
-            : `Synced ${gh.commits?.length ?? 0} commit(s) from repo`
-          : gh?.reason ?? 'GitHub sync skipped',
+        ok: Boolean(gh?.synced) || gh?.unchanged === true,
+        detail: ghDetail,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'GitHub sync failed';
+      const benignDuplicate = /unique constraint failed.*dedupeKey/i.test(msg);
       steps.push({
         step: 'github_sync',
-        ok: false,
-        detail: err instanceof Error ? err.message : 'GitHub sync failed',
+        ok: benignDuplicate,
+        detail: benignDuplicate ? 'GitHub already synced for latest commit' : msg,
       });
     }
 
@@ -178,10 +182,14 @@ export class FounderAutopilotService {
         detail: `Memory refreshed (${settings?.memoryStorageMode ?? 'PLATFORM'}) → platform DB (Neon via API)`,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Memory sync failed';
+      const concurrent = /fast forward/i.test(msg);
       steps.push({
         step: 'memory_sync',
-        ok: false,
-        detail: err instanceof Error ? err.message : 'Memory sync failed',
+        ok: concurrent,
+        detail: concurrent
+          ? 'Memory sync skipped — repo moved ahead (will retry on next resume)'
+          : msg,
       });
     }
 
@@ -243,11 +251,19 @@ export class FounderAutopilotService {
     const memory = await this.copilot.getProjectMemory(userId);
     let builderDispatch: string | null = null;
     const worker = await this.builder.resolveBuildWorker(userId);
-    if (
-      (worker === 'CURSOR' || worker === 'OPENHANDS') &&
-      (forceFull || settings?.autopilotEnabled || /\b(code|implement|cursor|full control)\b/i.test(prompt ?? ''))
-    ) {
-      const next = memory.suggestedNextStep?.trim();
+    const promptText = prompt ?? '';
+    const syncOnly =
+      forceFull ||
+      /\b(take full control|sync everything|push all updates|autopilot sync|run platform autopilot)\b/i.test(
+        promptText,
+      );
+    const explicitBuilderAsk =
+      !syncOnly &&
+      /\b(run builder|build with cursor|dispatch cursor|implement|fix bug|write code|open pr|create pr|ship code)\b/i.test(
+        promptText,
+      );
+    if ((worker === 'CURSOR' || worker === 'OPENHANDS') && explicitBuilderAsk) {
+      const next = promptText.trim() || memory.suggestedNextStep?.trim();
       if (next) {
         const result = await this.builder.executeBuildTask(userId, {
           spec: next,
@@ -280,7 +296,11 @@ export class FounderAutopilotService {
       ...steps.map((s) => `${s.ok ? '✓' : '✗'} ${s.step}: ${s.detail}`),
       '',
       `Memory: ${status.memoryPrivacyNote}`,
-      builderDispatch ? `\nTrack code agent: ${builderDispatch}` : '',
+      builderDispatch
+        ? `\n**Builder:** Queued in CEO inbox — progress streams in chat.\nOptional diff view: ${builderDispatch}`
+        : syncOnly && (worker === 'CURSOR' || worker === 'OPENHANDS')
+          ? '\n**Builder:** Idle — sync only (no code task). Say what to implement in Founder Brain to queue a build.'
+          : '',
       !settings?.autopilotEnabled && !forceFull
         ? '\nTip: Enable **Autopilot** in AI Stack for hands-free publish + redeploy.'
         : '',

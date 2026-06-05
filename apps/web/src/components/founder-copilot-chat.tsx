@@ -696,7 +696,7 @@ export function FounderCopilotChat({
           await streamAssistantAnswer(assistantId, result.answer, providerMeta);
           onResult?.(result.answer);
 
-          if (cursorDispatched && result.runtime && effectiveMode === 'build' && !isFounderRepoStatusPrompt(q)) {
+          if (cursorDispatched && result.runtime && !isFounderRepoStatusPrompt(q)) {
             const rt = result.runtime;
             const workerLabel = stack.buildWorkers.find((w) => w.key === 'CURSOR')?.label ?? 'Cursor';
             patchMessage(assistantId, {
