@@ -132,9 +132,10 @@ export function ensureAndroidReleaseKeystore() {
 
 export function writeGradleKeystoreProperties(androidDir, signing) {
   const propsPath = path.join(androidDir, 'keystore.properties');
-  const storeFile = path.relative(androidDir, signing.keystorePath).replace(/\\/g, '/');
+  const localKeystore = path.join(androidDir, 'upload-keystore.jks');
+  fs.copyFileSync(signing.keystorePath, localKeystore);
   const content = [
-    `storeFile=${storeFile}`,
+    'storeFile=upload-keystore.jks',
     `storePassword=${signing.storePass}`,
     `keyAlias=${signing.alias}`,
     `keyPassword=${signing.keyPass}`,

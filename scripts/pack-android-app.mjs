@@ -200,10 +200,11 @@ fs.rmSync(releaseDir, { recursive: true, force: true });
 fs.mkdirSync(releaseDir, { recursive: true });
 
 const gradleTask = buildType === 'release' ? 'assembleRelease' : 'assembleDebug';
+const gradleEnv = { ...process.env };
 if (process.platform === 'win32') {
-  run(`"${gradlew}"`, [gradleTask], { cwd: androidDir, shell: true });
+  run(`"${gradlew}"`, [gradleTask], { cwd: androidDir, shell: true, env: gradleEnv });
 } else {
-  run(gradlew, [gradleTask], { cwd: androidDir });
+  run(gradlew, [gradleTask], { cwd: androidDir, env: gradleEnv });
 }
 
 const built = findApk(path.join(androidDir, 'app/build/outputs/apk'));
