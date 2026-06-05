@@ -45,7 +45,25 @@ const apiRewrites = [
   },
 ];
 
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "img-src 'self' data: blob: https:",
+  "font-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "connect-src 'self' https: wss:",
+  "form-action 'self' https://accounts.google.com https://api.twitter.com https://twitter.com https://x.com",
+  "upgrade-insecure-requests",
+].join('; ');
+
 const securityHeaders = [
+  {
+    key: 'Content-Security-Policy',
+    value: contentSecurityPolicy,
+  },
   {
     key: 'Strict-Transport-Security',
     value: 'max-age=63072000; includeSubDomains; preload',
