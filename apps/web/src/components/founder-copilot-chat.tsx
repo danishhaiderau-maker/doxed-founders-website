@@ -26,7 +26,9 @@ import {
   isBuilderRunFailureStatus,
   isBuilderRunSuccessStatus,
   isFounderRepoStatusPrompt,
+  formatChiefOfStaffNudgeForChat,
   isStaleBoilerplateMissionTask,
+  type ChiefOfStaffNudge,
 } from '@dcf/utils';
 import {
   formatBuilderRunInChat,
@@ -73,6 +75,24 @@ type ChatMessage = {
 };
 
 const STORAGE_KEY = 'dcf-copilot-chat-v1';
+const SEEN_NUDGES_KEY = 'dcf-cos-seen-nudges-v1';
+
+function loadSeenNudgeIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = sessionStorage.getItem(SEEN_NUDGES_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function markSeenNudgeIds(ids: string[]) {
+  if (typeof window === 'undefined' || ids.length === 0) return;
+  const seen = loadSeenNudgeIds();
+  for (const id of ids) seen.add(id);
+  sessionStorage.setItem(SEEN_NUDGES_KEY, JSON.stringify([...seen].slice(-60)));
+}
 
 function loadMessages(): ChatMessage[] {
   if (typeof window === 'undefined') return [];
@@ -112,6 +132,8 @@ type FounderCopilotChatProps = {
   activeAgentRunActive?: boolean;
   /** Pending publish queue items — Content agent draft ready. */
   contentDraftReady?: boolean;
+  /** Live Chief of Staff nudges (polled from API). */
+  liveNudges?: ChiefOfStaffNudge[];
 };
 
 const ASK_CHIPS = [
@@ -137,6 +159,7 @@ export function FounderCopilotChat({
   agentTemplate,
   activeAgentRunActive = false,
   contentDraftReady = false,
+  liveNudges = [],
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -757,6 +780,26 @@ export function FounderCopilotChat({
     saveMessages([row]);
     onSeedAssistantConsumed?.();
   }, [seedAssistantMessage, onSeedAssistantConsumed]);
+
+  useEffect(() => {
+    if (!liveNudges.length) return;
+    const seen = loadSeenNudgeIds();
+    const fresh = liveNudges.filter((n) => !seen.has(n.id));
+    if (fresh.length === 0) return;
+    markSeenNudgeIds(fresh.map((n) => n.id));
+    setMessages((prev) => {
+      const added: ChatMessage[] = fresh.map((n) => ({
+        id: `cos-${n.id}`,
+        role: 'assistant',
+        content: formatChiefOfStaffNudgeForChat(n),
+        provider: 'FOUNDER_BRAIN',
+        routeFooter: 'Chief of Staff · proactive',
+      }));
+      const next = [...prev, ...added];
+      saveMessages(next);
+      return next;
+    });
+  }, [liveNudges]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {

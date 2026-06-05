@@ -121,6 +121,11 @@ export class EventsController {
     return this.copilot.getDailyStandup(user.id);
   }
 
+  @Get('copilot/chief-of-staff-nudges')
+  chiefOfStaffNudges(@CurrentUser() user: AuthUser) {
+    return this.copilot.getChiefOfStaffNudges(user.id);
+  }
+
   @Post('copilot/resume')
   resume(@CurrentUser() user: AuthUser) {
     return this.copilot.resumeWork(user.id);
