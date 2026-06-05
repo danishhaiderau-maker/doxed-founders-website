@@ -88,6 +88,7 @@ export * from './project-timeline';
 export * from './deploy-intelligence';
 export * from './desktop-bridge';
 export * from './founder-decision-log';
+export * from './founder-executive-brief';
 export * from './founder-chief-of-staff';
 export * from './outcome-intelligence';
 export * from './project-feed-filter';
