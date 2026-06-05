@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: add scrubbed audit bundle download instructions for ChatGPT
+docs: record audit bundle security scrub verification
 
 ## Last Activity
 
