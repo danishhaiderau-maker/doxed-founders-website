@@ -16,10 +16,20 @@ export function getFounderBrainRouteLabel(task: FounderBrainTask): string {
   return `Founder Brain · ${TASK_LABELS[task]}`;
 }
 
+/** Subtle chat footer — e.g. "Routed: build" / "Routed: research". */
+export function getFounderBrainRouteFooter(
+  task: FounderBrainTask,
+  mode?: 'ask' | 'build',
+): string {
+  if (mode === 'build') return 'Routed: build';
+  if (task === 'code') return 'Routed: code planning';
+  return `Routed: ${task}`;
+}
+
 export function classifyFounderBrainTask(prompt: string): FounderBrainTask {
   const t = prompt.trim().toLowerCase();
   if (
-    /\b(implement|refactor|debug|fix bug|pull request|create pr|typescript|react component|api route|deploy|ship code|cursor agent)\b/.test(
+    /\b(implement|refactor|debug|fix\b|fix bug|pull request|create pr|typescript|react component|api route|deploy|ship code|cursor agent)\b/.test(
       t,
     )
   ) {

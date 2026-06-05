@@ -87,6 +87,7 @@ export * from './founder-agent-run';
 export * from './project-timeline';
 export * from './deploy-intelligence';
 export * from './desktop-bridge';
+export * from './founder-decision-log';
 export * from './project-feed-filter';
 export * from './secrets-storage';
 export * from './phala-cvm-vault';

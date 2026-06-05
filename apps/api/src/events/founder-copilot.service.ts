@@ -66,6 +66,11 @@ import {
   buildDeployIntelligenceCard,
   formatDeployIntelligenceExcerpt,
   formatDesktopBridgeForPrompt,
+  parseFounderDecisionLog,
+  appendFounderDecision,
+  formatDecisionLogExcerpt,
+  detectDecisionFromPrompt,
+  FOUNDER_DECISION_LOG_KEY,
   type DeviceMemoryPayload,
   type DeviceMemoryMetadataPayload,
   type FounderBrainContextInput,
@@ -589,7 +594,7 @@ export class FounderCopilotService {
   }
 
   private async assembleBrainContextExtras(userId: string, repo: string | null) {
-    const [timelineRes, deployRes, desktopLatest] = await Promise.all([
+    const [timelineRes, deployRes, desktopLatest, decisionLog] = await Promise.all([
       this.getProjectTimelineForUser(userId, 30).catch(() => ({
         entries: [] as ProjectTimelineEntry[],
       })),
@@ -597,13 +602,50 @@ export class FounderCopilotService {
         cards: [] as DeployIntelligenceCard[],
       })),
       this.desktopBridge.getLatest(userId),
+      this.getDecisionLog(userId),
     ]);
 
     return {
       timelineExcerpt: formatProjectTimelineExcerpt(timelineRes.entries, 14),
       deployIntelligenceExcerpt: formatDeployIntelligenceExcerpt(deployRes.cards, 4),
       desktopBridgeBlock: formatDesktopBridgeForPrompt(desktopLatest),
+      decisionLogExcerpt: formatDecisionLogExcerpt(decisionLog, 8),
     };
+  }
+
+  async getDecisionLog(userId: string) {
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const graph = settings?.memoryGraph;
+    if (!graph || typeof graph !== 'object' || Array.isArray(graph)) return [];
+    return parseFounderDecisionLog((graph as Record<string, unknown>)[FOUNDER_DECISION_LOG_KEY]);
+  }
+
+  async appendDecision(
+    userId: string,
+    input: { decision: string; reason?: string; source?: string },
+  ) {
+    if (!input.decision?.trim()) {
+      throw new BadRequestException('decision required');
+    }
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const base =
+      settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
+        ? { ...(settings.memoryGraph as Record<string, unknown>) }
+        : {};
+    const log = appendFounderDecision(base[FOUNDER_DECISION_LOG_KEY], input);
+    base[FOUNDER_DECISION_LOG_KEY] = log;
+    await this.prisma.founderBuilderSettings.upsert({
+      where: { userId },
+      create: { userId, memoryGraph: base as object },
+      update: { memoryGraph: base as object },
+    });
+    return { entries: log, added: log[0] ?? null };
   }
 
   async getDailyStandup(userId: string) {
@@ -956,6 +998,14 @@ export class FounderCopilotService {
         cursorPrompt: taskPrompt,
         repository: memory.repoFullName ?? undefined,
       });
+      await this.agentRuns.start(userId, {
+        worker: 'CURSOR',
+        status: dispatch.status ?? 'CREATING',
+        task: taskPrompt,
+        repository: memory.repoFullName,
+        agentId: dispatch.agentId,
+        runId: dispatch.runId,
+      });
       const founder = await this.prisma.founder.findUnique({ where: { userId } });
       await this.events.emit({
         founderId: founder!.id,
@@ -1238,6 +1288,15 @@ export class FounderCopilotService {
 
     const routeLabel = getFounderBrainRouteLabel(brainTask);
 
+    const detectedDecision = detectDecisionFromPrompt(text);
+    if (detectedDecision) {
+      void this.appendDecision(userId, {
+        decision: detectedDecision.decision,
+        reason: detectedDecision.reason,
+        source: 'copilot_chat',
+      }).catch(() => undefined);
+    }
+
     return {
       answer,
       answerProvider,
@@ -1247,6 +1306,7 @@ export class FounderCopilotService {
         ? { template: brainTask, label: routeLabel }
         : undefined,
       founderBrain: { task: brainTask, label: routeLabel },
+      decisionLogged: detectedDecision ? true : undefined,
       stats: {
         commits: commitCount,
         deploys: deployCount,

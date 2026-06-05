@@ -1,8 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
-import type { FounderQueueItem } from '@dcf/utils';
+import { useMemo, useState } from 'react';
+import {
+  countActionableQueueItems,
+  FOUNDER_QUEUE_BUCKET_LABELS,
+  FOUNDER_QUEUE_BUCKET_ORDER,
+  groupFounderQueueByBucket,
+  type FounderQueueItem,
+} from '@dcf/utils';
 
 type Props = {
   queue: FounderQueueItem[];
@@ -28,7 +34,8 @@ export function FounderCommandCenterPanels({
 }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionNote, setActionNote] = useState<string | null>(null);
-  const topQueue = queue.slice(0, 8);
+  const actionableCount = useMemo(() => countActionableQueueItems(queue), [queue]);
+  const buckets = useMemo(() => groupFounderQueueByBucket(queue), [queue]);
 
   async function runControlAction(item: FounderQueueItem) {
     if (!onQueueAction) return;
@@ -44,13 +51,15 @@ export function FounderCommandCenterPanels({
     }
   }
 
+  const hasAny = FOUNDER_QUEUE_BUCKET_ORDER.some((b) => buckets[b].length > 0);
+
   return (
     <div className="flex flex-col gap-3">
       <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
         <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-          Founder queue
-          {queue.length > 0 && (
-            <span className="ml-2 text-violet-400">Needs you ({queue.length})</span>
+          CEO inbox
+          {actionableCount > 0 && (
+            <span className="ml-2 text-violet-400">Needs you ({actionableCount})</span>
           )}
         </p>
         {actionNote && (
@@ -58,23 +67,39 @@ export function FounderCommandCenterPanels({
             {actionNote}
           </p>
         )}
-        {loading && !topQueue.length ? (
+        {loading && !hasAny ? (
           <p className="mt-3 text-xs text-zinc-600">Loading…</p>
-        ) : topQueue.length === 0 ? (
-          <p className="mt-3 text-xs text-zinc-500">Queue is clear. Ask your connected model what to ship next.</p>
+        ) : !hasAny ? (
+          <p className="mt-3 text-xs text-zinc-500">
+            Inbox is clear. Ask Founder Brain what to ship next.
+          </p>
         ) : (
-          <ul className="mt-3 space-y-2">
-            {topQueue.map((item) => (
-              <li key={item.id}>
-                <QueueRow
-                  item={item}
-                  onPrompt={onPrompt}
-                  onQueueAction={onQueueAction ? () => runControlAction(item) : undefined}
-                  busy={busyId === item.id}
-                />
-              </li>
-            ))}
-          </ul>
+          <div className="mt-3 space-y-4">
+            {FOUNDER_QUEUE_BUCKET_ORDER.map((bucketKey) => {
+              const items = buckets[bucketKey].slice(0, 4);
+              if (items.length === 0) return null;
+              return (
+                <div key={bucketKey}>
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-600">
+                    {FOUNDER_QUEUE_BUCKET_LABELS[bucketKey]}
+                    <span className="ml-1 text-zinc-700">({buckets[bucketKey].length})</span>
+                  </p>
+                  <ul className="mt-2 space-y-2">
+                    {items.map((item) => (
+                      <li key={item.id}>
+                        <QueueRow
+                          item={item}
+                          onPrompt={onPrompt}
+                          onQueueAction={onQueueAction ? () => runControlAction(item) : undefined}
+                          busy={busyId === item.id}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
@@ -149,6 +174,32 @@ function QueueRow({
 
   if (item.href) {
     const href = item.href;
+    const externalOnly = item.action !== 'merge_pr' && item.action !== 'publish';
+    if (href.startsWith('http') && externalOnly) {
+      return (
+        <div className="flex items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2">
+          {content}
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 text-[10px] font-semibold text-zinc-500 hover:text-violet-400"
+          >
+            View ↗
+          </a>
+          {isControlAction(item) && onQueueAction && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onQueueAction()}
+              className="shrink-0 text-[10px] font-semibold text-violet-400"
+            >
+              {actionLabel}
+            </button>
+          )}
+        </div>
+      );
+    }
     if (href.startsWith('http')) {
       return (
         <a

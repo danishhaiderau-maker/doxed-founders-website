@@ -14,9 +14,11 @@ import {
   SuggestedUpdateStatus,
 } from '@prisma/client';
 import {
-  founderQueueToAttention,
+  countActionableQueueItems,
+  founderQueueToActionableAttention,
   isBuilderRunFailureStatus,
   isBuilderRunSuccessStatus,
+  isAgentRunActive,
   sortAttentionItems,
   sortFounderQueue,
   type AttentionItem,
@@ -25,7 +27,6 @@ import {
   agentBusHandoffFingerprint,
   type AgentBusHandoff,
   type WorkforceAgentOutput,
-  isAgentRunActive,
 } from '@dcf/utils';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -78,8 +79,23 @@ export class FounderCommandCenterService {
     if (!founder) throw new ForbiddenException('Founder profile required');
 
     const memory = await this.copilot.getProjectMemory(userId);
+    const activeRun = await this.agentRuns.getActive(userId);
     const items: FounderQueueItem[] = [];
     const repo = memory.repoFullName;
+
+    if (activeRun && isAgentRunActive(activeRun)) {
+      items.push({
+        id: `agent-run-${activeRun.runId ?? activeRun.conversationId ?? 'active'}`,
+        kind: 'AGENT_REVIEW',
+        priority: 1,
+        title: `Builder run: ${activeRun.task.slice(0, 72)}`,
+        detail: `${activeRun.worker} · ${activeRun.status}`,
+        action: 'open_url',
+        href: activeRun.prUrl ?? undefined,
+        prompt: `Review builder run: ${activeRun.task.slice(0, 200)}`,
+        sourceRunId: activeRun.runId ?? activeRun.conversationId ?? undefined,
+      });
+    }
 
     if (repo) {
       const prs = await this.github.listPullRequests(userId, repo);
@@ -94,6 +110,7 @@ export class FounderCommandCenterService {
           targetId: String(pr.number),
           href: pr.url,
           prompt: `Review PR #${pr.number} and suggest next steps`,
+          sourceRunId: activeRun?.prUrl === pr.url ? activeRun.runId ?? undefined : undefined,
         });
       }
     }
@@ -138,6 +155,7 @@ export class FounderCommandCenterService {
         detail: graph.blocked_by ? `Blocked: ${graph.blocked_by.slice(0, 100)}` : undefined,
         action: 'dispatch_build',
         prompt: graph.next_action,
+        sourceRunId: activeRun?.runId ?? activeRun?.conversationId ?? undefined,
       });
     }
 
@@ -235,7 +253,8 @@ export class FounderCommandCenterService {
     const sorted = sortFounderQueue(items);
     return {
       items: sorted,
-      count: sorted.length,
+      count: countActionableQueueItems(sorted),
+      totalCount: sorted.length,
       missionIntelligence: await this.copilot.computeMissionIntelligenceForUser(userId).catch(
         () => null,
       ),
@@ -244,7 +263,7 @@ export class FounderCommandCenterService {
 
   async getAttentionCenter(userId: string) {
     const queue = await this.getFounderQueue(userId);
-    const attention: AttentionItem[] = queue.items.map(founderQueueToAttention);
+    const attention: AttentionItem[] = founderQueueToActionableAttention(queue.items);
     const sorted = sortAttentionItems(attention);
     return {
       items: sorted,

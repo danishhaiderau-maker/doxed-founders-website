@@ -349,9 +349,8 @@ export function FounderOsDashboardLayout({
                   </h1>
                   <p className="mt-1 max-w-xl text-xs text-zinc-500">
                     <strong className="font-medium text-zinc-400">Resume</strong> syncs GitHub + vault.
-                    Under the chat, pick <strong className="font-medium text-zinc-400">Ask [your LLM]</strong>{' '}
-                    for status and planning, or <strong className="font-medium text-zinc-400">Build with Cursor</strong>{' '}
-                    (or OpenHands) to edit the repo.
+                    Type in <strong className="font-medium text-zinc-400">Founder Brain</strong> — status questions,
+                    research, and code tasks route automatically. Connect models in Settings if needed.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -377,7 +376,7 @@ export function FounderOsDashboardLayout({
                   >
                     <span className="block">What&apos;s the status?</span>
                     <span className="block text-[10px] font-normal text-zinc-500">
-                      Uses your selected Ask model
+                      GitHub-grounded · no mode picker
                     </span>
                   </button>
                   <Link
