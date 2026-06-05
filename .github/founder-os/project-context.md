@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Auto-link Vercel project when .vercel is missing during sync.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
