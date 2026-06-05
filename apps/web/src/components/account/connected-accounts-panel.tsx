@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { signIn, signOut } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { getIntegrationConnectGuide } from '@dcf/utils';
 import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
 import {
@@ -23,6 +24,8 @@ type Props = {
 };
 
 export function ConnectedAccountsPanel({ accessToken }: Props) {
+  const searchParams = useSearchParams();
+  const connectFromUrl = searchParams.get('connect')?.trim().toLowerCase() ?? null;
   const [data, setData] = useState<FounderOsDashboard | null>(null);
   const [providers, setProviders] = useState<IntegrationProviderConfig[]>([]);
   const [repoInput, setRepoInput] = useState('');
@@ -101,6 +104,13 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!connectFromUrl || providers.length === 0) return;
+    setExpandedGuide(connectFromUrl);
+    const el = document.getElementById(`connect-${connectFromUrl}`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [connectFromUrl, providers.length]);
 
   async function handleConnectGitHub() {
     if (!repoInput.trim()) {
@@ -228,7 +238,7 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
           const isExpanded = expandedGuide === app.provider;
 
           return (
-            <li key={app.provider} className="rounded-xl border border-zinc-800 bg-zinc-950/50">
+            <li key={app.provider} id={`connect-${app.provider}`} className="rounded-xl border border-zinc-800 bg-zinc-950/50 scroll-mt-24">
               <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">

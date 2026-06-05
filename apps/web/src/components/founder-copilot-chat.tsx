@@ -815,9 +815,13 @@ export function FounderCopilotChat({
 
   const isHero = variant === 'hero';
   const isEmbedded = variant === 'embedded';
-  const buttonLabel = isHero ? 'Send' : primaryButtonLabelForAction(selectedAction);
+  const buttonLabel = primaryButtonLabelForAction(selectedAction);
   const placeholder = isHero
-    ? 'Tell Founder Brain what to research, build, ship, or approve…'
+    ? selectedAction?.kind === 'build'
+      ? `What should ${selectedAction.label.replace(/^Build with /, '')} implement in your repo?`
+      : selectedAction
+        ? `${selectedAction.label} — type your task…`
+        : 'Tell Founder Brain what to research, build, ship, or approve…'
     : selectedAction?.kind === 'build'
       ? `What should ${selectedAction.label.replace(/^Build with /, '')} implement in your repo?`
       : selectedAction?.kind === 'ask'
@@ -864,7 +868,6 @@ export function FounderCopilotChat({
           )}
         </div>
         {!isHero && <FounderAiTeamStrip agents={aiTeam} />}
-        {isHero && <FounderAiTeamStrip agents={aiTeam} compact />}
       </header>
 
       {!isHero && workspaceStrip && (
@@ -1040,7 +1043,7 @@ export function FounderCopilotChat({
             </select>
           </div>
         )}
-        {!isHero && copilotActions.length > 0 && (
+        {copilotActions.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {copilotActions.map((action) => {
               const active = selectedAction?.id === action.id;
@@ -1146,9 +1149,9 @@ export function FounderCopilotChat({
             disabled={busy || !prompt.trim()}
             onClick={() => void submit(prompt, sendMode)}
             className={`rounded-lg px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-50 ${
-              isHero || selectedAction?.kind !== 'build' || !stack.canBuild
-                ? 'bg-violet-600 hover:bg-violet-500'
-                : 'bg-emerald-600 hover:bg-emerald-500'
+              selectedAction?.kind === 'build' && stack.canBuild
+                ? 'bg-emerald-600 hover:bg-emerald-500'
+                : 'bg-violet-600 hover:bg-violet-500'
             }`}
           >
             {busy ? '…' : buttonLabel}

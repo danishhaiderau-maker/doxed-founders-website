@@ -27,8 +27,10 @@ export function FounderMissionControlQuickstart({
       </p>
       {!compact && (
         <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
-          Pick your connected model under the chat (e.g. Ollama, DeepSeek, Cursor). Instructions below
-          match <strong className="font-medium text-zinc-300">your</strong> AI stack.
+          Pick an action below the chat — <strong className="font-medium text-zinc-300">Ask DeepSeek</strong>,{' '}
+          <strong className="font-medium text-zinc-300">Ask Ollama</strong>, or{' '}
+          <strong className="font-medium text-zinc-300">Build with Cursor</strong>. Your connection hub above
+          shows what is green vs needs setup.
         </p>
       )}
       <ol className={`mt-2 space-y-1 text-xs text-zinc-400 ${compact ? '' : 'list-decimal pl-4'}`}>

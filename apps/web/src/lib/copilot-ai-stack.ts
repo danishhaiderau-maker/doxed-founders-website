@@ -5,6 +5,34 @@ import {
 } from '@dcf/utils';
 
 export const AI_STACK_HREF = '/settings/builder';
+export const CONNECT_ACCOUNTS_HREF = '/account?tab=connected';
+
+export function infraConnectHref(providerKey: string): string {
+  return `${CONNECT_ACCOUNTS_HREF}&connect=${encodeURIComponent(providerKey)}`;
+}
+
+export function aiStackConnectHref(providerKey?: string): string {
+  if (!providerKey) return AI_STACK_HREF;
+  if (['OLLAMA_LOCAL', 'DEEPSEEK', 'OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER', 'JATEVO', 'PHALA'].includes(providerKey)) {
+    return `${AI_STACK_HREF}#connect-ai`;
+  }
+  if (providerKey === 'CURSOR' || providerKey === 'OPENHANDS') {
+    return `${AI_STACK_HREF}#remote-builder`;
+  }
+  return AI_STACK_HREF;
+}
+
+/** LLMs usable for Ask, research, and content drafting. */
+export const CHAT_LLM_KEYS = [
+  'DEEPSEEK',
+  'OLLAMA_LOCAL',
+  'OPENAI',
+  'ANTHROPIC',
+  'GEMINI',
+  'OPENROUTER',
+  'JATEVO',
+  'PHALA',
+] as const;
 
 export type ProviderRow = {
   key: string;
@@ -324,7 +352,15 @@ export type AiTeamAgentCard = {
   status: AiTeamAgentStatus;
   statusLabel: string;
   providerLabel?: string;
+  connectedProviders?: string[];
+  connectHref?: string;
 };
+
+function connectedLlmProviders(providers: ProviderRow[]): ProviderRow[] {
+  return providers.filter(
+    (p) => p.connected && CHAT_LLM_KEYS.includes(p.key as (typeof CHAT_LLM_KEYS)[number]),
+  );
+}
 
 export function resolveAiTeamCards(
   stack: CopilotStackSummary,
@@ -334,24 +370,13 @@ export function resolveAiTeamCards(
     contentDraftReady?: boolean;
   },
 ): AiTeamAgentCard[] {
-  const researchConnected = providers.some(
-    (p) =>
-      p.connected &&
-      [
-        'DEEPSEEK',
-        'JATEVO',
-        'OPENROUTER',
-        'PHALA',
-        'OPENAI',
-        'ANTHROPIC',
-        'GEMINI',
-        'OLLAMA_LOCAL',
-      ].includes(p.key),
-  );
-  const contentConnected = providers.some(
-    (p) =>
-      p.connected && ['OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER', 'JATEVO'].includes(p.key),
-  );
+  const llms = connectedLlmProviders(providers);
+  const llmLabels = llms.map((p) => shortProviderName(p));
+  const researchConnected = llms.length > 0;
+  const contentConnected = llms.length > 0;
+
+  const builderLabel =
+    stack.buildWorkers[0]?.label ?? (stack.canBuild ? 'Cursor' : undefined);
 
   return [
     {
@@ -360,22 +385,39 @@ export function resolveAiTeamCards(
       role: 'Analysis · tokenomics · strategy',
       status: researchConnected ? 'ready' : 'needs_setup',
       statusLabel: researchConnected ? 'Ready' : 'Connect LLM',
-      providerLabel: researchConnected ? 'Founder Brain' : undefined,
+      providerLabel: llmLabels.length > 0 ? llmLabels.join(' · ') : undefined,
+      connectedProviders: llmLabels,
+      connectHref: researchConnected ? AI_STACK_HREF : aiStackConnectHref('deepseek'),
     },
     {
       id: 'builder',
       label: 'Builder Agent',
       role: 'Code · PRs · fixes · deploy',
       status: opts?.builderWorking ? 'working' : stack.canBuild ? 'ready' : 'needs_setup',
-      statusLabel: opts?.builderWorking ? 'Working' : stack.canBuild ? 'Ready' : 'Connect in Settings',
-      providerLabel: stack.canBuild ? 'Builder Agent' : undefined,
+      statusLabel: opts?.builderWorking
+        ? 'Working'
+        : stack.canBuild
+          ? 'Ready'
+          : 'Connect Cursor',
+      providerLabel: builderLabel,
+      connectHref: stack.canBuild ? AI_STACK_HREF : `${AI_STACK_HREF}#remote-builder`,
     },
     {
       id: 'content',
       label: 'Content Agent',
       role: 'Posts · docs · announcements',
       status: opts?.contentDraftReady ? 'working' : contentConnected ? 'ready' : 'needs_setup',
-      statusLabel: opts?.contentDraftReady ? 'Draft ready' : contentConnected ? 'Ready' : 'Connect Claude/GPT',
+      statusLabel: opts?.contentDraftReady
+        ? 'Draft ready'
+        : contentConnected
+          ? 'Ready'
+          : 'Connect LLM',
+      providerLabel:
+        llmLabels.length > 0
+          ? llmLabels.join(' · ')
+          : 'DeepSeek · Ollama · Claude · GPT…',
+      connectedProviders: llmLabels,
+      connectHref: contentConnected ? AI_STACK_HREF : aiStackConnectHref('ollama'),
     },
   ];
 }
