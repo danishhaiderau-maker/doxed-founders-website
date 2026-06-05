@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-os): Sprint H ? continuous Chief of Staff, outcome intel, universal timeline
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
