@@ -283,7 +283,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
         </div>
       </section>
 
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <section id="remote-builder" className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 scroll-mt-24">
         <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
         <p className="mt-1 text-sm text-zinc-500">
           Optional cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys below power specs and

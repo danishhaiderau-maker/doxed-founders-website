@@ -19,7 +19,7 @@ import { FounderCommandCenterPanels } from '@/components/founder-command-center-
 import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
-import { MissionControlStatusStrip } from '@/components/mission-control-status-strip';
+import { MissionControlConnectionHub } from '@/components/mission-control-connection-hub';
 import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
@@ -434,6 +434,23 @@ export function FounderOsDashboardLayout({
                 </div>
               </header>
 
+              <MissionControlConnectionHub
+                accessToken={accessToken}
+                providers={aiProviders}
+                defaultProvider={defaultAiProvider}
+                buildWorker={workerStatus?.buildWorker}
+                workerConnections={{
+                  cursor: workerStatus?.connections?.cursor,
+                  openHands: workerStatus?.connections?.openHands,
+                }}
+                builderWorking={isAgentRunActive(activeAgentRun)}
+                contentDraftReady={contentDraftReady}
+                onRefresh={() => {
+                  void load();
+                  onRefresh();
+                }}
+              />
+
               <FounderMissionControlQuickstart
                 usageLines={copilotUsageLines}
                 onTryStatus={() => {
@@ -524,15 +541,6 @@ export function FounderOsDashboardLayout({
                       </p>
                     </div>
                   )}
-
-                  <MissionControlStatusStrip
-                    accessToken={accessToken}
-                    buildWorker={workerStatus?.buildWorker}
-                    onRefresh={() => {
-                      void load();
-                      onRefresh();
-                    }}
-                  />
 
                   <div className="grid grid-cols-2 gap-2">
                     {[
