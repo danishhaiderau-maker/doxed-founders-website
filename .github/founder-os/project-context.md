@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Copy upload keystore into android dir for Gradle release signing.
+Fix Gradle release keystore path under android/app.
 
 ## Last Activity
 
