@@ -33,7 +33,7 @@ function detectMobileOs(): 'android' | 'ios' | 'desktop' {
 
 export function AndroidAppDownloads({ variant = 'default', showInstallGuide = false }: Props) {
   const [githubApkUrl, setGithubApkUrl] = useState<string | null>(null);
-  const [releaseVersion, setReleaseVersion] = useState<string>('0.3.0');
+  const [releaseVersion, setReleaseVersion] = useState<string>('0.4.0');
   const [loading, setLoading] = useState(true);
 
   const mobileOs = useMemo(() => detectMobileOs(), []);
