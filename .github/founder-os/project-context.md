@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(discover): make universe bubbles draggable to reveal overlaps
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
