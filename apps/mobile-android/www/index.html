@@ -3,27 +3,180 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="refresh" content="0;url=https://doxxedcrypto.digital/discover?app=android" />
     <title>Doxxed Crypto</title>
     <style>
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
         min-height: 100vh;
-        display: grid;
-        place-items: center;
-        font-family: system-ui, sans-serif;
+        font-family: system-ui, -apple-system, sans-serif;
         background: #09090b;
         color: #e4e4e7;
+        padding: 24px 20px 40px;
+        line-height: 1.5;
       }
-      a {
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0 0 12px;
+        color: #a1a1aa;
+        font-size: 0.95rem;
+      }
+      .card {
+        max-width: 420px;
+        margin: 0 auto;
+        border: 1px solid #3f3f46;
+        border-radius: 16px;
+        padding: 20px;
+        background: #18181b;
+      }
+      .ok {
+        border-color: #10b98155;
+        background: #052e1b33;
+      }
+      .warn {
+        border-color: #f59e0b55;
+        background: #451a0333;
+      }
+      ol {
+        margin: 12px 0 0;
+        padding-left: 20px;
+        color: #d4d4d8;
+        font-size: 0.9rem;
+      }
+      li {
+        margin-bottom: 8px;
+      }
+      a.btn {
+        display: inline-block;
+        margin-top: 16px;
+        padding: 12px 18px;
+        border-radius: 10px;
+        background: #059669;
+        color: #fff;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+      a.link {
         color: #22d3ee;
+      }
+      .meta {
+        margin-top: 14px;
+        font-size: 0.75rem;
+        color: #71717a;
+        word-break: break-all;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid #3f3f46;
+        border-top-color: #10b981;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin: 16px 0;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
       }
     </style>
   </head>
   <body>
-    <p>
-      Loading…
-      <a href="https://doxxedcrypto.digital/discover?app=android">Open Doxxed Crypto</a>
-    </p>
+    <div class="card ok" id="panel-loading">
+      <h1>Opening Doxxed Crypto…</h1>
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Checking this phone can run the live app.</p>
+    </div>
+
+    <div class="card warn" id="panel-unsupported" style="display: none">
+      <h1>This phone needs an update</h1>
+      <p>
+        Doxxed Crypto loads our live site inside the app. Your <strong>Android System WebView</strong> is too
+        old, which causes a <strong>white screen</strong> on Android&nbsp;6 and similar devices.
+      </p>
+      <p><strong>Try these steps (in order):</strong></p>
+      <ol>
+        <li>
+          Open <strong>Play Store</strong> → search <strong>Android System WebView</strong> → tap
+          <strong>Update</strong> (also update <strong>Google Chrome</strong>).
+        </li>
+        <li>Reboot the phone, then open this app again.</li>
+        <li>
+          If it still fails, use <strong>Chrome</strong> and go to
+          <a class="link" href="https://doxxedcrypto.digital/discover?app=android">doxxedcrypto.digital</a>
+          (works best on <strong>Android 8+</strong>).
+        </li>
+        <li>Recommended: use a phone on <strong>Android 8 or newer</strong> for the APK.</li>
+      </ol>
+      <a class="btn" href="https://doxxedcrypto.digital/mobile">Help &amp; download page</a>
+      <p class="meta" id="device-meta"></p>
+    </div>
+
+    <script>
+      (function () {
+        var ENTRY = 'https://doxxedcrypto.digital/discover?app=android';
+        var MIN_CHROME = 80;
+
+        function chromeMajor() {
+          var ua = navigator.userAgent || '';
+          var m = ua.match(/Chrome\/(\d+)/);
+          if (m) return parseInt(m[1], 10);
+          m = ua.match(/Version\/(\d+).*Safari/);
+          if (m) return parseInt(m[1], 10);
+          return 0;
+        }
+
+        function androidApi() {
+          var ua = navigator.userAgent || '';
+          var m = ua.match(/Android\s([\d.]+)/);
+          if (!m) return 0;
+          var parts = m[1].split('.');
+          var major = parseInt(parts[0], 10) || 0;
+          if (major <= 6) return 23;
+          if (major === 7) return 24;
+          if (major === 8) return 26;
+          if (major === 9) return 28;
+          if (major >= 10) return 29;
+          return major;
+        }
+
+        function showUnsupported(reason) {
+          document.getElementById('panel-loading').style.display = 'none';
+          document.getElementById('panel-unsupported').style.display = 'block';
+          document.getElementById('device-meta').textContent =
+            reason + ' · ' + (navigator.userAgent || 'unknown');
+        }
+
+        function go() {
+          window.location.replace(ENTRY);
+        }
+
+        var chrome = chromeMajor();
+        var api = androidApi();
+
+        if (chrome > 0 && chrome < MIN_CHROME) {
+          showUnsupported('WebView Chrome ' + chrome + ' (need ' + MIN_CHROME + '+)');
+          return;
+        }
+
+        if (api > 0 && api < 26 && chrome > 0 && chrome < 90) {
+          showUnsupported('Android ' + api + ' with older WebView');
+          return;
+        }
+
+        if (chrome === 0) {
+          showUnsupported('Could not detect a modern WebView');
+          return;
+        }
+
+        setTimeout(go, 400);
+      })();
+    </script>
   </body>
 </html>

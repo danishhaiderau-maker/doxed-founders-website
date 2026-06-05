@@ -5,8 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Doxxed Crypto',
   webDir: 'www',
   server: {
-    // Phone-first: Discover, rankings, trust, agents, community trading
-    url: 'https://doxxedcrypto.digital/discover?app=android',
+    // Load local compat gate first (avoids white screen on Android 6 / old WebView), then redirect.
     cleartext: false,
     androidScheme: 'https',
   },
