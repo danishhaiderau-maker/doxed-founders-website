@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix Gradle release keystore path under android/app.
+Update site APK to v0.4.2 release-signed build.
 
 ## Last Activity
 
