@@ -29,15 +29,15 @@ All six sprints (A–F) implemented in one pass. Local builds: `@dcf/utils`, `@d
 | `npm run build:api` (full + prisma generate) | ⚠️ EPERM on Prisma DLL if API process holds lock — Nest `tsc` build OK |
 | `npm run sync:all` | ✅ (see sync audit) |
 
-## Sync audit (2026-06-05, automated)
+## Sync audit (2026-06-05, autonomous pipeline)
 
 | Target | Result |
 |--------|--------|
-| **GitHub** | ✅ `master` @ `5dba443` — fast-forwarded from `1e6f1ce`, clean tree, `origin/master` matched |
-| **Neon** | ✅ `db:push:neon` — schema already in sync with Prisma |
-| **Vercel** | ✅ Production deploy `dpl_96rBTvgNXHwNjzwZWRQz4T553ev5` → alias **https://doxxedcrypto.digital** |
-| **Railway** | ✅ Redeploy triggered: `doxed-founders-website` (API), `btc-conservative-agent` (bot) |
-| **Smoke** | ✅ `scripts/smoke-test.mjs` — all checks passed against production |
+| **GitHub** | OK `master` @ `c2b2440` — rebased, pushed Stage C + APK v0.4.0 label; clean tree |
+| **Neon** | OK `db:push:neon` — schema already in sync with Prisma |
+| **Vercel** | OK Production deploy `dpl_6uUgzaPW8RwqZ8KKMA2MD84mqkqh` → alias **https://doxxedcrypto.digital** |
+| **Railway** | OK Redeploy triggered: `doxed-founders-website` (API), `btc-conservative-agent` (bot) |
+| **Smoke** | OK `scripts/smoke-test.mjs` — all checks passed against production |
 
 **Notes (non-blocking):**
 
