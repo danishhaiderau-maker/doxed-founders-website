@@ -106,10 +106,12 @@ function run(cmd, cmdArgs, opts = {}) {
   const result = spawnSync(cmd, cmdArgs, {
     stdio: 'inherit',
     shell: opts.shell ?? false,
-    cwd: root,
+    cwd: opts.cwd ?? root,
+    env: opts.env ?? process.env,
     ...opts,
   });
   if (result.status !== 0) {
+    if (result.stderr) console.error(result.stderr.toString());
     process.exit(result.status ?? 1);
   }
 }
@@ -200,6 +202,13 @@ fs.rmSync(releaseDir, { recursive: true, force: true });
 fs.mkdirSync(releaseDir, { recursive: true });
 
 const gradleTask = buildType === 'release' ? 'assembleRelease' : 'assembleDebug';
+if (process.platform !== 'win32') {
+  try {
+    fs.chmodSync(gradlew, 0o755);
+  } catch {
+    /* ignore */
+  }
+}
 const gradleEnv = { ...process.env };
 if (process.platform === 'win32') {
   run(`"${gradlew}"`, [gradleTask], { cwd: androidDir, shell: true, env: gradleEnv });
