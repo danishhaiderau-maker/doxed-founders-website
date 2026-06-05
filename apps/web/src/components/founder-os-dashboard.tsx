@@ -11,6 +11,7 @@ import {
   STAGE_COLOR_CLASSES,
   isAgentRunActive,
   isStaleBoilerplateMissionTask,
+  type ChiefOfStaffNudge,
 } from '@dcf/utils';
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
@@ -30,6 +31,7 @@ import {
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
   fetchCopilotStandup,
+  fetchChiefOfStaffNudges,
   fetchMissionIntelligence,
   fetchFounderQueue,
   executeFounderQueueAction,
@@ -124,6 +126,7 @@ export function FounderOsDashboardLayout({
   const [founderQueue, setFounderQueue] = useState<FounderQueueItem[]>([]);
   const [commandCenterLoading, setCommandCenterLoading] = useState(true);
   const [activeAgentRun, setActiveAgentRun] = useState<FounderAgentRunRecord | null>(null);
+  const [liveNudges, setLiveNudges] = useState<ChiefOfStaffNudge[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -228,6 +231,18 @@ export function FounderOsDashboardLayout({
         sessionStorage.setItem(EXECUTIVE_BRIEF_DATE_KEY, today);
       })
       .catch(() => {});
+  }, [showMissionControl, accessToken]);
+
+  useEffect(() => {
+    if (!showMissionControl) return;
+    const poll = () => {
+      void fetchChiefOfStaffNudges(accessToken)
+        .then((res) => setLiveNudges(res.nudges ?? []))
+        .catch(() => undefined);
+    };
+    poll();
+    const id = window.setInterval(poll, 90_000);
+    return () => window.clearInterval(id);
   }, [showMissionControl, accessToken]);
 
   const contentDraftReady = useMemo(
@@ -446,6 +461,7 @@ export function FounderOsDashboardLayout({
                     }}
                     activeAgentRunActive={isAgentRunActive(activeAgentRun)}
                     contentDraftReady={contentDraftReady}
+                    liveNudges={liveNudges}
                     agentTemplate={null}
                     onInitialPromptConsumed={() => {
                       setQuickPrompt(null);

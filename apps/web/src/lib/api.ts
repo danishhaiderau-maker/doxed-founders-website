@@ -4445,6 +4445,14 @@ export function fetchCopilotStandup(token: string) {
   }>('/copilot/standup', undefined, token);
 }
 
+export function fetchChiefOfStaffNudges(token: string) {
+  return apiFetch<{ nudges: import('@dcf/utils').ChiefOfStaffNudge[] }>(
+    '/copilot/chief-of-staff-nudges',
+    undefined,
+    token,
+  );
+}
+
 export type CopilotMissionBuildResult = {
   graph: FounderMemoryGraph;
   taskLabel: string;

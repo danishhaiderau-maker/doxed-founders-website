@@ -4,7 +4,7 @@ import { groupCommitsByInitiative, type CommitSignal } from './commit-intelligen
 export type ProjectTimelineEntry = {
   id: string;
   at: string;
-  kind: 'theme' | 'merge' | 'deploy' | 'publish' | 'ship' | 'agent' | 'update';
+  kind: 'theme' | 'merge' | 'deploy' | 'publish' | 'ship' | 'agent' | 'update' | 'decision' | 'scout' | 'trade' | 'listing';
   title: string;
   detail?: string;
   commitCount?: number;
@@ -16,6 +16,8 @@ const TIMELINE_FOUNDER_EVENT_TYPES = new Set([
   'BUILD_PUBLISHED',
   'AGENT_RUN_COMPLETE',
   'CURSOR_BUILD_SESSION',
+  'SCOUT_MARKET_STAKE',
+  'RAISE_ALLOCATION',
 ]);
 
 export function isTimelineFounderEventType(type: string): boolean {
@@ -27,6 +29,9 @@ export function buildProjectTimeline(input: {
   commits: CommitSignal[];
   buildPosts: { id: string; headline: string; publishedAt: Date | string }[];
   founderUpdates: { id: string; headline: string; publishedAt: Date | string }[];
+  decisions?: { id: string; decision: string; date: string }[];
+  paperTrades?: { id: string; side: string; ticker: string; totalUsd: number; at: string }[];
+  listings?: { id: string; title: string; at: string }[];
 }): ProjectTimelineEntry[] {
   const entries: ProjectTimelineEntry[] = [];
 
@@ -41,9 +46,13 @@ export function buildProjectTimeline(input: {
           ? 'deploy'
           : e.type === 'BUILD_PUBLISHED'
             ? 'publish'
-            : e.type === 'AGENT_RUN_COMPLETE' || e.type === 'CURSOR_BUILD_SESSION'
-              ? 'agent'
-              : 'ship';
+            : e.type === 'SCOUT_MARKET_STAKE'
+              ? 'scout'
+              : e.type === 'RAISE_ALLOCATION'
+                ? 'listing'
+                : e.type === 'AGENT_RUN_COMPLETE' || e.type === 'CURSOR_BUILD_SESSION'
+                  ? 'agent'
+                  : 'ship';
     entries.push({
       id: `event-${e.id}`,
       at,
@@ -74,6 +83,36 @@ export function buildProjectTimeline(input: {
       kind: 'update',
       title: u.headline.slice(0, 160),
       detail: 'Founder update',
+    });
+  }
+
+  for (const d of input.decisions ?? []) {
+    entries.push({
+      id: `decision-${d.id}`,
+      at: d.date,
+      kind: 'decision',
+      title: d.decision.slice(0, 160),
+      detail: 'Founder decision',
+    });
+  }
+
+  for (const t of input.paperTrades ?? []) {
+    entries.push({
+      id: `trade-${t.id}`,
+      at: t.at,
+      kind: 'trade',
+      title: `${t.side} $${t.ticker} · $${Math.round(t.totalUsd)}`,
+      detail: 'Paper trade',
+    });
+  }
+
+  for (const l of input.listings ?? []) {
+    entries.push({
+      id: `listing-${l.id}`,
+      at: l.at,
+      kind: 'listing',
+      title: l.title.slice(0, 160),
+      detail: 'Listing / raise activity',
     });
   }
 

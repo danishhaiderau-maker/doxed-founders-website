@@ -24,8 +24,11 @@ import {
   buildDailyStandup,
   buildExecutiveBrief,
   buildProactiveNudges,
+  buildContinuousChiefOfStaffNudges,
   formatMarketIntelligenceForPrompt,
+  formatOutcomeIntelligenceExcerpt,
   type MarketIntelligenceSnapshot,
+  type ChiefOfStaffNudge,
   buildMissingLinkNarrativeHints,
   buildResumeCursorPrompt,
   buildSocialDraftFounderAccountBlock,
@@ -503,7 +506,7 @@ export class FounderCopilotService {
     const memory = await this.getProjectMemory(userId);
     const repo = memory.repoFullName;
 
-    const [events, buildPosts, founderUpdates, commits] = await Promise.all([
+    const [events, buildPosts, founderUpdates, commits, decisionLog, paperTrades] = await Promise.all([
       this.prisma.founderEvent.findMany({
         where: { founderId: founder.id, createdAt: { gte: since } },
         orderBy: { createdAt: 'desc' },
@@ -522,6 +525,19 @@ export class FounderCopilotService {
         select: { id: true, headline: true, publishedAt: true },
       }),
       repo ? this.github.listCommits(userId, repo, 60) : Promise.resolve([]),
+      this.getDecisionLog(userId),
+      this.prisma.paperTrade.findMany({
+        where: { userId, createdAt: { gte: since } },
+        orderBy: { createdAt: 'desc' },
+        take: 15,
+        select: {
+          id: true,
+          side: true,
+          totalUsd: true,
+          createdAt: true,
+          project: { select: { ticker: true } },
+        },
+      }),
     ]);
 
     const entries = buildProjectTimeline({
@@ -529,6 +545,33 @@ export class FounderCopilotService {
       commits: commits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
       buildPosts,
       founderUpdates,
+      decisions: decisionLog.map((d) => ({
+        id: d.id,
+        decision: d.decision,
+        date: d.date,
+      })),
+      paperTrades: paperTrades.map((t) => ({
+        id: t.id,
+        side: String(t.side),
+        ticker: t.project.ticker,
+        totalUsd: Number(t.totalUsd),
+        at: t.createdAt.toISOString(),
+      })),
+      listings: (
+        await this.prisma.founderEvent.findMany({
+          where: {
+            founderId: founder.id,
+            type: FounderEventType.RAISE_ALLOCATION,
+            createdAt: { gte: since },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        })
+      ).map((e) => ({
+        id: e.id,
+        title: e.title,
+        at: e.createdAt.toISOString(),
+      })),
     });
 
     return {
@@ -599,7 +642,7 @@ export class FounderCopilotService {
   }
 
   private async assembleBrainContextExtras(userId: string, repo: string | null) {
-    const [timelineRes, deployRes, desktopLatest, decisionLog, market] = await Promise.all([
+    const [timelineRes, deployRes, desktopLatest, decisionLog, market, commits] = await Promise.all([
       this.getProjectTimelineForUser(userId, 30).catch(() => ({
         entries: [] as ProjectTimelineEntry[],
       })),
@@ -609,7 +652,12 @@ export class FounderCopilotService {
       this.desktopBridge.getLatest(userId),
       this.getDecisionLog(userId),
       this.getMarketIntelligenceForUser(userId).catch(() => null),
+      repo ? this.github.listCommits(userId, repo, 25).catch(() => []) : Promise.resolve([]),
     ]);
+
+    const outcomeIntelligenceExcerpt = formatOutcomeIntelligenceExcerpt(
+      commits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
+    );
 
     return {
       timelineExcerpt: formatProjectTimelineExcerpt(timelineRes.entries, 14),
@@ -617,6 +665,7 @@ export class FounderCopilotService {
       desktopBridgeBlock: formatDesktopBridgeForPrompt(desktopLatest),
       decisionLogExcerpt: formatDecisionLogExcerpt(decisionLog, 8),
       marketIntelligenceExcerpt: market ? formatMarketIntelligenceForPrompt(market) : null,
+      outcomeIntelligenceExcerpt,
     };
   }
 
@@ -810,6 +859,107 @@ export class FounderCopilotService {
       missionIntelligence,
       memory,
     };
+  }
+
+  /** Sprint H1 — live Chief of Staff nudges while Mission Control is open. */
+  async getChiefOfStaffNudges(userId: string) {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { where: { approved: true }, take: 1 } },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+
+    const memory = await this.getProjectMemory(userId);
+    const repo = memory.repoFullName;
+    const now = Date.now();
+    const dayAgo = new Date(now - 86400000);
+    const twoDaysAgo = new Date(now - 2 * 86400000);
+    const project = founder.projects[0];
+
+    const [deployEvents, pendingUpdates, openPrs, mergeEvents, expiringScouts, market, tradesYesterday] =
+      await Promise.all([
+        this.prisma.founderEvent.findMany({
+          where: {
+            founderId: founder.id,
+            type: FounderEventType.DEPLOY_SUCCESS,
+            createdAt: { gte: dayAgo },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        }),
+        this.prisma.suggestedBuildUpdate.findMany({
+          where: { founderId: founder.id, status: SuggestedUpdateStatus.PENDING },
+          take: 5,
+        }),
+        repo ? this.github.listPullRequests(userId, repo) : Promise.resolve([]),
+        this.prisma.founderEvent.findMany({
+          where: {
+            founderId: founder.id,
+            type: FounderEventType.GITHUB_PR_MERGED,
+            createdAt: { gte: dayAgo },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 3,
+        }),
+        project
+          ? this.prisma.scoutMarket.findMany({
+              where: {
+                projectId: project.id,
+                status: ScoutMarketStatus.OPEN,
+                resolvesAt: { lte: new Date(now + 48 * 3600000) },
+              },
+              orderBy: { resolvesAt: 'asc' },
+              take: 3,
+            })
+          : Promise.resolve([]),
+        this.getMarketIntelligenceForUser(userId).catch(() => null),
+        this.prisma.paperTrade.count({
+          where: { userId, createdAt: { gte: twoDaysAgo, lt: dayAgo } },
+        }),
+      ]);
+
+    const pendingIds = new Set(pendingUpdates.map((u) => u.id));
+
+    const nudges = buildContinuousChiefOfStaffNudges({
+      recentDeploys: deployEvents.map((e) => {
+        const payload = e.payload as { suggestionId?: string } | null;
+        const sid = payload?.suggestionId;
+        return {
+          id: e.id,
+          title: e.title,
+          at: e.createdAt.toISOString(),
+          suggestionId: sid,
+          hasPendingPublish: sid ? pendingIds.has(sid) : pendingUpdates.length > 0,
+        };
+      }),
+      pendingPublishes: pendingUpdates.map((u) => ({ id: u.id, headline: u.headline })),
+      openPrs: openPrs
+        .filter((p) => p.state === 'open')
+        .map((p) => ({
+          number: p.number,
+          title: p.title,
+          createdAt: p.createdAt,
+        })),
+      recentMerges: mergeEvents
+        .map((e) => {
+          const m = /#(\d+)/.exec(e.title);
+          return {
+            number: m ? Number(m[1]) : 0,
+            title: e.title,
+            at: e.createdAt.toISOString(),
+          };
+        })
+        .filter((m) => m.number > 0),
+      expiringScouts: expiringScouts.map((s) => ({
+        id: s.id,
+        question: s.question,
+        resolvesAt: s.resolvesAt?.toISOString() ?? new Date(now + 86400000).toISOString(),
+      })),
+      market,
+      tradesYesterday,
+    });
+
+    return { nudges };
   }
 
   async askContinueFromMissionState(userId: string) {
