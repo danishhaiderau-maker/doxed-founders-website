@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DISCOVER_RECENTLY_LISTED_FILTER_LABEL,
   DISCOVER_UNIVERSE_COLORS,
@@ -42,6 +42,8 @@ export function DiscoverUniverseMap({
 }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ w: 960, h: 560 });
+  const [offsets, setOffsets] = useState<Record<string, { x: number; y: number }>>({});
+  const [draggingSlug, setDraggingSlug] = useState<string | null>(null);
 
   useEffect(() => {
     const el = canvasRef.current;
@@ -57,10 +59,40 @@ export function DiscoverUniverseMap({
     return () => ro.disconnect();
   }, []);
 
+  const visibleProjects = useMemo(() => projects.slice(0, 24), [projects]);
+
   const positions = useMemo(
-    () => layoutBubblePositions(Math.min(projects.length, 24), dims.w, dims.h),
-    [projects.length, dims.w, dims.h],
+    () => layoutBubblePositions(visibleProjects.length, dims.w, dims.h),
+    [visibleProjects.length, dims.w, dims.h],
   );
+
+  const layoutKey = useMemo(
+    () =>
+      `${visibleProjects.map((p) => p.slug).join('|')}:${dims.w}x${dims.h}:${stageFilter}:${chainSlug}:${timeframe}`,
+    [visibleProjects, dims.w, dims.h, stageFilter, chainSlug, timeframe],
+  );
+
+  useEffect(() => {
+    setOffsets({});
+    setDraggingSlug(null);
+  }, [layoutKey]);
+
+  const hasCustomLayout = useMemo(
+    () => Object.values(offsets).some((o) => Math.abs(o.x) > 1 || Math.abs(o.y) > 1),
+    [offsets],
+  );
+
+  const handleDragEnd = useCallback((slug: string, delta: { x: number; y: number }) => {
+    setDraggingSlug(null);
+    if (delta.x === 0 && delta.y === 0) return;
+    setOffsets((prev) => ({
+      ...prev,
+      [slug]: {
+        x: (prev[slug]?.x ?? 0) + delta.x,
+        y: (prev[slug]?.y ?? 0) + delta.y,
+      },
+    }));
+  }, []);
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#030308]">
@@ -143,22 +175,46 @@ export function DiscoverUniverseMap({
           tab = listed ≤14d (ring still follows stage)
         </span>
         <span className="text-zinc-600">· badge = activity score (0–100)</span>
+        <span className="flex items-center gap-1.5 text-sky-400/80">
+          <span aria-hidden className="text-[11px]">
+            ✥
+          </span>
+          drag bubbles apart to explore
+        </span>
+        {hasCustomLayout && (
+          <button
+            type="button"
+            onClick={() => setOffsets({})}
+            className="rounded-md border border-zinc-700/80 px-2 py-0.5 text-[10px] text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
+          >
+            Reset layout
+          </button>
+        )}
       </div>
 
       {/* Bubble canvas */}
-      <div ref={canvasRef} className="relative w-full" style={{ height: dims.h }}>
-        {projects.length === 0 ? (
+      <div
+        ref={canvasRef}
+        className="relative w-full select-none"
+        style={{ height: dims.h, touchAction: 'none' }}
+      >
+        {visibleProjects.length === 0 ? (
           <p className="flex h-full items-center justify-center text-sm text-zinc-500">
             No projects match these filters
           </p>
         ) : (
-          projects.slice(0, 24).map((p, i) => (
+          visibleProjects.map((p, i) => (
             <DiscoverUniverseBubble
               key={p.slug}
               project={p}
               x={positions[i]?.x ?? dims.w / 2}
               y={positions[i]?.y ?? dims.h / 2}
               index={i}
+              offset={offsets[p.slug] ?? { x: 0, y: 0 }}
+              canvasRef={canvasRef}
+              isDragging={draggingSlug === p.slug}
+              onDragStart={() => setDraggingSlug(p.slug)}
+              onDragEnd={(delta) => handleDragEnd(p.slug, delta)}
             />
           ))
         )}
