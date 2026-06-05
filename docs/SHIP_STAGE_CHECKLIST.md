@@ -15,11 +15,15 @@ Use after Mission Control Ask/Resume/Build routing is validated.
 - [ ] Confirm posts visible on **Feed** / **Social Hub** / X in browser (hard refresh).
 - [ ] Optional: merge any *new* PRs from Founder queue.
 
-## C — Android vault (validation) ← next after B
+## C — Android vault (validation) ← **current stage**
 
-- [ ] Install APK v0.3.0 on a physical device.
-- [ ] Pair Founder Node / vault; trigger pull + merge from production API.
-- [ ] Confirm conflict behavior and that private notes stay off Neon.
+See **[STAGE_C_ANDROID_VAULT.md](./STAGE_C_ANDROID_VAULT.md)**.
+
+- [ ] Run `npm run stage-c:probe` (server privacy check).
+- [ ] Install APK **v0.4.0** from https://doxxedcrypto.digital/mobile on a physical device.
+- [ ] Pair with **Code for Android** (Settings → Founder Node).
+- [ ] Pull + merge vault on device; confirm `lastSyncAt` updates.
+- [ ] Confirm private note bodies stay off Neon (probe + Resume copy).
 
 ## D — Daily use
 
