@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(stage-b): automate founder publish + update ship checklist
+feat(discover): make universe bubbles draggable to reveal overlaps
 
 ## Last Activity
 
