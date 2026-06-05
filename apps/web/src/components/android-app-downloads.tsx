@@ -1,6 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import {
+  ANDROID_APK_MIN_VERSION,
+  ANDROID_APK_OPTIMAL,
+  ANDROID_APK_RECOMMENDED,
+  ANDROID_PLAY_PROTECT_NOTE,
+} from '@/lib/android-app-requirements';
 
 const REPO = 'danishhaiderau-maker/doxed-founders-website';
 const SITE_APK = '/downloads/doxxedcrypto-android.apk';
@@ -33,7 +39,7 @@ function detectMobileOs(): 'android' | 'ios' | 'desktop' {
 
 export function AndroidAppDownloads({ variant = 'default', showInstallGuide = false }: Props) {
   const [githubApkUrl, setGithubApkUrl] = useState<string | null>(null);
-  const [releaseVersion, setReleaseVersion] = useState<string>('0.4.1');
+  const [releaseVersion, setReleaseVersion] = useState<string>('0.4.2');
   const [loading, setLoading] = useState(true);
 
   const mobileOs = useMemo(() => detectMobileOs(), []);
@@ -65,12 +71,47 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
         ? 'inline-flex flex-col rounded-xl border border-emerald-500/50 bg-emerald-950/35 px-5 py-2.5 text-sm font-semibold text-emerald-50 shadow-lg shadow-emerald-950/30 hover:bg-emerald-900/40'
         : 'inline-flex w-full max-w-md items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500 sm:w-auto';
 
+  const requirementsBlock = (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-4 text-xs text-zinc-300">
+      <p className="font-semibold text-white">Supported Android versions</p>
+      <ul className="mt-2 list-disc space-y-1 pl-4 text-zinc-400">
+        <li>
+          <strong className="text-zinc-200">Minimum:</strong> {ANDROID_APK_MIN_VERSION}
+        </li>
+        <li>
+          <strong className="text-zinc-200">Recommended:</strong> {ANDROID_APK_RECOMMENDED}
+        </li>
+        <li>
+          <strong className="text-zinc-200">Best experience:</strong> {ANDROID_APK_OPTIMAL} (e.g. Pixel 8)
+        </li>
+      </ul>
+    </div>
+  );
+
+  const playProtectBlock = (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-4 text-xs text-amber-100/90">
+      <p className="font-semibold text-amber-100">Google Play Protect (Pixel / Samsung)</p>
+      <p className="mt-2 leading-relaxed text-amber-100/85">{ANDROID_PLAY_PROTECT_NOTE}</p>
+      <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-amber-100/80">
+        <li>After download, open the APK → if blocked, tap <strong className="text-white">More details</strong>.</li>
+        <li>
+          Tap <strong className="text-white">Install anyway</strong> (v0.4.2+ uses release signing, not debug).
+        </li>
+        <li>
+          If enrolled in <strong className="text-white">Advanced Protection</strong>, Android may block all sideloads —
+          use <a href="https://doxxedcrypto.digital/discover" className="underline">Chrome</a> instead until Play Store
+          testing opens.
+        </li>
+      </ol>
+    </div>
+  );
+
   if (variant === 'landing-cta') {
     return (
       <a href={primaryHref} download className={primaryClass}>
         Download Android APK
         <span className="mt-0.5 block text-[10px] font-normal text-emerald-200/70">
-          v{releaseVersion} · Discover &amp; trading on phone
+          v{releaseVersion} · {ANDROID_APK_RECOMMENDED}
         </span>
       </a>
     );
@@ -80,7 +121,7 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
     <div className="space-y-4">
       {mobileOs === 'android' && (
         <p className="rounded-lg border border-emerald-500/30 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-100">
-          Android detected — tap below to install the Doxxed Crypto app.
+          Android detected — tap below to install. Works on Pixel 8 and most phones on {ANDROID_APK_RECOMMENDED}.
         </p>
       )}
       {mobileOs === 'ios' && (
@@ -96,6 +137,12 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
       <a href={primaryHref} download className={primaryClass}>
         Download Android app (.apk) — v{releaseVersion}
       </a>
+      <p className="text-xs text-zinc-500">
+        Supports {ANDROID_APK_MIN_VERSION} · recommended {ANDROID_APK_RECOMMENDED} · best on {ANDROID_APK_OPTIMAL}
+      </p>
+
+      {requirementsBlock}
+      {playProtectBlock}
 
       <div className="flex flex-wrap gap-3">
         <a
@@ -117,26 +164,25 @@ export function AndroidAppDownloads({ variant = 'default', showInstallGuide = fa
       <p className="text-xs text-zinc-500">
         {loading
           ? 'Checking GitHub release…'
-          : `~4 MB WebView shell — full platform loads online after install. Debug build; enable “Install unknown apps” if prompted.`}
+          : `~4 MB WebView shell — release-signed APK; full platform loads online after install.`}
       </p>
 
       {showInstallGuide && (
         <div className="rounded-lg border border-emerald-500/25 bg-emerald-950/15 p-4">
           <p className="text-sm font-medium text-emerald-100">Install on Android</p>
           <ol className="mt-3 list-decimal space-y-2 pl-5 text-xs text-zinc-300">
-            <li>Download the APK using the button above (same file hosts on this site and GitHub releases).</li>
+            <li>Download the APK using the button above (same file on this site and GitHub releases).</li>
             <li>
-              Open the file → allow install from this source if Android asks (
-              <strong className="text-white">Settings → Security → Unknown apps</strong>).
+              Open the file → allow install from this source if prompted (
+              <strong className="text-white">Settings → Apps → Special access → Install unknown apps</strong>).
             </li>
             <li>
-              <strong className="text-white">Android 8+ recommended.</strong> On Android 6–7, update{' '}
-              <strong className="text-white">Android System WebView</strong> and Chrome from Play Store first.
+              If Play Protect appears, follow the amber box above — <strong className="text-white">Install anyway</strong>.
             </li>
-            <li>Launch <strong className="text-white">Doxxed Crypto</strong> — opens Discover, trading, agents, and Founder OS.</li>
+            <li>Launch <strong className="text-white">Doxxed Crypto</strong> — Discover, trading, agents, Founder OS.</li>
             <li>
-              Sign in for Mission Control. For <strong className="text-white">private vault</strong>, pair{' '}
-              <strong className="text-white">Founder Node on PC</strong> and use <strong className="text-white">Code for Android</strong> in settings.
+              For <strong className="text-white">private vault</strong>, pair Founder Node on PC and use{' '}
+              <strong className="text-white">Code for Android</strong> in settings.
             </li>
           </ol>
           <p className="mt-3 text-[11px] text-zinc-500">

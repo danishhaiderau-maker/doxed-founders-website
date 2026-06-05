@@ -41,6 +41,10 @@ jobs:
       - name: Build Android APK
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: node scripts/pack-android-app.mjs
 
       - name: Upload APK artifact

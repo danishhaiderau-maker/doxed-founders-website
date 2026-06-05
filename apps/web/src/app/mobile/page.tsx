@@ -76,18 +76,21 @@ export default function MobileDownloadPage() {
         </section>
 
         <section className="rounded-2xl border border-amber-500/25 bg-amber-950/15 p-6 text-sm text-zinc-300">
-          <h2 className="text-base font-semibold text-amber-100">Phone requirements</h2>
+          <h2 className="text-base font-semibold text-amber-100">Phone requirements &amp; Play Protect</h2>
           <ul className="mt-3 list-disc space-y-2 pl-5 text-zinc-400">
             <li>
-              <strong className="text-white">Recommended: Android 8+</strong> with an up-to-date{' '}
-              <strong className="text-white">Android System WebView</strong> (update via Play Store).
+              <strong className="text-white">Minimum:</strong> Android 7.0 (API 23) ·{' '}
+              <strong className="text-white">Recommended:</strong> Android 8.0+ ·{' '}
+              <strong className="text-white">Best:</strong> Android 10+ (Pixel 8, Samsung, etc.)
             </li>
             <li>
-              <strong className="text-white">Android 6–7:</strong> often shows a <strong className="text-white">white screen</strong>{' '}
-              unless WebView and Chrome are updated. The app now shows setup steps instead of a blank page (v0.4.1+).
+              <strong className="text-white">Play Protect / Pixel:</strong> v0.4.2+ is <strong className="text-white">release-signed</strong>.
+              If blocked, tap <strong className="text-white">More details → Install anyway</strong>. Advanced Protection may
+              block sideloads entirely — use Chrome at doxxedcrypto.digital.
             </li>
             <li>
-              The APK loads our live website — it needs a modern browser engine (Chrome 80+), not only an old OS install.
+              <strong className="text-white">Android 6–7:</strong> update Android System WebView from Play Store; white screen
+              otherwise.
             </li>
           </ul>
         </section>
