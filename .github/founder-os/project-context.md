@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-Update site APK to v0.4.2 release-signed build.
+feat(founder-os): connection hub top, explicit Ask/Build actions, Ollama content
 
 ## Last Activity
 
-Just now
+12h ago
