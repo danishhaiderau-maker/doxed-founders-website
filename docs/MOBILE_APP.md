@@ -14,6 +14,8 @@ The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypt
 
 Build locally: `npm run pack:android` (writes `apps/web/public/downloads/doxxedcrypto-android.apk`).
 
+**v0.4.1+:** Local **compat gate** on launch — old WebView (common on **Android 6**) gets setup steps instead of a white screen. **Recommended: Android 8+** with updated **Android System WebView** (Play Store).
+
 **v0.4.0+:** On-device `FounderVault/` + **bidirectional merge** with desktop (LWW patches for goals/tasks/roadmap). Pair with **Code for Android** in Settings. APK stays ~4 MB; full site + vault sync after login.
 
 **Roadmap (PC↔phone merge):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)

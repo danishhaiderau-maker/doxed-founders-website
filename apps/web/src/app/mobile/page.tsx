@@ -75,6 +75,23 @@ export default function MobileDownloadPage() {
           </p>
         </section>
 
+        <section className="rounded-2xl border border-amber-500/25 bg-amber-950/15 p-6 text-sm text-zinc-300">
+          <h2 className="text-base font-semibold text-amber-100">Phone requirements</h2>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-zinc-400">
+            <li>
+              <strong className="text-white">Recommended: Android 8+</strong> with an up-to-date{' '}
+              <strong className="text-white">Android System WebView</strong> (update via Play Store).
+            </li>
+            <li>
+              <strong className="text-white">Android 6–7:</strong> often shows a <strong className="text-white">white screen</strong>{' '}
+              unless WebView and Chrome are updated. The app now shows setup steps instead of a blank page (v0.4.1+).
+            </li>
+            <li>
+              The APK loads our live website — it needs a modern browser engine (Chrome 80+), not only an old OS install.
+            </li>
+          </ul>
+        </section>
+
         <section className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-6 text-sm text-zinc-400">
           <h2 className="text-base font-semibold text-white">What the Android app includes today</h2>
           <ul className="mt-3 list-disc space-y-1 pl-5">
