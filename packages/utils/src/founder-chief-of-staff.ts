@@ -39,6 +39,20 @@ function hoursUntil(iso: string, now: number): number {
   return (new Date(iso).getTime() - now) / 3600000;
 }
 
+function dedupePendingPublishes(
+  items: ContinuousNudgeInput['pendingPublishes'],
+): ContinuousNudgeInput['pendingPublishes'] {
+  const seen = new Set<string>();
+  const out: ContinuousNudgeInput['pendingPublishes'] = [];
+  for (const item of items) {
+    const key = item.headline.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 /** Event-driven nudges — poll while Mission Control is open. */
 export function buildContinuousChiefOfStaffNudges(input: ContinuousNudgeInput): ChiefOfStaffNudge[] {
   const now = input.now ?? Date.now();
@@ -59,9 +73,10 @@ export function buildContinuousChiefOfStaffNudges(input: ContinuousNudgeInput): 
     });
   }
 
-  for (const p of input.pendingPublishes.slice(0, 3)) {
+  for (const p of dedupePendingPublishes(input.pendingPublishes).slice(0, 3)) {
+    const headlineKey = p.headline.trim().toLowerCase().slice(0, 80);
     nudges.push({
-      id: `publish-ready-${p.id}`,
+      id: `publish-ready-${headlineKey}`,
       kind: 'publish_ready',
       urgencyScore: 70,
       message: `Publish draft ready: **${p.headline.slice(0, 72)}**. Ship to Feed, X, and community?`,

@@ -29,6 +29,9 @@ type SpeechRecognitionEventLike = {
 
 export type VoiceInputPhase = 'idle' | 'starting' | 'listening';
 
+const MAX_RECOGNITION_RESTARTS = 8;
+const RESTART_DELAY_MS = 350;
+
 function getSpeechRecognition(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
   const w = window as Window & {
@@ -56,12 +59,9 @@ function voiceErrorMessage(code: string): string {
   }
 }
 
-function releaseStream(stream: MediaStream | null) {
-  if (!stream) return;
-  for (const track of stream.getTracks()) track.stop();
-}
-
-/** Keeps mic open until user toggles off — restarts recognition with a fresh instance on browser auto-end. */
+/**
+ * Chrome Web Speech API already opens the mic — do not also call getUserMedia (dual capture crashes tabs).
+ */
 export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => void) {
   const [phase, setPhase] = useState<VoiceInputPhase>('idle');
   const [supported, setSupported] = useState(false);
@@ -72,80 +72,64 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   );
   const wantListeningRef = useRef(false);
   const transcriptBaseRef = useRef('');
-  const streamRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const restartCountRef = useRef(0);
+  const pulseRafRef = useRef<number | null>(null);
+  const onTranscriptRef = useRef(onTranscript);
+
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+  }, [onTranscript]);
 
   const listening = phase === 'listening';
   const starting = phase === 'starting';
 
-  const stopAudioMeter = useCallback(() => {
-    if (rafRef.current != null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
+  const stopPulse = useCallback(() => {
+    if (pulseRafRef.current != null) {
+      cancelAnimationFrame(pulseRafRef.current);
+      pulseRafRef.current = null;
     }
     setAudioLevel(0);
-    if (audioCtxRef.current) {
-      void audioCtxRef.current.close().catch(() => undefined);
-      audioCtxRef.current = null;
-    }
-    releaseStream(streamRef.current);
-    streamRef.current = null;
   }, []);
 
-  const startAudioMeter = useCallback(async () => {
-    stopAudioMeter();
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setVoiceError('Microphone API not available — use HTTPS and a modern browser.');
-      return false;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-      streamRef.current = stream;
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-
-      const tick = () => {
-        analyser.getByteFrequencyData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i] ?? 0;
-        const avg = sum / data.length / 255;
-        setAudioLevel((prev) => prev * 0.55 + avg * 0.45);
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      rafRef.current = requestAnimationFrame(tick);
-      return true;
-    } catch {
-      setVoiceError(
-        'Could not open microphone — click the lock icon in the address bar and allow mic access.',
-      );
-      return false;
-    }
-  }, [stopAudioMeter]);
+  const startPulse = useCallback(() => {
+    stopPulse();
+    let t0 = performance.now();
+    const tick = (now: number) => {
+      if (!wantListeningRef.current) {
+        stopPulse();
+        return;
+      }
+      const wave = 0.35 + 0.25 * Math.sin((now - t0) / 180);
+      setAudioLevel((prev) => prev * 0.6 + wave * 0.4);
+      pulseRafRef.current = requestAnimationFrame(tick);
+    };
+    pulseRafRef.current = requestAnimationFrame(tick);
+  }, [stopPulse]);
 
   useEffect(() => {
-    const hasSpeech = Boolean(getSpeechRecognition());
-    const hasMic =
-      typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
-    setSupported(hasSpeech && hasMic);
+    setSupported(Boolean(getSpeechRecognition()));
     return () => {
       wantListeningRef.current = false;
       recRef.current?.abort();
-      stopAudioMeter();
+      stopPulse();
     };
-  }, [stopAudioMeter]);
+  }, [stopPulse]);
 
   const markListening = useCallback(() => {
     setPhase('listening');
     setVoiceError(null);
-  }, []);
+    startPulse();
+  }, [startPulse]);
+
+  const stopRecognition = useCallback(() => {
+    wantListeningRef.current = false;
+    restartCountRef.current = 0;
+    recRef.current?.stop();
+    recRef.current?.abort();
+    recRef.current = null;
+    setPhase('idle');
+    stopPulse();
+  }, [stopPulse]);
 
   const startRecognition = useCallback(() => {
     const Ctor = getSpeechRecognition();
@@ -153,7 +137,15 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       setVoiceError('Speech-to-text is not supported — use Chrome or Edge on desktop.');
       wantListeningRef.current = false;
       setPhase('idle');
-      stopAudioMeter();
+      stopPulse();
+      return;
+    }
+
+    if (restartCountRef.current >= MAX_RECOGNITION_RESTARTS) {
+      setVoiceError('Voice session ended — tap the mic again to continue.');
+      wantListeningRef.current = false;
+      setPhase('idle');
+      stopPulse();
       return;
     }
 
@@ -163,7 +155,10 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     rec.interimResults = true;
     rec.lang = 'en-US';
 
-    rec.onstart = () => markListening();
+    rec.onstart = () => {
+      restartCountRef.current = 0;
+      markListening();
+    };
     rec.onspeechstart = () => markListening();
 
     rec.onresult = (ev) => {
@@ -177,9 +172,9 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       }
       if (finalChunk) {
         transcriptBaseRef.current = `${transcriptBaseRef.current} ${finalChunk}`.trim();
-        onTranscript(transcriptBaseRef.current, true);
+        onTranscriptRef.current(transcriptBaseRef.current, true);
       } else if (interim) {
-        onTranscript(`${transcriptBaseRef.current} ${interim}`.trim(), false);
+        onTranscriptRef.current(`${transcriptBaseRef.current} ${interim}`.trim(), false);
       }
     };
 
@@ -189,24 +184,28 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       if (
         ev.error === 'not-allowed' ||
         ev.error === 'service-not-allowed' ||
-        ev.error === 'audio-capture'
+        ev.error === 'audio-capture' ||
+        ev.error === 'network'
       ) {
-        wantListeningRef.current = false;
-        setPhase('idle');
-        stopAudioMeter();
+        stopRecognition();
       }
     };
 
     rec.onend = () => {
-      if (wantListeningRef.current) {
-        setPhase('starting');
-        window.setTimeout(() => {
-          if (wantListeningRef.current) startRecognition();
-        }, 200);
-      } else {
+      if (!wantListeningRef.current) {
         setPhase('idle');
-        stopAudioMeter();
+        stopPulse();
+        return;
       }
+      restartCountRef.current += 1;
+      if (restartCountRef.current >= MAX_RECOGNITION_RESTARTS) {
+        stopRecognition();
+        return;
+      }
+      setPhase('starting');
+      window.setTimeout(() => {
+        if (wantListeningRef.current) startRecognition();
+      }, RESTART_DELAY_MS);
     };
 
     recRef.current = rec;
@@ -214,41 +213,32 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       rec.start();
     } catch {
       setVoiceError('Could not start voice recognition — wait a moment and tap the mic again.');
-      setPhase('idle');
       wantListeningRef.current = false;
-      stopAudioMeter();
+      setPhase('idle');
+      stopPulse();
     }
-  }, [markListening, onTranscript, stopAudioMeter]);
+  }, [markListening, stopPulse, stopRecognition]);
 
   const start = useCallback(
-    async (existingText = '') => {
+    (existingText = '') => {
       setVoiceError(null);
       transcriptBaseRef.current = existingText.trim();
       wantListeningRef.current = true;
+      restartCountRef.current = 0;
       setPhase('starting');
-      const micOk = await startAudioMeter();
-      if (!micOk) {
-        wantListeningRef.current = false;
-        setPhase('idle');
-        return;
-      }
       startRecognition();
     },
-    [startAudioMeter, startRecognition],
+    [startRecognition],
   );
 
   const stop = useCallback(() => {
-    wantListeningRef.current = false;
-    recRef.current?.stop();
-    recRef.current?.abort();
-    setPhase('idle');
-    stopAudioMeter();
-  }, [stopAudioMeter]);
+    stopRecognition();
+  }, [stopRecognition]);
 
   const toggle = useCallback(
     (existingText = '') => {
       if (phase !== 'idle') stop();
-      else void start(existingText);
+      else start(existingText);
     },
     [phase, start, stop],
   );
@@ -267,4 +257,4 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     stop,
     toggle,
   };
-}
+};

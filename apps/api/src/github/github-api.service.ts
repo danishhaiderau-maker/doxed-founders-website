@@ -283,6 +283,21 @@ export class GitHubApiService {
     files: { path: string; content: string }[],
     message: string,
   ): Promise<{ updated: number; skipped: number }> {
+    try {
+      return await this.upsertRepoFilesBatchOnce(userId, repo, files, message);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (!/fast forward/i.test(msg)) throw err;
+      return this.upsertRepoFilesBatchOnce(userId, repo, files, message);
+    }
+  }
+
+  private async upsertRepoFilesBatchOnce(
+    userId: string,
+    repo: string,
+    files: { path: string; content: string }[],
+    message: string,
+  ): Promise<{ updated: number; skipped: number }> {
     const pending: { path: string; content: string }[] = [];
     let skipped = 0;
 

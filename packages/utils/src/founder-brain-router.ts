@@ -58,8 +58,16 @@ export function classifyFounderBrainTask(prompt: string): FounderBrainTask {
 /** Strong signal that Ask should dispatch Builder Agent instead of an LLM. */
 export function shouldDispatchBuilderForCodeAsk(prompt: string, task: FounderBrainTask): boolean {
   if (isFounderRepoStatusPrompt(prompt)) return false;
+  if (isGitHistoryEditPrompt(prompt)) return false;
   if (task !== 'code') return false;
   return /\b(implement|fix|build|ship|refactor|add |create pr|write code|patch)\b/i.test(prompt);
+}
+
+/** Revert / undo requests need explicit build mode — not silent Cursor dispatch from Ask. */
+export function isGitHistoryEditPrompt(prompt: string): boolean {
+  return /\b(revert|remove|undo|drop|reset)\b.{0,48}\b(commit|changes|push|line|docs)\b/i.test(
+    prompt.trim(),
+  );
 }
 
 /** GitHub ground-truth questions — use Ask + commit intelligence, not Builder or Researcher workers. */

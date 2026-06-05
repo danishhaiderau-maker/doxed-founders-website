@@ -27,6 +27,8 @@ import {
   buildContinuousChiefOfStaffNudges,
   formatMarketIntelligenceForPrompt,
   formatOutcomeIntelligenceExcerpt,
+  isFounderEventBriefNoise,
+  isFounderOsSyncNoiseCommit,
   type MarketIntelligenceSnapshot,
   type ChiefOfStaffNudge,
   buildMissingLinkNarrativeHints,
@@ -784,10 +786,16 @@ export class FounderCopilotService {
 
     const dayAgo = new Date(Date.now() - 86400000);
     const project = founder.projects?.[0];
-    const [yCommits, yDeploys, yEvents, missionIntelligence, queueRes, market, marketsCreated24h, scoutStakes24h] =
+    const [yCommitGroups, yDeploys, yEvents, missionIntelligence, queueRes, market, marketsCreated24h, scoutStakes24h] =
       await Promise.all([
-        this.prisma.founderEvent.count({
-          where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: dayAgo } },
+        this.prisma.founderEvent.groupBy({
+          by: ['dedupeKey'],
+          where: {
+            founderId: founder.id,
+            type: FounderEventType.GITHUB_COMMIT,
+            createdAt: { gte: dayAgo },
+            dedupeKey: { not: null },
+          },
         }),
         this.prisma.founderEvent.count({
           where: { founderId: founder.id, type: FounderEventType.DEPLOY_SUCCESS, createdAt: { gte: dayAgo } },
@@ -795,7 +803,8 @@ export class FounderCopilotService {
         this.prisma.founderEvent.findMany({
           where: { founderId: founder.id, createdAt: { gte: dayAgo } },
           orderBy: { createdAt: 'desc' },
-          take: 5,
+          take: 12,
+          select: { title: true, type: true },
         }),
         this.computeMissionIntelligenceForUser(userId).catch(() => null),
         this.commandCenter.getFounderQueue(userId).catch(() => ({ items: [] })),
@@ -815,9 +824,23 @@ export class FounderCopilotService {
           : Promise.resolve(0),
       ]);
 
+    const yCommits = yCommitGroups.length;
+
     const openTaskTitles = memory.openTasks.map((t) => t.title);
     const estimatedDays = Math.max(1, Math.ceil((100 - memory.progressPercent) / 25));
     const founderFirstName = (founder.user?.name ?? 'Founder').split(' ')[0] ?? 'Founder';
+
+    const briefHighlights = yEvents
+      .filter(
+        (e) =>
+          (e.type === FounderEventType.GITHUB_COMMIT ||
+            e.type === FounderEventType.DEPLOY_SUCCESS ||
+            e.type === FounderEventType.BUILD_PUBLISHED) &&
+          !isFounderEventBriefNoise(e.title) &&
+          !isFounderOsSyncNoiseCommit(e.title),
+      )
+      .map((e) => e.title)
+      .slice(0, 4);
 
     const brief = buildExecutiveBrief({
       founderFirstName,
@@ -825,7 +848,7 @@ export class FounderCopilotService {
       sinceYesterday: {
         commits: yCommits,
         deploys: yDeploys,
-        highlights: yEvents.map((e) => e.title),
+        highlights: briefHighlights,
         predictionMarketsCreated: marketsCreated24h,
         scoutStakes24h,
       },
@@ -842,7 +865,7 @@ export class FounderCopilotService {
       projectName: memory.project?.name ?? founder.name,
       yesterdayCommits: yCommits,
       yesterdayDeploys: yDeploys,
-      yesterdayHighlights: yEvents.map((e) => e.title),
+      yesterdayHighlights: briefHighlights,
       openTasks: openTaskTitles,
       suggestedNext: memory.suggestedNextStep,
       progressPercent: memory.progressPercent,
