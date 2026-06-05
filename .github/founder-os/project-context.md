@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: record audit bundle security scrub verification
+chore(founder-os): sync tasks
 
 ## Last Activity
 
