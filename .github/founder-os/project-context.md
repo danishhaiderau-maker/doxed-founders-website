@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+fix(web): run prisma generate before Vercel build
 
 ## Last Activity
 
