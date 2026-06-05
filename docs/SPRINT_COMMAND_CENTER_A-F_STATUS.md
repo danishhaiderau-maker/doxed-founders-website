@@ -1,11 +1,12 @@
-# Founder OS Command Center — Sprints A–F Status
+﻿# Founder OS Command Center — Sprints A–F Status
 
 **Date:** 2026-06-05  
-**Branch:** main (pushed after implementation)
+**Sprint commit:** `1e6f1ce` (Implement Founder OS Command Center sprints A through F)  
+**Branch:** `master`
 
 ## Summary
 
-All six sprints (A–F) implemented in one pass. Builds: `@dcf/utils`, `@dcf/api`, `@dcf/web` succeeded.
+All six sprints (A–F) implemented in one pass. Local builds: `@dcf/utils`, `@dcf/api`, `@dcf/web` succeeded.
 
 ## Per sprint
 
@@ -18,26 +19,36 @@ All six sprints (A–F) implemented in one pass. Builds: `@dcf/utils`, `@dcf/api
 | **E — Decision memory** | ✅ | `founder-decision-log.ts`, `GET/POST /copilot/decisions`, auto-detect in `ask()`, injected in context assembly |
 | **F — Desktop Bridge** | ✅ | Founder Node heartbeat sends branch + open file names + task; API `saveFromHeartbeat`; timeline + Brain context |
 
-## Build / deploy
+## Build / deploy (local audit 2026-06-05)
 
 | Step | Result |
 |------|--------|
 | `npm run build:utils` | ✅ |
 | `npm run build --workspace=@dcf/api` | ✅ |
 | `npm run build --workspace=@dcf/web` | ✅ |
-| `npm run build:api` (full + prisma generate) | ⚠️ EPERM on Prisma DLL (likely locked by running API) — tsc build OK |
-| `npm run sync:all` | See below |
+| `npm run build:api` (full + prisma generate) | ⚠️ EPERM on Prisma DLL if API process holds lock — Nest `tsc` build OK |
+| `npm run sync:all` | ✅ (see sync audit) |
 
-## Sync (post-push)
+## Sync audit (2026-06-05, automated)
 
-Run manually if automated sync fails without vault/secrets:
+| Target | Result |
+|--------|--------|
+| **GitHub** | ✅ `master` @ `5dba443` — fast-forwarded from `1e6f1ce`, clean tree, `origin/master` matched |
+| **Neon** | ✅ `db:push:neon` — schema already in sync with Prisma |
+| **Vercel** | ✅ Production deploy `dpl_96rBTvgNXHwNjzwZWRQz4T553ev5` → alias **https://doxxedcrypto.digital** |
+| **Railway** | ✅ Redeploy triggered: `doxed-founders-website` (API), `btc-conservative-agent` (bot) |
+| **Smoke** | ✅ `scripts/smoke-test.mjs` — all checks passed against production |
+
+**Notes (non-blocking):**
+
+- Neon step: local `prisma generate` EPERM (Windows DLL lock) — push succeeded.
+- Vercel: initial read reported missing `NEXT_PUBLIC_API_URL`; sync script set production env vars and deployed.
+- Showcase bot credentials: skipped (none saved in Admin).
 
 ```bash
+# Re-run full pipeline
 npm run sync:all
-npm run deploy:web
 ```
-
-**Expected blockers without local secrets:** Railway/Vercel env sync, production DB push — document only; no secrets committed.
 
 ## User testing checklist
 
@@ -54,4 +65,4 @@ npm run deploy:web
 - **Cursor / OpenHands API keys** in Settings → AI stack for live builds
 - **GitHub** repo linked for PR queue + grounded status
 - **Founder Node pairing** for full Desktop Bridge (optional)
-- **Production sync secrets** for `sync:all` / Railway / Vercel if not in local vault
+- **Showcase exchange credentials** in Admin if bot showcase is needed
