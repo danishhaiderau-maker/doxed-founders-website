@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-os): connection hub top, explicit Ask/Build actions, Ollama content
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
-12h ago
+Just now
