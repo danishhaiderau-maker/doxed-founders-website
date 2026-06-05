@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+docs: add scrubbed audit bundle download instructions for ChatGPT
 
 ## Last Activity
 
