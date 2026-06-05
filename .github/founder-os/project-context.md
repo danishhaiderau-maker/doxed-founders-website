@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Implement Founder OS Command Center sprints A through F.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
