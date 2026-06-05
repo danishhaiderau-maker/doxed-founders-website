@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Copy upload keystore into android dir for Gradle release signing.
 
 ## Last Activity
 
