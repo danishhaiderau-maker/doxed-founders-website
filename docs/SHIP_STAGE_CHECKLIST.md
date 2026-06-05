@@ -2,19 +2,20 @@
 
 Use after Mission Control Ask/Resume/Build routing is validated.
 
-## A — Ship (code + production)
+## A — Ship (code + production) ✓
 
-- [ ] **Close or replace PR #2** — branch is ~684 commits behind `master`; do not merge as-is. Hardening is on `master` (headers, batched memory sync, Cursor repo binding).
-- [ ] **Production deploy** — `npm run sync:all` (Neon, Railway API, Vercel).
-- [ ] **API header** — `curl -I` Railway `/api/health` should not return `X-Powered-By: Express`.
-- [ ] **ZAP** — run GitHub Action `Security ZAP Baseline` (workflow_dispatch) on `doxxedcrypto.digital`.
+- [x] **Close or replace PR #2** — closed; hardening on `master`.
+- [x] **Production deploy** — `npm run sync:all` (Neon, Railway API, Vercel).
+- [x] **API header** — Railway `/api/health` has no `X-Powered-By: Express`.
+- [x] **ZAP** — `Security ZAP Baseline` workflow_dispatch green (run 26975147426).
 
-## B — Publish (product)
+## B — Publish (product) ✓
 
-- [ ] Mission Control → **Attention** → **Publish** pending founder updates (feed / X / community).
-- [ ] Optional: merge any *new* PRs created after PR #2 cleanup.
+- [x] **Founder queue → Publish** — `npm run stage-b:publish` (2 updates → feed, X, community).
+- [ ] Confirm posts visible on **Feed** / **Social Hub** / X in browser (hard refresh).
+- [ ] Optional: merge any *new* PRs from Founder queue.
 
-## C — Android vault (validation)
+## C — Android vault (validation) ← next after B
 
 - [ ] Install APK v0.3.0 on a physical device.
 - [ ] Pair Founder Node / vault; trigger pull + merge from production API.
@@ -22,6 +23,6 @@ Use after Mission Control Ask/Resume/Build routing is validated.
 
 ## D — Daily use
 
-- **Ask** — status and “what am I working on?”
-- **Run build** — only when Cursor should edit the repo.
-- **Resume** — briefing only (no auto-Cursor).
+- **Resume** — GitHub + vault briefing (no auto-build).
+- **Ask [Ollama / DeepSeek / …]** — status and planning.
+- **Build with Cursor** — repo edits from chat.
