@@ -132,10 +132,78 @@ Please structure findings as:
 
 ---
 
+## Command Center audit (2026-06)
+
+Use this section when asking ChatGPT (or another reviewer) to audit the **Founder OS Command Center** work — Sprints A–F and follow-up proof/sync docs on `master`.
+
+### Shareable links (GitHub)
+
+| What | URL |
+|------|-----|
+| **Repository** | https://github.com/danishhaiderau-maker/doxed-founders-website |
+| **Latest `master`** | https://github.com/danishhaiderau-maker/doxed-founders-website/commit/f9229fd |
+| **Sprint A–F implementation** | https://github.com/danishhaiderau-maker/doxed-founders-website/commit/1e6f1ce |
+| **Sprint + follow-up range** | https://github.com/danishhaiderau-maker/doxed-founders-website/compare/1e6f1ce^...f9229fd |
+| **Sync audit record** | https://github.com/danishhaiderau-maker/doxed-founders-website/commit/d52bd89 |
+| **This audit guide** | https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/AUDIT_FOR_CHATGPT.md |
+| **Proof pack** | https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_COMMAND_CENTER_PROOF.md |
+| **Architecture** | https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_COMMAND_CENTER_ARCHITECTURE.md |
+| **Sprint A–F status** | https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/SPRINT_COMMAND_CENTER_A-F_STATUS.md |
+| **North star** | https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_NORTH_STAR.md |
+
+**Full code audit (recommended):** run `npm run audit:export` from repo root, zip `../doxedcryptofounder-audit/`, and attach `AUDIT_SCOPE.txt` plus the proof pack link above. The export excludes `.env*`, `scripts/`, and ops-only paths by design.
+
+### What changed in Sprints A–F
+
+Commit `1e6f1ce` transformed Founder OS from a status dashboard into a **founder operating system** in one pass. **Sprint A** removed Ask/Build and provider pickers so a single Founder Brain auto-routes intent (`founder-brain-router.ts`, hero chat). **Sprint B** added a computed CEO inbox with buckets — Needs Attention, Review, Approval, Publishing, Deployment, Decision — via `GET /copilot/founder-queue`. **Sprint C** made Agent Runtime own builds: `agentRuns.start` on Cursor dispatch, in-chat step streaming, and `AGENT_REVIEW` queue items with `sourceRunId`. **Sprint D** shipped Agent Bus v1 (research→build, build→content handoffs with dedupe) plus control actions (merge PR, publish, sync) from Mission Control. **Sprint E** added decision memory — journal entries auto-detected in chat and injected into Brain context. **Sprint F** added Desktop Bridge metadata (branch, open file names, task label) from Founder Node heartbeat without syncing file contents. Production verification and the three acceptance tests (dashboard / command center / OS) are documented in the proof pack.
+
+### Suggested ChatGPT prompt (paste as-is)
+
+```text
+You are auditing the Founder OS Command Center for DoxxedCrypto.digital — a NestJS + Next.js monorepo. No secrets are included; do not ask for .env values.
+
+Start with these docs (read in order):
+1. https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_COMMAND_CENTER_PROOF.md
+2. https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_COMMAND_CENTER_ARCHITECTURE.md
+3. https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/SPRINT_COMMAND_CENTER_A-F_STATUS.md
+4. https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/AUDIT_FOR_CHATGPT.md
+
+Primary code change: commit 1e6f1ce (Sprints A–F). Compare range for follow-ups: 1e6f1ce^...f9229fd.
+
+Focus areas:
+- Intent routing and single-Brain UX (packages/utils/src/founder-brain-router.ts, apps/web founder-copilot-chat)
+- CEO inbox derivation and bucket semantics (packages/utils/src/founder-queue.ts)
+- Agent Runtime + builder step streaming (apps/web/src/lib/builder-run-live.ts, founder-copilot.service.ts)
+- Agent Bus handoffs and dedupe (packages/utils/src/agent-bus.ts, founder-command-center.service.ts)
+- Decision journal privacy and context injection (packages/utils/src/founder-decision-log.ts)
+- Desktop Bridge — confirm only metadata, no file contents (apps/founder-node, events.controller heartbeat)
+- Auth on /copilot/* routes; webhook and control-action guards
+
+Run the three acceptance tests from the proof pack conceptually: (1) dashboard fail — task title only, (2) command center pass — initiative + outcomes + blocker + queue, (3) OS pass — research→build→content without leaving the tab.
+
+Structure findings as: Severity | Location (file + route/function) | Issue | Recommendation | False positive note.
+
+If I attach a zip from npm run audit:export, scope your review to AUDIT_SCOPE.txt and the paths listed in AUDIT_FOR_CHATGPT.md.
+```
+
+### Command-center code map (quick reference)
+
+| Sprint | Key paths |
+|--------|-----------|
+| A — Brain | `packages/utils/src/founder-brain-router.ts`, `apps/web/src/components/founder-copilot-chat.tsx` |
+| B — CEO inbox | `packages/utils/src/founder-queue.ts`, `apps/web/src/components/founder-command-center-panels.tsx` |
+| C — Runtime | `apps/api/src/events/founder-copilot.service.ts`, `apps/web/src/lib/builder-run-live.ts` |
+| D — Agent Bus | `packages/utils/src/agent-bus.ts`, `apps/api/src/events/founder-command-center.service.ts` |
+| E — Decisions | `packages/utils/src/founder-decision-log.ts` |
+| F — Desktop Bridge | `apps/founder-node/src/sync-client.ts`, `apps/api/src/events/events.controller.ts` |
+
+---
+
 ## Document history
 
 | Date | Change |
 |------|--------|
 | 2026-06 | Initial auditable guide; aligns with paper session tokens, bot control secret, sync-metrics guard |
+| 2026-06 | Command Center audit section — Sprints A–F links, prompt, code map |
 
 For human-maintained security notes, see [FOUNDER_OS_AUDIT.md](./FOUNDER_OS_AUDIT.md).
