@@ -43,6 +43,7 @@ export type FounderBrainContextInput = {
   deployIntelligenceExcerpt?: string | null;
   desktopBridgeBlock?: string | null;
   decisionLogExcerpt?: string | null;
+  marketIntelligenceExcerpt?: string | null;
 };
 
 export function deriveMissionIntelligence(input: FounderBrainContextInput): MissionIntelligence {
@@ -229,6 +230,7 @@ export function formatFounderBrainContextForPrompt(
   }
   if (input.desktopBridgeBlock) sections.push('', input.desktopBridgeBlock);
   if (input.decisionLogExcerpt) sections.push('', input.decisionLogExcerpt);
+  if (input.marketIntelligenceExcerpt) sections.push('', input.marketIntelligenceExcerpt);
 
   sections.push(
     '',

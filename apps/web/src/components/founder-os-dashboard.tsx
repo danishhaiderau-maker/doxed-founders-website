@@ -29,6 +29,7 @@ import {
   fetchBuilderSettings,
   fetchBuilderWorkerStatus,
   fetchCopilotMemory,
+  fetchCopilotStandup,
   fetchMissionIntelligence,
   fetchFounderQueue,
   executeFounderQueueAction,
@@ -68,6 +69,8 @@ const COPILOT_CHIPS = [
   'Run platform autopilot sync',
 ];
 
+const EXECUTIVE_BRIEF_DATE_KEY = 'dcf-executive-brief-date-v1';
+
 export type FounderOsDashboardProps = {
   accessToken: string;
   dashboard: FounderDashboard | null;
@@ -106,6 +109,7 @@ export function FounderOsDashboardLayout({
   > | null>(null);
   const [quickPrompt, setQuickPrompt] = useState<string | null>(initialCopilotPrompt ?? null);
   const [resumeBriefing, setResumeBriefing] = useState<string | null>(null);
+  const [executiveBrief, setExecutiveBrief] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -204,6 +208,32 @@ export function FounderOsDashboardLayout({
   );
 
   const showMissionControl = activeTab === 'activity' && !tabContent;
+
+  useEffect(() => {
+    if (!showMissionControl) return;
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      if (sessionStorage.getItem(EXECUTIVE_BRIEF_DATE_KEY) === today) return;
+      const raw = sessionStorage.getItem('dcf-copilot-chat-v1');
+      if (raw && (JSON.parse(raw) as unknown[]).length > 0) return;
+    } catch {
+      /* ignore */
+    }
+
+    void fetchCopilotStandup(accessToken)
+      .then((res) => {
+        const text = res.brief?.trim() || res.standup?.trim();
+        if (!text) return;
+        setExecutiveBrief(text);
+        sessionStorage.setItem(EXECUTIVE_BRIEF_DATE_KEY, today);
+      })
+      .catch(() => {});
+  }, [showMissionControl, accessToken]);
+
+  const contentDraftReady = useMemo(
+    () => founderQueue.some((item) => item.kind === 'PUBLISH_UPDATE'),
+    [founderQueue],
+  );
 
   async function handleResumeWork() {
     setResumeBusy(true);
@@ -409,8 +439,13 @@ export function FounderOsDashboardLayout({
                     missionNextStep={displayNextStep}
                     defaultSendMode="ask"
                     initialPrompt={quickPrompt}
-                    seedAssistantMessage={resumeBriefing}
-                    onSeedAssistantConsumed={() => setResumeBriefing(null)}
+                    seedAssistantMessage={resumeBriefing ?? executiveBrief}
+                    onSeedAssistantConsumed={() => {
+                      setResumeBriefing(null);
+                      setExecutiveBrief(null);
+                    }}
+                    activeAgentRunActive={isAgentRunActive(activeAgentRun)}
+                    contentDraftReady={contentDraftReady}
                     agentTemplate={null}
                     onInitialPromptConsumed={() => {
                       setQuickPrompt(null);

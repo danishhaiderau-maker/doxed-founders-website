@@ -142,7 +142,14 @@ function QueueRow({
 
   const content = (
     <div className="min-w-0 flex-1">
-      <p className="truncate text-xs font-medium text-zinc-100">{item.title}</p>
+      <div className="flex items-center gap-2">
+        <p className="truncate text-xs font-medium text-zinc-100">{item.title}</p>
+        {(item.urgencyScore ?? 0) >= 75 && (
+          <span className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200">
+            Urgent
+          </span>
+        )}
+      </div>
       {item.detail && <p className="truncate text-[10px] text-zinc-600">{item.detail}</p>}
     </div>
   );

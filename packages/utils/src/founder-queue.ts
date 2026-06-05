@@ -60,6 +60,10 @@ export type FounderQueueItem = {
   /** Link to Agent Runtime run when applicable */
   sourceRunId?: string;
   createdAt?: string;
+  /** 0–100 — higher = act sooner (Sprint G scoring). */
+  urgencyScore?: number;
+  /** 0–100 — higher = more product impact. */
+  impactScore?: number;
 };
 
 export function getFounderQueueBucket(kind: FounderQueueItemKind): FounderQueueBucket {
@@ -107,6 +111,18 @@ export function groupFounderQueueByBucket(
   return buckets;
 }
 
+function fallbackUrgencyFromPriority(priority: number): number {
+  return Math.max(1, 110 - priority * 25);
+}
+
 export function sortFounderQueue(items: FounderQueueItem[]): FounderQueueItem[] {
-  return [...items].sort((a, b) => a.priority - b.priority || (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
+  return [...items].sort((a, b) => {
+    const ua = a.urgencyScore ?? fallbackUrgencyFromPriority(a.priority);
+    const ub = b.urgencyScore ?? fallbackUrgencyFromPriority(b.priority);
+    if (ub !== ua) return ub - ua;
+    const ia = a.impactScore ?? 50;
+    const ib = b.impactScore ?? 50;
+    if (ib !== ia) return ib - ia;
+    return a.priority - b.priority || (a.createdAt ?? '').localeCompare(b.createdAt ?? '');
+  });
 }

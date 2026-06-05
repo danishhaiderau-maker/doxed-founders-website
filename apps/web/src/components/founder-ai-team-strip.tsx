@@ -14,8 +14,34 @@ const STATUS_STYLES: Record<
   needs_setup: { dot: 'bg-amber-500/80', text: 'text-amber-200/90', border: 'border-amber-500/20' },
 };
 
-export function FounderAiTeamStrip({ agents }: { agents: AiTeamAgentCard[] }) {
+export function FounderAiTeamStrip({
+  agents,
+  compact = false,
+}: {
+  agents: AiTeamAgentCard[];
+  compact?: boolean;
+}) {
   const needsAny = agents.some((a) => a.status === 'needs_setup');
+
+  if (compact) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        {agents.map((agent) => {
+          const s = STATUS_STYLES[agent.status];
+          return (
+            <span
+              key={agent.id}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] ${s.border} ${s.text}`}
+              title={agent.role}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} aria-hidden />
+              {agent.label.replace(' Agent', '')}: {agent.statusLabel}
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">
