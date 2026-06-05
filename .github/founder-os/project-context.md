@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Founder OS / Mission Control (1 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
