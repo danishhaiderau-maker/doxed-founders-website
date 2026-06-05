@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(web): run prisma generate before Vercel build
+Auto-link Vercel project when .vercel is missing during sync.
 
 ## Last Activity
 
