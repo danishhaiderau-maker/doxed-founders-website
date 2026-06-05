@@ -95,3 +95,7 @@ scripts/run_sim.py
 
 # Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
 # Audit export (code-only): ../doxedcryptofounder-audit/
+
+# Large audit zips (regenerate locally)
+docs/exports/*.zip
+

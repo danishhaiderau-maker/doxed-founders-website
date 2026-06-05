@@ -57,6 +57,36 @@ Zip the audit folder and attach **`AUDIT_SCOPE.txt`** when asking ChatGPT or a h
 
 ---
 
+## Download bundle (scrubbed export)
+
+**Preferred for ChatGPT:** attach the **scrubbed** zip from `npm run audit:export` (excludes `.env*`, `scripts/`, ops paths). Do **not** use the full GitHub repo zip unless you accept a larger tree and more surface area.
+
+| Item | Value |
+|------|-------|
+| **Local zip (this machine)** | `c:\Users\user\Desktop\Final Bots\doxedcryptofounder\docs\exports\doxedcryptofounder-audit-2026-06-05.zip` |
+| **Size** | ~19.7 MB (20,654,231 bytes) |
+| **Generated from** | `../doxedcryptofounder-audit/` (sibling folder; includes `AUDIT_SCOPE.txt`) |
+| **GitHub direct zip** | Not committed (over ~10 MB); use local path or regenerate |
+
+**Regenerate:**
+
+```bash
+npm run audit:export
+```
+
+Then zip `../doxedcryptofounder-audit/` or save as `docs/exports/doxedcryptofounder-audit-YYYY-MM-DD.zip` (gitignored).
+
+**Attach to ChatGPT:**
+
+1. Upload the local zip above (or a freshly built zip).
+2. Paste the [suggested ChatGPT prompt](#suggested-chatgpt-paste-as-is) from the Command Center section (or the review checklist in this file).
+3. Optionally add doc links: [proof pack](https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/FOUNDER_OS_COMMAND_CENTER_PROOF.md), [this guide](https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/docs/AUDIT_FOR_CHATGPT.md).
+
+**Fallback (full repo, not scrubbed):** https://github.com/danishhaiderau-maker/doxed-founders-website/archive/refs/heads/master.zip — git-tracked files only; still **no** vault secrets, but **not** the same scope as `AUDIT_SCOPE.txt`.
+
+
+---
+
 ## Review checklist (suggested)
 
 ### 1. Authentication & authorization
@@ -204,6 +234,7 @@ If I attach a zip from npm run audit:export, scope your review to AUDIT_SCOPE.tx
 | Date | Change |
 |------|--------|
 | 2026-06 | Initial auditable guide; aligns with paper session tokens, bot control secret, sync-metrics guard |
+| 2026-06 | Download bundle section — local zip path, ChatGPT attach steps
 | 2026-06 | Command Center audit section — Sprints A–F links, prompt, code map |
 
 For human-maintained security notes, see [FOUNDER_OS_AUDIT.md](./FOUNDER_OS_AUDIT.md).
