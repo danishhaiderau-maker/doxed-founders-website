@@ -161,6 +161,11 @@ async function main() {
     process.exit(1);
   }
 
+  if (!existsSync(join(root, '.vercel', 'project.json'))) {
+    console.log('Vercel project not linked — linking doxed-founders-website…');
+    run('vercel link --yes --project doxed-founders-website');
+  }
+
   // Browser must use same-origin /api (Vercel rewrite → Railway). Remove legacy direct Railway URL.
   const rmPublicApi = spawnSync(
     'vercel',
