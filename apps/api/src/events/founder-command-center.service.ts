@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 import {
   countActionableQueueItems,
+  enrichFounderQueueItems,
   founderQueueToActionableAttention,
   isBuilderRunFailureStatus,
   isBuilderRunSuccessStatus,
@@ -110,6 +111,7 @@ export class FounderCommandCenterService {
           targetId: String(pr.number),
           href: pr.url,
           prompt: `Review PR #${pr.number} and suggest next steps`,
+          createdAt: pr.createdAt,
           sourceRunId: activeRun?.prUrl === pr.url ? activeRun.runId ?? undefined : undefined,
         });
       }
@@ -250,7 +252,7 @@ export class FounderCommandCenterService {
       });
     }
 
-    const sorted = sortFounderQueue(items);
+    const sorted = sortFounderQueue(enrichFounderQueueItems(items));
     return {
       items: sorted,
       count: countActionableQueueItems(sorted),

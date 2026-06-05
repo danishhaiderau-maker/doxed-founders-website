@@ -4435,7 +4435,14 @@ export function applyCopilotMemoryGraphAfterBuild(
 }
 
 export function fetchCopilotStandup(token: string) {
-  return apiFetch<{ standup: string; memory: ProjectMemory }>('/copilot/standup', undefined, token);
+  return apiFetch<{
+    standup: string;
+    brief: string;
+    nudges: string[];
+    market: import('@dcf/utils').MarketIntelligenceSnapshot | null;
+    missionIntelligence: MissionIntelligence | null;
+    memory: ProjectMemory;
+  }>('/copilot/standup', undefined, token);
 }
 
 export type CopilotMissionBuildResult = {

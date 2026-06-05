@@ -10,6 +10,7 @@ import {
   BuildQueueStatus,
   FounderEventType,
   RoadmapStatus,
+  ScoutMarketStatus,
   SimulatedRaiseStatus,
   SuggestedUpdateStatus,
 } from '@prisma/client';
@@ -21,6 +22,10 @@ import {
   PLATFORM_X_SHARE_FOOTER,
   filterCommitsSince,
   buildDailyStandup,
+  buildExecutiveBrief,
+  buildProactiveNudges,
+  formatMarketIntelligenceForPrompt,
+  type MarketIntelligenceSnapshot,
   buildMissingLinkNarrativeHints,
   buildResumeCursorPrompt,
   buildSocialDraftFounderAccountBlock,
@@ -594,7 +599,7 @@ export class FounderCopilotService {
   }
 
   private async assembleBrainContextExtras(userId: string, repo: string | null) {
-    const [timelineRes, deployRes, desktopLatest, decisionLog] = await Promise.all([
+    const [timelineRes, deployRes, desktopLatest, decisionLog, market] = await Promise.all([
       this.getProjectTimelineForUser(userId, 30).catch(() => ({
         entries: [] as ProjectTimelineEntry[],
       })),
@@ -603,6 +608,7 @@ export class FounderCopilotService {
       })),
       this.desktopBridge.getLatest(userId),
       this.getDecisionLog(userId),
+      this.getMarketIntelligenceForUser(userId).catch(() => null),
     ]);
 
     return {
@@ -610,6 +616,74 @@ export class FounderCopilotService {
       deployIntelligenceExcerpt: formatDeployIntelligenceExcerpt(deployRes.cards, 4),
       desktopBridgeBlock: formatDesktopBridgeForPrompt(desktopLatest),
       decisionLogExcerpt: formatDecisionLogExcerpt(decisionLog, 8),
+      marketIntelligenceExcerpt: market ? formatMarketIntelligenceForPrompt(market) : null,
+    };
+  }
+
+  /** Scout votes, DDollar flow, prediction markets — for Brain + Executive Brief. */
+  async getMarketIntelligenceForUser(userId: string): Promise<MarketIntelligenceSnapshot> {
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: { projects: { where: { approved: true }, take: 1 } },
+    });
+    const project = founder?.projects[0];
+    const dayAgo = new Date(Date.now() - 86400000);
+
+    const [paperPortfolio, paperTrades, scoutOpen, scoutExpiring, scoutStakes24h, marketsCreated24h, hotMarket] =
+      await Promise.all([
+        this.prisma.paperPortfolio.findUnique({
+          where: { userId },
+          select: { cashBalance: true },
+        }),
+        this.prisma.paperTrade.findMany({
+          where: { userId, createdAt: { gte: dayAgo } },
+          select: { totalUsd: true },
+        }),
+        project
+          ? this.prisma.scoutMarket.count({
+              where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
+            })
+          : Promise.resolve(0),
+        project
+          ? this.prisma.scoutMarket.findFirst({
+              where: {
+                projectId: project.id,
+                status: ScoutMarketStatus.OPEN,
+                resolvesAt: { lte: new Date(Date.now() + 48 * 3600000) },
+              },
+              orderBy: { resolvesAt: 'asc' },
+            })
+          : Promise.resolve(null),
+        project
+          ? this.prisma.scoutMarketPosition.count({
+              where: {
+                market: { projectId: project.id },
+                createdAt: { gte: dayAgo },
+              },
+            })
+          : Promise.resolve(0),
+        project
+          ? this.prisma.scoutMarket.count({
+              where: { projectId: project.id, createdAt: { gte: dayAgo } },
+            })
+          : Promise.resolve(0),
+        project
+          ? this.prisma.scoutMarket.findFirst({
+              where: { projectId: project.id, status: ScoutMarketStatus.OPEN },
+              orderBy: { yesPoolUsd: 'desc' },
+            })
+          : Promise.resolve(null),
+      ]);
+
+    return {
+      openScoutMarkets: scoutOpen,
+      expiringScoutQuestion: scoutExpiring?.question ?? null,
+      scoutStakes24h,
+      ddollarBalance: paperPortfolio ? Number(paperPortfolio.cashBalance) : null,
+      paperTrades24h: paperTrades.length,
+      paperVolume24hUsd: paperTrades.reduce((sum, t) => sum + Number(t.totalUsd), 0),
+      openPredictionMarkets: scoutOpen,
+      hotMarketQuestion: hotMarket?.question ?? null,
     };
   }
 
@@ -652,27 +726,67 @@ export class FounderCopilotService {
     const memory = await this.getProjectMemory(userId);
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
-      include: { user: { select: { name: true } } },
+      include: {
+        user: { select: { name: true } },
+        projects: { where: { approved: true }, take: 1 },
+      },
     });
     if (!founder) throw new ForbiddenException('Founder profile required');
 
     const dayAgo = new Date(Date.now() - 86400000);
-    const [yCommits, yDeploys, yEvents] = await Promise.all([
-      this.prisma.founderEvent.count({
-        where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: dayAgo } },
-      }),
-      this.prisma.founderEvent.count({
-        where: { founderId: founder.id, type: FounderEventType.DEPLOY_SUCCESS, createdAt: { gte: dayAgo } },
-      }),
-      this.prisma.founderEvent.findMany({
-        where: { founderId: founder.id, createdAt: { gte: dayAgo } },
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-      }),
-    ]);
+    const project = founder.projects?.[0];
+    const [yCommits, yDeploys, yEvents, missionIntelligence, queueRes, market, marketsCreated24h, scoutStakes24h] =
+      await Promise.all([
+        this.prisma.founderEvent.count({
+          where: { founderId: founder.id, type: FounderEventType.GITHUB_COMMIT, createdAt: { gte: dayAgo } },
+        }),
+        this.prisma.founderEvent.count({
+          where: { founderId: founder.id, type: FounderEventType.DEPLOY_SUCCESS, createdAt: { gte: dayAgo } },
+        }),
+        this.prisma.founderEvent.findMany({
+          where: { founderId: founder.id, createdAt: { gte: dayAgo } },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        }),
+        this.computeMissionIntelligenceForUser(userId).catch(() => null),
+        this.commandCenter.getFounderQueue(userId).catch(() => ({ items: [] })),
+        this.getMarketIntelligenceForUser(userId).catch(() => null),
+        project
+          ? this.prisma.scoutMarket.count({
+              where: { projectId: project.id, createdAt: { gte: dayAgo } },
+            })
+          : Promise.resolve(0),
+        project
+          ? this.prisma.scoutMarketPosition.count({
+              where: {
+                market: { projectId: project.id },
+                createdAt: { gte: dayAgo },
+              },
+            })
+          : Promise.resolve(0),
+      ]);
 
     const openTaskTitles = memory.openTasks.map((t) => t.title);
     const estimatedDays = Math.max(1, Math.ceil((100 - memory.progressPercent) / 25));
+    const founderFirstName = (founder.user?.name ?? 'Founder').split(' ')[0] ?? 'Founder';
+
+    const brief = buildExecutiveBrief({
+      founderFirstName,
+      projectName: memory.project?.name ?? founder.name,
+      sinceYesterday: {
+        commits: yCommits,
+        deploys: yDeploys,
+        highlights: yEvents.map((e) => e.title),
+        predictionMarketsCreated: marketsCreated24h,
+        scoutStakes24h,
+      },
+      missionIntelligence,
+      queueItems: queueRes.items,
+      market,
+      progressPercent: memory.progressPercent,
+      suggestedNext: memory.suggestedNextStep,
+      openTaskTitles,
+    });
 
     const standup = buildDailyStandup({
       founderName: founder.user?.name ?? 'Founder',
@@ -686,7 +800,16 @@ export class FounderCopilotService {
       estimatedDays,
     });
 
-    return { standup, memory };
+    const nudges = buildProactiveNudges(queueRes.items, missionIntelligence);
+
+    return {
+      standup,
+      brief,
+      nudges,
+      market,
+      missionIntelligence,
+      memory,
+    };
   }
 
   async askContinueFromMissionState(userId: string) {

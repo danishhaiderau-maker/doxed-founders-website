@@ -10,7 +10,13 @@ import { CredentialsCryptoService } from '../credentials/credentials-crypto.serv
 import { PrismaService } from '../prisma/prisma.service';
 
 export type GitHubCommit = { sha: string; message: string; date: string };
-export type GitHubPullRequest = { title: string; url: string; state: string; number: number };
+export type GitHubPullRequest = {
+  title: string;
+  url: string;
+  state: string;
+  number: number;
+  createdAt?: string;
+};
 export type GitHubIssueResult = { number: number; url: string; title: string };
 
 @Injectable()
@@ -217,12 +223,14 @@ export class GitHubApiService {
       title: string;
       html_url: string;
       state: string;
+      created_at?: string;
     }[];
     return data.map((pr) => ({
       number: pr.number,
       title: pr.title,
       url: pr.html_url,
       state: pr.state,
+      createdAt: pr.created_at ?? undefined,
     }));
   }
 

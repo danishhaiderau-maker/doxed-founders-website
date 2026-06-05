@@ -329,6 +329,10 @@ export type AiTeamAgentCard = {
 export function resolveAiTeamCards(
   stack: CopilotStackSummary,
   providers: ProviderRow[],
+  opts?: {
+    builderWorking?: boolean;
+    contentDraftReady?: boolean;
+  },
 ): AiTeamAgentCard[] {
   const researchConnected = providers.some(
     (p) =>
@@ -355,23 +359,23 @@ export function resolveAiTeamCards(
       label: 'Research Agent',
       role: 'Analysis · tokenomics · strategy',
       status: researchConnected ? 'ready' : 'needs_setup',
-      statusLabel: researchConnected ? 'Connected' : 'Connect LLM',
+      statusLabel: researchConnected ? 'Ready' : 'Connect LLM',
       providerLabel: researchConnected ? 'Founder Brain' : undefined,
     },
     {
       id: 'builder',
       label: 'Builder Agent',
       role: 'Code · PRs · fixes · deploy',
-      status: stack.canBuild ? 'ready' : 'needs_setup',
-      statusLabel: stack.canBuild ? 'Ready' : 'Connect in Settings',
+      status: opts?.builderWorking ? 'working' : stack.canBuild ? 'ready' : 'needs_setup',
+      statusLabel: opts?.builderWorking ? 'Working' : stack.canBuild ? 'Ready' : 'Connect in Settings',
       providerLabel: stack.canBuild ? 'Builder Agent' : undefined,
     },
     {
       id: 'content',
       label: 'Content Agent',
       role: 'Posts · docs · announcements',
-      status: contentConnected ? 'ready' : 'needs_setup',
-      statusLabel: contentConnected ? 'Ready' : 'Connect Claude/GPT',
+      status: opts?.contentDraftReady ? 'working' : contentConnected ? 'ready' : 'needs_setup',
+      statusLabel: opts?.contentDraftReady ? 'Draft ready' : contentConnected ? 'Ready' : 'Connect Claude/GPT',
     },
   ];
 }

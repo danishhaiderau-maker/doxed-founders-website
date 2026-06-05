@@ -108,6 +108,10 @@ type FounderCopilotChatProps = {
   seedAssistantMessage?: string | null;
   onSeedAssistantConsumed?: () => void;
   agentTemplate?: string | null;
+  /** Live builder run — shows Working on agent strip. */
+  activeAgentRunActive?: boolean;
+  /** Pending publish queue items — Content agent draft ready. */
+  contentDraftReady?: boolean;
 };
 
 const ASK_CHIPS = [
@@ -131,6 +135,8 @@ export function FounderCopilotChat({
   seedAssistantMessage,
   onSeedAssistantConsumed,
   agentTemplate,
+  activeAgentRunActive = false,
+  contentDraftReady = false,
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -190,7 +196,14 @@ export function FounderCopilotChat({
     return row ? shortProviderName(row) : stack.askLabel;
   }, [providers, activeChatProvider, stack.askLabel]);
 
-  const aiTeam = useMemo(() => resolveAiTeamCards(stack, providers), [stack, providers]);
+  const aiTeam = useMemo(
+    () =>
+      resolveAiTeamCards(stack, providers, {
+        builderWorking: activeAgentRunActive,
+        contentDraftReady,
+      }),
+    [stack, providers, activeAgentRunActive, contentDraftReady],
+  );
 
   const patchMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
@@ -736,6 +749,7 @@ export function FounderCopilotChat({
   useEffect(() => {
     const seed = seedAssistantMessage?.trim();
     if (!seed || consumedSeedRef.current === seed) return;
+    if (loadMessages().length > 0) return;
     consumedSeedRef.current = seed;
     const id = `seed-${Date.now()}`;
     const row: ChatMessage = { id, role: 'assistant', content: seed, provider: 'FOUNDER_BRAIN' };
@@ -807,6 +821,7 @@ export function FounderCopilotChat({
           )}
         </div>
         {!isHero && <FounderAiTeamStrip agents={aiTeam} />}
+        {isHero && <FounderAiTeamStrip agents={aiTeam} compact />}
       </header>
 
       {!isHero && workspaceStrip && (
