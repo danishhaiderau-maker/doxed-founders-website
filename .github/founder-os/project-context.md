@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: Founder OS command center proof pack
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
