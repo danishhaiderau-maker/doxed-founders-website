@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-docs: record autonomous sync audit (2026-06-05 pipeline).
+docs: Founder OS command center proof pack
 
 ## Last Activity
 
