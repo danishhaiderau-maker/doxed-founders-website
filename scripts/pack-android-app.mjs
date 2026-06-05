@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 /**
  * Build Doxxed Crypto Android APK (Capacitor WebView → doxxedcrypto.digital).
+ * Release-signed when vault/.env.android + keystore exist (Play Protect friendly).
  * Usage: node scripts/pack-android-app.mjs
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  ensureAndroidReleaseKeystore,
+  versionCodeFromSemver,
+  writeGradleKeystoreProperties,
+} from './lib/android-signing.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -79,10 +85,9 @@ function ensureLocalSdk() {
 }
 
 function run(cmd, cmdArgs, opts = {}) {
-  const useShell = opts.shell ?? process.platform === 'win32';
   const result = spawnSync(cmd, cmdArgs, {
     stdio: 'inherit',
-    shell: useShell,
+    shell: opts.shell ?? false,
     cwd: root,
     ...opts,
   });
@@ -133,6 +138,15 @@ function patchGradleJvmArgs() {
   }
 }
 
+function patchAppVersion() {
+  const gradlePath = path.join(androidDir, 'app/build.gradle');
+  let text = fs.readFileSync(gradlePath, 'utf8');
+  const code = versionCodeFromSemver(version);
+  text = text.replace(/versionCode\s+\d+/, `versionCode ${code}`);
+  text = text.replace(/versionName\s+"[^"]*"/, `versionName "${version}"`);
+  fs.writeFileSync(gradlePath, text);
+}
+
 prepareAssets();
 if (!process.env.JAVA_HOME) applyLocalSdkEnv();
 ensureLocalSdk();
@@ -141,6 +155,19 @@ run('npm', ['install'], { cwd: mobileDir });
 ensureAndroidProject();
 run('npx', ['cap', 'sync', 'android'], { cwd: mobileDir });
 patchGradleJvmArgs();
+patchAppVersion();
+
+let buildType = 'release';
+try {
+  const signing = ensureAndroidReleaseKeystore();
+  writeGradleKeystoreProperties(androidDir, signing);
+  console.log('Release signing configured (Play Protect–friendly build).');
+} catch (err) {
+  console.warn(
+    `Release signing unavailable (${err instanceof Error ? err.message : err}) — falling back to debug APK.`,
+  );
+  buildType = 'debug';
+}
 
 const gradlew =
   process.platform === 'win32'
@@ -154,10 +181,11 @@ if (!fs.existsSync(gradlew)) {
 fs.rmSync(releaseDir, { recursive: true, force: true });
 fs.mkdirSync(releaseDir, { recursive: true });
 
+const gradleTask = buildType === 'release' ? 'assembleRelease' : 'assembleDebug';
 if (process.platform === 'win32') {
-  run(`"${gradlew}"`, ['assembleDebug'], { cwd: androidDir, shell: true });
+  run(`"${gradlew}"`, [gradleTask], { cwd: androidDir, shell: true });
 } else {
-  run(gradlew, ['assembleDebug'], { cwd: androidDir });
+  run(gradlew, [gradleTask], { cwd: androidDir });
 }
 
 const built = findApk(path.join(androidDir, 'app/build/outputs/apk'));
@@ -166,11 +194,11 @@ if (!built) {
   process.exit(1);
 }
 
-const outName = `Doxxed-Crypto-${version}-android-debug.apk`;
+const outName = `Doxxed-Crypto-${version}-android-${buildType}.apk`;
 const releaseApk = path.join(releaseDir, outName);
 fs.copyFileSync(built, releaseApk);
 fs.mkdirSync(path.dirname(publicApk), { recursive: true });
 fs.copyFileSync(built, publicApk);
 
-console.log(`\nAPK: ${releaseApk}`);
+console.log(`\nAPK (${buildType}): ${releaseApk}`);
 console.log(`Landing download: ${publicApk}`);

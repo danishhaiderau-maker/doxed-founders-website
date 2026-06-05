@@ -14,7 +14,18 @@ The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypt
 
 Build locally: `npm run pack:android` (writes `apps/web/public/downloads/doxxedcrypto-android.apk`).
 
-**v0.4.1+:** Local **compat gate** on launch — old WebView (common on **Android 6**) gets setup steps instead of a white screen. **Recommended: Android 8+** with updated **Android System WebView** (Play Store).
+**v0.4.2+:** **Release-signed APK** (Play Protect friendly). **Supported:** min Android 7.0 (API 23), recommended **Android 8+**, best on **Android 10+** (Pixel 8). If Play Protect blocks install → **More details → Install anyway**. **Advanced Protection** accounts may block all sideloads — use Chrome until Play Store testing.
+
+### Install on Pixel / Samsung (Play Protect)
+
+1. Download from [/mobile](https://doxxedcrypto.digital/mobile).
+2. Open the APK → if Play Protect warns, tap **More details** → **Install anyway** (release-signed build).
+3. Allow **Install unknown apps** for Chrome or Files if prompted.
+4. **Advanced Protection:** Google may refuse any sideload — use [doxxedcrypto.digital](https://doxxedcrypto.digital) in Chrome (same account, no install).
+
+Build signing for CI: `npm run pack:android` once locally, then `npm run print:android-signing` → add GitHub Actions secrets so every release uses the **same** signing key.
+
+**v0.4.1+:** Local **compat gate** on launch — old WebView (common on **Android 6**) gets setup steps instead of a white screen.
 
 **v0.4.0+:** On-device `FounderVault/` + **bidirectional merge** with desktop (LWW patches for goals/tasks/roadmap). Pair with **Code for Android** in Settings. APK stays ~4 MB; full site + vault sync after login.
 
