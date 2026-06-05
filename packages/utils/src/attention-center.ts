@@ -1,4 +1,5 @@
 import type { FounderQueueItem } from './founder-queue';
+import { isActionableQueueItem } from './founder-queue';
 
 /** Actionable attention — no passive “points earned” rows. */
 export type AttentionItem = {
@@ -55,4 +56,11 @@ export function founderQueueToAttention(item: FounderQueueItem): AttentionItem {
 export function sortAttentionItems(items: AttentionItem[]): AttentionItem[] {
   const rank = { urgent: 0, normal: 1, low: 2 };
   return [...items].sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
+/** Attention badge — actionable queue rows only (merge, publish, build, sync). */
+export function founderQueueToActionableAttention(
+  items: FounderQueueItem[],
+): AttentionItem[] {
+  return items.filter(isActionableQueueItem).map(founderQueueToAttention);
 }

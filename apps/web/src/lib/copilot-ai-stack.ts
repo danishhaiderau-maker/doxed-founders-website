@@ -1,4 +1,8 @@
-import { isFounderRepoStatusPrompt } from '@dcf/utils';
+import {
+  classifyFounderBrainTask,
+  isFounderRepoStatusPrompt,
+  shouldDispatchBuilderForCodeAsk,
+} from '@dcf/utils';
 
 export const AI_STACK_HREF = '/settings/builder';
 
@@ -260,6 +264,25 @@ export function resolveCopilotSendMode(
 ): CopilotSendMode {
   if (isFounderRepoStatusPrompt(prompt)) return stack.canAsk ? 'ask' : defaultSendMode(stack);
   return requested ?? defaultSendMode(stack);
+}
+
+/** Mission Control hero chat — auto-route build vs research without mode picker. */
+export function resolveHeroBrainSendMode(
+  prompt: string,
+  stack: CopilotStackSummary,
+): CopilotSendMode {
+  if (isFounderRepoStatusPrompt(prompt)) return stack.canAsk ? 'ask' : defaultSendMode(stack);
+  if (/take full control|sync everything|push all updates/i.test(prompt)) return 'ask';
+  const task = classifyFounderBrainTask(prompt);
+  if (shouldDispatchBuilderForCodeAsk(prompt, task) && stack.canBuild) return 'build';
+  if (
+    task === 'code' &&
+    stack.canBuild &&
+    /\b(fix|implement|build|ship|refactor|create pr|patch|add )\b/i.test(prompt)
+  ) {
+    return 'build';
+  }
+  return stack.canAsk ? 'ask' : defaultSendMode(stack);
 }
 
 export function primaryButtonLabel(mode: CopilotSendMode, _stack: CopilotStackSummary): string {

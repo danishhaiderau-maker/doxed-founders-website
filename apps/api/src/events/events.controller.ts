@@ -84,6 +84,23 @@ export class EventsController {
     return this.copilot.patchMemoryGraph(user.id, body);
   }
 
+  @Get('copilot/decisions')
+  decisionLog(@CurrentUser() user: AuthUser) {
+    return this.copilot.getDecisionLog(user.id).then((entries) => ({ entries, count: entries.length }));
+  }
+
+  @Post('copilot/decisions')
+  appendDecision(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { decision?: string; reason?: string; source?: string },
+  ) {
+    return this.copilot.appendDecision(user.id, {
+      decision: body.decision?.trim() ?? '',
+      reason: body.reason?.trim(),
+      source: body.source?.trim(),
+    });
+  }
+
   @Post('copilot/memory-graph/after-build')
   memoryGraphAfterBuild(
     @CurrentUser() user: AuthUser,

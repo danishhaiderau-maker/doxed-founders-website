@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import {
   FOUNDER_NODE_APP_VERSION,
   founderNodeAuthHeader,
@@ -86,6 +87,34 @@ export function throwIfFounderNodeAuthResponse(status: number, text: string): vo
   }
 }
 
+function readGitBranchNearVault(vaultRoot: string): string | undefined {
+  try {
+    const headPath = path.join(vaultRoot, '..', '.git', 'HEAD');
+    if (!fs.existsSync(headPath)) return undefined;
+    const head = fs.readFileSync(headPath, 'utf8').trim();
+    if (head.startsWith('ref:')) {
+      const ref = head.replace(/^ref:\s*/, '');
+      return ref.split('/').pop();
+    }
+    return head.slice(0, 8);
+  } catch {
+    return undefined;
+  }
+}
+
+function listOpenVaultFileNames(vaultRoot: string): string[] {
+  try {
+    if (!fs.existsSync(vaultRoot)) return [];
+    return fs
+      .readdirSync(vaultRoot)
+      .filter((f) => /\.(md|json|ts|tsx|js|jsx)$/i.test(f))
+      .map((f) => f)
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
 export function buildDesktopBridgeFromVault(vaultRoot: string): DesktopBridgeInput | undefined {
   try {
     const tasksPath = vaultFilePath(vaultRoot, 'tasks');
@@ -95,7 +124,11 @@ export function buildDesktopBridgeFromVault(vaultRoot: string): DesktopBridgeInp
     const fileCount = fs.existsSync(vaultRoot)
       ? fs.readdirSync(vaultRoot).filter((f) => f.endsWith('.md') || f.endsWith('.json')).length
       : 0;
+    const openFiles = listOpenVaultFileNames(vaultRoot);
+    const branch = readGitBranchNearVault(vaultRoot);
     return {
+      branch,
+      openFilePaths: openFiles.length > 0 ? openFiles : undefined,
       taskLabel: openTask?.title ?? tasks?.currentGoal ?? undefined,
       editSummary: fileCount > 0 ? `${fileCount} vault files tracked` : undefined,
       agentStatus: 'founder_node_online',

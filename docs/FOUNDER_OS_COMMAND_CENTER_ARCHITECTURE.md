@@ -88,7 +88,7 @@ The bottleneck is correct: **not** Railway/Vercel/GitHub — **Context → Intel
 - `packages/utils/src/commit-intelligence.ts`
 - `apps/api/src/events/founder-copilot.service.ts` → `ask()`
 
-**v2:** Decision journal, last N chat turns, PR diff summaries, timeline slice.
+**v2:** Last N chat turns, PR diff summaries. **Decision journal ✅ P3 lite** (`founder-decision-log.ts`, `GET/POST /copilot/decisions`).
 
 ---
 
@@ -352,18 +352,19 @@ Next: smoke /discover, publish founder update
 
 ### P1 — Feel like command center
 
-1. **Agent Runtime** — `AgentRun` model + step UI  
-2. **Founder Queue** — computed inbox endpoint + right rail UI  
-3. **Attention Center** — aggregate actionable items  
-4. **Hide multi-agent picker** — Brain-only chat  
-5. **Agent Bus v1** — 3 handoff rules (research→build, build→content)  
+1. **Agent Runtime** — `AgentRun` model + step UI ✅  
+2. **Founder Queue** — computed inbox endpoint + CEO inbox buckets ✅  
+3. **Attention Center** — aggregate actionable items ✅  
+4. **Hide multi-agent picker** — Brain-only hero chat ✅  
+5. **Agent Bus v1** — 3 handoff rules (research→build, build→content) ✅  
 
 ### P2 — Feel like operating system
 
 1. **Project Timeline** — API + Brain context ✅ v1  
 2. **Deployment Intelligence** — outcome cards on deploy ✅ v1 heuristic  
 3. **Desktop Bridge** — metadata-only IDE sync ✅ v1 (heartbeat `desktopBridge`)  
-4. **Agent Bus v2** — persisted messages + custom rules (partial: dedupe shipped in P1.5)  
+4. **Agent Bus v2** — persisted messages + custom rules (partial: dedupe shipped in P1.5) ✅  
+5. **Decision log** — memory journal + Brain context ✅ P3 lite  
 
 ---
 

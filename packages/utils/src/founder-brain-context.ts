@@ -42,6 +42,7 @@ export type FounderBrainContextInput = {
   timelineExcerpt?: string | null;
   deployIntelligenceExcerpt?: string | null;
   desktopBridgeBlock?: string | null;
+  decisionLogExcerpt?: string | null;
 };
 
 export function deriveMissionIntelligence(input: FounderBrainContextInput): MissionIntelligence {
@@ -227,6 +228,7 @@ export function formatFounderBrainContextForPrompt(
     sections.push('', '## Deployment intelligence', input.deployIntelligenceExcerpt);
   }
   if (input.desktopBridgeBlock) sections.push('', input.desktopBridgeBlock);
+  if (input.decisionLogExcerpt) sections.push('', input.decisionLogExcerpt);
 
   sections.push(
     '',
