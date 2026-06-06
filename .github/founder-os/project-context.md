@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync tasks
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
-Just now
+8m ago
