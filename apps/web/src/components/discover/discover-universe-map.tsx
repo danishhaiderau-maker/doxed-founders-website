@@ -95,16 +95,18 @@ export function DiscoverUniverseMap({
   }, []);
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#030308]">
-      {/* Cosmic background */}
-      <div
-        className="pointer-events-none absolute inset-0 opacity-40"
-        style={{
-          background:
-            'radial-gradient(ellipse 80% 60% at 50% 40%, rgba(88,28,135,0.35), transparent 60%), radial-gradient(ellipse 60% 50% at 70% 70%, rgba(16,185,129,0.12), transparent 50%)',
-        }}
-      />
-      <div className="pointer-events-none absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMCIgY3k9IjEwIiByPSIxIiBmaWxsPSJyZ2JhKDI1NSwyNTUsMjU1LDAuMykiLz48Y2lyY2xlIGN4PSI4MCIgY3k9IjQwIiByPSIwLjUiIGZpbGw9InJnYmEoMjU1LDI1NSwyNTUsMC4yKSIvPjwvc3ZnPg==')] opacity-30" />
+    <div className="relative rounded-2xl border border-zinc-800/80 bg-[#030308]">
+      {/* Cosmic background — clipped so bubbles can drag outside inner canvas */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
+        <div
+          className="absolute inset-0 opacity-40"
+          style={{
+            background:
+              'radial-gradient(ellipse 80% 60% at 50% 40%, rgba(88,28,135,0.35), transparent 60%), radial-gradient(ellipse 60% 50% at 70% 70%, rgba(16,185,129,0.12), transparent 50%)',
+          }}
+        />
+        <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMCIgY3k9IjEwIiByPSIxIiBmaWxsPSJyZ2JhKDI1NSwyNTUsMjU1LDAuMykiLz48Y2lyY2xlIGN4PSI4MCIgY3k9IjQwIiByPSIwLjUiIGZpbGw9InJnYmEoMjU1LDI1NSwyNTUsMC4yKSIvPjwvc3ZnPg==')] opacity-30" />
+      </div>
 
       {/* Filters */}
       <div className="relative z-10 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-3">
@@ -192,14 +194,14 @@ export function DiscoverUniverseMap({
         )}
       </div>
 
-      {/* Bubble canvas */}
+      {/* Bubble canvas — overflow visible so dragged bubbles stay on screen */}
       <div
         ref={canvasRef}
-        className="relative w-full select-none"
-        style={{ height: dims.h, touchAction: 'none' }}
+        className="relative z-[1] w-full select-none overflow-visible"
+        style={{ height: dims.h, minHeight: 480, touchAction: 'none' }}
       >
         {visibleProjects.length === 0 ? (
-          <p className="flex h-full items-center justify-center text-sm text-zinc-500">
+          <p className="flex h-full min-h-[480px] items-center justify-center text-sm text-zinc-500">
             No projects match these filters
           </p>
         ) : (

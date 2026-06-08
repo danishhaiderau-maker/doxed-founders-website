@@ -57,18 +57,18 @@ export function DiscoverUniverseBubble({
         top: y - size / 2,
         width: size,
         height: size,
-        zIndex: isDragging ? 1000 : Math.round(project.activityScore),
+        zIndex: isDragging ? 2000 : 10 + Math.round(project.activityScore),
       }}
       drag
       dragMomentum={false}
-      dragElastic={0.08}
+      dragElastic={0.05}
       dragConstraints={canvasRef}
-      animate={{ x: offset.x, y: offset.y }}
-      initial={{ opacity: 0, scale: 0.6 }}
-      whileDrag={{ scale: 1.06, cursor: 'grabbing' }}
+      initial={{ opacity: 0, scale: 0.75 }}
+      animate={{ opacity: 1, scale: 1, x: offset.x, y: offset.y }}
+      whileDrag={{ scale: 1.08, zIndex: 2000, cursor: 'grabbing' }}
       transition={{
-        opacity: { duration: 0.4, delay: index * 0.03 },
-        scale: { duration: 0.4, delay: index * 0.03 },
+        opacity: { duration: 0.35, delay: index * 0.04 },
+        scale: { duration: 0.35, delay: index * 0.04 },
         x: { type: 'spring', stiffness: 380, damping: 32 },
         y: { type: 'spring', stiffness: 380, damping: 32 },
       }}
@@ -98,15 +98,10 @@ export function DiscoverUniverseBubble({
           isDragging
             ? { y: 0 }
             : {
-                opacity: 1,
-                scale: 1,
-                y: [0, -6, 0],
+                y: [0, -5, 0],
               }
         }
-        initial={{ opacity: 0, scale: 0.6 }}
         transition={{
-          opacity: { duration: 0.4, delay: index * 0.03 },
-          scale: { duration: 0.4, delay: index * 0.03 },
           y: { duration: floatDuration, repeat: Infinity, ease: 'easeInOut' },
         }}
       >
@@ -170,8 +165,7 @@ export function DiscoverUniverseBubble({
             </span>
           )}
 
-          {/* Hover preview card */}
-          <div className="pointer-events-none absolute left-1/2 top-full z-50 mt-3 w-52 -translate-x-1/2 scale-95 rounded-xl border border-zinc-700/80 bg-zinc-950/95 p-3 opacity-0 shadow-2xl backdrop-blur-md transition group-hover:scale-100 group-hover:opacity-100">
+          <div className="pointer-events-none absolute left-1/2 top-full z-[2100] mt-3 w-52 -translate-x-1/2 scale-95 rounded-xl border border-zinc-700/80 bg-zinc-950/95 p-3 opacity-0 shadow-2xl backdrop-blur-md transition group-hover:scale-100 group-hover:opacity-100">
             <p className="font-semibold text-white">{project.name}</p>
             {project.lastActivityPreview && (
               <p className="mt-1 line-clamp-2 text-[11px] text-zinc-400">
