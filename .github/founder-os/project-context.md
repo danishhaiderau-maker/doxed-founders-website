@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix Discover bubble map visibility and draggable layout.
 
 ## Last Activity
 
