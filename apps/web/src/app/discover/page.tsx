@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { DiscoverMetricsRow } from '@/components/discover/discover-metrics-row';
 import { DiscoverUniverseMap } from '@/components/discover/discover-universe-map';
@@ -24,20 +24,26 @@ export default function DiscoverPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const loadUniverse = useCallback(async () => {
     setLoading(true);
-    fetchDiscoverUniverse({
-      stageFilter,
-      chainSlug: chainSlug || undefined,
-      timeframe,
-    })
-      .then((res) => {
-        setData(res);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
+    setError(null);
+    try {
+      const res = await fetchDiscoverUniverse({
+        stageFilter,
+        chainSlug: chainSlug || undefined,
+        timeframe,
+      });
+      setData(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load project universe');
+    } finally {
+      setLoading(false);
+    }
   }, [stageFilter, chainSlug, timeframe]);
+
+  useEffect(() => {
+    void loadUniverse();
+  }, [loadUniverse]);
 
   return (
     <main className="min-h-screen bg-[#050508]">
@@ -57,17 +63,28 @@ export default function DiscoverPage() {
       <div className="mx-auto w-full max-w-[90rem] px-4 pb-10 pt-4 sm:px-6 lg:px-10">
         {error && (
           <p className="mb-4 rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-3 text-sm text-red-300">
-            {error}
+            {error}{' '}
+            <button type="button" onClick={() => void loadUniverse()} className="underline hover:text-white">
+              Retry
+            </button>
           </p>
         )}
 
-        <DiscoverRankingRules />
-
-        <div className="mt-5 grid gap-6 lg:grid-cols-[1fr_280px]">
+        <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
           <div>
             {loading && !data ? (
-              <div className="flex h-[560px] items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-950/50">
+              <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/50">
+                <div className="flex gap-3">
+                  {[96, 72, 120, 56].map((size, i) => (
+                    <span
+                      key={size}
+                      className="animate-pulse rounded-full bg-violet-500/20"
+                      style={{ width: size, height: size, animationDelay: `${i * 120}ms` }}
+                    />
+                  ))}
+                </div>
                 <p className="text-sm text-zinc-500">Loading project universe…</p>
+                <p className="text-[11px] text-zinc-600">Drag bubbles apart once loaded to explore overlap</p>
               </div>
             ) : data ? (
               <DiscoverUniverseMap
@@ -89,6 +106,10 @@ export default function DiscoverPage() {
               scoutCount={data.metrics.scoutReviewsAwaiting}
             />
           )}
+        </div>
+
+        <div className="mt-8">
+          <DiscoverRankingRules />
         </div>
 
         {data && (

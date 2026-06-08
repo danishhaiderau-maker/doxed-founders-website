@@ -105,22 +105,27 @@ export function bubbleRadiusFromActivityScore(score: number): number {
   return 120;
 }
 
-/** Golden-angle layout for stable bubble positions */
+/** Golden-angle layout — spread bubbles across the canvas (not stacked at center). */
 export function layoutBubblePositions(
   count: number,
   width: number,
   height: number,
 ): { x: number; y: number }[] {
+  if (count <= 0) return [];
   const cx = width / 2;
   const cy = height / 2;
   const golden = Math.PI * (3 - Math.sqrt(5));
+  const maxR = Math.min(width, height) * 0.4;
+  const pad = 64;
   return Array.from({ length: count }, (_, i) => {
-    const t = i + 0.5;
-    const r = Math.min(width, height) * 0.08 * Math.sqrt(t);
-    const angle = t * golden;
+    const t = (i + 0.5) / count;
+    const r = maxR * Math.sqrt(t);
+    const angle = i * golden;
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r * 0.88;
     return {
-      x: cx + Math.cos(angle) * r,
-      y: cy + Math.sin(angle) * r * 0.85,
+      x: Math.min(width - pad, Math.max(pad, x)),
+      y: Math.min(height - pad, Math.max(pad, y)),
     };
   });
 }
