@@ -3195,6 +3195,7 @@ export interface TradingAgentSummary {
   tradeCount: number;
   winRatePct: number;
   costDdollarDay: number;
+  costDdollarWeek?: number;
   liveSince: string;
   liveSinceDays: number;
   followerCount: number;

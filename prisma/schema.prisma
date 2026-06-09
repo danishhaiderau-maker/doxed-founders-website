@@ -2071,6 +2071,8 @@ model TradingAgent {
   tradeCount      Int                @default(0)
   winRatePct      Decimal            @db.Decimal(5, 2)
   costDdollarDay  Int                @default(1000)
+  /** One-time hire fee for a 1-week live instance rental */
+  costDdollarWeek Int                @default(2000)
   liveSince       DateTime
   followerCount   Int                @default(0)
   dashboardState  Json

@@ -134,6 +134,7 @@ function serializeAgent(
     tradeCount: live?.tradeCount ?? agent.tradeCount,
     winRatePct: live?.winRatePct ?? Number(agent.winRatePct),
     costDdollarDay: agent.costDdollarDay,
+    costDdollarWeek: agent.costDdollarWeek,
     liveSince: agent.liveSince.toISOString(),
     liveSinceDays:
       live?.liveSinceDays ??
@@ -164,7 +165,16 @@ export class TradingAgentsService implements OnModuleInit {
 
   async onModuleInit() {
     await this.ensureSeed().catch(() => undefined);
+    await this.syncConservativeBtcPricing().catch(() => undefined);
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
+  }
+
+  /** Keep showcase agent hire pricing in sync across environments. */
+  private async syncConservativeBtcPricing() {
+    await this.prisma.tradingAgent.updateMany({
+      where: { slug: 'conservative-btc' },
+      data: { costDdollarWeek: 2000 },
+    });
   }
 
   async ensureSeed() {
@@ -194,6 +204,7 @@ export class TradingAgentsService implements OnModuleInit {
         tradeCount: 43,
         winRatePct: 58,
         costDdollarDay: 1000,
+        costDdollarWeek: 2000,
         liveSince: daysAgo(31),
         dashboardState: dashboard as unknown as Prisma.InputJsonValue,
         isExperimental: true,
@@ -331,9 +342,13 @@ export class TradingAgentsService implements OnModuleInit {
     if (agent.slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
       return serializeAgent(agent, extra);
     }
-    const live = await this.botBridge.getLiveDashboard(agent.name);
+    const reachable = await this.botBridge.isReachable(true);
+    if (!reachable) {
+      return serializeAgent(agent, { ...extra, botConnected: false });
+    }
+    const live = await this.botBridge.getLiveDashboard(agent.name, true);
     if (!live) {
-      return serializeAgent(agent, extra);
+      return serializeAgent(agent, { ...extra, botConnected: false });
     }
     return serializeAgent(agent, {
       ...extra,
@@ -344,14 +359,31 @@ export class TradingAgentsService implements OnModuleInit {
 
   async getBotBridgeStatus() {
     const enabled = this.botBridge.isEnabled();
-    const state = enabled ? await this.botBridge.fetchState() : null;
+    if (!enabled) {
+      return { status: 'offline' as const, label: 'Agent offline' };
+    }
+    const reachable = await this.botBridge.isReachable(true);
+    if (!reachable) {
+      return { status: 'offline' as const, label: 'Showcase bot offline (stopped on Railway)' };
+    }
+    const state = await this.botBridge.fetchState(true);
     let status: 'online' | 'offline' | 'updating' = 'offline';
-    if (enabled && state) {
-      status = state.execution_paused ? 'updating' : 'online';
+    if (state) {
+      if (state.execution_paused) {
+        const reason = state.execution_reason ?? '';
+        status = reason === 'ADMIN_MANUAL' ? 'offline' : 'updating';
+      } else {
+        status = 'online';
+      }
     }
     return {
       status,
-      label: status === 'online' ? 'Agent online' : status === 'updating' ? 'Agent updating' : 'Agent offline',
+      label:
+        status === 'online'
+          ? 'Agent online'
+          : status === 'updating'
+            ? 'Agent updating'
+            : 'Showcase bot offline (stopped on Railway)',
     };
   }
 
@@ -363,9 +395,15 @@ export class TradingAgentsService implements OnModuleInit {
       enabled ? this.botBridge.fetchHealth() : Promise.resolve(null),
     ]);
 
+    const reachable = Boolean(state) || Boolean(health);
     let publicStatus: 'online' | 'offline' | 'updating' = 'offline';
-    if (enabled && state) {
-      publicStatus = state.execution_paused ? 'updating' : 'online';
+    if (enabled && reachable && state) {
+      if (state.execution_paused) {
+        const reason = state.execution_reason ?? '';
+        publicStatus = reason === 'ADMIN_MANUAL' ? 'offline' : 'updating';
+      } else {
+        publicStatus = 'online';
+      }
     }
 
     let host: string | null = null;
@@ -379,7 +417,7 @@ export class TradingAgentsService implements OnModuleInit {
 
     return {
       enabled,
-      connected: Boolean(state),
+      connected: reachable && Boolean(state),
       publicStatus,
       strategyMode: state?.strategy_mode ?? null,
       executionPaused: state?.execution_paused ?? false,
@@ -486,24 +524,27 @@ export class TradingAgentsService implements OnModuleInit {
     if (!agent) throw new NotFoundException('Agent not found');
 
     if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
-      const live = await this.botBridge.getLiveDashboard(agent.name);
-      if (live) {
-        return {
-          agent: serializeAgent(agent, {
-            liveStats: live.stats,
+      const reachable = await this.botBridge.isReachable(true);
+      if (reachable) {
+        const live = await this.botBridge.getLiveDashboard(agent.name, true);
+        if (live) {
+          return {
+            agent: serializeAgent(agent, {
+              liveStats: live.stats,
+              botConnected: true,
+            }),
+            dashboard: opts?.publicSafe
+              ? mapBotStateToPublicDashboard(live.rawState)
+              : live.dashboard,
+            rawBotState: opts?.publicSafe ? undefined : live.rawState,
+            updatedAt: new Date().toISOString(),
             botConnected: true,
-          }),
-          dashboard: opts?.publicSafe
-            ? mapBotStateToPublicDashboard(live.rawState)
-            : live.dashboard,
-          rawBotState: opts?.publicSafe ? undefined : live.rawState,
-          updatedAt: new Date().toISOString(),
-          botConnected: true,
-          botSource: 'LIVE' as const,
-          strategyMode: live.strategyMode,
-          executionPaused: live.executionPaused,
-          executionReason: live.executionReason,
-        };
+            botSource: 'LIVE' as const,
+            strategyMode: live.strategyMode,
+            executionPaused: live.executionPaused,
+            executionReason: live.executionReason,
+          };
+        }
       }
     }
 

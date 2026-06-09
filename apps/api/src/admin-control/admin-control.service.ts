@@ -42,6 +42,10 @@ export class AdminControlService {
     if (!enabled) {
       return { status: 'offline', label: 'Agent offline' };
     }
+    const reachable = await this.botBridge.isReachable(true);
+    if (!reachable) {
+      return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
+    }
     const state = await this.botBridge.fetchState(true);
     if (!state) {
       return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
@@ -163,6 +167,7 @@ export class AdminControlService {
     await this.botBridge.proxyBotPost('/api/pause', {}).catch(() => undefined);
 
     const rail = await this.showcaseRuntime.stopShowcaseDeployment();
+    this.botBridge.invalidateCache();
     if (rail.ok) {
       return {
         ok: true,

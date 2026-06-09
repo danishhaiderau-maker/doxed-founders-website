@@ -242,6 +242,8 @@ export function pointActionLabel(actionKey: string): string {
   if (base === 'EARLY_SCOUT') return 'Early scout badge';
   if (base === 'SCOUT_STAKE') return 'Scout market stake';
   if (base === 'AGENT_RENTAL') return 'Trading agent rental';
+  if (base === 'AGENT_HIRE') return 'Agent hire fee (1 week)';
+  if (base === 'PLATFORM_FEE') return 'Platform fee collected';
   return base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 

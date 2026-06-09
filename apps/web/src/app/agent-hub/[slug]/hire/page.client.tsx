@@ -32,7 +32,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [providers, setProviders] = useState<ExchangeProviderOption[]>([]);
   const [agentName, setAgentName] = useState('');
   const [agentId, setAgentId] = useState('');
-  const [costDay, setCostDay] = useState(0);
+  const [costWeek, setCostWeek] = useState(2000);
   const [exchange, setExchange] = useState('bitfinex');
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
@@ -51,7 +51,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       ]);
       setAgentName(agent.name);
       setAgentId(agent.id);
-      setCostDay(agent.costDdollarDay);
+      setCostWeek(agent.costDdollarWeek ?? agent.costDdollarDay ?? 2000);
       setProviders(ex);
       if (agent.hired && agent.instanceMode === 'live') {
         router.replace(`/agent-hub/${slug}`);
@@ -145,6 +145,13 @@ export default function AgentHireClient({ slug }: { slug: string }) {
           </Link>{' '}
           — no exchange or API keys.
         </div>
+        {costWeek > 0 && (
+          <p className="mt-3 text-sm text-zinc-300">
+            Hiring fee:{' '}
+            <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week (deducted on
+            activation).
+          </p>
+        )}
 
         {error && (
           <p className="mt-4 rounded-lg border border-red-500/30 bg-red-950/30 px-4 py-2 text-sm text-red-200">
@@ -315,7 +322,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               <p><span className="text-zinc-500">Agent:</span> {agentName}</p>
               <p><span className="text-zinc-500">Exchange:</span> {selectedProvider?.label ?? exchange}</p>
               <p><span className="text-zinc-500">AI:</span> Admin DeepSeek (platform copy — no key needed)</p>
-              <p><span className="text-zinc-500">Rental:</span> {costDay.toLocaleString()} DDollar/day</p>
+              <p><span className="text-zinc-500">Hiring fee:</span> {costWeek.toLocaleString()} DDollar for 1 week</p>
             </div>
             <label className="flex items-start gap-3 text-sm text-zinc-300">
               <input
