@@ -15,6 +15,11 @@ import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '@prisma/client';
 import { ExchangesService } from '../exchanges/exchanges.service';
+import {
+  USER_INSTANCE_STARTING_BALANCE,
+  buildFreshInstanceDashboardState,
+  readInstanceScope,
+} from './instance-view.mapper';
 
 @Injectable()
 export class TradingAgentInstancesService {
@@ -70,6 +75,7 @@ export class TradingAgentInstancesService {
     }
 
     const hireExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const sessionState = buildFreshInstanceDashboardState('live', USER_INSTANCE_STARTING_BALANCE);
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     /** Live tier mirrors admin DeepSeek decisions — users only connect exchange keys. */
@@ -88,10 +94,7 @@ export class TradingAgentInstancesService {
         activatedAt: new Date(),
         lastBilledAt: new Date(),
         expiresAt: hireExpiresAt,
-        dashboardState: {
-          instanceMode: 'live',
-          copySource: 'admin-showcase',
-        },
+        dashboardState: sessionState,
       },
       update: {
         exchangeProvider: input.exchangeProvider,
@@ -102,10 +105,7 @@ export class TradingAgentInstancesService {
         activatedAt: new Date(),
         expiresAt: hireExpiresAt,
         lastError: null,
-        dashboardState: {
-          instanceMode: 'live',
-          copySource: 'admin-showcase',
-        },
+        dashboardState: sessionState,
       },
     });
 
@@ -142,6 +142,7 @@ export class TradingAgentInstancesService {
 
     const isCopy = instance.exchangeProvider === 'paper';
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const scope = readInstanceScope(instance);
     const exchangeStatus = isCopy
       ? { connected: false, provider: 'copy', accountLabel: 'DDollar copy track' }
       : await this.exchanges.getUserExchangeStatus(userId, instance.exchangeProvider);
@@ -173,6 +174,8 @@ export class TradingAgentInstancesService {
         lastError: instance.lastError,
         instanceMode: (dashState.instanceMode as string) ?? (isCopy ? 'copy' : 'live'),
         paperAllocationUsd: dashState.paperAllocationUsd as number | undefined,
+        startingBalanceUsd: scope.startingBalanceUsd,
+        sessionStartedAt: scope.sessionStartedAt.toISOString(),
       },
       exchange: exchangeStatus,
       runtime: {
@@ -210,6 +213,10 @@ export class TradingAgentInstancesService {
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     const aiProvider = showcase?.showcaseAiProvider ?? 'deepseek';
+    const sessionState = buildFreshInstanceDashboardState('copy', amountUsd, {
+      paperDdSpent: ddCost,
+    });
+    const now = new Date();
 
     await this.prisma.tradingAgentInstance.upsert({
       where: { agentId_userId: { agentId: agent.id, userId } },
@@ -220,24 +227,16 @@ export class TradingAgentInstancesService {
         status: TradingAgentInstanceStatus.ACTIVE,
         aiProvidedByPlatform: true,
         aiProvider,
-        activatedAt: new Date(),
-        dashboardState: {
-          instanceMode: 'copy',
-          copySource: 'admin-showcase',
-          paperAllocationUsd: amountUsd,
-          paperDdSpent: ddCost,
-        },
+        activatedAt: now,
+        hiredAt: now,
+        dashboardState: sessionState,
       },
       update: {
         status: TradingAgentInstanceStatus.ACTIVE,
         aiProvidedByPlatform: true,
         aiProvider,
-        dashboardState: {
-          instanceMode: 'copy',
-          copySource: 'admin-showcase',
-          paperAllocationUsd: amountUsd,
-          paperDdSpent: ddCost,
-        },
+        activatedAt: now,
+        dashboardState: sessionState,
       },
     });
 

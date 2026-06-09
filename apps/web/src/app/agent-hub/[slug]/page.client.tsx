@@ -55,13 +55,15 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     status: 'offline',
     label: 'Agent offline',
   });
+  const [viewScope, setViewScope] = useState<'showcase' | 'user'>('showcase');
+  const [showcaseNote, setShowcaseNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const token = session?.accessToken;
       const results = await Promise.allSettled([
         withTimeout(fetchTradingAgentDashboard(slug, token), 15000, 'Dashboard'),
-        fetchTradingAgentActivity(slug, 20),
+        fetchTradingAgentActivity(slug, 20, token),
         fetchTradingAgent(slug, token),
         fetchPublicAgentStatus(),
         fetchTradingAgents('TRADING'),
@@ -86,6 +88,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setDashboard(dashR.value.dashboard);
         setBotConnected(Boolean(dashR.value.botConnected));
         setExecutionPaused(Boolean(dashR.value.executionPaused));
+        setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
+        setShowcaseNote(dashR.value.showcaseNote ?? null);
       } else if (metaR.status === 'fulfilled') {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
       }
@@ -140,6 +144,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       setHired(true);
       setInstanceStatus('ACTIVE');
       setInstanceMode('copy');
+      setViewScope('user');
+      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Copy track failed');
     } finally {
@@ -251,6 +257,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           publicStatus={publicStatus.status}
           instanceStatus={instanceStatus}
           instanceMode={instanceMode}
+          viewScope={viewScope}
+          showcaseNote={showcaseNote}
           onFollow={toggleFollow}
           followBusy={followBusy}
           onCopyAllocate={handleCopyTrack}

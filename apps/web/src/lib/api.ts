@@ -3204,6 +3204,8 @@ export interface TradingAgentSummary {
   hired?: boolean;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
+  viewScope?: 'showcase' | 'user';
+  userSessionStartedAt?: string | null;
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;
@@ -3218,6 +3220,18 @@ export interface TradingAgentDashboard {
   strategyMode?: string | null;
   executionPaused?: boolean;
   executionReason?: string | null;
+  viewScope?: 'showcase' | 'user';
+  userInstance?: {
+    balanceUsd: number;
+    equityUsd: number;
+    netReturnPct: number;
+    tradeCount: number;
+    winRatePct: number;
+    sessionStartedAt: string;
+    startingBalanceUsd: number;
+    instanceMode: 'copy' | 'live';
+  } | null;
+  showcaseNote?: string;
 }
 
 export interface TradingAgentActivityEntry {
@@ -3255,8 +3269,12 @@ export function fetchTradingAgentDashboard(slug: string, token?: string) {
   return apiFetch<TradingAgentDashboard>(`/trading-agents/${slug}/dashboard`, {}, token);
 }
 
-export function fetchTradingAgentActivity(slug: string, limit = 30) {
-  return apiFetch<TradingAgentActivityEntry[]>(`/trading-agents/${slug}/activity?limit=${limit}`);
+export function fetchTradingAgentActivity(slug: string, limit = 30, token?: string) {
+  return apiFetch<TradingAgentActivityEntry[]>(
+    `/trading-agents/${slug}/activity?limit=${limit}`,
+    {},
+    token,
+  );
 }
 
 export function followTradingAgent(agentId: string, token: string) {
