@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore: sync BTC research bot and restore sync:all script.
 
 ## Last Activity
 
