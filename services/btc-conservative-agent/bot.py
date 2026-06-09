@@ -7535,26 +7535,16 @@ DASHBOARD_JS = """(function () {
         if (sb) {
           const pid = d.bot_pid;
           const cd = d.ai_cooldown_remaining_sec;
-          const adminStopped = d.manual_admin_pause || (d.execution_paused && d.execution_reason === 'ADMIN_MANUAL');
-          if (adminStopped || d.execution_paused) {
-            sb.style.borderColor = '#f85149';
-            sb.style.background = '#3d1214';
-            sb.style.color = '#fecaca';
-            sb.innerText = adminStopped
-              ? '■ STOPPED BY ADMIN — no new trades or AI pipeline. Dashboard stays online for review. Resume from Doxxed Admin or POST /api/resume.'
-              : '⏸ PAUSED — ' + (d.execution_reason || 'execution blocked') + (pid ? ' · PID ' + pid : '');
-          } else {
-            let txt = pid
-              ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
-              : 'LIVE (PID unknown — restart bot)';
-            if (d.server_ts) txt += ' · server ' + d.server_ts;
-            if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
-            if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
-            sb.style.borderColor = '#238636';
-            sb.style.background = '#1f2937';
-            sb.style.color = '#c9d1d9';
-            sb.innerText = txt;
-          }
+          let txt = pid
+            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
+            : 'LIVE (PID unknown — restart bot)';
+          if (d.server_ts) txt += ' · server ' + d.server_ts;
+          if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
+          if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
+          txt += ' · Stop: run stop_bot.ps1 in Final Bots (closing CMD alone may not stop a background bot)';
+          sb.style.borderColor = '#238636';
+          sb.style.color = '#c9d1d9';
+          sb.innerText = txt;
         }
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
@@ -7562,7 +7552,7 @@ DASHBOARD_JS = """(function () {
           if (d.execution_paused) {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
-            banner.className = 'bg-red-950 p-6 rounded-lg shadow mb-8 border-4 border-red-600';
+            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
           } else if (d.price_source === 'WS') {
             src.innerHTML = d.data_banner_ws || ('REAL BITFINEX MARKET DATA (WS) · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-green-400 font-bold';
