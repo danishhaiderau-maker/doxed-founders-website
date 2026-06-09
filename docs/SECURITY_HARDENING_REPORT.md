@@ -26,9 +26,9 @@ Findings before this change:
 - API returned `X-Powered-By: Express`.
 - API CORS response was origin-varying and credential-aware.
 
-Latest live recheck (2026-06-05 06:54 UTC):
+Latest live recheck (2026-06-09 15:07 UTC):
 
-- Web currently returns HSTS with `includeSubDomains; preload`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and `Permissions-Policy`.
+- Web currently returns HSTS with `includeSubDomains; preload`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and `Permissions-Policy` on the main HTML response. Production does not yet return the branch CSP header.
 - API currently returns HSTS with `includeSubDomains`, `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`.
 - API no longer returns `X-Powered-By`.
 - API live `Permissions-Policy` was not present in the header check; the branch code adds it.
@@ -47,7 +47,7 @@ Changes implemented:
 
 ## OWASP ZAP / Burp status
 
-A manual GitHub Actions OWASP ZAP baseline run completed successfully on 2026-06-04. Summary: 0 failures, 12 warnings, 58 passes. The main actionable web-app warning was `Content Security Policy (CSP) Header Not Set`; this branch now adds a conservative CSP header in `apps/web/next.config.ts`.
+A manual GitHub Actions OWASP ZAP baseline run completed successfully on 2026-06-04. A scheduled baseline run also completed successfully on 2026-06-08. Latest summary: 0 failures, 12 warnings, 58 passes. The main actionable web-app warning remains `Content Security Policy (CSP) Header Not Set`; this branch adds a conservative CSP header in `apps/web/next.config.ts`, but it has not reached production yet. ZAP also reported HSTS missing on several cached/static `304 Not Modified` responses even though the main HTML response includes HSTS.
 
 The cloud agent image used for local rechecks did not include OWASP ZAP, Burp Suite, Docker, or `zap-baseline.py`; only Java and curl were available locally. Because of that, local rechecks used non-invasive live header checks and repository review while CI runs the ZAP baseline.
 
@@ -82,7 +82,8 @@ Findings:
 
 ## Remaining recommendations
 
-- Re-run the OWASP ZAP passive baseline after deploying the CSP header and review whether the CSP warning is resolved.
+- Deploy the CSP header to production, then re-run the OWASP ZAP passive baseline and review whether the CSP warning is resolved.
+- Investigate whether Vercel/Next headers apply consistently to cached static `304 Not Modified` responses, because ZAP still reports HSTS missing on some cached resources.
 - Add GitHub secret scanning / push protection if not already enabled on the repository.
 - Tighten CSP over time by removing `unsafe-inline` / `unsafe-eval` after adding nonce or hash support for Next.js runtime scripts.
-- Rotate production secrets if any have ever been pasted into local `.env` files outside the repo.
+- Rotate production secrets if any have ever been pasted into local `.env` files outside the repo. This repo scan cannot rotate secrets; rotation must happen in Vercel/Railway/GitHub secret stores.
