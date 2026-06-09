@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bot): show real RESEARCH equity on dashboard and sync research bot
 
 ## Last Activity
 
