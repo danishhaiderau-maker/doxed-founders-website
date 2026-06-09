@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(railway): btc bot early healthcheck on PORT 5000 for deploy success
+feat(agent-hub): mockup layout, admin stop button, and loading fix
 
 ## Last Activity
 
