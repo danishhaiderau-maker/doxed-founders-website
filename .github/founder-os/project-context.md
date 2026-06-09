@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(bot): show real RESEARCH equity on dashboard and sync research bot
+feat(agents): live transparency tables, multi-exchange hire, and faster dashboard load
 
 ## Last Activity
 
