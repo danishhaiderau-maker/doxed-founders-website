@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: sync BTC research bot and restore sync:all script.
+fix(railway): btc bot early healthcheck on PORT 5000 for deploy success
 
 ## Last Activity
 
