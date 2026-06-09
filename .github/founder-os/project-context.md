@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(bot): sync bybit-15m-research-bot v82-v84 ladder exec updates
+fix(agents): offline status after kill, 2000 DDollar/week hire fee
 
 ## Last Activity
 
