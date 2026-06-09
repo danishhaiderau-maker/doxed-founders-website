@@ -10,8 +10,6 @@ import {
   AGENT_BETA_RISK_COPY,
   BITFINEX_RECOMMEND_BANNER,
   EXCHANGE_API_GUIDES,
-  TRADING_AGENT_AI_PROVIDERS,
-  TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_CREDENTIAL_CONFIG,
   exchangeRequiresPassphrase,
   type ExchangeProvider,
@@ -23,7 +21,7 @@ import {
   hireTradingAgent,
 } from '@/lib/api';
 
-type Step = 'exchange' | 'credentials' | 'ai' | 'risk';
+type Step = 'exchange' | 'credentials' | 'risk';
 
 export default function AgentHireClient({ slug }: { slug: string }) {
   const { data: session, status } = useSession();
@@ -40,8 +38,6 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [apiSecret, setApiSecret] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [testnet, setTestnet] = useState(false);
-  const [aiProvider, setAiProvider] = useState('deepseek');
-  const [aiApiKey, setAiApiKey] = useState('');
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -57,8 +53,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       setAgentId(agent.id);
       setCostDay(agent.costDdollarDay);
       setProviders(ex);
-      if (agent.hired) {
-        router.replace(`/agent-hub/${slug}/my-dashboard`);
+      if (agent.hired && agent.instanceMode === 'live') {
+        router.replace(`/agent-hub/${slug}`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent');
@@ -89,13 +85,11 @@ export default function AgentHireClient({ slug }: { slug: string }) {
           apiSecret,
           passphrase: passphrase.trim() || undefined,
           testnet,
-          aiMode: 'own',
-          aiProvider,
-          aiApiKey,
+          aiMode: 'platform',
         },
         token,
       );
-      router.push(result.dashboardUrl);
+      router.push(result.dashboardUrl ?? `/agent-hub/${slug}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Activation failed');
     } finally {
@@ -120,7 +114,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
     : null;
   const exchangeGuide = exchange ? EXCHANGE_API_GUIDES[exchange as ExchangeProvider] : null;
 
-  const steps: Step[] = ['exchange', 'credentials', 'ai', 'risk'];
+  const steps: Step[] = ['exchange', 'credentials', 'risk'];
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
@@ -129,7 +123,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
           <div>
             <SiteBrand className="text-sm" />
             <Link href={`/agent-hub/${slug}`} className="mt-1 block text-xs text-violet-400 hover:text-violet-300">
-              ← Observe live showcase
+              ← Back to agent profile
             </Link>
           </div>
           <SiteNav />
@@ -137,11 +131,20 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       </header>
 
       <div className="mx-auto max-w-3xl px-6 py-10">
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Hire agent</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Go live · real money</p>
         <h1 className="mt-1 text-2xl font-bold">{agentName || 'Agent'}</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Your exchange + your AI keys. Admin showcase stays separate — you never share our credentials.
+          Connect your exchange only. Admin DeepSeek AI powers every trade — you mirror the same signals as the
+          showcase bot. No AI API key required.
         </p>
+
+        <div className="mt-4 rounded-xl border border-violet-500/25 bg-violet-950/15 px-4 py-3 text-sm text-violet-100/90">
+          Want to test first?{' '}
+          <Link href={`/agent-hub/${slug}`} className="font-semibold text-emerald-300 underline">
+            Use $500 DDollar copy track
+          </Link>{' '}
+          — no exchange or API keys.
+        </div>
 
         {error && (
           <p className="mt-4 rounded-lg border border-red-500/30 bg-red-950/30 px-4 py-2 text-sm text-red-200">
@@ -154,17 +157,10 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             <li
               key={s}
               className={`rounded-full px-3 py-1 ${
-                step === s ? 'bg-emerald-600 text-white' : 'bg-zinc-900 text-zinc-500'
+                step === s ? 'bg-violet-600 text-white' : 'bg-zinc-900 text-zinc-500'
               }`}
             >
-              {i + 1}.{' '}
-              {s === 'exchange'
-                ? 'Exchange'
-                : s === 'credentials'
-                  ? 'API keys'
-                  : s === 'ai'
-                    ? 'AI'
-                    : 'Risk & activate'}
+              {i + 1}. {s === 'exchange' ? 'Exchange' : s === 'credentials' ? 'API keys' : 'Risk & activate'}
             </li>
           ))}
         </ol>
@@ -176,7 +172,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             </div>
             <h2 className="font-semibold">Choose exchange</h2>
             <p className="text-xs text-zinc-500">
-              Bitfinex is tested end-to-end. Other exchanges are listed for future support.
+              Live tier places real orders on your account when admin AI trades. Never enable withdraw permissions.
             </p>
             <div className="grid gap-2 sm:grid-cols-2">
               {sortedProviders.map((p) => {
@@ -222,13 +218,13 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               e.preventDefault();
               if (!apiKey || !apiSecret) return;
               if (exchangeRequiresPassphrase(exchange as ExchangeProvider) && !passphrase.trim()) return;
-              setStep('ai');
+              setStep('risk');
             }}
           >
             <h2 className="font-semibold">Connect {selectedProvider?.label ?? exchange}</h2>
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs text-zinc-400">
-              <strong className="text-zinc-200">Security:</strong> Founder OS encrypts credentials. You own your funds.
-              Never enable withdraw permissions.
+              <strong className="text-zinc-200">Copy trading:</strong> Your exchange executes when admin DeepSeek AI
+              trades. Founder OS encrypts credentials. You own your funds.
             </div>
             <button
               type="button"
@@ -298,56 +294,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               <button type="button" onClick={() => setStep('exchange')} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm">
                 Back
               </button>
-              <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">
-                Continue
-              </button>
-            </div>
-          </form>
-        )}
-
-        {step === 'ai' && (
-          <form
-            className="mt-8 space-y-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!aiApiKey.trim()) return;
-              setStep('risk');
-            }}
-          >
-            <h2 className="font-semibold">Connect AI</h2>
-            <p className="text-sm text-zinc-500">
-              BYOAI — the agent uses your provider for decisions. DeepSeek matches the public showcase.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {TRADING_AGENT_AI_PROVIDERS.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setAiProvider(id)}
-                  className={`rounded-full px-3 py-1 text-xs ${
-                    aiProvider === id ? 'bg-violet-600 text-white' : 'border border-zinc-700 text-zinc-400'
-                  }`}
-                >
-                  {TRADING_AGENT_AI_PROVIDER_LABELS[id]}
-                  {id === 'deepseek' ? ' ★' : ''}
-                </button>
-              ))}
-            </div>
-            <label className="block text-sm">
-              {TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as keyof typeof TRADING_AGENT_AI_PROVIDER_LABELS]} API key
-              <input
-                type="password"
-                value={aiApiKey}
-                onChange={(e) => setAiApiKey(e.target.value)}
-                required
-                className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm"
-              />
-            </label>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setStep('credentials')} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm">
-                Back
-              </button>
-              <button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">
+              <button type="submit" className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium hover:bg-violet-500">
                 Continue
               </button>
             </div>
@@ -367,7 +314,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4 text-sm space-y-2">
               <p><span className="text-zinc-500">Agent:</span> {agentName}</p>
               <p><span className="text-zinc-500">Exchange:</span> {selectedProvider?.label ?? exchange}</p>
-              <p><span className="text-zinc-500">AI:</span> {TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as keyof typeof TRADING_AGENT_AI_PROVIDER_LABELS]}</p>
+              <p><span className="text-zinc-500">AI:</span> Admin DeepSeek (platform copy — no key needed)</p>
               <p><span className="text-zinc-500">Rental:</span> {costDay.toLocaleString()} DDollar/day</p>
             </div>
             <label className="flex items-start gap-3 text-sm text-zinc-300">
@@ -381,15 +328,15 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               {AGENT_BETA_RISK_COPY.checkboxLabel}
             </label>
             <div className="flex gap-2">
-              <button type="button" onClick={() => setStep('ai')} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm">
+              <button type="button" onClick={() => setStep('credentials')} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm">
                 Back
               </button>
               <button
                 type="submit"
                 disabled={busy || !riskAccepted}
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold hover:bg-emerald-500 disabled:opacity-50"
+                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold hover:bg-violet-500 disabled:opacity-50"
               >
-                {busy ? 'Activating…' : 'Activate on my account'}
+                {busy ? 'Activating…' : 'Activate live copy trading'}
               </button>
             </div>
           </form>

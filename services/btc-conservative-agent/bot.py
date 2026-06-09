@@ -2334,7 +2334,7 @@ state = {
     "warmup_mode": True
 }
 shutdown_event = threading.Event()
-PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100}
+PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
 
 def get_edge_threshold():
     with state_lock:
@@ -7752,10 +7752,23 @@ def get_debug_state():
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    with state_lock:
+        state["manual_admin_pause"] = True
+        save_persistent_config()
+    set_execution_paused("ADMIN_MANUAL")
+    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    with state_lock:
+        state["manual_admin_pause"] = False
+        save_persistent_config()
     set_execution_paused("")
-    return jsonify({"status": "resumed"})
+    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "resumed", "execution_paused": False})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -9385,7 +9398,7 @@ def system_health_check():
                 if not state.get("system_ready"):
                     logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
                 state["system_ready"] = True
-                if state.get("execution_paused"):
+                if state.get("execution_paused") and not state.get("manual_admin_pause"):
                     set_execution_paused("")
         else:
             state["last_ready_ts"] = 0

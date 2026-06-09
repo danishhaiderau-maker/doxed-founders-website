@@ -47,6 +47,10 @@ export class AdminControlService {
       return { status: 'offline', label: 'Agent offline' };
     }
     if (state.execution_paused) {
+      const reason = state.execution_reason ?? '';
+      if (reason === 'ADMIN_MANUAL') {
+        return { status: 'updating', label: 'Agent paused by admin' };
+      }
       return { status: 'updating', label: 'Agent updating' };
     }
     return { status: 'online', label: 'Agent online' };
@@ -88,6 +92,7 @@ export class AdminControlService {
         runtimePushedAt: credentials.runtimePushedAt,
         botRuntimeNote: credentials.botRuntimeNote,
         aiRuntimeNote: credentials.aiRuntimeNote,
+        agentShowcaseDefaultSettings: settings?.agentShowcaseDefaultSettings?.trim() ?? null,
       },
       adapters: {
         exchangeStatus: bridge.connected
@@ -175,7 +180,7 @@ export class AdminControlService {
 
   async updateShowcaseConfig(
     userId: string,
-    input: { exchangeProvider?: string; aiProvider?: string },
+    input: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
   ) {
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
@@ -183,14 +188,23 @@ export class AdminControlService {
         id: 'default',
         showcaseExchangeProvider: input.exchangeProvider ?? 'bybit',
         showcaseAiProvider: input.aiProvider ?? 'deepseek',
+        agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings ?? null,
         updatedByUserId: userId,
       },
       update: {
         ...(input.exchangeProvider ? { showcaseExchangeProvider: input.exchangeProvider } : {}),
         ...(input.aiProvider ? { showcaseAiProvider: input.aiProvider } : {}),
+        ...(input.agentShowcaseDefaultSettings !== undefined
+          ? { agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings || null }
+          : {}),
         updatedByUserId: userId,
       },
     });
     return this.getAgentControlOverview();
+  }
+
+  async getAgentDefaultSettings(): Promise<string | null> {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    return row?.agentShowcaseDefaultSettings?.trim() || null;
   }
 }

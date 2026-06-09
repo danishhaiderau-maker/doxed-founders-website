@@ -3201,6 +3201,8 @@ export interface TradingAgentSummary {
   isExperimental: boolean;
   following?: boolean;
   hired?: boolean;
+  instanceStatus?: string | null;
+  instanceMode?: 'copy' | 'live' | null;
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;
@@ -3209,8 +3211,6 @@ export interface TradingAgentSummary {
 export interface TradingAgentDashboard {
   agent: TradingAgentSummary;
   dashboard: import('@dcf/utils').TradingAgentDashboardState;
-  /** Full research bot snapshot when TRADING_AGENT_BOT_URL is connected. */
-  rawBotState?: Record<string, unknown> | null;
   updatedAt: string;
   botConnected?: boolean;
   botSource?: 'LIVE' | 'FALLBACK';
@@ -3363,6 +3363,7 @@ export interface AdminControlOverview {
     runtimePushedAt?: string | null;
     botRuntimeNote?: string | null;
     aiRuntimeNote?: string | null;
+    agentShowcaseDefaultSettings?: string | null;
   };
   adapters?: {
     exchangeStatus: string;
@@ -3450,8 +3451,50 @@ export function resetShowcaseSimulation(token: string) {
   );
 }
 
+export interface AdminResearchDashboard {
+  agent: { slug: string; name: string };
+  rawBotState: Record<string, unknown>;
+  botVersion: string | null;
+  executionPaused?: boolean;
+  executionReason?: string | null;
+  strategyMode?: string | null;
+  updatedAt: string;
+}
+
+export function fetchAdminResearchDashboard(token: string) {
+  return apiFetch<AdminResearchDashboard>('/admin-control/agent-research-dashboard', undefined, token);
+}
+
+export function fetchShowcaseDefaultSettings() {
+  return apiFetch<{ message: string | null }>('/trading-agents/showcase-default-settings');
+}
+
+export function paperTrackAgent(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; paperAllocationUsd: number; ddSpent: number }>(
+    `/trading-agents/${slug}/paper-track`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function pauseMyAgentInstance(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; status: string; message: string }>(
+    `/trading-agents/${slug}/instance/pause`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function resumeMyAgentInstance(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; status: string; message: string }>(
+    `/trading-agents/${slug}/instance/resume`,
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function updateShowcaseConfig(
-  body: { exchangeProvider?: string; aiProvider?: string },
+  body: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
   token: string,
 ) {
   return apiFetch<AdminControlOverview>(

@@ -6,10 +6,12 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PROVIDERS, TRADING_AGENT_AI_PROVIDER_LABELS, EXCHANGE_PROVIDERS, EXCHANGE_PROVIDER_LABELS, EXCHANGE_CREDENTIAL_CONFIG, type ExchangeProvider } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
+import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import {
   AdminControlOverview,
   fetchAdminControlOverview,
+  fetchAdminResearchDashboard,
   fetchGlobalShareFooter,
   pauseTradingAgent,
   resumeTradingAgent,
@@ -23,6 +25,7 @@ import {
 
 const SECTIONS = [
   { id: 'agent', label: 'Agent Control' },
+  { id: 'research', label: 'Research Dashboard' },
   { id: 'social', label: 'Social Messaging' },
   { id: 'platform', label: 'Platform & Treasury' },
   { id: 'moderation', label: 'Moderation' },
@@ -49,6 +52,11 @@ export default function AdminControlPage() {
   const [aiApiKey, setAiApiKey] = useState('');
   const [botPublicUrl, setBotPublicUrl] = useState('');
   const [showcaseTestnet, setShowcaseTestnet] = useState(false);
+  const [defaultSettings, setDefaultSettings] = useState('');
+  const [researchRaw, setResearchRaw] = useState<Record<string, unknown> | null>(null);
+  const [researchVersion, setResearchVersion] = useState<string | null>(null);
+  const [researchUpdated, setResearchUpdated] = useState<string>('');
+  const [researchAutoRefresh, setResearchAutoRefresh] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -61,6 +69,14 @@ export default function AdminControlPage() {
       setFooter(foot.footer);
       if (ov.showcase?.botPublicUrl) setBotPublicUrl(ov.showcase.botPublicUrl);
       setError(null);
+      try {
+        const research = await fetchAdminResearchDashboard(token);
+        setResearchRaw(research.rawBotState);
+        setResearchVersion(research.botVersion);
+        setResearchUpdated(research.updatedAt);
+      } catch {
+        setResearchRaw(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load admin control');
     }
@@ -188,6 +204,45 @@ export default function AdminControlPage() {
     }
   }
 
+  async function handleSaveDefaultSettings(e: FormEvent) {
+    e.preventDefault();
+    if (!token) return;
+    setBusy('default-settings');
+    setError(null);
+    try {
+      const ov = await updateShowcaseConfig({ agentShowcaseDefaultSettings: defaultSettings }, token);
+      setOverview(ov);
+      setMsg('Public default settings message saved — shown on agent hire sidebar.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const refreshResearch = useCallback(async () => {
+    if (!token) return;
+    try {
+      const research = await fetchAdminResearchDashboard(token);
+      setResearchRaw(research.rawBotState);
+      setResearchVersion(research.botVersion ? String(research.botVersion) : null);
+      setResearchUpdated(research.updatedAt);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Research dashboard unavailable');
+    }
+  }, [token]);
+
+  useEffect(() => {
+    const msg = overview?.showcase?.agentShowcaseDefaultSettings;
+    if (msg != null) setDefaultSettings(msg);
+  }, [overview?.showcase?.agentShowcaseDefaultSettings]);
+
+  useEffect(() => {
+    if (section !== 'research' || !researchAutoRefresh || !token) return;
+    const id = setInterval(() => void refreshResearch(), 5000);
+    return () => clearInterval(id);
+  }, [section, researchAutoRefresh, token, refreshResearch]);
+
   if (!isAdmin) return null;
 
   const runtime = overview?.runtime;
@@ -213,7 +268,7 @@ export default function AdminControlPage() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-8 lg:flex-row">
+      <main className={`mx-auto flex flex-col gap-6 px-6 py-8 lg:flex-row ${section === 'research' ? 'max-w-[90rem]' : 'max-w-5xl'}`}>
         <aside className="lg:w-48 lg:shrink-0">
           <nav className="flex flex-wrap gap-1 lg:flex-col">
             {SECTIONS.map((item) => (
@@ -453,6 +508,27 @@ export default function AdminControlPage() {
                     </p>
                   )}
 
+                  <form onSubmit={handleSaveDefaultSettings} className="mt-6 rounded-lg border border-amber-500/25 bg-amber-950/10 p-4">
+                    <p className="text-sm font-semibold text-amber-200">Public default settings message</p>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Shown on the agent hire sidebar. Users may override with experimental settings at their own risk.
+                    </p>
+                    <textarea
+                      value={defaultSettings}
+                      onChange={(e) => setDefaultSettings(e.target.value)}
+                      rows={4}
+                      className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"
+                      placeholder="Conservative edge threshold, RESEARCH mode, max $500 allocation…"
+                    />
+                    <button
+                      type="submit"
+                      disabled={busy === 'default-settings'}
+                      className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium hover:bg-amber-500 disabled:opacity-50"
+                    >
+                      {busy === 'default-settings' ? 'Saving…' : 'Save default settings message'}
+                    </button>
+                  </form>
+
                   <div className="mt-6 flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -510,6 +586,81 @@ export default function AdminControlPage() {
                     )}
                   </div>
                 </>
+              )}
+            </section>
+          )}
+
+          {section === 'research' && (
+            <section className="space-y-6">
+              <div className="rounded-xl border border-red-500/30 bg-red-950/15 p-5">
+                <h2 className="text-lg font-semibold text-red-100">Research dashboard (admin only)</h2>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Full pipeline state, AI inputs, and debug data. Never exposed on public agent pages.
+                </p>
+                <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
+                  <span className="rounded-full border border-zinc-700 px-3 py-1">
+                    Bot script:{' '}
+                    <strong className="text-white">
+                      {researchVersion ??
+                        (runtime?.deployVersion != null ? String(runtime.deployVersion) : '—')}
+                    </strong>
+                  </span>
+                  <span className="rounded-full border border-zinc-700 px-3 py-1 capitalize">
+                    Status: {runtime?.publicStatus ?? '—'}
+                  </span>
+                  {runtime?.executionPaused && (
+                    <span className="rounded-full border border-amber-500/40 bg-amber-950/30 px-3 py-1 text-amber-200">
+                      Paused ({runtime.executionReason ?? 'unknown'})
+                    </span>
+                  )}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy != null}
+                    onClick={() => void handleAgentAction('pause')}
+                    className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/30 disabled:opacity-50"
+                  >
+                    Pause showcase bot
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy != null}
+                    onClick={() => void handleAgentAction('resume')}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+                  >
+                    Resume showcase bot
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void refreshResearch()}
+                    className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white"
+                  >
+                    Refresh snapshot
+                  </button>
+                  <label className="flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={researchAutoRefresh}
+                      onChange={(e) => setResearchAutoRefresh(e.target.checked)}
+                    />
+                    Auto-refresh (5s)
+                  </label>
+                </div>
+              </div>
+
+              {researchRaw ? (
+                <ResearchBotDetailDashboard
+                  raw={researchRaw}
+                  updatedAt={researchUpdated || new Date().toISOString()}
+                  onRefresh={() => void refreshResearch()}
+                  autoRefresh={researchAutoRefresh}
+                  onAutoRefreshChange={setResearchAutoRefresh}
+                />
+              ) : (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-8 text-center text-sm text-zinc-500">
+                  Bot not connected — configure TRADING_AGENT_BOT_URL and ensure Railway runtime is online.
+                </div>
               )}
             </section>
           )}

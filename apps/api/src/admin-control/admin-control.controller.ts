@@ -6,6 +6,7 @@ import { AuthUser } from '../auth/auth.types';
 import { Public } from '../auth/public.decorator';
 import { AdminControlService } from './admin-control.service';
 import { ShowcaseRuntimeService } from './showcase-runtime.service';
+import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 
 @SkipThrottle()
 @Controller('admin-control')
@@ -13,6 +14,7 @@ export class AdminControlController {
   constructor(
     private readonly adminControl: AdminControlService,
     private readonly showcaseRuntime: ShowcaseRuntimeService,
+    private readonly tradingAgents: TradingAgentsService,
   ) {}
 
   @Public()
@@ -64,10 +66,16 @@ export class AdminControlController {
   }
 
   @UseGuards(AdminGuard)
+  @Get('agent-research-dashboard')
+  agentResearchDashboard() {
+    return this.tradingAgents.getAdminResearchDashboard('conservative-btc');
+  }
+
+  @UseGuards(AdminGuard)
   @Patch('showcase-config')
   updateShowcase(
     @CurrentUser() user: AuthUser,
-    @Body() body: { exchangeProvider?: string; aiProvider?: string },
+    @Body() body: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
   ) {
     return this.adminControl.updateShowcaseConfig(user.id, body);
   }

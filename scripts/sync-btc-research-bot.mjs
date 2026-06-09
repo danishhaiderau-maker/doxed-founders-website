@@ -7,6 +7,7 @@
  */
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,7 +39,6 @@ async function fetchResearchBot() {
 
 function patchForProduction(source) {
   let out = source;
-  // Portable debug log paths (Railway/Linux) instead of Windows-only paths
   out = out.replace(
     /_AGENT_DEBUG_LOG = r"C:\\Users\\user\\Desktop\\Final Bots\\debug-43f630\.log"/,
     '_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")',
@@ -54,6 +54,10 @@ function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
 
+function applyProductionPatches() {
+  execSync('node scripts/patch-btc-bot-production.mjs', { cwd: ROOT, stdio: 'inherit' });
+}
+
 async function main() {
   const checkOnly = process.argv.includes('--check-only');
   console.log(`Fetching ${REPO}/${SOURCE_FILE}`);
@@ -61,11 +65,26 @@ async function main() {
   if (!raw.includes('Flask') || raw.length < 50_000) {
     throw new Error('Downloaded file does not look like a valid bot.py');
   }
-  const patched = patchForProduction(raw);
-  const newHash = sha256(patched);
+
   const oldHash = existsSync(TARGET) ? sha256(readFileSync(TARGET, 'utf8')) : null;
 
-  console.log(`Research bot size: ${(patched.length / 1024).toFixed(0)} KB`);
+  if (checkOnly) {
+    const patched = patchForProduction(raw);
+    const probeHash = sha256(patched);
+    if (oldHash === probeHash) {
+      console.log('Already up to date — no changes.');
+      return;
+    }
+    console.log('Update available (--check-only, not writing).');
+    process.exit(2);
+  }
+
+  writeFileSync(TARGET, patchForProduction(raw), 'utf8');
+  applyProductionPatches();
+  const finalSrc = readFileSync(TARGET, 'utf8');
+  const newHash = sha256(finalSrc);
+
+  console.log(`Research bot size: ${(finalSrc.length / 1024).toFixed(0)} KB`);
   console.log(`Hash: ${newHash}${oldHash ? ` (was ${oldHash})` : ''}`);
 
   if (oldHash === newHash) {
@@ -73,12 +92,6 @@ async function main() {
     return;
   }
 
-  if (checkOnly) {
-    console.log('Update available (--check-only, not writing).');
-    process.exit(2);
-  }
-
-  writeFileSync(TARGET, patched, 'utf8');
   console.log(`Updated ${TARGET}`);
   console.log('Push to master → Railway redeploys btc-conservative-agent automatically.');
 }

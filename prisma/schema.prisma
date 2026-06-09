@@ -1266,6 +1266,8 @@ model PlatformSettings {
   showcaseBotPublicUrl        String?
   showcaseCredentialsUpdatedAt DateTime?
   showcaseRuntimePushedAt      DateTime?
+  /** Admin-recommended agent settings shown to users on hire/observe flows */
+  agentShowcaseDefaultSettings String? @db.Text
   updatedByUserId          String?
   updatedAt                DateTime @updatedAt
 }

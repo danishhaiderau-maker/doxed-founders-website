@@ -27,6 +27,12 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @Get('showcase-default-settings')
+  showcaseDefaults() {
+    return this.tradingAgents.getShowcaseDefaultSettings();
+  }
+
+  @Public()
   @Get('bot/status')
   botStatus() {
     return this.tradingAgents.getBotBridgeStatus();
@@ -49,6 +55,21 @@ export class TradingAgentsController {
   @Get(':slug/my-dashboard')
   myDashboard(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.getMyDashboard(user.id, slug);
+  }
+
+  @Post(':slug/paper-track')
+  paperTrack(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.instances.paperTrackAgent(user.id, slug, 500);
+  }
+
+  @Post(':slug/instance/pause')
+  pauseInstance(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.instances.setInstancePaused(user.id, slug, true);
+  }
+
+  @Post(':slug/instance/resume')
+  resumeInstance(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.instances.setInstancePaused(user.id, slug, false);
   }
 
   @Post(':id/hire')
@@ -74,7 +95,7 @@ export class TradingAgentsController {
   @Get(':slug/activity')
   activity(@Param('slug') slug: string, @Query('limit') limit?: string) {
     const n = limit ? Number(limit) : 30;
-    return this.tradingAgents.listActivity(slug, Number.isFinite(n) ? n : 30);
+    return this.tradingAgents.listActivity(slug, Number.isFinite(n) ? n : 30, true);
   }
 
   @Post(':id/follow')
