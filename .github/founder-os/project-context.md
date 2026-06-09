@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(agents): live transparency tables, multi-exchange hire, and faster dashboard load
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
