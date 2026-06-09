@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(showcase): clean $500 slate on every bot start and version change
+feat(agents): per-user $500 session balance and scoped activity
 
 ## Last Activity
 
