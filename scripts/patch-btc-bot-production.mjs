@@ -170,6 +170,132 @@ if (src.includes('DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10
   changed = true;
 }
 
+// ─── Clean slate: wipe config/policy, never restore sim balance, fix equity display ───
+if (!src.includes('CONFIG_FILE, POLICY_FILE')) {
+  src = src.replace(
+    `"near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
+        _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,`,
+    `"near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
+        CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
+        _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,`,
+  );
+  changed = true;
+}
+
+if (src.includes('"live_armed", "account_balance",')) {
+  src = src.replace(
+    '"live_armed", "account_balance",',
+    '"live_armed",',
+  );
+  changed = true;
+}
+
+if (!src.includes('def enforce_clean_research_session()')) {
+  src = src.replace(
+    'def load_persistent_config():',
+    `def enforce_clean_research_session():
+    """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
+    global bot_start_time
+    with trade_lock:
+        trades.clear()
+        pending_orders.clear()
+        expired_orders.clear()
+        open_positions.clear()
+        trades_map.clear()
+        recent_trades.clear()
+    with replay_lock:
+        replay_buffers.clear()
+    with state_lock:
+        state["account_balance"] = STARTING_BALANCE
+        state["daily_pnl_usd"] = 0.0
+        state["consecutive_losses"] = 0
+        state["loss_pause_until"] = 0.0
+        state["fresh_collection_mode"] = True
+        if not state.get("live_armed", False):
+            state["fresh_collection_mode"] = True
+    bot_start_time = time.time()
+    with state_lock:
+        state["bot_start_time"] = bot_start_time
+    logger.warning(
+        f"[STARTUP] Clean research session — balance={STARTING_BALANCE} fresh_collection=ON "
+        f"version={EXECUTION_FIX_VERSION} [PIPELINE ENFORCEMENT]"
+    )
+
+def _session_trades_only(trades_list):
+    """Only expose trades opened after this process started."""
+    start = bot_start_time or 0.0
+    if start <= 0:
+        return list(trades_list or [])
+    kept = []
+    for t in trades_list or []:
+        if not isinstance(t, dict):
+            continue
+        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0.0
+        if float(ts or 0) >= start - 1.0:
+            kept.append(t)
+    return kept
+
+def load_persistent_config():`,
+  );
+  changed = true;
+}
+
+if (!src.includes('enforce_clean_research_session()')) {
+  const mainInject = `    load_persistent_config()
+    if state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed", False):
+        enforce_clean_research_session()
+    startup_hard_fix_ai_threshold()`;
+  if (src.includes(mainInject)) {
+    // already patched
+  } else if (src.includes('    load_persistent_config()\n    startup_hard_fix_ai_threshold()')) {
+    src = src.replace(
+      '    load_persistent_config()\n    startup_hard_fix_ai_threshold()',
+      mainInject,
+    );
+    changed = true;
+  }
+}
+
+if (!src.includes('snapshot["trade_count_session"]')) {
+  const snapInject = `        snapshot["account_balance"] = get_display_balance()
+        snapshot["equity"] = snapshot["account_balance"] + total_unreal
+        session_trades = _session_trades_only(trades_copy)
+        snapshot["trades"] = session_trades
+        snapshot["trade_count_session"] = len(session_trades)
+        snapshot["bot_start_time"] = bot_start_time
+        snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        snapshot["ai_input"] = LAST_AI_PAYLOAD`;
+  if (src.includes('        snapshot["account_balance"] = get_display_balance()\n        snapshot["ai_input"] = LAST_AI_PAYLOAD')) {
+    src = src.replace(
+      '        snapshot["account_balance"] = get_display_balance()\n        snapshot["ai_input"] = LAST_AI_PAYLOAD',
+      snapInject,
+    );
+    changed = true;
+  }
+}
+
+if (!src.includes("@app.route('/api/reset'")) {
+  src = src.replace(
+    `@app.route('/api/toggle_fresh_collection', methods=['POST'])
+def toggle_fresh_collection():`,
+    `@app.route('/api/reset', methods=['POST'])
+def api_reset_showcase():
+    """Admin/platform: wipe all research artifacts and restart session at $500."""
+    result = perform_fresh_collection_reset()
+    enforce_clean_research_session()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
+
+@app.route('/api/toggle_fresh_collection', methods=['POST'])
+def toggle_fresh_collection():`,
+  );
+  changed = true;
+}
+
 if (changed) {
   writeFileSync(TARGET, src, 'utf8');
   console.log('Applied production patches to bot.py');

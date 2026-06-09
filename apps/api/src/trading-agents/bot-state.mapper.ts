@@ -5,6 +5,10 @@ export type BotApiState = {
   price?: number | null;
   account_balance?: number;
   equity?: number;
+  fresh_collection_mode?: boolean;
+  bot_start_time?: number;
+  trade_count_session?: number;
+  bot_version?: string;
   daily_pnl_usd?: number;
   regime?: string;
   strategy_mode?: string;
@@ -281,9 +285,25 @@ function regimeLabel(regime?: string): string {
 }
 
 export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STARTING_BALANCE) {
+  const sessionStart = bot.bot_start_time ?? 0;
+  const rawTrades = bot.trades ?? [];
+  const trades =
+    sessionStart > 0
+      ? rawTrades.filter((t) => {
+          const ts = (t as { created_ts_ts?: number; entry_ts?: number }).created_ts_ts
+            ?? (t as { entry_ts?: number }).entry_ts
+            ?? 0;
+          return Number(ts) >= sessionStart - 1;
+        })
+      : rawTrades;
+
   const balance = bot.account_balance ?? startingBalance;
-  const equity = bot.equity ?? balance;
-  const trades = bot.trades ?? [];
+  const openUnreal = (bot.positions ?? []).reduce(
+    (sum, p) => sum + Number(p.unreal_usd ?? 0),
+    0,
+  );
+  const equity = balance + openUnreal;
+
   const wins = trades.filter((t) => (t.net_pnl_usd ?? 0) > 0 || (t.pnl ?? 0) > 0).length;
   const winRate = trades.length > 0 ? (wins / trades.length) * 100 : 0;
   const netReturnPct = ((equity - startingBalance) / startingBalance) * 100;
@@ -299,9 +319,9 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
 
   return {
     balanceUsd: balance,
-    equityUsd: equity,
+    equityUsd: Number(equity.toFixed(2)),
     netReturnPct: Number(netReturnPct.toFixed(2)),
-    tradeCount: trades.length,
+    tradeCount: bot.trade_count_session ?? trades.length,
     winRatePct: Number(winRate.toFixed(1)),
     liveSinceDays,
     currentPosition: openCount === 0 ? 'NONE' : (bot.positions?.[0]?.dir ?? 'OPEN'),

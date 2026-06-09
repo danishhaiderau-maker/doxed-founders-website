@@ -165,15 +165,45 @@ export class TradingAgentsService implements OnModuleInit {
 
   async onModuleInit() {
     await this.ensureSeed().catch(() => undefined);
-    await this.syncConservativeBtcPricing().catch(() => undefined);
+    await this.syncConservativeBtcAgentRecord().catch(() => undefined);
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 
-  /** Keep showcase agent hire pricing in sync across environments. */
-  private async syncConservativeBtcPricing() {
+  /** Keep showcase agent pricing + stale seed metrics in sync across environments. */
+  private async syncConservativeBtcAgentRecord() {
     await this.prisma.tradingAgent.updateMany({
       where: { slug: 'conservative-btc' },
-      data: { costDdollarWeek: 2000 },
+      data: {
+        costDdollarWeek: 2000,
+        startingBalance: 500,
+        balanceUsd: 500,
+        equityUsd: 500,
+        netReturnPct: 0,
+        tradeCount: 0,
+        winRatePct: 0,
+      },
+    });
+    await this.syncShowcaseMetricsFromBot().catch(() => undefined);
+  }
+
+  /** Mirror live bot session stats into Neon so public profile never shows stale seed data. */
+  async syncShowcaseMetricsFromBot() {
+    if (!this.botBridge.isEnabled()) return;
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
+    if (!agent) return;
+
+    const live = await this.botBridge.getLiveDashboard(agent.name, true);
+    if (!live?.stats) return;
+
+    await this.prisma.tradingAgent.update({
+      where: { id: agent.id },
+      data: {
+        balanceUsd: live.stats.balanceUsd,
+        equityUsd: live.stats.equityUsd,
+        netReturnPct: live.stats.netReturnPct,
+        tradeCount: live.stats.tradeCount,
+        winRatePct: live.stats.winRatePct,
+      },
     });
   }
 
@@ -701,6 +731,8 @@ export class TradingAgentsService implements OnModuleInit {
 
     const bot = await this.botBridge.fetchState();
     if (!bot) return;
+
+    await this.syncShowcaseMetricsFromBot();
 
     const positions = bot.positions ?? [];
     const openPos = positions[0];
