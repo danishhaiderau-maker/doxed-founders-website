@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(agent-hub): mockup layout, admin stop button, and loading fix
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
