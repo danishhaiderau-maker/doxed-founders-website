@@ -60,12 +60,14 @@ export type BotApiState = {
   positions?: Array<{
     dir?: string;
     side?: string;
+    leg?: string;
     entry?: number;
     qty?: number;
     sl?: number;
     tp?: number;
     pnl_pct_margin?: number;
     unreal_usd?: number;
+    current_price?: number;
   }>;
   orders?: Array<{
     side?: string;
@@ -74,6 +76,18 @@ export type BotApiState = {
     qty?: number;
     signal_price?: number;
     age_min?: number;
+  }>;
+  expired_orders?: Array<{
+    trade_id?: string;
+    dir?: string;
+    limit_price?: number;
+    signal_price?: number;
+    created_ts?: number;
+    expired_ts?: number;
+    age_min?: number;
+    conf?: number;
+    mode?: string;
+    reason?: string;
   }>;
   trades?: Array<{
     ts?: string;
@@ -84,6 +98,12 @@ export type BotApiState = {
     exit?: number;
     pnl?: number;
     net_pnl_usd?: number;
+    gross_pnl_usd?: number;
+    trading_fees_usd?: number;
+    funding_fees_usd?: number;
+    dur_min?: number;
+    duration_min?: number;
+    ai_band?: string;
     exit_reason?: string;
   }>;
   ai_history?: Array<{
@@ -95,7 +115,27 @@ export type BotApiState = {
     final_direction?: string;
     ai_direction_raw?: string;
   }>;
-  signal_info?: { count?: number; active?: boolean };
+  signal_info?: {
+    count?: number;
+    active?: boolean;
+    signals?: Array<{
+      trade_id?: string;
+      dir?: string;
+      conf?: number;
+      regime?: string;
+      regime_birth?: string;
+      strategy_birth?: string;
+      created_ts?: string | number;
+      pullback_pct?: number;
+      pull_req?: number;
+      trigger?: string;
+      signal_price?: number;
+      outcome?: string;
+      fill_price?: number | null;
+      exit_reason?: string | null;
+      status?: string;
+    }>;
+  };
   trades_map?: Record<
     string,
     {
@@ -113,6 +153,112 @@ export type BotApiState = {
 };
 
 const STARTING_BALANCE = 500;
+const LIVE_BOOK_MAX = 5;
+
+function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
+  return rows.slice(-max).reverse();
+}
+
+function formatBotTime(ts: string | number | undefined): string {
+  if (ts == null || ts === '') return '—';
+  if (typeof ts === 'number') {
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    return new Date(ms).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  }
+  const parsed = Date.parse(ts);
+  if (!Number.isNaN(parsed)) {
+    return new Date(parsed).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  }
+  return String(ts).slice(11, 16) || String(ts);
+}
+
+function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
+  const activeSignals = takeLatest(
+    (bot.signal_info?.signals ?? []).map((s) => ({
+      time:
+        typeof s.created_ts === 'string' && s.created_ts.includes('T')
+          ? s.created_ts.slice(0, 19)
+          : formatBotTime(s.created_ts),
+      direction: String(s.dir ?? '—').toUpperCase(),
+      confidence: Math.round(Number(s.conf ?? 0)),
+      regime: String(s.regime_birth ?? s.regime ?? '—'),
+      strategy: String(s.strategy_birth ?? s.regime ?? bot.strategy_mode ?? 'SR'),
+      trigger: String(s.trigger ?? 'BASE'),
+      pullRequiredPct: Number(s.pull_req ?? s.pullback_pct ?? 0),
+      signalPrice: Number(s.signal_price ?? 0),
+      maxPullPct: Number(s.pullback_pct ?? s.pull_req ?? 0),
+      outcome: String(s.outcome ?? s.status ?? 'PENDING'),
+      fillPrice: s.fill_price != null ? Number(s.fill_price) : null,
+      exitReason: s.exit_reason ? String(s.exit_reason) : null,
+    })),
+  );
+
+  const positions = takeLatest(
+    (bot.positions ?? []).map((p, i) => ({
+      leg: String(p.leg ?? (i === 0 ? 'Main' : `Leg ${i + 1}`)),
+      side: String(p.dir ?? p.side ?? 'LONG').toUpperCase(),
+      qty: Number(p.qty ?? 0),
+      entry: Number(p.entry ?? 0),
+      current: Number(p.current_price ?? bot.price ?? 0),
+      stopLoss: Number(p.sl ?? 0),
+      takeProfit: Number(p.tp ?? 0),
+      pnlUsd: Number(p.unreal_usd ?? 0),
+    })),
+  );
+
+  const pendingOrders = takeLatest(
+    (bot.orders ?? []).map((o) => ({
+      ageMin: Math.round(Number(o.age_min ?? 0)),
+      side: String(o.side ?? '—').toUpperCase(),
+      status: String(o.status ?? 'PENDING').toUpperCase(),
+      qty: Number(o.qty ?? 0),
+      limitPrice: Number(o.limit_price ?? 0),
+      signalPrice: Number(o.signal_price ?? o.limit_price ?? 0),
+    })),
+  );
+
+  const expiredOrders = takeLatest(
+    (bot.expired_orders ?? []).map((o) => ({
+      time: formatBotTime(o.expired_ts ?? o.created_ts),
+      direction: String(o.dir ?? '—').toUpperCase(),
+      limitPrice: Number(o.limit_price ?? 0),
+      ageMin: Math.round(Number(o.age_min ?? 0)),
+      reason: String(o.reason ?? 'EXPIRED'),
+      confidence: Math.round(Number(o.conf ?? 0)),
+      mode: String(o.mode ?? bot.strategy_mode ?? '—'),
+    })),
+  );
+
+  const trades = takeLatest(
+    normalizeBotSessionTrades(bot).map((t) => {
+      const row = t as Record<string, unknown>;
+      return {
+        time: formatBotTime(t.ts),
+        tradeId: String(t.trade_id ?? '—'),
+        direction: String(t.final_direction ?? t.dir ?? '—').toUpperCase(),
+        entry: Number(t.entry ?? 0),
+        exit: Number(t.exit ?? 0),
+        durationMin: Math.round(Number(row.dur_min ?? row.duration_min ?? 0)),
+        pnlPct: Number(t.pnl ?? 0),
+        netUsd: Number(t.net_pnl_usd ?? row.net_pnl_usd ?? 0),
+        grossUsd: Number(row.gross_pnl_usd ?? 0),
+        tradeFeesUsd: Number(row.trading_fees_usd ?? row.fees_usd ?? 0),
+        fundingUsd: Number(row.funding_fees_usd ?? 0),
+        aiBand: String(row.ai_band ?? '—'),
+      };
+    }),
+  );
+
+  return { activeSignals, positions, pendingOrders, expiredOrders, trades };
+}
+
+const EMPTY_LIVE_BOOK: TradingAgentDashboardState['liveBook'] = {
+  activeSignals: [],
+  positions: [],
+  pendingOrders: [],
+  expiredOrders: [],
+  trades: [],
+};
 
 type BotTradeRow = NonNullable<BotApiState['trades']>[number];
 
@@ -175,6 +321,11 @@ export function normalizeBotSessionTrades(bot: BotApiState): BotTradeRow[] {
       exit,
       pnl: pnlPct,
       net_pnl_usd: netUsd,
+      gross_pnl_usd: Number(sig.gross_pnl_usd ?? exitCtx?.gross_pnl_usd ?? 0),
+      trading_fees_usd: Number(sig.trading_fees_usd ?? exitCtx?.trading_fees_usd ?? 0),
+      funding_fees_usd: Number(sig.funding_fees_usd ?? exitCtx?.funding_fees_usd ?? 0),
+      dur_min: Number(sig.dur_min ?? exitCtx?.duration_min ?? 0),
+      ai_band: String(sig.ai_band ?? (entry?.ai as Record<string, unknown> | undefined)?.ai_band ?? '—'),
       exit_reason: String(sig.exit_reason ?? ''),
     });
   }
@@ -333,6 +484,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
       daily: Number(dailyPnlPct.toFixed(2)),
       total: Number(totalPnlPct.toFixed(2)),
     },
+    liveBook: mapLiveBook(bot),
   };
 }
 

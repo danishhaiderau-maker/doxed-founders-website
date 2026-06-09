@@ -88,6 +88,13 @@ function buildDefaultDashboard(support: number, resistance: number, price: numbe
     wsHealth: 'HEALTHY',
     dataQuality: 'GOOD',
     pnl: { daily: -2.1, total: -4.9 },
+    liveBook: {
+      activeSignals: [],
+      positions: [],
+      pendingOrders: [],
+      expiredOrders: [],
+      trades: [],
+    },
   };
 }
 
@@ -379,11 +386,7 @@ export class TradingAgentsService implements OnModuleInit {
     if (agent.slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
       return serializeAgent(agent, extra);
     }
-    const reachable = await this.botBridge.isReachable(true);
-    if (!reachable) {
-      return serializeAgent(agent, { ...extra, botConnected: false });
-    }
-    const live = await this.botBridge.getLiveDashboard(agent.name, true);
+    const live = await this.botBridge.getLiveDashboard(agent.name, false);
     if (!live) {
       return serializeAgent(agent, { ...extra, botConnected: false });
     }
@@ -651,27 +654,24 @@ export class TradingAgentsService implements OnModuleInit {
     if (!agent) throw new NotFoundException('Agent not found');
 
     if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
-      const reachable = await this.botBridge.isReachable(true);
-      if (reachable) {
-        const live = await this.botBridge.getLiveDashboard(agent.name, true);
-        if (live) {
-          return {
-            agent: serializeAgent(agent, {
-              liveStats: live.stats,
-              botConnected: true,
-            }),
-            dashboard: opts?.publicSafe
-              ? mapBotStateToPublicDashboard(live.rawState)
-              : live.dashboard,
-            rawBotState: opts?.publicSafe ? undefined : live.rawState,
-            updatedAt: new Date().toISOString(),
+      const live = await this.botBridge.getLiveDashboard(agent.name, false);
+      if (live) {
+        return {
+          agent: serializeAgent(agent, {
+            liveStats: live.stats,
             botConnected: true,
-            botSource: 'LIVE' as const,
-            strategyMode: live.strategyMode,
-            executionPaused: live.executionPaused,
-            executionReason: live.executionReason,
-          };
-        }
+          }),
+          dashboard: opts?.publicSafe
+            ? mapBotStateToPublicDashboard(live.rawState)
+            : live.dashboard,
+          rawBotState: opts?.publicSafe ? undefined : live.rawState,
+          updatedAt: new Date().toISOString(),
+          botConnected: true,
+          botSource: 'LIVE' as const,
+          strategyMode: live.strategyMode,
+          executionPaused: live.executionPaused,
+          executionReason: live.executionReason,
+        };
       }
     }
 
