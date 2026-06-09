@@ -41,8 +41,10 @@ const NODE_COLORS: Record<JourneyNode['type'], string> = {
 
 export function AgentTradeJourney({
   activity,
+  layout = 'vertical',
 }: {
   activity: TradingAgentActivityEntry[];
+  layout?: 'vertical' | 'horizontal';
 }) {
   const nodes = activityToNodes(activity);
   const [selected, setSelected] = useState<TradingAgentActivityEntry | null>(
@@ -60,27 +62,41 @@ export function AgentTradeJourney({
 
   return (
     <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-6">
-      <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">Trade journey</h2>
+      <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">Trade journey · last 30 days</h2>
       <p className="mt-1 text-xs text-zinc-500">Click any step for reasoning, confidence, and share.</p>
 
-      <div className="mt-6 flex flex-col items-center gap-0 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-2">
+      <div
+        className={`mt-6 flex gap-2 ${
+          layout === 'horizontal'
+            ? 'flex-row flex-wrap justify-start overflow-x-auto pb-2'
+            : 'flex-col items-center sm:flex-row sm:flex-wrap sm:justify-center'
+        }`}
+      >
         {nodes.map((node, i) => {
           const item = activity.find((a) => a.id === node.id);
           const active = selected?.id === node.id;
           return (
-            <div key={node.id} className="flex flex-col items-center sm:flex-row">
+            <div
+              key={node.id}
+              className={`flex items-center ${layout === 'horizontal' ? 'shrink-0' : 'flex-col sm:flex-row'}`}
+            >
               <button
                 type="button"
                 onClick={() => item && setSelected(item)}
                 className={`min-w-[120px] rounded-xl border-2 px-4 py-3 text-center text-xs font-bold uppercase transition ${
                   NODE_COLORS[node.type]
-                } ${active ? 'ring-2 ring-white/30 scale-105' : 'opacity-90 hover:opacity-100'}`}
+                } ${active ? 'scale-105 ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
               >
                 {node.label}
               </button>
-              {i < nodes.length - 1 && (
+              {i < nodes.length - 1 && layout !== 'horizontal' && (
                 <span className="my-1 text-zinc-600 sm:mx-1 sm:my-0" aria-hidden>
                   ↓
+                </span>
+              )}
+              {i < nodes.length - 1 && layout === 'horizontal' && (
+                <span className="px-1 text-zinc-600" aria-hidden>
+                  →
                 </span>
               )}
             </div>

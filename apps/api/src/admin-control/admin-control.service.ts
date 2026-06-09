@@ -159,11 +159,20 @@ export class AdminControlService {
   }
 
   async pauseAgentTrading() {
-    return this.botBridge.proxyBotPost('/api/pause', {});
+    const res = await this.botBridge.proxyBotPost('/api/pause', {});
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const paused =
+      data.execution_paused === true ||
+      data.status === 'paused' ||
+      data.execution_reason === 'ADMIN_MANUAL';
+    return { ...res, ok: res.ok || paused, paused };
   }
 
   async resumeAgentTrading() {
-    return this.botBridge.proxyBotPost('/api/resume', {});
+    const res = await this.botBridge.proxyBotPost('/api/resume', {});
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const resumed = data.execution_paused === false || data.status === 'resumed';
+    return { ...res, ok: res.ok || resumed, resumed };
   }
 
   async restartAgentRuntime() {
