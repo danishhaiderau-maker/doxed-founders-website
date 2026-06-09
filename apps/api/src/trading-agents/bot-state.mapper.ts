@@ -231,6 +231,50 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
   };
 }
 
+/** Public-safe dashboard — no raw AI prompts, feature snapshots, or pipeline internals. */
+export function mapBotStateToPublicDashboard(bot: BotApiState): TradingAgentDashboardState {
+  const dash = mapBotStateToDashboard(bot);
+  const mc = bot.market_context ?? {};
+  const sr = bot.support_resistance ?? {};
+  const bias = mc.market_structure?.structure_bias ?? sr.sr_bias ?? 'neutral';
+  const mtf = mc.multi_tf?.agreement ?? 'mixed';
+  const winProb = bot.last_ai?.win_prob ?? 0;
+  const edge = dash.currentEdge;
+  const req = dash.requiredEdge;
+
+  dash.aiReasoning =
+    dash.currentAction === 'PAUSED'
+      ? 'Agent paused by operator. No new trades until resumed.'
+      : dash.currentPosition !== 'NONE'
+        ? `Managing open ${dash.currentPosition} position. Trend bias: ${bias}. Multi-timeframe: ${mtf}.`
+        : edge < req
+          ? `Watching market — edge ${edge}/${req} below threshold. Bias: ${bias}. Waiting for confirmation.`
+          : `Signal under review — ${winProb}% confidence, ${bias} bias, ${mtf} alignment.`;
+
+  dash.currentThinking = {
+    ...dash.currentThinking,
+    conclusion: dash.aiReasoning,
+  };
+
+  return dash;
+}
+
+export function sanitizeActivityForPublic(
+  items: BotActivityEntry[],
+): BotActivityEntry[] {
+  return items.map((item) => {
+    if (item.type.startsWith('AI_')) {
+      return {
+        ...item,
+        reason: item.outcome
+          ? `Market assessment: ${item.outcome}. Edge ${item.edgeScore ?? '—'}/${item.edgeRequired ?? '—'}.`
+          : 'Market conditions did not meet entry criteria.',
+      };
+    }
+    return item;
+  });
+}
+
 function regimeLabel(regime?: string): string {
   if (!regime) return 'Unknown';
   return regime.charAt(0) + regime.slice(1).toLowerCase();

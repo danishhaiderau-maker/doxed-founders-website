@@ -6,12 +6,9 @@ import {
 import {
   TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_PROVIDER_LABELS,
-  exchangeCredentialProvider,
-  tradingAiToCredentialProvider,
   type ExchangeProvider,
   type TradingAgentAiProvider,
 } from '@dcf/utils';
-import { BuilderService } from '../builder/builder.service';
 import { TradingAgentInstanceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -26,7 +23,6 @@ export class TradingAgentInstancesService {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
-    private readonly builder: BuilderService,
   ) {}
 
   async hireAgent(
@@ -49,7 +45,10 @@ export class TradingAgentInstancesService {
     const existing = await this.prisma.tradingAgentInstance.findUnique({
       where: { agentId_userId: { agentId, userId } },
     });
-    if (existing?.status === TradingAgentInstanceStatus.ACTIVE) {
+    if (
+      existing?.status === TradingAgentInstanceStatus.ACTIVE &&
+      existing.exchangeProvider !== 'paper'
+    ) {
       return this.formatInstance(existing, agent);
     }
 
@@ -66,15 +65,8 @@ export class TradingAgentInstancesService {
     }
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-    const useOwnAi = input.aiMode === 'own' && Boolean(input.aiApiKey?.trim());
-    const aiProvider = (useOwnAi
-      ? input.aiProvider ?? 'deepseek'
-      : showcase?.showcaseAiProvider ?? 'deepseek') as string;
-
-    if (useOwnAi && input.aiApiKey) {
-      const credProvider = tradingAiToCredentialProvider(aiProvider as TradingAgentAiProvider);
-      await this.builder.connectAiProvider(userId, credProvider, input.aiApiKey);
-    }
+    /** Live tier mirrors admin DeepSeek decisions — users only connect exchange keys. */
+    const aiProvider = (showcase?.showcaseAiProvider ?? 'deepseek') as string;
 
     const instance = await this.prisma.tradingAgentInstance.upsert({
       where: { agentId_userId: { agentId, userId } },
@@ -84,19 +76,27 @@ export class TradingAgentInstancesService {
         exchangeProvider: input.exchangeProvider,
         credentialId: connected.credentialId,
         status: TradingAgentInstanceStatus.ACTIVE,
-        aiProvidedByPlatform: !useOwnAi,
+        aiProvidedByPlatform: true,
         aiProvider,
         activatedAt: new Date(),
         lastBilledAt: new Date(),
+        dashboardState: {
+          instanceMode: 'live',
+          copySource: 'admin-showcase',
+        },
       },
       update: {
         exchangeProvider: input.exchangeProvider,
         credentialId: connected.credentialId,
         status: TradingAgentInstanceStatus.ACTIVE,
-        aiProvidedByPlatform: !useOwnAi,
+        aiProvidedByPlatform: true,
         aiProvider,
         activatedAt: new Date(),
         lastError: null,
+        dashboardState: {
+          instanceMode: 'live',
+          copySource: 'admin-showcase',
+        },
       },
     });
 
@@ -108,11 +108,9 @@ export class TradingAgentInstancesService {
 
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
-      title: `${agent.name} hired`,
-      body: useOwnAi
-        ? `Private dashboard on ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} with your ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} key.`
-        : `Private dashboard active on ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]}. Platform AI included.`,
-      link: `/agent-hub/${agent.slug}/my-dashboard`,
+      title: `${agent.name} live copy trading active`,
+      body: `Your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account will mirror admin ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} trades when the live tier executes.`,
+      link: `/agent-hub/${agent.slug}`,
     });
 
     return this.formatInstance(instance, agent);
@@ -129,13 +127,14 @@ export class TradingAgentInstancesService {
       throw new NotFoundException('No private instance — hire this agent first');
     }
 
-    const exchangeStatus = await this.exchanges.getUserExchangeStatus(
-      userId,
-      instance.exchangeProvider,
-    );
+    const isCopy = instance.exchangeProvider === 'paper';
+    const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const exchangeStatus = isCopy
+      ? { connected: false, provider: 'copy', accountLabel: 'DDollar copy track' }
+      : await this.exchanges.getUserExchangeStatus(userId, instance.exchangeProvider);
 
     return {
-      kind: 'private' as const,
+      kind: isCopy ? ('copy' as const) : ('live' as const),
       agent: {
         id: agent.id,
         slug: agent.slug,
@@ -159,13 +158,15 @@ export class TradingAgentInstancesService {
         hiredAt: instance.hiredAt.toISOString(),
         activatedAt: instance.activatedAt?.toISOString() ?? null,
         lastError: instance.lastError,
+        instanceMode: (dashState.instanceMode as string) ?? (isCopy ? 'copy' : 'live'),
+        paperAllocationUsd: dashState.paperAllocationUsd as number | undefined,
       },
       exchange: exchangeStatus,
-      /** Isolated runtime — execution worker attaches here later */
       runtime: {
         connected: instance.status === TradingAgentInstanceStatus.ACTIVE,
-        message:
-          'Your keys power your private instance only. Admin showcase keys are never used.',
+        message: isCopy
+          ? 'Copy-trading admin DeepSeek decisions with DDollar — no API keys required.'
+          : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
         openPositions: 0,
         pnlPct: 0,
       },
@@ -176,6 +177,103 @@ export class TradingAgentInstancesService {
     return this.prisma.tradingAgentInstance.findUnique({
       where: { agentId_userId: { agentId, userId } },
     });
+  }
+
+  async paperTrackAgent(userId: string, agentSlug: string, amountUsd = 500) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    const existing = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (existing?.exchangeProvider !== 'paper' && existing?.status === TradingAgentInstanceStatus.ACTIVE) {
+      throw new BadRequestException(
+        'You already have a live instance. Pause it first or use your live dashboard.',
+      );
+    }
+
+    const ddCost = Math.min(500, Math.max(100, amountUsd));
+    await this.points.spend(userId, ddCost, `AGENT_PAPER_TRACK:${agent.slug}`);
+
+    const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const aiProvider = showcase?.showcaseAiProvider ?? 'deepseek';
+
+    await this.prisma.tradingAgentInstance.upsert({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+      create: {
+        agentId: agent.id,
+        userId,
+        exchangeProvider: 'paper',
+        status: TradingAgentInstanceStatus.ACTIVE,
+        aiProvidedByPlatform: true,
+        aiProvider,
+        activatedAt: new Date(),
+        dashboardState: {
+          instanceMode: 'copy',
+          copySource: 'admin-showcase',
+          paperAllocationUsd: amountUsd,
+          paperDdSpent: ddCost,
+        },
+      },
+      update: {
+        status: TradingAgentInstanceStatus.ACTIVE,
+        aiProvidedByPlatform: true,
+        aiProvider,
+        dashboardState: {
+          instanceMode: 'copy',
+          copySource: 'admin-showcase',
+          paperAllocationUsd: amountUsd,
+          paperDdSpent: ddCost,
+        },
+      },
+    });
+
+    await this.prisma.tradingAgentFollow.upsert({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+      create: { agentId: agent.id, userId },
+      update: {},
+    });
+
+    await this.notifications.notifyUser(userId, {
+      type: NotificationType.TRADING_AGENT_UPDATE,
+      title: `Copy trading ${agent.name}`,
+      body: `$${amountUsd} DDollar allocated — mirrors admin DeepSeek trades with no exchange or AI keys.`,
+      link: `/agent-hub/${agent.slug}`,
+    });
+
+    return {
+      ok: true,
+      instanceMode: 'copy' as const,
+      paperAllocationUsd: amountUsd,
+      ddSpent: ddCost,
+      dashboardUrl: `/agent-hub/${agent.slug}`,
+    };
+  }
+
+  async setInstancePaused(userId: string, agentSlug: string, paused: boolean) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance) {
+      throw new NotFoundException('No private instance — hire or paper-track this agent first');
+    }
+
+    const status = paused ? TradingAgentInstanceStatus.PAUSED : TradingAgentInstanceStatus.ACTIVE;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: { status, lastError: null },
+    });
+
+    return {
+      ok: true,
+      status,
+      message: paused
+        ? 'Your agent instance is paused — no new trades until you resume.'
+        : 'Your agent instance is active again.',
+    };
   }
 
   private formatInstance(
@@ -203,7 +301,7 @@ export class TradingAgentInstancesService {
       aiProvider: instance.aiProvider,
       hiredAt: instance.hiredAt.toISOString(),
       activatedAt: instance.activatedAt?.toISOString() ?? null,
-      dashboardUrl: `/agent-hub/${agent.slug}/my-dashboard`,
+      dashboardUrl: `/agent-hub/${agent.slug}`,
     };
   }
 }

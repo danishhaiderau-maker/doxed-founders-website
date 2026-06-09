@@ -14,6 +14,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BotBridgeService } from './bot-bridge.service';
+import {
+  mapBotStateToPublicDashboard,
+  sanitizeActivityForPublic,
+} from './bot-state.mapper';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -97,6 +101,8 @@ function serializeAgent(
   extra?: {
     following?: boolean;
     hired?: boolean;
+    instanceStatus?: string | null;
+    instanceMode?: 'copy' | 'live' | null;
     liveStats?: {
       balanceUsd?: number;
       equityUsd?: number;
@@ -134,6 +140,8 @@ function serializeAgent(
     isExperimental: agent.isExperimental,
     following: extra?.following ?? false,
     hired: extra?.hired ?? false,
+    instanceStatus: extra?.instanceStatus ?? null,
+    instanceMode: extra?.instanceMode ?? null,
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
@@ -377,7 +385,10 @@ export class TradingAgentsService implements OnModuleInit {
       price: state?.price ?? null,
       wsHealth: state?.diag?.ws_status ?? state?.ws_ready ?? null,
       deepSeekConnected: Boolean(state?.last_ai?.source && state.last_ai.source !== 'NONE'),
-      appVersion: (state as Record<string, unknown> | null)?.app_version ?? null,
+      appVersion:
+        (state as Record<string, unknown> | null)?.bot_version ??
+        (state as Record<string, unknown> | null)?.app_version ??
+        null,
       lastFetchAt: state ? new Date().toISOString() : null,
       stateEndpoint: host,
       health,
@@ -402,6 +413,8 @@ export class TradingAgentsService implements OnModuleInit {
 
     let following = false;
     let hired = false;
+    let instanceStatus: string | null = null;
+    let instanceMode: 'copy' | 'live' | null = null;
     if (userId) {
       const [followRow, instanceRow] = await Promise.all([
         this.prisma.tradingAgentFollow.findUnique({
@@ -412,29 +425,61 @@ export class TradingAgentsService implements OnModuleInit {
         }),
       ]);
       following = Boolean(followRow);
-      hired = instanceRow?.status === 'ACTIVE';
+      instanceStatus = instanceRow?.status ?? null;
+      if (instanceRow) {
+        const dash = (instanceRow.dashboardState ?? {}) as Record<string, unknown>;
+        instanceMode =
+          dash.instanceMode === 'copy' || instanceRow.exchangeProvider === 'paper'
+            ? 'copy'
+            : dash.instanceMode === 'live'
+              ? 'live'
+              : instanceRow.exchangeProvider === 'paper'
+                ? 'copy'
+                : 'live';
+      }
+      hired =
+        instanceRow?.status === 'ACTIVE' || instanceRow?.status === 'PAUSED';
     }
 
-    return this.enrichWithBotLive(agent, { following, hired });
+    return this.enrichWithBotLive(agent, { following, hired, instanceStatus, instanceMode });
   }
 
-  /** Public showcase dashboard — admin bot only, no user keys. */
-  async getPublicDashboard(slug: string, userId?: string, role?: string) {
-    const payload = await this.getDashboard(slug);
-    const isAdmin = role === 'ADMIN';
-    const { rawBotState, ...rest } = payload as typeof payload & {
+  /** Public showcase dashboard — never exposes raw bot state or AI input payloads. */
+  async getPublicDashboard(slug: string, userId?: string, _role?: string) {
+    const payload = await this.getDashboard(slug, { publicSafe: true });
+    const { rawBotState: _raw, ...rest } = payload as typeof payload & {
       rawBotState?: unknown;
     };
     return {
       ...rest,
-      ...(isAdmin && rawBotState ? { rawBotState } : {}),
       kind: 'public' as const,
       showcaseNote:
         'Platform-owned showcase. Hire this agent for an isolated private instance with your exchange API.',
     };
   }
 
-  async getDashboard(slug: string) {
+  /** Admin-only full research bot snapshot (sensitive AI input / pipeline data). */
+  async getAdminResearchDashboard(slug: string) {
+    if (slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
+      throw new NotFoundException('Research dashboard unavailable');
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const live = await this.botBridge.getLiveDashboard(agent.name);
+    if (!live?.rawState) throw new NotFoundException('Bot not connected');
+    const raw = live.rawState as Record<string, unknown>;
+    return {
+      agent: { slug: agent.slug, name: agent.name },
+      rawBotState: live.rawState,
+      botVersion: raw.bot_version ?? raw.app_version ?? null,
+      executionPaused: live.executionPaused,
+      executionReason: live.executionReason,
+      strategyMode: live.strategyMode,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getDashboard(slug: string, opts?: { publicSafe?: boolean }) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
 
@@ -446,8 +491,10 @@ export class TradingAgentsService implements OnModuleInit {
             liveStats: live.stats,
             botConnected: true,
           }),
-          dashboard: live.dashboard,
-          rawBotState: live.rawState,
+          dashboard: opts?.publicSafe
+            ? mapBotStateToPublicDashboard(live.rawState)
+            : live.dashboard,
+          rawBotState: opts?.publicSafe ? undefined : live.rawState,
           updatedAt: new Date().toISOString(),
           botConnected: true,
           botSource: 'LIVE' as const,
@@ -488,7 +535,7 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
-  async listActivity(slug: string, limit = 30) {
+  async listActivity(slug: string, limit = 30, publicSafe = false) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
 
@@ -496,7 +543,7 @@ export class TradingAgentsService implements OnModuleInit {
       const liveActivity = await this.botBridge.getLiveActivity(agent.name);
       if (liveActivity?.length) {
         const take = Math.min(50, Math.max(1, limit));
-        return liveActivity.slice(0, take).map((row) => ({
+        const mapped = liveActivity.slice(0, take).map((row) => ({
           ...row,
           shareText:
             row.shareText ??
@@ -509,6 +556,7 @@ export class TradingAgentsService implements OnModuleInit {
               marketRegime: row.marketRegime,
             }),
         }));
+        return publicSafe ? sanitizeActivityForPublic(mapped) : mapped;
       }
     }
 
@@ -532,6 +580,15 @@ export class TradingAgentsService implements OnModuleInit {
       shareText: row.shareText,
       createdAt: row.createdAt.toISOString(),
     }));
+  }
+
+  async getShowcaseDefaultSettings() {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    return {
+      message:
+        row?.agentShowcaseDefaultSettings?.trim() ??
+        'Copy-trades admin DeepSeek AI on the showcase bot. DDollar demo ($500 max) needs no API keys. Live tier connects your exchange only — same AI signals as admin.',
+    };
   }
 
   async follow(userId: string, agentId: string) {

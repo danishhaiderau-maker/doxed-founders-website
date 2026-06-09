@@ -1,5 +1,4 @@
-import { Module, forwardRef } from '@nestjs/common';
-import { BuilderModule } from '../builder/builder.module';
+import { Module } from '@nestjs/common';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PointsModule } from '../points/points.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
@@ -9,7 +8,7 @@ import { TradingAgentsController } from './trading-agents.controller';
 import { TradingAgentsService } from './trading-agents.service';
 
 @Module({
-  imports: [NotificationsModule, PointsModule, ExchangesModule, forwardRef(() => BuilderModule)],
+  imports: [NotificationsModule, PointsModule, ExchangesModule],
   controllers: [TradingAgentsController],
   providers: [TradingAgentsService, TradingAgentInstancesService, BotBridgeService],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService],
