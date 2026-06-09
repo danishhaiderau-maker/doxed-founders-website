@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { contributorLevelFromPoints, pointActionLabel } from '@dcf/utils';
+import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -72,6 +73,21 @@ export class PointsService {
         },
       });
     }
+  }
+
+  /** Credit platform admin when a user pays a hire/rental fee. */
+  async creditAdminFee(amount: number, sourceKey: string) {
+    if (amount <= 0) return null;
+
+    const admin = await this.prisma.user.findFirst({
+      where: { role: UserRole.ADMIN },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!admin) return null;
+
+    await this.award(admin.id, amount, `PLATFORM_FEE:${sourceKey}`);
+    return admin.id;
   }
 
   /** Idempotent award — returns true if points were granted, false if already awarded. */

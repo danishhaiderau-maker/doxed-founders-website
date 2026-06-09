@@ -2391,18 +2391,7 @@ def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
         return custom if custom.endswith("/") else custom + "/"
-    for env_key in (
-        "RAILWAY_PUBLIC_DOMAIN",
-        "RAILWAY_STATIC_URL",
-        "RAILWAY_SERVICE_BTC_CONSERVATIVE_AGENT_URL",
-    ):
-        domain = (os.getenv(env_key) or "").strip()
-        if domain:
-            base = domain if domain.startswith("http") else f"https://{domain}"
-            return base if base.endswith("/") else base + "/"
-    port = os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800")
-    host = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
-    return f"http://{host}:{port}/"
+    return f"http://{DASHBOARD_PUBLIC_HOST}:{DASHBOARD_PORT}/"
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 CONSECUTIVE_LOSS_PAUSE = 4
 DEFAULT_RESEARCH_LEVERAGE = 100

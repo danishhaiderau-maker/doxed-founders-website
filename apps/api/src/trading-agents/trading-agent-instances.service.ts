@@ -59,10 +59,17 @@ export class TradingAgentInstancesService {
       testnet: input.testnet,
     });
 
-    const cost = agent.costDdollarDay;
-    if (cost > 0 && !existing) {
+    const cost = agent.costDdollarWeek > 0 ? agent.costDdollarWeek : agent.costDdollarDay;
+    const needsHireFee =
+      !existing ||
+      existing.exchangeProvider === 'paper' ||
+      (existing.expiresAt != null && existing.expiresAt < new Date());
+    if (cost > 0 && needsHireFee) {
       await this.points.spend(userId, cost, `AGENT_HIRE:${agent.slug}`);
+      await this.points.creditAdminFee(cost, agent.slug);
     }
+
+    const hireExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     /** Live tier mirrors admin DeepSeek decisions — users only connect exchange keys. */
@@ -80,6 +87,7 @@ export class TradingAgentInstancesService {
         aiProvider,
         activatedAt: new Date(),
         lastBilledAt: new Date(),
+        expiresAt: hireExpiresAt,
         dashboardState: {
           instanceMode: 'live',
           copySource: 'admin-showcase',
@@ -92,6 +100,7 @@ export class TradingAgentInstancesService {
         aiProvidedByPlatform: true,
         aiProvider,
         activatedAt: new Date(),
+        expiresAt: hireExpiresAt,
         lastError: null,
         dashboardState: {
           instanceMode: 'live',
@@ -109,11 +118,15 @@ export class TradingAgentInstancesService {
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
-      body: `Your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account will mirror admin ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} trades when the live tier executes.`,
+      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account will mirror admin ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} trades when the live tier executes.`,
       link: `/agent-hub/${agent.slug}`,
     });
 
-    return this.formatInstance(instance, agent);
+    return {
+      ...this.formatInstance(instance, agent),
+      hireFeeDdollar: needsHireFee ? cost : 0,
+      rentalExpiresAt: hireExpiresAt.toISOString(),
+    };
   }
 
   async getMyDashboard(userId: string, agentSlug: string) {

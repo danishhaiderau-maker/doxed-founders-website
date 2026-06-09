@@ -62,6 +62,7 @@ function PublicReasoningPanel({ dashboard }: { dashboard: TradingAgentDashboardS
 
 function HireSidebar({
   slug,
+  agent,
   signedIn,
   hired,
   instanceStatus,
@@ -73,6 +74,7 @@ function HireSidebar({
   copyBusy,
 }: {
   slug: string;
+  agent: TradingAgentSummary;
   signedIn: boolean;
   hired: boolean;
   instanceStatus?: string | null;
@@ -108,6 +110,13 @@ function HireSidebar({
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
         <p className="font-semibold text-white">Hire this agent</p>
+        <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
+          Hiring fee:{' '}
+          <strong className="text-white">
+            {(agent.costDdollarWeek ?? 2000).toLocaleString()} DDollar
+          </strong>{' '}
+          for 1 week of live copy trading
+        </p>
         <ol className="mt-4 space-y-3">
           {steps.map((s) => (
             <li key={s.n} className="flex gap-3 text-xs">
@@ -266,6 +275,18 @@ export function AgentPublicProfile({
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const isLive = botConnected && !executionPaused && publicStatus === 'online';
+  const statusLabel = isLive
+    ? 'Live (Admin account)'
+    : publicStatus === 'offline' && !botConnected
+      ? 'Stopped (Admin)'
+      : executionPaused
+        ? 'Paused (Admin)'
+        : 'Offline';
+  const statusColor = isLive
+    ? 'text-emerald-400'
+    : executionPaused && publicStatus !== 'offline'
+      ? 'text-amber-400'
+      : 'text-zinc-400';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
 
   return (
@@ -307,6 +328,12 @@ export function AgentPublicProfile({
                       <span className="text-zinc-600">Timeframe </span>
                       <span className="text-zinc-300">Swing · 4H / 1D</span>
                     </div>
+                    <div>
+                      <span className="text-zinc-600">Hiring fee </span>
+                      <span className="text-zinc-300">
+                        {(agent.costDdollarWeek ?? 2000).toLocaleString()} DDollar / week
+                      </span>
+                    </div>
                   </dl>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {STRATEGY_TAGS.map((tag) => (
@@ -323,9 +350,7 @@ export function AgentPublicProfile({
 
               <div className="shrink-0 lg:w-56">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Status</p>
-                <p className="mt-1 text-sm font-semibold text-emerald-400">
-                  {isLive ? 'Live (Admin account)' : executionPaused ? 'Paused (Admin)' : 'Offline'}
-                </p>
+                <p className={`mt-1 text-sm font-semibold ${statusColor}`}>{statusLabel}</p>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <MetricPill label="Win rate" value={`${agent.winRatePct.toFixed(0)}%`} />
                   <MetricPill
@@ -461,6 +486,7 @@ export function AgentPublicProfile({
 
         <HireSidebar
           slug={slug}
+          agent={agent}
           signedIn={signedIn}
           hired={hired}
           instanceStatus={instanceStatus}

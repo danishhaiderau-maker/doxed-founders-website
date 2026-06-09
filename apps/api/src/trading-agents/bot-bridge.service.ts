@@ -30,6 +30,11 @@ export class BotBridgeService {
     return Boolean(this.getBotUrl());
   }
 
+  invalidateCache() {
+    this.cached = null;
+    this.lastFetchAt = 0;
+  }
+
   async fetchState(force = false): Promise<BotApiState | null> {
     const base = this.getBotUrl();
     if (!base) return null;
@@ -46,22 +51,35 @@ export class BotBridgeService {
       });
       if (!res.ok) {
         this.logger.warn(`Bot /api/state HTTP ${res.status}`);
-        return this.cached;
+        this.invalidateCache();
+        return null;
       }
       const data = (await res.json()) as BotApiState;
-      if (!data || typeof data !== 'object') return this.cached;
+      if (!data || typeof data !== 'object') {
+        this.invalidateCache();
+        return null;
+      }
       this.cached = data;
       this.lastFetchAt = now;
       return data;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Bot fetch failed: ${msg}`);
-      return this.cached;
+      this.invalidateCache();
+      return null;
     }
   }
 
-  async getLiveDashboard(agentName: string) {
-    const bot = await this.fetchState();
+  /** True when the showcase bot HTTP endpoints respond (not killed on Railway). */
+  async isReachable(force = false): Promise<boolean> {
+    const state = await this.fetchState(force);
+    if (state) return true;
+    const health = await this.fetchHealth();
+    return Boolean(health);
+  }
+
+  async getLiveDashboard(agentName: string, force = false) {
+    const bot = await this.fetchState(force);
     if (!bot) return null;
     return {
       dashboard: mapBotStateToDashboard(bot),
