@@ -306,8 +306,8 @@ let syncFix = readFileSync(TARGET, 'utf8');
 let syncChanged = false;
 
 if (
-  syncFix.includes('if not state.get("live_armed", False):\n            return STARTING_BALANCE') &&
-  !syncFix.includes('strategy_mode") == "RESEARCH"')
+  syncFix.includes('def get_display_balance():') &&
+  !syncFix.includes('RESEARCH balance showcase [PIPELINE ENFORCEMENT]')
 ) {
   syncFix = syncFix.replace(
     `def get_display_balance():
@@ -317,6 +317,7 @@ if (
         return state.get("account_balance", STARTING_BALANCE)`,
     `def get_display_balance():
     with state_lock:
+        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
         if state.get("strategy_mode") == "RESEARCH":
             return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
