@@ -162,6 +162,14 @@ if (!src.includes('manual_admin_pause') || !src.includes('should_run_pipeline() 
   }
 }
 
+if (src.includes('DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")')) {
+  src = src.replace(
+    'DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")',
+    'DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")',
+  );
+  changed = true;
+}
+
 if (changed) {
   writeFileSync(TARGET, src, 'utf8');
   console.log('Applied production patches to bot.py');

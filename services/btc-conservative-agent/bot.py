@@ -2385,13 +2385,24 @@ EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800"))
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
-DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
+DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
 
 def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
         return custom if custom.endswith("/") else custom + "/"
-    return f"http://{DASHBOARD_PUBLIC_HOST}:{DASHBOARD_PORT}/"
+    for env_key in (
+        "RAILWAY_PUBLIC_DOMAIN",
+        "RAILWAY_STATIC_URL",
+        "RAILWAY_SERVICE_BTC_CONSERVATIVE_AGENT_URL",
+    ):
+        domain = (os.getenv(env_key) or "").strip()
+        if domain:
+            base = domain if domain.startswith("http") else f"https://{domain}"
+            return base if base.endswith("/") else base + "/"
+    port = os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800")
+    host = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
+    return f"http://{host}:{port}/"
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 CONSECUTIVE_LOSS_PAUSE = 4
 DEFAULT_RESEARCH_LEVERAGE = 100
