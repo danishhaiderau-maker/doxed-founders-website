@@ -17,6 +17,8 @@ import { BotBridgeService } from './bot-bridge.service';
 import {
   mapBotStateToPublicDashboard,
   sanitizeActivityForPublic,
+  filterActivityToExecutedTrades,
+  mapBotStateToExecutedTradesActivity,
 } from './bot-state.mapper';
 
 function daysAgo(n: number) {
@@ -540,10 +542,13 @@ export class TradingAgentsService implements OnModuleInit {
     if (!agent) throw new NotFoundException('Agent not found');
 
     if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
-      const liveActivity = await this.botBridge.getLiveActivity(agent.name);
-      if (liveActivity?.length) {
+      const bot = await this.botBridge.fetchState();
+      if (bot) {
         const take = Math.min(50, Math.max(1, limit));
-        const mapped = liveActivity.slice(0, take).map((row) => ({
+        const source = publicSafe
+          ? mapBotStateToExecutedTradesActivity(bot, agent.name)
+          : ((await this.botBridge.getLiveActivity(agent.name)) ?? []);
+        const mapped = source.slice(0, take).map((row) => ({
           ...row,
           shareText:
             row.shareText ??
@@ -556,7 +561,9 @@ export class TradingAgentsService implements OnModuleInit {
               marketRegime: row.marketRegime,
             }),
         }));
-        return publicSafe ? sanitizeActivityForPublic(mapped) : mapped;
+        return publicSafe
+          ? filterActivityToExecutedTrades(sanitizeActivityForPublic(mapped))
+          : mapped;
       }
     }
 

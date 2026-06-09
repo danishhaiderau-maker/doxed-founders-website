@@ -72,7 +72,13 @@ if (!row?.showcaseExchangeCredentialEnc) {
   process.exit(1);
 }
 
-const vars = { PORT: '5000', DASHBOARD_PORT: '5000' };
+const vars = {
+  PORT: '5000',
+  DASHBOARD_PORT: '5000',
+  DASHBOARD_PUBLIC_URL: (
+    row.showcaseBotPublicUrl?.trim() || 'https://btc-conservative-agent-production.up.railway.app'
+  ).replace(/\/$/, ''),
+};
 if (vercel.BOT_CONTROL_SECRET?.trim()) {
   vars.BOT_CONTROL_SECRET = vercel.BOT_CONTROL_SECRET.trim();
 }

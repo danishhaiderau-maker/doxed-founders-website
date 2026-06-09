@@ -3231,6 +3231,10 @@ export interface TradingAgentActivityEntry {
   marketRegime: string | null;
   shareText: string | null;
   createdAt: string;
+  entryPrice?: number | null;
+  exitPrice?: number | null;
+  balanceUsd?: number | null;
+  netPnlUsd?: number | null;
 }
 
 export function fetchTradingAgents(kind?: string) {

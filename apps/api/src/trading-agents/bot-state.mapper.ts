@@ -322,7 +322,68 @@ export type BotActivityEntry = {
   marketRegime: string | null;
   shareText: string | null;
   createdAt: string;
+  entryPrice?: number | null;
+  exitPrice?: number | null;
+  balanceUsd?: number | null;
+  netPnlUsd?: number | null;
 };
+
+/** Public trade journey — executed trades only (no NO_TRADE / AI reject noise). */
+export function mapBotStateToExecutedTradesActivity(
+  bot: BotApiState,
+  _agentName: string,
+): BotActivityEntry[] {
+  const trades = bot.trades ?? [];
+  let balance = STARTING_BALANCE;
+  const chronological = trades.slice(-20).map((t) => {
+    const netUsd =
+      t.net_pnl_usd ??
+      (t.pnl != null ? (Number(t.pnl) / 100) * STARTING_BALANCE : 0);
+    balance += netUsd;
+    const dir = (t.final_direction ?? t.dir ?? 'TRADE').toUpperCase();
+    const profitPct = t.pnl ?? null;
+    const won = (profitPct ?? 0) >= 0;
+    return {
+      id: `trade-${t.trade_id ?? t.ts}`,
+      type: 'POSITION_CLOSED',
+      title: `${dir} · ${won ? 'Win' : 'Loss'}`,
+      reason: t.exit_reason ?? null,
+      outcome: won ? 'Profit' : 'Loss',
+      profitPct,
+      edgeScore: null,
+      edgeRequired: null,
+      marketRegime: bot.support_resistance?.sr_state ?? bot.regime ?? null,
+      shareText: null,
+      createdAt: t.ts ?? new Date().toISOString(),
+      entryPrice: t.entry ?? null,
+      exitPrice: t.exit ?? null,
+      balanceUsd: Number(balance.toFixed(2)),
+      netPnlUsd: Number(netUsd.toFixed(2)),
+    } satisfies BotActivityEntry;
+  });
+
+  return chronological.reverse();
+}
+
+export function filterActivityToExecutedTrades(items: BotActivityEntry[]): BotActivityEntry[] {
+  return items.filter((item) => {
+    const t = item.type.toUpperCase();
+    const title = item.title.toUpperCase();
+    if (t === 'NO_TRADE' || t === 'AI_REJECTED' || t === 'AI_APPROVED') return false;
+    if (title.includes('NO TRADE') || title.includes('AI REJECTED') || title.includes('REJECTED')) {
+      return false;
+    }
+    return (
+      t.includes('TRADE') ||
+      t.includes('POSITION') ||
+      t.includes('OPEN') ||
+      t.includes('CLOSE') ||
+      t.includes('EXIT') ||
+      item.entryPrice != null ||
+      item.profitPct != null
+    );
+  });
+}
 
 export function mapBotStateToActivity(bot: BotApiState, agentName: string): BotActivityEntry[] {
   const items: BotActivityEntry[] = [];
