@@ -1456,6 +1456,9 @@ def get_execution_status() -> str:
 
 def get_display_balance():
     with state_lock:
+        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
+        if state.get("strategy_mode") == "RESEARCH":
+            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
             return STARTING_BALANCE
         return state.get("account_balance", STARTING_BALANCE)
