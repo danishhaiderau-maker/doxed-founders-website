@@ -181,18 +181,13 @@ export class TradingAgentsService implements OnModuleInit {
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 
-  /** Keep showcase agent pricing + stale seed metrics in sync across environments. */
+  /** Keep showcase pricing in sync; live PnL comes from bot bridge (never zero here). */
   private async syncConservativeBtcAgentRecord() {
     await this.prisma.tradingAgent.updateMany({
       where: { slug: 'conservative-btc' },
       data: {
         costDdollarWeek: 2000,
         startingBalance: 500,
-        balanceUsd: 500,
-        equityUsd: 500,
-        netReturnPct: 0,
-        tradeCount: 0,
-        winRatePct: 0,
       },
     });
     await this.syncShowcaseMetricsFromBot().catch(() => undefined);

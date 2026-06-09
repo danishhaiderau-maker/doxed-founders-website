@@ -9818,6 +9818,15 @@ def _session_trades_only(trades_list):
         if not isinstance(t, dict):
             continue
         ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if not ts:
+            raw_ts = t.get("ts")
+            if isinstance(raw_ts, str):
+                try:
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0.0
+            elif isinstance(raw_ts, (int, float)):
+                ts = float(raw_ts)
         if isinstance(ts, str):
             try:
                 ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()

@@ -299,6 +299,67 @@ def toggle_fresh_collection():`,
 if (changed) {
   writeFileSync(TARGET, src, 'utf8');
   console.log('Applied production patches to bot.py');
+}
+
+// ─── Showcase sync fixes: real RESEARCH balance + session trades in /api/state ───
+let syncFix = readFileSync(TARGET, 'utf8');
+let syncChanged = false;
+
+if (
+  syncFix.includes('if not state.get("live_armed", False):\n            return STARTING_BALANCE') &&
+  !syncFix.includes('strategy_mode") == "RESEARCH"')
+) {
+  syncFix = syncFix.replace(
+    `def get_display_balance():
+    with state_lock:
+        if not state.get("live_armed", False):
+            return STARTING_BALANCE
+        return state.get("account_balance", STARTING_BALANCE)`,
+    `def get_display_balance():
+    with state_lock:
+        if state.get("strategy_mode") == "RESEARCH":
+            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
+        if not state.get("live_armed", False):
+            return STARTING_BALANCE
+        return state.get("account_balance", STARTING_BALANCE)`,
+  );
+  syncChanged = true;
+}
+
+if (syncFix.includes('def _session_trades_only(trades_list):') && !syncFix.includes('raw_ts = t.get("ts")')) {
+  syncFix = syncFix.replace(
+    `        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0.0
+        if float(ts or 0) >= start - 1.0:
+            kept.append(t)`,
+    `        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if not ts:
+            raw_ts = t.get("ts")
+            if isinstance(raw_ts, str):
+                try:
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0.0
+            elif isinstance(raw_ts, (int, float)):
+                ts = float(raw_ts)
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0.0
+        if float(ts or 0) >= start - 1.0:
+            kept.append(t)`,
+  );
+  syncChanged = true;
+}
+
+if (syncChanged) {
+  writeFileSync(TARGET, syncFix, 'utf8');
+  console.log('Applied showcase sync fixes to bot.py');
 } else {
   console.log('bot.py production patches already applied');
 }
