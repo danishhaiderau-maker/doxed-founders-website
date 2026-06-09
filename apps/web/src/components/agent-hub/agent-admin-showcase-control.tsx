@@ -18,18 +18,35 @@ export function AgentAdminShowcaseControl({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
+  const stopped = executionPaused || !botConnected;
+
   async function toggle() {
     setBusy(true);
     setMsg(null);
     try {
-      const res = executionPaused
+      const res = stopped
         ? await resumeTradingAgent(token)
         : await pauseTradingAgent(token);
+      const message =
+        typeof res.message === 'string'
+          ? res.message
+          : typeof res.error === 'string'
+            ? res.error
+            : null;
       if (!res.ok) {
-        setMsg(typeof res.error === 'string' ? res.error : 'Command failed — check Railway bot is online');
+        setMsg(message ?? 'Command failed — check RAILWAY_TOKEN on API service');
       } else {
-        setMsg(executionPaused ? 'Showcase bot resumed' : 'Showcase bot stopped');
+        setMsg(
+          message ??
+            (stopped
+              ? 'Showcase bot starting on Railway (~60–120s)'
+              : 'Showcase bot killed — Railway URL offline'),
+        );
         onUpdated?.();
+        if (stopped) {
+          setTimeout(() => onUpdated?.(), 15000);
+          setTimeout(() => onUpdated?.(), 45000);
+        }
       }
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Stop/start failed');
@@ -42,8 +59,17 @@ export function AgentAdminShowcaseControl({
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">Admin account</p>
       <p className="mt-1 text-xs text-zinc-400">
-        Pauses trading on Railway (process stays up for logs). Research dashboard will show a red STOPPED banner —{' '}
-        {botConnected ? 'connected' : 'offline'}.
+        <strong>Stop</strong> kills the Railway deployment —{' '}
+        <a
+          href="https://btc-conservative-agent-production.up.railway.app/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-violet-300 hover:underline"
+        >
+          bot dashboard
+        </a>{' '}
+        goes offline (502). <strong>Start</strong> redeploys it (~2 min). Status:{' '}
+        {botConnected ? 'online' : 'offline'}.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -51,12 +77,12 @@ export function AgentAdminShowcaseControl({
           disabled={busy}
           onClick={() => void toggle()}
           className={`rounded-lg px-4 py-2 text-sm font-bold uppercase tracking-wide disabled:opacity-50 ${
-            executionPaused
+            stopped
               ? 'bg-emerald-600 text-white hover:bg-emerald-500'
               : 'bg-red-600 text-white hover:bg-red-500'
           }`}
         >
-          {busy ? '…' : executionPaused ? '▶ Start showcase bot' : '■ Stop showcase bot'}
+          {busy ? '…' : stopped ? '▶ Start showcase bot' : '■ Kill showcase bot'}
         </button>
         <Link
           href="/admin/control"
@@ -66,8 +92,10 @@ export function AgentAdminShowcaseControl({
         </Link>
       </div>
       {msg && <p className="mt-2 text-xs text-amber-200/90">{msg}</p>}
-      {executionPaused && (
-        <p className="mt-2 text-xs text-amber-300">Showcase paused — public page shows updating status.</p>
+      {stopped && !busy && (
+        <p className="mt-2 text-xs text-amber-300">
+          Showcase offline — public agent page shows offline until you Start.
+        </p>
       )}
     </div>
   );

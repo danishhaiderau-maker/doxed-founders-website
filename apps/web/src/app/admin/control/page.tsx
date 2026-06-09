@@ -119,12 +119,12 @@ export default function AdminControlPage() {
     try {
       if (action === 'pause') {
         const res = await pauseTradingAgent(token);
-        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Pause failed');
-        else setMsg('Trading paused on showcase runtime.');
+        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Kill failed');
+        else setMsg(typeof res.message === 'string' ? res.message : 'Showcase bot killed on Railway.');
       } else if (action === 'resume') {
         const res = await resumeTradingAgent(token);
-        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Resume failed');
-        else setMsg('Trading resumed on showcase runtime.');
+        if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Start failed');
+        else setMsg(typeof res.message === 'string' ? res.message : 'Showcase bot starting on Railway.');
       } else if (action === 'restart') {
         const res = await restartTradingAgent(token);
         if (!res.ok) setError(typeof res.error === 'string' ? res.error : 'Restart failed');
@@ -542,9 +542,9 @@ export default function AdminControlPage() {
                       type="button"
                       disabled={busy != null}
                       onClick={() => void handleAgentAction('pause')}
-                      className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/30 disabled:opacity-50"
+                      className="rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-2 text-sm text-red-200 hover:bg-red-950/50 disabled:opacity-50"
                     >
-                      Pause agent
+                      Kill showcase bot
                     </button>
                     <button
                       type="button"
@@ -619,9 +619,9 @@ export default function AdminControlPage() {
                     type="button"
                     disabled={busy != null}
                     onClick={() => void handleAgentAction('pause')}
-                    className="rounded-lg border border-amber-500/40 px-4 py-2 text-sm text-amber-200 hover:bg-amber-950/30 disabled:opacity-50"
+                    className="rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-2 text-sm text-red-200 hover:bg-red-950/50 disabled:opacity-50"
                   >
-                    Pause showcase bot
+                    Kill showcase bot
                   </button>
                   <button
                     type="button"
@@ -629,7 +629,7 @@ export default function AdminControlPage() {
                     onClick={() => void handleAgentAction('resume')}
                     className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
                   >
-                    Resume showcase bot
+                    Start showcase bot
                   </button>
                   <button
                     type="button"
