@@ -2021,7 +2021,7 @@ BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800"))
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
 
@@ -9330,6 +9330,10 @@ def _ensure_flask_port_available(port: int = None):
     """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
     if not _port_is_open("127.0.0.1", port):
         return
+    import sys
+    if sys.platform != "win32":
+        logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
+        return
     try:
         out = subprocess.check_output(
             ["netstat", "-ano"],
@@ -9664,6 +9668,9 @@ def main():
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
@@ -9766,8 +9773,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "

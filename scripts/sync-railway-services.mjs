@@ -99,6 +99,7 @@ for (const project of data.projects?.edges?.map((e) => e.node) ?? []) {
 
     const variables = svc.name === 'doxed-founders-website' ? apiVars : {
       PORT: '5000',
+      DASHBOARD_PORT: '5000',
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
     };
     console.log(`Sync ${project.name} / ${svc.name}…`);
