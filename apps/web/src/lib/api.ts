@@ -3420,7 +3420,7 @@ export function updateGlobalShareFooter(footer: string, token: string) {
 }
 
 export function pauseTradingAgent(token: string) {
-  return apiFetch<{ ok: boolean; error?: string; data?: unknown }>(
+  return apiFetch<{ ok: boolean; error?: string; message?: string; killed?: boolean; paused?: boolean; data?: unknown }>(
     '/admin-control/agent/pause',
     { method: 'POST' },
     token,
@@ -3428,7 +3428,7 @@ export function pauseTradingAgent(token: string) {
 }
 
 export function resumeTradingAgent(token: string) {
-  return apiFetch<{ ok: boolean; error?: string; data?: unknown }>(
+  return apiFetch<{ ok: boolean; error?: string; message?: string; resumed?: boolean; data?: unknown }>(
     '/admin-control/agent/resume',
     { method: 'POST' },
     token,

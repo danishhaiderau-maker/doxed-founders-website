@@ -42,14 +42,14 @@ export class AdminControlService {
     if (!enabled) {
       return { status: 'offline', label: 'Agent offline' };
     }
-    const state = await this.botBridge.fetchState();
+    const state = await this.botBridge.fetchState(true);
     if (!state) {
-      return { status: 'offline', label: 'Agent offline' };
+      return { status: 'offline', label: 'Showcase bot offline (stopped on Railway)' };
     }
     if (state.execution_paused) {
       const reason = state.execution_reason ?? '';
       if (reason === 'ADMIN_MANUAL') {
-        return { status: 'updating', label: 'Agent paused by admin' };
+        return { status: 'offline', label: 'Showcase bot stopped by admin' };
       }
       return { status: 'updating', label: 'Agent updating' };
     }
@@ -159,20 +159,52 @@ export class AdminControlService {
   }
 
   async pauseAgentTrading() {
+    // Save bot state before kill (best-effort — may fail if already stopping)
+    await this.botBridge.proxyBotPost('/api/pause', {}).catch(() => undefined);
+
+    const rail = await this.showcaseRuntime.stopShowcaseDeployment();
+    if (rail.ok) {
+      return {
+        ok: true,
+        paused: true,
+        killed: true,
+        message: rail.message,
+        deploymentId: rail.deploymentId,
+      };
+    }
+
     const res = await this.botBridge.proxyBotPost('/api/pause', {});
     const data = (res.data ?? {}) as Record<string, unknown>;
     const paused =
       data.execution_paused === true ||
       data.status === 'paused' ||
       data.execution_reason === 'ADMIN_MANUAL';
-    return { ...res, ok: res.ok || paused, paused };
+    return {
+      ...res,
+      ok: paused,
+      paused,
+      killed: false,
+      message: rail.message || (paused ? 'Trading paused (Railway still running)' : 'Stop failed'),
+    };
   }
 
   async resumeAgentTrading() {
+    const rail = await this.showcaseRuntime.startShowcaseDeployment();
+    if (!rail.ok) {
+      return { ok: false, error: rail.message, resumed: false };
+    }
+
+    // Bot needs time to boot before /api/resume
+    await new Promise((r) => setTimeout(r, 8000));
     const res = await this.botBridge.proxyBotPost('/api/resume', {});
     const data = (res.data ?? {}) as Record<string, unknown>;
-    const resumed = data.execution_paused === false || data.status === 'resumed';
-    return { ...res, ok: res.ok || resumed, resumed };
+    const resumed = data.execution_paused === false || data.status === 'resumed' || res.ok;
+    return {
+      ...res,
+      ok: rail.ok,
+      resumed,
+      message: rail.message,
+    };
   }
 
   async restartAgentRuntime() {

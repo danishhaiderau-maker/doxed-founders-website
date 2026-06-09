@@ -156,15 +156,166 @@ export class ShowcaseRuntimeService {
     return this.getCredentialsStatus();
   }
 
+  private getRailwayToken(): string | null {
+    return (
+      this.config.get<string>('RAILWAY_TOKEN')?.trim() ||
+      process.env.RAILWAY_API_TOKEN?.trim() ||
+      null
+    );
+  }
+
+  private botServiceName(): string {
+    return this.config.get<string>('BTC_BOT_RAILWAY_SERVICE')?.trim() || 'btc-conservative-agent';
+  }
+
+  /** Stop the showcase bot Railway deployment — URL goes offline (502) until Start. */
+  async stopShowcaseDeployment(): Promise<{ ok: boolean; message: string; deploymentId?: string }> {
+    const token = this.getRailwayToken();
+    if (!token) {
+      return {
+        ok: false,
+        message: 'RAILWAY_TOKEN not set on API — cannot kill showcase deployment.',
+      };
+    }
+    try {
+      const ctx = await this.resolveRailwayService(token, this.botServiceName());
+      const deploymentId = await this.getLatestDeploymentId(token, ctx);
+      if (!deploymentId) {
+        return { ok: false, message: 'No Railway deployment found for showcase bot.' };
+      }
+      await this.railwayGql(
+        token,
+        `mutation($id: String!) { deploymentStop(id: $id) }`,
+        { id: deploymentId },
+      );
+      this.logger.warn(`Showcase deployment stopped: ${deploymentId}`);
+      return {
+        ok: true,
+        message: 'Showcase bot killed on Railway — dashboard URL offline until Start.',
+        deploymentId,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Railway deploymentStop failed: ${msg}`);
+      return { ok: false, message: msg };
+    }
+  }
+
+  /** Start showcase bot — redeploy on Railway, then trading resumes after boot. */
+  async startShowcaseDeployment(): Promise<{ ok: boolean; message: string }> {
+    const token = this.getRailwayToken();
+    if (!token) {
+      return {
+        ok: false,
+        message: 'RAILWAY_TOKEN not set on API — cannot start showcase deployment.',
+      };
+    }
+    try {
+      const ctx = await this.resolveRailwayService(token, this.botServiceName());
+      const deploymentId = await this.getLatestDeploymentId(token, ctx);
+      if (deploymentId) {
+        try {
+          await this.railwayGql(
+            token,
+            `mutation($id: String!) { deploymentRestart(id: $id) }`,
+            { id: deploymentId },
+          );
+          return {
+            ok: true,
+            message: 'Showcase bot restarted on Railway — wait ~60s for dashboard.',
+          };
+        } catch {
+          /* fall through to full redeploy */
+        }
+      }
+      await this.railwayGql(
+        token,
+        `mutation($serviceId: String!, $environmentId: String!) {
+          serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+        }`,
+        { serviceId: ctx.serviceId, environmentId: ctx.environmentId },
+      );
+      return {
+        ok: true,
+        message: 'Showcase bot redeployed on Railway — wait ~2 min for dashboard.',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Railway showcase start failed: ${msg}`);
+      return { ok: false, message: msg };
+    }
+  }
+
+  private async resolveRailwayService(token: string, serviceName: string) {
+    const data = await this.railwayGql(
+      token,
+      `query {
+        projects { edges { node {
+          id name
+          environments { edges { node { id name } } }
+          services { edges { node { id name } } }
+        } } }
+      }`,
+    );
+
+    const projects =
+      (data.projects as { edges?: { node: Record<string, unknown> }[] })?.edges?.map((e) => e.node) ??
+      [];
+    const target = projects.find((p) =>
+      (p.services as { edges?: { node: { name: string } }[] })?.edges?.some(
+        (s) => s.node.name === serviceName,
+      ),
+    );
+    if (!target) {
+      throw new Error(
+        `Railway service "${serviceName}" not found — set BTC_BOT_RAILWAY_SERVICE or create the service`,
+      );
+    }
+
+    const env =
+      (target.environments as { edges?: { node: { id: string; name: string } }[] })?.edges?.find(
+        (e) => e.node.name === 'production',
+      )?.node ??
+      (target.environments as { edges?: { node: { id: string } }[] })?.edges?.[0]?.node;
+    const service = (
+      target.services as { edges?: { node: { id: string; name: string } }[] }
+    )?.edges?.find((e) => e.node.name === serviceName)?.node;
+
+    if (!env || !service) throw new Error('Missing Railway environment or service');
+
+    return {
+      projectId: target.id as string,
+      environmentId: env.id,
+      serviceId: service.id,
+    };
+  }
+
+  private async getLatestDeploymentId(
+    token: string,
+    ctx: { serviceId: string; environmentId: string },
+  ): Promise<string | null> {
+    const data = await this.railwayGql(
+      token,
+      `query($environmentId: String!, $serviceId: String!) {
+        serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+          latestDeployment { id status }
+        }
+      }`,
+      { environmentId: ctx.environmentId, serviceId: ctx.serviceId },
+    );
+    const latest = (
+      data.serviceInstance as { latestDeployment?: { id: string; status: string } } | null
+    )?.latestDeployment;
+    return latest?.id ?? null;
+  }
+
   async pushToRailwayRuntime(userId: string): Promise<{
     ok: boolean;
     message: string;
     serviceName?: string;
     variablesSet?: string[];
   }> {
-    const token =
-      this.config.get<string>('RAILWAY_TOKEN')?.trim() ||
-      process.env.RAILWAY_API_TOKEN?.trim();
+    const token = this.getRailwayToken();
     if (!token) {
       return {
         ok: false,
@@ -276,41 +427,7 @@ export class ShowcaseRuntimeService {
     serviceName: string,
     variables: Record<string, string>,
   ) {
-    const data = await this.railwayGql(
-      token,
-      `query {
-        projects { edges { node {
-          id name
-          environments { edges { node { id name } } }
-          services { edges { node { id name } } }
-        } } }
-      }`,
-    );
-
-    const projects =
-      (data.projects as { edges?: { node: Record<string, unknown> }[] })?.edges?.map((e) => e.node) ??
-      [];
-    const target = projects.find((p) =>
-      (p.services as { edges?: { node: { name: string } }[] })?.edges?.some(
-        (s) => s.node.name === serviceName,
-      ),
-    );
-    if (!target) {
-      throw new Error(
-        `Railway service "${serviceName}" not found — create the bot service or set BTC_BOT_RAILWAY_SERVICE`,
-      );
-    }
-
-    const env =
-      (target.environments as { edges?: { node: { id: string; name: string } }[] })?.edges?.find(
-        (e) => e.node.name === 'production',
-      )?.node ??
-      (target.environments as { edges?: { node: { id: string } }[] })?.edges?.[0]?.node;
-    const service = (
-      target.services as { edges?: { node: { id: string; name: string } }[] }
-    )?.edges?.find((e) => e.node.name === serviceName)?.node;
-
-    if (!env || !service) throw new Error('Missing Railway environment or service');
+    const ctx = await this.resolveRailwayService(token, serviceName);
 
     await this.railwayGql(
       token,
@@ -319,9 +436,9 @@ export class ShowcaseRuntimeService {
       }`,
       {
         input: {
-          projectId: target.id as string,
-          environmentId: env.id,
-          serviceId: service.id,
+          projectId: ctx.projectId,
+          environmentId: ctx.environmentId,
+          serviceId: ctx.serviceId,
           variables,
           replace: false,
         },
@@ -333,7 +450,7 @@ export class ShowcaseRuntimeService {
       `mutation($serviceId: String!, $environmentId: String!) {
         serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
       }`,
-      { serviceId: service.id, environmentId: env.id },
+      { serviceId: ctx.serviceId, environmentId: ctx.environmentId },
     );
   }
 }

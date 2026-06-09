@@ -50,6 +50,10 @@ const jwtSecret = vercelCheck.JWT_SECRET?.trim();
 const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
 const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
 const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
+const railwayToken =
+  xSecrets.RAILWAY_TOKEN?.trim() ||
+  xSecrets.RAILWAY_API_TOKEN?.trim() ||
+  process.env.RAILWAY_TOKEN?.trim();
 
 if (!token || !dbUrl) {
   console.error('Missing RAILWAY_TOKEN or DATABASE_URL in vault');
@@ -72,6 +76,7 @@ const apiVars = {
   ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
   ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
   ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
+  ...(railwayToken ? { RAILWAY_TOKEN: railwayToken } : {}),
 };
 
 const TARGET_SERVICES = new Set(['doxed-founders-website', 'btc-conservative-agent']);
