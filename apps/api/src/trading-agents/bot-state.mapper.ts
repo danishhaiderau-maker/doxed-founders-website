@@ -96,9 +96,107 @@ export type BotApiState = {
     ai_direction_raw?: string;
   }>;
   signal_info?: { count?: number; active?: boolean };
+  trades_map?: Record<
+    string,
+    {
+      signal_ref?: Record<string, unknown>;
+      ai?: Record<string, unknown>;
+    }
+  >;
+  research_counters?: {
+    last_trade_pnl_usd?: number;
+    last_exit_reason?: string;
+    trades_since_last_loss?: number;
+    approve_index?: number;
+  };
+  live_armed?: boolean;
 };
 
 const STARTING_BALANCE = 500;
+
+type BotTradeRow = NonNullable<BotApiState['trades']>[number];
+
+function parseTradeTimestamp(trade: Record<string, unknown>, sessionStart: number): number {
+  let ts =
+    Number(trade.created_ts_ts ?? trade.entry_ts ?? 0) ||
+    (typeof trade.ts === 'string'
+      ? Date.parse(trade.ts) / 1000
+      : typeof trade.ts === 'number'
+        ? trade.ts
+        : 0);
+  if (sessionStart > 0 && ts > 0 && ts < sessionStart - 1) return 0;
+  return ts;
+}
+
+/** Bot /api/state may drop closed rows from `trades` while keeping them in trades_map. */
+export function normalizeBotSessionTrades(bot: BotApiState): BotTradeRow[] {
+  const sessionStart = bot.bot_start_time ?? 0;
+  const listed = (bot.trades ?? []).filter((t) => {
+    if (!t || typeof t !== 'object') return false;
+    return parseTradeTimestamp(t as Record<string, unknown>, sessionStart) > 0 || sessionStart <= 0;
+  });
+  if (listed.length > 0) return listed;
+
+  const rows: BotTradeRow[] = [];
+  for (const entry of Object.values(bot.trades_map ?? {})) {
+    const sig = entry?.signal_ref;
+    if (!sig || typeof sig !== 'object') continue;
+    if (String(sig.status ?? '') !== 'CLOSED') continue;
+    const created = Number(sig.created_ts_ts ?? 0);
+    if (sessionStart > 0 && created > 0 && created < sessionStart - 1) continue;
+
+    const fill = Number(sig.fill_price ?? sig.limit_price ?? 0);
+    const exitCtx = sig.exit_context as Record<string, unknown> | undefined;
+    const exit = Number(exitCtx?.exit_price ?? sig.exit_price ?? fill);
+    const margin = Number(sig.margin_usdt ?? 15);
+    const counters = bot.research_counters;
+    const netUsd =
+      typeof sig.net_pnl_usd === 'number'
+        ? Number(sig.net_pnl_usd)
+        : rows.length === 0 && typeof counters?.last_trade_pnl_usd === 'number'
+          ? Number(counters.last_trade_pnl_usd)
+          : 0;
+    const pnlPct =
+      typeof sig.pnl === 'number'
+        ? Number(sig.pnl)
+        : margin > 0
+          ? (netUsd / margin) * 100
+          : 0;
+
+    rows.push({
+      ts:
+        typeof sig.closed_ts === 'number'
+          ? new Date(Number(sig.closed_ts) * 1000).toISOString()
+          : String(sig.created_ts ?? new Date().toISOString()),
+      trade_id: String(sig.trade_id ?? ''),
+      dir: String(sig.final_direction ?? sig.direction ?? 'TRADE'),
+      final_direction: String(sig.final_direction ?? sig.direction ?? 'TRADE'),
+      entry: fill,
+      exit,
+      pnl: pnlPct,
+      net_pnl_usd: netUsd,
+      exit_reason: String(sig.exit_reason ?? ''),
+    });
+  }
+  return rows;
+}
+
+function researchSessionBalance(bot: BotApiState, startingBalance = STARTING_BALANCE): number {
+  if (bot.strategy_mode === 'RESEARCH') {
+    const daily = bot.daily_pnl_usd;
+    if (typeof daily === 'number' && Number.isFinite(daily)) {
+      return startingBalance + daily;
+    }
+    const last = bot.research_counters?.last_trade_pnl_usd;
+    if (typeof last === 'number' && Number.isFinite(last)) {
+      return startingBalance + last;
+    }
+  }
+  if (bot.live_armed === false && bot.strategy_mode !== 'RESEARCH') {
+    return startingBalance;
+  }
+  return bot.account_balance ?? startingBalance;
+}
 
 function pctDist(price: number, level: number | null | undefined): number {
   if (!price || !level || level <= 0) return 0;
@@ -157,10 +255,14 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
       ? `No edge detected (${edgeScore}/${requiredEdge}). Waiting.`
       : `Signal active: ${aiDirection} @ ${bot.last_ai?.win_prob ?? 0}% win prob.`;
 
-  const balance = bot.account_balance ?? STARTING_BALANCE;
-  const equity = bot.equity ?? balance;
+  const balance = researchSessionBalance(bot, STARTING_BALANCE);
+  const openUnrealForEquity = (bot.positions ?? []).reduce(
+    (sum, p) => sum + Number(p.unreal_usd ?? 0),
+    0,
+  );
+  const equity = balance + openUnrealForEquity;
   const totalPnlPct = ((equity - STARTING_BALANCE) / STARTING_BALANCE) * 100;
-  const dailyPnl = bot.daily_pnl_usd ?? 0;
+  const dailyPnl = bot.daily_pnl_usd ?? equity - STARTING_BALANCE;
   const dailyPnlPct = (dailyPnl / STARTING_BALANCE) * 100;
 
   const wsHealth =
@@ -209,7 +311,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
       triggerPrice: o.limit_price ?? o.signal_price ?? 0,
       sizeUsd: (o.limit_price ?? 0) * (o.qty ?? 0),
     })),
-    recentTrades: (bot.trades ?? [])
+    recentTrades: normalizeBotSessionTrades(bot)
       .slice(-8)
       .reverse()
       .map((t) => ({
@@ -284,19 +386,9 @@ function regimeLabel(regime?: string): string {
 }
 
 export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STARTING_BALANCE) {
-  const sessionStart = bot.bot_start_time ?? 0;
-  const rawTrades = bot.trades ?? [];
-  const trades =
-    sessionStart > 0
-      ? rawTrades.filter((t) => {
-          const ts = (t as { created_ts_ts?: number; entry_ts?: number }).created_ts_ts
-            ?? (t as { entry_ts?: number }).entry_ts
-            ?? 0;
-          return Number(ts) >= sessionStart - 1;
-        })
-      : rawTrades;
+  const trades = normalizeBotSessionTrades(bot);
 
-  const balance = bot.account_balance ?? startingBalance;
+  const balance = researchSessionBalance(bot, startingBalance);
   const openUnreal = (bot.positions ?? []).reduce(
     (sum, p) => sum + Number(p.unreal_usd ?? 0),
     0,
@@ -316,11 +408,13 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
   else if (openCount > 0) currentAction = 'IN TRADE';
   else if ((bot.orders?.length ?? 0) > 0) currentAction = 'ORDER PENDING';
 
+  const sessionTradeCount = trades.length || bot.trade_count_session || 0;
+
   return {
-    balanceUsd: balance,
+    balanceUsd: Number(balance.toFixed(2)),
     equityUsd: Number(equity.toFixed(2)),
     netReturnPct: Number(netReturnPct.toFixed(2)),
-    tradeCount: bot.trade_count_session ?? trades.length,
+    tradeCount: sessionTradeCount,
     winRatePct: Number(winRate.toFixed(1)),
     liveSinceDays,
     currentPosition: openCount === 0 ? 'NONE' : (bot.positions?.[0]?.dir ?? 'OPEN'),
@@ -352,7 +446,11 @@ export function mapBotStateToExecutedTradesActivity(
   bot: BotApiState,
   _agentName: string,
 ): BotActivityEntry[] {
-  const trades = bot.trades ?? [];
+  const trades = normalizeBotSessionTrades(bot).sort((a, b) => {
+    const ta = a.ts ? Date.parse(a.ts) : 0;
+    const tb = b.ts ? Date.parse(b.ts) : 0;
+    return ta - tb;
+  });
   let balance = STARTING_BALANCE;
   const chronological = trades.slice(-20).map((t) => {
     const netUsd =
@@ -409,7 +507,7 @@ export function mapBotStateToActivity(bot: BotApiState, agentName: string): BotA
   const edgeRequired = bot.edge_threshold ?? 3;
   const regime = bot.support_resistance?.sr_state ?? bot.regime ?? null;
 
-  for (const t of (bot.trades ?? []).slice(-15).reverse()) {
+  for (const t of normalizeBotSessionTrades(bot).slice(-15).reverse()) {
     items.push({
       id: `trade-${t.trade_id ?? t.ts}`,
       type: 'POSITION_CLOSED',
