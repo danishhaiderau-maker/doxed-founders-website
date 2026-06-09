@@ -20,6 +20,13 @@ import {
   filterActivityToExecutedTrades,
   mapBotStateToExecutedTradesActivity,
 } from './bot-state.mapper';
+import {
+  readInstanceScope,
+  scopeActivityToUserSession,
+  statsFromScopedActivity,
+  type UserInstanceScope,
+  type UserInstanceStats,
+} from './instance-view.mapper';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -105,6 +112,8 @@ function serializeAgent(
     hired?: boolean;
     instanceStatus?: string | null;
     instanceMode?: 'copy' | 'live' | null;
+    viewScope?: 'showcase' | 'user';
+    userSessionStartedAt?: string | null;
     liveStats?: {
       balanceUsd?: number;
       equityUsd?: number;
@@ -145,6 +154,8 @@ function serializeAgent(
     hired: extra?.hired ?? false,
     instanceStatus: extra?.instanceStatus ?? null,
     instanceMode: extra?.instanceMode ?? null,
+    viewScope: extra?.viewScope ?? 'showcase',
+    userSessionStartedAt: extra?.userSessionStartedAt ?? null,
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
@@ -382,7 +393,7 @@ export class TradingAgentsService implements OnModuleInit {
     }
     return serializeAgent(agent, {
       ...extra,
-      liveStats: live.stats,
+      liveStats: extra?.viewScope === 'user' && extra?.liveStats ? extra.liveStats : live.stats,
       botConnected: true,
     });
   }
@@ -511,20 +522,110 @@ export class TradingAgentsService implements OnModuleInit {
         instanceRow?.status === 'ACTIVE' || instanceRow?.status === 'PAUSED';
     }
 
-    return this.enrichWithBotLive(agent, { following, hired, instanceStatus, instanceMode });
+    const userOverlay = userId
+      ? await this.resolveUserInstanceOverlay(agent.id, userId)
+      : null;
+
+    return this.enrichWithBotLive(agent, {
+      following,
+      hired,
+      instanceStatus,
+      instanceMode,
+      ...(userOverlay ?? {}),
+    });
   }
 
-  /** Public showcase dashboard — never exposes raw bot state or AI input payloads. */
+  private async resolveUserInstanceOverlay(agentId: string, userId: string) {
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId, userId } },
+    });
+    if (!instance || (instance.status !== 'ACTIVE' && instance.status !== 'PAUSED')) {
+      return null;
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { id: agentId } });
+    if (!agent) return null;
+
+    const scope = readInstanceScope(instance);
+    const rawActivity = await this.fetchShowcaseExecutedActivity(agent.slug);
+    const scoped = scopeActivityToUserSession(rawActivity, scope);
+    const stats = statsFromScopedActivity(scoped, scope);
+    return {
+      instanceStatus: instance.status,
+      instanceMode: scope.instanceMode,
+      viewScope: 'user' as const,
+      userSessionStartedAt: scope.sessionStartedAt.toISOString(),
+      liveStats: {
+        balanceUsd: stats.balanceUsd,
+        equityUsd: stats.equityUsd,
+        netReturnPct: stats.netReturnPct,
+        tradeCount: stats.tradeCount,
+        winRatePct: stats.winRatePct,
+      },
+    };
+  }
+
+  private async fetchShowcaseExecutedActivity(slug: string) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agent) return [];
+    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+      const bot = await this.botBridge.fetchState(true);
+      if (bot) {
+        return filterActivityToExecutedTrades(
+          mapBotStateToExecutedTradesActivity(bot, agent.name),
+        );
+      }
+    }
+    return [];
+  }
+
+  /** Public showcase dashboard — user instance overlays their own $500 session when signed in. */
   async getPublicDashboard(slug: string, userId?: string, _role?: string) {
     const payload = await this.getDashboard(slug, { publicSafe: true });
     const { rawBotState: _raw, ...rest } = payload as typeof payload & {
       rawBotState?: unknown;
     };
+
+    let userInstance: UserInstanceStats | null = null;
+    let viewScope: 'showcase' | 'user' = 'showcase';
+    let agent = rest.agent;
+
+    if (userId) {
+      const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+      if (agentRow) {
+        const overlay = await this.resolveUserInstanceOverlay(agentRow.id, userId);
+        if (overlay?.liveStats) {
+          viewScope = 'user';
+          userInstance = {
+            ...overlay.liveStats,
+            sessionStartedAt: overlay.userSessionStartedAt ?? new Date().toISOString(),
+            startingBalanceUsd: overlay.liveStats.balanceUsd,
+            instanceMode: overlay.instanceMode ?? 'copy',
+          };
+          agent = {
+            ...agent,
+            balanceUsd: overlay.liveStats.balanceUsd,
+            equityUsd: overlay.liveStats.equityUsd,
+            netReturnPct: overlay.liveStats.netReturnPct,
+            tradeCount: overlay.liveStats.tradeCount,
+            winRatePct: overlay.liveStats.winRatePct,
+            viewScope: 'user',
+            userSessionStartedAt: overlay.userSessionStartedAt,
+            instanceMode: overlay.instanceMode,
+          };
+        }
+      }
+    }
+
     return {
       ...rest,
+      agent,
       kind: 'public' as const,
+      viewScope,
+      userInstance,
       showcaseNote:
-        'Platform-owned showcase. Hire this agent for an isolated private instance with your exchange API.',
+        viewScope === 'user'
+          ? 'Your isolated copy session — stats and trades only from when you started testing.'
+          : 'Admin showcase for observation only. Paper-track or hire for your own $500 balance.',
     };
   }
 
@@ -608,9 +709,19 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
-  async listActivity(slug: string, limit = 30, publicSafe = false) {
+  async listActivity(slug: string, limit = 30, publicSafe = false, userId?: string) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
+
+    let userScope: UserInstanceScope | null = null;
+    if (userId) {
+      const instance = await this.prisma.tradingAgentInstance.findUnique({
+        where: { agentId_userId: { agentId: agent.id, userId } },
+      });
+      if (instance && (instance.status === 'ACTIVE' || instance.status === 'PAUSED')) {
+        userScope = readInstanceScope(instance);
+      }
+    }
 
     if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
       const bot = await this.botBridge.fetchState();
@@ -619,7 +730,7 @@ export class TradingAgentsService implements OnModuleInit {
         const source = publicSafe
           ? mapBotStateToExecutedTradesActivity(bot, agent.name)
           : ((await this.botBridge.getLiveActivity(agent.name)) ?? []);
-        const mapped = source.slice(0, take).map((row) => ({
+        let mapped = source.slice(0, take).map((row) => ({
           ...row,
           shareText:
             row.shareText ??
@@ -632,9 +743,13 @@ export class TradingAgentsService implements OnModuleInit {
               marketRegime: row.marketRegime,
             }),
         }));
-        return publicSafe
-          ? filterActivityToExecutedTrades(sanitizeActivityForPublic(mapped))
-          : mapped;
+        if (publicSafe) {
+          mapped = filterActivityToExecutedTrades(sanitizeActivityForPublic(mapped));
+        }
+        if (userScope) {
+          mapped = scopeActivityToUserSession(mapped, userScope).slice(0, take);
+        }
+        return mapped;
       }
     }
 

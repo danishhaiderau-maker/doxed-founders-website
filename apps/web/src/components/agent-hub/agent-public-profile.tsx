@@ -240,6 +240,8 @@ export function AgentPublicProfile({
   publicStatus,
   instanceStatus,
   instanceMode,
+  viewScope = 'showcase',
+  showcaseNote,
   onFollow,
   followBusy,
   onCopyAllocate,
@@ -264,6 +266,8 @@ export function AgentPublicProfile({
   publicStatus: PublicAgentStatus;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
+  viewScope?: 'showcase' | 'user';
+  showcaseNote?: string | null;
   onFollow?: () => void;
   followBusy?: boolean;
   onCopyAllocate?: () => void;
@@ -274,23 +278,36 @@ export function AgentPublicProfile({
   copyBusy?: boolean;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
-  const isLive = botConnected && !executionPaused && publicStatus === 'online';
-  const statusLabel = isLive
-    ? 'Live (Admin account)'
-    : publicStatus === 'offline' && !botConnected
-      ? 'Stopped (Admin)'
-      : executionPaused
-        ? 'Paused (Admin)'
-        : 'Offline';
-  const statusColor = isLive
-    ? 'text-emerald-400'
-    : executionPaused && publicStatus !== 'offline'
-      ? 'text-amber-400'
-      : 'text-zinc-400';
+  const isUserSession = viewScope === 'user' && hired;
+  const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
+  const statusLabel = isUserSession
+    ? instanceMode === 'live'
+      ? 'Your live copy session'
+      : `Your copy track · ${formatUsd(agent.startingBalance || 500, 0)} start`
+    : isLive
+      ? 'Admin showcase (observe only)'
+      : publicStatus === 'offline' && !botConnected
+        ? 'Showcase stopped'
+        : executionPaused
+          ? 'Showcase paused'
+          : 'Showcase offline';
+  const statusColor = isUserSession
+    ? 'text-violet-300'
+    : isLive
+      ? 'text-emerald-400'
+      : executionPaused && publicStatus !== 'offline'
+        ? 'text-amber-400'
+        : 'text-zinc-400';
+  const equityLabel = isUserSession ? 'Your equity' : 'Showcase equity';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
+      {showcaseNote && (
+        <p className="mb-4 rounded-xl border border-violet-500/25 bg-violet-950/20 px-4 py-3 text-sm text-violet-100/90">
+          {showcaseNote}
+        </p>
+      )}
       <AgentMarketplaceStats agents={allAgents ?? [agent]} builderCount={14} />
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_300px]">
@@ -361,7 +378,7 @@ export function AgentPublicProfile({
                   <MetricPill label="Max drawdown" value="6.2%" />
                   <MetricPill label="Total trades" value={String(agent.tradeCount)} />
                   <MetricPill label="Followers" value={agent.followerCount.toLocaleString()} />
-                  <MetricPill label="Equity" value={formatUsd(agent.equityUsd, 0)} />
+                  <MetricPill label={equityLabel} value={formatUsd(agent.equityUsd, 0)} />
                 </div>
               </div>
             </div>
@@ -438,7 +455,7 @@ export function AgentPublicProfile({
                 <MetricPill label="Sharpe" value="1.42" />
                 <MetricPill label="Profit factor" value="2.31" />
               </div>
-              <AgentTradeJourney activity={activity} layout="horizontal" />
+              <AgentTradeJourney activity={activity} layout="horizontal" showBalance={isUserSession} />
               <PublicReasoningPanel dashboard={dashboard} />
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed items={activity.slice(0, 8)} />
@@ -449,7 +466,9 @@ export function AgentPublicProfile({
           {tab === 'Performance' && (
             <AgentPerformanceChart agentReturnPct={agent.netReturnPct} label={agent.name} />
           )}
-          {tab === 'Trade Journey' && <AgentTradeJourney activity={activity} />}
+          {tab === 'Trade Journey' && (
+            <AgentTradeJourney activity={activity} showBalance={isUserSession} />
+          )}
           {tab === 'Reasoning' && <PublicReasoningPanel dashboard={dashboard} />}
           {tab === 'Activity' && <AgentActivityFeed items={activity} />}
           {tab === 'Followers' && (

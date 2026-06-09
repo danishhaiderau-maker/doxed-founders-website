@@ -70,9 +70,11 @@ function PnlBar({ pct }: { pct: number }) {
 export function AgentTradeJourney({
   activity,
   layout = 'vertical',
+  showBalance = true,
 }: {
   activity: TradingAgentActivityEntry[];
   layout?: 'vertical' | 'horizontal';
+  showBalance?: boolean;
 }) {
   const executed = useMemo(() => activity.filter(isExecutedTrade), [activity]);
   const nodes = activityToNodes(executed);
@@ -144,7 +146,7 @@ export function AgentTradeJourney({
                   {item.netPnlUsd != null ? ` · ${formatUsd(item.netPnlUsd, 2)}` : ''}
                 </p>
                 <PnlBar pct={pct} />
-                {item.balanceUsd != null && (
+                {showBalance && item.balanceUsd != null && (
                   <p className="mt-2 text-[10px] text-zinc-400">
                     Balance: {formatUsd(item.balanceUsd, 0)}
                   </p>
@@ -190,7 +192,7 @@ export function AgentTradeJourney({
               <PnlBar pct={selected.profitPct} />
             </>
           )}
-          {selected.balanceUsd != null && (
+          {showBalance && selected.balanceUsd != null && (
             <p className="mt-3 text-sm text-zinc-400">
               Balance after trade: <span className="font-semibold text-white">{formatUsd(selected.balanceUsd, 0)}</span>
             </p>

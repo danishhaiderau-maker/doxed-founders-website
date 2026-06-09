@@ -92,10 +92,15 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':slug/activity')
-  activity(@Param('slug') slug: string, @Query('limit') limit?: string) {
+  activity(
+    @Param('slug') slug: string,
+    @Query('limit') limit?: string,
+    @CurrentUser() user?: AuthUser,
+  ) {
     const n = limit ? Number(limit) : 30;
-    return this.tradingAgents.listActivity(slug, Number.isFinite(n) ? n : 30, true);
+    return this.tradingAgents.listActivity(slug, Number.isFinite(n) ? n : 30, true, user?.id);
   }
 
   @Post(':id/follow')
