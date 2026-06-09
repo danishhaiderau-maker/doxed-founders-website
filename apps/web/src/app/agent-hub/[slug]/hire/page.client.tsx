@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
@@ -26,6 +26,7 @@ type Step = 'exchange' | 'credentials' | 'risk';
 export default function AgentHireClient({ slug }: { slug: string }) {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const token = session?.accessToken;
 
   const [step, setStep] = useState<Step>('exchange');
@@ -69,6 +70,14 @@ export default function AgentHireClient({ slug }: { slug: string }) {
     }
     load();
   }, [status, router, slug, load]);
+
+  useEffect(() => {
+    const preferred = searchParams.get('exchange');
+    if (preferred && preferred in EXCHANGE_API_GUIDES) {
+      setExchange(preferred);
+      setStep('credentials');
+    }
+  }, [searchParams]);
 
   async function handleActivate(e: FormEvent) {
     e.preventDefault();

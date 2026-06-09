@@ -8,6 +8,7 @@ import {
   AGENT_RUN_CREDITS,
   WORKFORCE_TEMPLATES,
   formatRelativeTime,
+  type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AgentCard } from '@/components/agent-card';
@@ -16,6 +17,7 @@ import {
   AgentBetaWarningBanner,
   AgentMarketplaceCard,
 } from '@/components/agent-hub/agent-marketplace-card';
+import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import {
   AgentMarketplaceStats,
   AgentMarketplaceTabs,
@@ -32,6 +34,7 @@ import {
   fetchAgentHub,
   fetchTradingAgentLeaderboard,
   fetchTradingAgents,
+  fetchTradingAgentDashboard,
   followTradingAgent,
   FounderAgentSummary,
 } from '@/lib/api';
@@ -48,6 +51,22 @@ export default function AgentHubPageClient() {
   const [rankTab, setRankTab] = useState<'pnl' | 'followed' | 'builders'>('pnl');
   const [followBusy, setFollowBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [featuredLiveBook, setFeaturedLiveBook] = useState<
+    TradingAgentDashboardState['liveBook'] | null
+  >(null);
+  const [featuredLiveLoading, setFeaturedLiveLoading] = useState(false);
+
+  const loadFeaturedLive = useCallback(async () => {
+    setFeaturedLiveLoading(true);
+    try {
+      const dash = await fetchTradingAgentDashboard('conservative-btc', session?.accessToken);
+      setFeaturedLiveBook(dash.dashboard.liveBook ?? null);
+    } catch {
+      setFeaturedLiveBook(null);
+    } finally {
+      setFeaturedLiveLoading(false);
+    }
+  }, [session?.accessToken]);
 
   const load = useCallback(async () => {
     try {
@@ -62,16 +81,17 @@ export default function AgentHubPageClient() {
       setTradingAgents(trading.agents);
       setLeaderboard(board);
       setError(null);
+      void loadFeaturedLive();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load Agent Hub');
     }
-  }, [kind, founderCategory]);
+  }, [kind, founderCategory, loadFeaturedLive]);
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 60_000);
+    const interval = setInterval(loadFeaturedLive, 20_000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, loadFeaturedLive]);
 
   async function handleFollow(agent: TradingAgentSummary) {
     if (!session?.accessToken) {
@@ -144,6 +164,27 @@ export default function AgentHubPageClient() {
                   onFollow={() => handleFollow(featured)}
                   followBusy={followBusy === featured.id}
                 />
+                <div className="rounded-2xl border border-zinc-800/80 bg-zinc-950/40 p-4 sm:p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-400">
+                      Live transparency
+                    </h3>
+                    {featuredLiveLoading && (
+                      <span className="text-xs text-zinc-600">Syncing…</span>
+                    )}
+                    {(featuredLiveBook?.pendingOrders.length ?? 0) > 0 && (
+                      <span className="rounded-full bg-blue-500/20 px-2.5 py-0.5 text-[10px] font-bold uppercase text-blue-200">
+                        {featuredLiveBook!.pendingOrders.length} limit order(s) pending
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-600">
+                    Real-time signals, limit orders, positions, and trades from the admin showcase bot.
+                  </p>
+                  <div className="mt-4">
+                    <AgentTransparencyTables liveBook={featuredLiveBook ?? undefined} />
+                  </div>
+                </div>
               </section>
             )}
 

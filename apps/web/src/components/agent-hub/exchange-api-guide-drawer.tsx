@@ -46,6 +46,12 @@ export function ExchangeApiGuideDrawer({
           ))}
         </ol>
 
+        {guide.credentialHint && (
+          <p className="mt-4 rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-xs text-zinc-400">
+            <strong className="text-zinc-300">Credentials needed:</strong> {guide.credentialHint}
+          </p>
+        )}
+
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-400">Required</p>

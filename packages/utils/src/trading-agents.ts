@@ -1,3 +1,63 @@
+export type AgentLiveSignalRow = {
+  time: string;
+  direction: string;
+  confidence: number;
+  regime: string;
+  strategy: string;
+  trigger: string;
+  pullRequiredPct: number;
+  signalPrice: number;
+  maxPullPct: number;
+  outcome: string;
+  fillPrice: number | null;
+  exitReason: string | null;
+};
+
+export type AgentLivePositionRow = {
+  leg: string;
+  side: string;
+  qty: number;
+  entry: number;
+  current: number;
+  stopLoss: number;
+  takeProfit: number;
+  pnlUsd: number;
+};
+
+export type AgentLivePendingOrderRow = {
+  ageMin: number;
+  side: string;
+  status: string;
+  qty: number;
+  limitPrice: number;
+  signalPrice: number;
+};
+
+export type AgentLiveExpiredOrderRow = {
+  time: string;
+  direction: string;
+  limitPrice: number;
+  ageMin: number;
+  reason: string;
+  confidence: number;
+  mode: string;
+};
+
+export type AgentLiveTradeRow = {
+  time: string;
+  tradeId: string;
+  direction: string;
+  entry: number;
+  exit: number;
+  durationMin: number;
+  pnlPct: number;
+  netUsd: number;
+  grossUsd: number;
+  tradeFeesUsd: number;
+  fundingUsd: number;
+  aiBand: string;
+};
+
 export type TradingAgentDashboardState = {
   currentPrice: number;
   regime: string;
@@ -52,6 +112,13 @@ export type TradingAgentDashboardState = {
   wsHealth: string;
   dataQuality: string;
   pnl: { daily: number; total: number };
+  liveBook: {
+    activeSignals: AgentLiveSignalRow[];
+    positions: AgentLivePositionRow[];
+    pendingOrders: AgentLivePendingOrderRow[];
+    expiredOrders: AgentLiveExpiredOrderRow[];
+    trades: AgentLiveTradeRow[];
+  };
 };
 
 export const TRADING_AGENT_KIND_LABELS: Record<string, string> = {

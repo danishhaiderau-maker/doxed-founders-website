@@ -13,7 +13,7 @@ export class BotBridgeService {
   private readonly logger = new Logger(BotBridgeService.name);
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
-  private cacheMs = 3000;
+  private cacheMs = 8000;
 
   constructor(private readonly config: ConfigService) {}
 

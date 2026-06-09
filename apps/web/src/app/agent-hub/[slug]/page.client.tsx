@@ -57,31 +57,29 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   });
   const [viewScope, setViewScope] = useState<'showcase' | 'user'>('showcase');
   const [showcaseNote, setShowcaseNote] = useState<string | null>(null);
+  const [liveLoading, setLiveLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
+    setAgent(meta);
+    setFollowing(Boolean(meta.following));
+    setHired(Boolean(meta.hired));
+    setInstanceStatus(meta.instanceStatus ?? null);
+    setInstanceMode(meta.instanceMode ?? null);
+  }, []);
+
+  const loadLive = useCallback(async () => {
+    const token = session?.accessToken;
+    setLiveLoading(true);
     try {
-      const token = session?.accessToken;
       const results = await Promise.allSettled([
-        withTimeout(fetchTradingAgentDashboard(slug, token), 15000, 'Dashboard'),
+        withTimeout(fetchTradingAgentDashboard(slug, token), 10000, 'Dashboard'),
         fetchTradingAgentActivity(slug, 20, token),
-        fetchTradingAgent(slug, token),
         fetchPublicAgentStatus(),
-        fetchTradingAgents('TRADING'),
       ]);
 
       const dashR = results[0];
       const actR = results[1];
-      const metaR = results[2];
-      const statusR = results[3];
-      const agentsR = results[4];
-
-      if (metaR.status === 'fulfilled') {
-        setAgent(metaR.value);
-        setFollowing(Boolean(metaR.value.following));
-        setHired(Boolean(metaR.value.hired));
-        setInstanceStatus(metaR.value.instanceStatus ?? null);
-        setInstanceMode(metaR.value.instanceMode ?? null);
-      }
+      const statusR = results[2];
 
       if (dashR.status === 'fulfilled') {
         setAgent(dashR.value.agent);
@@ -90,30 +88,42 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExecutionPaused(Boolean(dashR.value.executionPaused));
         setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
         setShowcaseNote(dashR.value.showcaseNote ?? null);
-      } else if (metaR.status === 'fulfilled') {
+        setError(null);
+      } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
       }
 
       if (actR.status === 'fulfilled') setActivity(actR.value);
       if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);
-      if (agentsR.status === 'fulfilled') setAllAgents(agentsR.value.agents);
-
-      if (metaR.status === 'rejected' && dashR.status === 'rejected') {
-        throw metaR.reason;
-      }
-      setError((prev) => (dashR.status === 'rejected' && metaR.status === 'fulfilled' ? prev : null));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load dashboard');
+      setError(err instanceof Error ? err.message : 'Failed to load live data');
     } finally {
-      setLoading(false);
+      setLiveLoading(false);
     }
   }, [slug, session?.accessToken]);
 
+  const load = useCallback(async () => {
+    try {
+      const token = session?.accessToken;
+      const meta = await fetchTradingAgent(slug, token);
+      applyAgentMeta(meta);
+      setLoading(false);
+
+      void Promise.allSettled([loadLive(), fetchTradingAgents('TRADING')]).then(([, agentsR]) => {
+        if (agentsR.status === 'fulfilled') setAllAgents(agentsR.value.agents);
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load agent');
+      setLoading(false);
+      setLiveLoading(false);
+    }
+  }, [slug, session?.accessToken, applyAgentMeta, loadLive]);
+
   useEffect(() => {
     load();
-    const interval = setInterval(load, 20_000);
+    const interval = setInterval(loadLive, 20_000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, loadLive]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !agent) return;
@@ -216,6 +226,13 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     wsHealth: '',
     dataQuality: '',
     pnl: { daily: 0, total: 0 },
+    liveBook: {
+      activeSignals: [],
+      positions: [],
+      pendingOrders: [],
+      expiredOrders: [],
+      trades: [],
+    },
   };
 
   return (
@@ -224,6 +241,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         <p className="mx-4 mt-4 rounded-lg border border-amber-500/30 bg-amber-950/30 px-4 py-2 text-sm text-amber-200 sm:mx-6">
           {error}
         </p>
+      )}
+      {liveLoading && agent && (
+        <p className="mx-4 mt-2 text-xs text-zinc-500 sm:mx-6">Syncing live bot data…</p>
       )}
 
       {loading && !agent ? (

@@ -49,6 +49,16 @@ export function AgentMarketplaceCard({
                 Live
               </span>
             )}
+            {agent.currentAction === 'ORDER PENDING' && (
+              <span className="rounded-full border border-blue-500/40 bg-blue-950/40 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-200">
+                Limit pending
+              </span>
+            )}
+            {agent.hired && agent.instanceMode === 'copy' && (
+              <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-2 py-0.5 text-[10px] font-bold uppercase text-violet-200">
+                Your $500 track
+              </span>
+            )}
           </div>
         </div>
         <span className="rounded-lg bg-zinc-800 px-2 py-1 text-xs font-semibold text-zinc-300">
@@ -85,6 +95,12 @@ export function AgentMarketplaceCard({
               <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Position</dt>
               <dd className="font-semibold text-amber-200">{agent.currentPosition ?? 'FLAT'}</dd>
             </div>
+            {agent.currentAction && agent.currentAction !== 'WAITING' && (
+              <div className="col-span-2 sm:col-span-3">
+                <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Status</dt>
+                <dd className="text-sm font-semibold text-blue-300">{agent.currentAction}</dd>
+              </div>
+            )}
           </dl>
 
           <p className="mt-3 text-xs text-zinc-500">
