@@ -19,6 +19,7 @@ import {
   sanitizeActivityForPublic,
   filterActivityToExecutedTrades,
   mapBotStateToExecutedTradesActivity,
+  type BotActivityEntry,
 } from './bot-state.mapper';
 import {
   readInstanceScope,
@@ -730,7 +731,7 @@ export class TradingAgentsService implements OnModuleInit {
         const source = publicSafe
           ? mapBotStateToExecutedTradesActivity(bot, agent.name)
           : ((await this.botBridge.getLiveActivity(agent.name)) ?? []);
-        let mapped = source.slice(0, take).map((row) => ({
+        let mapped: BotActivityEntry[] = source.slice(0, take).map((row) => ({
           ...row,
           shareText:
             row.shareText ??
