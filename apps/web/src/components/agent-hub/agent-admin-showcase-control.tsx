@@ -42,7 +42,8 @@ export function AgentAdminShowcaseControl({
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">Admin account</p>
       <p className="mt-1 text-xs text-zinc-400">
-        Controls the live showcase bot on Railway — not your home network ({botConnected ? 'connected' : 'offline'}).
+        Pauses trading on Railway (process stays up for logs). Research dashboard will show a red STOPPED banner —{' '}
+        {botConnected ? 'connected' : 'offline'}.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button

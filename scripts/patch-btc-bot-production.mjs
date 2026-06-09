@@ -110,6 +110,58 @@ if (!src.includes('sys.platform != "win32"')) {
   changed = true;
 }
 
+if (!src.includes('manual_admin_pause') || !src.includes('should_run_pipeline() -> bool:\n    if state.get("manual_admin_pause")')) {
+  if (!src.includes('if state.get("manual_admin_pause")')) {
+    src = src.replace(
+      'def should_run_pipeline() -> bool:\n    if len(latest_candles) < MIN_CANDLES:',
+      'def should_run_pipeline() -> bool:\n    if state.get("manual_admin_pause") or (\n        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"\n    ):\n        return False\n    if len(latest_candles) < MIN_CANDLES:',
+    );
+    changed = true;
+  }
+
+  if (src.includes('"status": "alive"') && src.includes('def health():')) {
+    src = src.replace(
+      `def health():
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
+    return jsonify({
+        "status": "alive",
+        "last_heartbeat": hb,
+        "time_since_heartbeat": time.time() - hb,
+        "execution_paused": state.get("execution_paused", False),
+        "execution_reason": state.get("execution_reason", "")
+    })`,
+      `def health():
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
+    status = "paused" if paused else "alive"
+    return jsonify({
+        "status": status,
+        "last_heartbeat": hb,
+        "time_since_heartbeat": time.time() - hb,
+        "execution_paused": paused,
+        "execution_reason": reason,
+        "manual_admin_pause": manual,
+    })`,
+    );
+    changed = true;
+  }
+
+  if (src.includes('state["manual_admin_pause"] = True\n        save_persistent_config()') && !src.includes('state["live_armed"] = False')) {
+    src = src.replace(
+      `        state["manual_admin_pause"] = True
+        save_persistent_config()`,
+      `        state["manual_admin_pause"] = True
+        state["live_armed"] = False
+        save_persistent_config()`,
+    );
+    changed = true;
+  }
+}
+
 if (changed) {
   writeFileSync(TARGET, src, 'utf8');
   console.log('Applied production patches to bot.py');

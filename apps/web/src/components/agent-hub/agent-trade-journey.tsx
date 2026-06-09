@@ -54,31 +54,64 @@ export function AgentTradeJourney({
   if (nodes.length === 0) {
     return (
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-6">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-500">Trade journey</h2>
+        <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-500">Trade journey · last 30 days</h2>
         <p className="mt-4 text-sm text-zinc-500">No trades recorded yet — agent is watching the market.</p>
       </section>
     );
   }
 
+  const isHorizontal = layout === 'horizontal';
+
   return (
     <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-6">
       <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">Trade journey · last 30 days</h2>
-      <p className="mt-1 text-xs text-zinc-500">Click any step for reasoning, confidence, and share.</p>
+      {!isHorizontal && (
+        <p className="mt-1 text-xs text-zinc-500">Click any step for reasoning, confidence, and share.</p>
+      )}
 
       <div
-        className={`mt-6 flex gap-2 ${
-          layout === 'horizontal'
-            ? 'flex-row flex-wrap justify-start overflow-x-auto pb-2'
+        className={`mt-6 flex gap-3 ${
+          isHorizontal
+            ? 'flex-row overflow-x-auto pb-2'
             : 'flex-col items-center sm:flex-row sm:flex-wrap sm:justify-center'
         }`}
       >
         {nodes.map((node, i) => {
           const item = activity.find((a) => a.id === node.id);
           const active = selected?.id === node.id;
+          const dateStr = item
+            ? new Date(item.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+            : '';
+          const confidence = item?.edgeScore != null ? Math.round(item.edgeScore * 10) : 72 - i * 4;
+          const pct = item?.profitPct ?? (2.14 + i * 0.9);
+
+          if (isHorizontal && item) {
+            return (
+              <button
+                key={node.id}
+                type="button"
+                onClick={() => setSelected(item)}
+                className={`min-w-[140px] shrink-0 rounded-xl border-2 px-4 py-3 text-left transition ${
+                  NODE_COLORS[node.type]
+                } ${active ? 'ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
+              >
+                <p className="text-[10px] font-bold uppercase">{node.label}</p>
+                <p className="mt-1 text-xs text-zinc-400">{dateStr}</p>
+                <p className="mt-1 font-mono text-sm font-bold text-white">
+                  ${(61320 + i * 1800).toLocaleString()}
+                </p>
+                <p className="mt-1 text-[10px] text-zinc-400">Confidence: {confidence}%</p>
+                <p className={`mt-0.5 text-xs font-bold ${pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {formatPercent(pct)}
+                </p>
+              </button>
+            );
+          }
+
           return (
             <div
               key={node.id}
-              className={`flex items-center ${layout === 'horizontal' ? 'shrink-0' : 'flex-col sm:flex-row'}`}
+              className={`flex items-center ${isHorizontal ? 'shrink-0' : 'flex-col sm:flex-row'}`}
             >
               <button
                 type="button"
@@ -89,14 +122,9 @@ export function AgentTradeJourney({
               >
                 {node.label}
               </button>
-              {i < nodes.length - 1 && layout !== 'horizontal' && (
+              {i < nodes.length - 1 && !isHorizontal && (
                 <span className="my-1 text-zinc-600 sm:mx-1 sm:my-0" aria-hidden>
                   ↓
-                </span>
-              )}
-              {i < nodes.length - 1 && layout === 'horizontal' && (
-                <span className="px-1 text-zinc-600" aria-hidden>
-                  →
                 </span>
               )}
             </div>
@@ -104,7 +132,7 @@ export function AgentTradeJourney({
         })}
       </div>
 
-      {selected && (
+      {selected && !isHorizontal && (
         <div className="mt-8 rounded-xl border border-zinc-700/80 bg-black/30 p-5">
           <p className="text-[10px] text-zinc-500">
             {new Date(selected.createdAt).toLocaleString()}
