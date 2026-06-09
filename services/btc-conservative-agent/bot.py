@@ -335,9 +335,12 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "fill_tick_price": order.get("fill_price"),
         "trend_health_at_entry": copy.deepcopy(signal.get("trend_health_at_entry") or {}),
         "entry_mode": signal.get("entry_mode", ENTRY_MODE_PULLBACK),
-        "micro_sr_level": signal.get("micro_sr_level"),
-        "shadow_micro_sr_price": signal.get("shadow_micro_sr_price"),
-        "dist_to_micro_sr_pct": signal.get("dist_to_micro_sr_pct"),
+        "ema_hybrid_base": signal.get("ema_hybrid_base"),
+        "ema_hybrid_limit": signal.get("ema_hybrid_limit"),
+        "ema_hybrid_offset_usd": signal.get("ema_hybrid_offset_usd"),
+        "ema9_at_entry": signal.get("ema9_at_entry"),
+        "ema21_at_entry": signal.get("ema21_at_entry"),
+        "dist_to_ema_hybrid_pct": signal.get("dist_to_ema_hybrid_pct"),
     }
 
 def compute_live_factor_scores(mc: dict):
@@ -1717,7 +1720,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.4-micro-sr-live-2026-06-09"
+ANALYZER_SYNC_ID = "v8.4-ema-hybrid-entry-2026-06-09"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2032,70 +2035,88 @@ def compute_market_structure(candles):
         "pivot_count": len(swings),
     }
 
-def detect_micro_support_long(market_structure: dict, price: float):
-    """v84: recent HL pivot as micro support for long limit entries."""
-    if not market_structure or not market_structure.get("hh_hl_sequence_active"):
-        return None
-    level = market_structure.get("last_swing_low")
-    if level is None or not price or price <= 0 or level >= price:
-        return None
-    return float(level)
+def _entry_ema9_ema21() -> tuple:
+    with state_lock:
+        es = state.get("ema_status") or {}
+    return float(es.get("ema9") or 0), float(es.get("ema21") or 0)
 
-def detect_micro_resistance_short(market_structure: dict, price: float):
-    """v84: recent LH pivot as micro resistance for short limit entries."""
-    if not market_structure or not market_structure.get("lh_ll_sequence_active"):
+def compute_ema_hybrid_base(direction: str, price: float, ema9: float, ema21: float):
+    """LONG: max(ema9, ema21) below price. SHORT: min(ema9, ema21) above price."""
+    if not price or price <= 0:
         return None
-    level = market_structure.get("last_swing_high")
-    if level is None or not price or price <= 0 or level <= price:
-        return None
-    return float(level)
+    direction = str(direction or "").upper()
+    if direction == "LONG":
+        cands = [e for e in (ema9, ema21) if e > 0 and e < price]
+        return max(cands) if cands else None
+    if direction == "SHORT":
+        cands = [e for e in (ema9, ema21) if e > 0 and e > price]
+        return min(cands) if cands else None
+    return None
 
-def compute_micro_sr_entry(signal: dict) -> dict:
-    """v84: detect micro-SR pivot; live limit at level when structure confirms."""
+def apply_ema_hybrid_entry_offset(direction: str, hybrid_base: float) -> float:
+    """LONG: +$offset (higher bid, closer fill). SHORT: -$offset (lower offer, closer fill)."""
+    off = float(EMA_HYBRID_ENTRY_OFFSET_USD)
+    direction = str(direction or "").upper()
+    if direction == "LONG":
+        return float(hybrid_base) + off
+    if direction == "SHORT":
+        return float(hybrid_base) - off
+    return float(hybrid_base)
+
+def compute_ema_hybrid_entry(signal: dict) -> dict:
+    """v84.1: EMA9/EMA21 hybrid limit with fixed USD offset (no pivot micro-SR)."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
-    ctx = signal.get("context") or {}
-    mc = ctx.get("market_context") or state.get("market_context") or {}
-    ms = mc.get("market_structure") if isinstance(mc.get("market_structure"), dict) else {}
-    if not ms:
-        with state_lock:
-            candles = copy.deepcopy(latest_candles)
-        if candles:
-            ms = compute_market_structure(candles)
-    micro_level = None
-    if direction == "LONG":
-        micro_level = detect_micro_support_long(ms, price)
-    elif direction == "SHORT":
-        micro_level = detect_micro_resistance_short(ms, price)
-    dist_pct = round(abs(price - micro_level) / price * 100, 4) if micro_level and price > 0 else None
-    entry_mode = ENTRY_MODE_MICRO_SR if micro_level else ENTRY_MODE_PULLBACK
+    ema9, ema21 = _entry_ema9_ema21()
+    hybrid_base = compute_ema_hybrid_base(direction, price, ema9, ema21)
+    limit_price = None
+    if hybrid_base is not None:
+        limit_price = apply_ema_hybrid_entry_offset(direction, hybrid_base)
+        if direction == "SHORT" and limit_price <= price:
+            hybrid_base = None
+            limit_price = None
+        elif direction == "LONG" and limit_price >= price:
+            hybrid_base = None
+            limit_price = None
+    entry_mode = ENTRY_MODE_EMA_HYBRID if hybrid_base is not None else ENTRY_MODE_PULLBACK
+    dist_pct = (
+        round(abs(price - limit_price) / price * 100, 4)
+        if limit_price is not None and price > 0
+        else None
+    )
     signal["entry_mode"] = entry_mode
-    signal["micro_sr_level"] = micro_level
-    signal["shadow_micro_sr_price"] = micro_level
-    signal["dist_to_micro_sr_pct"] = dist_pct
+    signal["ema_hybrid_base"] = hybrid_base
+    signal["ema_hybrid_limit"] = limit_price
+    signal["ema_hybrid_offset_usd"] = EMA_HYBRID_ENTRY_OFFSET_USD
+    signal["ema9_at_entry"] = ema9
+    signal["ema21_at_entry"] = ema21
+    signal["dist_to_ema_hybrid_pct"] = dist_pct
     trade_id = signal.get("trade_id")
-    if entry_mode == ENTRY_MODE_MICRO_SR:
+    if entry_mode == ENTRY_MODE_EMA_HYBRID:
         logger.info(
-            f"[MICRO_SR LIVE] trade_id={trade_id} dir={direction} limit={fmt(micro_level)} "
-            f"signal={fmt(price)} dist={dist_pct}% labels={ms.get('swing_labels_last')} "
-            f"[PIPELINE ENFORCEMENT]"
+            f"[EMA HYBRID] trade_id={trade_id} dir={direction} signal={fmt(price)} "
+            f"ema9={fmt(ema9)} ema21={fmt(ema21)} base={fmt(hybrid_base)} "
+            f"offset_usd={EMA_HYBRID_ENTRY_OFFSET_USD} limit={fmt(limit_price)} "
+            f"dist={dist_pct}% [PIPELINE ENFORCEMENT]"
         )
     else:
         logger.info(
-            f"[MICRO_SR] trade_id={trade_id} dir={direction} no_micro_sr_level "
-            f"fallback={ENTRY_MODE_PULLBACK} [PIPELINE ENFORCEMENT]"
+            f"[EMA HYBRID] trade_id={trade_id} dir={direction} no_valid_ema_level "
+            f"ema9={fmt(ema9)} ema21={fmt(ema21)} fallback={ENTRY_MODE_PULLBACK} "
+            f"[PIPELINE ENFORCEMENT]"
         )
     return {
         "entry_mode": entry_mode,
-        "micro_sr_level": micro_level,
-        "shadow_micro_sr_price": micro_level,
-        "dist_to_micro_sr_pct": dist_pct,
+        "ema_hybrid_base": hybrid_base,
+        "ema_hybrid_limit": limit_price,
+        "dist_to_ema_hybrid_pct": dist_pct,
     }
 
-compute_shadow_micro_sr_entry = compute_micro_sr_entry
+compute_micro_sr_entry = compute_ema_hybrid_entry
+compute_shadow_micro_sr_entry = compute_ema_hybrid_entry
 
 def resolve_entry_limit_price(signal: dict) -> tuple:
-    """Return (limit_price, entry_mode) — micro-SR pivot when available, else pullback %."""
+    """Return (limit_price, entry_mode) — EMA hybrid + USD offset when available, else pullback %."""
     direction = str(signal.get("final_direction") or "").upper()
     signal_price = float(signal.get("signal_price") or state.get("price") or 0)
     pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002)))
@@ -2106,9 +2127,9 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
     else:
         pullback_limit = signal_price
     signal["planned_pullback_limit"] = pullback_limit
-    micro_level = signal.get("micro_sr_level")
-    if signal.get("entry_mode") == ENTRY_MODE_MICRO_SR and micro_level:
-        return float(micro_level), ENTRY_MODE_MICRO_SR
+    ema_limit = signal.get("ema_hybrid_limit")
+    if signal.get("entry_mode") == ENTRY_MODE_EMA_HYBRID and ema_limit is not None:
+        return float(ema_limit), ENTRY_MODE_EMA_HYBRID
     return float(pullback_limit), ENTRY_MODE_PULLBACK
 
 def tf_trend_from_candles(candles):
@@ -2331,9 +2352,10 @@ LADDER_ARMED_MONITOR_INTERVAL_SEC = 0.15
 WS_MAX_STALE_TRADE_SEC = 3.0
 WS_RECONNECT_STALE_GRACE_SEC = 8.0
 LADDER_AUDIT_LOG_INTERVAL_SEC = 0.25
-# v84 Tier C: micro-SR live entry (pivot limit when HH/HL or LH/LL; else pullback)
+# v84.1: EMA9/EMA21 hybrid entry (+$offset long / -$offset short); fallback pullback
 ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
-ENTRY_MODE_MICRO_SR = "MICRO_SR_LIMIT"
+ENTRY_MODE_EMA_HYBRID = "EMA_HYBRID_LIMIT"
+EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
 # v83 Tier B: Type-A stall, trend weakening, spread penalty
 TYPE_A_STALL_ENABLED = True
 TYPE_A_STALL_MIN_CANDLES = 3
@@ -2503,7 +2525,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.436-v84-micro-sr-live"
+EXECUTION_FIX_VERSION = "v10.9.437-v84-ema-hybrid-entry"
 
 
 def csv_research_meta() -> dict:
@@ -5112,7 +5134,7 @@ def execute_simulated_order(signal):
     if setup_type == "WEAK_SETUP":
         defer_instant_fill = True
         logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
-    if pullback_pct <= 0.0 and not defer_instant_fill and entry_mode != ENTRY_MODE_MICRO_SR:
+    if pullback_pct <= 0.0 and not defer_instant_fill and entry_mode != ENTRY_MODE_EMA_HYBRID:
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
@@ -5715,7 +5737,7 @@ def process_signal(event: dict):
             signal["_logged"] = False
             signal["_finalized"] = False
             signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
-            compute_micro_sr_entry(signal)
+            compute_ema_hybrid_entry(signal)
             begin_approve_research(signal, ai, pipeline_eff_thr)
 
             if not signal.get("final_direction"):
@@ -6670,9 +6692,10 @@ def close_position(pos: dict, exit_reason: str):
             "ai_approved": pos.get("ai_approved", master.get("ai_decision") == "APPROVE"),
             "entry_type": pos.get("entry_type", "UNKNOWN"),
             "entry_mode": pos.get("entry_mode", master.get("entry_mode", ENTRY_MODE_PULLBACK)),
-            "micro_sr_level": pos.get("micro_sr_level", master.get("micro_sr_level")),
-            "shadow_micro_sr_price": pos.get("shadow_micro_sr_price", master.get("shadow_micro_sr_price")),
-            "dist_to_micro_sr_pct": pos.get("dist_to_micro_sr_pct", master.get("dist_to_micro_sr_pct")),
+            "ema_hybrid_base": pos.get("ema_hybrid_base", master.get("ema_hybrid_base")),
+            "ema_hybrid_limit": pos.get("ema_hybrid_limit", master.get("ema_hybrid_limit")),
+            "ema_hybrid_offset_usd": pos.get("ema_hybrid_offset_usd", master.get("ema_hybrid_offset_usd")),
+            "dist_to_ema_hybrid_pct": pos.get("dist_to_ema_hybrid_pct", master.get("dist_to_ema_hybrid_pct")),
             "tp_stage": pos.get("tp_stage", 0),
             "regime": pos.get("signal_regime", state.get("regime", "UNKNOWN")),
             "strategy": pos.get("strategy_birth", "SR"),
@@ -8912,9 +8935,12 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             },
             "entry_thesis": capture_entry_thesis(signal),
             "entry_mode": signal.get("entry_mode", ENTRY_MODE_PULLBACK),
-            "micro_sr_level": signal.get("micro_sr_level"),
-            "shadow_micro_sr_price": signal.get("shadow_micro_sr_price"),
-            "dist_to_micro_sr_pct": signal.get("dist_to_micro_sr_pct"),
+            "ema_hybrid_base": signal.get("ema_hybrid_base"),
+            "ema_hybrid_limit": signal.get("ema_hybrid_limit"),
+            "ema_hybrid_offset_usd": signal.get("ema_hybrid_offset_usd"),
+            "ema9_at_entry": signal.get("ema9_at_entry"),
+            "ema21_at_entry": signal.get("ema21_at_entry"),
+            "dist_to_ema_hybrid_pct": signal.get("dist_to_ema_hybrid_pct"),
             "entry_gates": capture_entry_gate_snapshot(signal, ai, edge_score, feat),
             "entry_regime": capture_entry_regime_snapshot(signal, feat),
             "research_buckets": capture_research_buckets(signal, ai, edge_score, feat),
@@ -9392,9 +9418,10 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "exit_config": get_exit_config_snapshot(),
             "entry_thesis": pos.get("entry_thesis") or {},
             "entry_mode": pos.get("entry_mode", trade_row.get("entry_mode", ENTRY_MODE_PULLBACK)),
-            "micro_sr_level": pos.get("micro_sr_level", trade_row.get("micro_sr_level")),
-            "shadow_micro_sr_price": pos.get("shadow_micro_sr_price", trade_row.get("shadow_micro_sr_price")),
-            "dist_to_micro_sr_pct": pos.get("dist_to_micro_sr_pct", trade_row.get("dist_to_micro_sr_pct")),
+            "ema_hybrid_base": pos.get("ema_hybrid_base", trade_row.get("ema_hybrid_base")),
+            "ema_hybrid_limit": pos.get("ema_hybrid_limit", trade_row.get("ema_hybrid_limit")),
+            "ema_hybrid_offset_usd": pos.get("ema_hybrid_offset_usd", trade_row.get("ema_hybrid_offset_usd")),
+            "dist_to_ema_hybrid_pct": pos.get("dist_to_ema_hybrid_pct", trade_row.get("dist_to_ema_hybrid_pct")),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
@@ -10157,8 +10184,6 @@ def main():
     update_logger_level()
     validate_startup()
     load_persistent_config()
-    if state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed", False):
-        enforce_clean_research_session()
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
     if state.get("strategy_mode") == "RESEARCH":
