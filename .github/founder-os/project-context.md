@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(showcase): clean $500 slate on every bot start and version change
 
 ## Last Activity
 
