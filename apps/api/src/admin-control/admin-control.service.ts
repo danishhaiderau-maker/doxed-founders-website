@@ -217,10 +217,16 @@ export class AdminControlService {
   }
 
   async resetShowcaseSimulation() {
+    this.botBridge.invalidateCache();
+    const res = await this.botBridge.proxyBotPost('/api/reset', {});
+    await this.tradingAgents.syncShowcaseMetricsFromBot().catch(() => undefined);
+    const data = (res.data ?? {}) as Record<string, unknown>;
     return {
-      ok: false,
-      message:
-        'Reset simulation preserves historical trades in DB. Wire bot /api/reset when ready.',
+      ok: Boolean(res.ok),
+      message: res.ok
+        ? 'Showcase wiped — $500 clean slate, fresh collection ON'
+        : String(data.error ?? res.error ?? 'Bot reset failed'),
+      reset: data.reset ?? null,
     };
   }
 
