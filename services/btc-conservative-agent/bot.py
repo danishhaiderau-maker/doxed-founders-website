@@ -273,7 +273,7 @@ def _compute_entry_delay_sec(pos: dict, master: dict = None) -> float:
 
 def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     ai = ai or {}
-    entry = order.get("limit_price") or order.get("entry") or signal.get("signal_price") or state.get("price")
+    entry = order.get("fill_price") or order.get("limit_price") or order.get("entry") or signal.get("signal_price") or state.get("price")
     direction = order.get("signal_dir") or signal.get("final_direction")
     signal_price = order.get("signal_price") or signal.get("signal_price") or entry
     fill_ts = time.time()
@@ -330,6 +330,14 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_thesis": capture_entry_thesis(signal),
         "margin_usdt": float(signal.get("margin_usdt") or FIXED_MARGIN_USDT),
         "conviction_spread": signal.get("conviction_spread"),
+        "spread_penalty_mult": signal.get("spread_penalty_mult", 1.0),
+        "planned_limit_price": order.get("planned_limit_price"),
+        "fill_tick_price": order.get("fill_price"),
+        "trend_health_at_entry": copy.deepcopy(signal.get("trend_health_at_entry") or {}),
+        "entry_mode": signal.get("entry_mode", ENTRY_MODE_PULLBACK),
+        "micro_sr_level": signal.get("micro_sr_level"),
+        "shadow_micro_sr_price": signal.get("shadow_micro_sr_price"),
+        "dist_to_micro_sr_pct": signal.get("dist_to_micro_sr_pct"),
     }
 
 def compute_live_factor_scores(mc: dict):
@@ -660,6 +668,7 @@ def capture_entry_thesis(signal: dict) -> dict:
         "structure_bias": ms.get("structure_bias"),
         "adx": ts.get("adx"),
         "captured_ts": time.time(),
+        "trend_health": copy.deepcopy(signal.get("trend_health_at_entry") or state.get("trend_health") or {}),
     }
 
 
@@ -781,6 +790,12 @@ def get_exit_config_snapshot() -> dict:
         "thesis_score_flip_margin": THESIS_SCORE_FLIP_MARGIN,
         "thesis_early_decay_delta": THESIS_EARLY_DECAY_DELTA,
         "early_fail_pct_threshold": EARLY_FAIL_PCT_THRESHOLD,
+        "type_a_stall_enabled": TYPE_A_STALL_ENABLED,
+        "type_a_stall_min_candles": TYPE_A_STALL_MIN_CANDLES,
+        "type_a_stall_max_mfe_pct": TYPE_A_STALL_MAX_MFE_PCT,
+        "trend_weakening_enabled": TREND_WEAKENING_ENABLED,
+        "spread_penalty_threshold": SPREAD_PENALTY_THRESHOLD,
+        "spread_penalty_margin_mult": SPREAD_PENALTY_MARGIN_MULT,
     }
 
 
@@ -794,6 +809,168 @@ def get_profit_lock_floor(peak_pct: float):
     if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
         floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
     return floor
+
+def compute_trend_health(direction_hint: str = None) -> dict:
+    """v83: BULL / BULL_WEAKENING / BEAR / BEAR_WEAKENING / MIXED from live scores + tape."""
+    with state_lock:
+        mc = copy.deepcopy(state.get("market_context") or {})
+        fs = copy.deepcopy(state.get("feature_snapshot") or {})
+        hist = list(state.get("trend_health_history") or [])
+    bull, bear = compute_live_factor_scores(mc)
+    ms = mc.get("market_structure", {}) or {}
+    mtf = mc.get("multi_tf", {}) or {}
+    struct_score = float(ms.get("structure_score") or 0)
+    agreement = str(mtf.get("agreement") or "")
+    vel = float(fs.get("velocity") or 0)
+    vol_ratio = float(fs.get("volume_ratio") or 0)
+    delta = float(fs.get("delta") or 0)
+    direction_hint = str(direction_hint or "").upper()
+    if agreement == "BULL_ALIGNED" or struct_score >= 2:
+        base = "BULL"
+    elif agreement == "BEAR_ALIGNED" or struct_score <= -2:
+        base = "BEAR"
+    else:
+        base = "MIXED"
+    if direction_hint == "LONG" and base == "MIXED":
+        base = "BULL"
+    elif direction_hint == "SHORT" and base == "MIXED":
+        base = "BEAR"
+    weaken = 0
+    if base == "BULL":
+        if vel < -MOMENTUM_ALIGN_EPS:
+            weaken += 1
+        if delta < TYPE_A_STALL_WEAK_DELTA:
+            weaken += 1
+        if vol_ratio < TYPE_A_STALL_WEAK_VOLUME_RATIO:
+            weaken += 1
+        if len(hist) >= 1:
+            prev = hist[-1]
+            if bull < int(prev.get("bull_score", bull)) - 1:
+                weaken += 1
+            if bear > int(prev.get("bear_score", bear)) + 1:
+                weaken += 1
+    elif base == "BEAR":
+        if vel > MOMENTUM_ALIGN_EPS:
+            weaken += 1
+        if delta > -TYPE_A_STALL_WEAK_DELTA:
+            weaken += 1
+        if vol_ratio < TYPE_A_STALL_WEAK_VOLUME_RATIO:
+            weaken += 1
+        if len(hist) >= 1:
+            prev = hist[-1]
+            if bear < int(prev.get("bear_score", bear)) - 1:
+                weaken += 1
+            if bull > int(prev.get("bull_score", bull)) + 1:
+                weaken += 1
+    trend_state = base
+    if TREND_WEAKENING_ENABLED and weaken >= TREND_WEAKENING_MIN_SIGNALS:
+        if base == "BULL":
+            trend_state = "BULL_WEAKENING"
+        elif base == "BEAR":
+            trend_state = "BEAR_WEAKENING"
+    result = {
+        "trend_state": trend_state,
+        "base_state": base,
+        "bull_score": bull,
+        "bear_score": bear,
+        "weaken_signals": weaken,
+        "structure_score": struct_score,
+        "mtf_agreement": agreement,
+        "velocity": vel,
+        "volume_ratio": vol_ratio,
+        "delta": delta,
+        "ts": time.time(),
+    }
+    with state_lock:
+        state["trend_health"] = result
+        hist.append(result)
+        state["trend_health_history"] = hist[-TREND_HEALTH_HISTORY_MAX:]
+    return result
+
+def _effective_profit_lock_floor(pos: dict, peak_pct: float):
+    floor = get_profit_lock_floor(peak_pct)
+    if floor is None:
+        return None
+    tighten = 0.0
+    spread = int(pos.get("conviction_spread") or 0)
+    if spread_penalty_active(spread):
+        tighten += SPREAD_PENALTY_LOCK_TIGHTEN_PCT
+    health = state.get("trend_health") or {}
+    ts = str(health.get("trend_state") or "")
+    direction = str(pos.get("dir") or "").upper()
+    if TREND_WEAKENING_ENABLED:
+        if direction == "LONG" and ts == "BULL_WEAKENING":
+            tighten += TREND_WEAKENING_LOCK_TIGHTEN_PCT
+        elif direction == "SHORT" and ts == "BEAR_WEAKENING":
+            tighten += TREND_WEAKENING_LOCK_TIGHTEN_PCT
+    if tighten > 0:
+        floor = min(float(peak_pct) - 0.5, float(floor) + tighten)
+    return floor
+
+def _type_a_stall_weak_tape(direction: str, fs: dict) -> bool:
+    vol_ratio = float(fs.get("volume_ratio") or 0)
+    delta = float(fs.get("delta") or 0)
+    vel = float(fs.get("velocity") or 0)
+    if vol_ratio >= TYPE_A_STALL_WEAK_VOLUME_RATIO:
+        return False
+    if direction == "LONG":
+        return delta <= TYPE_A_STALL_WEAK_DELTA or vel < 0
+    if direction == "SHORT":
+        return delta >= -TYPE_A_STALL_WEAK_DELTA or vel > 0
+    return False
+
+def check_type_a_stall_exit(pos: dict, unreal_pct: float, now: float) -> bool:
+    if not TYPE_A_STALL_ENABLED:
+        return False
+    peak = float(pos.get("max_pnl_pct") or 0)
+    if peak >= TRAIL_LADDER[0][0]:
+        return False
+    entry_ts = float(pos.get("entry_ts") or 0)
+    if entry_ts <= 0:
+        return False
+    cur_candle = int((now - entry_ts) // CANDLE_INTERVAL_SEC) + 1
+    if cur_candle < TYPE_A_STALL_MIN_CANDLES:
+        return False
+    if peak >= TYPE_A_STALL_MAX_MFE_PCT:
+        return False
+    direction = str(pos.get("dir") or "").upper()
+    fs = state.get("feature_snapshot") or {}
+    if not _type_a_stall_weak_tape(direction, fs):
+        return False
+    logger.info(
+        f"[EXIT TRIGGER] TYPE_A_STALL trade_id={pos.get('trade_id')} candle={cur_candle} "
+        f"peak={peak:.1f}% unreal={unreal_pct:.1f}% vol_ratio={fs.get('volume_ratio')} "
+        f"delta={fs.get('delta')} vel={fs.get('velocity')} [PIPELINE ENFORCEMENT]"
+    )
+    close_position(pos, "TYPE_A_STALL")
+    return True
+
+def check_trend_weakening_exit(pos: dict, unreal_pct: float, now: float) -> bool:
+    if not TREND_WEAKENING_ENABLED:
+        return False
+    peak = float(pos.get("max_pnl_pct") or 0)
+    if peak >= TRAIL_LADDER[0][0]:
+        return False
+    health = state.get("trend_health") or {}
+    ts = str(health.get("trend_state") or "")
+    direction = str(pos.get("dir") or "").upper()
+    if direction == "LONG" and ts != "BULL_WEAKENING":
+        return False
+    if direction == "SHORT" and ts != "BEAR_WEAKENING":
+        return False
+    entry_ts = float(pos.get("entry_ts") or 0)
+    cur_candle = int((now - entry_ts) // CANDLE_INTERVAL_SEC) + 1 if entry_ts > 0 else 0
+    if cur_candle < 2:
+        return False
+    if unreal_pct > TREND_WEAKENING_SCRATCH_UNREAL_PCT:
+        return False
+    logger.info(
+        f"[EXIT TRIGGER] TREND_WEAKENING trade_id={pos.get('trade_id')} state={ts} "
+        f"peak={peak:.1f}% unreal={unreal_pct:.1f}% weaken={health.get('weaken_signals')} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    close_position(pos, "TREND_WEAKENING")
+    return True
 
 def unrealized_margin_pct(pos: dict, price: float) -> float:
     entry = pos.get("entry", 0)
@@ -965,6 +1142,17 @@ def conviction_size_multiplier(spread: int) -> float:
         return 0.25
     return 0.0
 
+def spread_penalty_margin_mult(spread: int) -> float:
+    """v83: soft penalty for wide conviction spread (≥5) — margin scale, not hard block."""
+    if not SPREAD_PENALTY_ENABLED:
+        return 1.0
+    if int(spread or 0) >= SPREAD_PENALTY_THRESHOLD:
+        return SPREAD_PENALTY_MARGIN_MULT
+    return 1.0
+
+def spread_penalty_active(spread: int) -> bool:
+    return SPREAD_PENALTY_ENABLED and int(spread or 0) >= SPREAD_PENALTY_THRESHOLD
+
 def get_regime_risk_profile() -> dict:
     with state_lock:
         regime = str(state.get("regime", "RANGE")).upper()
@@ -1008,7 +1196,11 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
     adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
     if adx < ADX_BLOCK_NEW_ENTRY:
         return None, f"ADX_NO_ENTRY_{adx:.1f}"
+    penalty_mult = spread_penalty_margin_mult(spread)
     if FLAT_MARGIN_EVERY_TRADE:
+        margin = round(float(FIXED_MARGIN_USDT) * penalty_mult, 4)
+        if spread_penalty_active(spread):
+            return margin, None
         return float(FIXED_MARGIN_USDT), None
     adx_mult = ADX_HALF_SIZE_MULT if adx < ADX_HALF_SIZE_BELOW else 1.0
     regime_prof = get_regime_risk_profile()
@@ -1099,6 +1291,59 @@ def get_effective_max_active_signals() -> int:
         user_max = state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
     return min(int(user_max), int(prof["max_active"]))
 
+def _ws_trade_timestamp_sec(trade: dict) -> float:
+    trade_ts_raw = trade.get("T")
+    if not trade_ts_raw:
+        return time.time()
+    return float(trade_ts_raw) / 1000 if float(trade_ts_raw) > 1e12 else float(trade_ts_raw)
+
+def _is_stale_ws_trade(trade: dict) -> bool:
+    """Reject aged or pre-reconnect replay ticks that inflate MFE / false fills."""
+    now = time.time()
+    trade_ts = _ws_trade_timestamp_sec(trade)
+    age = max(0.0, now - trade_ts)
+    if age > WS_MAX_STALE_TRADE_SEC:
+        return True
+    ws_conn = float(state.get("ws_connected_ts") or 0)
+    if ws_conn > 0 and (now - ws_conn) < WS_RECONNECT_STALE_GRACE_SEC and trade_ts < (ws_conn - 0.5):
+        return True
+    return False
+
+def _position_monitor_interval_sec() -> float:
+    trigger = TRAIL_LADDER[0][0]
+    health = state.get("trend_health") or {}
+    ts = str(health.get("trend_state") or "")
+    with trade_lock:
+        for pos in open_positions:
+            if isinstance(pos, dict) and pos.get("status") == "OPEN":
+                if float(pos.get("max_pnl_pct") or 0) >= trigger:
+                    return LADDER_ARMED_MONITOR_INTERVAL_SEC
+                direction = str(pos.get("dir") or "").upper()
+                if direction == "LONG" and ts == "BULL_WEAKENING":
+                    return LADDER_ARMED_MONITOR_INTERVAL_SEC
+                if direction == "SHORT" and ts == "BEAR_WEAKENING":
+                    return LADDER_ARMED_MONITOR_INTERVAL_SEC
+    return POSITION_MONITOR_INTERVAL_SEC
+
+def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: float, lock_floor: float):
+    if peak < TRAIL_LADDER[0][0] or lock_floor is None:
+        return
+    now = time.time()
+    last_log = float(pos.get("_ladder_audit_ts") or 0)
+    near_floor = unreal_pct <= (lock_floor + 3.0)
+    crossed = pos.get("_prev_unreal_pct") is not None and float(pos["_prev_unreal_pct"]) > lock_floor >= unreal_pct
+    if not near_floor and not crossed:
+        return
+    if not crossed and (now - last_log) < LADDER_AUDIT_LOG_INTERVAL_SEC:
+        return
+    pos["_ladder_audit_ts"] = now
+    entry = float(pos.get("entry") or 0)
+    logger.info(
+        f"[LADDER AUDIT] trade_id={pos.get('trade_id')} entry={fmt(entry)} price={fmt(price)} "
+        f"source={state.get('price_source', 'WS')} peak={peak:.2f}% lock={lock_floor:.2f}% "
+        f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
+    )
+
 def _apply_position_exits(pos: dict, price: float, now: float = None):
     if now is None:
         now = time.time()
@@ -1129,15 +1374,25 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
         close_position(pos, "STOP_LOSS")
         return True
 
+    if check_type_a_stall_exit(pos, unreal_pct, now):
+        return True
+
+    if check_trend_weakening_exit(pos, unreal_pct, now):
+        return True
+
     peak = pos.get("max_pnl_pct", 0.0)
-    lock_floor = get_profit_lock_floor(peak)
+    lock_floor = _effective_profit_lock_floor(pos, peak)
+    _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
     if lock_floor is not None and peak >= TRAIL_LADDER[0][0] and unreal_pct <= lock_floor:
+        entry = float(pos.get("entry") or 0)
         logger.info(
             f"[EXIT TRIGGER] PROFIT_LOCK_LADDER trade_id={pos.get('trade_id')} peak={peak:.1f}% "
-            f"lock={lock_floor:.1f}% now={unreal_pct:.1f}% [PIPELINE ENFORCEMENT]"
+            f"lock={lock_floor:.1f}% now={unreal_pct:.1f}% entry={fmt(entry)} exit={fmt(price)} "
+            f"source={state.get('price_source', 'WS')} [PIPELINE ENFORCEMENT]"
         )
         close_position(pos, "PROFIT_LOCK_LADDER")
         return True
+    pos["_prev_unreal_pct"] = unreal_pct
 
     if check_thesis_invalidation(pos, price):
         return True
@@ -1462,7 +1717,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.1-sole-ai-funnel-2026-06-04"
+ANALYZER_SYNC_ID = "v8.4-micro-sr-live-2026-06-09"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -1777,6 +2032,85 @@ def compute_market_structure(candles):
         "pivot_count": len(swings),
     }
 
+def detect_micro_support_long(market_structure: dict, price: float):
+    """v84: recent HL pivot as micro support for long limit entries."""
+    if not market_structure or not market_structure.get("hh_hl_sequence_active"):
+        return None
+    level = market_structure.get("last_swing_low")
+    if level is None or not price or price <= 0 or level >= price:
+        return None
+    return float(level)
+
+def detect_micro_resistance_short(market_structure: dict, price: float):
+    """v84: recent LH pivot as micro resistance for short limit entries."""
+    if not market_structure or not market_structure.get("lh_ll_sequence_active"):
+        return None
+    level = market_structure.get("last_swing_high")
+    if level is None or not price or price <= 0 or level <= price:
+        return None
+    return float(level)
+
+def compute_micro_sr_entry(signal: dict) -> dict:
+    """v84: detect micro-SR pivot; live limit at level when structure confirms."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(signal.get("signal_price") or state.get("price") or 0)
+    ctx = signal.get("context") or {}
+    mc = ctx.get("market_context") or state.get("market_context") or {}
+    ms = mc.get("market_structure") if isinstance(mc.get("market_structure"), dict) else {}
+    if not ms:
+        with state_lock:
+            candles = copy.deepcopy(latest_candles)
+        if candles:
+            ms = compute_market_structure(candles)
+    micro_level = None
+    if direction == "LONG":
+        micro_level = detect_micro_support_long(ms, price)
+    elif direction == "SHORT":
+        micro_level = detect_micro_resistance_short(ms, price)
+    dist_pct = round(abs(price - micro_level) / price * 100, 4) if micro_level and price > 0 else None
+    entry_mode = ENTRY_MODE_MICRO_SR if micro_level else ENTRY_MODE_PULLBACK
+    signal["entry_mode"] = entry_mode
+    signal["micro_sr_level"] = micro_level
+    signal["shadow_micro_sr_price"] = micro_level
+    signal["dist_to_micro_sr_pct"] = dist_pct
+    trade_id = signal.get("trade_id")
+    if entry_mode == ENTRY_MODE_MICRO_SR:
+        logger.info(
+            f"[MICRO_SR LIVE] trade_id={trade_id} dir={direction} limit={fmt(micro_level)} "
+            f"signal={fmt(price)} dist={dist_pct}% labels={ms.get('swing_labels_last')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        logger.info(
+            f"[MICRO_SR] trade_id={trade_id} dir={direction} no_micro_sr_level "
+            f"fallback={ENTRY_MODE_PULLBACK} [PIPELINE ENFORCEMENT]"
+        )
+    return {
+        "entry_mode": entry_mode,
+        "micro_sr_level": micro_level,
+        "shadow_micro_sr_price": micro_level,
+        "dist_to_micro_sr_pct": dist_pct,
+    }
+
+compute_shadow_micro_sr_entry = compute_micro_sr_entry
+
+def resolve_entry_limit_price(signal: dict) -> tuple:
+    """Return (limit_price, entry_mode) — micro-SR pivot when available, else pullback %."""
+    direction = str(signal.get("final_direction") or "").upper()
+    signal_price = float(signal.get("signal_price") or state.get("price") or 0)
+    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002)))
+    if direction == "LONG":
+        pullback_limit = signal_price * (1 - pullback_pct)
+    elif direction == "SHORT":
+        pullback_limit = signal_price * (1 + pullback_pct)
+    else:
+        pullback_limit = signal_price
+    signal["planned_pullback_limit"] = pullback_limit
+    micro_level = signal.get("micro_sr_level")
+    if signal.get("entry_mode") == ENTRY_MODE_MICRO_SR and micro_level:
+        return float(micro_level), ENTRY_MODE_MICRO_SR
+    return float(pullback_limit), ENTRY_MODE_PULLBACK
+
 def tf_trend_from_candles(candles):
     if not candles or len(candles) < 30:
         return "UNKNOWN"
@@ -1968,9 +2302,11 @@ def update_market_context(force: bool = False):
     with state_lock:
         state["market_context"] = ctx
     _last_market_context_ts = now
+    health = compute_trend_health()
     logger.info(
         f"[MARKET_CTX] structure_score={structure.get('structure_score')} bias={structure.get('structure_bias')} "
-        f"mtf={mtf.get('trends')} adx={trend_strength.get('adx')} trend_score={trend_strength.get('trend_score')} [PIPELINE ENFORCEMENT]"
+        f"mtf={mtf.get('trends')} adx={trend_strength.get('adx')} trend_score={trend_strength.get('trend_score')} "
+        f"trend_health={health.get('trend_state')} [PIPELINE ENFORCEMENT]"
     )
 
 def get_market_context_for_ai():
@@ -1985,10 +2321,34 @@ CANDLE_INTERVAL_SEC = 15 * 60
 # --- v6 exit / risk (evidence-driven: MFE positive, TIME_EXIT losses) ---
 FIXED_TIME_EXIT_ENABLED = False
 EMERGENCY_MAX_HOLD_SEC = 24 * 3600
+# v82: earlier first protection — replay-backed 10→6 vs legacy 12→8
 TRAIL_LADDER = [
-    (12, 8), (15, 12), (20, 15), (30, 25), (40, 30), (50, 40),
-    (60, 50), (80, 60), (100, 80), (120, 100), (150, 140),
+    (10, 6), (15, 10), (20, 15), (25, 18), (40, 30),
+    (60, 50), (80, 60), (100, 80),
 ]
+POSITION_MONITOR_INTERVAL_SEC = 1.0
+LADDER_ARMED_MONITOR_INTERVAL_SEC = 0.15
+WS_MAX_STALE_TRADE_SEC = 3.0
+WS_RECONNECT_STALE_GRACE_SEC = 8.0
+LADDER_AUDIT_LOG_INTERVAL_SEC = 0.25
+# v84 Tier C: micro-SR live entry (pivot limit when HH/HL or LH/LL; else pullback)
+ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
+ENTRY_MODE_MICRO_SR = "MICRO_SR_LIMIT"
+# v83 Tier B: Type-A stall, trend weakening, spread penalty
+TYPE_A_STALL_ENABLED = True
+TYPE_A_STALL_MIN_CANDLES = 3
+TYPE_A_STALL_MAX_MFE_PCT = 3.0
+TYPE_A_STALL_WEAK_VOLUME_RATIO = 0.35
+TYPE_A_STALL_WEAK_DELTA = 0.0
+TREND_WEAKENING_ENABLED = True
+TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
+TREND_WEAKENING_MIN_SIGNALS = 2
+TREND_WEAKENING_SCRATCH_UNREAL_PCT = 2.0
+TREND_HEALTH_HISTORY_MAX = 12
+SPREAD_PENALTY_ENABLED = True
+SPREAD_PENALTY_THRESHOLD = 5
+SPREAD_PENALTY_MARGIN_MULT = 0.75
+SPREAD_PENALTY_LOCK_TIGHTEN_PCT = 1.0
 PEAK_NEVER_LOSER_MIN_PEAK = 40.0
 PEAK_NEVER_LOSER_FLOOR = 10.0
 TP_EMERGENCY_MARGIN_PCT = 150.0
@@ -2002,13 +2362,15 @@ THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
 THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -18.0
-THESIS_MFE_PROTECT_PCT = 6.0  # v80: skip thesis fast-cut when peak MFE >= 6% margin
+THESIS_FAST_EXIT_UNREAL_PCT = -28.0  # v82: wider cut — replay showed -18% bleeding Type-B recoveries
+THESIS_MFE_PROTECT_PCT = 8.0  # v82: skip thesis fast-cut when peak MFE >= 8% margin
 ADX_BLOCK_NEW_ENTRY = 15.0
 ADX_HALF_SIZE_BELOW = 18.0
 ADX_HALF_SIZE_MULT = 0.5
 RESEARCH_AI_THRESHOLD_DEFAULT = 50
-LIVE_AI_THRESHOLD_FLOOR = 70
+LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard override is not clamped to this
+AI_THRESHOLD_MIN = 0
+AI_THRESHOLD_MAX = 100
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 2.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference threshold — sweeps use this; live gate disabled when FREE_RUN below
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
@@ -2141,7 +2503,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.433-v81-sole-ai-funnel"
+EXECUTION_FIX_VERSION = "v10.9.436-v84-micro-sr-live"
 
 
 def csv_research_meta() -> dict:
@@ -2299,6 +2661,8 @@ state = {
     "data_quality": 0.0,
     "funding": {"rate": 0.0, "next_time": 0},
     "market_context": {},
+    "trend_health": {},
+    "trend_health_history": [],
     "debug_state": {
         "last_event_time": None,
         "last_edge_score": 0,
@@ -4242,22 +4606,25 @@ def is_research_data_collection() -> bool:
     with state_lock:
         return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
 
+def _clamp_ai_threshold(value: float) -> float:
+    return max(AI_THRESHOLD_MIN, min(AI_THRESHOLD_MAX, float(value)))
+
 def get_ai_threshold():
     with state_lock:
         t = state.get("ai_threshold")
-        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-        default = RESEARCH_AI_THRESHOLD_DEFAULT if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        research = state.get("strategy_mode") == "RESEARCH"
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
         raw = default if t is None else float(t)
-        floor = 0.0 if research_collect else LIVE_AI_THRESHOLD_FLOOR
-        return max(raw, floor)
+        if research or state.get("_threshold_locked"):
+            return _clamp_ai_threshold(raw)
+        return _clamp_ai_threshold(max(raw, LIVE_AI_THRESHOLD_FLOOR))
 
 def set_ai_threshold(value):
     with state_lock:
-        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-        default = RESEARCH_AI_THRESHOLD_DEFAULT if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        research = state.get("strategy_mode") == "RESEARCH"
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
         raw = float(value) if value is not None else default
-        floor = 0.0 if research_collect else LIVE_AI_THRESHOLD_FLOOR
-        state["ai_threshold"] = max(raw, floor)
+        state["ai_threshold"] = _clamp_ai_threshold(raw)
         state["_threshold_locked"] = True
         state["last_ai_ts"] = 0
         state["last_ai_signal_key"] = None
@@ -4563,6 +4930,10 @@ def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
+    if state.get("manual_admin_pause") or (
+        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
+    ):
+        return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
@@ -4700,10 +5071,8 @@ def execute_simulated_order(signal):
     price = state.get("price")
     pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
     signal_price = signal.get("signal_price", price)
-    if signal["final_direction"] == "LONG":
-        limit_price = signal_price * (1 - pullback_pct)
-    else:
-        limit_price = signal_price * (1 + pullback_pct)
+    limit_price, entry_mode = resolve_entry_limit_price(signal)
+    signal["entry_mode"] = entry_mode
     margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
     lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
     qty = margin_usdt * lev / price
@@ -4712,6 +5081,8 @@ def execute_simulated_order(signal):
         "side": map_signal_to_exchange_side(signal["final_direction"]),
         "signal_dir": signal["final_direction"],
         "limit_price": limit_price,
+        "planned_limit_price": limit_price,
+        "entry_mode": entry_mode,
         "qty": qty,
         "status": "PENDING",
         "created_ts": time.time(),
@@ -4726,7 +5097,11 @@ def execute_simulated_order(signal):
     signal["order_placed"] = True
     with trade_lock:
         pending_orders.append(order)
-    logger.info(f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} limit_price={fmt(limit_price)} pullback={pullback_pct*100}% final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
+    logger.info(
+        f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
+        f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
+        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
+    )
     defer_instant_fill = False
     features = signal.get("features") or state.get("feature_snapshot") or {}
     direction = signal.get("final_direction")
@@ -4737,7 +5112,7 @@ def execute_simulated_order(signal):
     if setup_type == "WEAK_SETUP":
         defer_instant_fill = True
         logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
-    if pullback_pct <= 0.0 and not defer_instant_fill:
+    if pullback_pct <= 0.0 and not defer_instant_fill and entry_mode != ENTRY_MODE_MICRO_SR:
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
@@ -4768,14 +5143,23 @@ def process_pending_orders():
                     continue
                 order.pop("await_confirm", None)
             if order["side"] == "buy" and price <= order["limit_price"]:
+                order["fill_price"] = float(price)
+                order["limit_price"] = float(price)
                 order["status"] = "FILLED"
                 fill_order(order)
             elif order["side"] == "sell" and price >= order["limit_price"]:
+                order["fill_price"] = float(price)
+                order["limit_price"] = float(price)
                 order["status"] = "FILLED"
                 fill_order(order)
 
 def fill_order(order):
-    logger.info(f"[ORDER] FILLED trade_id={order['trade_id']} final_direction={order.get('signal_dir')} [PIPELINE ENFORCEMENT]")
+    planned = order.get("planned_limit_price") or order.get("signal_price")
+    tick = order.get("fill_price") or order.get("limit_price")
+    logger.info(
+        f"[ORDER] FILLED trade_id={order['trade_id']} final_direction={order.get('signal_dir')} "
+        f"tick={fmt(tick)} planned_limit={fmt(planned)} [PIPELINE ENFORCEMENT]"
+    )
     with trade_lock:
         if order in pending_orders:
             pending_orders.remove(order)
@@ -4787,10 +5171,17 @@ def fill_order(order):
     with trade_lock:
         pos = _build_open_position(order, signal, ai)
         open_positions.append(pos)
-    mark_approve_research_executed(pos.get("trade_id"), order.get("limit_price") or pos.get("entry"))
+    fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
+    mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
-        master.update({"status": "FILLED", "filled_ts": time.time(), "fill_price": order["limit_price"], "outcome": "OPEN"})
+        master.update({
+            "status": "FILLED",
+            "filled_ts": time.time(),
+            "fill_price": fill_px,
+            "planned_limit_price": order.get("planned_limit_price"),
+            "outcome": "OPEN",
+        })
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
     pipeline_state_sync()
@@ -5324,6 +5715,7 @@ def process_signal(event: dict):
             signal["_logged"] = False
             signal["_finalized"] = False
             signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
+            compute_micro_sr_entry(signal)
             begin_approve_research(signal, ai, pipeline_eff_thr)
 
             if not signal.get("final_direction"):
@@ -5472,8 +5864,41 @@ def process_signal(event: dict):
                     update_debug_state_always(margin_reason, {"edge": edge_score, "spread": compute_directional_spread(final_direction, ai)})
                     state["last_pipeline_stage"] = "IDLE"
                     return
+            spread = compute_directional_spread(final_direction, ai)
             signal["margin_usdt"] = margin_usdt
-            signal["conviction_spread"] = compute_directional_spread(final_direction, ai)
+            signal["conviction_spread"] = spread
+            signal["spread_penalty_mult"] = spread_penalty_margin_mult(spread)
+            health = compute_trend_health(final_direction)
+            signal["trend_health_at_entry"] = health
+            if final_direction == "LONG" and health.get("trend_state") == "BULL_WEAKENING":
+                if sole:
+                    _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
+                else:
+                    exit_pipeline(signal, ai, "TREND_WEAKENING")
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "TREND_WEAKENING"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "TREND_WEAKENING"
+                    update_debug_state_always("TREND_WEAKENING", {"edge": edge_score, "health": health})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+            if final_direction == "SHORT" and health.get("trend_state") == "BEAR_WEAKENING":
+                if sole:
+                    _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
+                else:
+                    exit_pipeline(signal, ai, "TREND_WEAKENING")
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "TREND_WEAKENING"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "TREND_WEAKENING"
+                    update_debug_state_always("TREND_WEAKENING", {"edge": edge_score, "health": health})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+            if spread_penalty_active(spread):
+                logger.info(
+                    f"[SPREAD PENALTY] spread={spread} margin_mult={signal['spread_penalty_mult']:.2f} "
+                    f"margin=${margin_usdt} trade_id={trade_id} [PIPELINE ENFORCEMENT]"
+                )
             prof = get_regime_risk_profile()
             sizing_ref = compute_reference_scaled_margin(
                 final_direction, ai, signal.get("context", {}) or ctx
@@ -5623,12 +6048,19 @@ def _process_ws_trade_tick(trade: dict):
     if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
         _agent_dbg("H2", "safe_ws_handler", "dedupe_skip", {"fp": str(trade_fp)[:80]})
         return
-    _last_ws_trade_fp = trade_fp
-    _last_ws_trade_fp_ts = time.time()
     price = float(trade.get("p", 0))
     size = float(trade.get("v", 0))
     if price <= 0:
         return
+    if _is_stale_ws_trade(trade):
+        trade_ts = _ws_trade_timestamp_sec(trade)
+        logger.debug(
+            f"[WS STALE SKIP] price={fmt(price)} trade_age={time.time() - trade_ts:.2f}s "
+            f"fp={str(trade_fp)[:40]} [PIPELINE ENFORCEMENT]"
+        )
+        return
+    _last_ws_trade_fp = trade_fp
+    _last_ws_trade_fp_ts = time.time()
     prev_price = nz(state.get("price"))
     state["price"] = price
     state["price_ts"] = time.time()
@@ -5664,6 +6096,12 @@ def _process_ws_trade_tick(trade: dict):
     if not state.get("ws_ready"):
         state["ws_ready"] = True
         logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
+    with trade_lock:
+        has_open = any(
+            isinstance(p, dict) and p.get("status") == "OPEN" for p in open_positions
+        )
+    if has_open:
+        process_positions()
 
 def safe_ws_handler(message):
     try:
@@ -5675,6 +6113,8 @@ def safe_ws_handler(message):
             ev = data.get("event")
             if ev in ("info", "subscribed", "pong"):
                 if ev == "subscribed" and data.get("channel") == "trades":
+                    with state_lock:
+                        state["ws_connected_ts"] = time.time()
                     logger.info(f"[WS] Subscribed trades chanId={data.get('chanId')} symbol={data.get('symbol')}")
                 return
             if ev == "error":
@@ -6018,10 +6458,8 @@ def create_limit_order(signal):
         return None
     pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
     signal_price = signal.get("signal_price", price)
-    if signal["final_direction"] == "LONG":
-        limit_price = signal_price * (1 - pullback_pct)
-    else:
-        limit_price = signal_price * (1 + pullback_pct)
+    limit_price, entry_mode = resolve_entry_limit_price(signal)
+    signal["entry_mode"] = entry_mode
     if limit_price <= 0:
         logger.error(f"[ORDER BLOCK] Invalid limit price {limit_price}")
         return None
@@ -6033,6 +6471,7 @@ def create_limit_order(signal):
         "side": map_signal_to_exchange_side(signal["final_direction"]),
         "signal_dir": signal["final_direction"],
         "limit_price": limit_price,
+        "entry_mode": entry_mode,
         "qty": qty,
         "status": "PENDING",
         "created_ts": time.time(),
@@ -6047,7 +6486,11 @@ def create_limit_order(signal):
     signal["order_placed"] = True
     with trade_lock:
         pending_orders.append(order)
-    logger.info(f"[ORDER CREATED] trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} limit_price={fmt(limit_price)} pullback={pullback_pct*100}% final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
+    logger.info(
+        f"[ORDER CREATED] trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
+        f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
+        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
+    )
     pipeline_state_sync()
     assert any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders), "Order append failed"
     return order
@@ -6130,7 +6573,7 @@ def position_manager():
 
             pipeline_state_sync()
             print_console_dashboard()
-            time.sleep(1)
+            time.sleep(_position_monitor_interval_sec())
     except Exception as e:
         logger.exception(f"Position manager crash: {e}")
         set_execution_paused("THREAD_CRASH")
@@ -6226,6 +6669,10 @@ def close_position(pos: dict, exit_reason: str):
             "ai_threshold": get_ai_threshold(),
             "ai_approved": pos.get("ai_approved", master.get("ai_decision") == "APPROVE"),
             "entry_type": pos.get("entry_type", "UNKNOWN"),
+            "entry_mode": pos.get("entry_mode", master.get("entry_mode", ENTRY_MODE_PULLBACK)),
+            "micro_sr_level": pos.get("micro_sr_level", master.get("micro_sr_level")),
+            "shadow_micro_sr_price": pos.get("shadow_micro_sr_price", master.get("shadow_micro_sr_price")),
+            "dist_to_micro_sr_pct": pos.get("dist_to_micro_sr_pct", master.get("dist_to_micro_sr_pct")),
             "tp_stage": pos.get("tp_stage", 0),
             "regime": pos.get("signal_regime", state.get("regime", "UNKNOWN")),
             "strategy": pos.get("strategy_birth", "SR"),
@@ -7088,16 +7535,26 @@ DASHBOARD_JS = """(function () {
         if (sb) {
           const pid = d.bot_pid;
           const cd = d.ai_cooldown_remaining_sec;
-          let txt = pid
-            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
-            : 'LIVE (PID unknown — restart bot)';
-          if (d.server_ts) txt += ' · server ' + d.server_ts;
-          if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
-          if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
-          txt += ' · Stop: run stop_bot.ps1 in Final Bots (closing CMD alone may not stop a background bot)';
-          sb.style.borderColor = '#238636';
-          sb.style.color = '#c9d1d9';
-          sb.innerText = txt;
+          const adminStopped = d.manual_admin_pause || (d.execution_paused && d.execution_reason === 'ADMIN_MANUAL');
+          if (adminStopped || d.execution_paused) {
+            sb.style.borderColor = '#f85149';
+            sb.style.background = '#3d1214';
+            sb.style.color = '#fecaca';
+            sb.innerText = adminStopped
+              ? '■ STOPPED BY ADMIN — no new trades or AI pipeline. Dashboard stays online for review. Resume from Doxxed Admin or POST /api/resume.'
+              : '⏸ PAUSED — ' + (d.execution_reason || 'execution blocked') + (pid ? ' · PID ' + pid : '');
+          } else {
+            let txt = pid
+              ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
+              : 'LIVE (PID unknown — restart bot)';
+            if (d.server_ts) txt += ' · server ' + d.server_ts;
+            if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
+            if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
+            sb.style.borderColor = '#238636';
+            sb.style.background = '#1f2937';
+            sb.style.color = '#c9d1d9';
+            sb.innerText = txt;
+          }
         }
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
@@ -7105,7 +7562,7 @@ DASHBOARD_JS = """(function () {
           if (d.execution_paused) {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
-            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
+            banner.className = 'bg-red-950 p-6 rounded-lg shadow mb-8 border-4 border-red-600';
           } else if (d.price_source === 'WS') {
             src.innerHTML = d.data_banner_ws || ('REAL BITFINEX MARKET DATA (WS) · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-green-400 font-bold';
@@ -7308,7 +7765,7 @@ DASHBOARD_JS = """(function () {
           const mcp = document.getElementById('maxConcurrentPositions');
           if (mcp) mcp.value = d.max_active_signals;
         }
-        if (d.ai_threshold) {
+        if (d.ai_threshold != null && d.ai_threshold !== '') {
           const aiThresh = document.getElementById('aiThreshold');
           if (aiThresh) aiThresh.value = d.ai_threshold;
         }
@@ -7739,12 +8196,17 @@ def api_state():
 def health():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
+    status = "paused" if paused else "alive"
     return jsonify({
-        "status": "alive",
+        "status": status,
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
-        "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", "")
+        "execution_paused": paused,
+        "execution_reason": reason,
+        "manual_admin_pause": manual,
     })
 
 @app.route('/debug_state')
@@ -7756,6 +8218,7 @@ def get_debug_state():
 def api_pause():
     with state_lock:
         state["manual_admin_pause"] = True
+        state["live_armed"] = False
         save_persistent_config()
     set_execution_paused("ADMIN_MANUAL")
     logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
@@ -7861,7 +8324,15 @@ def set_max_active_signals():
 def set_threshold():
     data = request.get_json() or {}
     value = data.get("value")
-    set_ai_threshold(value)
+    if value is None:
+        return jsonify({"status": "error", "msg": "missing value"}), 400
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "msg": "invalid threshold"}), 400
+    if val < AI_THRESHOLD_MIN or val > AI_THRESHOLD_MAX:
+        return jsonify({"status": "error", "msg": f"threshold must be {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}"}), 400
+    set_ai_threshold(val)
     return jsonify({"status": "ok", "ai_threshold": get_ai_threshold()})
 
 @app.route('/api/set_edge_threshold', methods=['POST'])
@@ -8436,6 +8907,10 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "strategy": signal.get("strategy") or state.get("strategy"),
             },
             "entry_thesis": capture_entry_thesis(signal),
+            "entry_mode": signal.get("entry_mode", ENTRY_MODE_PULLBACK),
+            "micro_sr_level": signal.get("micro_sr_level"),
+            "shadow_micro_sr_price": signal.get("shadow_micro_sr_price"),
+            "dist_to_micro_sr_pct": signal.get("dist_to_micro_sr_pct"),
             "entry_gates": capture_entry_gate_snapshot(signal, ai, edge_score, feat),
             "entry_regime": capture_entry_regime_snapshot(signal, feat),
             "research_buckets": capture_research_buckets(signal, ai, edge_score, feat),
@@ -8912,6 +9387,10 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             },
             "exit_config": get_exit_config_snapshot(),
             "entry_thesis": pos.get("entry_thesis") or {},
+            "entry_mode": pos.get("entry_mode", trade_row.get("entry_mode", ENTRY_MODE_PULLBACK)),
+            "micro_sr_level": pos.get("micro_sr_level", trade_row.get("micro_sr_level")),
+            "shadow_micro_sr_price": pos.get("shadow_micro_sr_price", trade_row.get("shadow_micro_sr_price")),
+            "dist_to_micro_sr_pct": pos.get("dist_to_micro_sr_pct", trade_row.get("dist_to_micro_sr_pct")),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
@@ -9288,16 +9767,12 @@ def load_persistent_config():
                 logger.warning(
                     f"[CONFIG] Capped leverage {lev} -> {MAX_RESEARCH_LEVERAGE}x [PIPELINE ENFORCEMENT]"
                 )
-            cur_ai = float(state.get("ai_threshold") or RESEARCH_AI_THRESHOLD_DEFAULT)
-            research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-            if not research_collect and cur_ai < LIVE_AI_THRESHOLD_FLOOR:
+            if state.get("ai_threshold") is not None:
+                state["ai_threshold"] = _clamp_ai_threshold(state["ai_threshold"])
+            elif state.get("strategy_mode") == "RESEARCH":
+                state["ai_threshold"] = RESEARCH_AI_THRESHOLD_DEFAULT
+            elif not state.get("_threshold_locked"):
                 state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
-                state["_threshold_locked"] = True
-                save_persistent_config()
-                logger.info(
-                    f"[CONFIG] AI threshold raised {cur_ai} -> {LIVE_AI_THRESHOLD_FLOOR} "
-                    f"(live mode) [PIPELINE ENFORCEMENT]"
-                )
         logger.info("Loaded persistent config from config.json - ai_threshold restored")
 
 def save_persistent_config():
@@ -9429,43 +9904,34 @@ def auto_recovery_check():
 
 def startup_hard_fix_ai_threshold():
     with state_lock:
-        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-        if research_collect:
-            if "ai_threshold" not in state:
-                state["ai_threshold"] = RESEARCH_AI_THRESHOLD_DEFAULT
-                save_persistent_config()
-                logger.info(
-                    f"[INIT] Research data collection — AI threshold default "
-                    f"{RESEARCH_AI_THRESHOLD_DEFAULT} (no floor) [PIPELINE ENFORCEMENT]"
-                )
+        research = state.get("strategy_mode") == "RESEARCH"
+        if "ai_threshold" in state:
+            state["ai_threshold"] = _clamp_ai_threshold(state["ai_threshold"])
             return
-        floor = LIVE_AI_THRESHOLD_FLOOR
-        cur = float(state.get("ai_threshold") or floor)
-        if cur < floor:
-            state["ai_threshold"] = floor
-            state["_threshold_locked"] = True
-            save_persistent_config()
-            logger.info(f"[INIT] Live mode — AI threshold raised {cur} -> {floor} [PIPELINE ENFORCEMENT]")
-        elif "ai_threshold" not in state:
-            state["ai_threshold"] = floor
-            save_persistent_config()
-            logger.info(f"[INIT] Live mode — AI threshold set to floor {floor} [PIPELINE ENFORCEMENT]")
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
+        state["ai_threshold"] = default
+        save_persistent_config()
+        logger.info(
+            f"[INIT] AI threshold default {default} "
+            f"({'research flexible 0–100' if research else 'live suggested floor'}) "
+            f"[PIPELINE ENFORCEMENT]"
+        )
 
 def startup_log_research_sync():
     """Confirm dashboard thresholds match runtime after config load (research vs live)."""
     enforce_edge_threshold_options()
     if not is_research_data_collection():
         logger.info(
-            f"[INIT] Live mode — AI floor {LIVE_AI_THRESHOLD_FLOOR} | "
+            f"[INIT] Live mode — AI={get_ai_threshold()} (suggested floor {LIVE_AI_THRESHOLD_FLOOR}) | "
             f"edge={get_edge_threshold()} effective={get_effective_edge_threshold()} "
             f"[PIPELINE ENFORCEMENT]"
         )
         return
     logger.info(
         f"[INIT] RESEARCH DATA COLLECTION — flexible thresholds | "
-        f"AI={get_ai_threshold()} (no floor) | edge={get_edge_threshold()} "
-        f"effective={get_effective_edge_threshold()} (dashboard-only) | "
-        f"live_armed=OFF [PIPELINE ENFORCEMENT]"
+        f"AI={get_ai_threshold()} (flexible {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}) | "
+        f"edge={get_edge_threshold()} effective={get_effective_edge_threshold()} (dashboard-only) | "
+        f"live_armed={'ON' if state.get('live_armed') else 'OFF'} [PIPELINE ENFORCEMENT]"
     )
 
 def recover_from_crash():
@@ -9489,7 +9955,7 @@ def heartbeat_loop():
             logger.debug(f"[HEARTBEAT] Skipped - AI cooldown active ({AI_COOLDOWN_SECONDS - (now - state.get('last_ai_call_ts', 0)):.0f}s left) [PIPELINE ENFORCEMENT]")
             continue
         if _sole_ai_research_mode():
-            logger.info("[HEARTBEAT] v81 periodic AI check [PIPELINE ENFORCEMENT]")
+            logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
             event = detect_event_light()
             if event and round(event.get("edge_score", 0), 1) > 0:
                 process_signal(event)
