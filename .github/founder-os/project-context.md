@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(agents): per-user $500 session balance and scoped activity
+fix(api): resolve nest build errors blocking Railway deploy
 
 ## Last Activity
 
