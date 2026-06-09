@@ -41,7 +41,7 @@ export const EXCHANGE_CREDENTIAL_CONFIG: Record<ExchangeProvider, ExchangeCreden
   bitfinex: {
     apiKeyLabel: 'API Key',
     apiSecretLabel: 'API Secret',
-    helpText: 'Create a key with wallet read permission minimum.',
+    helpText: 'Bitfinex recommended: zero fees for eligible users. Enable Read + Trade only — never Withdraw.',
   },
   hyperliquid: {
     apiKeyLabel: 'Agent wallet address',

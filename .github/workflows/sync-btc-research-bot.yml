@@ -1,0 +1,38 @@
+name: Sync BTC research bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+  repository_dispatch:
+    types: [research-bot-updated]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Pull bybit_bot.py from research repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.RESEARCH_BOT_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+        run: node scripts/sync-btc-research-bot.mjs
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet services/btc-conservative-agent/bot.py; then
+            echo "No bot changes."
+            exit 0
+          fi
+          git add services/btc-conservative-agent/bot.py
+          git commit -m "chore(bot): sync conservative BTC agent from bybit-15m-research-bot"
+          git push

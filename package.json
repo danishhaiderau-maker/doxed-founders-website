@@ -74,7 +74,7 @@
     "run:first-x-sync": "node scripts/run-first-x-sync.mjs",
     "housekeeping": "node scripts/housekeeping.mjs",
     "sync:production": "node scripts/sync-production-cloud.mjs",
-    "sync:all": "node scripts/sync-all-production.mjs",
+    "sync:btc-research-bot": "node scripts/sync-btc-research-bot.mjs",
     "stage-b:publish": "node scripts/stage-b-publish.mjs",
     "stage-c:probe": "node scripts/stage-c-vault-probe.mjs",
     "ensure:btc-bot-url": "node scripts/ensure-btc-bot-public-url.mjs",
