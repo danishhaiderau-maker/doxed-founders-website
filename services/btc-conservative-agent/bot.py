@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-3-Factor Bybit 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.425
+3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.428
 ENFORCED: WINDOW=10 + SINGLE AGGREGATED SOURCE + SOFT FEATURE VALIDATION + EDGE→AI ALIGN + FEATURE VALIDITY LOG-ONLY + PIPELINE LOCK + AVG_VOLUME FIXED + FULL TRACE + RESEARCH DATA COLLECTION + DIRECTION CONSISTENCY (final_direction SINGLE SOURCE OF TRUTH + IMMEDIATE INVERSION) + SINGLE FEATURE SNAPSHOT ENFORCEMENT + HARD AI BLOCK ON INCOMPLETE DATA + DELTA_CHANGE PERSISTENT + STRICT BUFFER GATE + ATOMIC SNAPSHOT + NO ZERO FALLBACKS IN AI
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ import time
 import math
 import threading
 import logging
+from logging.handlers import RotatingFileHandler
 import csv
 import zipfile
 import io
@@ -20,8 +21,10 @@ import re
 import copy
 import shutil
 import sys
+import subprocess
 import traceback
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
 from flask import Flask, jsonify, render_template_string, request, send_file
 import ccxt
@@ -35,17 +38,41 @@ import numpy as np
 import pytz
 
 # #region agent log
-_AGENT_DEBUG_LOG = r"C:\Users\user\Desktop\Final Bots\debug-43f630.log"
-_AGENT_DEBUG_LOG_ALT = r"C:\Users\user\Desktop\BOT\debug-43f630.log"
+_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
+_AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug-alt.log")
+AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
+WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
+WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "15"))
+MOMENTUM_ALIGN_EPS = 1e-6
+MOMENTUM_FLAT_MAX = 0.01
+FLAT_MOMENTUM_EDGE_FLOOR = 4.8
+FLAT_MOMENTUM_FLOOR_LOW_EDGE = 2.0
+FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
+def get_weak_setup_min_edge() -> float:
+    """Post-AI WEAK_SETUP floor; defaults to dashboard edge threshold (keeps UI and execution aligned)."""
+    raw = (os.getenv("WEAK_SETUP_MIN_EDGE") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return get_edge_threshold()
 _last_ws_trade_fp = None
 _last_ws_trade_fp_ts = 0.0
 
 def _agent_dbg(hypothesis_id, location, message, data=None, run_id="post-fix"):
+    if os.getenv("DISABLE_AGENT_DEBUG_LOG", "").lower() in ("1", "true", "yes"):
+        return
     try:
         payload = {"sessionId": "43f630", "runId": run_id, "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time() * 1000)}
         line = json.dumps(payload) + "\n"
         for path in (_AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT):
             try:
+                if os.path.exists(path) and os.path.getsize(path) > AGENT_DEBUG_LOG_MAX_BYTES:
+                    continue
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(line)
                 break
@@ -126,6 +153,110 @@ def _compute_momentum_metric(features: dict) -> float:
     velocity = abs(float(features.get("velocity") or 0))
     return round(min(max(ret_1m * 5000, ret_5m * 2000, velocity * 8000), 1.0), 6)
 
+def _signed_momentum_components(features: dict) -> tuple:
+    features = features or {}
+    return (
+        float(features.get("ret_1m") or 0),
+        float(features.get("ret_5m") or 0),
+        float(features.get("velocity") or 0),
+    )
+
+def _tape_bounce_against(direction: str, features: dict) -> bool:
+    if not features or direction not in ("LONG", "SHORT"):
+        return False
+    r1, r5, vel = _signed_momentum_components(features)
+    eps = MOMENTUM_ALIGN_EPS
+    if direction == "SHORT":
+        return r1 > eps and r5 >= -eps and vel >= -eps
+    if direction == "LONG":
+        return r1 < -eps and r5 <= eps and vel <= eps
+    return False
+
+def evaluate_momentum_alignment(direction: str, features: dict) -> tuple:
+    if not features:
+        return False, None
+    if _tape_bounce_against(direction, features):
+        return True, "MOMENTUM_BOUNCE_BLOCK"
+    mom = _compute_momentum_metric(features)
+    r1, r5, vel = _signed_momentum_components(features)
+    eps = MOMENTUM_ALIGN_EPS
+    if direction == "SHORT":
+        if mom < MOMENTUM_FLAT_MAX and r1 > eps:
+            return True, "MOMENTUM_FLAT_BOUNCE_SHORT"
+        if r5 > eps and vel > eps:
+            return True, "MOMENTUM_COUNTER_TREND_SHORT"
+    elif direction == "LONG":
+        if mom < MOMENTUM_FLAT_MAX and r1 < -eps:
+            return True, "MOMENTUM_FLAT_BOUNCE_LONG"
+        if r5 < -eps and vel < -eps:
+            return True, "MOMENTUM_COUNTER_TREND_LONG"
+    return False, None
+
+def _trim_oversized_log(path: str, max_bytes: int):
+    try:
+        if max_bytes > 0 and os.path.exists(path) and os.path.getsize(path) > max_bytes:
+            os.remove(path)
+    except Exception:
+        pass
+
+def prune_aux_logs_on_startup():
+    _trim_oversized_log("near_edge.log", NEAR_EDGE_LOG_MAX_BYTES)
+    for path in (_AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT):
+        _trim_oversized_log(path, AGENT_DEBUG_LOG_MAX_BYTES)
+
+RESEARCH_SESSION_FILE = "research_session.json"
+
+def _wipe_csv_on_startup() -> bool:
+    return os.getenv("WIPE_CSV_ON_STARTUP", "").strip().lower() in ("1", "true", "yes")
+
+def _preserve_research_data() -> bool:
+    return os.getenv("PRESERVE_RESEARCH_DATA", "").strip().lower() in ("1", "true", "yes")
+
+def _load_research_session_meta() -> dict:
+    try:
+        if os.path.isfile(RESEARCH_SESSION_FILE):
+            with open(RESEARCH_SESSION_FILE, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _write_research_session(start_ts: float):
+    payload = {
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "bot_start_time": start_ts,
+        "bot_start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "cwd": os.getcwd(),
+        "launcher": "15minu_bot.py",
+    }
+    with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+def _should_wipe_research_on_startup() -> bool:
+    if _preserve_research_data():
+        return False
+    if _wipe_csv_on_startup():
+        return True
+    prev = _load_research_session_meta()
+    if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION:
+        return True
+    return True  # fresh CSV/JSONL every bot start — set PRESERVE_RESEARCH_DATA=1 to keep history
+
+def _wipe_research_on_startup_if_needed():
+    if not _should_wipe_research_on_startup():
+        logger.info("[STARTUP] PRESERVE_RESEARCH_DATA=1 — keeping existing research files [PIPELINE ENFORCEMENT]")
+        return
+    prev = _load_research_session_meta()
+    reason = "version change" if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION else "fresh session"
+    logger.warning(f"[STARTUP] Wiping research files ({reason}) — only post-start data will be collected [PIPELINE ENFORCEMENT]")
+    reset_all_research_files()
+
+def _private_api_keys_ok() -> bool:
+    k = os.getenv("BITFINEX_API_KEY", "").strip()
+    s = os.getenv("BITFINEX_API_SECRET", "").strip()
+    return bool(k and len(k) >= 10 and s and len(s) >= 10)
+
 def _compute_volatility_metric(features: dict) -> float:
     return round(abs(float(features.get("candle_range") or features.get("volatility") or 0)), 6)
 
@@ -190,6 +321,9 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_dist_to_resistance": context.get("dist_to_resistance", 0.0),
         "entry_dist_to_support": context.get("dist_to_support", 0.0),
         "last_funding_accrual_ts": fill_ts,
+        "funding_rate_at_entry": (state.get("funding") or {}).get("rate"),
+        "funding_rate_pct_8h_at_entry": (state.get("funding") or {}).get("rate_pct_per_8h"),
+        "funding_source_at_entry": (state.get("funding") or {}).get("source"),
         "bull_score_at_entry": signal.get("bull_score_at_entry") or (signal.get("ai_factors") or {}).get("bull_score", 0),
         "bear_score_at_entry": signal.get("bear_score_at_entry") or (signal.get("ai_factors") or {}).get("bear_score", 0),
         "ai_factors": copy.deepcopy(signal.get("ai_factors", {})),
@@ -231,6 +365,275 @@ def compute_live_factor_scores(mc: dict):
         bear += 1
     return int(bull), int(bear)
 
+def _utc_session_label(ts: float = None) -> str:
+    dt = datetime.fromtimestamp(ts or time.time(), timezone.utc)
+    h = dt.hour
+    if h < 8:
+        return "ASIA"
+    if h < 16:
+        return "EU"
+    return "US"
+
+
+def _candle_15m_elapsed_pct(ts: float = None) -> float:
+    now = float(ts or time.time())
+    elapsed = now % CANDLE_INTERVAL_SEC
+    return round(elapsed / CANDLE_INTERVAL_SEC, 4)
+
+
+def _funding_bucket(funding: dict) -> str:
+    rate = float((funding or {}).get("rate_pct_per_8h") or (funding or {}).get("rate") or 0)
+    if rate > 0.01:
+        return "HIGH_POS"
+    if rate < -0.01:
+        return "HIGH_NEG"
+    if rate > 0.001:
+        return "LOW_POS"
+    if rate < -0.001:
+        return "LOW_NEG"
+    return "NEUTRAL"
+
+
+def _volatility_bucket(vol_metric: float) -> str:
+    v = abs(float(vol_metric or 0))
+    if v >= 0.015:
+        return "HIGH"
+    if v >= 0.008:
+        return "MED"
+    if v >= 0.003:
+        return "LOW"
+    return "FLAT"
+
+
+def _adx_bucket(adx: float) -> str:
+    a = float(adx or 0)
+    if a >= 30:
+        return "STRONG"
+    if a >= 25:
+        return "TREND"
+    if a >= 18:
+        return "MODERATE"
+    if a >= 12:
+        return "WEAK"
+    return "LOW"
+
+
+def _research_session_bucket(ts: float = None) -> str:
+    """ASIA / LONDON / OVERLAP / NEW_YORK for v80 segmented research."""
+    h = datetime.fromtimestamp(ts or time.time(), timezone.utc).hour
+    if h < 8:
+        return "ASIA"
+    if h < 13:
+        return "LONDON"
+    if h < 16:
+        return "OVERLAP"
+    if h < 22:
+        return "NEW_YORK"
+    return "ASIA"
+
+
+def _edge_score_bucket(edge: float) -> str:
+    e = float(edge or 0)
+    if e < 1.0:
+        return "0.5-1.0"
+    if e < 1.5:
+        return "1.0-1.5"
+    if e < 2.0:
+        return "1.5-2.0"
+    if e < 2.5:
+        return "2.0-2.5"
+    if e < 3.0:
+        return "2.5-3.0"
+    if e < 3.5:
+        return "3.0-3.5"
+    if e < 4.0:
+        return "3.5-4.0"
+    return "4.0+"
+
+
+def _spread_bucket(spread: int) -> str:
+    s = int(spread or 0)
+    if s <= 1:
+        return "0-1"
+    if s == 2:
+        return "2"
+    if s == 3:
+        return "3"
+    if s == 4:
+        return "4"
+    return "5+"
+
+
+def _sr_location_bucket(sr_state: str) -> str:
+    s = str(sr_state or "").upper()
+    if "SUPPORT" in s:
+        return "NEAR_SUPPORT"
+    if "RESISTANCE" in s:
+        return "NEAR_RESISTANCE"
+    return "MID_RANGE"
+
+
+def _ai_probability_bucket(prob: float) -> str:
+    p = float(prob or 0)
+    if p < 50:
+        return "45-50"
+    if p < 55:
+        return "50-55"
+    if p < 60:
+        return "55-60"
+    if p < 65:
+        return "60-65"
+    return "65+"
+
+
+def _trade_mfe_type_label(mfe_pct: float) -> str:
+    m = float(mfe_pct or 0)
+    if m < 10:
+        return "TYPE_A"
+    if m >= 15:
+        return "TYPE_B"
+    return "MIXED"
+
+
+def _compute_quality_components(
+    edge: float, spread: int, structure_score, sr_state: str, adx: float, ai_prob: float,
+) -> dict:
+    """Research-only quality decomposition — not used for gating in v80."""
+    edge_comp = min(1.0, max(0.0, float(edge or 0) / 4.0))
+    spread_comp = min(1.0, max(0.0, float(spread or 0) / 5.0))
+    struct = float(structure_score or 0)
+    structure_comp = max(0.0, min(1.0, (struct + 2.0) / 4.0))
+    loc = _sr_location_bucket(sr_state)
+    location_comp = {"NEAR_SUPPORT": 0.85, "MID_RANGE": 0.55, "NEAR_RESISTANCE": 0.25}.get(loc, 0.5)
+    adx_comp = min(1.0, max(0.0, float(adx or 0) / 30.0))
+    ai_comp = min(1.0, max(0.0, float(ai_prob or 0) / 100.0))
+    quality_score = round(
+        0.20 * edge_comp + 0.30 * spread_comp + 0.20 * structure_comp
+        + 0.15 * location_comp + 0.10 * adx_comp + 0.05 * ai_comp,
+        4,
+    )
+    return {
+        "edge_component": round(edge_comp, 4),
+        "spread_component": round(spread_comp, 4),
+        "structure_component": round(structure_comp, 4),
+        "location_component": round(location_comp, 4),
+        "adx_component": round(adx_comp, 4),
+        "ai_component": round(ai_comp, 4),
+        "quality_score": quality_score,
+    }
+
+
+def capture_research_buckets(signal: dict, ai: dict, edge_score: float, features: dict = None) -> dict:
+    """Frozen bucket labels at APPROVE for v80 analyzer cohort reports."""
+    features = features or signal.get("features") or {}
+    direction = str(signal.get("final_direction") or ai.get("direction") or "LONG").upper()
+    bull = int(ai.get("bull_score") or signal.get("bull_score_at_entry") or 0)
+    bear = int(ai.get("bear_score") or signal.get("bear_score_at_entry") or 0)
+    spread = bull - bear if direction == "LONG" else bear - bull
+    sr_state = (
+        features.get("sr_state")
+        or (state.get("support_resistance") or {}).get("sr_state")
+        or "UNKNOWN"
+    )
+    mc = signal.get("context", {}).get("market_context") or signal.get("market_context") or {}
+    if not isinstance(mc, dict):
+        mc = {}
+    ms = mc.get("market_structure", {}) if isinstance(mc.get("market_structure"), dict) else {}
+    ts_mc = mc.get("trend_strength", {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    adx = float(ts_mc.get("adx") or 0)
+    ai_prob = float(ai.get("win_prob") or 0)
+    edge_score = round(float(edge_score or 0), 2)
+    now_ts = time.time()
+    return {
+        "edge_score_bucket": _edge_score_bucket(edge_score),
+        "directional_spread_bucket": _spread_bucket(spread),
+        "support_resistance_bucket": _sr_location_bucket(sr_state),
+        "session_bucket": _research_session_bucket(now_ts),
+        "ai_probability_bucket": _ai_probability_bucket(ai_prob),
+        "directional_spread": spread,
+        "edge_score": edge_score,
+        "sr_state": sr_state,
+        "structure_score": ms.get("structure_score"),
+        "adx": adx,
+        "ai_win_prob": ai_prob,
+        "quality_components": _compute_quality_components(
+            edge_score, spread, ms.get("structure_score"), sr_state, adx, ai_prob,
+        ),
+    }
+
+
+def _research_session_context() -> dict:
+    rc = state.setdefault("research_counters", {})
+    return {
+        "approve_index": int(rc.get("approve_index", 0)),
+        "trades_since_last_loss": int(rc.get("trades_since_last_loss", 0)),
+        "last_exit_reason": rc.get("last_exit_reason"),
+        "last_trade_pnl_usd": rc.get("last_trade_pnl_usd"),
+    }
+
+
+def _bump_research_approve_index() -> int:
+    rc = state.setdefault("research_counters", {})
+    rc["approve_index"] = int(rc.get("approve_index", 0)) + 1
+    return rc["approve_index"]
+
+
+def _record_research_trade_close(net_pnl: float, exit_reason: str):
+    rc = state.setdefault("research_counters", {})
+    rc["last_exit_reason"] = exit_reason
+    rc["last_trade_pnl_usd"] = round(float(net_pnl), 4)
+    if net_pnl < 0:
+        rc["trades_since_last_loss"] = 0
+    else:
+        rc["trades_since_last_loss"] = int(rc.get("trades_since_last_loss", 0)) + 1
+
+
+def capture_entry_regime_snapshot(signal: dict, features: dict = None) -> dict:
+    """Frozen regime/session context at APPROVE for segmented analyzer research."""
+    features = features or signal.get("features") or {}
+    ctx = signal.get("context") or {}
+    mc = ctx.get("market_context") or signal.get("market_context") or state.get("market_context") or {}
+    if not isinstance(mc, dict):
+        mc = {}
+    ts_mc = mc.get("trend_strength", {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    mtf = mc.get("multi_tf", {}) if isinstance(mc.get("multi_tf"), dict) else {}
+    trends = mtf.get("trends") or {}
+    sr = mc.get("sr_context", {}) if isinstance(mc.get("sr_context"), dict) else {}
+    if not sr:
+        sr_ctx = state.get("support_resistance") or {}
+        sr = {
+            "sr_state": sr_ctx.get("sr_state", "UNKNOWN"),
+            "dist_to_resistance_pct": round(nz(sr_ctx.get("dist_to_resistance", 0)) * 100, 3),
+            "dist_to_support_pct": round(nz(sr_ctx.get("dist_to_support", 0)) * 100, 3),
+        }
+    funding = copy.deepcopy(state.get("funding") or {})
+    vol_metric = _compute_volatility_metric(features)
+    adx = float(ts_mc.get("adx") or 0)
+    now_ts = time.time()
+    mtf_4h = str(trends.get("4h") or "").upper()
+    return {
+        "captured_ts": now_ts,
+        "session_utc": _utc_session_label(now_ts),
+        "candle_15m_elapsed_pct": _candle_15m_elapsed_pct(now_ts),
+        "regime_label": signal.get("regime") or mc.get("regime_label") or state.get("regime", "UNKNOWN"),
+        "strategy": signal.get("strategy") or state.get("strategy"),
+        "sr_state": sr.get("sr_state", "UNKNOWN"),
+        "dist_to_resistance_pct": sr.get("dist_to_resistance_pct"),
+        "dist_to_support_pct": sr.get("dist_to_support_pct"),
+        "adx": adx,
+        "adx_bucket": _adx_bucket(adx),
+        "volatility_metric": vol_metric,
+        "volatility_bucket": _volatility_bucket(vol_metric),
+        "mtf_4h": trends.get("4h"),
+        "mtf_4h_ranging": mtf_4h in ("RANGING", "NEUTRAL", "MIXED", ""),
+        "funding_rate": funding.get("rate"),
+        "funding_rate_pct_8h": funding.get("rate_pct_per_8h"),
+        "funding_source": funding.get("source"),
+        "funding_bucket": _funding_bucket(funding),
+        "session_context": _research_session_context(),
+    }
+
+
 def capture_entry_thesis(signal: dict) -> dict:
     mc = (
         signal.get("context", {}).get("market_context")
@@ -243,15 +646,143 @@ def capture_entry_thesis(signal: dict) -> dict:
     mtf = mc.get("multi_tf", {}) if isinstance(mc.get("multi_tf"), dict) else {}
     ms = mc.get("market_structure", {}) if isinstance(mc.get("market_structure"), dict) else {}
     ts = mc.get("trend_strength", {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    trends = mtf.get("trends") or {}
     return {
         "bull_score": int(signal.get("bull_score_at_entry") or 0),
         "bear_score": int(signal.get("bear_score_at_entry") or 0),
         "structure_score": ms.get("structure_score"),
         "mtf_agreement": mtf.get("agreement"),
+        "mtf_15m": trends.get("15m"),
+        "mtf_1h": trends.get("1h"),
+        "mtf_4h": trends.get("4h"),
+        "mtf_bull_tf_count": mtf.get("bull_tf_count"),
+        "mtf_bear_tf_count": mtf.get("bear_tf_count"),
         "structure_bias": ms.get("structure_bias"),
         "adx": ts.get("adx"),
         "captured_ts": time.time(),
     }
+
+
+def capture_entry_gate_snapshot(signal: dict, ai: dict, edge_score: float, features: dict = None) -> dict:
+    """Frozen gate metrics at APPROVE for analyzer MTF/chop sweet-spot sweeps."""
+    direction = str(signal.get("final_direction") or ai.get("direction") or "LONG").upper()
+    ctx = signal.get("context") or {}
+    features = features or signal.get("features") or {}
+    mc = ctx.get("market_context") or signal.get("market_context") or {}
+    if not isinstance(mc, dict):
+        mc = {}
+    mtf = mc.get("multi_tf", {}) if isinstance(mc.get("multi_tf"), dict) else {}
+    trends = mtf.get("trends") or {}
+    ts = mc.get("trend_strength", {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    adx = float(ts.get("adx") or 0)
+    mom = round(_compute_momentum_metric(features), 4)
+    agreement = mtf.get("agreement") or ""
+    bull = int(ai.get("bull_score") or signal.get("bull_score_at_entry") or 0)
+    bear = int(ai.get("bear_score") or signal.get("bear_score_at_entry") or 0)
+    spread = bull - bear if direction == "LONG" else bear - bull
+    edge_score = round(float(edge_score or 0), 2)
+    adx_pass = adx >= ADX_BLOCK_NEW_ENTRY
+    edge_pass = edge_score >= get_edge_threshold() - 1e-9
+    spread_pass = spread >= 1
+    edge_min = get_edge_threshold()
+    chop_max = MOMENTUM_CHOP_BLOCK_ABOVE
+    adx_min = ADX_BLOCK_NEW_ENTRY
+    spread_min = 1
+    if direction == "LONG":
+        mtf_pass_strict = agreement == "BULL_ALIGNED"
+    elif direction == "SHORT":
+        mtf_pass_strict = agreement == "BEAR_ALIGNED"
+    else:
+        mtf_pass_strict = True
+    mtf_pass = True if RESEARCH_FREE_RUN_DISABLE_MTF_GATE else mtf_pass_strict
+    chop_pass_strict = mom <= chop_max + 1e-9
+    chop_pass = True if RESEARCH_FREE_RUN_DISABLE_CHOP_GATE else chop_pass_strict
+    return {
+        "direction": direction,
+        "gate_mode": "FREE_RUN" if (
+            RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE
+        ) else "STRICT",
+        "free_run": {
+            "mtf_disabled": RESEARCH_FREE_RUN_DISABLE_MTF_GATE,
+            "chop_disabled": RESEARCH_FREE_RUN_DISABLE_CHOP_GATE,
+            "momentum_align_disabled": RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN,
+        },
+        "would_pass_strict": {
+            "mtf": mtf_pass_strict,
+            "chop": chop_pass_strict,
+            "adx": adx_pass,
+            "edge": edge_pass,
+            "spread": spread_pass,
+            "live_stack": adx_pass and chop_pass_strict and mtf_pass_strict and edge_pass and spread_pass,
+        },
+        "mom_metric": mom,
+        "adx": adx,
+        "edge_score": edge_score,
+        "directional_spread": spread,
+        "margins": {
+            "adx_margin": round(adx - adx_min, 4),
+            "chop_margin": round(chop_max - mom, 4),
+            "edge_margin": round(edge_score - edge_min, 4),
+            "spread_margin": int(spread - spread_min),
+            "mtf_pass": bool(mtf_pass),
+            "mtf_agreement": agreement,
+            "live_stack_margin": round(
+                min(adx - adx_min, chop_max - mom, edge_score - edge_min, spread - spread_min), 4
+            ),
+        },
+        "chop_components": {
+            "ret_1m": features.get("ret_1m"),
+            "ret_5m": features.get("ret_5m"),
+            "velocity": features.get("velocity"),
+            "volume_ratio": features.get("volume_ratio"),
+            "imbalance": features.get("imbalance"),
+        },
+        "multi_tf": {
+            "agreement": agreement,
+            "trends": trends,
+            "mtf_15m": trends.get("15m"),
+            "mtf_1h": trends.get("1h"),
+            "mtf_4h": trends.get("4h"),
+            "bull_tf_count": mtf.get("bull_tf_count"),
+            "bear_tf_count": mtf.get("bear_tf_count"),
+            "interpretation_note": mtf.get("interpretation_note"),
+        },
+        "thresholds": {
+            "adx_min": adx_min,
+            "chop_max": chop_max,
+            "edge_min": edge_min,
+            "spread_min": spread_min,
+            "long_mtf_required": "BULL_ALIGNED",
+            "short_mtf_required": "BEAR_ALIGNED",
+        },
+        "would_pass": {
+            "adx": adx_pass,
+            "chop": chop_pass,
+            "mtf": mtf_pass,
+            "edge": edge_pass,
+            "spread": spread_pass,
+            "live_stack": adx_pass and chop_pass and mtf_pass and edge_pass and spread_pass,
+            "strict_stack": adx_pass and chop_pass_strict and mtf_pass_strict and edge_pass and spread_pass,
+        },
+    }
+
+def get_exit_config_snapshot() -> dict:
+    """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
+    return {
+        "trail_ladder": TRAIL_LADDER,
+        "ladder_first_trigger_pct": TRAIL_LADDER[0][0],
+        "ladder_first_lock_pct": TRAIL_LADDER[0][1],
+        "peak_never_loser_min_peak": PEAK_NEVER_LOSER_MIN_PEAK,
+        "peak_never_loser_floor": PEAK_NEVER_LOSER_FLOOR,
+        "thesis_fast_exit_unreal_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "thesis_mfe_protect_pct": THESIS_MFE_PROTECT_PCT,
+        "thesis_exit_if_above_unreal_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
+        "thesis_min_age_sec": THESIS_MIN_AGE_SEC,
+        "thesis_score_flip_margin": THESIS_SCORE_FLIP_MARGIN,
+        "thesis_early_decay_delta": THESIS_EARLY_DECAY_DELTA,
+        "early_fail_pct_threshold": EARLY_FAIL_PCT_THRESHOLD,
+    }
+
 
 def get_profit_lock_floor(peak_pct: float):
     if peak_pct is None or peak_pct < TRAIL_LADDER[0][0]:
@@ -286,14 +817,23 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     if unreal_pct > THESIS_EXIT_IF_ABOVE_UNREAL_PCT:
         return False
+    if peak >= TRAIL_LADDER[0][0]:
+        return False
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
-        logger.info(
-            f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
-        )
-        close_position(pos, "THESIS_FAST_CUT")
-        return True
+        if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
+            logger.info(
+                f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+                f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
+                f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
+            )
+        else:
+            logger.info(
+                f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+                f"unreal={unreal_pct:.1f}% peak={peak:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
+            )
+            close_position(pos, "THESIS_FAST_CUT")
+            return True
     if age_sec < THESIS_MIN_AGE_SEC:
         return False
     update_market_context()
@@ -437,6 +977,28 @@ def get_regime_risk_profile() -> dict:
         return {"max_active": 4, "max_long": 3, "max_short": 3, "size_mult": 1.0, "label": "TREND_STRONG"}
     return {"max_active": 4, "max_long": 3, "max_short": 3, "size_mult": 1.0, "label": "TREND"}
 
+def compute_reference_scaled_margin(direction: str, ai: dict, ctx: dict) -> dict:
+    """Legacy risk-sized margin (pre-v79) — logged for analyzer size sweep, not used live when FLAT_MARGIN_EVERY_TRADE."""
+    spread = compute_directional_spread(direction, ai)
+    conv = conviction_size_multiplier(spread)
+    mc = ctx.get("market_context") or {}
+    adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
+    adx_mult = ADX_HALF_SIZE_MULT if adx < ADX_HALF_SIZE_BELOW else 1.0
+    regime_prof = get_regime_risk_profile()
+    scaled = round(FIXED_MARGIN_USDT * conv * adx_mult * regime_prof["size_mult"], 4)
+    scaled = max(FIXED_MARGIN_USDT * 0.1, min(scaled, FIXED_MARGIN_USDT))
+    return {
+        "directional_spread": spread,
+        "conviction_mult": conv,
+        "adx_mult": adx_mult,
+        "regime_mult": regime_prof.get("size_mult"),
+        "regime_label": regime_prof.get("label"),
+        "adx": adx,
+        "reference_scaled_margin_usdt": scaled,
+        "live_flat_margin_usdt": FIXED_MARGIN_USDT if FLAT_MARGIN_EVERY_TRADE else scaled,
+    }
+
+
 def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
     spread = compute_directional_spread(direction, ai)
     conv = conviction_size_multiplier(spread)
@@ -446,22 +1008,59 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
     adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
     if adx < ADX_BLOCK_NEW_ENTRY:
         return None, f"ADX_NO_ENTRY_{adx:.1f}"
+    if FLAT_MARGIN_EVERY_TRADE:
+        return float(FIXED_MARGIN_USDT), None
     adx_mult = ADX_HALF_SIZE_MULT if adx < ADX_HALF_SIZE_BELOW else 1.0
     regime_prof = get_regime_risk_profile()
     margin = round(FIXED_MARGIN_USDT * conv * adx_mult * regime_prof["size_mult"], 4)
     margin = max(FIXED_MARGIN_USDT * 0.1, min(margin, FIXED_MARGIN_USDT))
     return margin, None
 
-def evaluate_entry_quality_filter(direction: str, ctx: dict, ai: dict):
+def evaluate_entry_quality_filter(direction: str, ctx: dict, ai: dict, features: dict = None):
     mc = ctx.get("market_context") or {}
     mtf = (mc.get("multi_tf", {}) or {}).get("agreement", "")
-    if direction == "LONG" and mtf != "BULL_ALIGNED":
-        return True, f"LONG_REQUIRES_BULL_MTF_{mtf or 'UNKNOWN'}"
-    if direction == "SHORT":
-        if mtf == "BULL_ALIGNED":
-            return True, "SHORT_BLOCKED_BULL_MTF"
-        if mtf not in ("BEAR_ALIGNED",):
-            return True, f"SHORT_REQUIRES_BEAR_MTF_{mtf or 'UNKNOWN'}"
+    if not RESEARCH_FREE_RUN_DISABLE_MTF_GATE:
+        if direction == "LONG" and mtf != "BULL_ALIGNED":
+            return True, f"LONG_REQUIRES_BULL_MTF_{mtf or 'UNKNOWN'}"
+        if direction == "SHORT":
+            if mtf == "BULL_ALIGNED":
+                return True, "SHORT_BLOCKED_BULL_MTF"
+            if mtf not in ("BEAR_ALIGNED",):
+                return True, f"SHORT_REQUIRES_BEAR_MTF_{mtf or 'UNKNOWN'}"
+    features = features or ctx.get("features") or {}
+    if not RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN:
+        blocked, reason = evaluate_momentum_alignment(direction, features)
+        if blocked:
+            return True, reason
+    return False, None
+
+def evaluate_evidence_entry_filter(
+    direction: str, ctx: dict, ai: dict, features: dict, edge_score: float
+) -> tuple:
+    """v63 analyzer gates: momentum chop, SR zone, edge dead zone (both directions)."""
+    sr_state = str(
+        ctx.get("sr_state")
+        or (ctx.get("support_resistance") or {}).get("sr_state")
+        or state.get("support_resistance", {}).get("sr_state")
+        or ""
+    ).upper()
+    if (
+        direction in ("LONG", "SHORT")
+        and state.get("block_free_range_entries", BLOCK_FREE_RANGE_ENTRIES)
+        and sr_state == "FREE_RANGE"
+    ):
+        return True, f"{direction}_BLOCKED_FREE_RANGE"
+
+    edge_score = round(float(edge_score or 0), 1)
+    if not is_research_data_collection():
+        if EDGE_DEAD_ZONE_LOW < edge_score <= EDGE_DEAD_ZONE_HIGH:
+            return True, f"EDGE_DEAD_ZONE_{edge_score:.1f}"
+
+    features = features or ctx.get("features") or {}
+    if not RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
+        mom = _compute_momentum_metric(features)
+        if direction in ("LONG", "SHORT") and mom > MOMENTUM_CHOP_BLOCK_ABOVE:
+            return True, f"{direction}_MOMENTUM_CHOP_{mom:.2f}"
     return False, None
 
 def risk_trading_allowed() -> bool:
@@ -504,9 +1103,21 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     if now is None:
         now = time.time()
     unreal_pct = unrealized_margin_pct(pos, price)
+    append_replay_tick(pos.get("trade_id"), price, unreal_pct)
     pos["max_pnl_pct"] = max(pos.get("max_pnl_pct", 0.0), unreal_pct)
     if pos.get("max_drawdown", 0) is None or unreal_pct < pos.get("max_drawdown", 0):
         pos["max_drawdown"] = min(pos.get("max_drawdown", 0.0), unreal_pct)
+    entry_ts = float(pos.get("entry_ts") or 0)
+    if entry_ts > 0:
+        cur_candle = int((now - entry_ts) // CANDLE_INTERVAL_SEC) + 1
+        prev_candle = int(pos.get("_candle_track_idx") or 0)
+        if cur_candle > prev_candle and cur_candle <= 3:
+            pos.setdefault("first_3_candles", {})[str(cur_candle)] = {
+                "mfe_pct": round(float(pos.get("max_pnl_pct") or 0), 2),
+                "mae_pct": round(float(pos.get("max_drawdown") or 0), 2),
+                "unreal_pct": round(float(unreal_pct), 2),
+            }
+            pos["_candle_track_idx"] = cur_candle
 
     if state.get("early_fail_enabled", True) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
         logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
@@ -518,9 +1129,6 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
         close_position(pos, "STOP_LOSS")
         return True
 
-    if check_thesis_invalidation(pos, price):
-        return True
-
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = get_profit_lock_floor(peak)
     if lock_floor is not None and peak >= TRAIL_LADDER[0][0] and unreal_pct <= lock_floor:
@@ -529,6 +1137,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             f"lock={lock_floor:.1f}% now={unreal_pct:.1f}% [PIPELINE ENFORCEMENT]"
         )
         close_position(pos, "PROFIT_LOCK_LADDER")
+        return True
+
+    if check_thesis_invalidation(pos, price):
         return True
 
     tp_price = pos.get("tp", 0)
@@ -651,10 +1262,23 @@ def sync_cooldown_debug_state():
         state["debug_state"]["cooldown_remaining_ai"] = int(ai_rem)
         state["debug_state"]["signal_cooldown_active"] = sig_rem > 0
         state["debug_state"]["cooldown_remaining_signal"] = int(sig_rem)
+        ag = state["debug_state"].get("ai_gate") or {}
+        ai_was_called = bool(ag.get("called"))
         if ai_rem <= 0 and sig_rem <= 0:
             sr = state["debug_state"].get("skip_reason")
             if sr in ("AI_COOLDOWN_ACTIVE", "GLOBAL_COOLDOWN", None):
                 state["debug_state"]["skip_reason"] = None
+            elif sr and not ai_was_called and _is_misleading_ai_skip_label(sr):
+                state["debug_state"]["skip_reason"] = None
+                state["debug_state"]["last_block_reason"] = None
+            elif sr and str(sr).startswith("AI_") and state.get("last_pipeline_stage") == "IDLE":
+                state["debug_state"]["skip_reason"] = None
+                state["debug_state"]["last_block_reason"] = None
+            if not ai_was_called and state.get("last_pipeline_stage") == "IDLE":
+                if state.get("final_decision") == "AI_REJECTED":
+                    state["final_decision"] = None
+                if state.get("ai_decision") == "REJECTED":
+                    state["ai_decision"] = None
     _agent_dbg("H4", "sync_cooldown_debug_state", "synced", {"ai_rem": int(ai_rem), "sig_rem": int(sig_rem), "skip_reason": state.get("debug_state", {}).get("skip_reason")})
 
 def purge_dead_pending_orders():
@@ -719,10 +1343,18 @@ def to_melbourne_time(utc_iso_str):
     except:
         return utc_iso_str
 
-DEBUG_LOG_BUFFER = deque(maxlen=1000)
+DEBUG_LOG_BUFFER = deque(maxlen=5000)
 
 def store_debug_snapshot(stage: str, data: dict):
     entry = {"ts": utc_iso(), "stage": stage, "data": data}
+    if isinstance(data, dict):
+        ai = data.get("ai") or {}
+        if ai.get("ai_error") or ai.get("decision") == "AI_ERROR":
+            entry["ai_error"] = True
+            entry["error_type"] = ai.get("error_type")
+            entry["error_detail"] = (ai.get("error_detail") or ai.get("comment") or "")[:500]
+        if data.get("edge"):
+            entry["edge_score"] = (data.get("edge") or {}).get("score")
     DEBUG_LOG_BUFFER.append(entry)
     logger.info(f"[DEBUG SNAPSHOT STORED] {stage} [PIPELINE ENFORCEMENT]")
 
@@ -789,6 +1421,8 @@ def compute_exposure():
     return total
 
 FIXED_MARGIN_USDT = 20.0
+# v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
+FLAT_MARGIN_EVERY_TRADE = True
 MAX_SL_MARGIN_PCT = 30.0
 
 def sl_price_pct(leverage: int = None) -> float:
@@ -797,8 +1431,9 @@ def sl_price_pct(leverage: int = None) -> float:
 
 SL_PCT = sl_price_pct(20)
 # Fee profile: BITFINEX_ZERO = 0% maker/taker (Bitfinex default since Dec 2025 on spot/margin/derivatives).
-# BYBIT_DEFAULT = prior Bybit-style sim (~0.02% maker / 0.06% taker on notional). Funding not modeled in either.
-EXCHANGE_FEE_PROFILE = "BITFINEX_ZERO"
+# BYBIT_DEFAULT = legacy research comparison only (~0.02% maker / 0.06% taker on notional).
+_EXCHANGE_FEE_RAW = os.getenv("EXCHANGE_FEE_PROFILE", "BITFINEX_ZERO").strip().upper()
+EXCHANGE_FEE_PROFILE = _EXCHANGE_FEE_RAW if _EXCHANGE_FEE_RAW in ("BITFINEX_ZERO", "BYBIT_DEFAULT") else "BITFINEX_ZERO"
 _BYBIT_MAKER_FEE_PCT = 0.0002
 _BYBIT_TAKER_FEE_PCT = 0.0006
 
@@ -808,21 +1443,51 @@ def get_trading_fee_rates():
     return _BYBIT_MAKER_FEE_PCT, _BYBIT_TAKER_FEE_PCT
 
 MAKER_FEE_PCT, TAKER_FEE_PCT = get_trading_fee_rates()
-# Bitfinex perp funding (BTC USDt perpetual via ccxt). Trading fees = 0; funding still applies.
+# Bitfinex BTC USDt perpetual — market data + sim; live funding from /v2/status/deriv.
 FUNDING_SIMULATION_ENABLED = True
-BITFINEX_PERP_SYMBOL = "BTC/USDT:USDT"
+# Bitfinex deriv status row indices (https://docs.bitfinex.com/reference/rest-public-derivatives-status)
+_DERIV_STATUS_DERIV_PRICE = 3
+_DERIV_STATUS_SPOT_PRICE = 4
+_DERIV_STATUS_NEXT_FUNDING_MTS = 8
+_DERIV_STATUS_NEXT_FUNDING_ACCRUED = 9
+_DERIV_STATUS_NEXT_FUNDING_STEP = 10
+_DERIV_STATUS_CURRENT_FUNDING = 12
+_DERIV_STATUS_MARK_PRICE = 15
+_DERIV_STATUS_OPEN_INTEREST = 18
+_DERIV_STATUS_CLAMP_MIN = 22
+_DERIV_STATUS_CLAMP_MAX = 23
+BITFINEX_REST_BASE = "https://api-pub.bitfinex.com/v2"
+BITFINEX_WS_URL = "wss://api-pub.bitfinex.com/ws/2"
+BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
+SYMBOL = BITFINEX_WS_SYMBOL
+BOT_EXCHANGE = "bitfinex"
+# Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
+ANALYZER_SYNC_ID = "v8.1-sole-ai-funnel-2026-06-04"
+SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 bitfinex_public = None
+bitfinex_private = None
 
 def get_bitfinex_public():
-    global bitfinex_public
     if bitfinex_public is None:
-        bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
-        bitfinex_public.load_markets()
+        raise RuntimeError("Bitfinex public client not initialized")
     return bitfinex_public
+
+def fetch_bitfinex_ohlcv(timeframe: str = "15m", limit: int = 250) -> list:
+    """Bitfinex REST candles (ccxt OHLCV for perps can return stale rows)."""
+    key = f"trade:{timeframe}:{BITFINEX_WS_SYMBOL}"
+    url = f"{BITFINEX_REST_BASE}/candles/{key}/hist"
+    resp = requests.get(url, params={"limit": limit}, timeout=30)
+    resp.raise_for_status()
+    rows = resp.json() or []
+    candles = []
+    for row in reversed(rows):
+        ts, o, c, h, l, v = row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])
+        candles.append([ts, o, h, l, c, v])
+    return candles
 
 def synthetic_funding_rate_8h():
     """Fallback 8h rate from premium (price vs EMA200) + orderflow when API unavailable."""
@@ -837,6 +1502,49 @@ def synthetic_funding_rate_8h():
     rate = (premium * 0.15) + (imbalance * 0.00005) + (0.00002 if delta > 0 else -0.00002 if delta < 0 else 0)
     return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, rate))
 
+def _effective_funding_rate_8h(current_funding: float, next_accrued: float) -> float:
+    """Bitfinex: CURRENT_FUNDING is the live 8h rate; if zero, use next-period accrual."""
+    cur = float(current_funding or 0.0)
+    if abs(cur) >= 1e-12:
+        return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, cur))
+    acc = float(next_accrued or 0.0)
+    if abs(acc) >= 1e-12:
+        return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, acc))
+    return 0.0
+
+def fetch_bitfinex_deriv_funding_rest(symbol: str = BITFINEX_WS_SYMBOL) -> dict:
+    """Live perp funding from Bitfinex GET /v2/status/deriv?keys=... (public, no API key)."""
+    url = f"{BITFINEX_REST_BASE}/status/deriv"
+    resp = requests.get(url, params={"keys": symbol}, timeout=12)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not payload or not isinstance(payload, list):
+        raise ValueError("empty deriv status response")
+    row = payload[0]
+    if not isinstance(row, (list, tuple)) or len(row) < 13:
+        raise ValueError(f"unexpected deriv status row len={len(row) if isinstance(row, (list, tuple)) else 'n/a'}")
+    current = row[_DERIV_STATUS_CURRENT_FUNDING]
+    next_accrued = row[_DERIV_STATUS_NEXT_FUNDING_ACCRUED]
+    rate = _effective_funding_rate_8h(current, next_accrued)
+    next_ms = row[_DERIV_STATUS_NEXT_FUNDING_MTS]
+    next_ts = float(next_ms) / 1000.0 if next_ms else None
+    mark = row[_DERIV_STATUS_MARK_PRICE] if len(row) > _DERIV_STATUS_MARK_PRICE else None
+    spot = row[_DERIV_STATUS_SPOT_PRICE] if len(row) > _DERIV_STATUS_SPOT_PRICE else None
+    oi = row[_DERIV_STATUS_OPEN_INTEREST] if len(row) > _DERIV_STATUS_OPEN_INTEREST else None
+    return {
+        "rate": rate,
+        "current_funding": float(current or 0.0),
+        "next_funding_accrued": float(next_accrued or 0.0),
+        "next_funding_step": int(row[_DERIV_STATUS_NEXT_FUNDING_STEP] or 0),
+        "next_time": next_ts,
+        "mark_price": float(mark) if mark is not None else None,
+        "index_price": float(spot) if spot is not None else None,
+        "open_interest": float(oi) if oi is not None else None,
+        "clamp_min": float(row[_DERIV_STATUS_CLAMP_MIN]) if len(row) > _DERIV_STATUS_CLAMP_MIN and row[_DERIV_STATUS_CLAMP_MIN] is not None else None,
+        "clamp_max": float(row[_DERIV_STATUS_CLAMP_MAX]) if len(row) > _DERIV_STATUS_CLAMP_MAX and row[_DERIV_STATUS_CLAMP_MAX] is not None else None,
+        "source": "BITFINEX_DERIV_STATUS",
+    }
+
 def refresh_funding_state(force: bool = False):
     """Pull live Bitfinex perp funding; update state['funding'] for sim + AI."""
     global _last_funding_refresh_ts
@@ -850,19 +1558,29 @@ def refresh_funding_state(force: bool = False):
     mark = None
     index = None
     source = "SYNTHETIC"
+    meta = {}
     try:
-        fr = get_bitfinex_public().fetch_funding_rate(BITFINEX_PERP_SYMBOL)
-        rate = fr.get("fundingRate")
-        if rate is None:
-            rate = fr.get("nextFundingRate")
-        next_ms = fr.get("nextFundingTimestamp") or fr.get("fundingTimestamp")
-        if next_ms:
-            next_ts = float(next_ms) / 1000.0
-        mark = fr.get("markPrice")
-        index = fr.get("indexPrice")
-        source = "BITFINEX_LIVE"
+        meta = fetch_bitfinex_deriv_funding_rest(BITFINEX_WS_SYMBOL)
+        rate = meta.get("rate")
+        next_ts = meta.get("next_time")
+        mark = meta.get("mark_price")
+        index = meta.get("index_price")
+        source = meta.get("source", "BITFINEX_DERIV_STATUS")
     except Exception as e:
-        logger.warning(f"[FUNDING] Bitfinex fetch failed: {e} — using synthetic [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[FUNDING] Bitfinex deriv status failed: {e} — trying ccxt [PIPELINE ENFORCEMENT]")
+        try:
+            fr = get_bitfinex_public().fetch_funding_rate(SYMBOL_CCXT)
+            rate = fr.get("fundingRate")
+            if rate is None:
+                rate = fr.get("nextFundingRate")
+            next_ms = fr.get("nextFundingTimestamp") or fr.get("fundingTimestamp")
+            if next_ms:
+                next_ts = float(next_ms) / 1000.0
+            mark = fr.get("markPrice")
+            index = fr.get("indexPrice")
+            source = "BITFINEX_CCXT"
+        except Exception as e2:
+            logger.warning(f"[FUNDING] ccxt funding failed: {e2} — using synthetic [PIPELINE ENFORCEMENT]")
     if rate is None:
         rate = synthetic_funding_rate_8h()
         source = "SYNTHETIC"
@@ -875,18 +1593,40 @@ def refresh_funding_state(force: bool = False):
             "rate": rate,
             "rate_pct_per_8h": round(rate * 100, 5),
             "next_time": next_ts,
+            "next_time_iso": datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat(),
             "mark_price": mark,
             "index_price": index,
             "interval_hours": FUNDING_INTERVAL_HOURS,
             "source": source,
             "longs_pay": rate > 0,
+            "shorts_receive_when_positive": rate > 0,
             "updated_ts": now,
+            "current_funding": meta.get("current_funding"),
+            "next_funding_accrued": meta.get("next_funding_accrued"),
+            "next_funding_step": meta.get("next_funding_step"),
+            "open_interest": meta.get("open_interest"),
+            "clamp_min": meta.get("clamp_min"),
+            "clamp_max": meta.get("clamp_max"),
+            "symbol": BITFINEX_WS_SYMBOL,
         }
     _last_funding_refresh_ts = now
     logger.info(
-        f"[FUNDING] {source} rate_8h={rate*100:.5f}% next_settlement={datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat()} "
-        f"longs_pay={rate > 0} [PIPELINE ENFORCEMENT]"
+        f"[FUNDING] {source} rate_8h={rate*100:.5f}% current={meta.get('current_funding')} "
+        f"next_accrued={meta.get('next_funding_accrued')} next_settlement="
+        f"{datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat()} longs_pay={rate > 0} "
+        f"[PIPELINE ENFORCEMENT]"
     )
+    if rate > 0:
+        with trade_lock:
+            short_n = sum(
+                1 for p in open_positions
+                if p.get("dir") == "SHORT" and p.get("status") == "OPEN"
+            )
+        if short_n:
+            logger.info(
+                f"[FUNDING MONITOR] positive rate with {short_n} open SHORT(s) — favorable carry (monitor only) "
+                f"[PIPELINE ENFORCEMENT]"
+            )
 
 def funding_cost_for_position(pos: dict, rate_8h: float, hours: float) -> float:
     """
@@ -899,6 +1639,24 @@ def funding_cost_for_position(pos: dict, rate_8h: float, hours: float) -> float:
         return 0.0
     dir_sign = 1.0 if pos.get("dir") == "LONG" else -1.0
     return dir_sign * notional * rate_8h * (hours / FUNDING_INTERVAL_HOURS)
+
+def funding_side_label(rate_8h: float, direction: str) -> str:
+    if abs(float(rate_8h or 0)) < 1e-12:
+        return "NEUTRAL"
+    if direction == "LONG":
+        return "LONG_PAYS" if rate_8h > 0 else "LONG_RECEIVES"
+    return "SHORT_RECEIVES" if rate_8h > 0 else "SHORT_PAYS"
+
+def projected_funding_to_next_settlement(pos: dict, funding: dict = None) -> float:
+    """USD funding until next Bitfinex settlement (uses live rate from state)."""
+    if funding is None:
+        with state_lock:
+            funding = copy.deepcopy(state.get("funding") or {})
+    next_ts = float(funding.get("next_time") or 0)
+    if next_ts <= 0:
+        return 0.0
+    hours = max(0.0, (next_ts - time.time()) / 3600.0)
+    return funding_cost_for_position(pos, float(funding.get("rate") or 0.0), hours)
 
 def accrue_position_funding(pos: dict, now: float = None):
     if not FUNDING_SIMULATION_ENABLED:
@@ -1045,7 +1803,7 @@ def fetch_mtf_candles(timeframe: str, limit: int = 120):
     if bucket["candles"] and now - bucket["ts"] < MTF_REFRESH_SEC:
         return bucket["candles"]
     try:
-        candles = bybit_public.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
+        candles = fetch_bitfinex_ohlcv(timeframe, limit=limit)
         if candles:
             _mtf_cache[timeframe] = {"ts": now, "candles": candles}
             return candles
@@ -1228,7 +1986,7 @@ CANDLE_INTERVAL_SEC = 15 * 60
 FIXED_TIME_EXIT_ENABLED = False
 EMERGENCY_MAX_HOLD_SEC = 24 * 3600
 TRAIL_LADDER = [
-    (12, 9), (20, 15), (30, 25), (40, 30), (50, 40),
+    (12, 8), (15, 12), (20, 15), (30, 25), (40, 30), (50, 40),
     (60, 50), (80, 60), (100, 80), (120, 100), (150, 140),
 ]
 PEAK_NEVER_LOSER_MIN_PEAK = 40.0
@@ -1244,16 +2002,38 @@ THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
 THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -12.0
+THESIS_FAST_EXIT_UNREAL_PCT = -18.0
+THESIS_MFE_PROTECT_PCT = 6.0  # v80: skip thesis fast-cut when peak MFE >= 6% margin
 ADX_BLOCK_NEW_ENTRY = 15.0
 ADX_HALF_SIZE_BELOW = 18.0
 ADX_HALF_SIZE_MULT = 0.5
-RESEARCH_AI_THRESHOLD_FLOOR = 68
+RESEARCH_AI_THRESHOLD_DEFAULT = 50
+LIVE_AI_THRESHOLD_FLOOR = 70
+RESEARCH_EDGE_THRESHOLD_DEFAULT = 2.0
+MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference threshold — sweeps use this; live gate disabled when FREE_RUN below
+# v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
+RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
+RESEARCH_FREE_RUN_DISABLE_CHOP_GATE = True
+RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN = True
+RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; gates log-only
+RESEARCH_PERIODIC_AI_INTERVAL_SEC = 300  # align with AI_COOLDOWN_SECONDS
+BLOCK_FREE_RANGE_ENTRIES = True
+EDGE_DEAD_ZONE_LOW = 4.92
+EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))
+DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
+DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
+
+def dashboard_public_url() -> str:
+    custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
+    if custom:
+        return custom if custom.endswith("/") else custom + "/"
+    return f"http://{DASHBOARD_PUBLIC_HOST}:{DASHBOARD_PORT}/"
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 CONSECUTIVE_LOSS_PAUSE = 4
-DEFAULT_RESEARCH_LEVERAGE = 50
-MAX_RESEARCH_LEVERAGE = 50
+DEFAULT_RESEARCH_LEVERAGE = 100
+MAX_RESEARCH_LEVERAGE = 100
 CONVICTION_SPREAD_FULL = 5
 CONVICTION_SPREAD_HALF = 3
 CONVICTION_SPREAD_QUARTER = 1
@@ -1282,24 +2062,49 @@ CSV_BLOCKS = "blocked_signals_3factor.csv"
 CSV_AI_TRANCHE = "ai_tranche_log.csv"
 CSV_SETUP_LOG = "setup_log_3factor.csv"
 CSV_CANDLES = "candles_3factor.csv"
+CSV_PIPELINE_EVENTS = "pipeline_events_3factor.csv"
+CSV_AI_ERRORS = "ai_errors_3factor.csv"
+PIPELINE_EVENT_DEDUPE_SEC = 2.0
 EMA_FAST = 9
 EMA_SLOW = 21
 EMA_LONG = 200
-SYMBOL = "BTCUSDT"
 LIVE_TRADING_ENABLED = False
 MAX_PENDING_ORDERS = 2
 MAX_EXPIRED_ORDERS = 20
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+def _load_local_dotenv():
+    """Load Final Bots/.env into os.environ (does not override existing vars)."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(root, ".env")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception:
+        pass
+
+_load_local_dotenv()
+DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 6
 AI_TIMEOUT_SEC = 60
-HEDGE_MODE = True
+HEDGE_MODE = False
 SIGNAL_TTL_SEC = 2700
 REPLAY_TTL_SEC = 120 * 60
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = 1800
+SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
+POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 ANALYTICS_INTERVAL_SEC = 600
@@ -1309,7 +2114,7 @@ STARTUP_GRACE_PERIOD = 30
 CANDLE_STALE_SEC = 180
 MAX_ACTIVE_SIGNALS = 6
 MAX_SIGNAL_RETENTION_SEC = 7200
-BUFFER_MIN = 150
+BUFFER_MIN = 150  # Legacy depth target for process_signal warmup flag; readiness gate uses WINDOW_SIZE (10).
 MIN_CANDLES = 200
 READY_STABLE_SEC = 5.0
 STALE_SOFT_SEC = 20
@@ -1318,15 +2123,39 @@ SR_ZONE_PCT = 0.0162
 PRICE_CHANGE_THRESHOLD = 0.0002
 MAX_WS_AGE = 3
 PIPELINE_INTERVAL = 10.0
-AI_COOLDOWN_SECONDS = 300
+AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "300"))  # mandatory 5 min between DeepSeek calls
 MIN_PIPELINE_INTERVAL = 30
 EDGE_INTERVAL_SEC = 30
 EDGE_SCORE_MAX = 6.0
+EDGE_HYSTERESIS_DROP = 0.5
+EDGE_MIN_SPIKE_DELTA = 0.4
+EDGE_CROSS_ONLY_TRIGGER = True
+EDGE_CANDLE_REARM_RESEARCH = True
+EDGE_RANGE_THRESHOLD_BUMP = 0.5
+EDGE_CHOP_CONFLICTED_PENALTY = 0.5
+EDGE_CHOP_COMPRESSION_PENALTY = 0.35
+EDGE_PRE_AI_MIN_SCORE = 3.0
+PRE_AI_BLOCK_CONFLICTED_BELOW = 4.0
+PRE_AI_BLOCK_COMPRESSION_BELOW = 3.2
+PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
+PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v6.3-loss-asymmetry-risk"
+EXECUTION_FIX_VERSION = "v10.9.433-v81-sole-ai-funnel"
+
+
+def csv_research_meta() -> dict:
+    """Columns written to research CSVs for analyzer version/exchange verification."""
+    return {
+        "exchange": BOT_EXCHANGE,
+        "data_symbol": SYMBOL,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "fee_profile": EXCHANGE_FEE_PROFILE,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+    }
 ORDER_PLACEMENT_GRACE_SEC = 30
-RESEARCH_INSTANT_FILL = True
+# Instant fill only when dashboard pullback is 0.0% (see execute_simulated_order / execute_order).
+RESEARCH_INSTANT_FILL = False
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
 TERMINAL_SIGNAL_OUTCOMES = frozenset({"STALE_NO_EXPOSURE", "SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "CAPACITY_REPLACED", "WIN", "LOSS"})
 last_signal_hash = None
@@ -1334,7 +2163,16 @@ last_event_trigger = 0.0
 last_pipeline_run = 0.0
 last_edge_compute = 0.0
 
-EDGE_OPTIONS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
+EDGE_OPTIONS = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
+EDGE_RANGE_PRESETS = [
+    {"id": "min_only", "min": 0.0, "max": None, "label": "Any > 0 (no upper cap) — v81 sole-AI funnel"},
+    {"id": "2.0_2.5", "min": 2.0, "max": 2.5, "label": "2.0 – 2.5 (sweet spot experiment)"},
+    {"id": "2.0_3.0", "min": 2.0, "max": 3.0, "label": "2.0 – 3.0"},
+    {"id": "2.5_3.5", "min": 2.5, "max": 3.5, "label": "2.5 – 3.5"},
+    {"id": "3.0_4.0", "min": 3.0, "max": 4.0, "label": "3.0 – 4.0"},
+    {"id": "custom", "min": None, "max": None, "label": "Custom min / max"},
+]
+DEFAULT_EDGE_RANGE_PRESET = "min_only"
 
 candidate_signal = {"active": False, "direction": None, "confidence": 0.0, "ts": 0.0}
 
@@ -1343,19 +2181,25 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "early_fail_enabled": True,
+    "block_free_range_entries": True,
     "ai_enabled": True,
     "invert_signal": False,
     "telegram_enabled": False,
     "pullback_threshold": 0.001,
     "leverage": DEFAULT_RESEARCH_LEVERAGE,
     "max_active_signals": MAX_CONCURRENT_POSITIONS_DEFAULT,
-    "ai_threshold": 68,
+    "ai_threshold": 50,
     "consecutive_losses": 0,
     "loss_pause_until": 0.0,
-    "edge_threshold": 3.0,
+    "edge_threshold": 0.0,
+    "edge_threshold_max": None,
+    "edge_range_preset": DEFAULT_EDGE_RANGE_PRESET,
     "min_confidence": 0,
     "force_ai_every_signal": False,
-    "debug_enabled": True,
+    "debug_enabled": False,
+    "fresh_collection_mode": False,
+    "last_fresh_reset_ts": 0.0,
+    "last_fresh_reset_summary": "",
     "daily_pnl_usd": 0.0,
     "account_balance": STARTING_BALANCE,
     "current_trading_day": datetime.now(timezone.utc).date(),
@@ -1376,6 +2220,7 @@ state = {
     "last_engine_error": "None",
     "drawdown_kill_until": None,
     "last_ai": {"win_prob": None, "direction": None, "trade_id": None, "comment": None, "ai_error": None, "factors": {}, "source": "NONE", "decision": None},
+    "last_approve_outcome": {"status": None, "reason": None, "effective_threshold": None, "edge_at_approve": None, "trade_id": None, "ts": None},
     "last_ai_ts": 0.0,
     "last_ai_fp": "",
     "ai_history": [],
@@ -1475,10 +2320,16 @@ state = {
         "skip_reason": None,
         "edge_progress": None,
         "ai_gate": {"called": False, "reason": "", "edge": 0.0, "threshold": 0.0},
-        "edge_reason": "UNKNOWN"
+        "edge_reason": "UNKNOWN",
+        "edge_trigger_reason": None,
+        "pipeline_event_trigger": None,
+        "edge_above_threshold": False,
     },
     "last_edge": 0.0,
-    "edge_threshold": 3.0,
+    "edge_prev": 0.0,
+    "edge_trigger_armed": True,
+    "last_edge_trigger_candle_bucket": -1,
+    "edge_threshold": 2.0,
     "last_pipeline_stage": "IDLE",
     "warmup_mode": True
 }
@@ -1489,25 +2340,265 @@ def get_edge_threshold():
     with state_lock:
         return round(float(state["edge_threshold"]), 1)
 
+def get_edge_threshold_max():
+    """Optional upper cap; None = no max (min-only gate)."""
+    with state_lock:
+        raw = state.get("edge_threshold_max")
+    if raw is None or raw == "":
+        return None
+    try:
+        return round(float(raw), 1)
+    except (TypeError, ValueError):
+        return None
+
+def _edge_range_label() -> str:
+    lo = get_edge_threshold()
+    hi = get_edge_threshold_max()
+    if hi is None:
+        return f">={lo:.1f}"
+    return f"{lo:.1f}–{hi:.1f}"
+
+def edge_range_allows(edge_score: float) -> tuple:
+    """Return (allowed, block_reason). Uses effective min + optional dashboard max."""
+    edge_score = round(float(edge_score), 1)
+    eff_thr = get_effective_edge_threshold()
+    if eff_thr <= 0.0:
+        if edge_score <= 0.0:
+            return False, "EDGE_BELOW_THRESHOLD"
+    elif edge_score < eff_thr - 1e-9:
+        return False, "EDGE_BELOW_THRESHOLD"
+    edge_max = get_edge_threshold_max()
+    if edge_max is not None and edge_score > edge_max + 1e-9:
+        return False, "EDGE_ABOVE_MAX"
+    return True, "EDGE_IN_RANGE"
+
+def get_pre_ai_min_score() -> float:
+    """Pre-AI gate follows dashboard edge threshold (research tuning knob)."""
+    return get_edge_threshold()
+
+def get_dynamic_flat_momentum_floor(base: float = None) -> float:
+    """
+    Flat-momentum extra bar scales with dashboard edge:
+    edge 2.0 → no flat penalty (experiment mode); edge 4.0+ → full FLAT_MOMENTUM_EDGE_FLOOR.
+    """
+    base = round(float(base if base is not None else get_edge_threshold()), 1)
+    if base <= FLAT_MOMENTUM_FLOOR_LOW_EDGE:
+        return base
+    if base >= FLAT_MOMENTUM_FLOOR_HIGH_EDGE:
+        return round(FLAT_MOMENTUM_EDGE_FLOOR, 1)
+    span = FLAT_MOMENTUM_FLOOR_HIGH_EDGE - FLAT_MOMENTUM_FLOOR_LOW_EDGE
+    t = (base - FLAT_MOMENTUM_FLOOR_LOW_EDGE) / span
+    return round(FLAT_MOMENTUM_FLOOR_LOW_EDGE + t * (FLAT_MOMENTUM_EDGE_FLOOR - FLAT_MOMENTUM_FLOOR_LOW_EDGE), 1)
+
+def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None):
+    with state_lock:
+        state["last_approve_outcome"] = {
+            "status": status,
+            "reason": reason,
+            "effective_threshold": eff_thr,
+            "edge_at_approve": edge,
+            "trade_id": trade_id,
+            "ts": utc_iso(),
+            "win_prob": (ai or {}).get("win_prob") or state.get("last_ai", {}).get("win_prob"),
+            "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
+        }
+
 def enforce_edge_threshold_options():
     with state_lock:
         current = round(state["edge_threshold"], 1)
+        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+        if research_collect and RESEARCH_AI_SOLE_AUTHORITY:
+            fallback = 0.0
+        else:
+            fallback = RESEARCH_EDGE_THRESHOLD_DEFAULT if research_collect else 3.0
         if current not in [round(x, 1) for x in EDGE_OPTIONS]:
-            logger.warning(f"[EDGE ENFORCEMENT] Invalid threshold {current} - resetting to 3.0 [PIPELINE ENFORCEMENT]")
-            state["edge_threshold"] = 3.0
+            logger.warning(
+                f"[EDGE ENFORCEMENT] Invalid threshold {current} - resetting to {fallback} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            state["edge_threshold"] = fallback
             state["debug_state"]["edge_reason"] = "RESET_TO_DEFAULT"
     logger.info(f"[EDGE ENFORCEMENT] threshold validated at {get_edge_threshold()} [PIPELINE ENFORCEMENT]")
 
-def is_edge_valid(edge_score: float) -> bool:
-    threshold = get_edge_threshold()
-    edge_score_rounded = round(edge_score, 1)
-    valid = edge_score_rounded >= threshold
+def get_effective_edge_threshold() -> float:
+    """Regime-aware edge bar in live mode; dashboard-only in research data collection."""
+    base = get_edge_threshold()
+    if is_research_data_collection():
+        with state_lock:
+            comps = state.get("debug_state", {}).get("edge_components") or {}
+            comps["base_threshold"] = base
+            comps["effective_threshold"] = round(base, 1)
+            comps["research_mode"] = True
+            state["debug_state"]["edge_components"] = comps
+        return round(base, 1)
     with state_lock:
-        state["debug_state"]["edge_progress"] = f"{edge_score_rounded:.1f}/{threshold:.1f} (max {EDGE_SCORE_MAX:.1f})"
-        state["debug_state"]["last_trigger"] = valid
-        state["debug_state"]["last_edge_score"] = edge_score_rounded
-    logger.info(f"[EDGE GATE SINGLE SOURCE] edge={edge_score_rounded:.1f} valid={valid} threshold={threshold} [PIPELINE ENFORCEMENT]")
+        regime = str(state.get("regime", "RANGE")).upper()
+        sr_state = str((state.get("support_resistance") or {}).get("sr_state", "")).upper()
+        fs = state.get("feature_snapshot") or {}
+    eff = round(base + EDGE_RANGE_THRESHOLD_BUMP, 1) if (regime == "RANGE" or "COMPRESSION" in sr_state) else base
+    flat_floor = get_dynamic_flat_momentum_floor(base)
+    momentum_flat = _compute_momentum_metric(fs) < MOMENTUM_FLAT_MAX
+    if momentum_flat:
+        eff = max(eff, flat_floor)
+    with state_lock:
+        comps = state.get("debug_state", {}).get("edge_components") or {}
+        comps["base_threshold"] = base
+        comps["flat_momentum_floor"] = flat_floor
+        comps["momentum_flat"] = momentum_flat
+        comps["effective_threshold"] = round(eff, 1)
+        state["debug_state"]["edge_components"] = comps
+    return round(eff, 1)
+
+def _sync_edge_arm_state(edge_score: float):
+    """Hysteresis: re-arm only after edge falls meaningfully below threshold."""
+    edge_score = round(float(edge_score), 1)
+    eff_thr = get_effective_edge_threshold()
+    rearm_below = round(max(0.5, eff_thr - EDGE_HYSTERESIS_DROP), 1)
+    with state_lock:
+        prev = round(float(state.get("edge_prev", state.get("last_edge", 0)) or 0), 1)
+        state["edge_prev"] = edge_score
+        if edge_score < rearm_below:
+            state["edge_trigger_armed"] = True
+        armed = state.get("edge_trigger_armed", True)
+        range_hi = get_edge_threshold_max()
+        range_cap = f"{range_hi:.1f}" if range_hi is not None else f"{EDGE_SCORE_MAX:.1f}+"
+        state["debug_state"]["edge_progress"] = (
+            f"{edge_score:.1f}/{eff_thr:.1f}–{range_cap} armed={armed}"
+        )
+        state["debug_state"]["last_edge_score"] = edge_score
+    return prev, armed, eff_thr
+
+def is_edge_valid(edge_score: float) -> bool:
+    edge_score_rounded = round(edge_score, 1)
+    eff_thr = get_effective_edge_threshold()
+    valid, _reason = edge_range_allows(edge_score_rounded)
+    _sync_edge_arm_state(edge_score_rounded)
+    with state_lock:
+        state["debug_state"]["edge_above_threshold"] = valid
+    logger.info(
+        f"[EDGE GATE] edge={edge_score_rounded:.1f} valid={valid} "
+        f"range={_edge_range_label()} effective_min={eff_thr} [PIPELINE ENFORCEMENT]"
+    )
     return valid
+
+def _edge_candle_bucket() -> int:
+    return int(time.time() // CANDLE_INTERVAL_SEC)
+
+def should_trigger_edge_event(edge_score: float) -> tuple:
+    """
+    Decide if this cycle should open the pipeline (and eventually AI).
+    Cross-only mode avoids calling AI on every tick while edge stays high.
+    In RESEARCH mode, re-arm once per closed 15m candle bucket when edge stays elevated.
+    """
+    edge_score = round(float(edge_score), 1)
+    prev, armed, eff_thr = _sync_edge_arm_state(edge_score)
+    allowed, block_reason = edge_range_allows(edge_score)
+    if not allowed:
+        return False, block_reason
+    candle_bucket = _edge_candle_bucket()
+    with state_lock:
+        last_candle_bucket = int(state.get("last_edge_trigger_candle_bucket", -1))
+        research_candle_rearm = (
+            EDGE_CANDLE_REARM_RESEARCH
+            and state.get("strategy_mode") == "RESEARCH"
+            and candle_bucket > last_candle_bucket
+        )
+    spike = (edge_score - prev) >= EDGE_MIN_SPIKE_DELTA
+    if EDGE_CROSS_ONLY_TRIGGER:
+        if armed or research_candle_rearm:
+            with state_lock:
+                state["edge_trigger_armed"] = False
+                state["last_edge_trigger_candle_bucket"] = candle_bucket
+            if prev < eff_thr:
+                reason = "EDGE_CROSS"
+            elif spike:
+                reason = "EDGE_SPIKE"
+            elif research_candle_rearm and not armed:
+                reason = "CANDLE_REARM"
+            else:
+                reason = "EDGE_ARMED"
+            logger.info(
+                f"[EDGE TRIGGER] {reason} edge={edge_score} prev={prev} thr={eff_thr} "
+                f"candle_bucket={candle_bucket} [PIPELINE ENFORCEMENT]"
+            )
+            return True, reason
+        return False, "EDGE_SUSTAINED_NO_REARM"
+    if spike or prev < eff_thr:
+        return True, "EDGE_PASS"
+    return True, "EDGE_PASS"
+
+def _sole_ai_research_mode() -> bool:
+    return RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection()
+
+def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
+    """Cheap structural gate — blocks AI without an API call."""
+    if _sole_ai_research_mode():
+        return False, None
+    edge_score = round(float(edge_score), 1)
+    allowed, block_reason = edge_range_allows(edge_score)
+    if not allowed:
+        if block_reason == "EDGE_ABOVE_MAX":
+            return True, f"PRE_AI_EDGE_ABOVE_MAX_{edge_score}"
+        return True, f"PRE_AI_EDGE_LOW_{edge_score}"
+    pre_ai_min = get_pre_ai_min_score()
+    if edge_score < pre_ai_min:
+        return True, f"PRE_AI_EDGE_LOW_{edge_score}"
+    if is_research_data_collection():
+        return False, None
+    update_market_context()
+    with state_lock:
+        mc = state.get("market_context") or {}
+    mtf = (mc.get("multi_tf") or {})
+    ts = (mc.get("trend_strength") or {})
+    agreement = str(mtf.get("agreement", ""))
+    adx = float(ts.get("adx") or 0)
+    sr_state = ""
+    if features:
+        sr_state = str(features.get("sr_state", "")).upper()
+    if not sr_state:
+        sr_state = str((state.get("support_resistance") or {}).get("sr_state", "")).upper()
+    if agreement == "CONFLICTED" and edge_score < PRE_AI_BLOCK_CONFLICTED_BELOW:
+        return True, "PRE_AI_MTF_CONFLICTED"
+    if "COMPRESSION" in sr_state and edge_score < PRE_AI_BLOCK_COMPRESSION_BELOW:
+        return True, "PRE_AI_RANGE_COMPRESSION"
+    if adx < PRE_AI_MIN_ADX and edge_score < PRE_AI_BLOCK_LOW_ADX_BELOW:
+        return True, f"PRE_AI_LOW_ADX_{adx:.1f}"
+    return False, None
+
+def ai_cooldown_remaining_sec() -> int:
+    return max(0, int(AI_COOLDOWN_SECONDS - (time.time() - state.get("last_ai_call_ts", 0))))
+
+def reserve_ai_cooldown_slot() -> tuple:
+    """Atomically claim the 5-minute DeepSeek slot immediately before any API call."""
+    with state_lock:
+        now = time.time()
+        last = float(state.get("last_ai_call_ts") or 0)
+        if now - last < AI_COOLDOWN_SECONDS:
+            rem = int(AI_COOLDOWN_SECONDS - (now - last))
+            return False, f"AI_COOLDOWN_{rem}s"
+        state["last_ai_call_ts"] = now
+        state["debug_state"]["ai_cooldown_active"] = True
+        state["debug_state"]["cooldown_remaining_ai"] = AI_COOLDOWN_SECONDS
+    return True, "RESERVED"
+
+def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple:
+    """Final gate before DeepSeek — edge event + pre-AI blocks; cooldown enforced via reserve_ai_cooldown_slot()."""
+    if state.get("force_ai_every_signal"):
+        return True, "FORCE_AI"
+    if _sole_ai_research_mode():
+        if ai_cooldown_remaining_sec() > 0:
+            return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
+        if round(float(edge_score), 1) <= 0.0:
+            return False, "EDGE_ZERO"
+        return True, "PERIODIC_RESEARCH_AI"
+    if ai_cooldown_remaining_sec() > 0:
+        return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
+    if not event_trigger:
+        return False, "NO_EDGE_TRIGGER"
+    blocked, reason = evaluate_pre_ai_gate(edge_score, ctx)
+    if blocked:
+        return False, reason
+    return True, "EDGE_EVENT"
 
 def compute_ret_1m():
     if len(price_buffer) < 2:
@@ -1519,7 +2610,9 @@ def compute_ret_5m():
         return 0.0
     return (price_buffer[-1] - price_buffer[-20]) / price_buffer[-20] if price_buffer[-20] != 0 else 0.0
 
-def populate_candle_buffers_from_candles(candles):
+def populate_candle_buffers_from_candles(candles, *, force=False):
+    if not force and len(candle_range_buffer) >= WINDOW_SIZE:
+        return 0
     populated = 0
     for candle in candles:
         try:
@@ -1538,10 +2631,10 @@ def populate_candle_buffers_from_candles(candles):
             body_ratio_buffer.append(body_ratio)
             wick_ratio_buffer.append(wick_ratio)
             populated += 1
-            logger.debug(f"[CANDLE BUFFER PRELOAD] range={candle_range:.4f} body_ratio={body_ratio:.4f} wick_ratio={wick_ratio:.4f} [PIPELINE ENFORCEMENT]")
         except Exception as e:
             logger.error(f"[CANDLE BUFFER PRELOAD ERROR] {e} [PIPELINE ENFORCEMENT]")
     logger.info(f"[CANDLE BUFFER PRELOAD] populated {populated} candles into buffers [PIPELINE ENFORCEMENT]")
+    return populated
 
 def compute_volume_ratio():
     if len(volume_buffer) < 1:
@@ -1685,9 +2778,7 @@ def compute_edge_score(features: dict = None) -> float:
         ema9 = nz(features.get("ema9", 0))
         ema21 = nz(features.get("ema21", 0))
         ema200 = nz(features.get("ema200", 0))
-        ret_1m = abs(nz(features.get("ret_1m", 0)))
-        ret_5m = abs(nz(features.get("ret_5m", 0)))
-        velocity = abs(nz(features.get("velocity", 0)))
+        ret_1m_raw, ret_5m_raw, velocity_raw = _signed_momentum_components(features)
         volume = nz(features.get("volume", 0))
         volume_ratio = nz(features.get("volume_ratio", 0))
         delta = abs(nz(features.get("delta", 0)))
@@ -1712,8 +2803,32 @@ def compute_edge_score(features: dict = None) -> float:
         else:
             ema_trend_component = 0.35
         trend_component = ema_trend_component + (0.25 if adx >= 25 else 0.0)
-        momentum_raw = max(ret_1m * 5000, ret_5m * 2000, velocity * 8000)
+        agreement = str(mtf.get("agreement", ""))
+        struct_score_raw = float(ms.get("structure_score") or 0)
+        pref_dir = None
+        if agreement == "BEAR_ALIGNED" or struct_score_raw <= -3:
+            pref_dir = "SHORT"
+        elif agreement == "BULL_ALIGNED" or struct_score_raw >= 3:
+            pref_dir = "LONG"
+
+        def _aligned_momentum(val, scale):
+            if pref_dir == "SHORT":
+                return max(0.0, -val) * scale
+            if pref_dir == "LONG":
+                return max(0.0, val) * scale
+            return abs(val) * scale
+
+        momentum_raw = max(
+            _aligned_momentum(ret_1m_raw, 5000),
+            _aligned_momentum(ret_5m_raw, 2000),
+            _aligned_momentum(velocity_raw, 8000),
+        )
         momentum_component = min(momentum_raw, 1.0) * 1.0
+        momentum_misalign_penalty = 0.0
+        if pref_dir == "SHORT" and _tape_bounce_against("SHORT", features):
+            momentum_misalign_penalty = min(0.6, ret_1m_raw * 8000 + max(0.0, ret_5m_raw) * 3000)
+        elif pref_dir == "LONG" and _tape_bounce_against("LONG", features):
+            momentum_misalign_penalty = min(0.6, abs(ret_1m_raw) * 8000 + max(0.0, -ret_5m_raw) * 3000)
         flow_component = min(volume_ratio, 1.0) * min(delta / 50, 1.0) * 1.0
         sr_near = dist_to_support < 0.02 or dist_to_resistance < 0.02
         sr_component = 0.6 if sr_near else 0.15
@@ -1725,8 +2840,18 @@ def compute_edge_score(features: dict = None) -> float:
             flow_component +
             sr_component
         )
+        chop_penalty = 0.0
+        if mtf.get("agreement") == "CONFLICTED":
+            chop_penalty += EDGE_CHOP_CONFLICTED_PENALTY
+        sr_state = str((state.get("support_resistance") or {}).get("sr_state", "")).upper()
+        if "COMPRESSION" in sr_state:
+            chop_penalty += EDGE_CHOP_COMPRESSION_PENALTY
+        if adx < PRE_AI_MIN_ADX:
+            chop_penalty += 0.25
+        edge_score = edge_score - chop_penalty - momentum_misalign_penalty
         edge_score = max(0.1, min(edge_score, EDGE_SCORE_MAX))
         edge_score = round(edge_score, 1)
+        eff_thr = get_effective_edge_threshold()
         with state_lock:
             state["last_edge"] = edge_score
             state["debug_state"]["last_edge_score"] = edge_score
@@ -1737,8 +2862,13 @@ def compute_edge_score(features: dict = None) -> float:
                 "momentum": round(momentum_component, 2),
                 "flow": round(flow_component, 2),
                 "sr_context": round(sr_component, 2),
+                "chop_penalty": round(chop_penalty, 2),
+                "momentum_misalign_penalty": round(momentum_misalign_penalty, 2),
+                "effective_threshold": eff_thr,
             }
-            state["debug_state"]["edge_progress"] = f"{edge_score:.1f}/{get_edge_threshold():.1f} (max {EDGE_SCORE_MAX:.1f})"
+            state["debug_state"]["edge_progress"] = (
+                f"{edge_score:.1f}/{eff_thr:.1f} (max {EDGE_SCORE_MAX:.1f})"
+            )
             state["debug_state"]["edge_reason"] = "OK" if edge_score > 0.5 else "LOW"
         logger.info(f"[EDGE] compute_edge_score completed edge={edge_score:.1f} reason={state['debug_state']['edge_reason']} [PIPELINE ENFORCEMENT]")
         enforce_edge_threshold_options()
@@ -1747,6 +2877,144 @@ def compute_edge_score(features: dict = None) -> float:
     except Exception as e:
         logger.error(f"[EDGE SCORE ERROR] {e} [PIPELINE ENFORCEMENT]")
         return 0.1
+
+def _fresh_debug_state():
+    return {
+        "last_event_time": None,
+        "last_edge_score": 0,
+        "last_flags": {},
+        "last_trigger": False,
+        "last_signal_attempt": None,
+        "last_block_reason": None,
+        "last_ai_call": None,
+        "last_ai_decision": None,
+        "last_ai_score": None,
+        "signal_cooldown_active": False,
+        "ai_cooldown_active": False,
+        "cooldown_remaining_signal": 0,
+        "cooldown_remaining_ai": 0,
+        "last_pipeline_stage": None,
+        "system_last_tick": None,
+        "engine_last_run": None,
+        "last_check_time": None,
+        "skip_reason": None,
+        "edge_progress": None,
+        "ai_gate": {"called": False, "reason": "", "edge": 0.0, "threshold": 0.0},
+        "edge_reason": "UNKNOWN",
+        "edge_trigger_reason": None,
+        "pipeline_event_trigger": None,
+        "edge_above_threshold": False,
+    }
+
+def _ai_gate_was_called(debug_state: dict) -> bool:
+    return bool(((debug_state or {}).get("ai_gate") or {}).get("called"))
+
+def _is_misleading_ai_skip_label(label) -> bool:
+    """Labels that imply DeepSeek ran when ai_gate.called is false."""
+    if label is None:
+        return False
+    s = str(label).strip().upper()
+    if not s or s in ("-", "OK", "UNKNOWN"):
+        return False
+    if s.startswith("EDGE_") or s.startswith("PRE_AI_"):
+        return False
+    if s in (
+        "EDGE_FAIL", "DUPLICATE", "DUPLICATE_KEY", "CTX_FAIL", "NO_PRICE",
+        "CLUSTER_ENTRY", "MAX_ACTIVE_SIGNALS", "GLOBAL_COOLDOWN",
+    ):
+        return False
+    if s.startswith("AI_"):
+        return True
+    return s in {"REJECT", "AI_REJECT", "AI_REJECTED", "BELOW_THRESHOLD", "AI_FAIL"}
+
+def _dashboard_idle_gate_reason(debug_state: dict) -> str:
+    dbg = debug_state or {}
+    reason = dbg.get("edge_trigger_reason") or dbg.get("edge_reason")
+    if reason and str(reason) not in ("OK", "UNKNOWN", ""):
+        return str(reason)
+    edge = dbg.get("last_edge_score")
+    try:
+        eff = (dbg.get("edge_components") or {}).get("effective_threshold")
+        if eff is None:
+            eff = get_effective_edge_threshold()
+    except Exception:
+        eff = get_edge_threshold()
+    if edge is not None and eff is not None:
+        return f"EDGE_WAIT ({float(edge):.1f} / {float(eff):.1f})"
+    return "WAITING_FOR_EDGE"
+
+def _dashboard_skip_block(debug_state: dict) -> tuple:
+    """Map skip/block to the real gate when DeepSeek was not invoked this cycle."""
+    dbg = debug_state or {}
+    skip = dbg.get("skip_reason")
+    block = dbg.get("last_block_reason")
+    if _ai_gate_was_called(dbg):
+        return skip or "-", block or "-"
+    if skip and not _is_misleading_ai_skip_label(skip):
+        return skip, block or skip
+    if block and not _is_misleading_ai_skip_label(block):
+        return skip or block, block
+    idle = _dashboard_idle_gate_reason(dbg)
+    return idle, idle
+
+def build_dashboard_display(snapshot: dict) -> dict:
+    """Server-side labels for dashboard (avoids stale AI_REJECT / Bybit-era copy)."""
+    dbg = snapshot.get("debug_state") or {}
+    ag = dbg.get("ai_gate") or {}
+    la = snapshot.get("last_ai") or {}
+    sk, bl = _dashboard_skip_block(dbg)
+    symbol = BITFINEX_WS_SYMBOL
+    if _ai_gate_was_called(dbg):
+        dec = la.get("decision") or snapshot.get("ai_outcome") or "UNKNOWN"
+        if dec == "AI_ERROR":
+            ai_status = "AI_ERROR"
+            err_note = (la.get("error_detail") or la.get("reason") or la.get("comment") or "DeepSeek API/parse failure")[:400]
+            if "MISSING_API_KEY" in err_note or "MISSING_API_KEY" in str(la.get("error_type") or ""):
+                err_note = "MISSING_API_KEY — add DEEPSEEK_API_KEY to Final Bots\\.env and restart"
+            good = snapshot.get("last_ai_best") or _pick_dashboard_last_ai({"last_ai": {}}, snapshot.get("ai_history") or [])
+            if good.get("decision") not in (None, "", "AI_ERROR", "UNKNOWN"):
+                ai_note = f"{err_note} | Last OK: {good.get('decision')} {good.get('win_prob')}% ({good.get('direction')})"
+            else:
+                ai_note = err_note
+        else:
+            ai_status = dec
+            ai_note = "DeepSeek evaluated this pipeline cycle"
+        ai_prob = la.get("win_prob") if dec != "AI_ERROR" else None
+    else:
+        ai_status = "NO_AI_CALL"
+        ai_note = f"No DeepSeek call — {sk}"
+        ai_prob = None
+        if la.get("decision") and la.get("source") in ("CSV", "FRESH", "AI"):
+            ai_note += f" (table below may show prior call: {la.get('decision')})"
+    return {
+        "display_skip_block": {"skip": sk, "block": bl},
+        "display_ai": {
+            "status": ai_status,
+            "win_prob": ai_prob,
+            "note": ai_note,
+            "gate_called": bool(ag.get("called")),
+        },
+        "exchange_label": "Bitfinex",
+        "market_symbol": symbol,
+        "data_banner_ws": f"REAL BITFINEX MARKET DATA (WS) · {symbol}",
+        "data_banner_rest": f"BITFINEX REST FALLBACK · {symbol}",
+        "data_banner_boot": f"BITFINEX CONNECTING · {symbol}",
+    }
+
+def sync_dashboard_branding():
+    """Keep exchange/banner fields on state so /api/state is never Bybit-stale."""
+    try:
+        with state_lock:
+            snap = {
+                "debug_state": copy.deepcopy(state.get("debug_state") or {}),
+                "last_ai": copy.deepcopy(state.get("last_ai") or {}),
+                "ai_outcome": state.get("ai_outcome"),
+            }
+        branding = build_dashboard_display(snap)
+        with state_lock:
+            state.update(branding)
+    except Exception as e:
+        logger.debug(f"[DASHBOARD BRANDING] {e}")
 
 def update_debug_state_always(stage=None, extra=None, *args, **kwargs):
     try:
@@ -1764,7 +3032,10 @@ def update_debug_state_always(stage=None, extra=None, *args, **kwargs):
 
 def reset_all_csv():
     logger.warning("[RESET] Deleting all CSV files for fresh session [PIPELINE ENFORCEMENT]")
-    files = [CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES]
+    files = [
+        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
+        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
+    ]
     for f in files:
         try:
             if os.path.exists(f):
@@ -1775,11 +3046,17 @@ def reset_all_csv():
 
 def update_logger_level():
     try:
-        level = logging.DEBUG if state.get("debug_enabled") else logging.INFO
-        logger.setLevel(level)
+        console_level = logging.DEBUG if state.get("debug_enabled") else logging.INFO
+        logger.setLevel(console_level)
         for h in logger.handlers:
-            h.setLevel(level)
-        logger.info(f"[LOGGER] Level set to {logging.getLevelName(level)} [PIPELINE ENFORCEMENT]")
+            if isinstance(h, RotatingFileHandler):
+                h.setLevel(logging.INFO)
+            else:
+                h.setLevel(console_level)
+        logger.info(
+            f"[LOGGER] console={logging.getLevelName(console_level)} "
+            f"file=INFO rotate={LOG_MAX_BYTES // (1024*1024)}MB x{LOG_BACKUP_COUNT} [PIPELINE ENFORCEMENT]"
+        )
     except Exception as e:
         logger.error(f"[LOGGER ERROR] {e} [PIPELINE ENFORCEMENT]")
 
@@ -1994,7 +3271,7 @@ def sanitize_ai_inputs(ctx: dict) -> dict:
             clean[k] = v
     return clean
 
-def enforce_log(signal: dict, stage: str, extra: str = None):
+def enforce_log(signal: dict, stage: str, extra: str = None, skip_stage: str = None):
     if not signal or not isinstance(signal, dict) or not signal.get("trade_id"):
         logger.error(f"[LOG ENFORCEMENT FAIL] Missing trade_id for stage={stage} [PIPELINE ENFORCEMENT]")
         return
@@ -2003,7 +3280,7 @@ def enforce_log(signal: dict, stage: str, extra: str = None):
         return
     signal[logged_key] = True
     signal["_logged"] = True
-    log_decision(signal, stage, extra or stage)
+    log_decision(signal, stage, extra or stage, skip_stage=skip_stage or stage, ai_extra=extra)
     persist_signal(signal, stage)
     logger.info(f"[ENFORCE_LOG] {stage} trade_id={signal.get('trade_id')} extra={extra} [PIPELINE ENFORCEMENT]")
 
@@ -2073,6 +3350,18 @@ def exit_pipeline(signal: dict, ai: dict = None, reason: str = "UNKNOWN"):
     signal["block_reason"] = reason
     if ai is None:
         ai = {"win_prob":0,"direction":"NO_TRADE","decision":"REJECT","source":"SYSTEM","approved":False}
+    if ai.get("decision") == "APPROVE":
+        record_approve_outcome(
+            "BLOCKED",
+            reason,
+            signal.get("effective_threshold_at_entry") or get_effective_edge_threshold(),
+            signal.get("trade_id"),
+            signal.get("edge_score_at_entry"),
+            ai,
+        )
+        defer_shadow_research(signal.get("trade_id"), reason)
+        if not signal.get("_logged_BLOCKED"):
+            enforce_log(signal, "BLOCKED", reason, skip_stage="POST_AI")
     log_blocked_signal(signal, ai, reason)
     finalize_signal(signal, ai, "BLOCKED")
     full_pipeline_trace("BLOCKED", reason, signal.get("trade_id"))
@@ -2092,12 +3381,32 @@ def trace(stage: str, msg: str, trade_id: str = None):
 
 def debug_snapshot(signal=None, ai=None, stage="UNKNOWN"):
     try:
+        dbg = state.get("debug_state") or {}
         snapshot = {
             "time": utc_iso(),
             "stage": stage,
             "price": state.get("price"),
             "regime": state.get("regime"),
-            "ai": {"direction": ai.get("direction") if ai else None,"decision": ai.get("decision") if ai else None,"win_prob": ai.get("win_prob") if ai else None},
+            "ai": {
+                "direction": ai.get("direction") if ai else None,
+                "decision": ai.get("decision") if ai else None,
+                "win_prob": ai.get("win_prob") if ai else None,
+                "source": ai.get("source") if ai else None,
+                "ai_error": ai.get("ai_error") if ai else None,
+                "error_type": ai.get("error_type") if ai else None,
+                "error_detail": (ai.get("error_detail") or (ai.get("comment") if ai else None) or "")[:500] if ai else None,
+                "latency_ms": ai.get("latency_ms") if ai else None,
+                "http_status": ai.get("http_status") if ai else None,
+            },
+            "edge": {
+                "score": dbg.get("last_edge_score"),
+                "threshold": get_edge_threshold(),
+                "effective": get_effective_edge_threshold(),
+                "trigger_reason": dbg.get("edge_trigger_reason"),
+                "trigger": dbg.get("pipeline_event_trigger"),
+                "components": dbg.get("edge_components"),
+            },
+            "ai_gate": dbg.get("ai_gate"),
             "threshold": state.get("ai_threshold"),
             "max_pos": state.get("max_active_signals"),
             "active_signals": get_active_signal_count(),
@@ -2105,7 +3414,8 @@ def debug_snapshot(signal=None, ai=None, stage="UNKNOWN"):
             "signal": {"id": signal.get("trade_id") if signal else None,"status": signal.get("status") if signal else None,"direction": signal.get("final_direction") if signal else None},
             "orderflow": {"delta": orderflow["delta"], "imbalance": orderflow["imbalance"]},
             "volume_spike": (len(volume_buffer) > 5 and volume_buffer[-1] > np.mean(volume_buffer) * 1.5),
-            "exposure": compute_exposure()
+            "exposure": compute_exposure(),
+            "pipeline_outcome": state.get("pipeline_outcome"),
         }
         store_debug_snapshot(stage, snapshot)
         logger.info("\n" + "="*80)
@@ -2255,9 +3565,61 @@ def build_pure_ai_context(state_snapshot, buffers):
         return None
     return sanitize_ai_inputs(ctx)
 
-def evaluate_sr_direction_filter(direction: str, sr_state: str, market_context: dict = None):
+def _structure_allows_bear_continuation(market_context: dict) -> bool:
+    mc = market_context or {}
+    ms = mc.get("market_structure", {})
+    mtf = mc.get("multi_tf", {})
+    struct_score = float(ms.get("structure_score") or 0)
+    if ms.get("lh_ll_sequence_active"):
+        return True
+    if struct_score <= -2:
+        return True
+    if mtf.get("agreement") == "BEAR_ALIGNED":
+        return True
+    return False
+
+
+def _structure_allows_bull_continuation(market_context: dict) -> bool:
+    mc = market_context or {}
+    ms = mc.get("market_structure", {})
+    mtf = mc.get("multi_tf", {})
+    struct_score = float(ms.get("structure_score") or 0)
+    if ms.get("hh_hl_sequence_active"):
+        return True
+    if struct_score >= 2:
+        return True
+    if mtf.get("agreement") == "BULL_ALIGNED":
+        return True
+    return False
+
+
+def _ai_confirms_sr_continuation(direction: str, ai: dict, market_context: dict) -> bool:
+    """AI already receives SR context; APPROVE + factor scores can confirm continuation at S/R."""
+    if not ai or str(ai.get("decision", "")).upper() != "APPROVE":
+        return False
+    bull = int(ai.get("bull_score", 0) or 0)
+    bear = int(ai.get("bear_score", 0) or 0)
+    mc = market_context or {}
+    ms = mc.get("market_structure", {})
+    struct_score = float(ms.get("structure_score") or 0)
+    mtf_agree = (mc.get("multi_tf") or {}).get("agreement", "MIXED")
+    if direction == "SHORT":
+        return (
+            bear >= bull + MIN_FACTOR_SCORE_MARGIN
+            and (mtf_agree == "BEAR_ALIGNED" or struct_score <= SHORT_NEAR_SUPPORT_MIN_STRUCT)
+        )
+    if direction == "LONG":
+        return (
+            bull >= bear + MIN_FACTOR_SCORE_MARGIN
+            and (mtf_agree == "BULL_ALIGNED" or struct_score >= 2)
+        )
+    return False
+
+
+def evaluate_sr_direction_filter(direction: str, sr_state: str, market_context: dict = None, ai: dict = None):
     """
-    Phase B soft S/R filter. Blocks fade trades at S/R only when structure + MTF oppose the direction.
+    Phase B soft S/R filter. SOFT mode blocks fade trades at S/R only when structure + MTF oppose;
+    strong continuation (and AI factor confirmation after SR-aware APPROVE) is allowed.
     Returns (blocked: bool, reason: str|None).
     """
     if SR_FILTER_MODE == "OFF":
@@ -2267,27 +3629,31 @@ def evaluate_sr_direction_filter(direction: str, sr_state: str, market_context: 
     mc = market_context or {}
     ms = mc.get("market_structure", {})
     mtf = mc.get("multi_tf", {})
-    struct_score = ms.get("structure_score", 0)
-    hh_hl = ms.get("hh_hl_sequence_active", False)
-    lh_ll = ms.get("lh_ll_sequence_active", False)
+    struct_score = float(ms.get("structure_score") or 0)
     mtf_agree = mtf.get("agreement", "MIXED")
 
     if direction == "LONG" and sr_state == "NEAR_RESISTANCE":
-        if SR_FILTER_MODE == "HARD" or BLOCK_LONG_NEAR_RESISTANCE:
+        if SR_FILTER_MODE == "HARD" or (BLOCK_LONG_NEAR_RESISTANCE and SR_FILTER_MODE != "SOFT"):
             return True, "LONG_BLOCKED_NEAR_RESISTANCE"
-        if hh_hl or struct_score >= 2 or mtf_agree == "BULL_ALIGNED":
+        if _structure_allows_bull_continuation(mc) or _ai_confirms_sr_continuation("LONG", ai, mc):
             return False, "SR_SOFT_ALLOW_BULL_CONTINUATION"
         if struct_score <= -2 and mtf_agree == "BEAR_ALIGNED":
+            return True, "LONG_BLOCKED_NEAR_RESISTANCE"
+        if BLOCK_LONG_NEAR_RESISTANCE:
             return True, "LONG_BLOCKED_NEAR_RESISTANCE"
         return False, None
 
     if direction == "SHORT" and sr_state == "NEAR_SUPPORT":
-        if SR_FILTER_MODE == "HARD" or BLOCK_SHORT_NEAR_SUPPORT:
+        if SR_FILTER_MODE == "HARD":
             return True, "SHORT_BLOCKED_NEAR_SUPPORT"
-        if lh_ll or struct_score <= -2 or mtf_agree == "BEAR_ALIGNED":
+        if _structure_allows_bear_continuation(mc):
             return False, "SR_SOFT_ALLOW_BEAR_CONTINUATION"
+        if _ai_confirms_sr_continuation("SHORT", ai, mc):
+            return False, "SR_SOFT_ALLOW_AI_FACTOR_CONTINUATION"
         if struct_score >= 2 and mtf_agree == "BULL_ALIGNED":
             return True, "SHORT_BLOCKED_NEAR_SUPPORT"
+        if BLOCK_SHORT_NEAR_SUPPORT:
+            return True, "SHORT_BLOCKED_NEAR_SUPPORT_WEAK"
         return False, None
 
     return False, None
@@ -2378,8 +3744,7 @@ def double_confirm_ai(original_ai, ctx):
         confirm_prompt = f"""Original decision: Direction={original_ai.get('direction')} WinProb={original_ai.get('win_prob')} Decision={original_ai.get('decision')}
 Context: {json.dumps(ctx, indent=2)}
 Verify if still correct. Return same format."""
-        res = requests.post(DEEPSEEK_URL, headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}, json={"model": "deepseek-chat","messages": [{"role": "user", "content": confirm_prompt}],"temperature": 0.3}, timeout=AI_TIMEOUT_SEC)
-        text = res.json()["choices"][0]["message"]["content"]
+        text, _latency = call_deepseek_api([{"role": "user", "content": confirm_prompt}], temperature=0.3)
         dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
         direction = dir_match.group(1).upper() if dir_match else original_ai.get("direction")
         match = re.search(r"Win probability:\s*(\d+)", text)
@@ -2393,6 +3758,351 @@ Verify if still correct. Return same format."""
     except Exception as e:
         logger.error(f"[DOUBLE AI] Failed: {e} — using original [PIPELINE ENFORCEMENT]")
         return original_ai
+
+def _format_melbourne_hm(ts_str: str) -> str:
+    if not ts_str or ts_str == "-":
+        return "-"
+    try:
+        ts = ts_str.replace("Z", "+00:00")
+        if "+" not in ts and ts.count(":") >= 2:
+            ts = ts + "+00:00"
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        mel = dt.astimezone(ZoneInfo("Australia/Melbourne"))
+        return mel.strftime("%Y-%m-%d %H:%M Melbourne")
+    except Exception:
+        return ts_str
+
+def _session_ai_history(in_memory: list, limit: int = 50) -> list:
+    """Return in-memory AI history rows from current bot session only."""
+    session_start = bot_start_time or 0.0
+    filtered = []
+    for row in in_memory or []:
+        ts = parse_ts(row.get("time") or row.get("ts") or "")
+        if ts >= session_start - 1.0:
+            filtered.append(row)
+    return filtered[-limit:]
+
+def _research_log_would_block(signal, ai, reason, edge_score=None):
+    """Log gate that would have blocked in v80; continue in v81 sole-AI mode."""
+    tag = f"WOULD_BLOCK_{reason}"
+    log_blocked_signal(signal, ai, tag)
+    log_pipeline_event(
+        "POST_AI", "WOULD_BLOCK", tag,
+        signal.get("trade_id") if signal else None,
+        edge_score if edge_score is not None else (signal or {}).get("edge_score_at_entry", 0),
+        force=True,
+    )
+
+def _append_ai_history_row(ai_result: dict) -> None:
+    """In-memory session AI history for dashboard AI History table."""
+    now_iso = utc_iso()
+    with state_lock:
+        state["ai_history"].append({
+            "time": now_iso,
+            "melbourne_time": _format_melbourne_hm(now_iso),
+            "session_ts": bot_start_time,
+            "trade_id": ai_result.get("trade_id"),
+            "ai_direction_raw": ai_result.get("direction"),
+            "final_direction": ai_result.get("direction"),
+            "inverted": False,
+            "decision": ai_result.get("decision"),
+            "win_prob": ai_result.get("win_prob"),
+            "edge_score": state.get("last_edge", 0.0),
+            "edge_threshold": get_edge_threshold(),
+            "source": ai_result.get("source", "AI"),
+            "comment": (ai_result.get("comment") or "")[:2000],
+            "ai_error": ai_result.get("ai_error", False),
+            "error_type": ai_result.get("error_type"),
+            "error_detail": (ai_result.get("error_detail") or "")[:500],
+            "final_outcome": state.get("execution_outcome", "PENDING"),
+            "bull_score": ai_result.get("bull_score", 0),
+            "bear_score": ai_result.get("bear_score", 0),
+        })
+        hist_limit = 50 if _sole_ai_research_mode() else 5
+        state["ai_history"] = state["ai_history"][-hist_limit:]
+        state["ai_history_updated"] = time.time()
+
+def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
+    """Align top AI card + debug panel after every DeepSeek evaluation (approve or reject)."""
+    tid = trade_id or ai_result.get("trade_id")
+    with state_lock:
+        state["last_ai_ts"] = time.time()
+        state["debug_state"]["last_ai_call"] = utc_iso()
+        state["debug_state"]["last_ai_score"] = ai_result.get("win_prob")
+        state["last_ai"]["win_prob"] = ai_result.get("win_prob")
+        state["last_ai"]["direction"] = ai_result.get("direction")
+        state["last_ai"]["decision"] = ai_result.get("decision")
+        state["last_ai"]["trade_id"] = tid
+        state["last_ai"]["comment"] = (ai_result.get("comment") or "")[:500]
+        state["last_ai"]["source"] = ai_result.get("source", "FRESH")
+        state["last_ai"]["ai_error"] = ai_result.get("ai_error", False)
+        state["last_ai"]["error_type"] = ai_result.get("error_type")
+        state["last_ai"]["error_detail"] = (ai_result.get("error_detail") or "")[:500]
+        if ai_result.get("decision") == "AI_ERROR":
+            state["last_ai"]["reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
+        else:
+            state["last_ai"]["reason"] = (ai_result.get("comment") or "")[:500]
+        state["ai_outcome"] = ai_result.get("decision")
+        state["ai_decision"] = ai_result.get("decision")
+
+def _deepseek_api_key():
+    """Read key each call so .env / env changes apply without full process restart."""
+    _load_local_dotenv()
+    return (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
+
+def _csv_row_to_ai_history(row: dict) -> dict:
+    try:
+        wp = float(row.get("win_prob") or 0)
+    except (TypeError, ValueError):
+        wp = 0
+    dec = (row.get("decision") or "").strip().upper()
+    if not dec and str(row.get("approved", "")).lower() in ("true", "1", "yes"):
+        dec = "APPROVE"
+    if not dec and str(row.get("approved", "")).lower() in ("false", "0", "no"):
+        dec = "REJECT"
+    comment = (row.get("comment") or row.get("full_comment") or "")
+    if not dec or dec == "AI_ERROR":
+        m = re.search(r"Decision:\s*(APPROVE|REJECT)", comment, re.IGNORECASE)
+        if m:
+            dec = m.group(1).upper()
+    return {
+        "time": row.get("ts") or row.get("time") or "-",
+        "trade_id": row.get("trade_id"),
+        "ai_direction_raw": row.get("ai_direction_raw") or row.get("dir"),
+        "final_direction": row.get("final_direction") or row.get("dir"),
+        "inverted": str(row.get("inverted", "")).lower() in ("true", "1", "yes"),
+        "decision": dec or "UNKNOWN",
+        "win_prob": wp,
+        "comment": comment[:2000],
+        "source": row.get("source", "CSV"),
+        "ai_error": str(row.get("ai_error", "")).lower() in ("true", "1", "yes") or dec == "AI_ERROR",
+    }
+
+def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
+    """Hydrate dashboard from Final Bots + legacy %USERPROFILE% logs."""
+    bot_root = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        os.path.join(bot_root, CSV_AI_TRANCHE),
+        os.path.join(os.path.expanduser("~"), CSV_AI_TRANCHE),
+        CSV_AI_TRANCHE,
+    ]
+    seen_paths = set()
+    rows = []
+    for path in paths:
+        if path in seen_paths or not os.path.isfile(path):
+            continue
+        seen_paths.add(path)
+        for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+            try:
+                with open(path, newline="", encoding=enc) as f:
+                    rows.extend(list(csv.DictReader(f)))
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.debug(f"[AI HISTORY CSV] read failed {path}: {e}")
+                break
+    if not rows:
+        return []
+    rows.sort(key=lambda r: r.get("ts") or r.get("time") or "")
+    out = [_csv_row_to_ai_history(r) for r in rows[-max(limit * 3, limit):]]
+    return out[-limit:]
+
+def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
+    if RESEARCH_AI_SOLE_AUTHORITY or is_research_data_collection():
+        return _session_ai_history(in_memory, limit)
+    csv_rows = _load_recent_ai_history_from_csv(limit * 2)
+    combined = (in_memory or []) + csv_rows
+    by_trade = {}
+    for row in combined:
+        tid = row.get("trade_id") or ""
+        prev = by_trade.get(tid)
+        if not prev or (row.get("time") or "") >= (prev.get("time") or ""):
+            by_trade[tid] = row
+    deduped = sorted(by_trade.values(), key=lambda r: r.get("time") or "")
+    return deduped[-limit:]
+
+def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
+    """Prefer latest non-error AI row (fixes dashboard stuck on MISSING_API_KEY from an old cycle)."""
+    la = copy.deepcopy(snapshot.get("last_ai") or {})
+    if la.get("decision") and la.get("decision") != "AI_ERROR" and not la.get("ai_error"):
+        return la
+    for row in reversed(ai_history or []):
+        dec = row.get("decision")
+        if dec and dec != "AI_ERROR" and not row.get("ai_error"):
+            return {
+                "win_prob": row.get("win_prob"),
+                "direction": row.get("ai_direction_raw") or row.get("dir"),
+                "final_direction": row.get("final_direction"),
+                "decision": dec,
+                "trade_id": row.get("trade_id"),
+                "comment": row.get("comment"),
+                "source": row.get("source", "CSV"),
+                "inverted": row.get("inverted"),
+                "ai_error": False,
+                "from_csv_history": True,
+            }
+    return la
+
+_last_pipeline_event_log = {"key": None, "ts": 0.0}
+
+def call_deepseek_api(messages, temperature=0.4):
+    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    api_key = _deepseek_api_key()
+    if not api_key:
+        raise RuntimeError("MISSING_API_KEY")
+    t0 = time.time()
+    try:
+        res = requests.post(
+            DEEPSEEK_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": "deepseek-chat", "messages": messages, "temperature": temperature},
+            timeout=AI_TIMEOUT_SEC,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"HTTP_ERROR:{e}") from e
+    latency_ms = int((time.time() - t0) * 1000)
+    if res.status_code >= 400:
+        body = (res.text or "")[:500]
+        err = RuntimeError(f"HTTP_{res.status_code}:{body}")
+        err.http_status = res.status_code  # type: ignore[attr-defined]
+        err.latency_ms = latency_ms  # type: ignore[attr-defined]
+        raise err
+    try:
+        payload = res.json()
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"JSON_DECODE:{e}:{(res.text or '')[:200]}") from e
+    if payload.get("error"):
+        err_obj = payload["error"]
+        msg = err_obj.get("message", err_obj) if isinstance(err_obj, dict) else str(err_obj)
+        raise RuntimeError(f"API_ERROR:{msg}")
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"NO_CHOICES:{str(payload)[:300]}")
+    text = (choices[0].get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("EMPTY_CONTENT")
+    return text, latency_ms
+
+def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
+    err_type = type(exc).__name__
+    detail = str(exc)[:1500]
+    if getattr(exc, "http_status", None):
+        http_status = exc.http_status
+    if latency_ms is None and getattr(exc, "latency_ms", None):
+        latency_ms = exc.latency_ms
+    return {
+        "win_prob": 0,
+        "direction": "NO_TRADE",
+        "decision": "AI_ERROR",
+        "override": False,
+        "comment": f"AI_CRASH_FAILSAFE: {detail}",
+        "ai_error": True,
+        "error_type": err_type,
+        "error_detail": detail,
+        "latency_ms": latency_ms,
+        "http_status": http_status,
+        "factors": {},
+        "source": "ERROR",
+        "approved": False,
+        "trade_id": trade_id,
+    }
+
+def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extra=None, force=False):
+    """Structured gate trace for edge/AI/post-AI diagnosis (deduped per 2s by default)."""
+    global _last_pipeline_event_log
+    try:
+        key = f"{stage}|{outcome}|{reason}|{round(float(edge if edge is not None else state.get('last_edge', 0) or 0), 1)}"
+        now = time.time()
+        if not force and _last_pipeline_event_log.get("key") == key and now - _last_pipeline_event_log.get("ts", 0) < PIPELINE_EVENT_DEDUPE_SEC:
+            return
+        _last_pipeline_event_log = {"key": key, "ts": now}
+        dbg = state.get("debug_state") or {}
+        mc = state.get("market_context") or {}
+        mtf = (mc.get("multi_tf") or {}).get("trends") or {}
+        ec = dbg.get("edge_components") or {}
+        row = {
+            "ts": utc_iso(),
+            "stage": stage,
+            "outcome": outcome,
+            "reason": reason,
+            "trade_id": trade_id or "",
+            "edge_score": edge if edge is not None else dbg.get("last_edge_score"),
+            "edge_threshold": get_edge_threshold(),
+            "effective_threshold": get_effective_edge_threshold(),
+            "edge_trigger": dbg.get("pipeline_event_trigger"),
+            "edge_trigger_reason": dbg.get("edge_trigger_reason"),
+            "price": state.get("price"),
+            "regime": state.get("regime"),
+            "mtf_15m": mtf.get("15m"),
+            "mtf_1h": mtf.get("1h"),
+            "mtf_4h": mtf.get("4h"),
+            "structure_bias": (mc.get("market_structure") or {}).get("structure_bias"),
+            "adx": (mc.get("trend_strength") or {}).get("adx"),
+            "ai_gate_called": (dbg.get("ai_gate") or {}).get("called"),
+            "pipeline_outcome": state.get("pipeline_outcome"),
+            "momentum_pts": ec.get("momentum"),
+            "orderflow_pts": ec.get("orderflow"),
+            **csv_research_meta(),
+        }
+        if extra:
+            for k, v in extra.items():
+                row[f"x_{k}"] = v
+        with csv_lock:
+            dynamic_csv_writer(CSV_PIPELINE_EVENTS, row)
+    except Exception as e:
+        logger.debug(f"[PIPELINE EVENT] skip log: {e}")
+
+def log_ai_error_row(ai_result, ctx=None):
+    try:
+        with csv_lock:
+            row = {
+                "ts": utc_iso(),
+                "trade_id": ai_result.get("trade_id") or "",
+                "error_type": ai_result.get("error_type"),
+                "error_detail": (ai_result.get("error_detail") or ai_result.get("comment") or "")[:2000],
+                "http_status": ai_result.get("http_status"),
+                "latency_ms": ai_result.get("latency_ms"),
+                "edge_score": state.get("last_edge", 0.0),
+                "edge_threshold": get_edge_threshold(),
+                "effective_threshold": get_effective_edge_threshold(),
+                "price": state.get("price"),
+                "ctx_trade_id": (ctx or {}).get("trade_id"),
+                **csv_research_meta(),
+            }
+            dynamic_csv_writer(CSV_AI_ERRORS, row)
+    except Exception as e:
+        logger.error(f"[AI ERROR CSV] {e}")
+
+def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
+    try:
+        with csv_lock:
+            row = {
+                "ts": utc_iso(),
+                "trade_id": ai_result.get("trade_id") or "",
+                "ai_direction_raw": ai_result.get("direction"),
+                "decision": ai_result.get("decision"),
+                "approved": ai_result.get("approved", False),
+                "win_prob": ai_result.get("win_prob"),
+                "comment": (ai_result.get("comment") or "")[:2000],
+                "source": ai_result.get("source"),
+                "event": event,
+                "ai_error": ai_result.get("ai_error", False),
+                "error_type": ai_result.get("error_type"),
+                "error_detail": (ai_result.get("error_detail") or "")[:2000],
+                "latency_ms": ai_result.get("latency_ms"),
+                "http_status": ai_result.get("http_status"),
+                "edge_score": state.get("last_edge", 0.0),
+                "factor_gate": ai_result.get("factor_gate"),
+                "bull_score": ai_result.get("bull_score", 0),
+                "bear_score": ai_result.get("bear_score", 0),
+                **csv_research_meta(),
+            }
+            dynamic_csv_writer(CSV_AI_TRANCHE, row)
+    except Exception as e:
+        logger.error(f"[AI TRANCHE] {e}")
 
 def evaluate_signal_with_ai(raw_context: dict):
     try:
@@ -2422,13 +4132,20 @@ def evaluate_signal_with_ai(raw_context: dict):
         LAST_AI_TIMESTAMP = utc_iso()
         logger.info(f"[AI PAYLOAD SNAPSHOT] {ctx} [PIPELINE ENFORCEMENT]")
         prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
-        res = requests.post(DEEPSEEK_URL, headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}, json={"model": "deepseek-chat","messages": [{"role": "user", "content": prompt}],"temperature": 0.4}, timeout=AI_TIMEOUT_SEC)
-        text = res.json()["choices"][0]["message"]["content"]
+        text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=0.4)
+        log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
         direction = dir_match.group(1).upper() if dir_match else "NO_TRADE"
         match = re.search(r"Win probability:\s*(\d+)", text)
         win_prob = int(match.group(1)) if match else 0
+        factors = parse_ai_factor_block(text)
+        if win_prob <= 0:
+            conf_json = re.search(r'"confidence"\s*:\s*(\d+)', text)
+            conf_line = re.search(r"Confidence:\s*(\d+)", text, re.IGNORECASE)
+            fallback = int(conf_json.group(1)) if conf_json else (int(conf_line.group(1)) if conf_line else 0)
+            if 0 < fallback <= 100:
+                win_prob = fallback
         decision_match = re.search(r"Decision:\s*(APPROVE|REJECT)", text, re.IGNORECASE)
         decision = decision_match.group(1).upper() if decision_match else "REJECT"
         override_match = re.search(r"Override:\s*(YES|NO)", text, re.IGNORECASE)
@@ -2438,7 +4155,6 @@ def evaluate_signal_with_ai(raw_context: dict):
         if direction not in ["LONG", "SHORT", "NO_TRADE"]:
             direction = "NO_TRADE"
             win_prob = 0
-        factors = parse_ai_factor_block(text)
         ai_result = {
             "win_prob": win_prob,
             "direction": direction,
@@ -2451,38 +4167,32 @@ def evaluate_signal_with_ai(raw_context: dict):
             "bear_score": factors.get("bear_score", 0),
             "source": "FRESH",
             "approved": decision == "APPROVE",
-            "trade_id": ctx.get("trade_id")
+            "trade_id": ctx.get("trade_id"),
+            "latency_ms": latency_ms,
         }
         ai_result = apply_phase_c_factor_gate(ai_result)
         if DOUBLE_CONFIRM_AI:
             ai_result = double_confirm_ai(ai_result, ctx)
             ai_result = apply_phase_c_factor_gate(ai_result)
         with state_lock:
-            state["last_ai_ts"] = time.time()
-            state["last_ai_call_ts"] = time.time()
-            state["ai_history"].append({
-                "time": utc_iso(),
-                "trade_id": ai_result.get("trade_id"),
-                "ai_direction_raw": ai_result.get("direction"),
-                "final_direction": ai_result.get("direction"),
-                "inverted": False,
-                "decision": ai_result.get("decision"),
-                "win_prob": ai_result.get("win_prob"),
-                "edge_score": state.get("last_edge", 0.0),
-                "edge_threshold": get_edge_threshold(),
-                "source": "AI",
-                "comment": ai_result.get("comment"),
-                "final_outcome": state.get("execution_outcome", "PENDING")
-            })
-            state["ai_history"] = state["ai_history"][-5:]
-            state["ai_history_updated"] = time.time()
-            state["ai_outcome"] = ai_result.get("decision")
-            state["ai_decision"] = ai_result.get("decision")
             state["pipeline_outcome"] = "AI_EVALUATED"
-            state["last_ai"]["win_prob"] = ai_result.get("win_prob")
-            state["last_ai"]["direction"] = ai_result.get("direction")
-            state["last_ai"]["decision"] = ai_result.get("decision")
-            state["last_ai"]["reason"] = ai_result.get("comment")
+        ai_result["_tranche_logged"] = True
+        log_ai_tranche_outcome(ai_result)
+        _append_ai_history_row(ai_result)
+        _sync_ai_dashboard_debug(ai_result)
+        with state_lock:
+            eff = get_effective_edge_threshold()
+            state["debug_state"]["ai_gate"] = {
+                "called": True,
+                "reason": ai_result.get("decision", "AI_DONE"),
+                "edge": state.get("last_edge", 0.0),
+                "threshold": eff,
+            }
+        log_pipeline_event(
+            "AI", ai_result.get("decision", "UNKNOWN"), ai_result.get("factor_gate") or "MODEL",
+            ctx.get("trade_id"), state.get("last_edge"),
+            {"win_prob": win_prob, "latency_ms": latency_ms}, force=True,
+        )
         logger.info(
             f"[AI CALL] FRESH dir={direction} prob={win_prob} decision={ai_result.get('decision')} "
             f"bull={factors.get('bull_score')} bear={factors.get('bear_score')} "
@@ -2499,47 +4209,55 @@ def evaluate_signal_with_ai(raw_context: dict):
         return ai_result
     except Exception as e:
         logger.error(f"[AI CRASH] {e} [PIPELINE ENFORCEMENT]")
-        ai_result = {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"AI_CRASH_FAILSAFE: {e}", "ai_error": True, "factors": {}, "source": "ERROR", "approved": False, "trade_id": raw_context.get("trade_id")}
+        ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
         full_pipeline_trace("[AI]", "EVALUATE_CRASH", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_CRASH", raw_context.get("trade_id"))
         debug_snapshot(None, ai_result, "AI_CRASH")
-        if not ai_result.get("ai_error"):
-            with state_lock:
-                state["ai_call_count"] = state.get("ai_call_count", 0) + 1
-            state["ai_history"].append({
-                "time": utc_iso(),
-                "trade_id": ai_result.get("trade_id"),
-                "ai_direction_raw": ai_result.get("direction"),
-                "final_direction": ai_result.get("direction"),
-                "inverted": False,
-                "decision": ai_result.get("decision"),
-                "win_prob": ai_result.get("win_prob"),
-                "edge_score": state.get("last_edge", 0.0),
-                "edge_threshold": get_edge_threshold(),
-                "source": "ERROR",
-                "comment": ai_result.get("comment"),
-                "final_outcome": "CRASH"
-            })
-            state["ai_history"] = state["ai_history"][-5:]
-            state["ai_history_updated"] = time.time()
-            state["ai_outcome"] = ai_result.get("decision")
-            state["ai_decision"] = ai_result.get("decision")
+        log_ai_error_row(ai_result, raw_context)
+        log_ai_tranche_outcome(ai_result, event="AI_ERROR")
+        _append_ai_history_row(ai_result)
+        log_pipeline_event(
+            "AI", "AI_ERROR", ai_result.get("error_type", "UNKNOWN"),
+            raw_context.get("trade_id"), state.get("last_edge"),
+            {"detail": (ai_result.get("error_detail") or "")[:200]}, force=True,
+        )
+        with state_lock:
             state["pipeline_outcome"] = "AI_CRASH"
-            state["last_ai"]["win_prob"] = ai_result.get("win_prob")
-            state["last_ai"]["direction"] = ai_result.get("direction")
-            state["last_ai"]["decision"] = ai_result.get("decision")
-            state["last_ai"]["reason"] = ai_result.get("comment")
-        logger.info(f"[AI RESULT] decision={ai_result['decision']} prob={ai_result['win_prob']} [PIPELINE ENFORCEMENT]")
+            eff = get_effective_edge_threshold()
+            state["debug_state"]["ai_gate"] = {
+                "called": True,
+                "reason": f"AI_ERROR:{ai_result.get('error_type', 'unknown')}",
+                "edge": state.get("last_edge", 0.0),
+                "threshold": eff,
+            }
+            state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
+        _append_ai_history_row(ai_result)
+        _sync_ai_dashboard_debug(ai_result)
+        with state_lock:
+            state["ai_call_count"] = state.get("ai_call_count", 0) + 1
+        logger.info(f"[AI RESULT] decision={ai_result['decision']} prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]")
         return ai_result
+
+def is_research_data_collection() -> bool:
+    with state_lock:
+        return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
 
 def get_ai_threshold():
     with state_lock:
         t = state.get("ai_threshold")
-        return 60 if t is None else float(t)
+        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        raw = default if t is None else float(t)
+        floor = 0.0 if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        return max(raw, floor)
 
 def set_ai_threshold(value):
     with state_lock:
-        state["ai_threshold"] = float(value) if value is not None else 60
+        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        raw = float(value) if value is not None else default
+        floor = 0.0 if research_collect else LIVE_AI_THRESHOLD_FLOOR
+        state["ai_threshold"] = max(raw, floor)
         state["_threshold_locked"] = True
         state["last_ai_ts"] = 0
         state["last_ai_signal_key"] = None
@@ -2555,9 +4273,57 @@ def set_edge_threshold(value):
         return
     with state_lock:
         state["edge_threshold"] = value
+        edge_max = state.get("edge_threshold_max")
+        if edge_max is not None and value > float(edge_max) + 1e-9:
+            state["edge_threshold_max"] = value
+        state["edge_range_preset"] = "custom"
         save_persistent_config()
-        logger.info(f"[SET] EDGE threshold set to {state['edge_threshold']} [PIPELINE ENFORCEMENT]")
+        logger.info(
+            f"[SET] EDGE min={state['edge_threshold']} max={state.get('edge_threshold_max')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
         enforce_edge_threshold_options()
+
+def set_edge_threshold_max(value):
+    if value is None or value == "" or (isinstance(value, str) and value.lower() in ("none", "null", "no_cap")):
+        with state_lock:
+            state["edge_threshold_max"] = None
+            state["edge_range_preset"] = "custom"
+            save_persistent_config()
+        logger.info("[SET] EDGE max cleared (min-only gate) [PIPELINE ENFORCEMENT]")
+        return
+    value = round(float(value), 1)
+    if value not in [round(x, 1) for x in EDGE_OPTIONS]:
+        logger.warning(f"[EDGE SET] Invalid max {value} - rejected [PIPELINE ENFORCEMENT]")
+        return
+    with state_lock:
+        if float(state["edge_threshold"]) > value + 1e-9:
+            state["edge_threshold"] = value
+        state["edge_threshold_max"] = value
+        state["edge_range_preset"] = "custom"
+        save_persistent_config()
+    logger.info(f"[SET] EDGE max={value} min={get_edge_threshold()} [PIPELINE ENFORCEMENT]")
+    enforce_edge_threshold_options()
+
+def apply_edge_range_preset(preset_id: str):
+    preset = next((p for p in EDGE_RANGE_PRESETS if p["id"] == preset_id), None)
+    if not preset:
+        logger.warning(f"[EDGE SET] Unknown preset {preset_id} [PIPELINE ENFORCEMENT]")
+        return
+    if preset_id == "custom":
+        with state_lock:
+            state["edge_range_preset"] = "custom"
+            save_persistent_config()
+        return
+    with state_lock:
+        state["edge_threshold"] = round(float(preset["min"]), 1)
+        state["edge_threshold_max"] = None if preset["max"] is None else round(float(preset["max"]), 1)
+        state["edge_range_preset"] = preset_id
+        save_persistent_config()
+    enforce_edge_threshold_options()
+    logger.info(
+        f"[SET] EDGE preset={preset_id} range={_edge_range_label()} [PIPELINE ENFORCEMENT]"
+    )
 
 def hash_context(ctx):
     try:
@@ -2592,21 +4358,14 @@ def decision_from_score(score):
     return "NO_TRADE"
 
 def should_call_ai(ctx, event_trigger):
-    now = time.time()
-    if now - state.get("last_ai_call_ts", 0) < AI_COOLDOWN_SECONDS:
-        logger.info(f"[AI] COOLDOWN SKIP remaining={(AI_COOLDOWN_SECONDS - (now - state.get('last_ai_call_ts', 0))):.0f}s [PIPELINE ENFORCEMENT]")
-        return False, "COOLDOWN"
-    if event_trigger:
-        return True, "EVENT"
-    if now - state.get("last_ai_call_ts", 0) > HEARTBEAT_INTERVAL and safe_float(ctx.get("volume_ratio", 0)) > 1.1:
-        return True, "HEARTBEAT"
-    return False, "NO_TRIGGER"
+    """Legacy alias — use should_invoke_ai for edge-gated AI."""
+    return should_invoke_ai(ctx, state.get("last_edge", 0), event_trigger)
 
 def log_setup(signal):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_setup"
         with csv_lock:
-            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"price": signal.get("signal_price"),"ai_win_prob": signal.get("ai_win_prob", 0),"regime": signal.get("regime"),"direction": signal.get("final_direction"),"event": "BUILD","edge_score": signal.get("edge_score_at_entry")}
+            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"price": signal.get("signal_price"),"ai_win_prob": signal.get("ai_win_prob", 0),"regime": signal.get("regime"),"direction": signal.get("final_direction"),"event": "BUILD","edge_score": signal.get("edge_score_at_entry"), **csv_research_meta()}
             dynamic_csv_writer(CSV_SETUP_LOG, row)
         logger.info(f"[LOG SETUP] trade_id={signal.get('trade_id')} ai_win_prob={signal.get('ai_win_prob',0)} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
@@ -2615,15 +4374,17 @@ def log_setup(signal):
 def log_ai(signal, ai):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_ai"
+        if ai.get("_tranche_logged"):
+            return
         signal["_ai_logged"] = True
         with csv_lock:
-            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry")}
+            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta()}
             dynamic_csv_writer(CSV_AI_TRANCHE, row)
         logger.info(f"[LOG AI] trade_id={signal.get('trade_id')} prob={ai.get('win_prob')} source={ai.get('source')} decision={ai.get('decision')} override={ai.get('override')} final_direction={signal.get('final_direction')} inverted={signal.get('inverted')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"AI LOG FAIL: {e} [PIPELINE ENFORCEMENT]")
 
-def log_decision(signal, decision, reason):
+def log_decision(signal, decision, reason, skip_stage=None, ai_extra=None):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_decision"
         with csv_lock:
@@ -2632,20 +4393,29 @@ def log_decision(signal, decision, reason):
                 "trade_id": signal.get("trade_id"),
                 "decision": decision,
                 "reason": reason,
+                "skip_stage": skip_stage or decision,
                 "ai_win_prob": signal.get("ai_win_prob"),
                 "ai_threshold": get_ai_threshold(),
                 "ai_decision_text": signal.get("ai_decision"),
                 "edge_score": signal.get("edge_score_at_entry", 0.0),
+                "edge_threshold": get_edge_threshold(),
+                "effective_threshold": signal.get("effective_threshold_at_entry") or get_effective_edge_threshold(),
                 "invert_signal": state.get("invert_signal", False),
                 "early_fail_enabled": state.get("early_fail_enabled", True),
-                "edge_threshold": get_edge_threshold(),
                 "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
                 "features_price": signal.get("features",{}).get("price"),
                 "features_ema9": signal.get("features",{}).get("ema9"),
                 "features_delta": signal.get("features",{}).get("delta"),
                 "controls_edge": signal.get("controls",{}).get("edge_threshold"),
-                "final_direction": signal.get("final_direction")
+                "final_direction": signal.get("final_direction"),
+                "ai_error": signal.get("ai_error")
+                or (str(ai_extra or reason or skip_stage or "").startswith("AI_ERROR")),
+                "ai_source": signal.get("ai_source"),
+                "edge_trigger_reason": state.get("debug_state", {}).get("edge_trigger_reason"),
+                **csv_research_meta(),
             }
+            if ai_extra and str(ai_extra).startswith("AI_ERROR"):
+                row["ai_error_detail"] = str(ai_extra)[:500]
             dynamic_csv_writer(CSV_DECISIONS, row)
         logger.info(f"[LOG DECISION] trade_id={signal.get('trade_id')} decision={decision} reason={reason} ai_decision_text={signal.get('ai_decision')} experiment={row.get('experiment_tag')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
@@ -2684,21 +4454,27 @@ def log_blocked_signal(signal, ai, reason):
             row["invert_signal"] = state.get("invert_signal", False)
             row["early_fail_enabled"] = state.get("early_fail_enabled", True)
             row["edge_threshold"] = get_edge_threshold()
+            row["effective_threshold"] = signal.get("effective_threshold_at_entry") or get_effective_edge_threshold()
             row["experiment_tag"] = f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}"
+            row.update(csv_research_meta())
             dynamic_csv_writer(CSV_BLOCKS, row)
         logger.info(f"[CSV] Blocked signal logged reason={reason} trade_id={signal.get('trade_id')} structure={sr.get('sr_state')} ai_decision={ai.get('decision')} experiment={row.get('experiment_tag')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
+        patch_signal_snapshot_outcome(signal.get("trade_id"), executed=False, block_reason=reason)
     except Exception as e:
         logger.error(f"CSV BLOCKED WRITE FAILED: {e} [PIPELINE ENFORCEMENT]")
 
-def log_no_signal_with_context(signal=None, reason="NO_SETUP_DETECTED"):
+def log_no_signal_with_context(signal=None, reason="NO_SETUP_DETECTED", skip_stage="PRE_PIPELINE"):
     trade_id = str(uuid.uuid4()) if not signal or not signal.get("trade_id") else signal.get("trade_id")
     edge_score = state.get("last_edge", state.get("debug_state", {}).get("last_edge_score", 0.0))
+    eff_thr = get_effective_edge_threshold()
     stub = {
         "trade_id": trade_id,
         "edge_score_at_entry": round(float(edge_score or 0.0), 1),
+        "effective_threshold_at_entry": eff_thr,
         "features": state.get("debug_state", {}).get("last_features", {}),
     }
-    enforce_log(stub, "NO_SIGNAL", reason)
+    enforce_log(stub, "NO_SIGNAL", reason, skip_stage=skip_stage)
+    log_pipeline_event("PIPELINE", "NO_SIGNAL", reason, trade_id, edge_score, force=True)
     logger.info(f"[PIPELINE] No signal - skipping cycle | trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("BLOCKED", reason, trade_id)
 
@@ -2757,7 +4533,11 @@ def is_system_ready():
     with state_lock:
         price_ok = state.get("price") is not None and state.get("price") > 0
         ws_ok = state.get("ws_ready", False) and (time.time() - state.get("price_ts", 0) < STALE_HARD_SEC)
-        buffer_ready = len(volume_buffer) >= BUFFER_MIN and len(price_buffer) >= BUFFER_MIN and len(delta_buffer) >= BUFFER_MIN
+        buffer_ready = (
+            len(volume_buffer) >= WINDOW_SIZE
+            and len(price_buffer) >= WINDOW_SIZE
+            and len(delta_buffer) >= WINDOW_SIZE
+        )
         return price_ok and ws_ok and buffer_ready
 
 def pipeline_guard(stage: str, signal: dict) -> bool:
@@ -2817,18 +4597,55 @@ def detect_event_light():
         if now - last_event_trigger < 0.5:
             return {"event_trigger": False, "edge_score": edge_score, "price": price, "timestamp": utc_iso(), "features": features}
 
-        event_trigger = is_edge_valid(edge_score)
+        is_edge_valid(edge_score)
+        if _sole_ai_research_mode() and ai_cooldown_remaining_sec() == 0 and round(edge_score, 1) > 0.0:
+            event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
+        else:
+            event_trigger, trigger_reason = should_trigger_edge_event(edge_score)
 
         last_event_trigger = now
 
         logger.info(
-            f"[EVENT LIGHT V2] edge={edge_score:.1f} trigger={event_trigger} threshold={get_edge_threshold():.1f} [PIPELINE ENFORCEMENT]"
+            f"[EVENT LIGHT V2] edge={edge_score:.1f} trigger={event_trigger} "
+            f"reason={trigger_reason} effective_thr={get_effective_edge_threshold():.1f} "
+            f"[PIPELINE ENFORCEMENT]"
         )
 
-        update_debug_state_always("EVENT_DETECTED", {"edge": edge_score, "trigger": event_trigger})
+        eff_thr = get_effective_edge_threshold()
+        with state_lock:
+            ds = state["debug_state"]
+            ds["last_edge_score"] = edge_score
+            ds["pipeline_event_trigger"] = event_trigger
+            ds["edge_trigger_reason"] = trigger_reason
+            ds["edge_above_threshold"] = edge_score >= eff_thr
+            ag = dict(ds.get("ai_gate") or {"called": False, "reason": "", "edge": 0.0, "threshold": 0.0})
+            if not ag.get("called"):
+                ag["reason"] = trigger_reason if not event_trigger else "EDGE_EVENT_ARMED"
+                ag["edge"] = edge_score
+                ag["threshold"] = eff_thr
+                ds["ai_gate"] = ag
+            if not event_trigger:
+                ds["skip_reason"] = trigger_reason
+                ds["last_block_reason"] = trigger_reason
+            elif _is_misleading_ai_skip_label(ds.get("skip_reason")):
+                ds["skip_reason"] = None
+                ds["last_block_reason"] = None
+
+        update_debug_state_always(
+            "EVENT_DETECTED",
+            {"edge": edge_score, "pipeline_event_trigger": event_trigger, "edge_trigger_reason": trigger_reason},
+        )
+        log_pipeline_event(
+            "EDGE", "TRIGGER" if event_trigger else "WAIT",
+            trigger_reason, None, edge_score,
+            {"effective_threshold": eff_thr, "edge_threshold_max": get_edge_threshold_max()},
+        )
+        if not event_trigger and trigger_reason in ("EDGE_BELOW_THRESHOLD", "EDGE_ABOVE_MAX"):
+            log_edge_census(edge_score, "EDGE_EVENT", trigger_reason, features)
 
         return {
             "event_trigger": event_trigger,
+            "edge_trigger_reason": trigger_reason,
             "edge_score": round(edge_score, 1),
             "components": {
                 "momentum": 0,
@@ -2881,7 +4698,7 @@ def execute_simulated_order(signal):
     logger.info(f"[SIM] Simulated order created trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("[EXECUTION]", "SIM_ORDER_CREATED", signal.get("trade_id"))
     price = state.get("price")
-    pullback_pct = signal.get("pullback_pct", 0.001)
+    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
     signal_price = signal.get("signal_price", price)
     if signal["final_direction"] == "LONG":
         limit_price = signal_price * (1 - pullback_pct)
@@ -2910,12 +4727,25 @@ def execute_simulated_order(signal):
     with trade_lock:
         pending_orders.append(order)
     logger.info(f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} limit_price={fmt(limit_price)} pullback={pullback_pct*100}% final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
-    if state.get("strategy_mode") == "RESEARCH" and RESEARCH_INSTANT_FILL:
+    defer_instant_fill = False
+    features = signal.get("features") or state.get("feature_snapshot") or {}
+    direction = signal.get("final_direction")
+    if _tape_bounce_against(direction, features):
+        defer_instant_fill = True
+        logger.info(f"[SIM] Bounce vs {direction} — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
+    setup_type = signal.get("setup_type") or classify_setup(features)
+    if setup_type == "WEAK_SETUP":
+        defer_instant_fill = True
+        logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
+    if pullback_pct <= 0.0 and not defer_instant_fill:
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
         fill_order(order)
-        logger.info(f"[SIM] RESEARCH instant fill at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+        logger.info(f"[SIM] Instant fill (pullback=0%) at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+    elif defer_instant_fill:
+        order["await_confirm"] = True
+        logger.info(f"[SIM] Pullback limit pending confirm trade_id={signal.get('trade_id')} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]")
     pipeline_state_sync()
     return True
 
@@ -2928,6 +4758,15 @@ def process_pending_orders():
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
                 continue
+            if order.get("await_confirm"):
+                direction = order.get("signal_dir")
+                fs = state.get("feature_snapshot") or {}
+                r1, _, vel = _signed_momentum_components(fs)
+                if direction == "SHORT" and vel > MOMENTUM_ALIGN_EPS and r1 > MOMENTUM_ALIGN_EPS:
+                    continue
+                if direction == "LONG" and vel < -MOMENTUM_ALIGN_EPS and r1 < -MOMENTUM_ALIGN_EPS:
+                    continue
+                order.pop("await_confirm", None)
             if order["side"] == "buy" and price <= order["limit_price"]:
                 order["status"] = "FILLED"
                 fill_order(order)
@@ -2946,7 +4785,9 @@ def fill_order(order):
     if order["signal_dir"] not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     with trade_lock:
-        open_positions.append(_build_open_position(order, signal, ai))
+        pos = _build_open_position(order, signal, ai)
+        open_positions.append(pos)
+    mark_approve_research_executed(pos.get("trade_id"), order.get("limit_price") or pos.get("entry"))
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
         master.update({"status": "FILLED", "filled_ts": time.time(), "fill_price": order["limit_price"], "outcome": "OPEN"})
@@ -2996,16 +4837,20 @@ def classify_setup(features):
     else:
         return "WEAK_SETUP"
 
-def atomic_freeze_signal(signal, edge_score):
+def atomic_freeze_signal(signal, edge_score, pipeline_eff_thr=None):
+    eff = float(pipeline_eff_thr if pipeline_eff_thr is not None else get_effective_edge_threshold())
     signal["features"] = copy.deepcopy(state.get("feature_snapshot", {}))
     signal["edge_score_at_entry"] = float(round(edge_score, 1))
     signal["edge_threshold_at_entry"] = float(get_edge_threshold())
-    signal["edge_passed"] = edge_score >= get_edge_threshold()
+    signal["effective_threshold_at_entry"] = eff
+    signal["edge_passed"] = round(float(edge_score), 1) >= eff
     signal["controls"] = copy.deepcopy({
         "early_fail_enabled": state.get("early_fail_enabled"),
         "invert_signal": state.get("invert_signal"),
         "ai_enabled": state.get("ai_enabled"),
         "edge_threshold": get_edge_threshold(),
+        "edge_threshold_max": get_edge_threshold_max(),
+        "edge_range_preset": state.get("edge_range_preset"),
         "ai_threshold": get_ai_threshold(),
         "leverage": state.get("leverage"),
         "pullback_threshold": state.get("pullback_threshold")
@@ -3023,21 +4868,67 @@ def atomic_freeze_signal(signal, edge_score):
     signal["_frozen"] = True
     logger.info(f"[ATOMIC FREEZE SUCCESS] trade_id={signal.get('trade_id')} edge={round(edge_score,1):.1f} frozen=True [PIPELINE ENFORCEMENT]")
 
+def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):
+    """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""
+    try:
+        features = features or {}
+        edge_score = round(float(edge_score or 0), 2)
+        row = {
+            "schema": "edge_census_v1",
+            "ts": utc_iso(),
+            "ts_epoch": time.time(),
+            "stage": stage,
+            "reason": reason,
+            "trade_id": trade_id,
+            "edge_score": edge_score,
+            "edge_score_bucket": _edge_score_bucket(edge_score),
+            "edge_threshold_min": get_edge_threshold(),
+            "edge_threshold_max": get_edge_threshold_max(),
+            "edge_range_preset": state.get("edge_range_preset"),
+            "effective_threshold": get_effective_edge_threshold(),
+            "in_range": edge_range_allows(edge_score)[0],
+            "price": nz(state.get("price")),
+            "regime": state.get("regime"),
+            "sr_state": (state.get("support_resistance") or {}).get("sr_state"),
+            "support_resistance_bucket": _sr_location_bucket(
+                (state.get("support_resistance") or {}).get("sr_state")
+            ),
+            "session_bucket": _research_session_bucket(),
+            "volume_ratio": nz(features.get("volume_ratio")),
+            "delta": nz(features.get("delta")),
+            "velocity": nz(features.get("velocity")),
+            "bot_version": EXECUTION_FIX_VERSION,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+        }
+        rotate_log(EDGE_CENSUS_FILE)
+        with open(EDGE_CENSUS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as e:
+        logger.error(f"[EDGE_CENSUS] log failed: {e} [PIPELINE ENFORCEMENT]")
+
+
 def log_near_edge(candidate, edge_score):
     try:
+        edge_score = round(float(edge_score or 0), 2)
         with csv_lock:
             row = {
                 "ts": utc_iso(),
-                "edge_score": round(edge_score, 1),
+                "edge_score": edge_score,
+                "edge_score_bucket": _edge_score_bucket(edge_score),
                 "threshold": get_edge_threshold(),
+                "edge_threshold_max": get_edge_threshold_max(),
+                "effective_threshold": get_effective_edge_threshold(),
+                "in_range": edge_range_allows(edge_score)[0],
+                "flat_momentum_floor": get_dynamic_flat_momentum_floor(),
                 "price": nz(state.get("price")),
                 "reason": "NEAR_EDGE",
                 "delta": nz(candidate.get("delta")),
                 "volume_ratio": nz(candidate.get("volume_ratio")),
-                "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}"
+                "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
+                **csv_research_meta(),
             }
             dynamic_csv_writer("near_edge.log", row)
-        logger.info(f"[NEAR_EDGE] edge={round(edge_score,1):.1f} logged for analysis [PIPELINE ENFORCEMENT]")
+        logger.info(f"[NEAR_EDGE] edge={edge_score:.1f} logged for analysis [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"[NEAR_EDGE LOG FAIL] {e} [PIPELINE ENFORCEMENT]")
 
@@ -3065,15 +4956,39 @@ def process_signal(event: dict):
             edge_score = compute_edge_score(features)
             logger.info(f"[PIPELINE] edge computed = {edge_score:.1f} [PIPELINE ENFORCEMENT]")
 
-            if edge_score > 1.5:
+            if edge_score >= 0.5:
                 log_near_edge(features, edge_score)
+            allowed_edge, edge_block = edge_range_allows(edge_score)
+            if not allowed_edge:
+                log_edge_census(edge_score, "PIPELINE", edge_block, features)
 
             event_obj = event if event else detect_event_light()
             if not event_obj:
                 event_obj = {"event_trigger": False, "edge_score": edge_score, "price": nz(state.get("price")), "timestamp": utc_iso(), "features": features}
 
-            if edge_score < get_edge_threshold():
-                logger.info(f"[EDGE GATE] edge_score={edge_score:.1f} < threshold — NO_SIGNAL [PIPELINE ENFORCEMENT]")
+            eff_thr = get_effective_edge_threshold()
+            pipeline_eff_thr = eff_thr
+            sole = _sole_ai_research_mode()
+            if sole:
+                if round(float(edge_score), 1) <= 0.0:
+                    logger.info(
+                        f"[EDGE GATE] edge_score={edge_score:.1f} <= 0 — NO_SIGNAL (v81 sole-AI) "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                    log_no_signal_with_context(reason="EDGE_FAIL")
+                    full_pipeline_trace("BLOCKED", "EDGE_FAIL", None)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "EDGE_FAIL"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "EDGE_FAIL"
+                    update_debug_state_always("EDGE_FAIL", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+            elif edge_score < eff_thr:
+                logger.info(
+                    f"[EDGE GATE] edge_score={edge_score:.1f} < effective_threshold={eff_thr} — NO_SIGNAL "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
                 log_no_signal_with_context(reason="EDGE_FAIL")
                 full_pipeline_trace("BLOCKED", "EDGE_FAIL", None)
                 with state_lock:
@@ -3084,7 +4999,32 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            logger.info(f"[PIPELINE] EDGE PASSED → proceeding to candidate stage (event flag only metadata) [PIPELINE ENFORCEMENT]")
+            if sole:
+                trigger_ok = True
+                trigger_reason = event_obj.get("edge_trigger_reason", "PERIODIC_RESEARCH_AI")
+            elif event_obj.get("event_trigger") and event:
+                trigger_ok = True
+                trigger_reason = event_obj.get("edge_trigger_reason", "EDGE_EVENT_PASSTHROUGH")
+            else:
+                trigger_ok, trigger_reason = should_trigger_edge_event(edge_score)
+            if not trigger_ok:
+                logger.info(
+                    f"[EDGE GATE] edge={edge_score:.1f} >= {eff_thr} but no trigger ({trigger_reason}) — skip AI "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                log_no_signal_with_context(reason=trigger_reason)
+                full_pipeline_trace("BLOCKED", trigger_reason, None)
+                with state_lock:
+                    state["debug_state"]["last_block_reason"] = trigger_reason
+                    state["debug_state"]["skip_reason"] = trigger_reason
+                update_debug_state_always(trigger_reason, {"edge": edge_score})
+                state["last_pipeline_stage"] = "IDLE"
+                return
+
+            logger.info(
+                f"[PIPELINE] EDGE TRIGGER {trigger_reason} → candidate stage (AI only if pre-gates pass) "
+                f"[PIPELINE ENFORCEMENT]"
+            )
 
             safe_clear_pending()
             now = time.time()
@@ -3093,7 +5033,7 @@ def process_signal(event: dict):
 
             with state_lock:
                 max_active = state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
-            if not ensure_signal_capacity():
+            if not sole and not ensure_signal_capacity():
                 active = get_active_signal_count()
                 logger.info(f"[MAX ACTIVE SIGNALS] Hard block at entry - {active}/{max_active} [PIPELINE ENFORCEMENT]")
                 _agent_dbg("H1", "process_signal", "max_active_block", {"active": active, "max_active": max_active, "pending_list": len(pending_orders), "positions": len(open_positions), "fix_version": EXECUTION_FIX_VERSION})
@@ -3102,29 +5042,32 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            if time.time() - state.get("last_signal_create_ts", 0) < GLOBAL_SIGNAL_COOLDOWN:
+            if not sole and time.time() - state.get("last_signal_create_ts", 0) < GLOBAL_SIGNAL_COOLDOWN:
                 logger.info("[GLOBAL COOLDOWN] 5min block active after any prior signal attempt [PIPELINE ENFORCEMENT]")
+                log_no_signal_with_context(reason="GLOBAL_COOLDOWN", skip_stage="COOLDOWN")
                 full_pipeline_trace("BLOCKED", "GLOBAL_COOLDOWN", None)
                 update_debug_state_always("GLOBAL_COOLDOWN", {"edge": edge_score})
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            current_bucket = int(time.time() / 5)
-            signal_key = f"{round(state.get('price',0),2)}_{round(edge_score,1)}_{current_bucket}"
-            if signal_key == state.get("last_signal_key"):
-                logger.info("[SIGNAL BLOCKED] DUPLICATE CONTEXT - LOGGED [PIPELINE ENFORCEMENT]")
-                full_pipeline_trace("BLOCKED", "DUPLICATE", None)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = "DUPLICATE"
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = "DUPLICATE"
-                update_debug_state_always("DUPLICATE", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
-            state["last_signal_key"] = signal_key
+            if not sole:
+                current_bucket = int(time.time() / 5)
+                signal_key = f"{round(state.get('price',0),2)}_{round(edge_score,1)}_{current_bucket}"
+                if signal_key == state.get("last_signal_key"):
+                    logger.info("[SIGNAL BLOCKED] DUPLICATE CONTEXT - LOGGED [PIPELINE ENFORCEMENT]")
+                    full_pipeline_trace("BLOCKED", "DUPLICATE", None)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "DUPLICATE"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "DUPLICATE"
+                    update_debug_state_always("DUPLICATE", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+                state["last_signal_key"] = signal_key
 
             if now - state.get("last_ai_call_ts", 0) < AI_COOLDOWN_SECONDS:
                 logger.info(f"[AI] COOLDOWN ACTIVE - BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]")
+                log_no_signal_with_context(reason="AI_COOLDOWN_ACTIVE", skip_stage="COOLDOWN")
                 full_pipeline_trace("BLOCKED", "AI_COOLDOWN_ACTIVE", None)
                 with state_lock:
                     state["debug_state"]["last_block_reason"] = "AI_COOLDOWN_ACTIVE"
@@ -3159,10 +5102,71 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
+            if round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1):
+                logger.info(
+                    f"[EDGE GATE] edge={edge_score:.1f} < frozen effective={pipeline_eff_thr:.1f} "
+                    f"— skip before AI [PIPELINE ENFORCEMENT]"
+                )
+                log_no_signal_with_context(reason=f"EDGE_BELOW_{pipeline_eff_thr}", skip_stage="PRE_AI")
+                full_pipeline_trace("BLOCKED", "EDGE_BELOW_THRESHOLD", None)
+                with state_lock:
+                    state["debug_state"]["last_block_reason"] = "EDGE_BELOW_THRESHOLD"
+                    state["debug_state"]["skip_reason"] = f"EDGE_BELOW_{pipeline_eff_thr}"
+                update_debug_state_always("EDGE_BELOW_THRESHOLD", {"edge": edge_score, "effective_threshold": pipeline_eff_thr})
+                state["last_pipeline_stage"] = "IDLE"
+                return
+
+            invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
+            if not invoke_ai:
+                logger.info(
+                    f"[AI GATE] Skipped DeepSeek — {ai_gate_reason} edge={edge_score:.1f} "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                log_no_signal_with_context(reason=ai_gate_reason, skip_stage="PRE_AI")
+                full_pipeline_trace("BLOCKED", ai_gate_reason, None)
+                with state_lock:
+                    state["debug_state"]["last_block_reason"] = ai_gate_reason
+                    state["debug_state"]["skip_reason"] = ai_gate_reason
+                    state["debug_state"]["ai_gate"] = {
+                        "called": False,
+                        "reason": ai_gate_reason,
+                        "edge": edge_score,
+                        "threshold": eff_thr,
+                    }
+                update_debug_state_always(ai_gate_reason, {"edge": edge_score})
+                state["last_pipeline_stage"] = "IDLE"
+                return
+
+            ctx["trade_id"] = str(uuid.uuid4())
+            with state_lock:
+                state["debug_state"]["ai_gate"] = {
+                    "called": False,
+                    "reason": "AI_CALL_PENDING",
+                    "edge": edge_score,
+                    "threshold": pipeline_eff_thr,
+                }
+            reserved, reserve_reason = reserve_ai_cooldown_slot()
+            if not reserved:
+                logger.info(f"[AI] COOLDOWN RESERVE BLOCKED — {reserve_reason} [PIPELINE ENFORCEMENT]")
+                log_no_signal_with_context(reason=reserve_reason, skip_stage="COOLDOWN")
+                full_pipeline_trace("BLOCKED", reserve_reason, None)
+                with state_lock:
+                    state["debug_state"]["last_block_reason"] = reserve_reason
+                    state["debug_state"]["skip_reason"] = reserve_reason
+                    state["debug_state"]["ai_gate"] = {
+                        "called": False,
+                        "reason": reserve_reason,
+                        "edge": edge_score,
+                        "threshold": pipeline_eff_thr,
+                    }
+                update_debug_state_always(reserve_reason, {"edge": edge_score})
+                state["last_pipeline_stage"] = "IDLE"
+                return
+
             ai = evaluate_signal_with_ai(ctx)
-            last_ai_call_ts = time.time()
             if not ai:
-                enforce_log({"trade_id": str(uuid.uuid4())}, "BLOCKED", "AI_FAIL")
+                enforce_log({"trade_id": ctx["trade_id"]}, "BLOCKED", "AI_FAIL")
+                log_pipeline_event("AI", "BLOCKED", "AI_FAIL", ctx["trade_id"], edge_score, force=True)
                 full_pipeline_trace("BLOCKED", "AI_FAIL", None)
                 with state_lock:
                     state["debug_state"]["last_block_reason"] = "AI_FAIL"
@@ -3173,9 +5177,29 @@ def process_signal(event: dict):
                 return
 
             if ai.get("decision") != "APPROVE":
-                trade_id = str(uuid.uuid4())
-                block_tag = ai.get("factor_gate") or f"AI_{ai.get('decision')}"
-                enforce_log({"trade_id": trade_id}, "BLOCKED", block_tag)
+                trade_id = ai.get("trade_id") or ctx["trade_id"]
+                ai["trade_id"] = trade_id
+                if ai.get("decision") == "AI_ERROR":
+                    block_tag = f"AI_ERROR:{ai.get('error_type', 'UNKNOWN')}"
+                    skip_stage = "AI_ERROR"
+                else:
+                    block_tag = ai.get("factor_gate") or f"AI_{ai.get('decision')}"
+                    skip_stage = "AI"
+                _sync_ai_dashboard_debug(ai, trade_id)
+                reject_stub = {
+                    "trade_id": trade_id,
+                    "edge_score_at_entry": round(float(edge_score), 1),
+                    "effective_threshold_at_entry": pipeline_eff_thr,
+                    "ai_win_prob": ai.get("win_prob"),
+                    "ai_decision": ai.get("decision"),
+                    "ai_error": ai.get("ai_error"),
+                    "ai_source": ai.get("source"),
+                    "error_type": ai.get("error_type"),
+                    "error_detail": ai.get("error_detail"),
+                    "features": state.get("debug_state", {}).get("last_features", {}),
+                }
+                enforce_log(reject_stub, "BLOCKED", block_tag, skip_stage=skip_stage)
+                log_pipeline_event("AI", "BLOCKED", block_tag, trade_id, edge_score, {"win_prob": ai.get("win_prob")}, force=True)
                 full_pipeline_trace("BLOCKED", block_tag, trade_id)
                 with state_lock:
                     state["debug_state"]["last_block_reason"] = block_tag
@@ -3185,7 +5209,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            trade_id = str(uuid.uuid4())
+            trade_id = ctx.get("trade_id") or str(uuid.uuid4())
             signal = {
                 "trade_id": trade_id,
                 "status": "INIT",
@@ -3203,13 +5227,23 @@ def process_signal(event: dict):
                 "exit_context": None,
                 "_frozen": False
             }
-            atomic_freeze_signal(signal, edge_score)
+            atomic_freeze_signal(signal, edge_score, pipeline_eff_thr)
+            signal["ai_decision"] = ai.get("decision")
+            signal["ai_win_prob"] = ai.get("win_prob")
             enforce_immutable(signal)
             ensure_signal_registered(signal)
             log_setup(signal)
+            enforce_log(signal, "AI", extra=f"{ai.get('decision')}", skip_stage="AI")
+            log_ai(signal, ai)
+            record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai)
+            full_pipeline_trace("[PIPELINE]", f"AI_{ai.get('decision')}", trade_id)
+            with state_lock:
+                state["debug_state"]["last_pipeline_stage"] = "AI"
+                state["debug_state"]["last_ai_call"] = utc_iso()
+                state["debug_state"]["ai_gate"] = {"called": True, "reason": "AI_CALLED", "edge": edge_score, "threshold": pipeline_eff_thr}
             full_pipeline_trace("[PIPELINE]", "START", trade_id)
-            logger.info("[PIPELINE] SINGLE ENTRY - EDGE GATE FIRST - AI ONLY AFTER EDGE - ATOMIC FREEZE ENFORCED [PIPELINE ENFORCEMENT]")
-            logger.info(f"[PIPELINE START] timestamp={utc_iso()} event_trigger={event_obj.get('event_trigger', False)} edge={edge_score:.1f} [PIPELINE ENFORCEMENT]")
+            logger.info("[PIPELINE] EDGE+AI GATES PASSED (frozen eff_thr) → EXECUTION PATH [PIPELINE ENFORCEMENT]")
+            logger.info(f"[PIPELINE START] timestamp={utc_iso()} event_trigger={event_obj.get('event_trigger', False)} edge={edge_score:.1f} eff={pipeline_eff_thr:.1f} [PIPELINE ENFORCEMENT]")
 
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "START"
@@ -3235,44 +5269,29 @@ def process_signal(event: dict):
                 "ai_called": True,
                 "ai_decision": ai.get("decision"),
                 "ai_win_prob": ai.get("win_prob"),
-                "ai_reason": ai.get("comment", "")
+                "ai_reason": ai.get("comment", ""),
+                "effective_threshold": pipeline_eff_thr,
             }
 
-            if not is_edge_valid(edge_score):
-                logger.info(f"[EDGE GATE] edge_score={edge_score:.1f} < threshold — NO AI CALL [PIPELINE ENFORCEMENT]")
-                enforce_log(signal, "BLOCKED", "EDGE_BELOW_THRESHOLD")
-                log_event_rejection({"edge": edge_score, "threshold": get_edge_threshold()})
-                log_no_signal_with_context(reason="EDGE_BELOW_THRESHOLD")
-                full_pipeline_trace("BLOCKED", "EDGE_BELOW_THRESHOLD", trade_id)
-                with state_lock:
-                    state["debug_state"]["skip_reason"] = f"EDGE_BELOW_{get_edge_threshold()}"
-                    state["debug_state"]["last_pipeline_stage"] = "EDGE_ONLY"
-                update_debug_state_always("EDGE_BELOW_THRESHOLD", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
-
-            logger.info("[PIPELINE] → EDGE PASSED — AI COOLDOWN ALREADY PASSED [PIPELINE ENFORCEMENT]")
-            signal["decision"]["ai_called"] = True
-            enforce_log(signal, "AI", extra=f"{ai.get('decision')}")
-            full_pipeline_trace("[PIPELINE]", f"AI_{ai.get('decision')}", trade_id)
-            with state_lock:
-                state["debug_state"]["last_pipeline_stage"] = "AI"
-                state["debug_state"]["last_ai_call"] = utc_iso()
-                state["debug_state"]["ai_gate"]["called"] = True
-                state["debug_state"]["ai_gate"]["reason"] = "AI_CALLED"
-
             if state["data_quality"] < 0.5:
-                logger.warning("[EXECUTION BLOCK] Data quality too low [PIPELINE ENFORCEMENT]")
-                enforce_log(signal, "BLOCKED", "LOW_DATA_QUALITY")
-                full_pipeline_trace("BLOCKED", "LOW_DATA_QUALITY", trade_id)
-                update_debug_state_always("LOW_DATA_QUALITY", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, "LOW_DATA_QUALITY", edge_score)
+                else:
+                    logger.warning("[EXECUTION BLOCK] Data quality too low [PIPELINE ENFORCEMENT]")
+                    enforce_log(signal, "BLOCKED", "LOW_DATA_QUALITY")
+                    full_pipeline_trace("BLOCKED", "LOW_DATA_QUALITY", trade_id)
+                    update_debug_state_always("LOW_DATA_QUALITY", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
 
             if state["data_quality"] < 0.7:
                 logger.warning("[DATA QUALITY] Suboptimal (<0.7) [PIPELINE ENFORCEMENT]")
 
-            if len(volume_buffer) < BUFFER_MIN or len(price_buffer) < BUFFER_MIN or len(delta_buffer) < BUFFER_MIN:
+            if not (
+                len(volume_buffer) >= WINDOW_SIZE
+                and len(price_buffer) >= WINDOW_SIZE
+                and len(delta_buffer) >= WINDOW_SIZE
+            ):
                 logger.warning("[WARMUP] Partial mode - buffers not full [PIPELINE ENFORCEMENT]")
                 state["system_ready"] = False
             else:
@@ -3304,25 +5323,29 @@ def process_signal(event: dict):
             signal["strategy"] = state.get("strategy")
             signal["_logged"] = False
             signal["_finalized"] = False
-            signal["pullback_pct"] = state.get("pullback_threshold", 0.001)
+            signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
+            begin_approve_research(signal, ai, pipeline_eff_thr)
 
             if not signal.get("final_direction"):
                 raise RuntimeError("PIPELINE BREAK: AI returned no direction")
 
             sr_state = signal.get("context", {}).get("sr_state") or state.get("support_resistance", {}).get("sr_state", "UNKNOWN")
             mc = signal.get("context", {}).get("market_context") or state.get("market_context", {})
-            sr_blocked, sr_block_reason = evaluate_sr_direction_filter(final_direction, sr_state, mc)
+            sr_blocked, sr_block_reason = evaluate_sr_direction_filter(final_direction, sr_state, mc, ai)
             if sr_blocked:
-                logger.info(f"[SR FILTER] {sr_block_reason} mode={SR_FILTER_MODE} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-                log_blocked_signal(signal, ai, sr_block_reason)
-                exit_pipeline(signal, ai, sr_block_reason)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = sr_block_reason
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = sr_block_reason
-                update_debug_state_always(sr_block_reason, {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, sr_block_reason, edge_score)
+                else:
+                    logger.info(f"[SR FILTER] {sr_block_reason} mode={SR_FILTER_MODE} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_blocked_signal(signal, ai, sr_block_reason)
+                    exit_pipeline(signal, ai, sr_block_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = sr_block_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = sr_block_reason
+                    update_debug_state_always(sr_block_reason, {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
             elif sr_block_reason and str(sr_block_reason).startswith("SR_SOFT_ALLOW"):
                 logger.info(f"[SR SOFT] Allowed {final_direction} at {sr_state}: {sr_block_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
 
@@ -3330,33 +5353,78 @@ def process_signal(event: dict):
                 final_direction, signal.get("context", {}) or ctx, ai
             )
             if loc_blocked:
-                logger.info(f"[ENTRY FILTER] {loc_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-                log_blocked_signal(signal, ai, loc_reason)
-                exit_pipeline(signal, ai, loc_reason)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = loc_reason
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = loc_reason
-                update_debug_state_always(loc_reason, {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, loc_reason, edge_score)
+                else:
+                    logger.info(f"[ENTRY FILTER] {loc_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_blocked_signal(signal, ai, loc_reason)
+                    exit_pipeline(signal, ai, loc_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = loc_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = loc_reason
+                    update_debug_state_always(loc_reason, {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
 
             qual_blocked, qual_reason = evaluate_entry_quality_filter(
-                final_direction, signal.get("context", {}) or ctx, ai
+                final_direction, signal.get("context", {}) or ctx, ai, signal.get("features")
             )
             if qual_blocked:
-                logger.info(f"[ENTRY QUALITY] {qual_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-                log_blocked_signal(signal, ai, qual_reason)
-                exit_pipeline(signal, ai, qual_reason)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = qual_reason
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = qual_reason
-                update_debug_state_always(qual_reason, {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, qual_reason, edge_score)
+                else:
+                    logger.info(f"[ENTRY QUALITY] {qual_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_blocked_signal(signal, ai, qual_reason)
+                    exit_pipeline(signal, ai, qual_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = qual_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = qual_reason
+                    update_debug_state_always(qual_reason, {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
 
-            if not ensure_directional_capacity(final_direction):
+            ev_blocked, ev_reason = evaluate_evidence_entry_filter(
+                final_direction,
+                signal.get("context", {}) or ctx,
+                ai,
+                signal.get("features"),
+                edge_score,
+            )
+            if ev_blocked:
+                if sole:
+                    _research_log_would_block(signal, ai, ev_reason, edge_score)
+                else:
+                    logger.info(f"[EVIDENCE GATE] {ev_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_blocked_signal(signal, ai, ev_reason)
+                    exit_pipeline(signal, ai, ev_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = ev_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = ev_reason
+                    update_debug_state_always(ev_reason, {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+
+            setup_type = signal.get("setup_type") or classify_setup(signal.get("features") or {})
+            if not is_research_data_collection():
+                weak_min_edge = get_weak_setup_min_edge()
+                if setup_type == "WEAK_SETUP" and edge_score < weak_min_edge:
+                    weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
+                    logger.info(f"[SETUP GATE] {weak_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_pipeline_event("POST_AI", "BLOCKED", weak_reason, trade_id, edge_score, {"setup_type": setup_type, "min_edge": weak_min_edge}, force=True)
+                    log_blocked_signal(signal, ai, weak_reason)
+                    exit_pipeline(signal, ai, weak_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = weak_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = weak_reason
+                    update_debug_state_always(weak_reason, {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+
+            if not sole and not ensure_directional_capacity(final_direction):
                 block_reason = f"MAX_{final_direction}S"
                 logger.info(f"[DIRECTION CAP] {block_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
                 log_blocked_signal(signal, ai, block_reason)
@@ -3371,63 +5439,80 @@ def process_signal(event: dict):
 
             direction = final_direction
             price = state.get("price")
-            signal_key = f"{direction}_{round(price, 1)}" if price else "UNKNOWN"
-            if signal_key == state.get("last_signal_key"):
-                logger.info("[DUPLICATE] Signal blocked by key match [PIPELINE ENFORCEMENT]")
-                enforce_log(signal, "BLOCKED", "DUPLICATE_KEY")
-                full_pipeline_trace("BLOCKED", "DUPLICATE_KEY_BLOCK", trade_id)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = "DUPLICATE_KEY"
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = "DUPLICATE_KEY"
-                update_debug_state_always("DUPLICATE_KEY", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
-            state["last_signal_key"] = signal_key
+            if not sole:
+                signal_key = f"{direction}_{round(price, 1)}" if price else "UNKNOWN"
+                if signal_key == state.get("last_signal_key"):
+                    logger.info("[DUPLICATE] Signal blocked by key match [PIPELINE ENFORCEMENT]")
+                    enforce_log(signal, "BLOCKED", "DUPLICATE_KEY")
+                    full_pipeline_trace("BLOCKED", "DUPLICATE_KEY_BLOCK", trade_id)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "DUPLICATE_KEY"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "DUPLICATE_KEY"
+                    update_debug_state_always("DUPLICATE_KEY", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+                state["last_signal_key"] = signal_key
 
             margin_usdt, margin_reason = resolve_entry_margin_usdt(
                 final_direction, ai, signal.get("context", {}) or ctx
             )
             if margin_reason:
-                logger.info(f"[RISK SIZE] {margin_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-                log_blocked_signal(signal, ai, margin_reason)
-                exit_pipeline(signal, ai, margin_reason)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = margin_reason
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = margin_reason
-                update_debug_state_always(margin_reason, {"edge": edge_score, "spread": compute_directional_spread(final_direction, ai)})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, margin_reason, edge_score)
+                    margin_usdt = margin_usdt or FIXED_MARGIN_USDT
+                else:
+                    logger.info(f"[RISK SIZE] {margin_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                    log_blocked_signal(signal, ai, margin_reason)
+                    exit_pipeline(signal, ai, margin_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = margin_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = margin_reason
+                    update_debug_state_always(margin_reason, {"edge": edge_score, "spread": compute_directional_spread(final_direction, ai)})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
             signal["margin_usdt"] = margin_usdt
             signal["conviction_spread"] = compute_directional_spread(final_direction, ai)
             prof = get_regime_risk_profile()
+            sizing_ref = compute_reference_scaled_margin(
+                final_direction, ai, signal.get("context", {}) or ctx
+            )
+            signal["sizing_reference"] = sizing_ref
             logger.info(
-                f"[RISK SIZE] margin=${margin_usdt} spread={signal['conviction_spread']} "
-                f"regime={prof.get('label')} trade_id={trade_id} [PIPELINE ENFORCEMENT]"
+                f"[RISK SIZE] margin=${margin_usdt} (flat={FLAT_MARGIN_EVERY_TRADE}) "
+                f"ref_scaled=${sizing_ref.get('reference_scaled_margin_usdt')} "
+                f"spread={signal['conviction_spread']} regime={prof.get('label')} "
+                f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
             )
 
             if ai.get("win_prob", 0) < get_ai_threshold():
-                exit_pipeline(signal, ai, "BELOW_THRESHOLD")
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = "BELOW_THRESHOLD"
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = "BELOW_THRESHOLD"
-                update_debug_state_always("BELOW_THRESHOLD", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
+                else:
+                    exit_pipeline(signal, ai, "BELOW_THRESHOLD")
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "BELOW_THRESHOLD"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "BELOW_THRESHOLD"
+                    update_debug_state_always("BELOW_THRESHOLD", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
 
             if is_clustered_entry(final_direction, price):
-                exit_pipeline(signal, ai, "CLUSTER_ENTRY")
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = "CLUSTER_ENTRY"
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = "CLUSTER_ENTRY"
-                update_debug_state_always("CLUSTER_ENTRY", {"edge": edge_score, "price": price})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                if sole:
+                    _research_log_would_block(signal, ai, "CLUSTER_ENTRY", edge_score)
+                else:
+                    exit_pipeline(signal, ai, "CLUSTER_ENTRY")
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "CLUSTER_ENTRY"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "CLUSTER_ENTRY"
+                    update_debug_state_always("CLUSTER_ENTRY", {"edge": edge_score, "price": price})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
 
-            if not ensure_signal_capacity():
+            if not sole and not ensure_signal_capacity():
                 logger.warning("[MAX ACTIVE SIGNALS] Hard block before finalize [PIPELINE ENFORCEMENT]")
                 exit_pipeline(signal, ai, "MAX_ACTIVE_SIGNALS")
                 with state_lock:
@@ -3455,14 +5540,19 @@ def process_signal(event: dict):
 
             logger.info("[PIPELINE] → AI APPROVED → EXECUTION STAGE REACHED [PIPELINE ENFORCEMENT]")
             if not execution_allowed():
-                exit_pipeline(signal, ai, state.get("execution_reason"))
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = state.get("execution_reason")
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = state.get("execution_reason")
-                update_debug_state_always("EXECUTION_BLOCK", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
+                exec_reason = state.get("execution_reason") or "EXECUTION_BLOCK"
+                hard_exec_blocks = frozenset({"STALE_DATA_HARD_STOP", "NO_PRICE", "AI_FAIL"})
+                if sole and exec_reason not in hard_exec_blocks:
+                    _research_log_would_block(signal, ai, exec_reason, edge_score)
+                else:
+                    exit_pipeline(signal, ai, exec_reason)
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = exec_reason
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = exec_reason
+                    update_debug_state_always("EXECUTION_BLOCK", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
             full_pipeline_trace("[PIPELINE]", "EXECUTION_ALLOWED", trade_id)
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "EXECUTION_ALLOWED"
@@ -3472,6 +5562,7 @@ def process_signal(event: dict):
                 exit_pipeline(signal, ai, "ORDER_FAILED")
                 state["last_pipeline_stage"] = "IDLE"
                 return
+            record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
             final_status = signal.get("status") if signal.get("status") in ("FILLED", "OPEN") else "ORDERED"
             finalize_signal(signal, ai, final_status)
             logger.info("[PIPELINE] → ORDER STAGE COMPLETE [PIPELINE ENFORCEMENT]")
@@ -3494,77 +5585,108 @@ def parse_ts(ts_str):
     except:
         return 0
 
+def _normalize_bitfinex_trade(mts, amount, price):
+    px = float(price)
+    amt = float(amount)
+    if px <= 0:
+        return None
+    return {
+        "p": px,
+        "v": abs(amt),
+        "S": "Buy" if amt > 0 else "Sell",
+        "T": int(mts),
+    }
+
+def _bitfinex_ws_trades_from_message(data) -> list:
+    """Parse Bitfinex WS v2 trades channel messages into internal trade dicts."""
+    if not isinstance(data, list) or len(data) < 2:
+        return []
+    tag = data[1]
+    out = []
+    if isinstance(tag, str) and tag in ("te", "tu") and len(data) >= 3:
+        row = data[2]
+        if isinstance(row, list) and len(row) >= 4:
+            t = _normalize_bitfinex_trade(row[1], row[2], row[3])
+            if t:
+                out.append(t)
+    elif isinstance(tag, list):
+        for row in tag:
+            if isinstance(row, list) and len(row) >= 4:
+                t = _normalize_bitfinex_trade(row[1], row[2], row[3])
+                if t:
+                    out.append(t)
+    return out
+
+def _process_ws_trade_tick(trade: dict):
+    global _last_ws_trade_fp, _last_ws_trade_fp_ts, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
+    trade_fp = (trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
+    if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
+        _agent_dbg("H2", "safe_ws_handler", "dedupe_skip", {"fp": str(trade_fp)[:80]})
+        return
+    _last_ws_trade_fp = trade_fp
+    _last_ws_trade_fp_ts = time.time()
+    price = float(trade.get("p", 0))
+    size = float(trade.get("v", 0))
+    if price <= 0:
+        return
+    prev_price = nz(state.get("price"))
+    state["price"] = price
+    state["price_ts"] = time.time()
+    state["ws_last_tick"] = time.time()
+    state["last_data_ts"] = time.time()
+    price_buffer.append(price)
+    volume_buffer.append(size)
+    update_orderflow(trade)
+    delta_buffer.append(orderflow["delta"])
+    delta_change = orderflow["delta"] - orderflow.get("prev_delta", 0)
+    delta_change_buffer.append(delta_change)
+    imbalance_buffer.append(orderflow["imbalance"])
+    if len(price_buffer) >= 2:
+        velocity = (price_buffer[-1] - price_buffer[-2]) / price_buffer[-2]
+        velocity_buffer.append(velocity)
+    update_feature_snapshot()
+    try:
+        data_quality = update_data_quality(state["feature_snapshot"])
+    except Exception as e:
+        logger.error(f"[DATA QUALITY FAILSAFE] {e}")
+        data_quality = 0.0
+    with state_lock:
+        state["data_quality"] = data_quality
+    if state.get("debug_enabled"):
+        logger.debug(f"[FEATURES] {state['feature_snapshot']}")
+        logger.debug(f"[DATA QUALITY] {data_quality:.3f}")
+    trade_ts_raw = trade.get("T")
+    trade_ts = trade_ts_raw / 1000 if trade_ts_raw and trade_ts_raw > 1e12 else (trade_ts_raw or time.time())
+    latency = max(0, (time.time() - trade_ts) * 1000)
+    with state_lock:
+        state["diag"].update({"ws_latency_ms": round(latency, 1)})
+        state["price_source"] = "WS"
+    if not state.get("ws_ready"):
+        state["ws_ready"] = True
+        logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
+
 def safe_ws_handler(message):
-    global _last_ws_trade_fp, _last_ws_trade_fp_ts
     try:
         logger.debug(f"[WS RAW] Received message length: {len(message)}")
         data = json.loads(message)
         global last_ws_message_time
         last_ws_message_time = time.time()
-        if 'topic' in data and data['topic'] == 'publicTrade.BTCUSDT':
-            trade_data = data.get('data')
-            if not isinstance(trade_data, list) or not trade_data:
-                logger.warning("[WS] Invalid data format - skipping")
+        if isinstance(data, dict):
+            ev = data.get("event")
+            if ev in ("info", "subscribed", "pong"):
+                if ev == "subscribed" and data.get("channel") == "trades":
+                    logger.info(f"[WS] Subscribed trades chanId={data.get('chanId')} symbol={data.get('symbol')}")
                 return
-            _agent_dbg("H2", "safe_ws_handler", "batch", {"trades_in_msg": len(trade_data), "msg_len": len(message)})
-            for trade in trade_data:
-                trade_fp = (trade.get("i"), trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
-                if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
-                    _agent_dbg("H2", "safe_ws_handler", "dedupe_skip", {"fp": str(trade_fp)[:80]})
-                    continue
-                _last_ws_trade_fp = trade_fp
-                _last_ws_trade_fp_ts = time.time()
-                price = float(trade.get('p', 0))
-                size = float(trade.get('v', 0))
-                side = trade.get('S', 'Buy')
-                if price <= 0:
-                    continue
-                global prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
-                prev_price = nz(state.get("price"))
-                state["price"] = price
-                state["price_ts"] = time.time()
-                state["ws_last_tick"] = time.time()
-                state["last_data_ts"] = time.time()
-
-                price_buffer.append(price)
-                volume = size
-                volume_buffer.append(volume)
-
-                update_orderflow(trade)
-
-                delta_buffer.append(orderflow["delta"])
-                delta_change = orderflow["delta"] - orderflow.get("prev_delta", 0)
-                delta_change_buffer.append(delta_change)
-
-                imbalance = orderflow["imbalance"]
-                imbalance_buffer.append(imbalance)
-
-                if len(price_buffer) >= 2:
-                    velocity = (price_buffer[-1] - price_buffer[-2]) / price_buffer[-2]
-                    velocity_buffer.append(velocity)
-
-                update_feature_snapshot()
-                try:
-                    data_quality = update_data_quality(state["feature_snapshot"])
-                except Exception as e:
-                    logger.error(f"[DATA QUALITY FAILSAFE] {e}")
-                    data_quality = 0.0
-                with state_lock:
-                    state["data_quality"] = data_quality
-                if state.get("debug_enabled"):
-                    logger.debug(f"[FEATURES] {state['feature_snapshot']}")
-                    logger.debug(f"[DATA QUALITY] {data_quality:.3f}")
-
-                trade_ts_raw = trade.get('T')
-                trade_ts = trade_ts_raw / 1000 if trade_ts_raw else time.time()
-                latency = max(0, (time.time() - trade_ts) * 1000)
-                with state_lock:
-                    state["diag"].update({"ws_latency_ms": round(latency,1)})
-                if not state.get("ws_ready"):
-                    state["ws_ready"] = True
-                    logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
-        else:
-            logger.debug(f"[WS] Non-trade message received: {data.get('topic','unknown')}")
+            if ev == "error":
+                logger.error(f"[WS] Bitfinex error: {data}")
+                return
+            return
+        trades = _bitfinex_ws_trades_from_message(data)
+        if not trades:
+            return
+        _agent_dbg("H2", "safe_ws_handler", "batch", {"trades_in_msg": len(trades), "msg_len": len(message)})
+        for trade in trades:
+            _process_ws_trade_tick(trade)
     except IndexError as ie:
         logger.error(f"[WS FIX] deque underflow prevented: {ie}")
         return
@@ -3573,11 +5695,17 @@ def safe_ws_handler(message):
         set_execution_paused("THREAD_CRASH")
 
 def on_message(ws, message):
-    safe_ws_handler(message)
+    try:
+        safe_ws_handler(message)
+    except Exception as e:
+        logger.error(f"[WS FATAL] on_message: {e}")
 
 def on_open(ws):
-    logger.info("WS: Connected and subscribed to BTCUSDT trades")
-    ws.send(json.dumps({"op": "subscribe", "args": ["publicTrade.BTCUSDT"]}))
+    global ws_alive, ws_app
+    logger.info(f"WS: Connected — subscribing Bitfinex trades {BITFINEX_WS_SYMBOL}")
+    ws.send(json.dumps({"event": "subscribe", "channel": "trades", "symbol": BITFINEX_WS_SYMBOL}))
+    with state_lock:
+        state["ws_connected_ts"] = time.time()
     threading.Thread(target=ping_ws, args=(ws,), daemon=True).start()
 
 def on_error(ws, error):
@@ -3585,14 +5713,14 @@ def on_error(ws, error):
 
 def on_close(ws, code, reason):
     logger.warning(f"WS closed: code={code}, reason={reason}")
-    ws.sock = None
+    ws_sock = None
     global ws_alive
     ws_alive = False
-    set_execution_paused("STALE_DATA_HARD_STOP")
+    # Log only — do not pause execution on brief disconnects (watchdog handles stale/reconnect)
 
 def start_websocket():
     global ws_app, ws_alive
-    ws_url = "wss://stream.bybit.com/v5/public/linear"
+    ws_url = BITFINEX_WS_URL
     while not shutdown_event.is_set():
         with ws_lock:
             if ws_app:
@@ -3622,7 +5750,7 @@ def ping_ws(ws):
             break
         time.sleep(15)
         try:
-            ws.send(json.dumps({"op": "ping"}))
+            ws.send(json.dumps({"event": "ping"}))
         except Exception:
             break
 
@@ -3633,15 +5761,13 @@ def ws_watchdog():
             time.sleep(3)
             price_ts = state.get("price_ts")
             if price_ts is None:
-                logger.info("[WS WATCHDOG] Startup phase - no price yet, skipping stale check")
                 continue
             age = time.time() - price_ts
-            if age > 10:
-                if not ws_reconnecting or (time.time() - last_ws_reconnect > 5):
+            if age > WATCHDOG_WS_STALE_SEC:
+                if not ws_reconnecting:
                     ws_reconnecting = True
-                    last_ws_reconnect = time.time()
-                    reconnect_delay = min(ws_retry * 2, 30)
-                    logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s - backoff {reconnect_delay}s")
+                    ws_stale_count = ws_stale_count + 1
+                    logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) — nudging reconnect")
                     with ws_lock:
                         if ws_app:
                             try:
@@ -3649,17 +5775,15 @@ def ws_watchdog():
                                 if ws_app.sock:
                                     ws_app.sock.close()
                                 ws_app.close()
-                            except:
+                            except Exception:
                                 pass
-                    time.sleep(reconnect_delay)
-                    start_websocket()
-                    ws_reconnecting = False
-                    ws_retry = 1
-            if age > STALE_HARD_SEC and price_ts is not None:
-                set_execution_paused("STALE_DATA_HARD_STOP")
+                    ws_retry = min(ws_retry + 1, 8)
+                    time.sleep(min(ws_retry * 2, 30))
+            elif ws_reconnecting:
+                ws_reconnecting = False
+                ws_retry = 1
             else:
                 if state.get("execution_reason") == "STALE_DATA_HARD_STOP":
-                    logger.info("[RECOVERY FIX] Clearing stale hard stop")
                     set_execution_paused("")
     except Exception as e:
         logger.exception("[CRITICAL] WS watchdog crash")
@@ -3672,6 +5796,7 @@ def state_monitor_loop():
             time.sleep(1)
             with state_lock:
                 state["heartbeat"] = int(time.time())
+                state["last_heartbeat"] = time.time()
                 validate_market_data()
                 data_age = time.time() - state.get("last_data_ts", 0)
                 if data_age <= 5:
@@ -3691,13 +5816,14 @@ def state_monitor_loop():
                             set_execution_paused("")
                             logger.info("[RECOVERY][STATE_SYNC] Execution resumed after WS/OHLCV recovery")
                 elif state["ws_ready"]:
-                    state["data_source"] = "ws_ready_waiting_ohlcv"
+                    state["data_source"] = "ws_ready_waiting_bitfinex"
                 elif state["ohlcv_ready"]:
-                    state["data_source"] = "ohlcv_ready_waiting_ws"
+                    state["data_source"] = "ws_ready_waiting_bitfinex"
                 else:
-                    state["data_source"] = "booting"
-                ws_age = time.time() - (state.get("ws_last_tick") or 0)
-                state["diag"]["ws_status"] = "OK" if ws_age < STALE_HARD_SEC else "STALE"
+                    state["data_source"] = "booting_bitfinex"
+                ws_tick = state.get("ws_last_tick")
+                ws_age = (time.time() - ws_tick) if ws_tick else 0
+                state["diag"]["ws_status"] = "OK" if (ws_tick and ws_age < STALE_HARD_SEC) else ("BOOTING" if not ws_tick else "STALE")
                 engine_age = time.time() - last_ohlcv_fetch
                 state["diag"]["engine_status"] = "OK" if engine_age < 300 else "STALE"
                 state["diag"]["ai_status"] = "OK" if state["ai_enabled"] else "OFF"
@@ -3706,9 +5832,12 @@ def state_monitor_loop():
                 else:
                     state["ws_stale_count"] = 0
                 if state["ws_stale_count"] > 3:
-                    logger.error("[PIPELINE] WS DEAD -> THREAD_CRASH")
+                    logger.error(
+                        "[PIPELINE] WS DEAD -> THREAD_CRASH (monitor keeps running; WS watchdog will reconnect) "
+                        "[PIPELINE ENFORCEMENT]"
+                    )
                     set_execution_paused("THREAD_CRASH")
-                    return
+                    state["ws_stale_count"] = 0
             fetch_ohlcv()
             update_ema()
             trend_info()
@@ -3734,7 +5863,13 @@ def state_monitor_loop():
                         dump_replay(tid)
                         replay_buffers.pop(tid, None)
                         continue
-                    if time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC or len(buf.get("ticks", [])) >= 2000:
+                    age_from_start = time.time() - buf.get("start_ts", 0)
+                    is_deferred_shadow = buf.get("lane") in ("shadow", "shadow_deferred") and buf.get("block_reason")
+                    if len(buf.get("ticks", [])) >= 2000:
+                        expired_ids.append(tid)
+                    elif is_deferred_shadow and age_from_start > SHADOW_REPLAY_TTL_SEC:
+                        expired_ids.append(tid)
+                    elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
                     sorted_ids = sorted(replay_buffers, key=lambda k: replay_buffers[k].get("start_ts", 0))
@@ -3743,7 +5878,12 @@ def state_monitor_loop():
                         dump_replay(tid)
                         replay_buffers.pop(tid, None)
             for tid in expired_ids:
-                close_replay_buffer(tid)
+                with replay_lock:
+                    buf = replay_buffers.get(tid)
+                    if buf and buf.get("lane") not in ("executed",) and buf.get("lane") != "shadow_blocked":
+                        finalize_shadow_research(tid, buf.get("block_reason") or "SHADOW_TTL")
+                    else:
+                        close_replay_buffer(tid)
             with replay_lock:
                 oldest_id = None
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
@@ -3761,6 +5901,19 @@ def state_monitor_loop():
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
                     process_signal(event)
+                elif _sole_ai_research_mode() and ai_cooldown_remaining_sec() == 0:
+                    features = build_full_feature_snapshot()
+                    if features:
+                        edge_score = compute_edge_score(features)
+                        if round(edge_score, 1) > 0.0:
+                            process_signal({
+                                "event_trigger": True,
+                                "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
+                                "edge_score": round(edge_score, 1),
+                                "price": nz(state.get("price")),
+                                "timestamp": utc_iso(),
+                                "features": features,
+                            })
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -3793,21 +5946,28 @@ def execute_order(signal, ai=None):
         logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
-        use_limit = state.get("allow_compression", True)
-        if use_limit:
+        pullback_pct = float(state.get("pullback_threshold", 0.002))
+        use_instant = pullback_pct <= 0.0
+        if use_instant or not state.get("allow_compression", True):
+            execute_market_order(signal)
+            with trade_lock:
+                filled = any(p.get("trade_id") == signal.get("trade_id") for p in open_positions)
+            if not filled:
+                logger.error(f"[EXECUTION FAIL HARD] Market fill missing position trade_id={signal.get('trade_id')}")
+                exit_pipeline(signal, ai, "ORDER_NOT_RECORDED")
+                return False
+        else:
             order = create_limit_order(signal)
             if order is None:
                 logger.error("[EXECUTION] create_limit_order failed")
                 exit_pipeline(signal, ai, "ORDER_CREATION_FAILED")
                 return False
-        else:
-            execute_market_order(signal)
-        created = any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders)
-        if not created:
-            logger.error(f"[EXECUTION FAIL HARD] Order not in pending_orders trade_id={signal.get('trade_id')}")
-            exit_pipeline(signal, ai, "ORDER_NOT_RECORDED")
-            return False
-        assert any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders), "[CRITICAL] Order not recorded in pending_orders"
+            created = any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders)
+            if not created:
+                logger.error(f"[EXECUTION FAIL HARD] Order not in pending_orders trade_id={signal.get('trade_id')}")
+                exit_pipeline(signal, ai, "ORDER_NOT_RECORDED")
+                return False
+            assert any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders), "[CRITICAL] Order not recorded in pending_orders"
         full_pipeline_trace("[ORDER]", "PLACED", signal.get("trade_id"))
         return True
     except Exception as e:
@@ -3837,7 +5997,9 @@ def execute_market_order(signal):
         "fee_type": "TAKER",
     }
     with trade_lock:
-        open_positions.append(_build_open_position(order, signal, signal.get("ai", {})))
+        pos = _build_open_position(order, signal, signal.get("ai", {}))
+        open_positions.append(pos)
+    mark_approve_research_executed(pos.get("trade_id"), price)
     master = trades_map.get(signal["trade_id"], {}).get("signal_ref")
     if master:
         master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": price,"outcome": "OPEN"})
@@ -3854,7 +6016,7 @@ def create_limit_order(signal):
         enforce_log(signal, "BLOCKED_INSUFFICIENT_CAPITAL")
         exit_pipeline(signal, None, "BLOCKED_INSUFFICIENT_CAPITAL")
         return None
-    pullback_pct = signal.get("pullback_pct", 0.001)
+    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
     signal_price = signal.get("signal_price", price)
     if signal["final_direction"] == "LONG":
         limit_price = signal_price * (1 - pullback_pct)
@@ -3948,6 +6110,7 @@ def position_manager():
             cleanup_expired_orders()
             process_pending_orders()
             process_positions()
+            tick_all_replay_buffers(price)
 
             with trade_lock:
                 for order in list(pending_orders):
@@ -3995,14 +6158,20 @@ def close_position(pos: dict, exit_reason: str):
         position_value_entry = entry * qty
         position_value_exit = price * qty
         entry_is_maker = pos.get("entry_fee_type") == "MAKER"
-        exit_is_maker = pos.get("exit_fee_type") == "MAKER" or "TP" in exit_reason or "POSTONLY" in exit_reason
+        exit_is_maker = (
+            pos.get("exit_fee_type") == "MAKER"
+            or exit_reason in ("TAKE_PROFIT", "PROFIT_LOCK_LADDER", "TP_HIT")
+            or ("PROFIT" in exit_reason and "FAST" not in exit_reason)
+            or "POSTONLY" in exit_reason
+        )
         maker_fee, taker_fee = get_trading_fee_rates()
         entry_fee = position_value_entry * (maker_fee if entry_is_maker else taker_fee)
         exit_fee = position_value_exit * (maker_fee if exit_is_maker else taker_fee)
-        total_fees = entry_fee + exit_fee
+        trading_fees = entry_fee + exit_fee
         accrue_position_funding(pos, time.time())
-        funding_total = pos.get("funding_fees", 0.0)
-        net_pnl = gross_pnl - total_fees - funding_total
+        funding_total = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
+        total_fees = trading_fees
+        net_pnl = gross_pnl - trading_fees - funding_total
 
         if net_pnl <= 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
@@ -4046,7 +6215,10 @@ def close_position(pos: dict, exit_reason: str):
             "conviction_spread": pos.get("conviction_spread"),
             "net_pnl_usd": round(net_pnl, 2),
             "gross_pnl_usd": round(gross_pnl, 2),
-            "fees_usd": round(total_fees, 2),
+            "trading_fees_usd": round(trading_fees, 2),
+            "fees_usd": round(trading_fees, 2),
+            "funding_fees_usd": round(funding_total, 2),
+            "total_cost_usd": round(trading_fees + funding_total, 2),
             "exit_reason": exit_reason,
             "leverage": pos.get("leverage", 20),
             "r_multiple": round(r_multiple, 2),
@@ -4068,7 +6240,7 @@ def close_position(pos: dict, exit_reason: str):
             "bull_score_at_entry": pos.get("bull_score_at_entry") or ai_factors.get("bull_score") or master.get("bull_score_at_entry"),
             "bear_score_at_entry": pos.get("bear_score_at_entry") or ai_factors.get("bear_score") or master.get("bear_score_at_entry"),
             "funding_rate_pct_8h_at_entry": fund.get("rate_pct_per_8h"),
-            "bot_version": EXECUTION_FIX_VERSION,
+            **csv_research_meta(),
             "ai_decision": master.get("ai_decision", state.get("ai_decision", "UNKNOWN")),
             "price_at_signal": pos.get("signal_price"),
             "distance_to_resistance": dist_res,
@@ -4120,7 +6292,10 @@ def close_position(pos: dict, exit_reason: str):
             "execution_fill_delay_sec": entry_delay,
             "outcome_net_pnl_usd": round(net_pnl, 2),
             "outcome_gross_pnl_usd": round(gross_pnl, 2),
-            "outcome_fees_usd": round(total_fees, 2),
+            "outcome_trading_fees_usd": round(trading_fees, 2),
+            "outcome_fees_usd": round(trading_fees, 2),
+            "outcome_funding_fees_usd": round(funding_total, 2),
+            "outcome_total_cost_usd": round(trading_fees + funding_total, 2),
             "outcome_pnl_pct": round(net_pnl / margin_usdt * 100, 2),
             "outcome_duration_sec": time.time() - pos.get("entry_ts", 0),
             "outcome_exit_reason": exit_reason,
@@ -4140,20 +6315,30 @@ def close_position(pos: dict, exit_reason: str):
             "invert_signal": state.get("invert_signal", False),
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
-            "final_direction": pos.get("dir")
+            "final_direction": pos.get("dir"),
+            **{f"cfg_{k}": v for k, v in get_exit_config_snapshot().items() if not isinstance(v, (list, tuple))},
+            "cfg_trail_ladder_json": json.dumps(TRAIL_LADDER),
+            "exit_config_json": json.dumps(get_exit_config_snapshot()),
         }
         open_positions.remove(pos)
+        close_replay_buffer(trade_id)
+        log_trade_outcome_jsonl(trade_row, pos)
         trades.append(trade_row)
         validate_state()
         try:
             log_trade(trade_row)
-            logger.info(f"[CSV] Trade logged reason={exit_reason} trade_id={trade_id} net_pnl={fmt(net_pnl)} gross={fmt(gross_pnl)} maker={fmt(pos.get('maker_fees',0))} taker={fmt(pos.get('taker_fees',0))} funding={fmt(pos.get('funding_fees',0))} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
+            logger.info(
+                f"[CSV] Trade logged reason={exit_reason} trade_id={trade_id} net_pnl={fmt(net_pnl)} "
+                f"gross={fmt(gross_pnl)} trading_fees={fmt(trading_fees)} funding={fmt(funding_total)} "
+                f"profile={EXCHANGE_FEE_PROFILE} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]"
+            )
             persist_signal_close(trade_id, "CLOSED")
             state["account_balance"] += net_pnl
             recent_trades.append({"pnl": net_pnl,"win": net_pnl > 0,"regime": trade_row.get("regime", "UNKNOWN"),"setup": trade_row.get("strategy", "SR")})
         except Exception as e:
             logger.error(f"[CSV ERROR] {e}")
         apply_trade_pnl(trade_row)
+        _record_research_trade_close(net_pnl, exit_reason)
 
         with state_lock:
             a = state.setdefault("analytics", {})
@@ -4264,19 +6449,14 @@ last_logged_candle_ts = 0
 rest_failure_count = 0
 MAX_REST_FAILURES = 5
 POSITIONS_FILE = "open_positions.json"
-bybit_public = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap', 'unifiedMargin': True}})
-try:
-    MARKETS = bybit_public.load_markets()
-except Exception as e:
-    MARKETS = {}
-    print(f"[WARN] Bybit load_markets failed at boot (will retry in engine): {e}", flush=True)
-api_key = os.getenv("BYBIT_API_KEY", "").strip()
-secret = os.getenv("BYBIT_SECRET", "").strip()
-bybit_private = ccxt.bybit({
-    'apiKey': api_key,
-    'secret': secret,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'swap', 'unifiedMargin': True, 'recvWindow': 15000}
+api_key = os.getenv("BITFINEX_API_KEY", "").strip()
+api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
+bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
+MARKETS = bitfinex_public.load_markets()
+bitfinex_private = ccxt.bitfinex({
+    "apiKey": api_key,
+    "secret": api_secret,
+    "enableRateLimit": True,
 })
 tick_prices = deque(maxlen=300)
 price_seq = 0
@@ -4284,17 +6464,116 @@ logger = logging.getLogger("3factor-bot")
 logger.setLevel(logging.INFO)
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
-file_handler = logging.FileHandler("bot_runtime.log", encoding='utf-8')
+LOG_FILE = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
+file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding='utf-8'
+)
 file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
+file_handler.setLevel(logging.INFO)
 logger.handlers.clear()
 logger.addHandler(stream_handler)
 logger.addHandler(file_handler)
+
+FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC = 3600
+_last_fresh_maintain_ts = 0.0
+
+def research_wipe_file_paths():
+    """Research artifacts that can grow without bound between analyzer runs."""
+    paths = [
+        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
+        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
+        "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl", "counterfactual.jsonl",
+        EDGE_CENSUS_FILE,
+        "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
+        _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
+    ]
+    return paths
+
+def _delete_paths(paths) -> tuple:
+    deleted = []
+    errors = []
+    seen = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                deleted.append(path)
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+    return deleted, errors
+
+def _reset_runtime_log_handlers():
+    """Truncate the rotating runtime log without restarting the process."""
+    for h in logger.handlers:
+        if not isinstance(h, RotatingFileHandler):
+            continue
+        try:
+            with h.lock:
+                if h.stream:
+                    h.stream.close()
+                    h.stream = None
+                for i in range(LOG_BACKUP_COUNT + 5, -1, -1):
+                    path = h.baseFilename if i == 0 else f"{h.baseFilename}.{i}"
+                    if os.path.exists(path):
+                        os.remove(path)
+                h.stream = h._open()
+        except Exception as e:
+            logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
+
+def reset_all_research_files() -> tuple:
+    deleted, errors = _delete_paths(research_wipe_file_paths())
+    return deleted, errors
+
+def maintain_fresh_collection_files():
+    """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
+    prune_aux_logs_on_startup()
+    log_path = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
+    if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_BYTES:
+        _reset_runtime_log_handlers()
+
+def perform_fresh_collection_reset() -> dict:
+    """Dashboard-triggered wipe: delete research files, reset session memory, keep bot running."""
+    global bot_start_time, _last_fresh_maintain_ts
+    logger.warning("[FRESH COLLECTION] Reset requested — wiping research files and session state")
+    with replay_lock:
+        replay_buffers.clear()
+    with trade_lock:
+        pending_orders.clear()
+        expired_orders.clear()
+        open_positions.clear()
+        trades_map.clear()
+        trades.clear()
+        recent_trades.clear()
+    deleted, errors = reset_all_research_files()
+    _reset_runtime_log_handlers()
+    reset_runtime_state()
+    reset_session_risk_state()
+    bot_start_time = time.time()
+    _last_fresh_maintain_ts = time.time()
+    summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    with state_lock:
+        state["fresh_collection_mode"] = True
+        state["last_fresh_reset_ts"] = time.time()
+        state["last_fresh_reset_summary"] = summary
+        state["execution_paused"] = False
+        state["execution_reason"] = ""
+        state["_pause_priority"] = 0
+    save_persistent_config()
+    logger.info(f"[FRESH COLLECTION] Reset complete — {summary} [PIPELINE ENFORCEMENT]")
+    return {"deleted": deleted, "errors": errors, "summary": summary, "ts": utc_iso()}
+
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
+EDGE_CENSUS_FILE = "edge_census.jsonl"
 SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
+SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
+_sim_processed_trade_ids: set = set()
 POLICY_FILE = "policy.json"
 CONFIG_FILE = "config.json"
 write_counter = 0
@@ -4390,11 +6669,17 @@ def dump_system_state():
 
 def watchdog_loop():
     while not shutdown_event.is_set():
-        if time.time() - last_heartbeat > 10:
-            if time.time() - state.get("ws_last_tick", 0) > 5:
-                logger.critical("[WATCHDOG] SYSTEM FREEZE DETECTED - using WS only")
-                dump_system_state()
-                dump_threads()
+        with state_lock:
+            hb_ts = state.get("last_heartbeat") or last_heartbeat
+            ws_ts = state.get("ws_last_tick") or 0
+        hb_age = time.time() - hb_ts
+        ws_age = time.time() - ws_ts
+        if hb_age > WATCHDOG_HEARTBEAT_STALE_SEC and ws_age > WATCHDOG_WS_STALE_SEC:
+            logger.critical(
+                f"[WATCHDOG] Pipeline stale {hb_age:.0f}s (WS {ws_age:.0f}s) — dumping state [PIPELINE ENFORCEMENT]"
+            )
+            dump_system_state()
+            dump_threads()
         time.sleep(5)
 
 def dump_threads():
@@ -4402,10 +6687,12 @@ def dump_threads():
         logger.debug(f"[THREAD] {thread.name} alive={thread.is_alive()}")
 
 def pipeline_heartbeat():
-    global last_pipeline_run
+    global last_pipeline_run, last_heartbeat
+    now = time.time()
     with state_lock:
-        state["last_heartbeat"] = time.time()
-    logger.debug("[HEARTBEAT] System alive - WS active")
+        state["last_heartbeat"] = now
+    last_heartbeat = now
+    logger.debug("[HEARTBEAT] Pipeline alive")
 
 def log_event_rejection(event):
     logger.info(f"[PIPELINE BLOCKED] edge={event.get('edge',0)} < threshold={event.get('threshold',2.9)} [PIPELINE ENFORCEMENT]")
@@ -4420,8 +6707,8 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>3-Factor Research Bot Dashboard</title>
-    <script src="/static/dashboard.js"></script>
+    <title>3-Factor Research Bot — Bitfinex · __BOT_VERSION__</title>
+    <script src="/static/dashboard.js?v=__BOT_VERSION__"></script>
     <style>
         body { background:#0d1117; color:#c9d1d9; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin:20px; }
         h1, h2, h3 { color:#58a6ff; }
@@ -4439,12 +6726,28 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 
-<h1>3-Factor Research Bot Dashboard</h1>
+<h1>3-Factor Research Bot — Bitfinex <span style="color:#3fb950;font-size:0.55em;vertical-align:middle;">__BOT_VERSION__</span></h1>
+<p style="color:#8b949e;margin-top:0;">Bot build: <strong id="botVersionBanner">__BOT_VERSION__</strong> · Exchange: <strong>Bitfinex</strong> perp · Symbol: <span id="marketSymbol">tBTCF0:USTF0</span> · Research / sim mode · <a href="__DASHBOARD_URL__" style="color:#58a6ff;">__DASHBOARD_URL__</a></p>
+<p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
+  Server: checking…
+</p>
 <p>
     <button type="button" onclick="refresh()">Refresh now</button>
     <label style="margin-left:12px;"><input type="checkbox" id="autoRefreshToggle"> Auto-refresh every 60s (optional)</label>
     <span id="refreshStatus" style="margin-left:8px;color:#8b949e;">Manual refresh by default — click Refresh now or enable auto</span>
 </p>
+
+<div id="dashboardToggles" style="margin:12px 0;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;">
+    <strong style="color:#58a6ff;">Quick toggles</strong>
+    <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
+    <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
+    <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
+    <button onclick="toggleBlockFreeRange()">Block FREE_RANGE entries: <span id="blockFreeRangeBtn">ON</span></button>
+    <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
+    <button onclick="downloadDebug()">Download Debug Logs</button>
+    <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
+</div>
 
 <div id="dataBanner">
     Data Source: <span id="dataSource">Loading...</span>
@@ -4465,18 +6768,25 @@ HTML = """<!DOCTYPE html>
 <p><strong>SR State:</strong> <span id="srState">-</span></p>
 <p><strong>SR Bias:</strong> <span id="srBias">-</span></p>
 
-<h3>AI Decision (Last Signal)</h3>
-<p><strong>AI Status:</strong> <span id="aiDecision">-</span></p>
+<h3>AI Decision (current cycle)</h3>
+<p><strong>AI Status:</strong> <span id="aiDecision">-</span> <span id="aiStatusNote" style="color:#8b949e;font-size:0.9em;"></span></p>
 <p><strong>AI Win Prob:</strong> <span id="aiProb">-</span></p>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
 <p><strong>AI Threshold:</strong> <span id="aiThresholdDisplay">-</span>%</p>
-<p><strong>Edge Threshold (min to trigger):</strong> <span id="edgeThresholdDisplay">-</span></p>
+<p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">-</span></p>
+<p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
+
+<h3>Exchange &amp; Cost Model (Research Sim)</h3>
+<p><strong>Exchange:</strong> <span id="exchangeLabel">Bitfinex</span> · <strong>Fee profile:</strong> <span id="feeProfile">-</span> · <strong>Trading fees:</strong> <span id="tradingFeeRates">-</span></p>
+<p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (UTC):</strong> <span id="fundingNextSettle">-</span></p>
+<p><strong>Funding meaning:</strong> <span id="fundingMeaning">-</span> · <strong>Open-interest:</strong> <span id="fundingOpenInterest">-</span></p>
 
 <h3>System Status</h3>
 <p id="why"></p>
+<p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
 <p>Last Fetch: <span id="lastFetch"></span></p>
 <p>WS Age: <span id="ws_age"></span></p>
 
@@ -4487,7 +6797,8 @@ HTML = """<!DOCTYPE html>
     <p><strong>Edge Score:</strong> <span id="edgeScore">-</span></p>
     <p><strong>Edge Progress (score / min required, max 6):</strong> <span id="edgeProgress">-</span></p>
     <p><strong>Flags:</strong> <span id="flags">-</span></p>
-    <p><strong>Trigger:</strong> <span id="trigger">-</span></p>
+    <p><strong>Pipeline trigger (edge event):</strong> <span id="trigger">-</span></p>
+    <p><strong>AI Gate (DeepSeek):</strong> <span id="aiGateStatus">-</span></p>
     <p><strong>Skip Reason:</strong> <span id="skipReason">-</span></p>
     <p><strong>Signal Attempt:</strong> <span id="signalAttempt">-</span></p>
     <p><strong>Block Reason:</strong> <span id="blockReason">-</span></p>
@@ -4502,43 +6813,67 @@ HTML = """<!DOCTYPE html>
     <p><strong>Data Quality:</strong> <span id="dataQuality">-</span></p>
 </div>
 
-<div>
-    <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
-    <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
-    <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button onclick="downloadDebug()">Download Debug Logs</button>
-    <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
-</div>
+<p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
+  <strong>Fresh Collection:</strong> turn ON to delete research CSVs, jsonl logs, debug/log files, and reset in-memory trades/session counters. The bot keeps running and starts collecting clean data. While ON, oversized aux logs are trimmed hourly.
+</p>
+<p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
 <h2>Controls</h2>
-<label>Leverage:</label><input id="leverage" type="number" min="1" max="50" value="50"><br>
+<p style="color:#8b949e;font-size:0.9em;">Changes apply live and save to config.json. Leverage / max positions update when you leave the field or press Enter.</p>
+<label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
 <label>Pullback %:</label>
 <select id="pullbackThresh">
-  <option value="0.1">0.1%</option>
+  <option value="0.0">0.0% (instant)</option>
+  <option value="0.1" selected>0.1%</option>
   <option value="0.2">0.2%</option>
   <option value="0.3">0.3%</option>
   <option value="0.4">0.4%</option>
   <option value="0.5">0.5%</option>
   <option value="0.6">0.6%</option>
 </select><br>
-<label>Max Positions:</label><input id="maxConcurrentPositions" type="number" min="1" value="3"><br>
-<label>AI Threshold:</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
-<label>Edge Threshold:</label>
-<select id="edgeThreshold" onchange="updateEdge(this.value)">
-  <option value="0.5">0.5</option>
+<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3"><br>
+<label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
+<label>Edge range preset:</label>
+<select id="edgeRangePreset">
+  <option value="min_only" selected>Any ≥ min (no upper cap) — v80 collection</option>
+  <option value="2.0_2.5">2.0 – 2.5 (sweet spot experiment)</option>
+  <option value="2.0_3.0">2.0 – 3.0</option>
+  <option value="2.5_3.5">2.5 – 3.5</option>
+  <option value="3.0_4.0">3.0 – 4.0</option>
+  <option value="custom">Custom min / max</option>
+</select><br>
+<div id="edgeCustomRange" style="display:none;margin:6px 0;padding:8px;border:1px solid #30363d;border-radius:6px;">
+<label>Min edge:</label>
+<select id="edgeThreshold">
+  <option value="0.5" selected>0.5</option>
   <option value="1.0">1.0</option>
   <option value="1.5">1.5</option>
   <option value="2.0">2.0</option>
   <option value="2.5">2.5</option>
-  <option value="3.0" selected>3.0</option>
+  <option value="3.0">3.0</option>
   <option value="3.5">3.5</option>
   <option value="4.0">4.0</option>
   <option value="4.5">4.5</option>
   <option value="5.0">5.0</option>
   <option value="5.5">5.5</option>
   <option value="6.0">6.0</option>
-</select><br>
+</select>
+<label style="margin-left:12px;">Max edge:</label>
+<select id="edgeThresholdMax">
+  <option value="no_cap" selected>No cap</option>
+  <option value="2.0">2.0</option>
+  <option value="2.5">2.5</option>
+  <option value="3.0">3.0</option>
+  <option value="3.5">3.5</option>
+  <option value="4.0">4.0</option>
+  <option value="4.5">4.5</option>
+  <option value="5.0">5.0</option>
+  <option value="5.5">5.5</option>
+  <option value="6.0">6.0</option>
+</select>
+</div>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
+<p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
 
 <h2>Active Signals</h2>
 <table>
@@ -4566,11 +6901,11 @@ HTML = """<!DOCTYPE html>
 
 <h2>Trades</h2>
 <table>
-    <thead><tr><th>Time</th><th>ID</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Fees USD</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Time</th><th>ID</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
-<h2>AI History (Last 5)</h2>
+<h2>AI History (Session)</h2>
 <table>
     <thead><tr><th>Time</th><th>Trade ID</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -4586,6 +6921,20 @@ HTML = """<!DOCTYPE html>
 
 DASHBOARD_JS = """(function () {
   try {
+    function formatMelbourneDateTime(ts) {
+      if (!ts || ts === '-') return '-';
+      try {
+        const d = new Date(ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z');
+        if (isNaN(d.getTime())) return ts;
+        const parts = new Intl.DateTimeFormat('en-AU', {
+          timeZone: 'Australia/Melbourne',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false
+        }).formatToParts(d);
+        const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+        return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} Melbourne`;
+      } catch (e) { return ts; }
+    }
     function safeText(id, value) {
       const el = document.getElementById(id);
       if (el) el.innerText = value ?? "-";
@@ -4608,8 +6957,75 @@ DASHBOARD_JS = """(function () {
       await post('/api/set_threshold', {value: parseFloat(value)});
       refresh();
     }
+    function normalizeEdgeOptionValue(value) {
+      const n = parseFloat(value);
+      if (Number.isNaN(n)) return null;
+      return n.toFixed(1);
+    }
+    function syncEdgeThresholdSelect(threshold) {
+      const edgeSel = document.getElementById('edgeThreshold');
+      if (!edgeSel || threshold == null || threshold === '') return;
+      const normalized = normalizeEdgeOptionValue(threshold);
+      if (!normalized) return;
+      edgeSel.value = normalized;
+      if (!edgeSel.value) {
+        const opt = document.createElement('option');
+        opt.value = normalized;
+        opt.textContent = normalized;
+        edgeSel.appendChild(opt);
+        edgeSel.value = normalized;
+      }
+    }
+    function syncEdgeThresholdMaxSelect(maxVal) {
+      const maxSel = document.getElementById('edgeThresholdMax');
+      if (!maxSel) return;
+      if (maxVal == null || maxVal === '' || maxVal === undefined) {
+        maxSel.value = 'no_cap';
+        return;
+      }
+      const normalized = normalizeEdgeOptionValue(maxVal);
+      if (!normalized) return;
+      maxSel.value = normalized;
+      if (!maxSel.value) maxSel.value = 'no_cap';
+    }
+    function toggleEdgeCustomPanel(presetId) {
+      const panel = document.getElementById('edgeCustomRange');
+      if (panel) panel.style.display = presetId === 'custom' ? 'block' : 'none';
+    }
+    function syncEdgeRangePreset(presetId) {
+      const presetSel = document.getElementById('edgeRangePreset');
+      if (!presetSel || !presetId) return;
+      presetSel.value = presetId;
+      if (!presetSel.value) {
+        const opt = document.createElement('option');
+        opt.value = presetId;
+        opt.textContent = presetId;
+        presetSel.appendChild(opt);
+        presetSel.value = presetId;
+      }
+      toggleEdgeCustomPanel(presetId);
+    }
+    async function updateEdgeRangePreset(presetId) {
+      await post('/api/set_edge_range', {preset: presetId});
+      syncEdgeRangePreset(presetId);
+      refresh();
+    }
+    async function updateEdgeRangeCustom() {
+      const minSel = document.getElementById('edgeThreshold');
+      const maxSel = document.getElementById('edgeThresholdMax');
+      const minVal = minSel ? parseFloat(normalizeEdgeOptionValue(minSel.value)) : null;
+      const maxRaw = maxSel ? maxSel.value : 'no_cap';
+      const maxVal = maxRaw === 'no_cap' ? null : parseFloat(normalizeEdgeOptionValue(maxRaw));
+      await post('/api/set_edge_range', {preset: 'custom', min: minVal, max: maxVal});
+      syncEdgeRangePreset('custom');
+      refresh();
+    }
     async function updateEdge(value) {
-      await post('/api/set_edge_threshold', {value: parseFloat(value)});
+      const normalized = normalizeEdgeOptionValue(value);
+      if (!normalized) return;
+      await post('/api/set_edge_threshold', {value: parseFloat(normalized)});
+      syncEdgeThresholdSelect(normalized);
+      syncEdgeRangePreset('custom');
       refresh();
     }
     async function toggleLive() {
@@ -4625,9 +7041,32 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_invert_signal');
       refresh();
     }
+    async function toggleBlockFreeRange() {
+      await post('/api/toggle_block_free_range_entries');
+      refresh();
+    }
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
       await post('/api/toggle_debug', {enabled: cur});
+      refresh();
+    }
+    async function toggleFreshCollection() {
+      const turningOn = document.getElementById('freshCollectionLabel').innerText.includes('OFF');
+      if (turningOn) {
+        const ok = confirm(
+          'Fresh Collection will DELETE all research CSVs, jsonl logs, debug/log files, and clear open/pending trades in memory.\\n\\nThe bot keeps running and starts collecting from zero.\\n\\nContinue?'
+        );
+        if (!ok) return;
+      }
+      const res = await post('/api/toggle_fresh_collection', {enabled: turningOn});
+      try {
+        const body = await res.json();
+        if (body.error) {
+          alert('Fresh Collection blocked: ' + body.error);
+        } else if (body.reset && body.reset.summary) {
+          alert('Fresh collection reset complete: ' + body.reset.summary);
+        }
+      } catch (e) {}
       refresh();
     }
     function downloadDebug() {
@@ -4644,27 +7083,60 @@ DASHBOARD_JS = """(function () {
         }
         const d = await r.json();
         const rs = document.getElementById('refreshStatus');
-        if (rs) rs.innerText = 'Last updated ' + new Date().toLocaleTimeString();
+        if (rs) rs.innerText = 'Last updated ' + new Date().toLocaleTimeString() + ' (live)';
+        const sb = document.getElementById('serverBanner');
+        if (sb) {
+          const pid = d.bot_pid;
+          const cd = d.ai_cooldown_remaining_sec;
+          let txt = pid
+            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
+            : 'LIVE (PID unknown — restart bot)';
+          if (d.server_ts) txt += ' · server ' + d.server_ts;
+          if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
+          if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
+          txt += ' · Stop: run stop_bot.ps1 in Final Bots (closing CMD alone may not stop a background bot)';
+          sb.style.borderColor = '#238636';
+          sb.style.color = '#c9d1d9';
+          sb.innerText = txt;
+        }
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
         if (src && banner) {
           if (d.execution_paused) {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
-            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-red-700 animate-pulse';
+            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
           } else if (d.price_source === 'WS') {
-            src.innerHTML = 'REAL BYBIT MARKET DATA (WS)';
+            src.innerHTML = d.data_banner_ws || ('REAL BITFINEX MARKET DATA (WS) · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-green-400 font-bold';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
           } else if (d.price_source === 'REST') {
-            src.innerHTML = 'REST FALLBACK (DEGRADED)';
+            src.innerHTML = d.data_banner_rest || ('BITFINEX REST FALLBACK · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-orange-400 font-bold';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-orange-600';
           } else {
-            src.innerHTML = 'CHECKING...';
+            src.innerHTML = d.data_banner_boot || ('BITFINEX CONNECTING · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-yellow-400 font-bold';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-yellow-600';
           }
+        }
+        const inst = document.getElementById('botInstance');
+        if (inst) {
+          const pid = d.bot_pid;
+          const keyOk = d.deepseek_key_present;
+          const weakMin = d.weak_setup_min_edge;
+          let syncTxt = keyOk ? 'DeepSeek key OK' : 'DeepSeek key MISSING (.env)';
+          if (pid) syncTxt = 'PID ' + pid + ' | ' + syncTxt;
+          else syncTxt = 'PID unknown — restart bot to sync dashboard | ' + syncTxt;
+          if (weakMin != null) syncTxt += ' | WEAK_SETUP min edge ' + weakMin;
+          const cd = d.ai_cooldown_remaining_sec;
+          if (cd != null && cd > 0) syncTxt += ' | AI cooldown ' + cd + 's / ' + (d.ai_cooldown_sec || 300) + 's';
+          if (d.bot_cwd) syncTxt += ' | ' + d.bot_cwd;
+          if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
+          if (d.bot_version) syncTxt += ' | ' + d.bot_version;
+          if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
+          if (d.block_free_range_entries === false) syncTxt += ' | FREE_RANGE block OFF';
+          inst.innerText = syncTxt;
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
         let wsAgeText = '-';
@@ -4679,6 +7151,22 @@ DASHBOARD_JS = """(function () {
         safeText('accountBalance', '$' + (d.account_balance != null ? d.account_balance.toFixed(2) : '500.00'));
         safeText('dailyPnl', '$' + (d.daily_pnl_usd != null ? d.daily_pnl_usd.toFixed(2) : '0.00') + ' net (UTC day)');
         safeText('equity', '$' + (d.equity != null ? d.equity.toFixed(2) : '500.00'));
+        safeText('exchangeLabel', d.exchange_label || 'Bitfinex');
+        const fp = d.fee_profile || 'BITFINEX_ZERO';
+        safeText('feeProfile', fp);
+        const mfr = d.maker_fee_pct != null ? (d.maker_fee_pct * 100).toFixed(4) : '0';
+        const tfr = d.taker_fee_pct != null ? (d.taker_fee_pct * 100).toFixed(4) : '0';
+        safeText('tradingFeeRates', mfr + '% maker / ' + tfr + '% taker (sim)');
+        const fund = d.funding || {};
+        const frPct = fund.rate_pct_per_8h != null ? fund.rate_pct_per_8h : (fund.rate != null ? (fund.rate * 100).toFixed(5) : '-');
+        safeText('fundingRateLive', frPct !== '-' ? frPct + '% per 8h' : '-');
+        safeText('fundingSource', fund.source || '-');
+        safeText('fundingNextSettle', fund.next_time_iso || (fund.next_time ? new Date(fund.next_time * 1000).toISOString() : '-'));
+        let fMean = 'neutral';
+        if (fund.rate > 0) fMean = 'positive rate → longs pay, shorts receive';
+        else if (fund.rate < 0) fMean = 'negative rate → shorts pay, longs receive';
+        safeText('fundingMeaning', fMean);
+        safeText('fundingOpenInterest', fund.open_interest != null ? fund.open_interest.toLocaleString() : '-');
 
         const sr = d.support_resistance || {};
         safeText('swingHigh', sr.swing_high != null ? sr.swing_high.toLocaleString() : '-');
@@ -4689,13 +7177,79 @@ DASHBOARD_JS = """(function () {
         safeText('srState', sr.sr_state || '-');
         safeText('srBias', sr.sr_bias || '-');
 
-        safeText('aiDecision', d.last_ai?.decision || d.ai_outcome || 'NO_SIGNAL');
-        safeText('aiProb', d.last_ai?.win_prob != null ? d.last_ai.win_prob + '%' : '-');
+        const dai = d.display_ai || {};
+        const aiCalled = !!dai.gate_called;
+        let aiStatusTxt = 'NO AI CALL (this cycle)';
+        if (aiCalled) {
+          aiStatusTxt = dai.status || d.last_ai?.decision || d.ai_outcome || 'UNKNOWN';
+          if (aiStatusTxt === 'AI_ERROR') {
+            aiStatusTxt = 'AI ERROR (API)';
+          }
+        } else if (dai.status && dai.status !== 'NO_AI_CALL') {
+          aiStatusTxt = dai.status;
+        }
+        safeText('aiDecision', aiStatusTxt);
+        safeText('aiStatusNote', dai.note || '');
+        const aiProbEl = document.getElementById('aiProb');
+        if (aiProbEl) {
+          aiProbEl.innerText = aiCalled && dai.win_prob != null
+            ? dai.win_prob + '%'
+            : (aiCalled && d.last_ai?.win_prob != null ? d.last_ai.win_prob + '%' : '-');
+        }
+        const msym = document.getElementById('marketSymbol');
+        if (msym && d.market_symbol) msym.innerText = d.market_symbol;
         safeText('aiDirRaw', d.last_ai?.direction || '-');
         safeText('finalDir', d.last_ai?.final_direction || '-');
         safeText('inverted', d.last_ai?.inverted ? 'YES' : 'NO');
         safeText('aiThresholdDisplay', d.ai_threshold != null ? d.ai_threshold : 'WAITING');
-        safeText('edgeThresholdDisplay', d.edge_threshold != null ? d.edge_threshold : '3.0');
+        const edgeBase = d.edge_threshold != null ? normalizeEdgeOptionValue(d.edge_threshold) : '2.0';
+        const edgeMax = d.edge_threshold_max;
+        const edgeEff = d.debug_state?.edge_components?.effective_threshold;
+        const flatFloor = d.debug_state?.edge_components?.flat_momentum_floor;
+        let edgeDisp = edgeMax != null && edgeMax !== ''
+          ? edgeBase + ' – ' + normalizeEdgeOptionValue(edgeMax)
+          : edgeBase + '+';
+        if (d.edge_range_preset) edgeDisp += ' (' + d.edge_range_preset + ')';
+        if (edgeEff != null) {
+          edgeDisp += ' | eff min ' + normalizeEdgeOptionValue(edgeEff);
+          if (flatFloor != null && flatFloor > parseFloat(edgeBase)) edgeDisp += ', flat floor ' + normalizeEdgeOptionValue(flatFloor);
+        }
+        safeText('edgeThresholdDisplay', edgeDisp);
+        const lao = d.last_approve_outcome || {};
+        const approveEl = document.getElementById('approveOutcome');
+        if (approveEl) {
+          if (lao.status === 'EXECUTED') {
+            approveEl.innerHTML = '<span class="green">EXECUTED — trade placed' + (lao.trade_id ? ' (' + lao.trade_id.slice(0,8) + '…)' : '') + '</span>';
+          } else if (lao.status === 'BLOCKED') {
+            approveEl.innerHTML = '<span class="red">BLOCKED (' + (lao.reason || '?') + ', eff=' + (lao.effective_threshold != null ? lao.effective_threshold : '-') + ', edge=' + (lao.edge_at_approve != null ? lao.edge_at_approve : '-') + ')</span>';
+          } else if (lao.status === 'PENDING') {
+            approveEl.innerHTML = '<span style="color:#fbbf24">PENDING execution checks…</span>';
+          } else {
+            approveEl.innerText = '-';
+          }
+        }
+        const gate = document.getElementById('executionGateHint');
+        if (gate) {
+          const prob = d.last_ai?.win_prob;
+          const thr = d.ai_threshold;
+          const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
+          if (dec === 'APPROVE') {
+            if (lao.status === 'EXECUTED') {
+              gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
+            } else if (lao.status === 'BLOCKED') {
+              gate.innerHTML = `<span class="red">Last APPROVE ${prob}% → BLOCKED: ${lao.reason || '?'} (eff=${lao.effective_threshold ?? '-'}, edge=${lao.edge_at_approve ?? '-'})</span>`;
+            } else if (prob != null && thr != null) {
+              const ok = prob >= thr;
+              gate.innerHTML = ok
+                ? `<span class="green">Last APPROVE: AI ${prob}% ≥ min ${thr}% → passing execution gates…</span>`
+                : `<span class="red">Last APPROVE: AI ${prob}% &lt; min ${thr}% → blocked (BELOW_THRESHOLD)</span>`;
+            }
+          } else if (!aiCalled) {
+            gate.innerHTML = `<span style="color:#8b949e">DeepSeek not called this cycle — ${dai.note || skipBlk.skip || 'waiting for edge ≥ threshold'}</span>`;
+          } else {
+            gate.innerHTML = `<span style="color:#8b949e">Min win % to execute: ${thr != null ? thr : '-'} | Last AI: ${dec || '-'} ${prob != null ? prob + '%' : ''}</span>`;
+          }
+        }
         safeText('aiReason', d.last_ai?.reason || d.ai_reason || '-');
         const why = document.getElementById('why');
         if (why) {
@@ -4716,10 +7270,35 @@ DASHBOARD_JS = """(function () {
           invertBtn.innerText = `Invert Signal ${d.invert_signal ? 'ON' : 'OFF'}`;
           invertBtn.style.backgroundColor = d.invert_signal ? '#f97316' : '#374151';
         }
+        const blockFrBtn = document.getElementById('blockFreeRangeBtn');
+        if (blockFrBtn) {
+          const bfr = d.block_free_range_entries !== false;
+          blockFrBtn.innerText = `Block FREE_RANGE entries ${bfr ? 'ON' : 'OFF'}`;
+          blockFrBtn.style.backgroundColor = bfr ? '#10b981' : '#ef4444';
+        }
         const debugBtn = document.getElementById('debugToggle');
         if (debugBtn) {
           debugBtn.innerText = `Debug Mode (Console) ${d.debug_enabled ? 'ON' : 'OFF'}`;
           debugBtn.style.backgroundColor = d.debug_enabled ? '#10b981' : '#ef4444';
+        }
+        const freshBtn = document.getElementById('freshCollectionBtn');
+        const freshLabel = document.getElementById('freshCollectionLabel');
+        if (freshLabel) {
+          freshLabel.innerText = d.fresh_collection_mode ? 'ON' : 'OFF';
+        }
+        if (freshBtn) {
+          freshBtn.style.backgroundColor = d.fresh_collection_mode ? '#2563eb' : '#374151';
+        }
+        const freshStatus = document.getElementById('freshCollectionStatus');
+        if (freshStatus) {
+          if (d.last_fresh_reset_summary) {
+            freshStatus.innerText = 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
+              (d.last_fresh_reset_ts ? ' @ ' + new Date(d.last_fresh_reset_ts * 1000).toLocaleString() : '');
+          } else {
+            freshStatus.innerText = d.fresh_collection_mode
+              ? 'Auto-trim active — aux logs checked hourly'
+              : '';
+          }
         }
         if (d.leverage) {
           const lev = document.getElementById('leverage');
@@ -4733,11 +7312,16 @@ DASHBOARD_JS = """(function () {
           const aiThresh = document.getElementById('aiThreshold');
           if (aiThresh) aiThresh.value = d.ai_threshold;
         }
-        if (d.edge_threshold) {
-          const edgeSel = document.getElementById('edgeThreshold');
-          if (edgeSel) edgeSel.value = d.edge_threshold;
+        if (d.edge_range_preset) {
+          syncEdgeRangePreset(d.edge_range_preset);
         }
-        if (d.pullback_threshold) {
+        if (d.edge_threshold != null && d.edge_threshold !== '') {
+          syncEdgeThresholdSelect(d.edge_threshold);
+        }
+        if (d.edge_threshold_max !== undefined) {
+          syncEdgeThresholdMaxSelect(d.edge_threshold_max);
+        }
+        if (d.pullback_threshold != null && d.pullback_threshold !== '') {
           const pb = document.getElementById('pullbackThresh');
           if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
@@ -4801,22 +7385,28 @@ DASHBOARD_JS = """(function () {
             <td>${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
             <td>$${t.net_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
-            <td>$${t.fees_usd?.toFixed(2)||'-'}</td>
+            <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
+            <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
             <td>${t.ai_band || '-'}</td>
           </tr>
         `).join(''));
-        safeHTML('aiHistoryTable', (d.ai_history || []).map(a => `
+        const aiHist = d.ai_history || [];
+        safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
+          const prob = a.win_prob != null && a.win_prob !== '' ? Number(a.win_prob) : null;
+          const c = a.comment || '';
+          const cShort = c.length > 80 ? c.substring(0, 80) + '...' : (c || '-');
+          return `
           <tr>
-            <td>${a.time || '-'}</td>
+            <td>${a.melbourne_time || formatMelbourneDateTime(a.time || a.ts)}</td>
             <td>${a.trade_id || '-'}</td>
-            <td>${a.ai_direction_raw || '-'}</td>
-            <td>${a.final_direction || '-'}</td>
+            <td>${a.ai_direction_raw || a.dir || '-'}</td>
+            <td>${a.final_direction || a.dir || '-'}</td>
             <td>${a.inverted ? 'YES' : 'NO'}</td>
             <td>${a.decision || '-'}</td>
-            <td>${a.win_prob != null ? a.win_prob.toFixed(0) + '%' : '-'}</td>
-            <td title="${a.comment || '-'}">${(a.comment || '').substring(0, 80)}...</td>
-          </tr>
-        `).join(''));
+            <td>${prob != null && !Number.isNaN(prob) ? prob.toFixed(0) + '%' : '-'}</td>
+            <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
+          </tr>`;
+        }).join('') : '<tr><td colspan="8" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
         safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
           <tr>
             <td>${k}%</td>
@@ -4846,21 +7436,57 @@ DASHBOARD_JS = """(function () {
         safeText('edgeScore', dbg.last_edge_score || '0');
         safeText('edgeProgress', dbg.edge_progress || '-');
         safeText('flags', JSON.stringify(dbg.last_flags || {}));
-        safeText('trigger', dbg.last_trigger ? 'YES' : 'NO');
-        safeText('skipReason', dbg.skip_reason || '-');
+        const pipeTrig = dbg.pipeline_event_trigger;
+        safeText('trigger', pipeTrig === true ? 'YES' : (pipeTrig === false ? 'NO' : (dbg.edge_above_threshold ? 'edge≥thr only' : '-')));
+        const skipBlk = d.display_skip_block || {};
+        const ag = dbg.ai_gate || {};
+        const agTxt = ag.called
+          ? ('CALLED — ' + (ag.reason || 'ok'))
+          : ('NOT CALLED — ' + (dai.note || ag.reason || skipBlk.skip || 'waiting for edge'));
+        safeText('aiGateStatus', agTxt);
+        safeText('skipReason', skipBlk.skip != null ? skipBlk.skip : (dbg.skip_reason || '-'));
         safeText('signalAttempt', dbg.last_signal_attempt ? dbg.last_signal_attempt.time : '-');
-        safeText('blockReason', dbg.last_block_reason || '-');
+        safeText('blockReason', skipBlk.block != null ? skipBlk.block : (dbg.last_block_reason || '-'));
         safeText('lastAICall', dbg.last_ai_call || '-');
         safeText('aiScore', dbg.last_ai_score || '-');
         safeText('signalCooldown', dbg.signal_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_signal + 's)' : 'READY');
         safeText('aiCooldown', dbg.ai_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_ai + 's)' : 'READY');
         safeText('lastPipeline', dbg.last_pipeline_stage || '-');
-        safeText('heartbeat', d.heartbeat ? 'Alive (' + Math.round(Date.now()/1000 - d.heartbeat) + 's ago)' : '-');
-        safeText('aiInput', JSON.stringify(d.ai_input || {}));
-        safeText('features', JSON.stringify(d.feature_snapshot || {}));
+        const hbAge = d.heartbeat ? Math.round(Date.now()/1000 - d.heartbeat) : null;
+        if (hbAge != null) {
+          const hbStale = hbAge > 45;
+          safeText('heartbeat', (hbStale ? 'STALE' : 'Alive') + ' (' + hbAge + 's ago)');
+        } else {
+          safeText('heartbeat', '-');
+        }
+        const dashPort = d.dashboard_port || __DASHBOARD_PORT__;
+        const onWrongPort = (window.location.port && String(window.location.port) !== String(dashPort));
+        safeText('aiInput', JSON.stringify(d.ai_input || {}) + (d.ai_input_time ? ' @ ' + d.ai_input_time : '') + ' (snapshot at last AI call)');
+        safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
+        if (onWrongPort) {
+          const sb = document.getElementById('serverBanner');
+          if (sb) {
+            sb.style.borderColor = '#f85149';
+            sb.style.color = '#f85149';
+            sb.innerHTML = 'Wrong port :' + window.location.port + ' — use <strong>__DASHBOARD_URL__</strong> (bot listens on ' + dashPort + ')';
+          }
+        }
         safeText('dataQuality', (d.data_quality * 100).toFixed(1) + '%');
       } catch(e) {
         console.error("Refresh failed:", e);
+        const rs = document.getElementById('refreshStatus');
+        if (rs) rs.innerText = 'OFFLINE — no bot on this address (' + new Date().toLocaleTimeString() + ')';
+        const sb = document.getElementById('serverBanner');
+        if (sb) {
+          sb.style.borderColor = '#f85149';
+          sb.style.color = '#f85149';
+          sb.innerHTML = 'BOT OFFLINE — nothing listening or network error. Use <strong>__DASHBOARD_URL__</strong> (not :5000 or old IPs). Start: <code>start_bot.ps1</code> · Stop: <code>stop_bot.ps1</code>';
+        }
+        const src = document.getElementById('dataSource');
+        if (src) {
+          src.innerHTML = 'OFFLINE — start bot or fix URL';
+          src.className = 'text-red-500 font-bold';
+        }
       } finally {
         refreshInFlight = false;
       }
@@ -4869,15 +7495,41 @@ DASHBOARD_JS = """(function () {
       const dropdowns = {
         'leverage': '/api/set_leverage',
         'pullbackThresh': '/api/set_pullback_threshold',
-        'maxConcurrentPositions': '/api/set_max_active_signals'
+        'maxConcurrentPositions': '/api/set_max_active_signals',
+        'edgeThreshold': '/api/set_edge_range',
+        'edgeThresholdMax': '/api/set_edge_range',
+        'edgeRangePreset': '/api/set_edge_range'
       };
+      function debounce(fn, ms) {
+        let t;
+        return function (...args) {
+          clearTimeout(t);
+          t = setTimeout(() => fn.apply(this, args), ms);
+        };
+      }
       Object.keys(dropdowns).forEach(id => {
         const el = document.getElementById(id);
         if (el) {
-          el.addEventListener('change', function() {
+          const save = debounce(function() {
             post(dropdowns[id], {value: this.value});
             refresh();
+          }, 400);
+          el.addEventListener('change', function() {
+            if (id === 'edgeRangePreset') {
+              updateEdgeRangePreset(this.value);
+              return;
+            }
+            if (id === 'edgeThreshold' || id === 'edgeThresholdMax') {
+              updateEdgeRangeCustom();
+              return;
+            }
+            const val = this.value;
+            post(dropdowns[id], {value: val});
+            refresh();
           });
+          if (el.type === 'number') {
+            el.addEventListener('input', save);
+          }
         }
       });
       const AUTO_REFRESH_MS = 60000;
@@ -4902,7 +7554,9 @@ DASHBOARD_JS = """(function () {
     window.toggleLive = toggleLive;
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
+    window.toggleBlockFreeRange = toggleBlockFreeRange;
     window.toggleDebug = toggleDebug;
+    window.toggleFreshCollection = toggleFreshCollection;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
     window.updateEdge = updateEdge;
@@ -4912,40 +7566,32 @@ DASHBOARD_JS = """(function () {
   console.info("dashboard.js loaded: true");
 })();"""
 
-BOT_CONTROL_SECRET = os.getenv("BOT_CONTROL_SECRET", "").strip()
-_BOT_PUBLIC_GET_PATHS = frozenset({"/", "/health", "/api/state", "/static/dashboard.js"})
-
-def _bot_control_secret_ok():
-    if not BOT_CONTROL_SECRET:
-        if os.getenv("NODE_ENV") == "production" or os.getenv("RAILWAY_ENVIRONMENT"):
-            return False
-        return True
-    header = (request.headers.get("X-Bot-Control-Secret") or "").strip()
-    auth = (request.headers.get("Authorization") or "").strip()
-    if auth.lower().startswith("bearer "):
-        header = header or auth[7:].strip()
-    return header == BOT_CONTROL_SECRET
-
-@app.before_request
-def _enforce_bot_control_auth():
-    path = request.path.rstrip("/") or "/"
-    if request.method == "GET" and path in _BOT_PUBLIC_GET_PATHS:
-        return None
-    if not _bot_control_secret_ok():
-        return jsonify({"error": "unauthorized"}), 401
-    return None
-
 @app.route('/static/dashboard.js')
 def dashboard_js():
-    return DASHBOARD_JS, 200, {'Content-Type': 'application/javascript'}
+    js = (
+        DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
+        .replace("__DASHBOARD_URL__", dashboard_public_url())
+    )
+    return js, 200, {'Content-Type': 'application/javascript'}
 
 @app.route('/')
 def dashboard():
-    return render_template_string(HTML)
+    page = (
+        HTML.replace("__DASHBOARD_URL__", dashboard_public_url())
+        .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
+        .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
+    )
+    return render_template_string(page)
 
 @app.route('/api/state')
 def api_state():
     try:
+        refresh_funding_state()
+        now_ts = time.time()
+        with trade_lock:
+            for pos in open_positions:
+                if pos.get("status") == "OPEN":
+                    accrue_position_funding(pos, now_ts)
         with state_lock:
             snapshot = copy.deepcopy(state)
             positions_copy = copy.deepcopy(open_positions)
@@ -4954,8 +7600,21 @@ def api_state():
             expired_orders_copy = copy.deepcopy(expired_orders)
             ai_history_copy = copy.deepcopy(state["ai_history"])
             trades_map_copy = copy.deepcopy(trades_map)
+        ai_history_copy = _session_ai_history(ai_history_copy, 50)
+        snapshot["ai_history"] = ai_history_copy
+        snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
+        snapshot["deepseek_key_present"] = bool(_deepseek_api_key())
+        snapshot["bot_pid"] = os.getpid()
+        snapshot["bot_cwd"] = os.getcwd()
+        snapshot["bot_script"] = os.path.abspath(__file__)
+        snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
+        snapshot["ai_cooldown_sec"] = AI_COOLDOWN_SECONDS
+        snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
+        snapshot["dashboard_port"] = DASHBOARD_PORT
+        snapshot["dashboard_url"] = dashboard_public_url()
         snapshot["positions"] = []
         total_unreal = 0.0
+        funding_snap = snapshot.get("funding") or {}
         for pos in positions_copy:
             pos_copy = copy.deepcopy(pos)
             pos_copy["current_price"] = snapshot["price"]
@@ -4963,9 +7622,18 @@ def api_state():
             move_pct = ((snapshot["price"] - pos["entry"]) / pos["entry"] * 100 * dir_factor) if snapshot["price"] and pos["entry"] else 0
             pnl_usd = (move_pct / 100) * FIXED_MARGIN_USDT * pos.get("leverage", 20)
             pnl_pct_margin = move_pct * pos.get("leverage", 20)
+            funding_acc = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
             pos_copy["pnl_pct_margin"] = pnl_pct_margin
-            pos_copy["unreal_usd"] = pnl_usd
-            total_unreal += pnl_usd
+            pos_copy["unreal_usd_gross"] = pnl_usd
+            pos_copy["funding_fees_accrued"] = funding_acc
+            pos_copy["unreal_usd"] = round(pnl_usd - funding_acc, 4)
+            pos_copy["funding_projected_to_settlement"] = round(
+                projected_funding_to_next_settlement(pos, funding_snap), 4
+            )
+            pos_copy["funding_side"] = funding_side_label(
+                float(funding_snap.get("rate") or 0.0), pos.get("dir", "LONG")
+            )
+            total_unreal += pos_copy["unreal_usd"]
             pos_copy["side"] = "LONG" if pos["dir"] == "LONG" else "SHORT"
             pos_copy["leg"] = "Main"
             snapshot["positions"].append(pos_copy)
@@ -4995,6 +7663,10 @@ def api_state():
             snapshot["price"] = None
         reconcile_stale_signals()
         sync_cooldown_debug_state()
+        branding = build_dashboard_display(snapshot)
+        snapshot.update(branding)
+        with state_lock:
+            state.update(branding)
         active_list = []
         pending_ids = {o.get("trade_id") for o in pending_orders_copy if o.get("trade_id")}
         open_ids = {p.get("trade_id") for p in positions_copy if p.get("trade_id")}
@@ -5038,27 +7710,42 @@ def api_state():
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
         snapshot["data_quality"] = state.get("data_quality", 0.0)
         snapshot["edge_threshold"] = get_edge_threshold()
+        snapshot["edge_threshold_max"] = get_edge_threshold_max()
+        snapshot["edge_range_preset"] = state.get("edge_range_preset", DEFAULT_EDGE_RANGE_PRESET)
+        snapshot["edge_threshold_display"] = _edge_range_label()
+        snapshot["effective_threshold"] = get_effective_edge_threshold()
+        snapshot["research_data_collection"] = is_research_data_collection()
         snapshot["edge_options"] = EDGE_OPTIONS
+        snapshot["edge_range_presets"] = EDGE_RANGE_PRESETS
         snapshot["max_active_signals"] = state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT)
+        m_fee, t_fee = get_trading_fee_rates()
+        snapshot["fee_profile"] = EXCHANGE_FEE_PROFILE
+        snapshot["maker_fee_pct"] = m_fee
+        snapshot["taker_fee_pct"] = t_fee
+        snapshot["funding_simulation_enabled"] = FUNDING_SIMULATION_ENABLED
+        snapshot["bot_version"] = EXECUTION_FIX_VERSION
+        snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
+        with state_lock:
+            snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
         logger.info(f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} [PIPELINE ENFORCEMENT]")
         return jsonify(snapshot)
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
         return jsonify({})
 
-_startup_complete = False
-
 @app.route('/health')
+@app.route('/api/status')
+@app.route('/status')
 def health():
-    """Railway healthcheck — must respond before long Bybit/candle bootstrap finishes."""
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
     return jsonify({
-        "status": "alive" if _startup_complete else "starting",
-        "ready": _startup_complete,
-        "last_heartbeat": last_heartbeat,
-        "time_since_heartbeat": time.time() - last_heartbeat,
+        "status": "alive",
+        "last_heartbeat": hb,
+        "time_since_heartbeat": time.time() - hb,
         "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", ""),
-    }), 200
+        "execution_reason": state.get("execution_reason", "")
+    })
 
 @app.route('/debug_state')
 def get_debug_state():
@@ -5069,13 +7756,6 @@ def get_debug_state():
 def api_resume():
     set_execution_paused("")
     return jsonify({"status": "resumed"})
-
-@app.route('/api/pause', methods=['POST'])
-def api_pause():
-    data = request.get_json() or {}
-    reason = data.get("reason", "ADMIN_PAUSE")
-    set_execution_paused(reason)
-    return jsonify({"status": "paused", "reason": reason})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -5091,6 +7771,13 @@ def toggle_invert_signal():
         save_persistent_config()
     return jsonify({"invert_signal": state["invert_signal"]})
 
+@app.route('/api/toggle_block_free_range_entries', methods=['POST'])
+def toggle_block_free_range_entries():
+    with state_lock:
+        state["block_free_range_entries"] = not state.get("block_free_range_entries", BLOCK_FREE_RANGE_ENTRIES)
+        save_persistent_config()
+    return jsonify({"block_free_range_entries": state["block_free_range_entries"]})
+
 @app.route('/api/toggle_debug', methods=['POST'])
 def toggle_debug():
     data = request.get_json() or {}
@@ -5099,6 +7786,24 @@ def toggle_debug():
         save_persistent_config()
         update_logger_level()
     return jsonify({"debug_enabled": state["debug_enabled"]})
+
+@app.route('/api/toggle_fresh_collection', methods=['POST'])
+def toggle_fresh_collection():
+    data = request.get_json() or {}
+    want_on = data.get("enabled")
+    if want_on is None:
+        want_on = not state.get("fresh_collection_mode", False)
+    if want_on:
+        with state_lock:
+            if state.get("live_armed"):
+                return jsonify({"error": "Disable LIVE ARM before fresh collection reset"}), 400
+        result = perform_fresh_collection_reset()
+        return jsonify({"fresh_collection_mode": True, "reset": result})
+    with state_lock:
+        state["fresh_collection_mode"] = False
+        save_persistent_config()
+    logger.info("[FRESH COLLECTION] Mode turned OFF — no file wipe [PIPELINE ENFORCEMENT]")
+    return jsonify({"fresh_collection_mode": False})
 
 @app.route('/api/live_arm', methods=['POST'])
 def live_arm():
@@ -5117,7 +7822,7 @@ def set_leverage():
         state["leverage"] = val
         save_persistent_config()
     if int(data.get("value", val)) > MAX_RESEARCH_LEVERAGE:
-        logger.warning(f"[LEVERAGE] Capped request to {MAX_RESEARCH_LEVERAGE}x (research max) [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[LEVERAGE] Capped request to {MAX_RESEARCH_LEVERAGE}x (max allowed) [PIPELINE ENFORCEMENT]")
     return jsonify({"leverage": val})
 
 @app.route('/api/set_pullback_threshold', methods=['POST'])
@@ -5133,7 +7838,7 @@ def set_pullback_threshold():
 @app.route('/api/set_max_active_signals', methods=['POST'])
 def set_max_active_signals():
     data = request.get_json() or {}
-    val = int(data.get("value", 3))
+    val = max(1, min(20, int(data.get("value", 3))))
     with state_lock:
         state["max_active_signals"] = val
         save_persistent_config()
@@ -5144,27 +7849,64 @@ def set_threshold():
     data = request.get_json() or {}
     value = data.get("value")
     set_ai_threshold(value)
-    return jsonify({"status": "ok", "ai_threshold": value})
+    return jsonify({"status": "ok", "ai_threshold": get_ai_threshold()})
 
 @app.route('/api/set_edge_threshold', methods=['POST'])
-def set_edge_threshold():
+def api_set_edge_threshold():
     data = request.get_json() or {}
     value = round(float(data.get("value", 3.0)), 1)
     if value not in [round(x, 1) for x in EDGE_OPTIONS]:
         logger.warning(f"[EDGE SET API] Invalid value {value} rejected [PIPELINE ENFORCEMENT]")
         return jsonify({"status": "error", "msg": "invalid threshold"}), 400
+    set_edge_threshold(value)
+    return jsonify({
+        "status": "ok",
+        "new_value": value,
+        "edge_threshold": get_edge_threshold(),
+        "edge_threshold_max": get_edge_threshold_max(),
+        "edge_threshold_display": _edge_range_label(),
+    })
+
+@app.route('/api/set_edge_range', methods=['POST'])
+def api_set_edge_range():
+    data = request.get_json() or {}
+    preset = data.get("preset")
+    if preset and preset != "custom":
+        apply_edge_range_preset(str(preset))
+    else:
+        if "min" in data and data.get("min") is not None:
+            set_edge_threshold(round(float(data["min"]), 1))
+        if "max" in data:
+            set_edge_threshold_max(data.get("max"))
+        elif preset == "custom":
+            with state_lock:
+                state["edge_range_preset"] = "custom"
+                save_persistent_config()
     with state_lock:
-        state["edge_threshold"] = value
-        save_persistent_config()
-    logger.info(f"[EDGE SET API] threshold updated to {value} and locked [PIPELINE ENFORCEMENT]")
-    enforce_edge_threshold_options()
-    return jsonify({"status": "ok", "new_value": value})
+        preset_out = state.get("edge_range_preset")
+    return jsonify({
+        "status": "ok",
+        "edge_threshold": get_edge_threshold(),
+        "edge_threshold_max": get_edge_threshold_max(),
+        "edge_range_preset": preset_out,
+        "edge_threshold_display": _edge_range_label(),
+    })
 
 @app.route('/api/download_debug_config')
 def download_debug_config():
     with state_lock:
         config = {k: v for k, v in state.items() if not k.startswith("_")}
     return jsonify(config), 200, {'Content-Disposition': 'attachment; filename=debug_config.json'}
+
+def _read_log_tail(path, max_lines=400):
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        return "".join(lines[-max_lines:])
+    except Exception:
+        return ""
 
 @app.route('/api/export_debug')
 def export_debug():
@@ -5173,6 +7915,23 @@ def export_debug():
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
             debug_data = list(DEBUG_LOG_BUFFER)
             z.writestr("debug.json", json.dumps(debug_data, indent=2, default=str))
+            errors_only = [e for e in debug_data if e.get("ai_error") or (e.get("data") or {}).get("ai", {}).get("ai_error")]
+            z.writestr("debug_ai_errors.json", json.dumps(errors_only, indent=2, default=str))
+            with state_lock:
+                snap = {
+                    "debug_state": copy.deepcopy(state.get("debug_state", {})),
+                    "last_edge": state.get("last_edge"),
+                    "pipeline_outcome": state.get("pipeline_outcome"),
+                    "ai_call_count": state.get("ai_call_count"),
+                    "last_ai": copy.deepcopy(state.get("last_ai", {})),
+                }
+            z.writestr("debug_state_snapshot.json", json.dumps(snap, indent=2, default=str))
+            log_tail = _read_log_tail(os.getenv("BOT_LOG_FILE", "bot_runtime.log"))
+            if log_tail:
+                z.writestr("bot_runtime_tail.log", log_tail)
+            for csv_name in [CSV_PIPELINE_EVENTS, CSV_AI_ERRORS, CSV_DECISIONS, CSV_AI_TRANCHE]:
+                if os.path.exists(csv_name):
+                    z.write(csv_name, arcname=csv_name)
         buf.seek(0)
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name='debug_export.zip')
     except Exception as e:
@@ -5183,7 +7942,12 @@ def export_debug():
 def export_csv():
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file in [CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES, SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, COUNTERFACTUAL_FILE]:
+        for file in [
+            CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
+            CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
+            SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
+            EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
+        ]:
             if os.path.exists(file):
                 zip_file.write(file)
     zip_buffer.seek(0)
@@ -5194,7 +7958,7 @@ def calc_position_qty(price, leverage, margin_usdt=None):
         if price is None or price <= 0 or leverage is None:
             logger.error(f"[QTY CALC FAIL] price={price} leverage={leverage}")
             return 0.0001
-        market = bybit_public.market(SYMBOL)
+        market = bitfinex_public.market(SYMBOL_CCXT)
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.001)
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
         fee_buffer = 1 - (MAKER_FEE_PCT + TAKER_FEE_PCT)
@@ -5203,7 +7967,7 @@ def calc_position_qty(price, leverage, margin_usdt=None):
             notional = min_notional
         qty = notional / price
         qty = max(min_qty, qty)
-        qty = float(bybit_public.amount_to_precision(SYMBOL, qty))
+        qty = float(bitfinex_public.amount_to_precision(SYMBOL_CCXT, qty))
         if qty < min_qty:
             qty = min_qty
         return qty
@@ -5244,7 +8008,7 @@ def fetch_ohlcv():
         return True
     for attempt in range(5):
         try:
-            candles = bybit_public.fetch_ohlcv(SYMBOL, '15m', limit=250)
+            candles = fetch_bitfinex_ohlcv("15m", limit=250)
             if candles and len(candles) >= MIN_CANDLES:
                 with state_lock:
                     latest_candles = candles[-250:]
@@ -5252,14 +8016,14 @@ def fetch_ohlcv():
                     state["last_data_ts"] = time.time()
                     state["ohlcv_ready"] = True
                     state["data_error"] = None
-                populate_candle_buffers_from_candles(candles)
+                populate_candle_buffers_from_candles(latest_candles)
                 last_ohlcv_fetch = time.time()
                 update_ema()
                 trend_info()
                 update_market_context(force=True)
                 with state_lock:
                     state.update({"last_fetch_success": utc_iso()})
-                    state.update({"data_source": "rest_only"})
+                    state.update({"data_source": "bitfinex_rest"})
                 return True
         except Exception as e:
             logger.warning(f"[OHLCV RETRY {attempt+1}/5] {e}")
@@ -5373,6 +8137,7 @@ def update_price(price: float):
             if state.get("execution_paused") and state.get("execution_reason") in ["WS_STALE", "THREAD_CRASH", "STALE_DATA_HARD_STOP"]:
                 set_execution_paused("")
                 logger.info("[WS RECOVERY][STATE_SYNC] Execution auto-resumed after first tick [PIPELINE ENFORCEMENT]")
+            sync_dashboard_branding()
     tick_prices.append(price)
     full_pipeline_trace("[WS]", f"PRICE_UPDATED price={price}", None)
     if not state.get("ws_ready") or len(latest_candles) < MIN_CANDLES:
@@ -5437,6 +8202,18 @@ def trend_info():
         state.update({"regime": regime})
     return regime
 
+def reset_session_risk_state():
+    """Research: each process start forgets prior session PnL and loss-streak pauses."""
+    with state_lock:
+        state["daily_pnl_usd"] = 0.0
+        state["consecutive_losses"] = 0
+        state["loss_pause_until"] = 0.0
+        state["execution_paused"] = False
+        state["execution_reason"] = ""
+        state["_pause_priority"] = 0
+        state["current_trading_day"] = datetime.now(timezone.utc).date()
+    logger.info("[STARTUP] Session risk reset — daily PnL and loss streak cleared [PIPELINE ENFORCEMENT]")
+
 def reset_runtime_state():
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
     logger.warning("[RESET] HARD RESET START - clearing all in-memory state for true clean slate")
@@ -5450,6 +8227,8 @@ def reset_runtime_state():
         state.update({
             "account_balance": STARTING_BALANCE,
             "daily_pnl_usd": 0.0,
+            "consecutive_losses": 0,
+            "loss_pause_until": 0.0,
             "last_ai": {"win_prob": 0, "direction": None, "trade_id": None, "comment": "NO_SIGNAL", "ai_error": False, "factors": {}, "source": "NONE", "decision": None},
             "last_ai_ts": 0.0,
             "last_ai_fp": "",
@@ -5467,7 +8246,13 @@ def reset_runtime_state():
             "execution_reason": "",
             "_pause_priority": 0,
             "last_event_ts": 0.0,
-            "bootstrap_done": False
+            "bootstrap_done": False,
+            "edge_prev": 0.0,
+            "edge_trigger_armed": True,
+            "last_edge_trigger_candle_bucket": -1,
+            "debug_state": _fresh_debug_state(),
+            "last_pipeline_stage": "IDLE",
+            "ai_call_count": 0,
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
 
@@ -5498,14 +8283,631 @@ def validate_state():
 
 def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime, event_id):
     with state_lock:
-        state["ai_history"] = [x for x in state["ai_history"] if parse_ts(x.get("time")) >= bot_start_time]
-        state["ai_history"].append({"ts": utc_iso(),"trade_id": trade_id,"dir": dir_,"approved": approved,"win_prob": win_prob,"comment": comment,"event_id": event_id})
-        if len(state["ai_history"]) > 5:
-            state["ai_history"] = state["ai_history"][-5:]
+        now_iso = utc_iso()
+        state["ai_history"].append({
+            "ts": now_iso,
+            "time": now_iso,
+            "melbourne_time": _format_melbourne_hm(now_iso),
+            "session_ts": bot_start_time,
+            "trade_id": trade_id,
+            "dir": dir_,
+            "approved": approved,
+            "win_prob": win_prob,
+            "comment": comment,
+            "event_id": event_id,
+        })
+        hist_limit = 50 if _sole_ai_research_mode() else 5
+        if len(state["ai_history"]) > hist_limit:
+            state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_decision"] = "APPROVED" if approved else "REJECTED"
         state["final_decision"] = "APPROVED" if approved else "AI_REJECTED"
         state["last_ai"].update({"win_prob": win_prob,"direction": dir_,"trade_id": trade_id,"comment": comment,"ai_error": None})
         state["last_engine_error"] = "" if approved else "AI rejected"
+
+REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
+
+
+def _profit_lock_floor_for_ladder(peak_pct: float, ladder):
+    if peak_pct is None or peak_pct < ladder[0][0]:
+        return None
+    floor = None
+    for trigger, lock in ladder:
+        if peak_pct >= trigger:
+            floor = lock
+    if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
+        floor = max(floor or 0, PEAK_NEVER_LOSER_FLOOR)
+    return floor
+
+
+def _margin_pct_to_usd(margin_pct: float, margin_usdt: float) -> float:
+    try:
+        return float(margin_pct) / 100.0 * float(margin_usdt)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def patch_signal_snapshot_outcome(
+    trade_id: str,
+    executed: bool = None,
+    block_reason: str = None,
+    fill_price: float = None,
+    post_block_research: dict = None,
+    fill_dynamics: dict = None,
+):
+    """Merge execution outcome into signal_snapshot.jsonl for analyzer cohort joins."""
+    if not trade_id or not os.path.exists(SIGNAL_SNAPSHOT_FILE):
+        return
+    try:
+        lines = []
+        updated = False
+        with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                row = json.loads(raw)
+                if row.get("trade_id") == trade_id:
+                    if executed is not None:
+                        row["executed"] = bool(executed)
+                    if block_reason is not None:
+                        row["block_reason"] = block_reason
+                    outcome = row.get("outcome") or {}
+                    if fill_price is not None:
+                        outcome["fill_price"] = float(fill_price)
+                    if fill_dynamics:
+                        outcome["fill_dynamics"] = fill_dynamics
+                    if post_block_research:
+                        row["post_block_research"] = post_block_research
+                    outcome["patched_ts"] = time.time()
+                    row["outcome"] = outcome
+                    updated = True
+                lines.append(json.dumps(row))
+        if updated:
+            with open(SIGNAL_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        logger.error(f"[SIGNAL_SNAPSHOT] patch failed trade_id={trade_id}: {e}")
+
+
+def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
+    """Persist APPROVE-time config for counterfactual / shadow research."""
+    try:
+        trade_id = signal.get("trade_id")
+        if not trade_id or ai.get("decision") != "APPROVE":
+            return
+        price = float(signal.get("signal_price") or state.get("price") or 0)
+        if price <= 0:
+            return
+        lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+        margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+        edge_score = float(signal.get("edge_score_at_entry") or state.get("last_edge") or 0)
+        feat = signal.get("features") or {}
+        approve_idx = _bump_research_approve_index()
+        snapshot = {
+            "schema": "signal_snapshot_v4",
+            "trade_id": trade_id,
+            "ts": utc_iso(),
+            "approve_ts": time.time(),
+            "approve_index": approve_idx,
+            "direction": signal.get("final_direction"),
+            "price": price,
+            "edge_score": signal.get("edge_score_at_entry"),
+            "effective_threshold": pipeline_eff_thr,
+            "executed": False,
+            "block_reason": None,
+            "ai": {
+                "approved": True,
+                "decision": "APPROVE",
+                "win_prob": ai.get("win_prob"),
+                "direction": ai.get("direction"),
+                "bull_score": ai.get("bull_score"),
+                "bear_score": ai.get("bear_score"),
+                "source": ai.get("source"),
+            },
+            "config": {
+                "pullback_threshold": float(state.get("pullback_threshold", 0.002)),
+                "leverage": lev,
+                "sl_pct": sl_price_pct(lev),
+                "margin_usdt": margin_usdt,
+                "trail_ladder": TRAIL_LADDER,
+                "free_run_mtf": RESEARCH_FREE_RUN_DISABLE_MTF_GATE,
+                "free_run_chop": RESEARCH_FREE_RUN_DISABLE_CHOP_GATE,
+                "free_run_momentum_align": RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN,
+                **get_exit_config_snapshot(),
+            },
+            "policy_effective": {
+                "early_fail": bool(state.get("early_fail_enabled", True)),
+            },
+            "market": {
+                "regime": signal.get("regime") or state.get("regime"),
+                "strategy": signal.get("strategy") or state.get("strategy"),
+            },
+            "entry_thesis": capture_entry_thesis(signal),
+            "entry_gates": capture_entry_gate_snapshot(signal, ai, edge_score, feat),
+            "entry_regime": capture_entry_regime_snapshot(signal, feat),
+            "research_buckets": capture_research_buckets(signal, ai, edge_score, feat),
+            "entry_sizing": signal.get("sizing_reference") or compute_reference_scaled_margin(
+                str(signal.get("final_direction") or ai.get("direction") or "LONG").upper(),
+                ai,
+                signal.get("context") or {},
+            ),
+            "setup_type": signal.get("setup_type") or classify_setup(feat),
+            "bot_version": EXECUTION_FIX_VERSION,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+        }
+        if feat:
+            snapshot["entry_features"] = {
+                "mom_metric": round(_compute_momentum_metric(feat), 4),
+                "ret_1m": feat.get("ret_1m"),
+                "ret_5m": feat.get("ret_5m"),
+                "velocity": feat.get("velocity"),
+                "volume_ratio": feat.get("volume_ratio"),
+                "imbalance": feat.get("imbalance"),
+            }
+        rotate_log(SIGNAL_SNAPSHOT_FILE)
+        with open(SIGNAL_SNAPSHOT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot) + "\n")
+        logger.info(f"[SIGNAL_SNAPSHOT] trade_id={trade_id} dir={snapshot['direction']} price={fmt(price)} [PIPELINE ENFORCEMENT]")
+    except Exception as e:
+        logger.error(f"[SIGNAL_SNAPSHOT] failed: {e}")
+
+
+def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
+    """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""
+    if ai.get("decision") != "APPROVE":
+        return
+    trade_id = signal.get("trade_id")
+    price = float(signal.get("signal_price") or state.get("price") or 0)
+    if not trade_id or price <= 0:
+        return
+    log_signal_snapshot(signal, ai, pipeline_eff_thr)
+    lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+    margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+    start_replay_buffer(
+        trade_id,
+        price,
+        lane="shadow",
+        direction=signal.get("final_direction"),
+        leverage=lev,
+        margin_usdt=margin_usdt,
+        pullback_pct=float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002))),
+        early_fail_enabled=bool(state.get("early_fail_enabled", True)),
+        exit_config=get_exit_config_snapshot(),
+        ai_win_prob=ai.get("win_prob"),
+        edge_score=signal.get("edge_score_at_entry"),
+    )
+    append_replay_tick(trade_id, price, None)
+
+
+def mark_approve_research_executed(trade_id: str, fill_price: float):
+    if not trade_id or not fill_price or fill_price <= 0:
+        return
+    fill_dynamics = None
+    with replay_lock:
+        buf = replay_buffers.get(trade_id)
+        if not buf:
+            start_replay_buffer(trade_id, fill_price, lane="executed")
+            buf = replay_buffers.get(trade_id)
+        if buf:
+            buf["lane"] = "executed"
+            buf["block_reason"] = None
+            buf["virtual_entry"] = float(fill_price)
+            fill_t = time.time() - buf.get("start_ts", time.time())
+            buf["virtual_fill_t"] = fill_t
+            start_price = float(buf.get("start_price") or fill_price)
+            direction = str(buf.get("direction", "LONG")).upper()
+            dir_factor = 1 if direction == "LONG" else -1
+            leverage = int(buf.get("leverage", state.get("leverage", 20)))
+            pre_fill_mae = 0.0
+            for tick in sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0)):
+                t = float(tick.get("t", 0))
+                if t >= fill_t:
+                    break
+                p = float(tick.get("price") or 0)
+                if p > 0 and start_price > 0:
+                    unreal = ((p - start_price) / start_price) * dir_factor * leverage * 100
+                    pre_fill_mae = min(pre_fill_mae, unreal)
+            fill_dynamics = {
+                "fill_delay_sec": round(fill_t, 3),
+                "pre_fill_mae_margin_pct": round(pre_fill_mae, 4),
+                "achieved_pullback_pct": round(abs(fill_price - start_price) / start_price, 6) if start_price > 0 else None,
+            }
+    patch_signal_snapshot_outcome(
+        trade_id, executed=True, block_reason=None, fill_price=fill_price, fill_dynamics=fill_dynamics,
+    )
+
+
+def _shadow_unreal_pct(buf: dict, price: float) -> float:
+    entry = buf.get("virtual_entry")
+    if not entry or entry <= 0 or price <= 0:
+        return 0.0
+    direction = buf.get("direction", "LONG")
+    leverage = int(buf.get("leverage", state.get("leverage", 20)))
+    dir_factor = 1 if direction == "LONG" else -1
+    return ((price - entry) / entry) * dir_factor * leverage * 100
+
+
+def _try_shadow_limit_fill(buf: dict, price: float, t_rel: float):
+    if buf.get("virtual_entry"):
+        return
+    start_price = buf.get("start_price")
+    direction = buf.get("direction", "LONG")
+    pullback_pct = float(buf.get("pullback_pct", 0))
+    if not start_price or start_price <= 0:
+        return
+    if pullback_pct <= 0.0:
+        buf["virtual_entry"] = float(price)
+        buf["virtual_fill_t"] = t_rel
+        return
+    if direction == "LONG" and price <= start_price * (1 - pullback_pct):
+        buf["virtual_entry"] = float(price)
+        buf["virtual_fill_t"] = t_rel
+    elif direction == "SHORT" and price >= start_price * (1 + pullback_pct):
+        buf["virtual_entry"] = float(price)
+        buf["virtual_fill_t"] = t_rel
+
+
+def tick_all_replay_buffers(price: float):
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    with replay_lock:
+        items = list(replay_buffers.items())
+    for trade_id, buf in items:
+        if buf.get("closed") or buf.get("lane") == "executed":
+            continue
+        t_rel = now - buf.get("start_ts", now)
+        _try_shadow_limit_fill(buf, price, t_rel)
+        unreal = _shadow_unreal_pct(buf, price) if buf.get("virtual_entry") else None
+        append_replay_tick(trade_id, price, unreal)
+
+
+def simulate_replay_outcome(buf: dict) -> dict:
+    """Walk replay ticks with bot exit rules — used for blocked APPROVE shadow PnL."""
+    ticks = sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0))
+    direction = str(buf.get("direction", "LONG")).upper()
+    leverage = int(buf.get("leverage", state.get("leverage", 20)))
+    margin_usdt = float(buf.get("margin_usdt", FIXED_MARGIN_USDT))
+    pullback_pct = float(buf.get("pullback_pct", 0))
+    start_price = float(buf.get("start_price") or 0)
+    exit_config = buf.get("exit_config") or get_exit_config_snapshot()
+    trail_ladder = exit_config.get("trail_ladder", TRAIL_LADDER)
+    fast_cut = float(exit_config.get("thesis_fast_exit_unreal_pct", THESIS_FAST_EXIT_UNREAL_PCT))
+    thesis_above = float(exit_config.get("thesis_exit_if_above_unreal_pct", THESIS_EXIT_IF_ABOVE_UNREAL_PCT))
+    early_fail = bool(buf.get("early_fail_enabled", True))
+    sl_pct = sl_price_pct(leverage)
+    dir_factor = 1 if direction == "LONG" else -1
+
+    entry = buf.get("virtual_entry")
+    fill_t = buf.get("virtual_fill_t")
+    if entry is None:
+        for tick in ticks:
+            price = tick.get("price")
+            t = float(tick.get("t", 0))
+            if price is None or price <= 0 or t > REPLAY_TTL_SEC:
+                continue
+            if pullback_pct <= 0.0:
+                entry = float(price)
+                fill_t = t
+                break
+            if direction == "LONG" and price <= start_price * (1 - pullback_pct):
+                entry = float(price)
+                fill_t = t
+                break
+            if direction == "SHORT" and price >= start_price * (1 + pullback_pct):
+                entry = float(price)
+                fill_t = t
+                break
+    if entry is None or fill_t is None:
+        return {
+            "filled": False,
+            "exit_reason": "NO_FILL",
+            "net_pnl_usd": 0.0,
+            "gross_pnl_margin_pct": 0.0,
+            "max_profit_margin_pct": 0.0,
+            "max_drawdown_margin_pct": 0.0,
+            "fill_delay_sec": None,
+        }
+
+    sl = entry * (1 - dir_factor * sl_pct)
+    peak = 0.0
+    mae = 0.0
+    exit_reason = "MARK_TO_MARKET"
+    exit_margin_pct = 0.0
+    for tick in ticks:
+        t = float(tick.get("t", 0))
+        if t < fill_t:
+            continue
+        price = tick.get("price")
+        if price is None or price <= 0:
+            continue
+        unreal = tick.get("unreal_pct")
+        if unreal is None:
+            unreal = ((price - entry) / entry) * dir_factor * leverage * 100
+        else:
+            unreal = float(unreal)
+        peak = max(peak, unreal)
+        mae = min(mae, unreal)
+        age_min = (t - fill_t) / 60.0
+        if early_fail and unreal <= EARLY_FAIL_PCT_THRESHOLD and age_min < EARLY_FAIL_MINUTES:
+            exit_reason = "EARLY_FAIL"
+            exit_margin_pct = unreal
+            break
+        if (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl):
+            exit_reason = "STOP_LOSS"
+            exit_margin_pct = -MAX_SL_MARGIN_PCT
+            break
+        lock_floor = _profit_lock_floor_for_ladder(peak, trail_ladder)
+        if lock_floor is not None and peak >= trail_ladder[0][0] and unreal <= lock_floor:
+            exit_reason = "PROFIT_LOCK_LADDER"
+            exit_margin_pct = lock_floor
+            break
+        if peak < trail_ladder[0][0] and unreal <= fast_cut:
+            exit_reason = "THESIS_FAST_CUT"
+            exit_margin_pct = fast_cut
+            break
+        if unreal >= TP_EMERGENCY_MARGIN_PCT:
+            exit_reason = "TAKE_PROFIT"
+            exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
+            break
+        exit_margin_pct = unreal
+    else:
+        exit_margin_pct = float(unreal) if ticks else 0.0
+
+    net_usd = _margin_pct_to_usd(exit_margin_pct, margin_usdt)
+    return {
+        "filled": True,
+        "exit_reason": exit_reason,
+        "net_pnl_usd": round(net_usd, 4),
+        "gross_pnl_margin_pct": round(exit_margin_pct, 4),
+        "max_profit_margin_pct": round(peak, 4),
+        "max_drawdown_margin_pct": round(mae, 4),
+        "fill_delay_sec": round(float(fill_t), 3),
+        "entry": entry,
+        "fill_price": entry,
+    }
+
+
+def compute_post_block_research(buf: dict, gate_outcome: dict) -> dict:
+    """Post-block price path + block quality metrics for analyzer."""
+    block_t = float(buf.get("block_t_rel") or 0)
+    ticks = sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0))
+    post_ticks = [t for t in ticks if float(t.get("t", 0)) >= block_t]
+    start_price = float(buf.get("start_price") or 0)
+    direction = str(buf.get("direction", "LONG")).upper()
+    dir_factor = 1 if direction == "LONG" else -1
+    max_fav = 0.0
+    max_adv = 0.0
+    for tick in post_ticks:
+        p = float(tick.get("price") or 0)
+        if p <= 0 or start_price <= 0:
+            continue
+        move_pct = ((p - start_price) / start_price) * dir_factor * 100
+        max_fav = max(max_fav, move_pct)
+        max_adv = min(max_adv, move_pct)
+    cf_pnl = gate_outcome.get("net_pnl_usd")
+    filled = bool(gate_outcome.get("filled"))
+    post_end = max((float(t.get("t", 0)) for t in post_ticks), default=block_t)
+    return {
+        "block_t_rel_sec": round(block_t, 3),
+        "post_block_tick_count": len(post_ticks),
+        "post_block_duration_sec": round(max(0.0, post_end - block_t), 3),
+        "post_block_max_favorable_pct": round(max_fav, 4),
+        "post_block_max_adverse_pct": round(max_adv, 4),
+        "counterfactual_pnl_usd": round(float(cf_pnl), 4) if filled and cf_pnl is not None else None,
+        "block_was_correct": bool(filled and cf_pnl is not None and cf_pnl < 0),
+        "block_cost_usd": round(float(cf_pnl), 4) if filled and cf_pnl and cf_pnl > 0 else 0.0,
+        "block_saved_usd": round(-float(cf_pnl), 4) if filled and cf_pnl is not None and cf_pnl < 0 else 0.0,
+        "continuation_target_sec": POST_BLOCK_CONTINUATION_SEC,
+    }
+
+
+def log_shadow_outcome_jsonl(
+    trade_id: str, block_reason: str, outcome: dict, buf: dict,
+    signal: dict = None, ai: dict = None, post_block_research: dict = None,
+):
+    try:
+        row = {
+            "schema": "shadow_outcome_v2",
+            "ts": utc_iso(),
+            "trade_id": trade_id,
+            "executed": False,
+            "block_reason": block_reason,
+            "direction": buf.get("direction"),
+            "ai_win_prob": buf.get("ai_win_prob") or (ai or {}).get("win_prob"),
+            "edge_score": buf.get("edge_score"),
+            "pullback_pct": buf.get("pullback_pct"),
+            "leverage": buf.get("leverage"),
+            "margin_usdt": buf.get("margin_usdt"),
+            "start_price": buf.get("start_price"),
+            "tick_count": len(buf.get("ticks", [])),
+            "block_t_rel_sec": buf.get("block_t_rel"),
+            "post_block_tick_count": (post_block_research or {}).get("post_block_tick_count"),
+            "exit_config": buf.get("exit_config") or get_exit_config_snapshot(),
+            "post_block_research": post_block_research or {},
+            **outcome,
+        }
+        rotate_log(SHADOW_OUTCOME_FILE)
+        with open(SHADOW_OUTCOME_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        logger.info(
+            f"[SHADOW_OUTCOME] trade_id={trade_id} reason={block_reason} filled={outcome.get('filled')} "
+            f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as e:
+        logger.error(f"[SHADOW_OUTCOME] log failed: {e}")
+
+
+def defer_shadow_research(trade_id: str, block_reason: str):
+    """Keep blocked APPROVE replay alive until SHADOW_REPLAY_TTL_SEC for counterfactual ticks."""
+    if not trade_id:
+        return
+    now = time.time()
+    block_t_rel = 0.0
+    with replay_lock:
+        buf = replay_buffers.get(trade_id)
+        if not buf or buf.get("lane") == "executed":
+            return
+        buf["block_reason"] = block_reason
+        buf["block_ts"] = now
+        block_t_rel = round(now - buf.get("start_ts", now), 3)
+        buf["block_t_rel"] = block_t_rel
+        buf["lane"] = "shadow_deferred"
+    logger.info(
+        f"[SHADOW_DEFER] trade_id={trade_id} reason={block_reason} "
+        f"block_t={block_t_rel}s ttl={SHADOW_REPLAY_TTL_SEC}s post_block>={POST_BLOCK_CONTINUATION_SEC}s "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+
+
+def finalize_shadow_research(trade_id: str, block_reason: str, signal: dict = None, ai: dict = None):
+    """Simulate blocked APPROVE path and persist shadow PnL."""
+    if not trade_id:
+        return
+    with replay_lock:
+        buf = replay_buffers.get(trade_id)
+        if not buf:
+            return
+        if buf.get("lane") == "executed":
+            return
+        buf["block_reason"] = block_reason
+        buf["lane"] = "shadow_blocked"
+        buf_copy = {
+            **buf,
+            "ticks": list(buf.get("ticks", [])),
+        }
+    outcome = simulate_replay_outcome(buf_copy)
+    post_block = compute_post_block_research(buf_copy, outcome)
+    log_shadow_outcome_jsonl(
+        trade_id, block_reason, outcome, buf_copy, signal=signal, ai=ai, post_block_research=post_block,
+    )
+    patch_signal_snapshot_outcome(trade_id, executed=False, block_reason=block_reason, post_block_research=post_block)
+    close_replay_buffer(trade_id)
+
+
+def start_replay_buffer(trade_id: str, start_price: float, **meta):
+    if not trade_id or not start_price:
+        return
+    with replay_lock:
+        if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
+            return
+        replay_buffers[trade_id] = {
+            "start_ts": time.time(),
+            "start_price": float(start_price),
+            "ticks": [],
+            "last_update": time.time(),
+            "last_tick_ts": 0.0,
+            "closed": False,
+            "seq": 0,
+            "lane": meta.get("lane", "executed"),
+            "direction": meta.get("direction"),
+            "leverage": meta.get("leverage"),
+            "margin_usdt": meta.get("margin_usdt"),
+            "pullback_pct": meta.get("pullback_pct"),
+            "early_fail_enabled": meta.get("early_fail_enabled", True),
+            "exit_config": meta.get("exit_config"),
+            "virtual_entry": meta.get("virtual_entry"),
+            "virtual_fill_t": meta.get("virtual_fill_t"),
+            "block_reason": meta.get("block_reason"),
+            "ai_win_prob": meta.get("ai_win_prob"),
+            "edge_score": meta.get("edge_score"),
+        }
+
+
+def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
+    if not trade_id or price is None or price <= 0:
+        return
+    now = time.time()
+    with replay_lock:
+        buf = replay_buffers.get(trade_id)
+        if not buf or buf.get("closed"):
+            return
+        if now - buf.get("last_tick_ts", 0) < REPLAY_TICK_MIN_INTERVAL_SEC:
+            return
+        buf["seq"] = int(buf.get("seq", 0)) + 1
+        t_rel = round(now - buf["start_ts"], 3)
+        phase = "post_block" if buf.get("block_ts") and now >= float(buf["block_ts"]) else "pre_block"
+        buf["ticks"].append({
+            "seq": buf["seq"],
+            "t": t_rel,
+            "price": float(price),
+            "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
+            "phase": phase,
+        })
+        buf["last_update"] = now
+        buf["last_tick_ts"] = now
+
+
+def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
+    """Per-trade path summary for analyzer thesis/ladder counterfactuals."""
+    try:
+        mfe = float(trade_row.get("max_profit") or pos.get("max_pnl_pct") or 0)
+        direction = str(trade_row.get("dir") or pos.get("dir") or "LONG").upper()
+        bull = int(trade_row.get("bull_score_at_entry") or pos.get("bull_score_at_entry") or 0)
+        bear = int(trade_row.get("bear_score_at_entry") or pos.get("bear_score_at_entry") or 0)
+        spread = bull - bear if direction == "LONG" else bear - bull
+        edge = float(trade_row.get("decision_edge_score") or pos.get("edge_score_at_entry") or 0)
+        sr_state = trade_row.get("sr_state") or pos.get("entry_sr_state") or "UNKNOWN"
+        ai_prob = float(trade_row.get("ai_win_prob") or pos.get("ai_win_prob") or 0)
+        structure = trade_row.get("structure_score_at_entry")
+        adx = trade_row.get("adx_at_entry")
+        buckets = capture_research_buckets(
+            {
+                "final_direction": direction,
+                "bull_score_at_entry": bull,
+                "bear_score_at_entry": bear,
+                "features": {"sr_state": sr_state},
+            },
+            {"bull_score": bull, "bear_score": bear, "win_prob": ai_prob},
+            edge,
+            {"sr_state": sr_state},
+        )
+        outcome = {
+            "schema": "trade_outcome_v2",
+            "ts": trade_row.get("ts"),
+            "trade_id": trade_row.get("trade_id"),
+            "dir": trade_row.get("dir"),
+            "exit_reason": trade_row.get("exit_reason"),
+            "entry": trade_row.get("entry"),
+            "exit": trade_row.get("exit"),
+            "margin_usdt": trade_row.get("margin_usdt"),
+            "leverage": trade_row.get("leverage"),
+            "max_profit_margin_pct": trade_row.get("max_profit"),
+            "max_drawdown_margin_pct": trade_row.get("max_drawdown"),
+            "final_pnl_margin_pct": trade_row.get("pnl"),
+            "net_pnl_usd": trade_row.get("net_pnl_usd"),
+            "dur_min": trade_row.get("dur_min"),
+            "entry_type": trade_row.get("entry_type"),
+            "trade_mfe_type": _trade_mfe_type_label(mfe),
+            "first_3_candles": pos.get("first_3_candles") or {},
+            "research_buckets": buckets,
+            "entry_features": {
+                "edge_score": edge,
+                "directional_spread": spread,
+                "structure_score": structure,
+                "sr_state": sr_state,
+                "dist_to_support": trade_row.get("distance_to_support"),
+                "dist_to_resistance": trade_row.get("distance_to_resistance"),
+                "adx": adx,
+                "volume_ratio": trade_row.get("features_volume_ratio"),
+                "imbalance": trade_row.get("features_imbalance"),
+                "delta": trade_row.get("features_delta"),
+                "velocity": trade_row.get("features_velocity"),
+                "ret_1m": None,
+                "ret_5m": None,
+                "ai_win_prob": ai_prob,
+            },
+            "exit_config": get_exit_config_snapshot(),
+            "entry_thesis": pos.get("entry_thesis") or {},
+            "bot_version": EXECUTION_FIX_VERSION,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+        }
+        rotate_log(TRADE_OUTCOME_FILE)
+        with open(TRADE_OUTCOME_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(outcome) + "\n")
+    except Exception as e:
+        logger.error(f"[TRADE_OUTCOME] log failed: {e}")
+
 
 def close_replay_buffer(trade_id):
     with replay_lock:
@@ -5522,7 +8924,25 @@ def dump_replay(trade_id: str):
         if not buf:
             return
         try:
-            replay = {"schema": "signal_replay_v1","trade_id": trade_id,"start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),"start_price": buf["start_price"],"ticks": list(buf["ticks"])}
+            post_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_block"]
+            replay = {
+                "schema": "signal_replay_v3",
+                "trade_id": trade_id,
+                "start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),
+                "start_price": buf["start_price"],
+                "direction": buf.get("direction"),
+                "lane": buf.get("lane"),
+                "block_reason": buf.get("block_reason"),
+                "block_ts": buf.get("block_ts"),
+                "block_t_rel": buf.get("block_t_rel"),
+                "post_block_tick_count": len(post_ticks),
+                "virtual_entry": buf.get("virtual_entry"),
+                "virtual_fill_t": buf.get("virtual_fill_t"),
+                "pullback_pct": buf.get("pullback_pct"),
+                "leverage": buf.get("leverage"),
+                "margin_usdt": buf.get("margin_usdt"),
+                "ticks": list(buf["ticks"]),
+            }
             rotate_log(SIGNAL_REPLAY_FILE)
             with open(SIGNAL_REPLAY_FILE, 'a') as f:
                 f.write(json.dumps(replay) + "\n")
@@ -5641,11 +9061,47 @@ def compute_analytics():
         state["analytics"] = analytics
         state["analytics_ts"] = utc_iso()
 
+def run_offline_research_sim():
+    """Backfill counterfactual.jsonl from snapshots + replays (deduped by trade_id)."""
+    global _sim_processed_trade_ids
+    try:
+        if os.path.exists(COUNTERFACTUAL_FILE):
+            with open(COUNTERFACTUAL_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        tid = row.get("trade_id")
+                        if tid:
+                            _sim_processed_trade_ids.add(tid)
+                    except Exception:
+                        pass
+        if os.path.exists(SHADOW_OUTCOME_FILE):
+            with open(SHADOW_OUTCOME_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        tid = row.get("trade_id")
+                        if tid:
+                            _sim_processed_trade_ids.add(tid)
+                    except Exception:
+                        pass
+        offline_simulator()
+    except Exception as e:
+        logger.error(f"[RESEARCH_SIM] {e}")
+
+
 def analytics_loop():
     try:
         while not shutdown_event.is_set():
             try:
                 compute_analytics()
+                run_offline_research_sim()
             except Exception as e:
                 logger.error(f"Analytics error: {e}")
             time.sleep(ANALYTICS_INTERVAL_SEC)
@@ -5654,121 +9110,99 @@ def analytics_loop():
         set_execution_paused("THREAD_CRASH")
 
 def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
-    global write_counter
-    if not os.path.exists(signal_snapshot_file):
+    global write_counter, _sim_processed_trade_ids
+    if not os.path.exists(signal_snapshot_file) or not os.path.exists(signal_replay_file):
         return
-    if not os.path.exists(signal_replay_file):
-        return
-    snapshots = []
-    with open(signal_snapshot_file, 'r') as f:
+    snapshots = {}
+    with open(signal_snapshot_file, "r", encoding="utf-8") as f:
         for line in f:
-            snapshots.append(json.loads(line))
-    replays = []
-    with open(signal_replay_file, 'r') as f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                tid = row.get("trade_id")
+                if tid:
+                    snapshots[tid] = row
+            except Exception:
+                pass
+    replays = {}
+    with open(signal_replay_file, "r", encoding="utf-8") as f:
         for line in f:
-            replays.append(json.loads(line))
-    simulated_open = 0
-    for snapshot in snapshots:
-        trade_id = snapshot["trade_id"]
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                tid = row.get("trade_id")
+                if tid:
+                    replays[tid] = row
+            except Exception:
+                pass
+    written = 0
+    for trade_id, snapshot in snapshots.items():
+        if trade_id in _sim_processed_trade_ids:
+            continue
         if not snapshot.get("ai", {}).get("approved", False):
             continue
-        replay = next((r for r in replays if r["trade_id"] == trade_id), None)
+        replay = replays.get(trade_id)
         if not replay:
             continue
-        start_price = replay["start_price"]
-        ticks = sorted(replay["ticks"], key=lambda x: x["seq"])
-        sl_pct = snapshot["config"].get("sl_pct", SL_PCT)
-        trail_ladder = snapshot["config"].get("trail_ladder", TRAIL_LADDER)
-        leverage = snapshot["config"].get("leverage", 20)
-        ttl_sec = REPLAY_TTL_SEC
-        pullback_pct = snapshot["config"].get("pullback_threshold", 0.0)
-        scenario = snapshot["direction"]
-        entry = None
-        fill_t = None
-        for tick in ticks:
-            price = tick["price"]
-            t = tick["t"]
-            if t > ttl_sec:
-                break
-            if scenario == "LONG":
-                if price <= start_price * (1 - pullback_pct):
-                    entry = price
-                    fill_t = t
-                    break
-            else:
-                if price >= start_price * (1 + pullback_pct):
-                    entry = price
-                    fill_t = t
-                    break
-        if entry is None or simulated_open >= state.get("max_active_signals", 3):
-            continue
-        simulated_open += 1
-        dir_factor = 1 if scenario == "LONG" else -1
-        sl = entry * (1 - dir_factor * sl_pct)
-        current_sl = sl
-        max_favorable = 0.0
-        max_adverse = 0.0
-        best_exit_price = entry
-        best_pnl_pct = 0.0
-        time_to_sl = None
-        time_to_best = None
-        effective_early_fail = snapshot["policy_effective"]["early_fail"]
-        for tick in ticks:
-            price = tick["price"]
-            t = tick["t"]
-            if t < fill_t:
-                continue
-            if t > ttl_sec:
-                break
-            unreal_pct = ((price - entry) / entry * 100) * dir_factor * leverage
-            max_favorable = max(max_favorable, unreal_pct)
-            max_adverse = min(max_adverse, unreal_pct)
-            age_min = (t - fill_t) / 60
-            if effective_early_fail and unreal_pct < EARLY_FAIL_PCT_THRESHOLD and age_min < EARLY_FAIL_MINUTES:
-                best_exit_price = price
-                best_pnl_pct = unreal_pct
-                break
-            best_lock = None
-            for trigger_pct, lock_pct in trail_ladder:
-                if unreal_pct >= trigger_pct:
-                    best_lock = lock_pct
-            if best_lock is not None:
-                price_move_pct = best_lock / leverage
-                if scenario == "LONG":
-                    candidate = price * (1 - price_move_pct / 100)
-                    current_sl = max(current_sl, candidate)
-                else:
-                    candidate = price * (1 + price_move_pct / 100)
-                    current_sl = min(current_sl, candidate)
-            if (scenario == "LONG" and price <= current_sl) or (scenario == "SHORT" and price >= current_sl):
-                if time_to_sl is None:
-                    time_to_sl = t
-                break
-            if unreal_pct > best_pnl_pct:
-                best_pnl_pct = unreal_pct
-                best_exit_price = price
-                time_to_best = t
-        simulated_open -= 1
-        counterfactual = {"schema": "counterfactual_v1","trade_id": trade_id,"scenario": scenario,"fill_price": entry,"fill_time_sec": fill_t,"best_exit_price": best_exit_price,"best_pnl_pct": round(best_pnl_pct, 2),"max_adverse_pct": round(max_adverse, 2),"time_to_sl_sec": time_to_sl,"time_to_best_sec": time_to_best}
+        cfg = snapshot.get("config", {})
+        buf = {
+            "start_price": replay.get("start_price"),
+            "ticks": replay.get("ticks", []),
+            "direction": snapshot.get("direction") or replay.get("direction"),
+            "leverage": cfg.get("leverage", state.get("leverage", 20)),
+            "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
+            "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.002)),
+            "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
+            "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
+                "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
+            )}},
+            "virtual_entry": replay.get("virtual_entry"),
+            "virtual_fill_t": replay.get("virtual_fill_t"),
+        }
+        outcome = simulate_replay_outcome(buf)
+        counterfactual = {
+            "schema": "counterfactual_v2",
+            "trade_id": trade_id,
+            "scenario": buf["direction"],
+            "executed": bool(snapshot.get("executed")),
+            "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
+            "lane": replay.get("lane"),
+            "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+            "edge_score": snapshot.get("edge_score"),
+            "fill_price": outcome.get("fill_price"),
+            "fill_delay_sec": outcome.get("fill_delay_sec"),
+            "filled": outcome.get("filled"),
+            "exit_reason": outcome.get("exit_reason"),
+            "net_pnl_usd": outcome.get("net_pnl_usd"),
+            "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
+            "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
+            "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+        }
         try:
-            rotate_log(COUNTERFACTUAL_FILE)
-            with open(output_file, 'a') as f:
+            rotate_log(output_file)
+            with open(output_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(counterfactual) + "\n")
                 f.flush()
-                global write_counter
                 write_counter += 1
                 if write_counter % 10 == 0:
                     os.fsync(f.fileno())
+            _sim_processed_trade_ids.add(trade_id)
+            written += 1
         except Exception as e:
             logger.error(f"Counterfactual log failed: {e}")
-    logger.info("Offline simulation complete")
+    if written:
+        logger.info(f"[RESEARCH_SIM] counterfactual rows written={written} [PIPELINE ENFORCEMENT]")
 
 def preload_candles():
     global latest_candles, last_candle_ts
     preload_failed = True
     for attempt in range(5):
         try:
-            candles = bybit_public.fetch_ohlcv(SYMBOL, '15m', limit=250)
+            candles = fetch_bitfinex_ohlcv("15m", limit=250)
             with state_lock:
                 latest_candles[:] = candles[-250:]
                 last_candle_ts = candles[-1][0] / 1000 if candles else time.time()
@@ -5779,7 +9213,7 @@ def preload_candles():
             update_support_resistance()
             trend_info()
             update_market_context(force=True)
-            populate_candle_buffers_from_candles(latest_candles)
+            populate_candle_buffers_from_candles(latest_candles, force=True)
             logger.info(f"[PRELOAD INDICATORS + CANDLE BUFFERS] completed [PIPELINE ENFORCEMENT]")
             preload_failed = False
             break
@@ -5811,9 +9245,21 @@ def rebuild_state_from_snapshots():
             continue
     logger.info(f"Recovered {restored} active signals from snapshot log")
 
+def _persistent_config_keys():
+    keys = [
+        "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
+        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed", "account_balance",
+        "min_confidence",
+        "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
+        "edge_range_preset", "fresh_collection_mode",
+    ]
+    if state.get("strategy_mode") != "RESEARCH":
+        keys.append("daily_pnl_usd")
+    return keys
+
 def load_persistent_config():
     if os.path.exists(CONFIG_FILE):
-        allowed_keys = ["pullback_threshold", "leverage","max_active_signals", "ai_enabled","early_fail_enabled", "invert_signal", "debug_enabled", "live_armed","account_balance", "daily_pnl_usd","min_confidence", "force_ai_every_signal","ai_threshold", "edge_threshold"]
+        allowed_keys = _persistent_config_keys()
         with open(CONFIG_FILE, 'r') as f:
             config = json.load(f)
             with state_lock:
@@ -5823,22 +9269,26 @@ def load_persistent_config():
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
         with state_lock:
-            if float(state.get("ai_threshold", 60) or 60) < RESEARCH_AI_THRESHOLD_FLOOR:
-                state["ai_threshold"] = RESEARCH_AI_THRESHOLD_FLOOR
-                logger.info(
-                    f"[CONFIG] Raised ai_threshold to research floor {RESEARCH_AI_THRESHOLD_FLOOR} "
-                    f"[PIPELINE ENFORCEMENT]"
-                )
             lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE) or DEFAULT_RESEARCH_LEVERAGE)
             if lev > MAX_RESEARCH_LEVERAGE:
                 state["leverage"] = MAX_RESEARCH_LEVERAGE
                 logger.warning(
                     f"[CONFIG] Capped leverage {lev} -> {MAX_RESEARCH_LEVERAGE}x [PIPELINE ENFORCEMENT]"
                 )
+            cur_ai = float(state.get("ai_threshold") or RESEARCH_AI_THRESHOLD_DEFAULT)
+            research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+            if not research_collect and cur_ai < LIVE_AI_THRESHOLD_FLOOR:
+                state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
+                state["_threshold_locked"] = True
+                save_persistent_config()
+                logger.info(
+                    f"[CONFIG] AI threshold raised {cur_ai} -> {LIVE_AI_THRESHOLD_FLOOR} "
+                    f"(live mode) [PIPELINE ENFORCEMENT]"
+                )
         logger.info("Loaded persistent config from config.json - ai_threshold restored")
 
 def save_persistent_config():
-    config = {k: state[k] for k in ["pullback_threshold", "leverage","max_active_signals", "ai_enabled","early_fail_enabled", "invert_signal", "debug_enabled", "live_armed","account_balance", "daily_pnl_usd","min_confidence", "force_ai_every_signal","ai_threshold","_threshold_locked","bootstrap_done", "edge_threshold"]}
+    config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, 'w') as f:
         json.dump(config, f)
@@ -5853,20 +9303,67 @@ def rotate_log(file):
         next_index = len(existing) + 1
         os.rename(file, f"{file}.{next_index}")
 
+def _port_is_open(host: str, port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+def _ensure_flask_port_available(port: int = None):
+    if port is None:
+        port = DASHBOARD_PORT
+    """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
+    if not _port_is_open("127.0.0.1", port):
+        return
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano"],
+            text=True,
+            errors="replace",
+            timeout=10,
+        )
+    except Exception as e:
+        raise SystemExit(
+            f"Port {port} is in use and listener PID could not be resolved ({e}). "
+            f"Stop the old bot, then restart from Final Bots."
+        ) from e
+    me = os.getpid()
+    pids = set()
+    needle = f":{port}"
+    for line in out.splitlines():
+        if "LISTENING" not in line or needle not in line:
+            continue
+        parts = line.split()
+        if parts and parts[-1].isdigit():
+            pids.add(int(parts[-1]))
+    others = sorted(p for p in pids if p != me)
+    if others:
+        raise SystemExit(
+            f"Port {port} already in use by PID(s) {others}. "
+            f"Run: taskkill /PID {others[0]} /F  then start one bot from Final Bots."
+        )
+
 def run_flask():
-    port = int(os.environ.get("PORT", "5000"))
-    logger.info(f"[HTTP] Listening on 0.0.0.0:{port} (health=/health)")
-    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
+    _ensure_flask_port_available(DASHBOARD_PORT)
+    app.run(host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, use_reloader=False)
 
 def is_ai_active():
-    return state.get("ai_enabled", False) and bool(DEEPSEEK_API_KEY)
+    return state.get("ai_enabled", False) and bool(_deepseek_api_key())
 
 def ttl_monitor():
+    global _last_fresh_maintain_ts
     logger.info("[TTL] Independent monitor started")
     while not shutdown_event.is_set():
         try:
             prune_signals()
             cleanup_expired_orders()
+            if state.get("fresh_collection_mode"):
+                now = time.time()
+                if now - _last_fresh_maintain_ts >= FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC:
+                    _last_fresh_maintain_ts = now
+                    maintain_fresh_collection_files()
             time.sleep(30)
         except Exception as e:
             logger.error(f"[TTL] ERROR: {e}")
@@ -5893,10 +9390,13 @@ def system_health_check():
         else:
             state["last_ready_ts"] = 0
             state["system_ready"] = False
-            if not ws_ok and state.get("price_ts") is not None:
-                state["execution_paused"] = True
-                state["execution_reason"] = "STALE_DATA_HARD_STOP"
-                logger.error("[HARD STOP] WS STALE - execution paused")
+            ws_tick = state.get("ws_last_tick")
+            if ws_tick is not None and not ws_ok:
+                ws_age = now - ws_tick
+                if ws_age >= STALE_HARD_SEC:
+                    state["execution_paused"] = True
+                    state["execution_reason"] = "STALE_DATA_HARD_STOP"
+                    logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s — execution paused")
     if not healthy:
         logger.warning(f"[HEALTH] NOT READY ws={ws_ok} price={price_ok} candle={candle_ok}")
     else:
@@ -5912,8 +9412,44 @@ def auto_recovery_check():
 
 def startup_hard_fix_ai_threshold():
     with state_lock:
-        if "ai_threshold" not in state or not state.get("_threshold_locked"):
-            logger.info("[INIT] AI threshold restored from config (no hard default)")
+        research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+        if research_collect:
+            if "ai_threshold" not in state:
+                state["ai_threshold"] = RESEARCH_AI_THRESHOLD_DEFAULT
+                save_persistent_config()
+                logger.info(
+                    f"[INIT] Research data collection — AI threshold default "
+                    f"{RESEARCH_AI_THRESHOLD_DEFAULT} (no floor) [PIPELINE ENFORCEMENT]"
+                )
+            return
+        floor = LIVE_AI_THRESHOLD_FLOOR
+        cur = float(state.get("ai_threshold") or floor)
+        if cur < floor:
+            state["ai_threshold"] = floor
+            state["_threshold_locked"] = True
+            save_persistent_config()
+            logger.info(f"[INIT] Live mode — AI threshold raised {cur} -> {floor} [PIPELINE ENFORCEMENT]")
+        elif "ai_threshold" not in state:
+            state["ai_threshold"] = floor
+            save_persistent_config()
+            logger.info(f"[INIT] Live mode — AI threshold set to floor {floor} [PIPELINE ENFORCEMENT]")
+
+def startup_log_research_sync():
+    """Confirm dashboard thresholds match runtime after config load (research vs live)."""
+    enforce_edge_threshold_options()
+    if not is_research_data_collection():
+        logger.info(
+            f"[INIT] Live mode — AI floor {LIVE_AI_THRESHOLD_FLOOR} | "
+            f"edge={get_edge_threshold()} effective={get_effective_edge_threshold()} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return
+    logger.info(
+        f"[INIT] RESEARCH DATA COLLECTION — flexible thresholds | "
+        f"AI={get_ai_threshold()} (no floor) | edge={get_edge_threshold()} "
+        f"effective={get_effective_edge_threshold()} (dashboard-only) | "
+        f"live_armed=OFF [PIPELINE ENFORCEMENT]"
+    )
 
 def recover_from_crash():
     if state.get("execution_reason") == "THREAD_CRASH":
@@ -5923,15 +9459,23 @@ def recover_from_crash():
 def heartbeat_loop():
     global last_heartbeat
     while not shutdown_event.is_set():
+        now = time.time()
         with state_lock:
-            state["heartbeat"] = time.time()
-        last_heartbeat = time.time()
+            state["heartbeat"] = now
+            state["last_heartbeat"] = now
+        last_heartbeat = now
         time.sleep(HEARTBEAT_INTERVAL)
         if not (state.get("ws_ready") and len(latest_candles) >= MIN_CANDLES):
             continue
         now = time.time()
         if now - state.get("last_ai_call_ts", 0) < AI_COOLDOWN_SECONDS:
             logger.debug(f"[HEARTBEAT] Skipped - AI cooldown active ({AI_COOLDOWN_SECONDS - (now - state.get('last_ai_call_ts', 0)):.0f}s left) [PIPELINE ENFORCEMENT]")
+            continue
+        if _sole_ai_research_mode():
+            logger.info("[HEARTBEAT] v81 periodic AI check [PIPELINE ENFORCEMENT]")
+            event = detect_event_light()
+            if event and round(event.get("edge_score", 0), 1) > 0:
+                process_signal(event)
             continue
         logger.info("[HEARTBEAT] Periodic pipeline check (no direct AI call) [PIPELINE ENFORCEMENT]")
         event = detect_event_light()
@@ -6063,19 +9607,29 @@ def apply_trade_pnl(trade_row):
             )
 
 def main():
-    global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute, _startup_complete
-    logger.info(f"[AI INIT] KEY PRESENT: {bool(os.getenv('DEEPSEEK_API_KEY'))}")
-    validate_startup()
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(0.8)
-    logger.info("[STARTUP] HTTP server up — Railway /health available during bootstrap")
-    logger.info("[STARTUP] WIPING OLD DATA FOR FRESH RUN")
-    reset_all_csv()
+    global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
+    prune_aux_logs_on_startup()
+    global DEEPSEEK_API_KEY
+    _load_local_dotenv()
+    DEEPSEEK_API_KEY = _deepseek_api_key()
+    logger.info(f"[AI INIT] KEY PRESENT: {bool(DEEPSEEK_API_KEY)} cwd={os.getcwd()} [PIPELINE ENFORCEMENT]")
+    if not DEEPSEEK_API_KEY:
+        logger.warning(
+            "[AI INIT] DEEPSEEK_API_KEY missing — copy .env.example to .env in this folder "
+            "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
+        )
+    _wipe_research_on_startup_if_needed()
     reset_runtime_state()
     update_logger_level()
-    startup_hard_fix_ai_threshold()
+    validate_startup()
     load_persistent_config()
+    startup_hard_fix_ai_threshold()
+    startup_log_research_sync()
+    if state.get("strategy_mode") == "RESEARCH":
+        reset_session_risk_state()
     bot_start_time = time.time()
+    with state_lock:
+        state["ai_history"] = []
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
@@ -6096,30 +9650,34 @@ def main():
     last_heartbeat = time.time()
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
-    if not api_key or len(api_key) < 10 or not secret or len(secret) < 10:
-        logger.error(
-            "[STARTUP] BYBIT_API_KEY/BYBIT_SECRET missing or invalid — staying up for /health; trading paused"
-        )
-        set_execution_paused("MISSING_BYBIT_KEYS")
-        state["account_balance"] = STARTING_BALANCE
+    _write_research_session(bot_start_time)
+    research_mode = state.get("strategy_mode") == "RESEARCH"
+    keys_ok = _private_api_keys_ok()
+    if not keys_ok:
+        if research_mode and not state.get("live_armed"):
+            logger.warning(
+                "[STARTUP] BITFINEX private API keys missing — RESEARCH public-data mode "
+                f"(balance={STARTING_BALANCE}) [PIPELINE ENFORCEMENT]"
+            )
+            state["account_balance"] = STARTING_BALANCE
+        else:
+            raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
     else:
         try:
-            balance = bybit_private.fetch_balance()
-            logger.info(f"API keys validated - Balance: {balance}")
+            balance = bitfinex_private.fetch_balance()
+            logger.info(f"Bitfinex API keys validated - Balance: {balance}")
             if state.get("live_armed"):
-                state["account_balance"] = (
-                    balance.get('total', {}).get('USDT', STARTING_BALANCE)
-                    if isinstance(balance, dict)
-                    else STARTING_BALANCE
-                )
+                usdt = STARTING_BALANCE
+                if isinstance(balance, dict):
+                    usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
+                state["account_balance"] = usdt
             else:
                 state["account_balance"] = STARTING_BALANCE
         except Exception as e:
-            logger.error(f"API key test failed: {e}")
-            set_execution_paused("BYBIT_API_ERROR")
+            logger.error(f"Bitfinex API key test failed: {e}")
             state["account_balance"] = STARTING_BALANCE
-    if not DEEPSEEK_API_KEY:
-        logger.warning("AI disabled: DEEPSEEK_API_KEY missing")
+    if not _deepseek_api_key():
+        logger.warning("AI disabled: DEEPSEEK_API_KEY missing (see Final Bots\\.env)")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
     load_policy()
     preload_candles()
@@ -6152,6 +9710,16 @@ def main():
         f"[FEES] profile={EXCHANGE_FEE_PROFILE} maker={m_fee*100:.4f}% taker={t_fee*100:.4f}% | "
         f"funding_sim={FUNDING_SIMULATION_ENABLED} rate_8h={f.get('rate_pct_per_8h', 0)}% source={f.get('source')} [PIPELINE ENFORCEMENT]"
     )
+    logger.info(
+        f"[V75 EXIT] pullback_default={state.get('pullback_threshold', 0.002)*100:.2f}% "
+        f"ladder_1st={TRAIL_LADDER[0][0]}%→lock{TRAIL_LADDER[0][1]}% "
+        f"thesis_fast_cut={THESIS_FAST_EXIT_UNREAL_PCT}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
+        f"(0.0% pullback toggle=instant fill) [PIPELINE ENFORCEMENT]"
+    )
+    logger.info(
+        f"[V72 SHADOW RESEARCH] snapshot+replay at APPROVE | shadow_outcome.jsonl on blocked APPROVE | "
+        f"counterfactual auto-sim in analytics loop [PIPELINE ENFORCEMENT]"
+    )
     with state_lock:
         mc = state.get("market_context", {})
     logger.info(
@@ -6165,19 +9733,34 @@ def main():
         f"[PHASE-C] factor_gate={PHASE_C_FACTOR_GATE_ENABLED} min_margin={MIN_FACTOR_SCORE_MARGIN} [PIPELINE ENFORCEMENT]"
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
+    if RESEARCH_AI_SOLE_AUTHORITY:
+        logger.warning(
+            f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
+            f"{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s | post-AI gates log WOULD_BLOCK_* only "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    if RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
+        logger.warning(
+            f"[FREE_RUN] Post-AI gates OFF — mtf={RESEARCH_FREE_RUN_DISABLE_MTF_GATE} "
+            f"chop={RESEARCH_FREE_RUN_DISABLE_CHOP_GATE} "
+            f"mom_align={RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN} "
+            f"(strict v75 thresholds still logged in snapshots) [PIPELINE ENFORCEMENT]"
+        )
+    if FLAT_MARGIN_EVERY_TRADE:
+        logger.warning(
+            f"[FLAT_MARGIN] Every trade uses ${FIXED_MARGIN_USDT} — conviction/regime/ADX size scaling OFF "
+            f"(reference scaled margin logged in snapshots) [PIPELINE ENFORCEMENT]"
+        )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    _startup_complete = True
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
     fetch_ohlcv()
-    if HEDGE_MODE:
-        try:
-            bybit_private.set_position_mode(True, SYMBOL)
-            logger.info("Position mode already hedge or UTA handled")
-        except ccxt.BaseError as e:
-            if "110025" in str(e) or "not modified" in str(e).lower() or "unified account" in str(e).lower():
-                logger.info("Position mode already hedge or UTA handled")
-            else:
-                logger.error(f"Hedge mode set failed: {e}")
+    logger.info(
+        f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
+        f"pid={os.getpid()} cwd={os.getcwd()} dashboard={dashboard_public_url()} [PIPELINE ENFORCEMENT]"
+    )
+    sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
@@ -6207,10 +9790,4 @@ def main():
             time.sleep(5)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.critical(f"[FATAL STARTUP] Process staying alive for health/debug: {e}")
-        logger.critical(traceback.format_exc())
-        while not shutdown_event.is_set():
-            time.sleep(60)
+    main()
