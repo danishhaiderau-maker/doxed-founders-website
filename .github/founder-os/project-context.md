@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agents): offline status after kill, 2000 DDollar/week hire fee
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
