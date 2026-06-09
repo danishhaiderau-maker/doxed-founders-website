@@ -96,7 +96,6 @@ export type BotApiState = {
     ai_direction_raw?: string;
   }>;
   signal_info?: { count?: number; active?: boolean };
-  bot_start_time?: number;
 };
 
 const STARTING_BALANCE = 500;
