@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(api): resolve nest build errors blocking Railway deploy
+chore(bot): sync bybit-15m-research-bot latest with production patches
 
 ## Last Activity
 
