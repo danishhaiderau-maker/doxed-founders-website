@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(bot): Admin Control credentials independent of research bot sync
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
