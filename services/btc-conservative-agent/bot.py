@@ -38,8 +38,8 @@ import numpy as np
 import pytz
 
 # #region agent log
-_AGENT_DEBUG_LOG = r"C:\Users\user\Desktop\Final Bots\debug-43f630.log"
-_AGENT_DEBUG_LOG_ALT = r"C:\Users\user\Desktop\BOT\debug-43f630.log"
+_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
+_AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug-alt.log")
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
@@ -312,6 +312,33 @@ def _wipe_research_on_startup_if_needed():
     reason = "version change" if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION else "fresh session"
     logger.warning(f"[STARTUP] Wiping research files ({reason}) — only post-start data will be collected [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
+
+def _log_credential_sources():
+    """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
+    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+    admin = os.getenv("CREDENTIALS_FROM", "").strip().lower() == "admin_control"
+    ds_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    bx_ok = _private_api_keys_ok()
+    ds_ok = bool(ds_key)
+    ds_tail = ds_key[-4:] if len(ds_key) >= 4 else "none"
+    bx_key = (os.getenv("BITFINEX_API_KEY") or "").strip()
+    bx_tail = bx_key[-4:] if len(bx_key) >= 4 else "none"
+    logger.info(
+        f"[CREDENTIALS] railway={on_railway} admin_control={admin} "
+        f"deepseek={'ok' if ds_ok else 'MISSING'}(…{ds_tail}) "
+        f"bitfinex={'ok' if bx_ok else 'MISSING'}(…{bx_tail}) "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if on_railway and not ds_ok:
+        logger.error(
+            "[CREDENTIALS] Railway DEEPSEEK missing — save key at /admin/control and Push to Runtime "
+            "(npm run push:showcase-bot) [PIPELINE ENFORCEMENT]"
+        )
+    if on_railway and not bx_ok:
+        logger.error(
+            "[CREDENTIALS] Railway Bitfinex keys missing — save at /admin/control and Push to Runtime "
+            "[PIPELINE ENFORCEMENT]"
+        )
 
 def _private_api_keys_ok() -> bool:
     k = os.getenv("BITFINEX_API_KEY", "").strip()
@@ -1898,6 +1925,9 @@ def get_execution_status() -> str:
 
 def get_display_balance():
     with state_lock:
+        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
+        if state.get("strategy_mode") == "RESEARCH":
+            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
             return STARTING_BALANCE
         return state.get("account_balance", STARTING_BALANCE)
@@ -2845,9 +2875,9 @@ BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800"))
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
-DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
+DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
 
 def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
@@ -2897,11 +2927,21 @@ MAX_PENDING_ORDERS = 2
 MAX_EXPIRED_ORDERS = 20
 
 def _load_local_dotenv():
-    """Load Final Bots/.env into os.environ (does not override existing vars)."""
+    """Load .env into os.environ (does not override existing vars).
+    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return
     root = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(root, ".env")
     if not os.path.isfile(path):
         return
+    secret_keys = frozenset({
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
+        "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
+        "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
+    })
     try:
         with open(path, encoding="utf-8") as f:
             for raw in f:
@@ -2910,8 +2950,11 @@ def _load_local_dotenv():
                     continue
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
+                if not key or key in os.environ:
+                    continue
+                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
+                    continue
+                os.environ[key] = val
     except Exception:
         pass
 
@@ -3172,7 +3215,7 @@ state = {
     "warmup_mode": True
 }
 shutdown_event = threading.Event()
-PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100}
+PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
 
 def get_edge_threshold():
     with state_lock:
@@ -5571,6 +5614,10 @@ def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
+    if state.get("manual_admin_pause") or (
+        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
+    ):
+        return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
@@ -7355,7 +7402,7 @@ def position_manager():
                         logger.warning(f"[TTL] ORDER EXPIRED {order.get('trade_id')} age={age:.1f}s [PIPELINE ENFORCEMENT]")
                         if order in pending_orders:
                             pending_orders.remove(order)
-                        expired = {"trade_id": order.get("trade_id"),"dir": order.get("side"),"limit_price": order.get("limit_price"),"signal_price": order.get("signal_price"),"created_ts": order.get("created_ts"),"expired_ts": now,"age_min": int(age / 60),"conf": order.get("ai_win_prob", 0),"mode": state.get("strategy_mode"),"reason": "TTL_EXPIRED"}
+                        expired = {"trade_id": order.get("trade_id"),"dir": order.get("side"),"limit_price": order.get("limit_price"),"signal_price": order.get("signal_price"),"created_ts": order.get("created_ts"),"expired_ts": now,"age_min": int(age / 60),"conf": order.get("ai_win_prob", 0),"mode": state.get("strategy_mode"),"reason": "TTL_EXPIRED","research_lane": order.get("research_lane"),"research_model": order.get("research_model")}
                         expired_orders.append(expired)
                         expire_signal_for_order(order, "TTL_EXPIRED")
                         if len(expired_orders) > MAX_EXPIRED_ORDERS:
@@ -7725,6 +7772,7 @@ def research_wipe_file_paths():
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
+        CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     return paths
@@ -9016,6 +9064,7 @@ DASHBOARD_JS = """(function () {
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
     window.toggleBlockFreeRange = toggleBlockFreeRange;
+    window.toggleGoldenStack = toggleGoldenStack;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.downloadDebug = downloadDebug;
@@ -9172,6 +9221,12 @@ def api_state():
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
+        snapshot["equity"] = snapshot["account_balance"] + total_unreal
+        session_trades = _session_trades_only(trades_copy)
+        snapshot["trades"] = session_trades
+        snapshot["trade_count_session"] = len(session_trades)
+        snapshot["bot_start_time"] = bot_start_time
+        snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -9212,12 +9267,17 @@ def api_state():
 def health():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
+    status = "paused" if paused else "alive"
     return jsonify({
-        "status": "alive",
+        "status": status,
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
-        "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", "")
+        "execution_paused": paused,
+        "execution_reason": reason,
+        "manual_admin_pause": manual,
     })
 
 @app.route('/debug_state')
@@ -9225,10 +9285,24 @@ def get_debug_state():
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    with state_lock:
+        state["manual_admin_pause"] = True
+        state["live_armed"] = False
+        save_persistent_config()
+    set_execution_paused("ADMIN_MANUAL")
+    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    with state_lock:
+        state["manual_admin_pause"] = False
+        save_persistent_config()
     set_execution_paused("")
-    return jsonify({"status": "resumed"})
+    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "resumed", "execution_paused": False})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -9298,6 +9372,13 @@ def toggle_debug():
         save_persistent_config()
         update_logger_level()
     return jsonify({"debug_enabled": state["debug_enabled"]})
+
+@app.route('/api/reset', methods=['POST'])
+def api_reset_showcase():
+    """Admin/platform: wipe all research artifacts and restart session at $500."""
+    result = perform_fresh_collection_reset()
+    enforce_clean_research_session()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
@@ -10791,7 +10872,7 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed", "account_balance",
+        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
@@ -10801,6 +10882,62 @@ def _persistent_config_keys():
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
     return keys
+
+def enforce_clean_research_session():
+    """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
+    global bot_start_time
+    with trade_lock:
+        trades.clear()
+        pending_orders.clear()
+        expired_orders.clear()
+        open_positions.clear()
+        trades_map.clear()
+        recent_trades.clear()
+    with replay_lock:
+        replay_buffers.clear()
+    with state_lock:
+        state["account_balance"] = STARTING_BALANCE
+        state["daily_pnl_usd"] = 0.0
+        state["consecutive_losses"] = 0
+        state["loss_pause_until"] = 0.0
+        state["fresh_collection_mode"] = True
+        if not state.get("live_armed", False):
+            state["fresh_collection_mode"] = True
+    bot_start_time = time.time()
+    with state_lock:
+        state["bot_start_time"] = bot_start_time
+    logger.warning(
+        f"[STARTUP] Clean research session — balance={STARTING_BALANCE} fresh_collection=ON "
+        f"version={EXECUTION_FIX_VERSION} [PIPELINE ENFORCEMENT]"
+    )
+
+def _session_trades_only(trades_list):
+    """Only expose trades opened after this process started."""
+    start = bot_start_time or 0.0
+    if start <= 0:
+        return list(trades_list or [])
+    kept = []
+    for t in trades_list or []:
+        if not isinstance(t, dict):
+            continue
+        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if not ts:
+            raw_ts = t.get("ts")
+            if isinstance(raw_ts, str):
+                try:
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0.0
+            elif isinstance(raw_ts, (int, float)):
+                ts = float(raw_ts)
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0.0
+        if float(ts or 0) >= start - 1.0:
+            kept.append(t)
+    return kept
 
 def load_persistent_config():
     if os.path.exists(CONFIG_FILE):
@@ -10857,6 +10994,10 @@ def _ensure_flask_port_available(port: int = None):
         port = DASHBOARD_PORT
     """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
     if not _port_is_open("127.0.0.1", port):
+        return
+    import sys
+    if sys.platform != "win32":
+        logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
     try:
         out = subprocess.check_output(
@@ -10926,7 +11067,7 @@ def system_health_check():
                 if not state.get("system_ready"):
                     logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
                 state["system_ready"] = True
-                if state.get("execution_paused"):
+                if state.get("execution_paused") and not state.get("manual_admin_pause"):
                     set_execution_paused("")
         else:
             state["last_ready_ts"] = 0
@@ -11183,6 +11324,9 @@ def main():
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
@@ -11314,8 +11458,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
