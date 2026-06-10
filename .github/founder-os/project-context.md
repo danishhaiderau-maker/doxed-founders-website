@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Sync btc-conservative-agent to v88 dashboard lane display (a813621).
 
 ## Last Activity
 
