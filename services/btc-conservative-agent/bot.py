@@ -38,8 +38,8 @@ import numpy as np
 import pytz
 
 # #region agent log
-_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
-_AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug-alt.log")
+_AGENT_DEBUG_LOG = r"C:\Users\user\Desktop\Final Bots\debug-43f630.log"
+_AGENT_DEBUG_LOG_ALT = r"C:\Users\user\Desktop\BOT\debug-43f630.log"
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
@@ -312,33 +312,6 @@ def _wipe_research_on_startup_if_needed():
     reason = "version change" if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION else "fresh session"
     logger.warning(f"[STARTUP] Wiping research files ({reason}) — only post-start data will be collected [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
-
-def _log_credential_sources():
-    """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
-    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
-    admin = os.getenv("CREDENTIALS_FROM", "").strip().lower() == "admin_control"
-    ds_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
-    bx_ok = _private_api_keys_ok()
-    ds_ok = bool(ds_key)
-    ds_tail = ds_key[-4:] if len(ds_key) >= 4 else "none"
-    bx_key = (os.getenv("BITFINEX_API_KEY") or "").strip()
-    bx_tail = bx_key[-4:] if len(bx_key) >= 4 else "none"
-    logger.info(
-        f"[CREDENTIALS] railway={on_railway} admin_control={admin} "
-        f"deepseek={'ok' if ds_ok else 'MISSING'}(…{ds_tail}) "
-        f"bitfinex={'ok' if bx_ok else 'MISSING'}(…{bx_tail}) "
-        f"[PIPELINE ENFORCEMENT]"
-    )
-    if on_railway and not ds_ok:
-        logger.error(
-            "[CREDENTIALS] Railway DEEPSEEK missing — save key at /admin/control and Push to Runtime "
-            "(npm run push:showcase-bot) [PIPELINE ENFORCEMENT]"
-        )
-    if on_railway and not bx_ok:
-        logger.error(
-            "[CREDENTIALS] Railway Bitfinex keys missing — save at /admin/control and Push to Runtime "
-            "[PIPELINE ENFORCEMENT]"
-        )
 
 def _private_api_keys_ok() -> bool:
     k = os.getenv("BITFINEX_API_KEY", "").strip()
@@ -1925,9 +1898,6 @@ def get_execution_status() -> str:
 
 def get_display_balance():
     with state_lock:
-        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
-        if state.get("strategy_mode") == "RESEARCH":
-            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
             return STARTING_BALANCE
         return state.get("account_balance", STARTING_BALANCE)
@@ -2176,7 +2146,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.8-lane-live-execution-2026-06-10"
+ANALYZER_SYNC_ID = "v8.8-dashboard-lane-display-2026-06-04"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2875,9 +2845,9 @@ BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT", "7800"))
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
-DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
+DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
 
 def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
@@ -2927,21 +2897,11 @@ MAX_PENDING_ORDERS = 2
 MAX_EXPIRED_ORDERS = 20
 
 def _load_local_dotenv():
-    """Load .env into os.environ (does not override existing vars).
-    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-        return
+    """Load Final Bots/.env into os.environ (does not override existing vars)."""
     root = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(root, ".env")
     if not os.path.isfile(path):
         return
-    secret_keys = frozenset({
-        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-        "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
-        "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
-        "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
-        "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
-    })
     try:
         with open(path, encoding="utf-8") as f:
             for raw in f:
@@ -2950,11 +2910,8 @@ def _load_local_dotenv():
                     continue
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip().strip('"').strip("'")
-                if not key or key in os.environ:
-                    continue
-                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
-                    continue
-                os.environ[key] = val
+                if key and key not in os.environ:
+                    os.environ[key] = val
     except Exception:
         pass
 
@@ -3008,7 +2965,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.442-v87-lane-live-execution"
+EXECUTION_FIX_VERSION = "v10.9.443-v88-dashboard-lane-display"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3215,7 +3172,7 @@ state = {
     "warmup_mode": True
 }
 shutdown_event = threading.Event()
-PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
+PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100}
 
 def get_edge_threshold():
     with state_lock:
@@ -3876,6 +3833,8 @@ def build_dashboard_display(snapshot: dict) -> dict:
             "win_prob": ai_prob,
             "note": ai_note,
             "gate_called": bool(ag.get("called")),
+            "research_lane": la.get("research_lane"),
+            "research_model": la.get("research_model") or research_lane_label(la.get("research_lane")),
         },
         "exchange_label": "Bitfinex",
         "market_symbol": symbol,
@@ -4702,6 +4661,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
             "final_outcome": state.get("execution_outcome", "PENDING"),
             "bull_score": ai_result.get("bull_score", 0),
             "bear_score": ai_result.get("bear_score", 0),
+            "research_lane": ai_result.get("research_lane"),
+            "research_model": ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane")),
         })
         hist_limit = 50 if _sole_ai_research_mode() else 5
         state["ai_history"] = state["ai_history"][-hist_limit:]
@@ -4727,6 +4688,8 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
             state["last_ai"]["reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
         else:
             state["last_ai"]["reason"] = (ai_result.get("comment") or "")[:500]
+        state["last_ai"]["research_lane"] = ai_result.get("research_lane")
+        state["last_ai"]["research_model"] = ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane"))
         state["ai_outcome"] = ai_result.get("decision")
         state["ai_decision"] = ai_result.get("decision")
 
@@ -5608,10 +5571,6 @@ def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
-    if state.get("manual_admin_pause") or (
-        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
-    ):
-        return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
@@ -7348,7 +7307,9 @@ def cleanup_expired_orders():
                     "age_min": int(age / 60),
                     "conf": order.get("ai_win_prob", 0),
                     "mode": state.get("strategy_mode"),
-                    "reason": "TTL_EXPIRED"
+                    "reason": "TTL_EXPIRED",
+                    "research_lane": order.get("research_lane"),
+                    "research_model": order.get("research_model"),
                 })
                 if len(expired_orders) > MAX_EXPIRED_ORDERS:
                     expired_orders.pop(0)
@@ -7764,7 +7725,6 @@ def research_wipe_file_paths():
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
-        CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     return paths
@@ -8053,6 +8013,7 @@ HTML = """<!DOCTYPE html>
 
 <h3>AI Decision (current cycle)</h3>
 <p><strong>AI Status:</strong> <span id="aiDecision">-</span> <span id="aiStatusNote" style="color:#8b949e;font-size:0.9em;"></span></p>
+<p><strong>Research Model:</strong> <span id="aiResearchModel">-</span></p>
 <p><strong>AI Win Prob:</strong> <span id="aiProb">-</span></p>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
@@ -8209,37 +8170,37 @@ HTML = """<!DOCTYPE html>
 
 <h2>Active Signals</h2>
 <table>
-    <thead><tr><th>Time</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
+    <thead><tr><th>Time</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
 </table>
 
 <h2>Positions</h2>
 <table>
-    <thead><tr><th>Leg</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
+    <thead><tr><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th></tr></thead>
     <tbody id="positionsTable"></tbody>
 </table>
 
 <h2>Pending Orders</h2>
 <table>
-    <thead><tr><th>Age min</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Signal Price</th></tr></thead>
+    <thead><tr><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Signal Price</th></tr></thead>
     <tbody id="ordersTable"></tbody>
 </table>
 
 <h2>Expired Orders</h2>
 <table>
-    <thead><tr><th>Time</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
+    <thead><tr><th>Time</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
 </table>
 
 <h2>Trades</h2>
 <table>
-    <thead><tr><th>Time</th><th>ID</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Time</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
 <h2>AI History (Session)</h2>
 <table>
-    <thead><tr><th>Time</th><th>Trade ID</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th></tr></thead>
+    <thead><tr><th>Time</th><th>Trade ID</th><th>Model</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -8274,6 +8235,17 @@ DASHBOARD_JS = """(function () {
     function safeHTML(id, html) {
       const el = document.getElementById(id);
       if (el) el.innerHTML = html ?? "";
+    }
+    function laneBadge(lane, model) {
+      const m = model || lane || '-';
+      const colors = {
+        'CONTINUOUS': '#58a6ff',
+        'STABILITY': '#bc8cff',
+        'GOLDEN_STACK': '#d4a72c'
+      };
+      const c = colors[lane] || '#8b949e';
+      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : m;
+      return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     async function post(url, obj={}) {
       try {
@@ -8540,6 +8512,8 @@ DASHBOARD_JS = """(function () {
         }
         safeText('aiDecision', aiStatusTxt);
         safeText('aiStatusNote', dai.note || '');
+        const laneLabels = {'CONTINUOUS': 'Continuous AI Research', 'STABILITY': 'AI Stability Research', 'GOLDEN_STACK': 'Golden Stack'};
+        safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
         const aiProbEl = document.getElementById('aiProb');
         if (aiProbEl) {
           aiProbEl.innerText = aiCalled && dai.win_prob != null
@@ -8809,6 +8783,7 @@ DASHBOARD_JS = """(function () {
         safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
+            <td>${laneBadge(s.research_lane, s.research_model)}</td>
             <td>${s.final_direction || s.dir || '-'}</td>
             <td>${s.conf || '-'}</td>
             <td>${s.regime || '-'}</td>
@@ -8825,6 +8800,7 @@ DASHBOARD_JS = """(function () {
         safeHTML('positionsTable', (d.positions||[]).map(l => `
           <tr>
             <td>${l.leg || '-'}</td>
+            <td>${laneBadge(l.research_lane, l.research_model)}</td>
             <td>${l.side || '-'}</td>
             <td>${l.qty || '-'}</td>
             <td>${l.entry != null ? l.entry.toFixed(2) : '-'}</td>
@@ -8837,6 +8813,7 @@ DASHBOARD_JS = """(function () {
         safeHTML('ordersTable', (d.orders||[]).map(o => `
           <tr>
             <td>${o.age_min?.toFixed(1)||'-'}</td>
+            <td>${laneBadge(o.research_lane, o.research_model)}</td>
             <td>${o.side || '-'}</td>
             <td>${o.status || '-'}</td>
             <td>${o.qty || '-'}</td>
@@ -8847,6 +8824,7 @@ DASHBOARD_JS = """(function () {
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
             <td>${e.time || '-'}</td>
+            <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
             <td>${e.age_min?.toFixed(1)||'-'}</td>
@@ -8859,6 +8837,7 @@ DASHBOARD_JS = """(function () {
           <tr>
             <td>${t.ts || '-'}</td>
             <td>${t.trade_id || '-'}</td>
+            <td>${laneBadge(t.research_lane, t.research_model)}</td>
             <td>${t.final_direction || t.dir || '-'}</td>
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
@@ -8880,6 +8859,7 @@ DASHBOARD_JS = """(function () {
           <tr>
             <td>${a.melbourne_time || formatMelbourneDateTime(a.time || a.ts)}</td>
             <td>${a.trade_id || '-'}</td>
+            <td>${laneBadge(a.research_lane, a.research_model)}</td>
             <td>${a.ai_direction_raw || a.dir || '-'}</td>
             <td>${a.final_direction || a.dir || '-'}</td>
             <td>${a.inverted ? 'YES' : 'NO'}</td>
@@ -8887,7 +8867,7 @@ DASHBOARD_JS = """(function () {
             <td>${prob != null && !Number.isNaN(prob) ? prob.toFixed(0) + '%' : '-'}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="8" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="9" style="color:#8b949e">No AI evaluations yet this session</td></tr>');
         safeHTML('aiBandsAnalytics', Object.entries(d.analytics?.ai_bands || {}).map(([k,v])=>`
           <tr>
             <td>${k}%</td>
@@ -9036,7 +9016,6 @@ DASHBOARD_JS = """(function () {
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
     window.toggleBlockFreeRange = toggleBlockFreeRange;
-    window.toggleGoldenStack = toggleGoldenStack;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.downloadDebug = downloadDebug;
@@ -9168,13 +9147,17 @@ def api_state():
                 "research_lane": s.get("research_lane"),
                 "research_model": s.get("research_model"),
                 "dir": s.get("final_direction") or s.get("dir"),
+                "final_direction": s.get("final_direction") or s.get("dir"),
                 "conf": s.get("ai_win_prob", 0),
                 "regime": s.get("regime"),
+                "strategy": s.get("strategy") or s.get("strategy_birth", snapshot.get("strategy", "-")),
                 "created_ts": s.get("created_ts"),
                 "expires_ts": expires_ts,
                 "ttl_remaining": (expires_ts - time.time()),
                 "age": time.time() - created_ts,
                 "pullback_pct": s.get("pull_req", 0),
+                "pull_req": s.get("pull_req"),
+                "max_pull": s.get("max_pull"),
                 "regime_birth": s.get("regime_birth", snapshot.get("regime", "-")),
                 "strategy_birth": s.get("strategy_birth", snapshot.get("strategy", "-")),
                 "status": s.get("status", "UNKNOWN"),
@@ -9189,12 +9172,6 @@ def api_state():
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
-        snapshot["equity"] = snapshot["account_balance"] + total_unreal
-        session_trades = _session_trades_only(trades_copy)
-        snapshot["trades"] = session_trades
-        snapshot["trade_count_session"] = len(session_trades)
-        snapshot["bot_start_time"] = bot_start_time
-        snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -9235,17 +9212,12 @@ def api_state():
 def health():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
-        paused = bool(state.get("execution_paused", False))
-        reason = state.get("execution_reason", "")
-        manual = bool(state.get("manual_admin_pause", False))
-    status = "paused" if paused else "alive"
     return jsonify({
-        "status": status,
+        "status": "alive",
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
-        "execution_paused": paused,
-        "execution_reason": reason,
-        "manual_admin_pause": manual,
+        "execution_paused": state.get("execution_paused", False),
+        "execution_reason": state.get("execution_reason", "")
     })
 
 @app.route('/debug_state')
@@ -9253,24 +9225,10 @@ def get_debug_state():
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
-@app.route('/api/pause', methods=['POST'])
-def api_pause():
-    with state_lock:
-        state["manual_admin_pause"] = True
-        state["live_armed"] = False
-        save_persistent_config()
-    set_execution_paused("ADMIN_MANUAL")
-    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
-    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
-
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
-    with state_lock:
-        state["manual_admin_pause"] = False
-        save_persistent_config()
     set_execution_paused("")
-    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
-    return jsonify({"status": "resumed", "execution_paused": False})
+    return jsonify({"status": "resumed"})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -9340,13 +9298,6 @@ def toggle_debug():
         save_persistent_config()
         update_logger_level()
     return jsonify({"debug_enabled": state["debug_enabled"]})
-
-@app.route('/api/reset', methods=['POST'])
-def api_reset_showcase():
-    """Admin/platform: wipe all research artifacts and restart session at $500."""
-    result = perform_fresh_collection_reset()
-    enforce_clean_research_session()
-    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
@@ -10840,7 +10791,7 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed",
+        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed", "account_balance",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
@@ -10850,62 +10801,6 @@ def _persistent_config_keys():
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
     return keys
-
-def enforce_clean_research_session():
-    """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
-    global bot_start_time
-    with trade_lock:
-        trades.clear()
-        pending_orders.clear()
-        expired_orders.clear()
-        open_positions.clear()
-        trades_map.clear()
-        recent_trades.clear()
-    with replay_lock:
-        replay_buffers.clear()
-    with state_lock:
-        state["account_balance"] = STARTING_BALANCE
-        state["daily_pnl_usd"] = 0.0
-        state["consecutive_losses"] = 0
-        state["loss_pause_until"] = 0.0
-        state["fresh_collection_mode"] = True
-        if not state.get("live_armed", False):
-            state["fresh_collection_mode"] = True
-    bot_start_time = time.time()
-    with state_lock:
-        state["bot_start_time"] = bot_start_time
-    logger.warning(
-        f"[STARTUP] Clean research session — balance={STARTING_BALANCE} fresh_collection=ON "
-        f"version={EXECUTION_FIX_VERSION} [PIPELINE ENFORCEMENT]"
-    )
-
-def _session_trades_only(trades_list):
-    """Only expose trades opened after this process started."""
-    start = bot_start_time or 0.0
-    if start <= 0:
-        return list(trades_list or [])
-    kept = []
-    for t in trades_list or []:
-        if not isinstance(t, dict):
-            continue
-        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
-        if not ts:
-            raw_ts = t.get("ts")
-            if isinstance(raw_ts, str):
-                try:
-                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
-                except Exception:
-                    ts = 0.0
-            elif isinstance(raw_ts, (int, float)):
-                ts = float(raw_ts)
-        if isinstance(ts, str):
-            try:
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-            except Exception:
-                ts = 0.0
-        if float(ts or 0) >= start - 1.0:
-            kept.append(t)
-    return kept
 
 def load_persistent_config():
     if os.path.exists(CONFIG_FILE):
@@ -10962,10 +10857,6 @@ def _ensure_flask_port_available(port: int = None):
         port = DASHBOARD_PORT
     """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
     if not _port_is_open("127.0.0.1", port):
-        return
-    import sys
-    if sys.platform != "win32":
-        logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
     try:
         out = subprocess.check_output(
@@ -11035,7 +10926,7 @@ def system_health_check():
                 if not state.get("system_ready"):
                     logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
                 state["system_ready"] = True
-                if state.get("execution_paused") and not state.get("manual_admin_pause"):
+                if state.get("execution_paused"):
                     set_execution_paused("")
         else:
             state["last_ready_ts"] = 0
@@ -11292,9 +11183,6 @@ def main():
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
-    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
@@ -11426,6 +11314,8 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
