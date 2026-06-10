@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync btc-conservative-agent to v89 lane pipeline fix (678d626).
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
