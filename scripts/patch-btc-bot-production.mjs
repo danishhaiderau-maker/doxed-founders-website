@@ -457,3 +457,17 @@ if (credChanged) {
   writeFileSync(TARGET, credFix, 'utf8');
   console.log('Applied Railway Admin Control credential guard to bot.py');
 }
+
+// ─── Dashboard: Golden Stack toggle must be on window (onclick handler) ───
+let dashFix = readFileSync(TARGET, 'utf8');
+if (
+  dashFix.includes('async function toggleGoldenStack()') &&
+  !dashFix.includes('window.toggleGoldenStack = toggleGoldenStack')
+) {
+  dashFix = dashFix.replace(
+    '    window.toggleBlockFreeRange = toggleBlockFreeRange;\n    window.toggleDebug = toggleDebug;',
+    '    window.toggleBlockFreeRange = toggleBlockFreeRange;\n    window.toggleGoldenStack = toggleGoldenStack;\n    window.toggleDebug = toggleDebug;',
+  );
+  writeFileSync(TARGET, dashFix, 'utf8');
+  console.log('Applied Golden Stack dashboard toggle fix to bot.py');
+}
