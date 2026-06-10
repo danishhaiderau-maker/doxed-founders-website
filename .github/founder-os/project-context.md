@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync btc-conservative-agent to v93 research max collection (927fd0c).
+Sync btc-conservative-agent to v10.9.451-v95 research telemetry.
 
 ## Last Activity
 
