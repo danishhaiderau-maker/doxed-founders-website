@@ -8321,6 +8321,7 @@ DASHBOARD_JS = """(function () {
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
     window.toggleBlockFreeRange = toggleBlockFreeRange;
+    window.toggleGoldenStack = toggleGoldenStack;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.downloadDebug = downloadDebug;
