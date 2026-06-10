@@ -252,6 +252,33 @@ def _wipe_research_on_startup_if_needed():
     logger.warning(f"[STARTUP] Wiping research files ({reason}) — only post-start data will be collected [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
 
+def _log_credential_sources():
+    """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
+    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+    admin = os.getenv("CREDENTIALS_FROM", "").strip().lower() == "admin_control"
+    ds_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    bx_ok = _private_api_keys_ok()
+    ds_ok = bool(ds_key)
+    ds_tail = ds_key[-4:] if len(ds_key) >= 4 else "none"
+    bx_key = (os.getenv("BITFINEX_API_KEY") or "").strip()
+    bx_tail = bx_key[-4:] if len(bx_key) >= 4 else "none"
+    logger.info(
+        f"[CREDENTIALS] railway={on_railway} admin_control={admin} "
+        f"deepseek={'ok' if ds_ok else 'MISSING'}(…{ds_tail}) "
+        f"bitfinex={'ok' if bx_ok else 'MISSING'}(…{bx_tail}) "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if on_railway and not ds_ok:
+        logger.error(
+            "[CREDENTIALS] Railway DEEPSEEK missing — save key at /admin/control and Push to Runtime "
+            "(npm run push:showcase-bot) [PIPELINE ENFORCEMENT]"
+        )
+    if on_railway and not bx_ok:
+        logger.error(
+            "[CREDENTIALS] Railway Bitfinex keys missing — save at /admin/control and Push to Runtime "
+            "[PIPELINE ENFORCEMENT]"
+        )
+
 def _private_api_keys_ok() -> bool:
     k = os.getenv("BITFINEX_API_KEY", "").strip()
     s = os.getenv("BITFINEX_API_SECRET", "").strip()
@@ -2460,11 +2487,21 @@ MAX_PENDING_ORDERS = 2
 MAX_EXPIRED_ORDERS = 20
 
 def _load_local_dotenv():
-    """Load Final Bots/.env into os.environ (does not override existing vars)."""
+    """Load .env into os.environ (does not override existing vars).
+    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return
     root = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(root, ".env")
     if not os.path.isfile(path):
         return
+    secret_keys = frozenset({
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
+        "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
+        "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
+    })
     try:
         with open(path, encoding="utf-8") as f:
             for raw in f:
@@ -2473,8 +2510,11 @@ def _load_local_dotenv():
                     continue
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
+                if not key or key in os.environ:
+                    continue
+                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
+                    continue
+                os.environ[key] = val
     except Exception:
         pass
 

@@ -37,8 +37,26 @@ async function fetchResearchBot() {
   return res.text();
 }
 
-function patchForProduction(source) {
+/** Strip hardcoded secrets from research repo — Railway uses Admin Control keys only. */
+function stripEmbeddedSecrets(source) {
   let out = source;
+  out = out.replace(
+    /^DEEPSEEK_API_KEY\s*=\s*(?!.*getenv)[^\n]+/m,
+    'DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None',
+  );
+  out = out.replace(
+    /^BITFINEX_API_KEY\s*=\s*(?!.*getenv)["'][^"']*["']/m,
+    'BITFINEX_API_KEY = os.getenv("BITFINEX_API_KEY", "").strip()',
+  );
+  out = out.replace(
+    /^BITFINEX_API_SECRET\s*=\s*(?!.*getenv)["'][^"']*["']/m,
+    'BITFINEX_API_SECRET = os.getenv("BITFINEX_API_SECRET", "").strip()',
+  );
+  return out;
+}
+
+function patchForProduction(source) {
+  let out = stripEmbeddedSecrets(source);
   out = out.replace(
     /_AGENT_DEBUG_LOG = r"C:\\Users\\user\\Desktop\\Final Bots\\debug-43f630\.log"/,
     '_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")',
@@ -94,6 +112,14 @@ async function main() {
 
   console.log(`Updated ${TARGET}`);
   console.log('Push to master → Railway redeploys btc-conservative-agent automatically.');
+  console.log(
+    'IMPORTANT: DeepSeek + Bitfinex keys come from Admin Control (/admin/control), NOT from bybit_bot.py.',
+  );
+  console.log('After deploy, run: npm run push:showcase-bot  (or Push to Runtime in Admin)');
+
+  if (process.argv.includes('--push-credentials')) {
+    execSync('node scripts/push-showcase-bot-credentials.mjs', { cwd: ROOT, stdio: 'inherit' });
+  }
 }
 
 main().catch((err) => {
