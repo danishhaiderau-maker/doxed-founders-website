@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.451
+3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.452
 ENFORCED: WINDOW=10 + SINGLE AGGREGATED SOURCE + SOFT FEATURE VALIDATION + EDGE→AI ALIGN + FEATURE VALIDITY LOG-ONLY + PIPELINE LOCK + AVG_VOLUME FIXED + FULL TRACE + RESEARCH DATA COLLECTION + DIRECTION CONSISTENCY (final_direction SINGLE SOURCE OF TRUTH + IMMEDIATE INVERSION) + SINGLE FEATURE SNAPSHOT ENFORCEMENT + HARD AI BLOCK ON INCOMPLETE DATA + DELTA_CHANGE PERSISTENT + STRICT BUFFER GATE + ATOMIC SNAPSHOT + NO ZERO FALLBACKS IN AI
 """
 from __future__ import annotations
@@ -295,22 +295,55 @@ def _write_research_session(start_ts: float):
         json.dump(payload, f, indent=2)
 
 def _should_wipe_research_on_startup() -> bool:
+    """v96: never auto-wipe research data — archive via dashboard Fresh Collection or WIPE_CSV_ON_STARTUP=1."""
     if _preserve_research_data():
         return False
-    if _wipe_csv_on_startup():
-        return True
-    prev = _load_research_session_meta()
-    if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION:
-        return True
-    return True  # fresh CSV/JSONL every bot start — set PRESERVE_RESEARCH_DATA=1 to keep history
+    return _wipe_csv_on_startup()
+
+def archive_research_session(reason: str = "manual") -> str:
+    """Copy current research artifacts into research_archive/session_NNN before intentional wipe."""
+    os.makedirs(RESEARCH_ARCHIVE_DIR, exist_ok=True)
+    sessions = [
+        d for d in os.listdir(RESEARCH_ARCHIVE_DIR)
+        if d.startswith("session_") and os.path.isdir(os.path.join(RESEARCH_ARCHIVE_DIR, d))
+    ]
+    nums = []
+    for name in sessions:
+        parts = name.split("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            nums.append(int(parts[1]))
+    next_num = (max(nums) if nums else 0) + 1
+    dest = os.path.join(RESEARCH_ARCHIVE_DIR, f"session_{next_num:03d}")
+    os.makedirs(dest, exist_ok=True)
+    copied = []
+    for path in research_wipe_file_paths():
+        if path and os.path.isfile(path):
+            try:
+                shutil.copy2(path, os.path.join(dest, os.path.basename(path)))
+                copied.append(os.path.basename(path))
+            except Exception as e:
+                logger.error(f"[ARCHIVE] copy failed {path}: {e}")
+    meta = {
+        "reason": reason,
+        "archived_ts": utc_iso(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "files": copied,
+    }
+    with open(os.path.join(dest, "archive_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    logger.warning(f"[ARCHIVE] Saved {len(copied)} file(s) to {dest} reason={reason} [PIPELINE ENFORCEMENT]")
+    return dest
 
 def _wipe_research_on_startup_if_needed():
     if not _should_wipe_research_on_startup():
-        logger.info("[STARTUP] PRESERVE_RESEARCH_DATA=1 — keeping existing research files [PIPELINE ENFORCEMENT]")
+        logger.info(
+            "[STARTUP] Research data preserved (v96 default). "
+            "Use dashboard Fresh Collection to archive+wipe, or WIPE_CSV_ON_STARTUP=1 [PIPELINE ENFORCEMENT]"
+        )
         return
-    prev = _load_research_session_meta()
-    reason = "version change" if prev.get("bot_version") and prev.get("bot_version") != EXECUTION_FIX_VERSION else "fresh session"
-    logger.warning(f"[STARTUP] Wiping research files ({reason}) — only post-start data will be collected [PIPELINE ENFORCEMENT]")
+    archive_research_session(reason="startup_wipe_env")
+    logger.warning("[STARTUP] WIPE_CSV_ON_STARTUP=1 — wiping research files after archive [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
 
 def _private_api_keys_ok() -> bool:
@@ -2408,7 +2441,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.5-research-telemetry-2026-06-12"
+ANALYZER_SYNC_ID = "v9.6-research-datasets-2026-06-12"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3444,8 +3477,12 @@ REPLAY_TTL_SEC = 120 * 60
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = 1800
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
-REVERSAL_STUDY_TTL_SEC = 1800  # 30m horizon for reversal_risk_score validation
+REVERSAL_STUDY_TTL_SEC = 3600  # 60m horizon for reversal_risk_score validation
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
+AI_REASON_RESEARCH_FILE = "ai_reason_research.jsonl"
+AI_CONFIDENCE_CALIBRATION_FILE = "ai_confidence_calibration.jsonl"
+TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
+RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
@@ -3483,7 +3520,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.451-v95-research-telemetry"
+EXECUTION_FIX_VERSION = "v10.9.452-v96-research-datasets"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -5770,39 +5807,189 @@ def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
         reversal_risk=int(reversal_risk),
         source_trade_id=trade_id,
         research_lane=research_lane,
+        entry_stage=upgrade.get("entry_stage") or ctx.get("entry_stage"),
+        trend_health_state=upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+    )
+    log_reversal_research(
+        study_id,
+        {
+            "source_trade_id": trade_id,
+            "reversal_risk": int(reversal_risk),
+            "direction": direction,
+            "research_lane": research_lane,
+            "entry_stage": upgrade.get("entry_stage"),
+            "trend_health_state": upgrade.get("trend_health_state"),
+        },
+        {},
+        phase="start",
     )
 
 
-def finalize_reversal_study(study_id: str, buf: dict):
-    horizons = compute_horizon_outcomes_from_replay(buf)
-    mfe_30m = horizons.get("outcome_30m_pct") or horizons.get("mfe_pct")
-    mae_30m = horizons.get("mae_pct")
-    outcome = "WIN" if mfe_30m is not None and float(mfe_30m) > abs(float(mae_30m or 0)) else "LOSS"
+def log_reversal_research(study_id: str, buf: dict, horizons: dict, phase: str = "outcome"):
+    """Dedicated reversal dataset: risk score vs 15m/30m/60m MFE/MAE."""
+    mfe = horizons.get("mfe_pct")
+    mae = horizons.get("mae_pct")
+    o15 = horizons.get("outcome_15m_pct")
+    o30 = horizons.get("outcome_30m_pct")
+    o60 = horizons.get("outcome_1h_pct") or horizons.get("outcome_60m_pct")
+    ref = o30 if o30 is not None else o15
+    result = "WIN" if ref is not None and float(ref) > 0 else "LOSS"
     row = {
-        "schema": "reversal_study_outcome_v1",
+        "schema": "reversal_study_v2",
+        "phase": phase,
         "ts": utc_iso(),
         "study_id": study_id,
         "trade_id": buf.get("source_trade_id"),
         "reversal_risk": buf.get("reversal_risk"),
-        "future_mfe_30m": mfe_30m,
-        "future_mae_30m": mae_30m,
-        "outcome": outcome,
+        "future_mfe_15m": o15,
+        "future_mfe_30m": o30,
+        "future_mfe_60m": o60,
+        "future_mae_15m": mae if o15 is not None else None,
+        "future_mae_30m": mae,
+        "future_mae_60m": mae,
+        "mfe_pct": mfe,
+        "mae_pct": mae,
+        "result": result,
+        "outcome": result,
         "direction": buf.get("direction"),
         "research_lane": buf.get("research_lane"),
+        "entry_stage": buf.get("entry_stage"),
+        "trend_health_state": buf.get("trend_health_state"),
         "horizons": horizons,
         "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
     }
     try:
         rotate_log(REVERSAL_STUDY_FILE)
         with open(REVERSAL_STUDY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+            f.write(json.dumps(row, default=str) + "\n")
         logger.info(
-            f"[REVERSAL_STUDY] finalized study_id={study_id} risk={buf.get('reversal_risk')} "
-            f"mfe_30m={mfe_30m} mae_30m={mae_30m} outcome={outcome} [PIPELINE ENFORCEMENT]"
+            f"[REVERSAL_STUDY] {phase} study_id={study_id} risk={buf.get('reversal_risk')} "
+            f"15m={o15} 30m={o30} 60m={o60} result={result} [PIPELINE ENFORCEMENT]"
         )
     except Exception as e:
-        logger.error(f"[REVERSAL_STUDY] outcome log failed: {e}")
+        logger.error(f"[REVERSAL_RESEARCH] log failed: {e}")
+
+
+def finalize_reversal_study(study_id: str, buf: dict):
+    horizons = compute_horizon_outcomes_from_replay(buf)
+    log_reversal_research(study_id, buf, horizons, phase="outcome")
     close_replay_buffer(study_id)
+
+
+def log_ai_reason_research(ctx: dict, ai_result: dict, research_lane: str):
+    """Persist AI reasons_for / reasons_against for predictor analysis."""
+    if not is_research_data_collection():
+        return
+    factors = ai_result.get("factors") or {}
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    row = {
+        "schema": "ai_reason_v1",
+        "ts": utc_iso(),
+        "trade_id": ai_result.get("trade_id") or ctx.get("trade_id"),
+        "research_lane": research_lane,
+        "ai_decision": ai_result.get("decision"),
+        "ai_prob": ai_result.get("win_prob"),
+        "direction": ai_result.get("direction"),
+        "reasons_for": factors.get("reasons_for") or [],
+        "reasons_against": factors.get("reasons_against") or [],
+        "bull_score": ai_result.get("bull_score"),
+        "bear_score": ai_result.get("bear_score"),
+        "reversal_risk_score": upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score"),
+        "entry_stage": upgrade.get("entry_stage") or ctx.get("entry_stage"),
+        "trend_health_state": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+        "market_regime": (upgrade.get("market_regime_tracker") or {}).get("current"),
+        "outcome": None,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(AI_REASON_RESEARCH_FILE)
+        with open(AI_REASON_RESEARCH_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+    except Exception as e:
+        logger.error(f"[AI_REASON] log failed: {e}")
+
+
+def log_ai_reason_outcome(trade_id: str, net_pnl: float, exit_reason: str):
+    if not trade_id:
+        return
+    actual = "WIN" if net_pnl > 0 else "LOSS"
+    row = {
+        "schema": "ai_reason_outcome_v1",
+        "ts": utc_iso(),
+        "trade_id": trade_id,
+        "outcome": actual,
+        "net_pnl_usd": round(float(net_pnl), 4),
+        "exit_reason": exit_reason,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(AI_REASON_RESEARCH_FILE)
+        with open(AI_REASON_RESEARCH_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+    except Exception as e:
+        logger.error(f"[AI_REASON] outcome log failed: {e}")
+
+
+def log_ai_confidence_calibration(trade_row: dict, net_pnl: float):
+    """AI win_prob vs actual outcome for calibration tables."""
+    if not is_research_data_collection():
+        return
+    ai_prob = int(trade_row.get("ai_win_prob") or 0)
+    actual = "WIN" if net_pnl > 0 else "LOSS"
+    bucket_lo = (ai_prob // 5) * 5
+    row = {
+        "schema": "ai_calibration_v1",
+        "ts": trade_row.get("ts") or utc_iso(),
+        "trade_id": trade_row.get("trade_id"),
+        "ai_prob": ai_prob,
+        "prob_bucket": f"{bucket_lo}-{bucket_lo + 5}",
+        "actual": actual,
+        "net_pnl_usd": round(float(net_pnl), 4),
+        "pnl_margin_pct": trade_row.get("pnl"),
+        "exit_reason": trade_row.get("exit_reason"),
+        "research_lane": trade_row.get("research_lane"),
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(AI_CONFIDENCE_CALIBRATION_FILE)
+        with open(AI_CONFIDENCE_CALIBRATION_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+    except Exception as e:
+        logger.error(f"[AI_CALIBRATION] log failed: {e}")
+
+
+def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
+    """Consolidated per-trade lifecycle for optimization studies."""
+    if not is_research_data_collection():
+        return
+    master = master or {}
+    ctx = master.get("context") or pos.get("context") or {}
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    row = {
+        "schema": "trade_lifecycle_v1",
+        "ts": trade_row.get("ts") or utc_iso(),
+        "trade_id": trade_row.get("trade_id"),
+        "entry_stage": upgrade.get("entry_stage") or ctx.get("entry_stage"),
+        "trend_health_state": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+        "market_regime": (upgrade.get("market_regime_tracker") or ctx.get("market_regime_tracker") or {}).get("current"),
+        "reversal_risk_score": upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score"),
+        "peak_profit": trade_row.get("max_profit"),
+        "final_profit": trade_row.get("pnl"),
+        "net_pnl_usd": trade_row.get("net_pnl_usd"),
+        "exit_reason": trade_row.get("exit_reason"),
+        "dur_min": trade_row.get("dur_min"),
+        "entry_mode": trade_row.get("entry_mode"),
+        "research_lane": master.get("research_lane") or trade_row.get("research_lane"),
+        "ai_prob": trade_row.get("ai_win_prob"),
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(TRADE_LIFECYCLE_FILE)
+        with open(TRADE_LIFECYCLE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+    except Exception as e:
+        logger.error(f"[TRADE_LIFECYCLE] log failed: {e}")
 
 
 def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):
@@ -6460,6 +6647,7 @@ def evaluate_signal_with_ai(
                 research_lane=research_lane, shadow_only=shadow_only,
             )
             start_reversal_study_replay(ctx, ai_result, research_lane)
+            log_ai_reason_research(ctx, ai_result, research_lane)
         logger.info(
             f"[AI RESULT] lane={research_lane} decision={ai_result['decision']} "
             f"prob={ai_result['win_prob']} temp={temperature} "
@@ -8916,6 +9104,9 @@ def close_position(pos: dict, exit_reason: str):
         open_positions.remove(pos)
         close_replay_buffer(trade_id)
         log_trade_outcome_jsonl(trade_row, pos)
+        log_trade_lifecycle(trade_row, pos, master)
+        log_ai_confidence_calibration(trade_row, net_pnl)
+        log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
         trades.append(trade_row)
         validate_state()
         try:
@@ -9087,6 +9278,7 @@ def research_wipe_file_paths():
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
+        AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
@@ -9140,9 +9332,10 @@ def maintain_fresh_collection_files():
         _reset_runtime_log_handlers()
 
 def perform_fresh_collection_reset() -> dict:
-    """Dashboard-triggered wipe: delete research files, reset session memory, keep bot running."""
+    """Dashboard-triggered archive+wipe: never delete without archiving first."""
     global bot_start_time, _last_fresh_maintain_ts
-    logger.warning("[FRESH COLLECTION] Reset requested — wiping research files and session state")
+    archive_path = archive_research_session(reason="fresh_collection_dashboard")
+    logger.warning(f"[FRESH COLLECTION] Reset requested — archived to {archive_path}, wiping session state")
     with replay_lock:
         replay_buffers.clear()
     with trade_lock:
@@ -9168,7 +9361,7 @@ def perform_fresh_collection_reset() -> dict:
         state["_pause_priority"] = 0
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete — {summary} [PIPELINE ENFORCEMENT]")
-    return {"deleted": deleted, "errors": errors, "summary": summary, "ts": utc_iso()}
+    return {"deleted": deleted, "errors": errors, "summary": summary, "archive_path": archive_path, "ts": utc_iso()}
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100

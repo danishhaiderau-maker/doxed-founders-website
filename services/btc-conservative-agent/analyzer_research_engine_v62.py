@@ -58,14 +58,17 @@ NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
 # Must match bybit_bot.py EXECUTION_FIX_VERSION + ANALYZER_SYNC_ID when changing research CSV contract.
-EXPECTED_BOT_VERSION = "v10.9.451-v95-research-telemetry"
+EXPECTED_BOT_VERSION = "v10.9.452-v96-research-datasets"
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
-ANALYZER_SYNC_ID = "v9.5-research-telemetry-2026-06-12"
+ANALYZER_SYNC_ID = "v9.6-research-datasets-2026-06-12"
 BOT_VERSION = EXPECTED_BOT_VERSION
-ANALYZER_VERSION = "v95-research-telemetry"
+ANALYZER_VERSION = "v96-research-datasets"
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
+AI_REASON_RESEARCH_FILE = "ai_reason_research.jsonl"
+AI_CONFIDENCE_CALIBRATION_FILE = "ai_confidence_calibration.jsonl"
+TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
 RESEARCH_LANE_LABELS = {
     "CONTINUOUS": "Continuous AI Research",
     "STABILITY": "AI Stability Research",
