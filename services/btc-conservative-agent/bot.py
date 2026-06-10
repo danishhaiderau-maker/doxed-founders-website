@@ -2163,7 +2163,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.9-remove-free-range-block-2026-06-10"
+ANALYZER_SYNC_ID = "v8.9-fix-lane-pipeline-stuck-2026-06-10"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2994,7 +2994,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.444-v89-remove-free-range-block"
+EXECUTION_FIX_VERSION = "v10.9.445-v89-fix-lane-pipeline-stuck"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -6046,6 +6046,7 @@ def process_signal(event: dict):
     pre_ai = event.get("pre_ai")
     pre_ctx = event.get("pre_ctx")
     with get_lane_lock(research_lane):
+        lane_started = False
         try:
             if _lane_pipeline_running(research_lane):
                 logger.warning(
@@ -6055,6 +6056,7 @@ def process_signal(event: dict):
                 log_no_signal_with_context(reason=f"REENTRY_GUARD_{research_lane}")
                 return
             _set_lane_pipeline_stage(research_lane, "RUNNING")
+            lane_started = True
             with state_lock:
                 state["last_pipeline_stage"] = "RUNNING"
 
@@ -6811,8 +6813,10 @@ def process_signal(event: dict):
             else:
                 logger.error("[PIPELINE] No signal object for crash recovery [PIPELINE ENFORCEMENT]")
             update_debug_state_always("PIPELINE_ERROR", {"error": str(e)})
-            _set_lane_pipeline_stage(research_lane, "IDLE")
             state["last_pipeline_stage"] = "IDLE"
+        finally:
+            if lane_started:
+                _set_lane_pipeline_stage(research_lane, "IDLE")
 
 def parse_ts(ts_str):
     try:
