@@ -71,6 +71,21 @@ MOMENTUM_FLAT_MAX = 0.01
 FLAT_MOMENTUM_EDGE_FLOOR = 4.8
 FLAT_MOMENTUM_FLOOR_LOW_EDGE = 2.0
 FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
+# v87 multi-lane research — early define (default args on helpers below are evaluated at import)
+RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
+RESEARCH_LANE_STABILITY = "STABILITY"
+CONTINUOUS_AI_DEFAULT_ENABLED = True
+AI_STABILITY_DEFAULT_ENABLED = True
+RESEARCH_AI_TEMPERATURE = 0.0
+AI_STABILITY_TEMPERATURE = 0.0
+AI_STABILITY_LEGACY_TEMPERATURE = 0.4
+AI_STABILITY_CANDLE_ALIGN_SEC = 120
+AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
+REPLAY_MODEL_VERSION = "replay_v1_scorecard"
+REPLAY_MODEL_APPROVE_THRESHOLD = 0.52
+RESEARCH_PERIODIC_AI_INTERVAL_SEC = 300
+GOLDEN_STACK_DEFAULT_ENABLED = True
+
 def get_weak_setup_min_edge() -> float:
     """Post-AI WEAK_SETUP floor; defaults to dashboard edge threshold (keeps UI and execution aligned)."""
     raw = (os.getenv("WEAK_SETUP_MIN_EDGE") or "").strip()
@@ -1334,6 +1349,186 @@ def golden_stack_enabled() -> bool:
     with state_lock:
         return bool(state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED))
 
+def ai_stability_research_enabled() -> bool:
+    with state_lock:
+        return bool(state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED))
+
+def continuous_ai_research_enabled() -> bool:
+    with state_lock:
+        return bool(state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED))
+
+def research_ai_temperature() -> float:
+    """Research lanes use temp=0 for reproducible cross-lane comparison."""
+    if is_research_data_collection():
+        return RESEARCH_AI_TEMPERATURE
+    return AI_STABILITY_LEGACY_TEMPERATURE
+
+def ai_stability_config_for_dashboard() -> dict:
+    return {
+        "temperature": RESEARCH_AI_TEMPERATURE,
+        "legacy_temperature": AI_STABILITY_LEGACY_TEMPERATURE,
+        "candle_align_sec": AI_STABILITY_CANDLE_ALIGN_SEC,
+        "candle_interval_sec": CANDLE_INTERVAL_SEC,
+        "replay_model_version": REPLAY_MODEL_VERSION,
+        "replay_approve_threshold": REPLAY_MODEL_APPROVE_THRESHOLD,
+        "ai_input_log_file": AI_INPUT_LOG_FILE,
+        "continuous_ai_enabled": continuous_ai_research_enabled(),
+        "stability_lane": RESEARCH_LANE_STABILITY,
+        "continuous_lane": RESEARCH_LANE_CONTINUOUS,
+    }
+
+def is_candle_aligned_ai_window(ts: float = None) -> bool:
+    """True in the first N seconds after each 15m bucket rollover (post-close window)."""
+    now = float(ts or time.time())
+    return (now % CANDLE_INTERVAL_SEC) < AI_STABILITY_CANDLE_ALIGN_SEC
+
+def ai_candle_bucket_available() -> bool:
+    bucket = _edge_candle_bucket()
+    with state_lock:
+        return bucket > int(state.get("last_ai_candle_bucket", -1))
+
+def mark_ai_candle_bucket_used():
+    with state_lock:
+        state["last_ai_candle_bucket"] = _edge_candle_bucket()
+
+def ai_stability_candle_gate_ok() -> tuple:
+    if not ai_stability_research_enabled():
+        return True, "BUNDLE_OFF"
+    if not is_candle_aligned_ai_window():
+        elapsed = time.time() % CANDLE_INTERVAL_SEC
+        wait = int(CANDLE_INTERVAL_SEC - elapsed)
+        return False, f"CANDLE_ALIGN_WAIT_{wait}s"
+    if not ai_candle_bucket_available():
+        return False, "CANDLE_BUCKET_USED"
+    return True, "CANDLE_ALIGNED"
+
+def _ai_context_fingerprint(ctx: dict) -> str:
+    try:
+        payload = json.dumps(ctx, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return ""
+
+def _replay_momentum_from_ctx(ctx: dict) -> float:
+    ret_1m = float(ctx.get("ret_1m") or 0)
+    ret_5m = float(ctx.get("ret_5m") or 0)
+    velocity = float(ctx.get("velocity") or 0)
+    return round(min(max(ret_1m * 5000, ret_5m * 2000, velocity * 8000), 1.0), 6)
+
+def compute_replay_model_eval(ctx: dict, edge_score: float, ai: dict = None) -> dict:
+    """Deterministic scorecard logged alongside DeepSeek for offline calibration."""
+    mc = ctx.get("market_context") or {}
+    mtf = (mc.get("multi_tf") or {}) if isinstance(mc.get("multi_tf"), dict) else {}
+    ts = (mc.get("trend_strength") or {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    ms = (mc.get("market_structure") or {}) if isinstance(mc.get("market_structure"), dict) else {}
+    sr = (mc.get("sr_context") or {}) if isinstance(mc.get("sr_context"), dict) else {}
+    edge_n = min(max(float(edge_score or ctx.get("edge_score") or 0) / EDGE_SCORE_MAX, 0.0), 1.0)
+    adx = float(ts.get("adx") or 0)
+    adx_n = min(adx / 35.0, 1.0) if adx >= ADX_BLOCK_NEW_ENTRY else 0.0
+    struct = float(ms.get("structure_score") or 0)
+    agreement = str(mtf.get("agreement") or "")
+    mom = _replay_momentum_from_ctx(ctx)
+    chop_pen = min(max((mom - 0.5) / 0.5, 0.0), 1.0) if mom > 0.5 else 0.0
+    mtf_n = 1.0 if agreement in ("BULL_ALIGNED", "BEAR_ALIGNED") else 0.3
+    struct_n = min(abs(struct) / 8.0, 1.0)
+    sr_n = 0.2 if str(sr.get("sr_state") or ctx.get("sr_state") or "") == "FREE_RANGE" else 1.0
+    dq = min(max(float(ctx.get("data_quality") or 0), 0.0), 1.0)
+    score = (
+        0.22 * edge_n
+        + 0.18 * (1.0 - chop_pen)
+        + 0.14 * adx_n
+        + 0.16 * mtf_n
+        + 0.14 * struct_n
+        + 0.08 * sr_n
+        + 0.08 * dq
+    )
+    score = round(min(max(score, 0.0), 1.0), 4)
+    ai_decision = str((ai or {}).get("decision") or "").upper()
+    ai_approve = ai_decision == "APPROVE"
+    return {
+        "model_version": REPLAY_MODEL_VERSION,
+        "replay_score": score,
+        "replay_approve": score >= REPLAY_MODEL_APPROVE_THRESHOLD,
+        "approve_threshold": REPLAY_MODEL_APPROVE_THRESHOLD,
+        "edge_norm": round(edge_n, 4),
+        "chop_metric": mom,
+        "adx": adx,
+        "agreement": agreement,
+        "structure_score": struct,
+        "sr_state": sr.get("sr_state") or ctx.get("sr_state"),
+        "data_quality": dq,
+        "ai_agrees": (ai_approve and score >= REPLAY_MODEL_APPROVE_THRESHOLD)
+        or ((not ai_approve) and score < REPLAY_MODEL_APPROVE_THRESHOLD),
+    }
+
+def log_ai_input_full(
+    ctx: dict,
+    ai_result: dict,
+    replay_eval: dict,
+    temperature: float,
+    trigger_reason: str = "",
+    research_lane: str = RESEARCH_LANE_CONTINUOUS,
+    shadow_only: bool = False,
+):
+    """Persist full sanitized AI context + outcomes for offline replay model training."""
+    try:
+        row = {
+            "schema": "ai_input_v2",
+            "ts": utc_iso(),
+            "ts_epoch": time.time(),
+            "trade_id": ctx.get("trade_id") or ai_result.get("trade_id"),
+            "research_lane": research_lane,
+            "shadow_only": shadow_only,
+            "candle_bucket": _edge_candle_bucket(),
+            "candle_15m_elapsed_pct": _candle_15m_elapsed_pct(),
+            "continuous_ai_enabled": continuous_ai_research_enabled(),
+            "ai_stability_enabled": ai_stability_research_enabled(),
+            "golden_stack_enabled": golden_stack_enabled(),
+            "temperature": temperature,
+            "trigger_reason": trigger_reason or state.get("debug_state", {}).get("edge_trigger_reason"),
+            "context_fingerprint": _ai_context_fingerprint(ctx),
+            "context": copy.deepcopy(ctx),
+            "ai": {
+                "decision": ai_result.get("decision"),
+                "win_prob": ai_result.get("win_prob"),
+                "direction": ai_result.get("direction"),
+                "bull_score": ai_result.get("bull_score"),
+                "bear_score": ai_result.get("bear_score"),
+                "approved": ai_result.get("approved"),
+                "ai_error": ai_result.get("ai_error"),
+                "latency_ms": ai_result.get("latency_ms"),
+            },
+            "replay_model": replay_eval,
+            "bot_version": EXECUTION_FIX_VERSION,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+        }
+        rotate_log(AI_INPUT_LOG_FILE)
+        with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+            f.flush()
+        with state_lock:
+            state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
+    except Exception as e:
+        logger.error(f"[AI INPUT LOG] {e} [PIPELINE ENFORCEMENT]")
+
+def golden_stack_config_for_dashboard() -> dict:
+    """Static gate definitions for dashboard (mirrors v86 enforce rules)."""
+    return {
+        "chop_max": GOLDEN_STACK_CHOP_MAX,
+        "adx_block_low": GOLDEN_STACK_ADX_BLOCK_LOW,
+        "adx_block_high": GOLDEN_STACK_ADX_BLOCK_HIGH,
+        "spread_min": GOLDEN_STACK_SPREAD_MIN,
+        "spread_max": GOLDEN_STACK_SPREAD_MAX,
+        "short_struct_max": GOLDEN_STACK_SHORT_STRUCT_MAX,
+        "ema_dist_max_pct": GOLDEN_STACK_EMA_DIST_MAX_PCT,
+        "ema_dist_ideal_pct": GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT,
+        "entry_mode_required": ENTRY_MODE_EMA_HYBRID,
+        "block_high_pos_funding": GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING,
+        "ladder_first_rung": f"{TRAIL_LADDER[0][0]}% peak → lock {TRAIL_LADDER[0][1]}%",
+        "full_margin_when_on": True,
+        "edge_ai_gated": False,
+    }
+
 def capture_golden_stack_eval(signal: dict, ai: dict, edge_score: float, features: dict = None) -> dict:
     """Frozen v86 golden-stack check breakdown for analyzer replay."""
     direction = str(signal.get("final_direction") or ai.get("direction") or "").upper()
@@ -1918,7 +2113,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.6-golden-stack-gates-2026-06-10"
+ANALYZER_SYNC_ID = "v8.7-multi-lane-research-2026-06-10"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2613,7 +2808,6 @@ GOLDEN_STACK_EMA_DIST_MAX_PCT = 0.5
 GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT = 0.3
 GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING = True
 GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
-RESEARCH_PERIODIC_AI_INTERVAL_SEC = 300  # align with AI_COOLDOWN_SECONDS
 BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
@@ -2751,7 +2945,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.439-v86-golden-stack-gates"
+EXECUTION_FIX_VERSION = "v10.9.441-v87-multi-lane-research"
 
 
 def csv_research_meta() -> dict:
@@ -2809,6 +3003,13 @@ state = {
     "debug_enabled": False,
     "fresh_collection_mode": False,
     "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
+    "golden_stack_last_eval": None,
+    "golden_stack_last_block_reason": None,
+    "ai_stability_research_enabled": AI_STABILITY_DEFAULT_ENABLED,
+    "continuous_ai_research_enabled": CONTINUOUS_AI_DEFAULT_ENABLED,
+    "last_ai_candle_bucket": -1,
+    "last_stability_ai_ts": 0.0,
+    "last_replay_model_eval": None,
     "last_fresh_reset_ts": 0.0,
     "last_fresh_reset_summary": "",
     "daily_pnl_usd": 0.0,
@@ -2891,6 +3092,7 @@ state = {
     "system_ready_logged": False,
     "ai_skipped_signals": 0,
     "ai_call_count": 0,
+    "stability_ai_call_count": 0,
     "signals_last_hour": 0,
     "last_ai_confidence": 0.0,
     "ready_since": 0.0,
@@ -3199,6 +3401,8 @@ def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple
     if state.get("force_ai_every_signal"):
         return True, "FORCE_AI"
     if _sole_ai_research_mode():
+        if not continuous_ai_research_enabled():
+            return False, "CONTINUOUS_AI_OFF"
         if ai_cooldown_remaining_sec() > 0:
             return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
         if round(float(edge_score), 1) <= 0.0:
@@ -4695,6 +4899,8 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
             row = {
                 "ts": utc_iso(),
                 "trade_id": ai_result.get("trade_id") or "",
+                "research_lane": ai_result.get("research_lane", RESEARCH_LANE_CONTINUOUS),
+                "shadow_only": ai_result.get("shadow_only", False),
                 "ai_direction_raw": ai_result.get("direction"),
                 "decision": ai_result.get("decision"),
                 "approved": ai_result.get("approved", False),
@@ -4717,9 +4923,56 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     except Exception as e:
         logger.error(f"[AI TRANCHE] {e}")
 
-def evaluate_signal_with_ai(raw_context: dict):
+def maybe_run_stability_research_ai():
+    """Independent STABILITY lane: candle-aligned DeepSeek shadow call (log-only, no trades)."""
+    if not ai_stability_research_enabled() or not is_research_data_collection():
+        return
+    ok, reason = ai_stability_candle_gate_ok()
+    if not ok:
+        return
+    with state_lock:
+        if not state.get("system_ready") or not state.get("price"):
+            return
+        snap = copy.deepcopy(state)
+    buffers = {
+        "ret_1m": ret_1m_buffer,
+        "ret_5m": ret_5m_buffer,
+        "velocity": velocity_buffer,
+        "volume": volume_buffer,
+        "delta": delta_buffer,
+        "delta_change": delta_change_buffer,
+        "imbalance": imbalance_buffer,
+        "candle_range": candle_range_buffer,
+        "body_ratio": body_ratio_buffer,
+        "wick_ratio": wick_ratio_buffer,
+    }
+    ctx = build_pure_ai_context(snap, buffers)
+    if not ctx:
+        return
+    ctx["trade_id"] = f"stab-{uuid.uuid4().hex[:12]}"
+    ctx["edge_score"] = float(state.get("last_edge") or 0)
+    logger.info(
+        f"[AI STABILITY LANE] shadow call bucket={_edge_candle_bucket()} "
+        f"elapsed={_candle_15m_elapsed_pct():.2f} [PIPELINE ENFORCEMENT]"
+    )
+    evaluate_signal_with_ai(
+        ctx,
+        research_lane=RESEARCH_LANE_STABILITY,
+        shadow_only=True,
+        trigger_reason="CANDLE_ALIGNED_STABILITY",
+    )
+
+def evaluate_signal_with_ai(
+    raw_context: dict,
+    research_lane: str = RESEARCH_LANE_CONTINUOUS,
+    shadow_only: bool = False,
+    trigger_reason: str = "",
+):
     try:
-        logger.info(f"[AI] START evaluate_signal_with_ai [PIPELINE ENFORCEMENT]")
+        logger.info(
+            f"[AI] START lane={research_lane} shadow={shadow_only} "
+            f"evaluate_signal_with_ai [PIPELINE ENFORCEMENT]"
+        )
         full_pipeline_trace("[AI]", "EVALUATE_START", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_START", raw_context.get("trade_id"))
         debug_snapshot(None, None, "PRE_AI_EVAL")
@@ -4741,11 +4994,18 @@ def evaluate_signal_with_ai(raw_context: dict):
             logger.warning(f"[AI] Feature validation failed: {reason} - reject without API call [PIPELINE ENFORCEMENT]")
             return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id")}
         global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
-        LAST_AI_PAYLOAD = copy.deepcopy(ctx)
-        LAST_AI_TIMESTAMP = utc_iso()
-        logger.info(f"[AI PAYLOAD SNAPSHOT] {ctx} [PIPELINE ENFORCEMENT]")
+        if not shadow_only:
+            LAST_AI_PAYLOAD = copy.deepcopy(ctx)
+            LAST_AI_TIMESTAMP = utc_iso()
+        logger.info(f"[AI PAYLOAD SNAPSHOT] lane={research_lane} {ctx} [PIPELINE ENFORCEMENT]")
+        temperature = research_ai_temperature()
+        replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
+        with state_lock:
+            state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
         prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
-        text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=0.4)
+        if not trigger_reason:
+            trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
+        text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
         log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
@@ -4782,73 +5042,110 @@ def evaluate_signal_with_ai(raw_context: dict):
             "approved": decision == "APPROVE",
             "trade_id": ctx.get("trade_id"),
             "latency_ms": latency_ms,
+            "research_lane": research_lane,
+            "shadow_only": shadow_only,
         }
-        ai_result = apply_phase_c_factor_gate(ai_result)
-        if DOUBLE_CONFIRM_AI:
-            ai_result = double_confirm_ai(ai_result, ctx)
+        if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
+            if DOUBLE_CONFIRM_AI:
+                ai_result = double_confirm_ai(ai_result, ctx)
+                ai_result = apply_phase_c_factor_gate(ai_result)
         with state_lock:
-            state["pipeline_outcome"] = "AI_EVALUATED"
+            if not shadow_only:
+                state["pipeline_outcome"] = "AI_EVALUATED"
         ai_result["_tranche_logged"] = True
-        log_ai_tranche_outcome(ai_result)
-        _append_ai_history_row(ai_result)
-        _sync_ai_dashboard_debug(ai_result)
-        with state_lock:
-            eff = get_effective_edge_threshold()
-            state["debug_state"]["ai_gate"] = {
-                "called": True,
-                "reason": ai_result.get("decision", "AI_DONE"),
-                "edge": state.get("last_edge", 0.0),
-                "threshold": eff,
-            }
+        tranche_event = "AI_SHADOW" if shadow_only else "AI_DECISION"
+        log_ai_tranche_outcome(ai_result, event=tranche_event)
+        if not shadow_only:
+            _append_ai_history_row(ai_result)
+            _sync_ai_dashboard_debug(ai_result)
+            with state_lock:
+                eff = get_effective_edge_threshold()
+                state["debug_state"]["ai_gate"] = {
+                    "called": True,
+                    "reason": ai_result.get("decision", "AI_DONE"),
+                    "edge": state.get("last_edge", 0.0),
+                    "threshold": eff,
+                }
         log_pipeline_event(
-            "AI", ai_result.get("decision", "UNKNOWN"), ai_result.get("factor_gate") or "MODEL",
+            "AI", ai_result.get("decision", "UNKNOWN"),
+            f"{research_lane}_{ai_result.get('factor_gate') or 'MODEL'}",
             ctx.get("trade_id"), state.get("last_edge"),
-            {"win_prob": win_prob, "latency_ms": latency_ms}, force=True,
+            {"win_prob": win_prob, "latency_ms": latency_ms, "lane": research_lane, "shadow": shadow_only},
+            force=True,
         )
         logger.info(
-            f"[AI CALL] FRESH dir={direction} prob={win_prob} decision={ai_result.get('decision')} "
-            f"bull={factors.get('bull_score')} bear={factors.get('bear_score')} "
-            f"gate={ai_result.get('factor_gate', 'none')} approved={ai_result['approved']} [PIPELINE ENFORCEMENT]"
+            f"[AI CALL] lane={research_lane} shadow={shadow_only} dir={direction} prob={win_prob} "
+            f"decision={ai_result.get('decision')} bull={factors.get('bull_score')} "
+            f"bear={factors.get('bear_score')} gate={ai_result.get('factor_gate', 'none')} "
+            f"approved={ai_result['approved']} [PIPELINE ENFORCEMENT]"
         )
         full_pipeline_trace("[AI]", "EVALUATE_COMPLETE", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_COMPLETE", raw_context.get("trade_id"))
-        debug_snapshot(None, ai_result, "POST_AI_EVAL")
+        if not shadow_only:
+            debug_snapshot(None, ai_result, "POST_AI_EVAL")
         if not ai_result.get("ai_error"):
             with state_lock:
-                state["ai_call_count"] = state.get("ai_call_count", 0) + 1
-        logger.info(f"[AI RESULT] decision={ai_result['decision']} prob={ai_result['win_prob']} [PIPELINE ENFORCEMENT]")
-        update_debug_state_always("AI_COMPLETE", {"ai_decision": ai_result.get("decision")})
+                if research_lane == RESEARCH_LANE_STABILITY:
+                    state["stability_ai_call_count"] = state.get("stability_ai_call_count", 0) + 1
+                    state["last_stability_ai_ts"] = time.time()
+                else:
+                    state["ai_call_count"] = state.get("ai_call_count", 0) + 1
+        if research_lane == RESEARCH_LANE_STABILITY:
+            mark_ai_candle_bucket_used()
+        if is_research_data_collection():
+            log_ai_input_full(
+                ctx, ai_result, replay_eval, temperature, trigger_reason,
+                research_lane=research_lane, shadow_only=shadow_only,
+            )
+        logger.info(
+            f"[AI RESULT] lane={research_lane} decision={ai_result['decision']} "
+            f"prob={ai_result['win_prob']} temp={temperature} "
+            f"replay={replay_eval.get('replay_score')} "
+            f"replay_approve={replay_eval.get('replay_approve')} [PIPELINE ENFORCEMENT]"
+        )
+        if not shadow_only:
+            update_debug_state_always("AI_COMPLETE", {"ai_decision": ai_result.get("decision")})
         return ai_result
     except Exception as e:
-        logger.error(f"[AI CRASH] {e} [PIPELINE ENFORCEMENT]")
+        logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
+        ai_result["research_lane"] = research_lane
+        ai_result["shadow_only"] = shadow_only
         full_pipeline_trace("[AI]", "EVALUATE_CRASH", raw_context.get("trade_id"))
         trace("AI", "EVALUATE_CRASH", raw_context.get("trade_id"))
-        debug_snapshot(None, ai_result, "AI_CRASH")
+        if not shadow_only:
+            debug_snapshot(None, ai_result, "AI_CRASH")
         log_ai_error_row(ai_result, raw_context)
-        log_ai_tranche_outcome(ai_result, event="AI_ERROR")
-        _append_ai_history_row(ai_result)
+        log_ai_tranche_outcome(ai_result, event="AI_SHADOW_ERROR" if shadow_only else "AI_ERROR")
         log_pipeline_event(
-            "AI", "AI_ERROR", ai_result.get("error_type", "UNKNOWN"),
+            "AI", "AI_ERROR", f"{research_lane}_{ai_result.get('error_type', 'UNKNOWN')}",
             raw_context.get("trade_id"), state.get("last_edge"),
-            {"detail": (ai_result.get("error_detail") or "")[:200]}, force=True,
+            {"detail": (ai_result.get("error_detail") or "")[:200], "lane": research_lane, "shadow": shadow_only},
+            force=True,
         )
+        if not shadow_only:
+            _append_ai_history_row(ai_result)
+            with state_lock:
+                state["pipeline_outcome"] = "AI_CRASH"
+                eff = get_effective_edge_threshold()
+                state["debug_state"]["ai_gate"] = {
+                    "called": True,
+                    "reason": f"AI_ERROR:{ai_result.get('error_type', 'unknown')}",
+                    "edge": state.get("last_edge", 0.0),
+                    "threshold": eff,
+                }
+                state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
+            _sync_ai_dashboard_debug(ai_result)
         with state_lock:
-            state["pipeline_outcome"] = "AI_CRASH"
-            eff = get_effective_edge_threshold()
-            state["debug_state"]["ai_gate"] = {
-                "called": True,
-                "reason": f"AI_ERROR:{ai_result.get('error_type', 'unknown')}",
-                "edge": state.get("last_edge", 0.0),
-                "threshold": eff,
-            }
-            state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
-        _append_ai_history_row(ai_result)
-        _sync_ai_dashboard_debug(ai_result)
-        with state_lock:
-            state["ai_call_count"] = state.get("ai_call_count", 0) + 1
-        logger.info(f"[AI RESULT] decision={ai_result['decision']} prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]")
+            if research_lane == RESEARCH_LANE_STABILITY:
+                state["stability_ai_call_count"] = state.get("stability_ai_call_count", 0) + 1
+            else:
+                state["ai_call_count"] = state.get("ai_call_count", 0) + 1
+        logger.info(
+            f"[AI RESULT] lane={research_lane} decision={ai_result['decision']} "
+            f"prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]"
+        )
         return ai_result
 
 def is_research_data_collection() -> bool:
@@ -5218,7 +5515,12 @@ def detect_event_light():
             return {"event_trigger": False, "edge_score": edge_score, "price": price, "timestamp": utc_iso(), "features": features}
 
         is_edge_valid(edge_score)
-        if _sole_ai_research_mode() and ai_cooldown_remaining_sec() == 0 and round(edge_score, 1) > 0.0:
+        if (
+            _sole_ai_research_mode()
+            and continuous_ai_research_enabled()
+            and ai_cooldown_remaining_sec() == 0
+            and round(edge_score, 1) > 0.0
+        ):
             event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
         else:
             event_trigger, trigger_reason = should_trigger_edge_event(edge_score)
@@ -5998,6 +6300,10 @@ def process_signal(event: dict):
             signal["golden_stack_eval"] = capture_golden_stack_eval(
                 signal, ai, edge_score, signal.get("features")
             )
+            signal["ai_stability_research_enabled_at_entry"] = ai_stability_research_enabled()
+            with state_lock:
+                state["golden_stack_last_eval"] = copy.deepcopy(signal["golden_stack_eval"])
+                signal["replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             begin_approve_research(signal, ai, pipeline_eff_thr)
             gs_blocked, gs_reason = evaluate_golden_stack_filter(
                 final_direction,
@@ -6007,6 +6313,9 @@ def process_signal(event: dict):
                 edge_score,
                 signal,
             )
+            if gs_blocked:
+                with state_lock:
+                    state["golden_stack_last_block_reason"] = gs_reason
             if gs_blocked and _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
                 patch_signal_snapshot_outcome(
                     signal.get("trade_id"),
@@ -6645,7 +6954,11 @@ def state_monitor_loop():
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
                     process_signal(event)
-                elif _sole_ai_research_mode() and ai_cooldown_remaining_sec() == 0:
+                elif (
+                    _sole_ai_research_mode()
+                    and continuous_ai_research_enabled()
+                    and ai_cooldown_remaining_sec() == 0
+                ):
                     features = build_full_feature_snapshot()
                     if features:
                         edge_score = compute_edge_score(features)
@@ -6658,6 +6971,7 @@ def state_monitor_loop():
                                 "timestamp": utc_iso(),
                                 "features": features,
                             })
+                maybe_run_stability_research_ai()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -7235,6 +7549,7 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl", "counterfactual.jsonl",
+        AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
         CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
@@ -7496,7 +7811,9 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleBlockFreeRange()">Block FREE_RANGE entries: <span id="blockFreeRangeBtn">ON</span></button>
-    <button onclick="toggleGoldenStack()">Golden Stack gates: <span id="goldenStackBtn">ON</span></button>
+    <button onclick="toggleContinuousAi()" title="v87: periodic ~5min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
+    <button onclick="toggleAiStability()" title="v87: candle-aligned shadow AI lane (log-only)">AI Stability: <span id="aiStabilityBtn">ON</span></button>
+    <button onclick="toggleGoldenStack()" title="Enforce v86 quality gates after AI APPROVE">Golden Stack: <span id="goldenStackBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
@@ -7574,6 +7891,55 @@ HTML = """<!DOCTYPE html>
 
 <h2>Controls</h2>
 <p style="color:#8b949e;font-size:0.9em;">Changes apply live and save to config.json. Leverage / max positions update when you leave the field or press Enter.</p>
+
+<div id="continuousAiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+    <strong style="color:#58a6ff;font-size:1.05em;">Continuous AI Research (v87 execution lane)</strong>
+    <button type="button" onclick="toggleContinuousAi()" id="continuousAiControlBtn" style="padding:6px 14px;font-weight:bold;">Continuous AI: <span id="continuousAiControlLabel">ON</span></button>
+  </div>
+  <p id="continuousAiModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
+  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — sole-AI research path (~every 5 min when edge &gt; 0):</p>
+  <ul id="continuousAiFeatureList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
+  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
+    <strong>Logs:</strong> <code>ai_tranche.csv</code>, <code>decisions</code>, pipeline events, <code>ai_input_log.jsonl</code> (lane=CONTINUOUS).
+    Independent of AI Stability shadow lane and Golden Stack gates.
+  </p>
+  <p id="continuousAiLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
+</div>
+
+<div id="goldenStackPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+    <strong style="color:#58a6ff;font-size:1.05em;">Golden Stack (v86 quality gates)</strong>
+    <button type="button" onclick="toggleGoldenStack()" id="goldenStackControlBtn" style="padding:6px 14px;font-weight:bold;">Golden Stack: <span id="goldenStackControlLabel">ON</span></button>
+  </div>
+  <p id="goldenStackModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
+  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — after AI APPROVE, blocks execution unless <em>all</em> checks pass:</p>
+  <ul id="goldenStackGateList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
+  <p style="color:#8b949e;font-size:0.85em;margin:0 0 6px 0;">
+    <strong>Not gated</strong> (dashboard-flexible): edge score floor, AI win % threshold.
+  </p>
+  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
+    <strong>Data collection:</strong> pipeline + AI + <code>golden_stack_eval</code> snapshots are logged either way.
+    ON = <code>GOLDEN_STACK_*</code> blocks trade execution. OFF = logs <code>WOULD_BLOCK_GOLDEN_STACK_*</code> but sole-AI research may still execute for A/B comparison.
+  </p>
+  <p id="goldenStackLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
+</div>
+
+<div id="aiStabilityPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+    <strong style="color:#58a6ff;font-size:1.05em;">AI Stability Research (v87 shadow lane)</strong>
+    <button type="button" onclick="toggleAiStability()" id="aiStabilityControlBtn" style="padding:6px 14px;font-weight:bold;">AI Stability: <span id="aiStabilityControlLabel">ON</span></button>
+  </div>
+  <p id="aiStabilityModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
+  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — research collection mode (does not block AI threshold / edge):</p>
+  <ul id="aiStabilityFeatureList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
+  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
+    <strong>Logs:</strong> <code>ai_input_log.jsonl</code> (full context per call), <code>replay_model_eval</code> on APPROVE snapshots.
+    Analyzer compares DeepSeek vs deterministic replay scorecard vs trade PnL after session.
+  </p>
+  <p id="aiStabilityLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
+</div>
+
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
 <label>Pullback %:</label>
 <select id="pullbackThresh">
@@ -7799,8 +8165,16 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_block_free_range_entries');
       refresh();
     }
+    async function toggleContinuousAi() {
+      await post('/api/toggle_continuous_ai_research');
+      refresh();
+    }
     async function toggleGoldenStack() {
       await post('/api/toggle_golden_stack');
+      refresh();
+    }
+    async function toggleAiStability() {
+      await post('/api/toggle_ai_stability_research');
       refresh();
     }
     async function toggleDebug() {
@@ -7894,6 +8268,10 @@ DASHBOARD_JS = """(function () {
           if (d.bot_version) syncTxt += ' | ' + d.bot_version;
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           if (d.block_free_range_entries === false) syncTxt += ' | FREE_RANGE block OFF';
+          if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous AI OFF';
+          else syncTxt += ' | Continuous AI ON';
+          if (d.ai_stability_research_enabled === false) syncTxt += ' | AI Stability OFF';
+          else syncTxt += ' | AI Stability ON';
           if (d.golden_stack_enabled === false) syncTxt += ' | Golden Stack OFF';
           else syncTxt += ' | Golden Stack ON';
           inst.innerText = syncTxt;
@@ -8036,11 +8414,136 @@ DASHBOARD_JS = """(function () {
           blockFrBtn.innerText = `Block FREE_RANGE entries ${bfr ? 'ON' : 'OFF'}`;
           blockFrBtn.style.backgroundColor = bfr ? '#10b981' : '#ef4444';
         }
+        const contAiOn = d.continuous_ai_research_enabled !== false;
+        const contAiBtn = document.getElementById('continuousAiBtn');
+        if (contAiBtn) {
+          contAiBtn.innerText = contAiOn ? 'ON' : 'OFF';
+          contAiBtn.parentElement.style.backgroundColor = contAiOn ? '#10b981' : '#ef4444';
+        }
+        const contAiCtrlLabel = document.getElementById('continuousAiControlLabel');
+        const contAiCtrlBtn = document.getElementById('continuousAiControlBtn');
+        if (contAiCtrlLabel) contAiCtrlLabel.innerText = contAiOn ? 'ON' : 'OFF';
+        if (contAiCtrlBtn) contAiCtrlBtn.style.backgroundColor = contAiOn ? '#10b981' : '#ef4444';
+        const contAiMode = document.getElementById('continuousAiModeNote');
+        if (contAiMode) {
+          contAiMode.innerHTML = contAiOn
+            ? '<span style="color:#10b981">COLLECTING + EXECUTING</span> — temp=0, ~5 min sole-AI when edge &gt; 0; trades may execute on APPROVE.'
+            : '<span style="color:#fbbf24">OFF</span> — no periodic sole-AI calls; AI Stability shadow and Golden Stack unaffected.';
+        }
+        const contAiList = document.getElementById('continuousAiFeatureList');
+        const ascLane = d.ai_stability_config || {};
+        if (contAiList && ascLane.temperature != null) {
+          const items = [
+            'DeepSeek temperature = ' + ascLane.temperature + ' (all research lanes)',
+            'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
+            'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
+            'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
+            'Executes approved trades (subject to Golden Stack when ON)',
+          ];
+          contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+        }
+        const contAiLive = document.getElementById('continuousAiLiveStatus');
+        if (contAiLive) {
+          const n = d.ai_call_count != null ? d.ai_call_count : 0;
+          const cd = d.ai_cooldown_remaining_sec;
+          let txt = 'Continuous AI calls this session: ' + n;
+          if (cd != null && cd > 0) txt += ' · next slot in ' + cd + 's';
+          contAiLive.innerText = txt;
+        }
+        const gsOn = d.golden_stack_enabled !== false;
         const gsBtn = document.getElementById('goldenStackBtn');
         if (gsBtn) {
-          const gs = d.golden_stack_enabled !== false;
-          gsBtn.innerText = gs ? 'ON' : 'OFF';
-          gsBtn.style.backgroundColor = gs ? '#10b981' : '#ef4444';
+          gsBtn.innerText = gsOn ? 'ON' : 'OFF';
+          gsBtn.parentElement.style.backgroundColor = gsOn ? '#10b981' : '#ef4444';
+        }
+        const gsCtrlLabel = document.getElementById('goldenStackControlLabel');
+        const gsCtrlBtn = document.getElementById('goldenStackControlBtn');
+        if (gsCtrlLabel) gsCtrlLabel.innerText = gsOn ? 'ON' : 'OFF';
+        if (gsCtrlBtn) gsCtrlBtn.style.backgroundColor = gsOn ? '#10b981' : '#ef4444';
+        const gsMode = document.getElementById('goldenStackModeNote');
+        if (gsMode) {
+          gsMode.innerHTML = gsOn
+            ? '<span style="color:#10b981">ENFORCING</span> — failing any gate below blocks trade execution (logged as <code>GOLDEN_STACK_*</code>).'
+            : '<span style="color:#fbbf24">LOG-ONLY</span> — gates evaluated and logged as <code>WOULD_BLOCK_GOLDEN_STACK_*</code>; sole-AI research may still execute approved trades.';
+        }
+        const gsList = document.getElementById('goldenStackGateList');
+        const gsc = d.golden_stack_config || {};
+        if (gsList && gsc.chop_max != null) {
+          const items = [
+            'Momentum chop ≤ ' + gsc.chop_max + ' (conflicted tape penalty)',
+            'ADX not in ' + gsc.adx_block_low + '–' + gsc.adx_block_high + ' band (weak trend chop zone)',
+            'SHORT requires MTF BEAR_ALIGNED',
+            'SHORT structure score ≤ ' + gsc.short_struct_max,
+            'Directional spread ' + gsc.spread_min + '–' + gsc.spread_max + ' (bull/bear conviction gap)',
+            'Entry mode = ' + (gsc.entry_mode_required || 'EMA_HYBRID_LIMIT'),
+            'EMA hybrid distance ≤ ' + gsc.ema_dist_max_pct + '% (ideal ≤ ' + gsc.ema_dist_ideal_pct + '%)',
+            gsc.block_high_pos_funding ? 'Block HIGH_POS funding (longs pay heavily)' : 'Funding gate off',
+            'Full $20 margin when ON (no spread sizing penalty)',
+            'Profit ladder first rung: ' + (gsc.ladder_first_rung || '8%→5%'),
+          ];
+          gsList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+        }
+        const gsLive = document.getElementById('goldenStackLiveStatus');
+        if (gsLive) {
+          const ev = d.golden_stack_last_eval;
+          if (ev && ev.golden_stack_pass != null) {
+            const pass = ev.golden_stack_pass;
+            const br = d.golden_stack_last_block_reason;
+            let txt = 'Last AI APPROVE golden-stack check: ' + (pass ? '<span style="color:#10b981">PASS</span>' : '<span style="color:#ef4444">FAIL</span>');
+            if (br) txt += ' (' + br + ')';
+            if (ev.mom != null) txt += ' · chop ' + ev.mom + '/' + ev.chop_max;
+            if (ev.spread != null) txt += ' · spread ' + ev.spread;
+            if (ev.entry_mode) txt += ' · entry ' + ev.entry_mode;
+            gsLive.innerHTML = txt;
+          } else {
+            gsLive.innerText = 'No AI APPROVE yet this session — live gate check appears after first APPROVE.';
+          }
+        }
+        const aiStabOn = d.ai_stability_research_enabled !== false;
+        const aiStabBtn = document.getElementById('aiStabilityBtn');
+        if (aiStabBtn) {
+          aiStabBtn.innerText = aiStabOn ? 'ON' : 'OFF';
+          aiStabBtn.parentElement.style.backgroundColor = aiStabOn ? '#10b981' : '#ef4444';
+        }
+        const aiStabCtrlLabel = document.getElementById('aiStabilityControlLabel');
+        const aiStabCtrlBtn = document.getElementById('aiStabilityControlBtn');
+        if (aiStabCtrlLabel) aiStabCtrlLabel.innerText = aiStabOn ? 'ON' : 'OFF';
+        if (aiStabCtrlBtn) aiStabCtrlBtn.style.backgroundColor = aiStabOn ? '#10b981' : '#ef4444';
+        const aiStabMode = document.getElementById('aiStabilityModeNote');
+        if (aiStabMode) {
+          aiStabMode.innerHTML = aiStabOn
+            ? '<span style="color:#10b981">SHADOW COLLECTING</span> — temp=0, separate DeepSeek call in first 2 min of each 15m candle; log-only, never executes trades.'
+            : '<span style="color:#fbbf24">SHADOW OFF</span> — no candle-aligned calls; Continuous AI and Golden Stack unaffected.';
+        }
+        const aiStabList = document.getElementById('aiStabilityFeatureList');
+        const asc = d.ai_stability_config || {};
+        if (aiStabList && asc.temperature != null) {
+          const items = [
+            'DeepSeek temperature = ' + asc.temperature + ' (independent shadow call)',
+            'Candle-aligned trigger — first ' + (asc.candle_align_sec || 120) + 's of each 15m bucket only',
+            'Once per 15m candle bucket max (reduces timing lottery)',
+            'Lane tag: STABILITY · shadow_only=true · no trade execution',
+            'Full sanitized AI context → ai_input_log.jsonl',
+            'Deterministic replay scorecard (' + (asc.replay_model_version || 'replay_v1') + ', threshold ' + (asc.replay_approve_threshold || 0.52) + ')',
+            'Runs alongside Continuous AI (~5 min) — separate cooldown/bucket',
+          ];
+          aiStabList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
+        }
+        const aiStabLive = document.getElementById('aiStabilityLiveStatus');
+        if (aiStabLive) {
+          const stabN = d.stability_ai_call_count != null ? d.stability_ai_call_count : 0;
+          const elapsed = d.candle_15m_elapsed_pct != null ? (d.candle_15m_elapsed_pct * 100).toFixed(0) + '% into 15m candle' : '';
+          const aligned = d.candle_aligned_window ? ' · in align window' : ' · outside align window';
+          const rm = d.last_replay_model_eval;
+          let stabTxt = 'Stability shadow calls this session: ' + stabN;
+          if (elapsed) stabTxt += ' · ' + elapsed + aligned;
+          if (rm && rm.replay_score != null) {
+            stabTxt += ' · last replay ' + rm.replay_score + ' (approve≥' + (rm.approve_threshold || 0.52) + ')';
+            if (rm.ai_agrees != null) stabTxt += rm.ai_agrees ? ' · agrees with AI' : ' · disagrees with AI';
+          } else if (aiStabOn) {
+            stabTxt += ' · waiting for candle-aligned window';
+          }
+          aiStabLive.innerText = stabTxt;
         }
         const debugBtn = document.getElementById('debugToggle');
         if (debugBtn) {
@@ -8498,7 +9001,13 @@ def api_state():
         snapshot["funding_simulation_enabled"] = FUNDING_SIMULATION_ENABLED
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
+        snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
+        snapshot["ai_stability_config"] = ai_stability_config_for_dashboard()
+        snapshot["candle_15m_elapsed_pct"] = _candle_15m_elapsed_pct()
+        snapshot["candle_aligned_window"] = is_candle_aligned_ai_window()
+        snapshot["ai_candle_bucket_available"] = ai_candle_bucket_available()
         with state_lock:
+            snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
         logger.info(f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} [PIPELINE ENFORCEMENT]")
         return jsonify(snapshot)
@@ -8582,6 +9091,32 @@ def toggle_golden_stack():
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"golden_stack_enabled": state["golden_stack_enabled"]})
+
+@app.route('/api/toggle_ai_stability_research', methods=['POST'])
+def toggle_ai_stability_research():
+    with state_lock:
+        state["ai_stability_research_enabled"] = not bool(
+            state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[AI_STABILITY] toggled {'ON' if state['ai_stability_research_enabled'] else 'OFF'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"ai_stability_research_enabled": state["ai_stability_research_enabled"]})
+
+@app.route('/api/toggle_continuous_ai_research', methods=['POST'])
+def toggle_continuous_ai_research():
+    with state_lock:
+        state["continuous_ai_research_enabled"] = not bool(
+            state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[CONTINUOUS_AI] toggled {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
 
 @app.route('/api/toggle_debug', methods=['POST'])
 def toggle_debug():
@@ -9073,6 +9608,7 @@ def reset_runtime_state():
             "debug_state": _fresh_debug_state(),
             "last_pipeline_stage": "IDLE",
             "ai_call_count": 0,
+    "stability_ai_call_count": 0,
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
 
@@ -9263,6 +9799,10 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "analyzer_sync_id": ANALYZER_SYNC_ID,
             "golden_stack_enabled": signal.get("golden_stack_enabled_at_entry", golden_stack_enabled()),
             "golden_stack_eval": signal.get("golden_stack_eval"),
+            "ai_stability_research_enabled": signal.get(
+                "ai_stability_research_enabled_at_entry", ai_stability_research_enabled()
+            ),
+            "replay_model_eval": signal.get("replay_model_eval"),
         }
         if feat:
             snapshot["entry_features"] = {
@@ -10088,6 +10628,8 @@ def _persistent_config_keys():
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
+        "ai_stability_research_enabled",
+        "continuous_ai_research_enabled",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -10631,6 +11173,27 @@ def main():
         logger.warning(
             f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
             f"{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    logger.warning(
+        f"[V87 MULTI-LANE] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
+        f"| stability_shadow={'ON' if ai_stability_research_enabled() else 'OFF'} "
+        f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
+        f"| research_temp={RESEARCH_AI_TEMPERATURE} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if continuous_ai_research_enabled():
+        logger.warning(
+            f"[V87 CONTINUOUS_AI] ON — ~{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s sole-AI when edge>0 "
+            f"| temp={RESEARCH_AI_TEMPERATURE} | executes trades | lane={RESEARCH_LANE_CONTINUOUS} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    if ai_stability_research_enabled():
+        logger.warning(
+            f"[V87 AI_STABILITY] ON — shadow lane | candle-aligned first "
+            f"{AI_STABILITY_CANDLE_ALIGN_SEC}s/15m | once/bucket | log {AI_INPUT_LOG_FILE} | "
+            f"replay={REPLAY_MODEL_VERSION} threshold={REPLAY_MODEL_APPROVE_THRESHOLD} "
+            f"| lane={RESEARCH_LANE_STABILITY} "
             f"[PIPELINE ENFORCEMENT]"
         )
     if RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
