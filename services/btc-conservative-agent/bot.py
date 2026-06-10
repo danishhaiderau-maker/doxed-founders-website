@@ -43,6 +43,26 @@ _AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "a
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
+class SafeRotatingFileHandler(RotatingFileHandler):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('delay', True)
+        super().__init__(*args, **kwargs)
+        self._rollover_failed = False
+
+    def shouldRollover(self, record):
+        if self._rollover_failed:
+            return False
+        return super().shouldRollover(record)
+
+    def doRollover(self):
+        if self._rollover_failed:
+            return
+        try:
+            super().doRollover()
+        except (PermissionError, OSError):
+            self._rollover_failed = True
+
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
 WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "15"))
@@ -7197,7 +7217,7 @@ logger.setLevel(logging.INFO)
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
 LOG_FILE = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
-file_handler = RotatingFileHandler(
+file_handler = SafeRotatingFileHandler(
     LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding='utf-8'
 )
 file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
