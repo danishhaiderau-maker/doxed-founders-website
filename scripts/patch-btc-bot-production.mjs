@@ -364,3 +364,96 @@ if (syncChanged) {
 } else {
   console.log('bot.py production patches already applied');
 }
+
+// ─── Railway: Admin Control credentials only (never research .env / hardcoded keys) ───
+let credFix = readFileSync(TARGET, 'utf8');
+let credChanged = false;
+
+const RAILWAY_DOTENV_GUARD = `def _load_local_dotenv():
+    """Load .env into os.environ (does not override existing vars).
+    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return
+    root = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(root, ".env")
+    if not os.path.isfile(path):
+        return
+    secret_keys = frozenset({
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
+        "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
+        "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
+    })
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if not key or key in os.environ:
+                    continue
+                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
+                    continue
+                os.environ[key] = val
+    except Exception:
+        pass`;
+
+if (credFix.includes('def _load_local_dotenv():') && !credFix.includes('Admin Control → Neon')) {
+  credFix = credFix.replace(
+    /def _load_local_dotenv\(\):[\s\S]*?^\s+except Exception:\s*\n\s+pass/m,
+    RAILWAY_DOTENV_GUARD,
+  );
+  credChanged = true;
+}
+
+if (!credFix.includes('def _log_credential_sources():')) {
+  credFix = credFix.replace(
+    'def _private_api_keys_ok() -> bool:',
+    `def _log_credential_sources():
+    """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
+    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+    admin = os.getenv("CREDENTIALS_FROM", "").strip().lower() == "admin_control"
+    ds_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    bx_ok = _private_api_keys_ok()
+    ds_ok = bool(ds_key)
+    ds_tail = ds_key[-4:] if len(ds_key) >= 4 else "none"
+    bx_key = (os.getenv("BITFINEX_API_KEY") or "").strip()
+    bx_tail = bx_key[-4:] if len(bx_key) >= 4 else "none"
+    logger.info(
+        f"[CREDENTIALS] railway={on_railway} admin_control={admin} "
+        f"deepseek={'ok' if ds_ok else 'MISSING'}(…{ds_tail}) "
+        f"bitfinex={'ok' if bx_ok else 'MISSING'}(…{bx_tail}) "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if on_railway and not ds_ok:
+        logger.error(
+            "[CREDENTIALS] Railway DEEPSEEK missing — save key at /admin/control and Push to Runtime "
+            "(npm run push:showcase-bot) [PIPELINE ENFORCEMENT]"
+        )
+    if on_railway and not bx_ok:
+        logger.error(
+            "[CREDENTIALS] Railway Bitfinex keys missing — save at /admin/control and Push to Runtime "
+            "[PIPELINE ENFORCEMENT]"
+        )
+
+def _private_api_keys_ok() -> bool:`,
+  );
+  credChanged = true;
+}
+
+if (credFix.includes('[AI INIT] KEY PRESENT:') && !credFix.includes('_log_credential_sources()')) {
+  credFix = credFix.replace(
+    '    logger.info(f"[AI INIT] KEY PRESENT: {bool(DEEPSEEK_API_KEY)} cwd={os.getcwd()} [PIPELINE ENFORCEMENT]")',
+    `    logger.info(f"[AI INIT] KEY PRESENT: {bool(DEEPSEEK_API_KEY)} cwd={os.getcwd()} [PIPELINE ENFORCEMENT]")
+    _log_credential_sources()`,
+  );
+  credChanged = true;
+}
+
+if (credChanged) {
+  writeFileSync(TARGET, credFix, 'utf8');
+  console.log('Applied Railway Admin Control credential guard to bot.py');
+}

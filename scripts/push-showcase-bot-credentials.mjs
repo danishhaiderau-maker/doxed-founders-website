@@ -75,6 +75,7 @@ if (!row?.showcaseExchangeCredentialEnc) {
 const vars = {
   PORT: '5000',
   DASHBOARD_PORT: '5000',
+  CREDENTIALS_FROM: 'admin_control',
   DASHBOARD_PUBLIC_URL: (
     row.showcaseBotPublicUrl?.trim() || 'https://btc-conservative-agent-production.up.railway.app'
   ).replace(/\/$/, ''),

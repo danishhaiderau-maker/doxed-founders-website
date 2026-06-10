@@ -377,7 +377,10 @@ export class ShowcaseRuntimeService {
   private async buildRailwayEnvVarsPromise(
     settings: NonNullable<Awaited<ReturnType<typeof this.prisma.platformSettings.findUnique>>>,
   ) {
-    const vars: Record<string, string> = { PORT: '5000' };
+    const vars: Record<string, string> = {
+      PORT: '5000',
+      CREDENTIALS_FROM: 'admin_control',
+    };
 
     const botControlSecret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
     if (botControlSecret) {
