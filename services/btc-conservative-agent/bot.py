@@ -1332,20 +1332,7 @@ def evaluate_entry_quality_filter(direction: str, ctx: dict, ai: dict, features:
 def evaluate_evidence_entry_filter(
     direction: str, ctx: dict, ai: dict, features: dict, edge_score: float
 ) -> tuple:
-    """v63 analyzer gates: momentum chop, SR zone, edge dead zone (both directions)."""
-    sr_state = str(
-        ctx.get("sr_state")
-        or (ctx.get("support_resistance") or {}).get("sr_state")
-        or state.get("support_resistance", {}).get("sr_state")
-        or ""
-    ).upper()
-    if (
-        direction in ("LONG", "SHORT")
-        and state.get("block_free_range_entries", BLOCK_FREE_RANGE_ENTRIES)
-        and sr_state == "FREE_RANGE"
-    ):
-        return True, f"{direction}_BLOCKED_FREE_RANGE"
-
+    """v63 analyzer gates: momentum chop, edge dead zone (both directions)."""
     edge_score = round(float(edge_score or 0), 1)
     if not is_research_data_collection():
         if EDGE_DEAD_ZONE_LOW < edge_score <= EDGE_DEAD_ZONE_HIGH:
@@ -2176,7 +2163,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.8-dashboard-lane-display-2026-06-04"
+ANALYZER_SYNC_ID = "v8.9-remove-free-range-block-2026-06-10"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2871,7 +2858,6 @@ GOLDEN_STACK_EMA_DIST_MAX_PCT = 0.5
 GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT = 0.3
 GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING = True
 GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
-BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
@@ -3008,7 +2994,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.443-v88-dashboard-lane-display"
+EXECUTION_FIX_VERSION = "v10.9.444-v89-remove-free-range-block"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3051,7 +3037,6 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "early_fail_enabled": True,
-    "block_free_range_entries": True,
     "ai_enabled": True,
     "invert_signal": False,
     "telegram_enabled": False,
@@ -8030,7 +8015,6 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleBlockFreeRange()">Block FREE_RANGE entries: <span id="blockFreeRangeBtn">ON</span></button>
     <button onclick="toggleContinuousAi()" title="v87: periodic ~5min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
     <button onclick="toggleAiStability()" title="v87: candle-aligned shadow AI lane (log-only)">AI Stability: <span id="aiStabilityBtn">ON</span></button>
     <button onclick="toggleGoldenStack()" title="Enforce v86 quality gates after AI APPROVE">Golden Stack: <span id="goldenStackBtn">ON</span></button>
@@ -8393,10 +8377,6 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_invert_signal');
       refresh();
     }
-    async function toggleBlockFreeRange() {
-      await post('/api/toggle_block_free_range_entries');
-      refresh();
-    }
     async function toggleContinuousAi() {
       await post('/api/toggle_continuous_ai_research');
       refresh();
@@ -8499,7 +8479,6 @@ DASHBOARD_JS = """(function () {
           if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
           if (d.bot_version) syncTxt += ' | ' + d.bot_version;
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
-          if (d.block_free_range_entries === false) syncTxt += ' | FREE_RANGE block OFF';
           if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous AI OFF';
           else syncTxt += ' | Continuous AI ON';
           if (d.ai_stability_research_enabled === false) syncTxt += ' | AI Stability OFF';
@@ -8641,12 +8620,6 @@ DASHBOARD_JS = """(function () {
         if (invertBtn) {
           invertBtn.innerText = `Invert Signal ${d.invert_signal ? 'ON' : 'OFF'}`;
           invertBtn.style.backgroundColor = d.invert_signal ? '#f97316' : '#374151';
-        }
-        const blockFrBtn = document.getElementById('blockFreeRangeBtn');
-        if (blockFrBtn) {
-          const bfr = d.block_free_range_entries !== false;
-          blockFrBtn.innerText = `Block FREE_RANGE entries ${bfr ? 'ON' : 'OFF'}`;
-          blockFrBtn.style.backgroundColor = bfr ? '#10b981' : '#ef4444';
         }
         const contAiOn = d.continuous_ai_research_enabled !== false;
         const contAiBtn = document.getElementById('continuousAiBtn');
@@ -9063,8 +9036,6 @@ DASHBOARD_JS = """(function () {
     window.toggleLive = toggleLive;
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
-    window.toggleBlockFreeRange = toggleBlockFreeRange;
-    window.toggleGoldenStack = toggleGoldenStack;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.downloadDebug = downloadDebug;
@@ -9317,13 +9288,6 @@ def toggle_invert_signal():
         state["invert_signal"] = not state.get("invert_signal", False)
         save_persistent_config()
     return jsonify({"invert_signal": state["invert_signal"]})
-
-@app.route('/api/toggle_block_free_range_entries', methods=['POST'])
-def toggle_block_free_range_entries():
-    with state_lock:
-        state["block_free_range_entries"] = not state.get("block_free_range_entries", BLOCK_FREE_RANGE_ENTRIES)
-        save_persistent_config()
-    return jsonify({"block_free_range_entries": state["block_free_range_entries"]})
 
 @app.route('/api/toggle_golden_stack', methods=['POST'])
 def toggle_golden_stack():
@@ -10872,7 +10836,7 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed",
+        "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
