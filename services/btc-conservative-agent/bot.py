@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.449
+3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.451
 ENFORCED: WINDOW=10 + SINGLE AGGREGATED SOURCE + SOFT FEATURE VALIDATION + EDGE→AI ALIGN + FEATURE VALIDITY LOG-ONLY + PIPELINE LOCK + AVG_VOLUME FIXED + FULL TRACE + RESEARCH DATA COLLECTION + DIRECTION CONSISTENCY (final_direction SINGLE SOURCE OF TRUTH + IMMEDIATE INVERSION) + SINGLE FEATURE SNAPSHOT ENFORCEMENT + HARD AI BLOCK ON INCOMPLETE DATA + DELTA_CHANGE PERSISTENT + STRICT BUFFER GATE + ATOMIC SNAPSHOT + NO ZERO FALLBACKS IN AI
 """
 from __future__ import annotations
@@ -1703,8 +1703,9 @@ def log_ai_input_full(
 ):
     """Persist full sanitized AI context + outcomes for offline replay model training."""
     try:
+        upgrade = ctx.get("ai_input_upgrade") or {}
         row = {
-            "schema": "ai_input_v2",
+            "schema": "ai_input_v3",
             "ts": utc_iso(),
             "ts_epoch": time.time(),
             "trade_id": ctx.get("trade_id") or ai_result.get("trade_id"),
@@ -1718,6 +1719,13 @@ def log_ai_input_full(
             "temperature": temperature,
             "trigger_reason": trigger_reason or state.get("debug_state", {}).get("edge_trigger_reason"),
             "context_fingerprint": _ai_context_fingerprint(ctx),
+            "ai_input_upgrade": copy.deepcopy(upgrade),
+            "trend_health_state": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+            "entry_stage": upgrade.get("entry_stage") or ctx.get("entry_stage"),
+            "reversal_risk_score": upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score"),
+            "liquidity_sweep_high": upgrade.get("liquidity_sweep_high"),
+            "liquidity_sweep_low": upgrade.get("liquidity_sweep_low"),
+            "regime_change_count_60m": upgrade.get("regime_change_count_60m"),
             "context": copy.deepcopy(ctx),
             "ai": {
                 "decision": ai_result.get("decision"),
@@ -2400,7 +2408,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.3-research-max-collection-2026-06-11"
+ANALYZER_SYNC_ID = "v9.5-research-telemetry-2026-06-12"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3350,8 +3358,9 @@ GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
 EDGE_DEAD_ZONE_LOW = 4.92
 EDGE_DEAD_ZONE_HIGH = 5.1
 DASHBOARD_AUTO_REFRESH_MS = 60000
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "7800"))
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7800")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
+EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
 
 def dashboard_public_url() -> str:
@@ -3435,6 +3444,8 @@ REPLAY_TTL_SEC = 120 * 60
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = 1800
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
+REVERSAL_STUDY_TTL_SEC = 1800  # 30m horizon for reversal_risk_score validation
+REVERSAL_STUDY_FILE = "reversal_study.jsonl"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
@@ -3472,7 +3483,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.449-v93-research-max-collection"
+EXECUTION_FIX_VERSION = "v10.9.451-v95-research-telemetry"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3643,6 +3654,13 @@ state = {
     "market_context": {},
     "trend_health": {},
     "trend_health_history": [],
+    "regime_cycle_history": [],
+    "market_regime_tracker": {
+        "current": None,
+        "since_ts": 0.0,
+        "duration_sec": 0.0,
+        "history": [],
+    },
     "debug_state": {
         "last_event_time": None,
         "last_edge_score": 0,
@@ -4897,6 +4915,416 @@ def update_orderflow(trade):
     except Exception as e:
         logger.error(f"[ORDERFLOW ERROR] {e} [PIPELINE ENFORCEMENT]")
 
+def _trend_health_interpretation(trend_state: str, health: dict) -> str:
+    ts = str(trend_state or "").upper()
+    if ts == "BULL_WEAKENING":
+        return "Bullish but weakening"
+    if ts == "BEAR_WEAKENING":
+        return "Bearish but weakening"
+    if ts == "BULL":
+        return "Bullish and intact"
+    if ts == "BEAR":
+        return "Bearish and intact"
+    return "Mixed / no clear trend health"
+
+
+def _bull_bear_score_changes_15m() -> dict:
+    with state_lock:
+        hist = list(state.get("trend_health_history") or [])
+    if not hist:
+        return {"bull_score_change_15m": 0, "bear_score_change_15m": 0}
+    now = time.time()
+    target_ts = now - 900.0
+    baseline = None
+    for entry in hist:
+        if float(entry.get("ts") or 0) <= target_ts:
+            baseline = entry
+    if baseline is None and len(hist) >= 2:
+        baseline = hist[0]
+    current = hist[-1]
+    if baseline is None:
+        return {"bull_score_change_15m": 0, "bear_score_change_15m": 0}
+    bull_now = int(current.get("bull_score") or 0)
+    bear_now = int(current.get("bear_score") or 0)
+    bull_then = int(baseline.get("bull_score") or bull_now)
+    bear_then = int(baseline.get("bear_score") or bear_now)
+    return {
+        "bull_score_change_15m": bull_now - bull_then,
+        "bear_score_change_15m": bear_now - bear_then,
+    }
+
+
+def _record_regime_cycle(regime: str, trend_state: str) -> None:
+    with state_lock:
+        hist = list(state.get("regime_cycle_history") or [])
+        hist.append({
+            "ts": time.time(),
+            "regime": str(regime or "UNKNOWN"),
+            "trend_state": str(trend_state or "MIXED"),
+        })
+        state["regime_cycle_history"] = hist[-120:]
+
+
+def _regime_memory_snapshot() -> dict:
+    with state_lock:
+        hist = list(state.get("regime_cycle_history") or [])
+    now = time.time()
+    last_hour = [h for h in hist if now - float(h.get("ts") or 0) <= 3600.0]
+    changes = 0
+    prev_regime = None
+    for entry in last_hour:
+        regime = entry.get("regime")
+        if prev_regime is not None and regime != prev_regime:
+            changes += 1
+        prev_regime = regime
+    last_3 = hist[-3:]
+    return {
+        "regime_changes_60m": changes,
+        "trend_state_last_3_cycles": [h.get("trend_state") for h in last_3],
+        "last_3_regimes": [h.get("regime") for h in last_3],
+        "last_3_signals": [
+            "bull" if str(h.get("trend_state") or "").startswith("BULL") else (
+                "bear" if str(h.get("trend_state") or "").startswith("BEAR") else "mixed"
+            )
+            for h in last_3
+        ],
+    }
+
+
+def classify_market_regime(health: dict, ctx: dict, ms: dict, regime_mem: dict) -> str:
+    ts = str(health.get("trend_state") or "")
+    mc = ctx.get("market_context") or {}
+    adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
+    vol_ratio = float(ctx.get("volume_ratio") or 0)
+    struct = abs(float(ms.get("structure_score") or 0))
+    churn = int(regime_mem.get("regime_changes_60m") or 0)
+    if ts.endswith("_WEAKENING"):
+        return "WEAKENING"
+    if churn >= 3:
+        return "TRANSITION"
+    if adx < 18 and struct < 2:
+        return "RANGE"
+    if vol_ratio < 0.4:
+        return "COMPRESSION"
+    if vol_ratio > 1.5 and struct >= 3:
+        return "EXPANSION"
+    if ts in ("BULL", "BEAR") and adx >= 20:
+        return "TRENDING"
+    return "TRANSITION"
+
+
+def update_market_regime_tracker(health: dict, ctx: dict, ms: dict, regime_mem: dict) -> dict:
+    label = classify_market_regime(health, ctx, ms, regime_mem)
+    now = time.time()
+    with state_lock:
+        tracker = copy.deepcopy(state.get("market_regime_tracker") or {})
+        prev = tracker.get("current")
+        since = float(tracker.get("since_ts") or now)
+        history = list(tracker.get("history") or [])
+        if prev != label:
+            if prev:
+                history.append({
+                    "regime": prev,
+                    "duration_sec": round(now - since, 1),
+                    "ended_ts": now,
+                })
+            tracker["current"] = label
+            tracker["since_ts"] = now
+            since = now
+        tracker["duration_sec"] = round(now - since, 1)
+        tracker["history"] = history[-40:]
+        state["market_regime_tracker"] = tracker
+    return tracker
+
+
+def _entry_distance_metrics(price: float, ms: dict, ctx: dict, candles=None) -> dict:
+    price = float(price or 0)
+    if candles is None:
+        with state_lock:
+            candles = copy.deepcopy(latest_candles) or []
+    window = candles[-12:] if len(candles) >= 12 else list(candles or [])
+    metrics = {
+        "distance_from_last_impulse_pct": None,
+        "distance_from_last_pullback_pct": None,
+        "distance_from_micro_sr_pct": None,
+        "distance_from_ema_pct": None,
+    }
+    if price <= 0:
+        return metrics
+    ema9 = float(ctx.get("ema9") or 0)
+    if ema9 > 0:
+        metrics["distance_from_ema_pct"] = round(abs(price - ema9) / price * 100, 4)
+    micro_support = ms.get("micro_support")
+    micro_resistance = ms.get("micro_resistance")
+    micro_ref = micro_support or micro_resistance
+    if micro_ref:
+        metrics["distance_from_micro_sr_pct"] = round(abs(price - float(micro_ref)) / price * 100, 4)
+    if window:
+        impulse_high = max(float(c[2]) for c in window)
+        impulse_low = min(float(c[3]) for c in window)
+        impulse_range = max(impulse_high - impulse_low, 1e-9)
+        metrics["distance_from_last_impulse_pct"] = round(
+            abs(impulse_high - price) / impulse_range * 100, 4
+        )
+        metrics["distance_from_last_pullback_pct"] = round(
+            abs(price - impulse_low) / impulse_range * 100, 4
+        )
+    return metrics
+
+
+def compute_entry_stage(price: float, ms: dict, ctx: dict) -> tuple:
+    price = float(price or 0)
+    if price <= 0:
+        return "MID", {}
+    metrics = _entry_distance_metrics(price, ms, ctx)
+    struct = abs(float(ms.get("structure_score") or 0))
+    ret_5m = abs(float(ctx.get("ret_5m") or 0))
+    dist_impulse = metrics.get("distance_from_last_impulse_pct")
+    dist_pullback = metrics.get("distance_from_last_pullback_pct")
+    dist_micro = metrics.get("distance_from_micro_sr_pct")
+    dist_ema = metrics.get("distance_from_ema_pct")
+    near_pullback = dist_pullback is not None and dist_pullback <= 25.0
+    near_micro = dist_micro is not None and dist_micro <= 0.35
+    near_ema = dist_ema is not None and dist_ema <= 0.45
+    chasing = (
+        dist_impulse is not None
+        and dist_impulse <= 12.0
+        and struct >= 3
+    ) or (struct >= 5 and ret_5m > 0.002)
+    if near_pullback or near_micro or near_ema:
+        stage = "EARLY"
+    elif chasing:
+        stage = "LATE"
+    else:
+        stage = "MID"
+    meta = {
+        **metrics,
+        "structure_extension": round(struct, 2),
+        "ret_5m_abs": round(ret_5m, 6),
+    }
+    return stage, meta
+
+
+def detect_liquidity_sweep(candles=None, price: float = None, ms: dict = None, ctx: dict = None) -> dict:
+    if candles is None:
+        with state_lock:
+            candles = copy.deepcopy(latest_candles) or []
+    recent = candles[-8:] if len(candles) >= 8 else list(candles or [])
+    result = {
+        "liquidity_sweep_high": False,
+        "liquidity_sweep_low": False,
+        "sweep_high_volume_spike": False,
+        "sweep_low_volume_spike": False,
+        "sweep_engine": "v95_wick_reclaim_volume",
+    }
+    if not recent:
+        return result
+    ms = ms or {}
+    price = float(price if price is not None else recent[-1][4])
+    prior_high = ms.get("prior_resistance") or ms.get("last_swing_high") or ms.get("micro_resistance")
+    prior_low = ms.get("prior_support") or ms.get("last_swing_low") or ms.get("micro_support")
+    vols = [float(c[5]) if len(c) > 5 else float(ctx.get("volume") or 0) for c in recent]
+    avg_vol = sum(vols) / max(len(vols), 1)
+    vol_spike = max(avg_vol * 1.35, 1e-12)
+    for c in recent:
+        hi = float(c[2])
+        lo = float(c[3])
+        cl = float(c[4])
+        vol = float(c[5]) if len(c) > 5 else avg_vol
+        if prior_high:
+            level = float(prior_high)
+            if hi > level and cl < level and vol >= vol_spike:
+                result["liquidity_sweep_high"] = True
+                result["sweep_high_volume_spike"] = True
+        if prior_low:
+            level = float(prior_low)
+            if lo < level and cl > level and vol >= vol_spike:
+                result["liquidity_sweep_low"] = True
+                result["sweep_low_volume_spike"] = True
+    if not result["liquidity_sweep_high"] and prior_high:
+        level = float(prior_high)
+        max_hi = max(float(c[2]) for c in recent)
+        if max_hi > level * 1.0002 and price < level:
+            result["liquidity_sweep_high"] = True
+    if not result["liquidity_sweep_low"] and prior_low:
+        level = float(prior_low)
+        min_lo = min(float(c[3]) for c in recent)
+        if min_lo < level * 0.9998 and price > level:
+            result["liquidity_sweep_low"] = True
+    return result
+
+
+def compute_reversal_risk_score(health: dict, ctx: dict, ms: dict, micro_eval: dict, score_changes: dict) -> int:
+    risk = 0.0
+    ts = str(health.get("trend_state") or "")
+    weaken = int(health.get("weaken_signals") or 0)
+    vol_ratio = float(ctx.get("volume_ratio") or 0)
+    vel = float(ctx.get("velocity") or 0)
+    mc = ctx.get("market_context") or {}
+    struct = float((mc.get("market_structure") or {}).get("structure_score") or ms.get("structure_score") or 0)
+    if ts.endswith("_WEAKENING"):
+        risk += 20
+    risk += weaken * 8
+    if vol_ratio < 0.5:
+        risk += 10
+    if ts.startswith("BULL") and vel < 0:
+        risk += 12
+    elif ts.startswith("BEAR") and vel > 0:
+        risk += 12
+    if int(score_changes.get("bull_score_change_15m") or 0) < -1:
+        risk += 8
+    if int(score_changes.get("bear_score_change_15m") or 0) > 1:
+        risk += 8
+    if abs(struct) >= 6:
+        risk += 10
+    if micro_eval.get("rejects_micro_sr"):
+        risk += 15
+    if ms.get("lower_high") and ts.startswith("BULL"):
+        risk += 10
+    if ms.get("higher_low") and ts.startswith("BEAR"):
+        risk += 10
+    return int(min(100, round(risk)))
+
+
+def compute_ai_quality_components_from_ctx(ctx: dict, health: dict, micro_eval: dict, ms: dict) -> dict:
+    mc = ctx.get("market_context") or {}
+    ms_mc = mc.get("market_structure") or {}
+    struct = float(ms_mc.get("structure_score") or ms.get("structure_score") or 0)
+    structure_comp = max(0.0, min(100.0, (struct + 10.0) / 20.0 * 100.0))
+    if micro_eval.get("confirmed"):
+        micro_sr_comp = 100.0
+    elif micro_eval.get("bias_ok") or micro_eval.get("pattern_ok"):
+        micro_sr_comp = 55.0
+    else:
+        micro_sr_comp = 35.0
+    ts = str(health.get("trend_state") or "MIXED")
+    trend_map = {
+        "BULL": 100.0, "BEAR": 100.0,
+        "BULL_WEAKENING": 40.0, "BEAR_WEAKENING": 40.0,
+        "MIXED": 55.0,
+    }
+    trend_comp = trend_map.get(ts, 55.0)
+    bull = int(health.get("bull_score") or 0)
+    bear = int(health.get("bear_score") or 0)
+    spread = abs(bull - bear)
+    spread_comp = max(0.0, min(100.0, float(spread) / 7.0 * 100.0))
+    edge_score = float(ctx.get("edge_score") or 0)
+    edge_comp = max(0.0, min(100.0, edge_score / 6.0 * 100.0))
+    quality_score = round(
+        0.30 * structure_comp + 0.25 * micro_sr_comp + 0.20 * trend_comp
+        + 0.15 * spread_comp + 0.10 * edge_comp,
+        2,
+    )
+    return {
+        "quality_score": quality_score,
+        "structure_component": round(structure_comp, 2),
+        "micro_sr_component": round(micro_sr_comp, 2),
+        "trend_health_component": round(trend_comp, 2),
+        "spread_component": round(spread_comp, 2),
+        "edge_component": round(edge_comp, 2),
+        "trend_health_state": ts,
+    }
+
+
+def enrich_ai_context_upgrade(ctx: dict) -> dict:
+    """v94: Add trend health, entry timing, micro-SR, reversal risk, sweeps, quality, regime memory."""
+    if not isinstance(ctx, dict):
+        return ctx
+    price = float(ctx.get("price") or 0)
+    regime = str(ctx.get("regime") or "UNKNOWN")
+    health = compute_trend_health()
+    score_changes = _bull_bear_score_changes_15m()
+    ms = build_micro_sr_levels()
+    base = str(health.get("base_state") or "MIXED")
+    hint_dir = "LONG" if base == "BULL" else ("SHORT" if base == "BEAR" else "LONG")
+    micro_eval = evaluate_micro_structure_confirm(hint_dir, price, None, ms)
+    entry_stage, entry_meta = compute_entry_stage(price, ms, ctx)
+    sweeps = detect_liquidity_sweep(None, price, ms, ctx)
+    reversal_risk = compute_reversal_risk_score(health, ctx, ms, micro_eval, score_changes)
+    quality = compute_ai_quality_components_from_ctx(ctx, health, micro_eval, ms)
+    trend_state = str(health.get("trend_state") or "MIXED")
+    _record_regime_cycle(regime, trend_state)
+    regime_mem = _regime_memory_snapshot()
+    regime_tracker = update_market_regime_tracker(health, ctx, ms, regime_mem)
+    dist_micro_support = None
+    dist_micro_resistance = None
+    if price > 0 and ms.get("micro_support"):
+        dist_micro_support = round(abs(price - float(ms["micro_support"])) / price, 6)
+    if price > 0 and ms.get("micro_resistance"):
+        dist_micro_resistance = round(abs(price - float(ms["micro_resistance"])) / price, 6)
+    upgrade = {
+        "trend_health_state": trend_state,
+        "weaken_signals": int(health.get("weaken_signals") or 0),
+        "bull_score_change_15m": int(score_changes.get("bull_score_change_15m") or 0),
+        "bear_score_change_15m": int(score_changes.get("bear_score_change_15m") or 0),
+        "entry_stage": entry_stage,
+        "micro_structure_confirmed": bool(micro_eval.get("confirmed")),
+        "higher_low_detected": bool(ms.get("higher_low")),
+        "lower_high_detected": bool(ms.get("lower_high")),
+        "pivot_count": int(ms.get("pivot_count") or 0),
+        "distance_to_micro_support": dist_micro_support,
+        "distance_to_micro_resistance": dist_micro_resistance,
+        "reversal_risk_score": reversal_risk,
+        "liquidity_sweep_high": bool(sweeps.get("liquidity_sweep_high")),
+        "liquidity_sweep_low": bool(sweeps.get("liquidity_sweep_low")),
+        "quality_score_components": {
+            "structure_component": quality.get("structure_component"),
+            "micro_sr_component": quality.get("micro_sr_component"),
+            "trend_component": quality.get("trend_health_component"),
+            "spread_component": quality.get("spread_component"),
+            "edge_component": quality.get("edge_component"),
+            "quality_score": quality.get("quality_score"),
+        },
+        "regime_change_count_60m": int(regime_mem.get("regime_changes_60m") or 0),
+        "trend_state_last_3_cycles": list(regime_mem.get("trend_state_last_3_cycles") or []),
+        "last_3_regimes": list(regime_mem.get("last_3_regimes") or []),
+        "last_3_signals": list(regime_mem.get("last_3_signals") or []),
+        "entry_timing": entry_meta,
+        "trend_health_detail": {
+            "base_state": health.get("base_state"),
+            "bull_score": health.get("bull_score"),
+            "bear_score": health.get("bear_score"),
+            "interpretation": _trend_health_interpretation(trend_state, health),
+        },
+        "micro_structure": {
+            "micro_support": ms.get("micro_support"),
+            "micro_resistance": ms.get("micro_resistance"),
+            "structure_bias": ms.get("structure_bias"),
+            "rejects_micro_sr": bool(micro_eval.get("rejects_micro_sr")),
+            "near_micro_sr": bool(micro_eval.get("near_micro_sr")),
+        },
+        "market_regime_tracker": {
+            "current": regime_tracker.get("current"),
+            "duration_sec": regime_tracker.get("duration_sec"),
+            "recent_history": list(regime_tracker.get("history") or [])[-5:],
+        },
+        "edge_research_telemetry_only": EDGE_RESEARCH_TELEMETRY_ONLY,
+    }
+    ctx["trend_health"] = health
+    ctx["ai_input_upgrade"] = upgrade
+    ctx["trend_health_state"] = upgrade["trend_health_state"]
+    ctx["weaken_signals"] = upgrade["weaken_signals"]
+    ctx["bull_score_change_15m"] = upgrade["bull_score_change_15m"]
+    ctx["bear_score_change_15m"] = upgrade["bear_score_change_15m"]
+    ctx["entry_stage"] = upgrade["entry_stage"]
+    ctx["micro_structure_confirmed"] = upgrade["micro_structure_confirmed"]
+    ctx["higher_low_detected"] = upgrade["higher_low_detected"]
+    ctx["lower_high_detected"] = upgrade["lower_high_detected"]
+    ctx["pivot_count"] = upgrade["pivot_count"]
+    ctx["distance_to_micro_support"] = upgrade["distance_to_micro_support"]
+    ctx["distance_to_micro_resistance"] = upgrade["distance_to_micro_resistance"]
+    ctx["reversal_risk_score"] = upgrade["reversal_risk_score"]
+    ctx["liquidity_sweep_high"] = upgrade["liquidity_sweep_high"]
+    ctx["liquidity_sweep_low"] = upgrade["liquidity_sweep_low"]
+    ctx["quality_score_components"] = upgrade["quality_score_components"]
+    ctx["regime_change_count_60m"] = upgrade["regime_change_count_60m"]
+    ctx["trend_state_last_3_cycles"] = upgrade["trend_state_last_3_cycles"]
+    ctx["last_3_signals"] = upgrade["last_3_signals"]
+    ctx["market_regime_tracker"] = upgrade["market_regime_tracker"]
+    ctx["edge_research_telemetry_only"] = EDGE_RESEARCH_TELEMETRY_ONLY
+    return ctx
+
+
 def build_pure_ai_context(state_snapshot, buffers):
     ctx = {
         "price": nz(state_snapshot.get("price")),
@@ -4933,6 +5361,7 @@ def build_pure_ai_context(state_snapshot, buffers):
     if ctx["recent_high"] == 0 or ctx["recent_low"] == 0:
         logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
         return None
+    ctx = enrich_ai_context_upgrade(ctx)
     return sanitize_ai_inputs(ctx)
 
 def _structure_allows_bear_continuation(market_context: dict) -> bool:
@@ -5294,6 +5723,86 @@ def compute_horizon_outcomes_from_replay(buf: dict) -> dict:
         if key not in horizons and ticks:
             horizons[key] = round(last_unreal, 4)
     return {"mfe_pct": round(mfe, 4), "mae_pct": round(mae, 4), **horizons}
+
+
+def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
+    """Track reversal_risk_score vs 30m MFE/MAE for offline validation."""
+    if not is_research_data_collection():
+        return
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    reversal_risk = upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score")
+    if reversal_risk is None:
+        return
+    trade_id = ai.get("trade_id") or ctx.get("trade_id")
+    price = float(ctx.get("price") or state.get("price") or 0)
+    if not trade_id or price <= 0:
+        return
+    direction = str(ai.get("direction") or "LONG").upper()
+    if direction not in ("LONG", "SHORT"):
+        direction = "LONG"
+    study_id = f"rev-{trade_id}"
+    row = {
+        "schema": "reversal_study_v1",
+        "ts": utc_iso(),
+        "study_id": study_id,
+        "trade_id": trade_id,
+        "reversal_risk": int(reversal_risk),
+        "entry_stage": upgrade.get("entry_stage") or ctx.get("entry_stage"),
+        "trend_health_state": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+        "research_lane": research_lane,
+        "direction": direction,
+        "price": price,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(REVERSAL_STUDY_FILE)
+        with open(REVERSAL_STUDY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as e:
+        logger.error(f"[REVERSAL_STUDY] start log failed: {e}")
+    start_replay_buffer(
+        study_id,
+        price,
+        lane="reversal_study",
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(FIXED_MARGIN_USDT),
+        reversal_risk=int(reversal_risk),
+        source_trade_id=trade_id,
+        research_lane=research_lane,
+    )
+
+
+def finalize_reversal_study(study_id: str, buf: dict):
+    horizons = compute_horizon_outcomes_from_replay(buf)
+    mfe_30m = horizons.get("outcome_30m_pct") or horizons.get("mfe_pct")
+    mae_30m = horizons.get("mae_pct")
+    outcome = "WIN" if mfe_30m is not None and float(mfe_30m) > abs(float(mae_30m or 0)) else "LOSS"
+    row = {
+        "schema": "reversal_study_outcome_v1",
+        "ts": utc_iso(),
+        "study_id": study_id,
+        "trade_id": buf.get("source_trade_id"),
+        "reversal_risk": buf.get("reversal_risk"),
+        "future_mfe_30m": mfe_30m,
+        "future_mae_30m": mae_30m,
+        "outcome": outcome,
+        "direction": buf.get("direction"),
+        "research_lane": buf.get("research_lane"),
+        "horizons": horizons,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    try:
+        rotate_log(REVERSAL_STUDY_FILE)
+        with open(REVERSAL_STUDY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        logger.info(
+            f"[REVERSAL_STUDY] finalized study_id={study_id} risk={buf.get('reversal_risk')} "
+            f"mfe_30m={mfe_30m} mae_30m={mae_30m} outcome={outcome} [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as e:
+        logger.error(f"[REVERSAL_STUDY] outcome log failed: {e}")
+    close_replay_buffer(study_id)
 
 
 def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):
@@ -5714,11 +6223,23 @@ def spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, source_lan
     gs_eval = capture_golden_stack_eval(gs_probe, ai, edge_score, features)
     gs_probe["golden_stack_eval"] = gs_eval
     if gs_blocked:
+        gs_price = float(nz(state.get("price")) or 0)
+        if gs_price > 0:
+            start_replay_buffer(
+                gs_probe["trade_id"],
+                gs_price,
+                lane="golden_stack_reject",
+                direction=final_direction,
+                leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+                margin_usdt=float(FIXED_MARGIN_USDT),
+                block_reason=gs_reason,
+                failed_by=gs_eval.get("would_fail") or golden_stack_would_fail_list(gs_eval),
+            )
         log_golden_stack_rejection(
             gs_probe, ai, gs_eval, edge_score, block_reason=gs_reason, executed=False
         )
         logger.info(
-            f"[GOLDEN_STACK LANE] skip spawn — {gs_reason} would_fail={gs_eval.get('would_fail')} "
+            f"[GOLDEN_STACK LANE] skip spawn — {gs_reason} failed_by={gs_eval.get('would_fail')} "
             f"source={source_lane} [PIPELINE ENFORCEMENT]"
         )
         with state_lock:
@@ -5826,6 +6347,8 @@ def evaluate_signal_with_ai(
         if not ctx:
             logger.warning("[AI] Context build failed - using fallback reject [PIPELINE ENFORCEMENT]")
             return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": "CONTEXT_FALLBACK", "ai_error": True, "factors": {}, "source": "FALLBACK", "approved": False, "trade_id": raw_context.get("trade_id")}
+        if not ctx.get("ai_input_upgrade"):
+            ctx = enrich_ai_context_upgrade(ctx)
         ctx = sanitize_ai_inputs(ctx)
         ok, reason = validate_ai_features(ctx)
         if not ok:
@@ -5936,6 +6459,7 @@ def evaluate_signal_with_ai(
                 ctx, ai_result, replay_eval, temperature, trigger_reason,
                 research_lane=research_lane, shadow_only=shadow_only,
             )
+            start_reversal_study_replay(ctx, ai_result, research_lane)
         logger.info(
             f"[AI RESULT] lane={research_lane} decision={ai_result['decision']} "
             f"prob={ai_result['win_prob']} temp={temperature} "
@@ -6353,7 +6877,7 @@ def detect_event_light():
             _sole_ai_research_mode()
             and continuous_ai_research_enabled()
             and ai_cooldown_remaining_sec() == 0
-            and round(edge_score, 1) > 0.0
+            and round(edge_score, 1) >= 0.0
         ):
             event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
         else:
@@ -7903,11 +8427,14 @@ def state_monitor_loop():
                         replay_buffers.pop(tid, None)
                         continue
                     age_from_start = time.time() - buf.get("start_ts", 0)
+                    lane = buf.get("lane")
                     is_deferred_shadow = (
-                        buf.get("lane") in ("shadow", "shadow_deferred", "soft_reject")
+                        lane in ("shadow", "shadow_deferred", "soft_reject", "golden_stack_reject")
                         and buf.get("block_reason")
                     )
                     if len(buf.get("ticks", [])) >= 2000:
+                        expired_ids.append(tid)
+                    elif lane == "reversal_study" and age_from_start > REVERSAL_STUDY_TTL_SEC:
                         expired_ids.append(tid)
                     elif is_deferred_shadow and age_from_start > SHADOW_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
@@ -7922,10 +8449,19 @@ def state_monitor_loop():
             for tid in expired_ids:
                 with replay_lock:
                     buf = replay_buffers.get(tid)
-                    if buf and buf.get("lane") not in ("executed",) and buf.get("lane") != "shadow_blocked":
-                        finalize_shadow_research(tid, buf.get("block_reason") or "SHADOW_TTL")
-                    else:
-                        close_replay_buffer(tid)
+                    if not buf:
+                        continue
+                    lane = buf.get("lane")
+                    block_reason = buf.get("block_reason") or "SHADOW_TTL"
+                    buf_copy = {**buf, "ticks": list(buf.get("ticks", []))}
+                if lane == "reversal_study":
+                    finalize_reversal_study(tid, buf_copy)
+                elif lane == "golden_stack_reject":
+                    finalize_golden_stack_reject_study(tid, buf_copy)
+                elif lane not in ("executed", "shadow_blocked"):
+                    finalize_shadow_research(tid, block_reason)
+                else:
+                    close_replay_buffer(tid)
             with replay_lock:
                 oldest_id = None
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
@@ -7951,7 +8487,7 @@ def state_monitor_loop():
                     features = build_full_feature_snapshot()
                     if features:
                         edge_score = compute_edge_score(features)
-                        if round(edge_score, 1) > 0.0:
+                        if round(edge_score, 1) >= 0.0:
                             process_signal({
                                 "event_trigger": True,
                                 "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
@@ -8439,15 +8975,24 @@ Tasks:
 4) Decision: APPROVE only if your direction matches the stronger factor side
 
 Decision priority (highest weight first):
-1) market_context.market_structure — HH/HL/LH/LL swing labels and structure_score (-10 to +10)
-2) market_context.multi_tf — 15m/1h/4h trend agreement; note interpretation_note for pullbacks vs reversals
-3) market_context.trend_strength — ADX, trend_score, vwap_distance_pct (ADX>=25 = trending; favor continuation not fading)
-4) market_context.ema_alignment — price vs EMA distances and slopes (facts only; no rigid EMA-only rules)
-5) orderflow — delta, imbalance, volume_ratio, velocity
-6) funding — positioning pressure (rate per 8h; longs pay when rate > 0)
-7) sr_state / dist_to_resistance / dist_to_support — LOCATION CONTEXT ONLY (never sole reason to fade)
+1) Trend Direction — market_context.multi_tf agreement, bull_score vs bear_score, base trend_state
+2) Trend Health — trend_health_state, weaken_signals, bull_score_change_15m, bear_score_change_15m, trend_health_detail.interpretation (e.g. "Bullish but weakening" is NOT the same as "Bullish")
+3) Entry Timing — entry_stage (EARLY / MID / LATE); LATE often means chasing; EARLY favors pullback completion
+4) Reversal Risk — reversal_risk_score (0-100); high score = elevated fade/reversal risk even if trend direction looks good
+5) Micro Structure — micro_structure_confirmed, higher_low_detected, lower_high_detected, pivot_count, distance_to_micro_support/resistance, liquidity_sweep_high/low (sweep + reject is different from normal pullback)
+6) Trade Quality — quality_score_components (structure, micro_sr, trend, spread, edge) — inspect components, not only quality_score
+7) Regime Memory — regime_change_count_60m, trend_state_last_3_cycles, last_3_signals, market_regime_tracker (TRENDING/WEAKENING/TRANSITION/RANGE/COMPRESSION/EXPANSION + duration_sec)
+8) market_context.market_structure — HH/HL/LH/LL swing labels and structure_score (-10 to +10)
+9) market_context.trend_strength — ADX, trend_score, vwap_distance_pct
+10) orderflow — delta, imbalance, volume_ratio, velocity
+11) funding — positioning pressure (rate per 8h; longs pay when rate > 0)
+12) sr_state / dist_to_resistance / dist_to_support — LOCATION CONTEXT ONLY (never sole reason to fade)
 
 Rules:
+- REJECT or NO_TRADE when entry_stage=LATE and reversal_risk_score>=60 unless micro_structure_confirmed and trend health is intact
+- REJECT when trend_health_state ends with _WEAKENING and reversal_risk_score>=50 unless liquidity sweep confirms continuation
+- REJECT when regime_change_count_60m>=3 and entry_stage is not EARLY (chop environment)
+- Do NOT APPROVE solely because bull_score > bear_score — check health, timing, and reversal risk first
 - Do NOT assume any predefined strategy or invert signals
 - Do NOT infer hidden variables
 - If multi_tf.agreement is CONFLICTED, prefer NO_TRADE or lower win probability unless orderflow strongly confirms one side
@@ -8541,7 +9086,7 @@ def research_wipe_file_paths():
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
-        GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE,
+        GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
@@ -8632,8 +9177,6 @@ APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
 SOFT_REJECT_SHADOW_FILE = "soft_reject_shadow.jsonl"
 GOLDEN_STACK_REJECTIONS_FILE = "golden_stack_rejections.jsonl"
-APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
-NEAR_MISS_FILE = "near_miss.jsonl"
 TREND_HEALTH_CSV_FILE = "trend_health.csv"
 _last_trend_health_csv_ts = 0.0
 EDGE_CENSUS_FILE = "edge_census.jsonl"
@@ -9937,7 +10480,6 @@ def api_state():
         snapshot["server_ts"] = utc_iso()
         if snapshot.get("price") is None:
             snapshot["price"] = None
-        reconcile_stale_signals()
         sync_cooldown_debug_state()
         branding = build_dashboard_display(snapshot)
         snapshot.update(branding)
@@ -9983,7 +10525,7 @@ def api_state():
                 "trigger": s.get("trigger", "BASE"),
                 "signal_price": s.get("signal_price")
             })
-        exposure_count = get_active_signal_count()
+        exposure_count = max(len(active_list), len(live_ids))
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
@@ -10849,6 +11391,7 @@ def log_golden_stack_rejection(
             "edge_score": edge_score if edge_score is not None else signal.get("edge_score_at_entry"),
             "golden_stack_pass": bool(gs_eval.get("golden_stack_pass")),
             "would_fail": gs_eval.get("would_fail") or golden_stack_would_fail_list(gs_eval),
+            "failed_by": gs_eval.get("would_fail") or golden_stack_would_fail_list(gs_eval),
             "would_fail_mtf": gs_eval.get("would_fail_mtf"),
             "would_fail_spread": gs_eval.get("would_fail_spread"),
             "would_fail_structure": gs_eval.get("would_fail_structure"),
@@ -10878,12 +11421,29 @@ def log_golden_stack_rejection(
         logger.error(f"[GS_REJECTION] log failed: {e}")
 
 
+def finalize_golden_stack_reject_study(trade_id: str, buf: dict):
+    """Close GS reject replay with counterfactual MFE/MAE for optimizer studies."""
+    if not trade_id or not buf:
+        return
+    horizons = compute_horizon_outcomes_from_replay(buf)
+    post_block = compute_post_block_research(buf, {"filled": False})
+    merged = {**post_block, **horizons}
+    log_golden_stack_rejection_outcome(
+        trade_id,
+        post_block_research=merged,
+        executed=False,
+        failed_by=buf.get("failed_by"),
+    )
+    close_replay_buffer(trade_id)
+
+
 def log_golden_stack_rejection_outcome(
     trade_id: str,
     post_block_research: dict = None,
     executed: bool = False,
     realized_mfe: float = None,
     realized_mae: float = None,
+    failed_by: list = None,
 ):
     """Append counterfactual MFE/MAE after replay TTL for golden stack analysis."""
     if not trade_id:
@@ -10894,8 +11454,10 @@ def log_golden_stack_rejection_outcome(
         "ts": utc_iso(),
         "trade_id": trade_id,
         "executed": executed,
-        "future_mfe": pb.get("post_block_max_favorable_pct", realized_mfe),
-        "future_mae": pb.get("post_block_max_adverse_pct", realized_mae),
+        "failed_by": failed_by or [],
+        "future_mfe": pb.get("post_block_max_favorable_pct", realized_mfe) or pb.get("mfe_pct"),
+        "future_mae": pb.get("post_block_max_adverse_pct", realized_mae) or pb.get("mae_pct"),
+        "outcome_30m_pct": pb.get("outcome_30m_pct"),
         "post_block_duration_sec": pb.get("post_block_duration_sec"),
         "post_block_tick_count": pb.get("post_block_tick_count"),
         "bot_version": EXECUTION_FIX_VERSION,
@@ -11810,6 +12372,8 @@ def _ensure_flask_port_available(port: int = None):
     if port is None:
         port = DASHBOARD_PORT
     """Fail fast if another process already serves the dashboard (prevents stale dual-bot state)."""
+    if os.name != "nt":
+        return
     if not _port_is_open("127.0.0.1", port):
         return
     try:
@@ -11960,7 +12524,7 @@ def heartbeat_loop():
         if _sole_ai_research_mode():
             logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
             event = detect_event_light()
-            if event and round(event.get("edge_score", 0), 1) > 0:
+            if event and round(event.get("edge_score", 0), 1) >= 0:
                 process_signal(event)
             continue
         logger.info("[HEARTBEAT] Periodic pipeline check (no direct AI call) [PIPELINE ENFORCEMENT]")
