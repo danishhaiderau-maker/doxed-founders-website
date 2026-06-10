@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync btc-conservative-agent to v88 dashboard lane display (a813621).
+Sync btc-conservative-agent to v89 remove FREE_RANGE block (15e6453).
 
 ## Last Activity
 
