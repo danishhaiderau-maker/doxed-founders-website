@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync btc-conservative-agent v10.9.452-v96 research datasets.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
