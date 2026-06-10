@@ -108,6 +108,19 @@ def safe_num(x):
         logger.debug("[SAFE NUM] conversion failed - returning None [PIPELINE ENFORCEMENT]")
         return None
 
+def _ascii_fold_csv_text(s: str) -> str:
+    """Normalize common unicode in AI comments so Windows CSV writes stay safe."""
+    repl = {
+        "\u2192": "->", "\u2190": "<-", "\u2265": ">=", "\u2264": "<=",
+        "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"',
+    }
+    out = s
+    for src, dst in repl.items():
+        out = out.replace(src, dst)
+    return out
+
+
 def safe_csv_row(row: dict) -> dict:
     clean = {}
     for k, v in row.items():
@@ -115,6 +128,8 @@ def safe_csv_row(row: dict) -> dict:
             clean[k] = round(v, 6) if not math.isnan(v) else ""
         elif v is None:
             clean[k] = ""
+        elif isinstance(v, str):
+            clean[k] = _ascii_fold_csv_text(v)
         else:
             clean[k] = v
     return clean
@@ -821,6 +836,7 @@ def get_exit_config_snapshot() -> dict:
         "thesis_early_decay_delta": THESIS_EARLY_DECAY_DELTA,
         "early_fail_pct_threshold": EARLY_FAIL_PCT_THRESHOLD,
         "type_a_stall_enabled": TYPE_A_STALL_ENABLED,
+        "type_a_stall_min_age_sec": TYPE_A_STALL_MIN_AGE_SEC,
         "type_a_stall_min_candles": TYPE_A_STALL_MIN_CANDLES,
         "type_a_stall_max_mfe_pct": TYPE_A_STALL_MAX_MFE_PCT,
         "trend_weakening_enabled": TREND_WEAKENING_ENABLED,
@@ -958,19 +974,25 @@ def check_type_a_stall_exit(pos: dict, unreal_pct: float, now: float) -> bool:
     entry_ts = float(pos.get("entry_ts") or 0)
     if entry_ts <= 0:
         return False
-    cur_candle = int((now - entry_ts) // CANDLE_INTERVAL_SEC) + 1
-    if cur_candle < TYPE_A_STALL_MIN_CANDLES:
+    age_sec = now - entry_ts
+    if age_sec < TYPE_A_STALL_MIN_AGE_SEC:
         return False
     if peak >= TYPE_A_STALL_MAX_MFE_PCT:
         return False
     direction = str(pos.get("dir") or "").upper()
     fs = state.get("feature_snapshot") or {}
-    if not _type_a_stall_weak_tape(direction, fs):
+    if unreal_pct < 0:
+        stall_reason = "unreal_negative"
+    elif _type_a_stall_weak_tape(direction, fs):
+        stall_reason = "weak_tape"
+    else:
         return False
+    cur_candle = int(age_sec // CANDLE_INTERVAL_SEC) + 1
     logger.info(
-        f"[EXIT TRIGGER] TYPE_A_STALL trade_id={pos.get('trade_id')} candle={cur_candle} "
-        f"peak={peak:.1f}% unreal={unreal_pct:.1f}% vol_ratio={fs.get('volume_ratio')} "
-        f"delta={fs.get('delta')} vel={fs.get('velocity')} [PIPELINE ENFORCEMENT]"
+        f"[EXIT TRIGGER] TYPE_A_STALL trade_id={pos.get('trade_id')} reason={stall_reason} "
+        f"age_min={age_sec/60:.1f} candle={cur_candle} peak={peak:.1f}% unreal={unreal_pct:.1f}% "
+        f"vol_ratio={fs.get('volume_ratio')} delta={fs.get('delta')} vel={fs.get('velocity')} "
+        f"[PIPELINE ENFORCEMENT]"
     )
     close_position(pos, "TYPE_A_STALL")
     return True
@@ -1028,7 +1050,7 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
-        if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
+        if THESIS_MFE_PROTECT_PCT > 0 and unreal_pct >= THESIS_MFE_PROTECT_PCT:
             logger.info(
                 f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
                 f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
@@ -1224,9 +1246,12 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
         return None, f"CONVICTION_SPREAD_LOW_{spread}"
     mc = ctx.get("market_context") or {}
     adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
-    if adx < ADX_BLOCK_NEW_ENTRY:
+    if golden_stack_enabled():
+        if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
+            return None, f"ADX_BAND_{adx:.1f}"
+    elif adx < ADX_BLOCK_NEW_ENTRY:
         return None, f"ADX_NO_ENTRY_{adx:.1f}"
-    penalty_mult = spread_penalty_margin_mult(spread)
+    penalty_mult = 1.0 if golden_stack_enabled() else spread_penalty_margin_mult(spread)
     if FLAT_MARGIN_EVERY_TRADE:
         margin = round(float(FIXED_MARGIN_USDT) * penalty_mult, 4)
         if spread_penalty_active(spread):
@@ -1284,6 +1309,129 @@ def evaluate_evidence_entry_filter(
         if direction in ("LONG", "SHORT") and mom > MOMENTUM_CHOP_BLOCK_ABOVE:
             return True, f"{direction}_MOMENTUM_CHOP_{mom:.2f}"
     return False, None
+
+def golden_stack_enabled() -> bool:
+    with state_lock:
+        return bool(state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED))
+
+def capture_golden_stack_eval(signal: dict, ai: dict, edge_score: float, features: dict = None) -> dict:
+    """Frozen v86 golden-stack check breakdown for analyzer replay."""
+    direction = str(signal.get("final_direction") or ai.get("direction") or "").upper()
+    ctx = signal.get("context") or {}
+    features = features or signal.get("features") or {}
+    mc = ctx.get("market_context") or state.get("market_context") or {}
+    mtf = (mc.get("multi_tf") or {}) if isinstance(mc.get("multi_tf"), dict) else {}
+    ts = (mc.get("trend_strength") or {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    ms = (mc.get("market_structure") or {}) if isinstance(mc.get("market_structure"), dict) else {}
+    adx = float(ts.get("adx") or 0)
+    mom = round(_compute_momentum_metric(features), 4)
+    spread = int(compute_directional_spread(direction, ai))
+    struct = float(ms.get("structure_score") or 0)
+    agreement = str(mtf.get("agreement") or "")
+    entry_mode = str(signal.get("entry_mode") or "")
+    dist_pct = signal.get("dist_to_ema_hybrid_pct")
+    regime = capture_entry_regime_snapshot(signal, features)
+    funding_bucket = regime.get("funding_bucket") or _funding_bucket(state.get("funding") or {})
+    checks = {
+        "enabled": golden_stack_enabled(),
+        "chop_max": GOLDEN_STACK_CHOP_MAX,
+        "mom": mom,
+        "chop_pass": mom <= GOLDEN_STACK_CHOP_MAX + 1e-9,
+        "adx": adx,
+        "adx_block_band": GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH,
+        "adx_pass": not (GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH),
+        "mtf_agreement": agreement,
+        "mtf_pass": (direction != "SHORT") or agreement == "BEAR_ALIGNED",
+        "structure_score": struct,
+        "struct_pass": (direction != "SHORT") or struct <= GOLDEN_STACK_SHORT_STRUCT_MAX,
+        "spread": spread,
+        "spread_pass": GOLDEN_STACK_SPREAD_MIN <= spread <= GOLDEN_STACK_SPREAD_MAX,
+        "entry_mode": entry_mode,
+        "ema_hybrid_required": entry_mode == ENTRY_MODE_EMA_HYBRID,
+        "dist_to_ema_hybrid_pct": dist_pct,
+        "ema_dist_pass": dist_pct is None or float(dist_pct) <= GOLDEN_STACK_EMA_DIST_MAX_PCT,
+        "ema_dist_ideal": dist_pct is not None and float(dist_pct) <= GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT,
+        "funding_bucket": funding_bucket,
+        "funding_pass": funding_bucket in ("NEUTRAL", "LOW_NEG", "LOW_POS") or not GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING,
+        "session_utc": regime.get("session_utc"),
+        "vol_bucket": regime.get("volatility_bucket"),
+        "sr_state": regime.get("sr_state"),
+    }
+    checks["golden_stack_pass"] = all(
+        checks[k] for k in (
+            "chop_pass", "adx_pass", "mtf_pass", "struct_pass", "spread_pass",
+            "ema_hybrid_required", "ema_dist_pass", "funding_pass",
+        )
+    )
+    return checks
+
+def evaluate_golden_stack_filter(
+    direction: str, ctx: dict, ai: dict, features: dict, edge_score: float, signal: dict
+) -> tuple:
+    """v86 combined gate stack. Edge/AI thresholds intentionally excluded (dashboard)."""
+    if not direction:
+        return False, None
+    features = features or {}
+    mc = ctx.get("market_context") or state.get("market_context") or {}
+    mtf = (mc.get("multi_tf") or {}) if isinstance(mc.get("multi_tf"), dict) else {}
+    ts = (mc.get("trend_strength") or {}) if isinstance(mc.get("trend_strength"), dict) else {}
+    ms = (mc.get("market_structure") or {}) if isinstance(mc.get("market_structure"), dict) else {}
+    adx = float(ts.get("adx") or 0)
+    mom = _compute_momentum_metric(features)
+    if mom > GOLDEN_STACK_CHOP_MAX:
+        return True, f"MOMENTUM_CHOP_{mom:.2f}"
+    if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
+        return True, f"ADX_BAND_{adx:.1f}"
+    agreement = str(mtf.get("agreement") or "")
+    if direction == "SHORT" and agreement != "BEAR_ALIGNED":
+        return True, f"SHORT_REQUIRES_BEAR_MTF_{agreement or 'UNKNOWN'}"
+    struct = float(ms.get("structure_score") or 0)
+    if direction == "SHORT" and struct > GOLDEN_STACK_SHORT_STRUCT_MAX:
+        return True, f"STRUCTURE_{struct:.1f}"
+    spread = int(compute_directional_spread(direction, ai))
+    if spread < GOLDEN_STACK_SPREAD_MIN:
+        return True, f"SPREAD_LOW_{spread}"
+    if spread > GOLDEN_STACK_SPREAD_MAX:
+        return True, f"SPREAD_HIGH_{spread}"
+    entry_mode = str(signal.get("entry_mode") or "")
+    if entry_mode != ENTRY_MODE_EMA_HYBRID:
+        return True, f"ENTRY_MODE_{entry_mode or 'UNKNOWN'}"
+    dist_pct = signal.get("dist_to_ema_hybrid_pct")
+    if dist_pct is not None and float(dist_pct) > GOLDEN_STACK_EMA_DIST_MAX_PCT:
+        return True, f"EMA_DIST_{float(dist_pct):.3f}"
+    if GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING:
+        funding_bucket = _funding_bucket(state.get("funding") or {})
+        if funding_bucket == "HIGH_POS":
+            return True, f"FUNDING_{funding_bucket}"
+    return False, None
+
+def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
+    """Return True if process_signal should return after a golden-stack gate hit."""
+    trade_id = signal.get("trade_id")
+    tag = f"GOLDEN_STACK_{reason}"
+    if golden_stack_enabled():
+        logger.info(f"[GOLDEN_STACK] BLOCK {reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+        log_blocked_signal(signal, ai, tag)
+        log_pipeline_event("POST_AI", "BLOCKED", tag, trade_id, edge_score, force=True)
+        exit_pipeline(signal, ai, tag)
+        with state_lock:
+            state["debug_state"]["last_block_reason"] = tag
+            state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+            state["debug_state"]["skip_reason"] = tag
+        update_debug_state_always(tag, {"edge": edge_score, "golden_stack": True})
+        return True
+    if _sole_ai_research_mode():
+        _research_log_would_block(signal, ai, tag, edge_score)
+        return False
+    logger.info(f"[GOLDEN_STACK] BLOCK {reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+    log_blocked_signal(signal, ai, tag)
+    exit_pipeline(signal, ai, tag)
+    with state_lock:
+        state["debug_state"]["last_block_reason"] = tag
+        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+        state["debug_state"]["skip_reason"] = tag
+    update_debug_state_always(tag, {"edge": edge_score, "golden_stack": True})
+    return True
 
 def risk_trading_allowed() -> bool:
     now = time.time()
@@ -1750,7 +1898,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v8.4-ema-hybrid-entry-2026-06-09"
+ANALYZER_SYNC_ID = "v8.6-golden-stack-gates-2026-06-10"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2372,9 +2520,9 @@ CANDLE_INTERVAL_SEC = 15 * 60
 # --- v6 exit / risk (evidence-driven: MFE positive, TIME_EXIT losses) ---
 FIXED_TIME_EXIT_ENABLED = False
 EMERGENCY_MAX_HOLD_SEC = 24 * 3600
-# v82: earlier first protection — replay-backed 10→6 vs legacy 12→8
+# v86: earlier first rung 8→5 (replay-backed); was v82 10→6
 TRAIL_LADDER = [
-    (10, 6), (15, 10), (20, 15), (25, 18), (40, 30),
+    (8, 5), (15, 10), (20, 15), (25, 18), (40, 30),
     (60, 50), (80, 60), (100, 80),
 ]
 POSITION_MONITOR_INTERVAL_SEC = 1.0
@@ -2386,11 +2534,12 @@ LADDER_AUDIT_LOG_INTERVAL_SEC = 0.25
 ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
 ENTRY_MODE_EMA_HYBRID = "EMA_HYBRID_LIMIT"
 EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
-# v83 Tier B: Type-A stall, trend weakening, spread penalty
+# v85 P0: time-based Type-A stall (v83 candle gate was too slow for sim session)
 TYPE_A_STALL_ENABLED = True
-TYPE_A_STALL_MIN_CANDLES = 3
-TYPE_A_STALL_MAX_MFE_PCT = 3.0
-TYPE_A_STALL_WEAK_VOLUME_RATIO = 0.35
+TYPE_A_STALL_MIN_AGE_SEC = 8 * 60
+TYPE_A_STALL_MIN_CANDLES = 3  # legacy reference / analyzer label
+TYPE_A_STALL_MAX_MFE_PCT = 5.0
+TYPE_A_STALL_WEAK_VOLUME_RATIO = 0.5
 TYPE_A_STALL_WEAK_DELTA = 0.0
 TREND_WEAKENING_ENABLED = True
 TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
@@ -2414,8 +2563,8 @@ THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
 THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -28.0  # v82: wider cut — replay showed -18% bleeding Type-B recoveries
-THESIS_MFE_PROTECT_PCT = 8.0  # v82: skip thesis fast-cut when peak MFE >= 8% margin
+THESIS_FAST_EXIT_UNREAL_PCT = -20.0  # v85: replay plateau -18..-20%; was -28%
+THESIS_MFE_PROTECT_PCT = 8.0  # v85: skip thesis fast-cut only while unreal still >= 8% margin
 ADX_BLOCK_NEW_ENTRY = 15.0
 ADX_HALF_SIZE_BELOW = 18.0
 ADX_HALF_SIZE_MULT = 0.5
@@ -2424,12 +2573,26 @@ LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard overri
 AI_THRESHOLD_MIN = 0
 AI_THRESHOLD_MAX = 100
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 2.0
-MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference threshold — sweeps use this; live gate disabled when FREE_RUN below
+MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
 RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
 RESEARCH_FREE_RUN_DISABLE_CHOP_GATE = True
 RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN = True
-RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; gates log-only
+RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; gates log-only unless golden_stack_enabled
+# v86 Golden Stack — dashboard toggle; edge/AI thresholds remain dashboard-controlled
+GOLDEN_STACK_DEFAULT_ENABLED = True
+GOLDEN_STACK_CHOP_MAX = 0.8
+GOLDEN_STACK_ADX_MIN = 15.0
+GOLDEN_STACK_ADX_ALT_MAX = 20.0
+GOLDEN_STACK_ADX_BLOCK_LOW = 25.0
+GOLDEN_STACK_ADX_BLOCK_HIGH = 30.0
+GOLDEN_STACK_SPREAD_MIN = 3
+GOLDEN_STACK_SPREAD_MAX = 7
+GOLDEN_STACK_SHORT_STRUCT_MAX = -5.0
+GOLDEN_STACK_EMA_DIST_MAX_PCT = 0.5
+GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT = 0.3
+GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING = True
+GOLDEN_STACK_PREFER_NEUTRAL_FUNDING = True
 RESEARCH_PERIODIC_AI_INTERVAL_SEC = 300  # align with AI_COOLDOWN_SECONDS
 BLOCK_FREE_RANGE_ENTRIES = True
 EDGE_DEAD_ZONE_LOW = 4.92
@@ -2568,7 +2731,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.437-v84-ema-hybrid-entry"
+EXECUTION_FIX_VERSION = "v10.9.439-v86-golden-stack-gates"
 
 
 def csv_research_meta() -> dict:
@@ -2625,6 +2788,7 @@ state = {
     "force_ai_every_signal": False,
     "debug_enabled": False,
     "fresh_collection_mode": False,
+    "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
     "last_fresh_reset_ts": 0.0,
     "last_fresh_reset_summary": "",
     "daily_pnl_usd": 0.0,
@@ -3493,26 +3657,26 @@ def dynamic_csv_writer(filename, row):
     try:
         file_exists = os.path.exists(filename)
         if not file_exists:
-            with open(filename, "w", newline="") as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=list(row.keys()))
                 writer.writeheader()
                 writer.writerow(safe_csv_row(row))
             return
-        with open(filename, "r") as f:
+        with open(filename, "r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             existing = reader.fieldnames or []
         new_fields = list(set(existing) | set(row.keys()))
         if set(new_fields) != set(existing):
-            with open(filename, "r") as f:
+            with open(filename, "r", encoding="utf-8", errors="replace") as f:
                 old_rows = list(csv.DictReader(f))
-            with open(filename, "w", newline="") as f:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=new_fields)
                 writer.writeheader()
                 for old in old_rows:
                     writer.writerow(old)
                 writer.writerow(safe_csv_row(row))
         else:
-            with open(filename, "a", newline="") as f:
+            with open(filename, "a", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=existing)
                 writer.writerow(safe_csv_row(row))
         logger.info(f"[CSV WRITE] {filename} row added - edge={row.get('edge_score', 'N/A')} experiment={row.get('experiment_tag','NONE')} stage={row.get('stage','N/A')} [PIPELINE ENFORCEMENT]")
@@ -5183,17 +5347,49 @@ def execute_simulated_order(signal):
         order["fee_type"] = "TAKER"
         fill_order(order)
         logger.info(f"[SIM] Instant fill (pullback=0%) at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-    elif defer_instant_fill:
+    elif defer_instant_fill and entry_mode != ENTRY_MODE_EMA_HYBRID:
         order["await_confirm"] = True
         logger.info(f"[SIM] Pullback limit pending confirm trade_id={signal.get('trade_id')} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]")
+    elif defer_instant_fill and entry_mode == ENTRY_MODE_EMA_HYBRID:
+        logger.info(
+            f"[SIM] EMA_HYBRID_LIMIT — skip await_confirm trade_id={signal.get('trade_id')} "
+            f"limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]"
+        )
+    order["max_price_since_order"] = float(price)
+    order["min_price_since_order"] = float(price)
     pipeline_state_sync()
     return True
 
+def _update_pending_order_price_extremes(price: float):
+    if price is None or price <= 0:
+        return
+    with trade_lock:
+        for order in pending_orders:
+            if order.get("status") != "PENDING":
+                continue
+            mx = order.get("max_price_since_order")
+            if mx is None:
+                order["max_price_since_order"] = float(price)
+                order["min_price_since_order"] = float(price)
+            else:
+                order["max_price_since_order"] = max(float(mx), float(price))
+                order["min_price_since_order"] = min(float(order.get("min_price_since_order", price)), float(price))
+
+def _pending_limit_touched(order: dict, price: float) -> bool:
+    limit = float(order["limit_price"])
+    max_p = float(order.get("max_price_since_order", price) or price)
+    min_p = float(order.get("min_price_since_order", price) or price)
+    if order["side"] == "buy":
+        return min_p <= limit or price <= limit
+    if order["side"] == "sell":
+        return max_p >= limit or price >= limit
+    return False
+
 def process_pending_orders():
-    now = time.time()
     price = state.get("price")
     if price is None or price <= 0:
         return
+    _update_pending_order_price_extremes(price)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
@@ -5207,16 +5403,13 @@ def process_pending_orders():
                 if direction == "LONG" and vel < -MOMENTUM_ALIGN_EPS and r1 < -MOMENTUM_ALIGN_EPS:
                     continue
                 order.pop("await_confirm", None)
-            if order["side"] == "buy" and price <= order["limit_price"]:
-                order["fill_price"] = float(price)
-                order["limit_price"] = float(price)
-                order["status"] = "FILLED"
-                fill_order(order)
-            elif order["side"] == "sell" and price >= order["limit_price"]:
-                order["fill_price"] = float(price)
-                order["limit_price"] = float(price)
-                order["status"] = "FILLED"
-                fill_order(order)
+            if not _pending_limit_touched(order, price):
+                continue
+            fill_px = float(order["limit_price"])
+            order["fill_price"] = fill_px
+            order["limit_price"] = fill_px
+            order["status"] = "FILLED"
+            fill_order(order)
 
 def fill_order(order):
     planned = order.get("planned_limit_price") or order.get("signal_price")
@@ -5781,7 +5974,27 @@ def process_signal(event: dict):
             signal["_finalized"] = False
             signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
             compute_ema_hybrid_entry(signal)
+            signal["golden_stack_enabled_at_entry"] = golden_stack_enabled()
+            signal["golden_stack_eval"] = capture_golden_stack_eval(
+                signal, ai, edge_score, signal.get("features")
+            )
             begin_approve_research(signal, ai, pipeline_eff_thr)
+            gs_blocked, gs_reason = evaluate_golden_stack_filter(
+                final_direction,
+                signal.get("context", {}) or ctx,
+                ai,
+                signal.get("features"),
+                edge_score,
+                signal,
+            )
+            if gs_blocked and _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
+                patch_signal_snapshot_outcome(
+                    signal.get("trade_id"),
+                    executed=False,
+                    block_reason=f"GOLDEN_STACK_{gs_reason}",
+                )
+                state["last_pipeline_stage"] = "IDLE"
+                return
 
             if not signal.get("final_direction"):
                 raise RuntimeError("PIPELINE BREAK: AI returned no direction")
@@ -6161,10 +6374,16 @@ def _process_ws_trade_tick(trade: dict):
     if not state.get("ws_ready"):
         state["ws_ready"] = True
         logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
+    _update_pending_order_price_extremes(price)
     with trade_lock:
         has_open = any(
             isinstance(p, dict) and p.get("status") == "OPEN" for p in open_positions
         )
+        has_pending = any(
+            isinstance(o, dict) and o.get("status") == "PENDING" for o in pending_orders
+        )
+    if has_pending:
+        process_pending_orders()
     if has_open:
         process_positions()
 
@@ -7257,6 +7476,7 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleBlockFreeRange()">Block FREE_RANGE entries: <span id="blockFreeRangeBtn">ON</span></button>
+    <button onclick="toggleGoldenStack()">Golden Stack gates: <span id="goldenStackBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
@@ -7559,6 +7779,10 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_block_free_range_entries');
       refresh();
     }
+    async function toggleGoldenStack() {
+      await post('/api/toggle_golden_stack');
+      refresh();
+    }
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
       await post('/api/toggle_debug', {enabled: cur});
@@ -7650,6 +7874,8 @@ DASHBOARD_JS = """(function () {
           if (d.bot_version) syncTxt += ' | ' + d.bot_version;
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           if (d.block_free_range_entries === false) syncTxt += ' | FREE_RANGE block OFF';
+          if (d.golden_stack_enabled === false) syncTxt += ' | Golden Stack OFF';
+          else syncTxt += ' | Golden Stack ON';
           inst.innerText = syncTxt;
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
@@ -7789,6 +8015,12 @@ DASHBOARD_JS = """(function () {
           const bfr = d.block_free_range_entries !== false;
           blockFrBtn.innerText = `Block FREE_RANGE entries ${bfr ? 'ON' : 'OFF'}`;
           blockFrBtn.style.backgroundColor = bfr ? '#10b981' : '#ef4444';
+        }
+        const gsBtn = document.getElementById('goldenStackBtn');
+        if (gsBtn) {
+          const gs = d.golden_stack_enabled !== false;
+          gsBtn.innerText = gs ? 'ON' : 'OFF';
+          gsBtn.style.backgroundColor = gs ? '#10b981' : '#ef4444';
         }
         const debugBtn = document.getElementById('debugToggle');
         if (debugBtn) {
@@ -8316,6 +8548,19 @@ def toggle_block_free_range_entries():
         state["block_free_range_entries"] = not state.get("block_free_range_entries", BLOCK_FREE_RANGE_ENTRIES)
         save_persistent_config()
     return jsonify({"block_free_range_entries": state["block_free_range_entries"]})
+
+@app.route('/api/toggle_golden_stack', methods=['POST'])
+def toggle_golden_stack():
+    with state_lock:
+        state["golden_stack_enabled"] = not bool(
+            state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[GOLDEN_STACK] toggled {'ON' if state['golden_stack_enabled'] else 'OFF'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"golden_stack_enabled": state["golden_stack_enabled"]})
 
 @app.route('/api/toggle_debug', methods=['POST'])
 def toggle_debug():
@@ -8995,6 +9240,8 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "setup_type": signal.get("setup_type") or classify_setup(feat),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "golden_stack_enabled": signal.get("golden_stack_enabled_at_entry", golden_stack_enabled()),
+            "golden_stack_eval": signal.get("golden_stack_eval"),
         }
         if feat:
             snapshot["entry_features"] = {
@@ -9203,10 +9450,12 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
+        mfe_protect = float(exit_config.get("thesis_mfe_protect_pct", THESIS_MFE_PROTECT_PCT))
         if peak < trail_ladder[0][0] and unreal <= fast_cut:
-            exit_reason = "THESIS_FAST_CUT"
-            exit_margin_pct = fast_cut
-            break
+            if not (mfe_protect > 0 and unreal >= mfe_protect):
+                exit_reason = "THESIS_FAST_CUT"
+                exit_margin_pct = fast_cut
+                break
         if unreal >= TP_EMERGENCY_MARGIN_PCT:
             exit_reason = "TAKE_PROFIT"
             exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
@@ -9817,7 +10066,7 @@ def _persistent_config_keys():
         "block_free_range_entries", "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
-        "edge_range_preset", "fresh_collection_mode",
+        "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -10349,10 +10598,18 @@ def main():
         f"[PHASE-C] factor_gate={PHASE_C_FACTOR_GATE_ENABLED} min_margin={MIN_FACTOR_SCORE_MARGIN} [PIPELINE ENFORCEMENT]"
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
-    if RESEARCH_AI_SOLE_AUTHORITY:
+    if golden_stack_enabled():
+        logger.warning(
+            f"[V86 GOLDEN_STACK] ENFORCED — chop<={GOLDEN_STACK_CHOP_MAX} | SHORT BEAR_ALIGNED | "
+            f"struct<={GOLDEN_STACK_SHORT_STRUCT_MAX} | spread {GOLDEN_STACK_SPREAD_MIN}-{GOLDEN_STACK_SPREAD_MAX} | "
+            f"EMA_HYBRID dist<={GOLDEN_STACK_EMA_DIST_MAX_PCT}% | block ADX {GOLDEN_STACK_ADX_BLOCK_LOW}-"
+            f"{GOLDEN_STACK_ADX_BLOCK_HIGH} | ladder {TRAIL_LADDER[0][0]}→{TRAIL_LADDER[0][1]}% "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    elif RESEARCH_AI_SOLE_AUTHORITY:
         logger.warning(
             f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
-            f"{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s | post-AI gates log WOULD_BLOCK_* only "
+            f"{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
             f"[PIPELINE ENFORCEMENT]"
         )
     if RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
