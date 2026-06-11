@@ -32,6 +32,7 @@ exit forensics, TIME_EXIT deep dive, edge×structure×MTF combos, factor-gate fu
 import pandas as pd
 import numpy as np
 import time
+from collections import defaultdict
 from datetime import datetime
 import os
 import json
@@ -58,13 +59,13 @@ NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
 # Must match bybit_bot.py EXECUTION_FIX_VERSION + ANALYZER_SYNC_ID when changing research CSV contract.
-EXPECTED_BOT_VERSION = "v10.9.452-v96-research-datasets"
+EXPECTED_BOT_VERSION = "v1.0.3-execution-insights"
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
-ANALYZER_SYNC_ID = "v9.6-research-datasets-2026-06-12"
+ANALYZER_SYNC_ID = "v9.10-closed-loop-2026-06-11"
 BOT_VERSION = EXPECTED_BOT_VERSION
-ANALYZER_VERSION = "v96-research-datasets"
+ANALYZER_VERSION = "v101-closed-loop"
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
 AI_REASON_RESEARCH_FILE = "ai_reason_research.jsonl"
 AI_CONFIDENCE_CALIBRATION_FILE = "ai_confidence_calibration.jsonl"
@@ -1222,6 +1223,130 @@ def _load_jsonl_by_trade_id(path):
     except Exception as e:
         print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return rows
+
+
+def _load_jsonl_rows(path):
+    """Load all rows from a JSONL research dataset."""
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return rows
+
+
+def load_reversal_study():
+    """Load reversal_study.jsonl (risk score vs horizon outcomes)."""
+    return _load_jsonl_rows(REVERSAL_STUDY_FILE)
+
+
+def load_ai_reason_research():
+    """Load ai_reason_research.jsonl (reasons_for/against + outcomes)."""
+    return _load_jsonl_rows(AI_REASON_RESEARCH_FILE)
+
+
+def load_ai_confidence_calibration():
+    """Load ai_confidence_calibration.jsonl (prob bucket vs actual)."""
+    return _load_jsonl_rows(AI_CONFIDENCE_CALIBRATION_FILE)
+
+
+def load_trade_lifecycle():
+    """Load trade_lifecycle.jsonl (entry stage, regime, trend health)."""
+    return _load_jsonl_rows(TRADE_LIFECYCLE_FILE)
+
+
+def load_research_jsonl_datasets():
+    return {
+        "reversal_study": load_reversal_study(),
+        "ai_reason_research": load_ai_reason_research(),
+        "ai_confidence_calibration": load_ai_confidence_calibration(),
+        "trade_lifecycle": load_trade_lifecycle(),
+    }
+
+
+def research_jsonl_summary(datasets=None):
+    """Summarize v96+ JSONL research datasets for offline validation."""
+    print("\n=== RESEARCH JSONL DATASETS (reversal / AI reason / calibration / lifecycle) ===")
+    if datasets is None:
+        datasets = load_research_jsonl_datasets()
+    path_map = {
+        "reversal_study": REVERSAL_STUDY_FILE,
+        "ai_reason_research": AI_REASON_RESEARCH_FILE,
+        "ai_confidence_calibration": AI_CONFIDENCE_CALIBRATION_FILE,
+        "trade_lifecycle": TRADE_LIFECYCLE_FILE,
+    }
+    for label, rows in datasets.items():
+        path = path_map.get(label, "")
+        size = os.path.getsize(path) if path and os.path.exists(path) else 0
+        print(f"  {label}: n={len(rows)} size={size} {PIPELINE_ENFORCEMENT_TAG}")
+
+    reversal = datasets.get("reversal_study") or []
+    outcomes = [r for r in reversal if r.get("phase") != "start"]
+    if outcomes:
+        wins = sum(1 for r in outcomes if str(r.get("result", "")).upper() == "WIN")
+        print(f"  reversal_study outcomes: n={len(outcomes)} win_rate={wins / len(outcomes) * 100:.1f}% {PIPELINE_ENFORCEMENT_TAG}")
+
+    cal = datasets.get("ai_confidence_calibration") or []
+    if cal:
+        buckets = {}
+        for r in cal:
+            if r.get("schema") != "ai_calibration_v1":
+                continue
+            b = r.get("prob_bucket", "?")
+            buckets.setdefault(b, []).append(r.get("actual"))
+        print(f"  ai_confidence_calibration buckets: {len(buckets)} {PIPELINE_ENFORCEMENT_TAG}")
+        for b, vals in sorted(buckets.items(), key=lambda x: str(x[0])):
+            if not vals:
+                continue
+            hit = sum(1 for v in vals if v in ("WIN", "win", True) or (isinstance(v, (int, float)) and v > 0))
+            print(f"      {b}: n={len(vals)} win_rate={hit / len(vals) * 100:.1f}%")
+
+    lifecycle = datasets.get("trade_lifecycle") or []
+    if lifecycle:
+        stages = {}
+        for r in lifecycle:
+            if r.get("schema") != "trade_lifecycle_v1":
+                continue
+            stage = r.get("entry_stage") or "UNKNOWN"
+            pnl = float(r.get("net_pnl_usd") or 0)
+            stages.setdefault(stage, []).append(pnl)
+        print(f"  trade_lifecycle entry stages: {len(stages)} {PIPELINE_ENFORCEMENT_TAG}")
+        for stage, pnls in sorted(stages.items()):
+            wins = sum(1 for p in pnls if p > 0)
+            avg = sum(pnls) / len(pnls) if pnls else 0
+            print(f"      {stage}: n={len(pnls)} win_rate={wins / len(pnls) * 100:.1f}% avg_pnl=${avg:.2f}")
+
+    reasons = datasets.get("ai_reason_research") or []
+    if reasons:
+        unique_ids = {r.get("trade_id") for r in reasons if r.get("trade_id")}
+        decisions = defaultdict(int)
+        for r in reasons:
+            if r.get("schema") == "ai_reason_v1":
+                decisions[r.get("ai_decision") or "?"] += 1
+        print(
+            f"  ai_reason_research: n={len(reasons)} unique_trade_ids={len(unique_ids)} "
+            f"decisions={dict(decisions)} {PIPELINE_ENFORCEMENT_TAG}"
+        )
+        outcomes = [r for r in reasons if r.get("schema") == "ai_reason_outcome_v1"]
+        if outcomes:
+            wins = sum(1 for r in outcomes if str(r.get("outcome", "")).upper() == "WIN")
+            print(f"  ai_reason outcomes: n={len(outcomes)} win_rate={wins / len(outcomes) * 100:.1f}% {PIPELINE_ENFORCEMENT_TAG}")
+
+    lifecycle = datasets.get("trade_lifecycle") or []
+    if lifecycle:
+        regimes = {r.get("market_regime") for r in lifecycle if r.get("schema") == "trade_lifecycle_v1"}
+        trends = {r.get("trend_health_state") for r in lifecycle if r.get("schema") == "trade_lifecycle_v1"}
+        print(f"  trade_lifecycle regimes={sorted(x for x in regimes if x)} trend_health={sorted(x for x in trends if x)} {PIPELINE_ENFORCEMENT_TAG}")
 
 
 def shadow_approve_pnl_analysis(decisions, trades, blocked):
@@ -3133,6 +3258,10 @@ def research_data_coverage_audit(trades, decisions, blocked, pipeline_events=Non
         (SIGNAL_SNAPSHOT_FILE, SIGNAL_SNAPSHOT_FILE, "counterfactual", ["trade_id", "direction", "ai", "entry_gates", "entry_thesis", "research_buckets"]),
         (COUNTERFACTUAL_FILE, COUNTERFACTUAL_FILE, "counterfactual", ["trade_id", "net_pnl_usd"]),
         (EDGE_CENSUS_FILE, EDGE_CENSUS_FILE, "counterfactual", ["edge_score", "edge_score_bucket", "reason"]),
+        (REVERSAL_STUDY_FILE, REVERSAL_STUDY_FILE, "research_jsonl", ["trade_id", "reversal_risk", "phase"]),
+        (AI_REASON_RESEARCH_FILE, AI_REASON_RESEARCH_FILE, "research_jsonl", ["trade_id", "reasons_for", "reasons_against"]),
+        (AI_CONFIDENCE_CALIBRATION_FILE, AI_CONFIDENCE_CALIBRATION_FILE, "research_jsonl", ["prob_bucket", "actual"]),
+        (TRADE_LIFECYCLE_FILE, TRADE_LIFECYCLE_FILE, "research_jsonl", ["trade_id", "entry_stage", "net_pnl_usd"]),
     ]
     snap_cov = _load_signal_snapshots()
     if snap_cov:
@@ -4144,6 +4273,8 @@ def ai_timing_bucket_report(trades):
         t = trades.copy()
         t["net"] = pd.to_numeric(t.get("net_pnl_usd"), errors="coerce")
         work = work.merge(t[["trade_id", "net"]], on="trade_id", how="left")
+    else:
+        work["net"] = np.nan
     g = work.groupby("timing_bucket", observed=True).agg(
         n=("trade_id", "count"),
         ai_approve=("ai_approved", lambda x: (x == True).sum()),
@@ -5428,6 +5559,7 @@ def run():
         analysis_df = master if not master.empty else pd.DataFrame()
         executive_summary(trades, analysis_df, decisions, ai_log, blocked, near_edge, signal_persist, pipeline_events, ai_errors)
         research_data_coverage_audit(trades, decisions, blocked, pipeline_events)
+        research_jsonl_summary()
         v80_research_intelligence_report(analysis_df, decisions, ai_log, trades, near_edge, pipeline_events)
 
         if analysis_df.empty:
@@ -5540,6 +5672,7 @@ if __name__ == "__main__":
         analysis_df = master if not master.empty else pd.DataFrame()
         executive_summary(trades, analysis_df, decisions, ai_log, blocked, near_edge, signal_persist, pipeline_events, ai_errors)
         research_data_coverage_audit(trades, decisions, blocked, pipeline_events)
+        research_jsonl_summary()
         v80_research_intelligence_report(analysis_df, decisions, ai_log, trades, near_edge, pipeline_events)
         if not analysis_df.empty:
             core_metrics(analysis_df)
