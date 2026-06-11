@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync btc-conservative-agent to v1.0.3-execution-insights
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
