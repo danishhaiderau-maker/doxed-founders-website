@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.452
+3-Factor Bitfinex 15m Bot - FINAL RESEARCH-GRADE VERSION v10.9.454
 ENFORCED: WINDOW=10 + SINGLE AGGREGATED SOURCE + SOFT FEATURE VALIDATION + EDGE→AI ALIGN + FEATURE VALIDITY LOG-ONLY + PIPELINE LOCK + AVG_VOLUME FIXED + FULL TRACE + RESEARCH DATA COLLECTION + DIRECTION CONSISTENCY (final_direction SINGLE SOURCE OF TRUTH + IMMEDIATE INVERSION) + SINGLE FEATURE SNAPSHOT ENFORCEMENT + HARD AI BLOCK ON INCOMPLETE DATA + DELTA_CHANGE PERSISTENT + STRICT BUFFER GATE + ATOMIC SNAPSHOT + NO ZERO FALLBACKS IN AI
 """
 from __future__ import annotations
@@ -38,11 +38,19 @@ import numpy as np
 import pytz
 
 # #region agent log
-_AGENT_DEBUG_LOG = r"C:\Users\user\Desktop\Final Bots\debug-43f630.log"
-_AGENT_DEBUG_LOG_ALT = r"C:\Users\user\Desktop\BOT\debug-43f630.log"
+_AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
+_AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug-alt.log")
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
+class AsciiSafeFormatter(logging.Formatter):
+    """Windows consoles (cp1252) choke on unicode arrows in log lines."""
+
+    def format(self, record):
+        msg = super().format(record)
+        return _ascii_fold_csv_text(msg)
+
 
 class SafeRotatingFileHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
@@ -95,6 +103,12 @@ AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 REPLAY_MODEL_VERSION = "replay_v1_scorecard"
 REPLAY_MODEL_APPROVE_THRESHOLD = 0.52
 RESEARCH_PERIODIC_AI_INTERVAL_SEC = 120
+RESEARCH_AI_COOLDOWN_SEC = int(os.getenv("RESEARCH_AI_COOLDOWN_SEC", "60"))
+RESEARCH_INSTANT_FILL = os.getenv("RESEARCH_INSTANT_FILL", "0").lower() not in ("0", "false", "no")
+RESEARCH_SOFT_APPROVE_MIN_PROB = int(os.getenv("RESEARCH_SOFT_APPROVE_MIN_PROB", "45"))
+AI_RESEARCH_MODE_ENABLED = os.getenv("AI_RESEARCH_MODE", "1").lower() not in ("0", "false", "no")
+MTF_BLOCKING_RESEARCH = False  # MTF informational only in research — no hard reject from MTF
+AI_EXECUTE_TIERS = frozenset({"STRONG_APPROVE", "APPROVE", "SOFT_APPROVE"})
 GOLDEN_STACK_DEFAULT_ENABLED = True
 
 def get_weak_setup_min_edge() -> float:
@@ -130,6 +144,8 @@ def _agent_dbg(hypothesis_id, location, message, data=None, run_id="post-fix"):
 
 def nz(x, default=None):
     if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        if default is not None:
+            return float(default)
         logger.debug(f"[NZ] value was None/inf/nan - propagating None [PIPELINE ENFORCEMENT]")
         return None
     return float(x)
@@ -345,6 +361,33 @@ def _wipe_research_on_startup_if_needed():
     archive_research_session(reason="startup_wipe_env")
     logger.warning("[STARTUP] WIPE_CSV_ON_STARTUP=1 — wiping research files after archive [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
+
+def _log_credential_sources():
+    """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
+    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+    admin = os.getenv("CREDENTIALS_FROM", "").strip().lower() == "admin_control"
+    ds_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    bx_ok = _private_api_keys_ok()
+    ds_ok = bool(ds_key)
+    ds_tail = ds_key[-4:] if len(ds_key) >= 4 else "none"
+    bx_key = (os.getenv("BITFINEX_API_KEY") or "").strip()
+    bx_tail = bx_key[-4:] if len(bx_key) >= 4 else "none"
+    logger.info(
+        f"[CREDENTIALS] railway={on_railway} admin_control={admin} "
+        f"deepseek={'ok' if ds_ok else 'MISSING'}(…{ds_tail}) "
+        f"bitfinex={'ok' if bx_ok else 'MISSING'}(…{bx_tail}) "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if on_railway and not ds_ok:
+        logger.error(
+            "[CREDENTIALS] Railway DEEPSEEK missing — save key at /admin/control and Push to Runtime "
+            "(npm run push:showcase-bot) [PIPELINE ENFORCEMENT]"
+        )
+    if on_railway and not bx_ok:
+        logger.error(
+            "[CREDENTIALS] Railway Bitfinex keys missing — save at /admin/control and Push to Runtime "
+            "[PIPELINE ENFORCEMENT]"
+        )
 
 def _private_api_keys_ok() -> bool:
     k = os.getenv("BITFINEX_API_KEY", "").strip()
@@ -1129,8 +1172,16 @@ def check_type_a_stall_exit(pos: dict, unreal_pct: float, now: float) -> bool:
     close_position(pos, "TYPE_A_STALL")
     return True
 
+def _in_post_fill_grace(pos: dict, now: float) -> bool:
+    entry_ts = float(pos.get("entry_ts") or 0)
+    if entry_ts <= 0:
+        return False
+    return (now - entry_ts) < POST_FILL_GRACE_SEC
+
 def check_trend_weakening_exit(pos: dict, unreal_pct: float, now: float) -> bool:
     if not TREND_WEAKENING_ENABLED:
+        return False
+    if _in_post_fill_grace(pos, now):
         return False
     peak = float(pos.get("max_pnl_pct") or 0)
     if peak >= TRAIL_LADDER[0][0]:
@@ -1293,6 +1344,8 @@ def evaluate_entry_location_filter(direction: str, ctx: dict, ai: dict):
 
     if direction == "LONG":
         if struct <= -3:
+            if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+                return False, "LONG_BEAR_STRUCTURE_WARN"
             return True, "LONG_BLOCKED_BEAR_STRUCTURE"
         if dist_sup < LONG_NEAR_SUPPORT_MAX_DIST:
             if bull >= bear + LONG_NEAR_SUPPORT_MIN_BULL_SPREAD and mtf == "BULL_ALIGNED":
@@ -1783,16 +1836,36 @@ def log_ai_input_full(
     except Exception as e:
         logger.error(f"[AI INPUT LOG] {e} [PIPELINE ENFORCEMENT]")
 
-def golden_stack_config_for_dashboard() -> dict:
-    """Static gate definitions for dashboard (mirrors v86 enforce rules)."""
+def get_golden_stack_thresholds() -> dict:
+    """Production vs research-relaxed golden stack limits."""
+    if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+        return {
+            "chop_max": GOLDEN_STACK_CHOP_MAX,
+            "spread_min": 1,
+            "spread_max": GOLDEN_STACK_SPREAD_MAX,
+            "short_struct_max": -2.0,
+            "ema_dist_max_pct": 1.5,
+        }
     return {
         "chop_max": GOLDEN_STACK_CHOP_MAX,
-        "adx_block_low": GOLDEN_STACK_ADX_BLOCK_LOW,
-        "adx_block_high": GOLDEN_STACK_ADX_BLOCK_HIGH,
         "spread_min": GOLDEN_STACK_SPREAD_MIN,
         "spread_max": GOLDEN_STACK_SPREAD_MAX,
         "short_struct_max": GOLDEN_STACK_SHORT_STRUCT_MAX,
         "ema_dist_max_pct": GOLDEN_STACK_EMA_DIST_MAX_PCT,
+    }
+
+
+def golden_stack_config_for_dashboard() -> dict:
+    """Static gate definitions for dashboard (mirrors v86 enforce rules)."""
+    gs = get_golden_stack_thresholds()
+    return {
+        "chop_max": gs["chop_max"],
+        "adx_block_low": GOLDEN_STACK_ADX_BLOCK_LOW,
+        "adx_block_high": GOLDEN_STACK_ADX_BLOCK_HIGH,
+        "spread_min": gs["spread_min"],
+        "spread_max": gs["spread_max"],
+        "short_struct_max": gs["short_struct_max"],
+        "ema_dist_max_pct": gs["ema_dist_max_pct"],
         "ema_dist_ideal_pct": GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT,
         "entry_mode_required": ENTRY_MODE_EMA_HYBRID,
         "block_high_pos_funding": GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING,
@@ -1810,6 +1883,7 @@ def capture_golden_stack_eval(signal: dict, ai: dict, edge_score: float, feature
     mtf = (mc.get("multi_tf") or {}) if isinstance(mc.get("multi_tf"), dict) else {}
     ts = (mc.get("trend_strength") or {}) if isinstance(mc.get("trend_strength"), dict) else {}
     ms = (mc.get("market_structure") or {}) if isinstance(mc.get("market_structure"), dict) else {}
+    gs_thr = get_golden_stack_thresholds()
     adx = float(ts.get("adx") or 0)
     mom = round(_compute_momentum_metric(features), 4)
     spread = int(compute_directional_spread(direction, ai))
@@ -1823,22 +1897,22 @@ def capture_golden_stack_eval(signal: dict, ai: dict, edge_score: float, feature
     funding_bucket = regime.get("funding_bucket") or _funding_bucket(state.get("funding") or {})
     checks = {
         "enabled": golden_stack_enabled(),
-        "chop_max": GOLDEN_STACK_CHOP_MAX,
+        "chop_max": gs_thr["chop_max"],
         "mom": mom,
-        "chop_pass": mom <= GOLDEN_STACK_CHOP_MAX + 1e-9,
+        "chop_pass": mom <= gs_thr["chop_max"] + 1e-9,
         "adx": adx,
         "adx_block_band": GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH,
         "adx_pass": not (GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH),
         "mtf_agreement": agreement,
         "mtf_pass": (direction != "SHORT") or agreement == "BEAR_ALIGNED",
         "structure_score": struct,
-        "struct_pass": (direction != "SHORT") or struct <= GOLDEN_STACK_SHORT_STRUCT_MAX,
+        "struct_pass": (direction != "SHORT") or struct <= gs_thr["short_struct_max"],
         "spread": spread,
-        "spread_pass": GOLDEN_STACK_SPREAD_MIN <= spread <= GOLDEN_STACK_SPREAD_MAX,
+        "spread_pass": gs_thr["spread_min"] <= spread <= gs_thr["spread_max"],
         "entry_mode": entry_mode,
-        "ema_hybrid_required": entry_mode in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR),
+        "ema_hybrid_required": entry_mode in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER),
         "dist_to_ema_hybrid_pct": dist_pct,
-        "ema_dist_pass": dist_pct is None or float(dist_pct) <= GOLDEN_STACK_EMA_DIST_MAX_PCT,
+        "ema_dist_pass": dist_pct is None or float(dist_pct) <= gs_thr["ema_dist_max_pct"],
         "ema_dist_ideal": dist_pct is not None and float(dist_pct) <= GOLDEN_STACK_EMA_DIST_IDEAL_MAX_PCT,
         "funding_bucket": funding_bucket,
         "funding_pass": funding_bucket in ("NEUTRAL", "LOW_NEG", "LOW_POS") or not GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING,
@@ -1896,30 +1970,34 @@ def evaluate_golden_stack_filter(
     mtf = (mc.get("multi_tf") or {}) if isinstance(mc.get("multi_tf"), dict) else {}
     ts = (mc.get("trend_strength") or {}) if isinstance(mc.get("trend_strength"), dict) else {}
     ms = (mc.get("market_structure") or {}) if isinstance(mc.get("market_structure"), dict) else {}
+    gs_thr = get_golden_stack_thresholds()
     adx = float(ts.get("adx") or 0)
     mom = _compute_momentum_metric(features)
-    if mom > GOLDEN_STACK_CHOP_MAX:
+    if mom > gs_thr["chop_max"]:
         return True, f"MOMENTUM_CHOP_{mom:.2f}"
     if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
         return True, f"ADX_BAND_{adx:.1f}"
     agreement = str(mtf.get("agreement") or "")
     if direction == "SHORT" and agreement != "BEAR_ALIGNED":
-        return True, f"SHORT_REQUIRES_BEAR_MTF_{agreement or 'UNKNOWN'}"
+        if is_research_data_collection() and not MTF_BLOCKING_RESEARCH:
+            signal.setdefault("golden_stack_mtf_warn", f"SHORT_MTF_{agreement or 'UNKNOWN'}")
+        else:
+            return True, f"SHORT_REQUIRES_BEAR_MTF_{agreement or 'UNKNOWN'}"
     struct = float(ms.get("structure_score") or 0)
-    if direction == "SHORT" and struct > GOLDEN_STACK_SHORT_STRUCT_MAX:
+    if direction == "SHORT" and struct > gs_thr["short_struct_max"]:
         return True, f"STRUCTURE_{struct:.1f}"
     spread = int(compute_directional_spread(direction, ai))
-    if spread < GOLDEN_STACK_SPREAD_MIN:
+    if spread < gs_thr["spread_min"]:
         return True, f"SPREAD_LOW_{spread}"
-    if spread > GOLDEN_STACK_SPREAD_MAX:
+    if spread > gs_thr["spread_max"]:
         return True, f"SPREAD_HIGH_{spread}"
     entry_mode = str(signal.get("entry_mode") or "")
-    if entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR):
+    if entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER):
         return True, f"ENTRY_MODE_{entry_mode or 'UNKNOWN'}"
     dist_pct = signal.get("dist_to_ema_hybrid_pct")
     if dist_pct is None:
         dist_pct = signal.get("dist_to_micro_sr_pct")
-    if dist_pct is not None and float(dist_pct) > GOLDEN_STACK_EMA_DIST_MAX_PCT:
+    if dist_pct is not None and float(dist_pct) > gs_thr["ema_dist_max_pct"]:
         return True, f"EMA_DIST_{float(dist_pct):.3f}"
     if GOLDEN_STACK_BLOCK_HIGH_POS_FUNDING:
         funding_bucket = _funding_bucket(state.get("funding") or {})
@@ -1993,10 +2071,12 @@ def ensure_directional_capacity(direction: str) -> bool:
     return count_directional_exposure(direction) < cap
 
 def get_effective_max_active_signals() -> int:
-    prof = get_regime_risk_profile()
     with state_lock:
-        user_max = state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
-    return min(int(user_max), int(prof["max_active"]))
+        user_max = int(state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT)
+    if is_research_data_collection():
+        return min(user_max, RESEARCH_MAX_CONCURRENT_CAP)
+    prof = get_regime_risk_profile()
+    return min(user_max, int(prof["max_active"]))
 
 def _ws_trade_timestamp_sec(trade: dict) -> float:
     trade_ts_raw = trade.get("T")
@@ -2071,7 +2151,7 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             }
             pos["_candle_track_idx"] = cur_candle
 
-    if state.get("early_fail_enabled", True) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
+    if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
         logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
         close_position(pos, "EARLY_FAIL")
         return True
@@ -2138,11 +2218,15 @@ CIRCUIT_BREAKER_REASONS = frozenset({
     "STALE_DATA_HARD_STOP", "THREAD_CRASH", "WS_STALE", "PRICE_STALE_OR_MISSING",
     "ENGINE_FAILURE", "CSV_FAILURE", "PRELOAD_FAILED",
 })
+# Brief WS blips should not wipe pending limit orders — only hard infra failures cancel.
+CIRCUIT_BREAKER_CANCEL_REASONS = frozenset({
+    "STALE_DATA_HARD_STOP", "ENGINE_FAILURE", "CSV_FAILURE", "PRELOAD_FAILED",
+})
 
 
 def circuit_breaker_cancel_pending(reason: str):
     """Cancel pending orders on WS stale / API errors — optional flatten log for research."""
-    if reason not in CIRCUIT_BREAKER_REASONS:
+    if reason not in CIRCUIT_BREAKER_CANCEL_REASONS:
         return 0
     cancelled = 0
     with trade_lock:
@@ -2193,6 +2277,9 @@ def get_execution_status() -> str:
 
 def get_display_balance():
     with state_lock:
+        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
+        if state.get("strategy_mode") == "RESEARCH":
+            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
             return STARTING_BALANCE
         return state.get("account_balance", STARTING_BALANCE)
@@ -2441,7 +2528,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.6-research-datasets-2026-06-12"
+ANALYZER_SYNC_ID = "v9.10-closed-loop-2026-06-11"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2455,12 +2542,67 @@ def get_bitfinex_public():
         raise RuntimeError("Bitfinex public client not initialized")
     return bitfinex_public
 
+def _http_get_with_retry(url: str, params=None, timeout: float = 30, label: str = "HTTP", max_attempts: int = 5):
+    """Resilient GET: retries timeouts, connection drops, and HTTP 429."""
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code == 429:
+                wait = min(2 ** attempt, 30)
+                logger.warning(f"[{label}] HTTP 429 rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+            wait = min(2 ** attempt, 15)
+            logger.warning(f"[{label}] network error ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            time.sleep(wait)
+        except requests.RequestException as e:
+            last_err = e
+            if attempt + 1 >= max_attempts:
+                raise
+            wait = min(2 ** attempt, 15)
+            logger.warning(f"[{label}] request error ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            time.sleep(wait)
+    raise last_err or RuntimeError(f"{label} failed after {max_attempts} attempts")
+
+
+def _exchange_call_with_retry(fn, label: str = "EXCHANGE", max_attempts: int = 5):
+    """Wrap ccxt calls: rate limits, timeouts, and transient network failures."""
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except ccxt.RateLimitExceeded as e:
+            last_err = e
+            wait = min(2 ** attempt, 30)
+            logger.warning(f"[{label}] ccxt rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+            time.sleep(wait)
+        except (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable) as e:
+            last_err = e
+            wait = min(2 ** attempt, 15)
+            logger.warning(f"[{label}] ccxt network ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            time.sleep(wait)
+        except ccxt.ExchangeError as e:
+            msg = str(e).lower()
+            if "429" in msg or "rate" in msg:
+                last_err = e
+                wait = min(2 ** attempt, 30)
+                logger.warning(f"[{label}] exchange rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+                time.sleep(wait)
+                continue
+            raise
+    raise last_err or RuntimeError(f"{label} failed after {max_attempts} attempts")
+
+
 def fetch_bitfinex_ohlcv(timeframe: str = "15m", limit: int = 250) -> list:
     """Bitfinex REST candles (ccxt OHLCV for perps can return stale rows)."""
     key = f"trade:{timeframe}:{BITFINEX_WS_SYMBOL}"
     url = f"{BITFINEX_REST_BASE}/candles/{key}/hist"
-    resp = requests.get(url, params={"limit": limit}, timeout=30)
-    resp.raise_for_status()
+    resp = _http_get_with_retry(url, params={"limit": limit}, timeout=30, label="OHLCV")
     rows = resp.json() or []
     candles = []
     for row in reversed(rows):
@@ -2494,8 +2636,7 @@ def _effective_funding_rate_8h(current_funding: float, next_accrued: float) -> f
 def fetch_bitfinex_deriv_funding_rest(symbol: str = BITFINEX_WS_SYMBOL) -> dict:
     """Live perp funding from Bitfinex GET /v2/status/deriv?keys=... (public, no API key)."""
     url = f"{BITFINEX_REST_BASE}/status/deriv"
-    resp = requests.get(url, params={"keys": symbol}, timeout=12)
-    resp.raise_for_status()
+    resp = _http_get_with_retry(url, params={"keys": symbol}, timeout=12, label="FUNDING")
     payload = resp.json()
     if not payload or not isinstance(payload, list):
         raise ValueError("empty deriv status response")
@@ -2961,8 +3102,72 @@ def compute_ema_hybrid_entry(signal: dict) -> dict:
     }
 
 
+def load_historically_profitable_patterns() -> dict:
+    """Closed-loop reject research — injected into AI context."""
+    path = PROFITABLE_REJECT_FEATURES_FILE
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("historically_profitable_patterns") or data
+    except Exception:
+        return {}
+
+
+def compute_research_quality_score(ctx: dict, features: dict = None) -> float:
+    """Research-mode AI gate — micro structure + quality, not edge threshold."""
+    features = features or {}
+    price = float(ctx.get("price") or state.get("price") or 0)
+    ms = build_micro_sr_levels()
+    hint = str(ctx.get("regime") or "LONG")
+    micro_eval = evaluate_micro_structure_confirm("LONG" if "BULL" in hint else "SHORT", price, None, ms)
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    qcomp = upgrade.get("quality_score_components") or {}
+    micro_sr = float(qcomp.get("micro_sr_component") or (100 if micro_eval.get("confirmed") else 40))
+    mc = ctx.get("market_context") or state.get("market_context") or {}
+    struct = float((mc.get("market_structure") or {}).get("structure_score") or 0)
+    structure_comp = max(0.0, min(100.0, (struct + 10.0) / 20.0 * 100.0))
+    sweep_bonus = 25.0 if upgrade.get("liquidity_sweep_high") or upgrade.get("liquidity_sweep_low") else 0.0
+    return round(0.50 * micro_sr + 0.35 * structure_comp + 0.15 * sweep_bonus, 1)
+
+
+def resolve_ai_planner_limit(
+    direction: str, price: float, trade_planner: dict, ms: dict, micro_eval: dict
+) -> tuple:
+    """AI entry zone primary; micro S/R validates/clips limit inside zone."""
+    plan = trade_planner or {}
+    try:
+        zlo = float(plan.get("entry_zone_low"))
+        zhi = float(plan.get("entry_zone_high"))
+    except (TypeError, ValueError):
+        return None, None
+    if zhi <= zlo or price <= 0 or direction not in ("LONG", "SHORT"):
+        return None, None
+    limit = zlo + (zhi - zlo) * 0.5
+    micro_support = ms.get("micro_support")
+    micro_resistance = ms.get("micro_resistance")
+    if direction == "LONG":
+        if micro_support:
+            ms_lim = float(micro_support) + MICRO_SR_ENTRY_BUFFER_USD
+            if zlo <= ms_lim <= zhi:
+                limit = ms_lim
+        limit = min(limit, price)
+        if limit >= price:
+            limit = price * (1 - float(state.get("pullback_threshold", 0.002)))
+    else:
+        if micro_resistance:
+            ms_lim = float(micro_resistance) - MICRO_SR_ENTRY_BUFFER_USD
+            if zlo <= ms_lim <= zhi:
+                limit = ms_lim
+        limit = max(limit, price)
+        if limit <= price:
+            limit = price * (1 + float(state.get("pullback_threshold", 0.002)))
+    return float(limit), "AI_ZONE_MICRO_VALIDATED"
+
+
 def compute_micro_sr_entry(signal: dict) -> dict:
-    """v91: Real micro S/R entry — EMA zone arms; pivot structure confirms; entry at micro level."""
+    """v101: AI planner zone primary; micro S/R validates; EMA secondary confirmation only."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     ema9, ema21 = _entry_ema9_ema21()
@@ -3001,14 +3206,25 @@ def compute_micro_sr_entry(signal: dict) -> dict:
         else None
     )
 
-    if ema_zone_ok and micro_level and limit_price:
-        if micro_eval.get("confirmed") and not overext.get("require_micro_confirm"):
-            entry_mode = ENTRY_MODE_MICRO_SR
-            entry_reason = "MICRO_SR_CONFIRMED"
-        else:
-            entry_mode = ENTRY_MODE_EMA_HYBRID
-            entry_reason = "EMA_ARMED_AWAIT_MICRO"
-            await_micro_confirm = True
+    trade_planner = signal.get("trade_planner") or (signal.get("ai_output") or {}).get("trade_planner")
+    ai_limit, ai_reason = resolve_ai_planner_limit(direction, price, trade_planner, ms, micro_eval)
+    if ai_limit is not None:
+        entry_mode = ENTRY_MODE_AI_PLANNER
+        limit_price = ai_limit
+        entry_reason = ai_reason or "AI_PLANNER_ZONE"
+        signal["ai_entry_zone_low"] = trade_planner.get("entry_zone_low")
+        signal["ai_entry_zone_high"] = trade_planner.get("entry_zone_high")
+        signal["ai_planner_limit"] = ai_limit
+        await_micro_confirm = not micro_eval.get("confirmed")
+        signal["ema_secondary_confirm"] = bool(ema_zone_ok)
+    elif micro_eval.get("confirmed") and micro_level and limit_price and not overext.get("require_micro_confirm"):
+        entry_mode = ENTRY_MODE_MICRO_SR
+        entry_reason = "MICRO_SR_CONFIRMED"
+    elif micro_level and limit_price:
+        entry_mode = ENTRY_MODE_MICRO_SR if micro_eval.get("confirmed") else ENTRY_MODE_PULLBACK
+        entry_reason = "MICRO_SR_AWAIT" if not micro_eval.get("confirmed") else "MICRO_SR_CONFIRMED"
+        await_micro_confirm = not micro_eval.get("confirmed")
+        signal["ema_secondary_confirm"] = bool(ema_zone_ok)
         if overext.get("require_micro_confirm"):
             await_micro_confirm = True
             entry_reason = "OVEREXT_AWAIT_MICRO"
@@ -3016,9 +3232,9 @@ def compute_micro_sr_entry(signal: dict) -> dict:
                 signal["overextension_would_block"] = overext.get("reason")
             else:
                 signal["overextension_research"] = overext.get("reason")
-    elif hybrid_base is not None:
+    elif hybrid_base is not None and ema_zone_ok:
         entry_mode = ENTRY_MODE_EMA_HYBRID
-        entry_reason = "EMA_ZONE_NOT_REACHED"
+        entry_reason = "EMA_SECONDARY_AWAIT_MICRO"
         await_micro_confirm = True
 
     signal["entry_mode"] = entry_mode
@@ -3036,7 +3252,14 @@ def compute_micro_sr_entry(signal: dict) -> dict:
     signal["higher_low_detected"] = bool(ms.get("higher_low"))
     signal["lower_high_detected"] = bool(ms.get("lower_high"))
     trade_id = signal.get("trade_id")
-    if entry_mode == ENTRY_MODE_MICRO_SR:
+    if entry_mode == ENTRY_MODE_AI_PLANNER:
+        logger.info(
+            f"[AI PLANNER] trade_id={trade_id} dir={direction} reason={entry_reason} "
+            f"zone={fmt(signal.get('ai_entry_zone_low'))}-{fmt(signal.get('ai_entry_zone_high'))} "
+            f"limit={fmt(limit_price)} ema_secondary={signal.get('ema_secondary_confirm')} "
+            f"micro_confirmed={micro_eval.get('confirmed')} [PIPELINE ENFORCEMENT]"
+        )
+    elif entry_mode == ENTRY_MODE_MICRO_SR:
         logger.info(
             f"[MICRO SR] trade_id={trade_id} dir={direction} reason={entry_reason} "
             f"limit={fmt(limit_price)} support={fmt(micro_support)} resist={fmt(micro_resistance)} "
@@ -3083,6 +3306,8 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
         pullback_limit = signal_price
     signal["planned_pullback_limit"] = pullback_limit
     entry_mode = signal.get("entry_mode")
+    if entry_mode == ENTRY_MODE_AI_PLANNER and signal.get("ai_planner_limit") is not None:
+        return float(signal["ai_planner_limit"]), ENTRY_MODE_AI_PLANNER
     micro_limit = signal.get("micro_sr_limit")
     if entry_mode == ENTRY_MODE_MICRO_SR and micro_limit is not None:
         return float(micro_limit), ENTRY_MODE_MICRO_SR
@@ -3316,6 +3541,9 @@ LADDER_AUDIT_LOG_INTERVAL_SEC = 0.25
 ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
 ENTRY_MODE_EMA_HYBRID = "EMA_HYBRID_LIMIT"
 ENTRY_MODE_MICRO_SR = "MICRO_SR_LIMIT"
+ENTRY_MODE_AI_PLANNER = "AI_PLANNER_LIMIT"
+RESEARCH_QUALITY_MIN = 15.0
+PROFITABLE_REJECT_FEATURES_FILE = "profitable_reject_features.json"
 EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
 MICRO_SR_NEAR_PCT = 0.003
 MICRO_SR_PIVOT_LOOKBACK = 10
@@ -3338,6 +3566,7 @@ TREND_WEAKENING_ENABLED = True
 TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
 TREND_WEAKENING_MIN_SIGNALS = 1
 TREND_WEAKENING_SCRATCH_UNREAL_PCT = 6.0
+POST_FILL_GRACE_SEC = int(os.getenv("POST_FILL_GRACE_SEC", "90"))
 TREND_HEALTH_HISTORY_MAX = 12
 TREND_HEALTH_LOG_INTERVAL_SEC = 30
 SPREAD_PENALTY_ENABLED = True
@@ -3363,7 +3592,7 @@ ADX_BLOCK_NEW_ENTRY = 15.0
 RESEARCH_ADX_MIN = 12.0  # v93: logging reference in sole research (live block still ADX_BLOCK_NEW_ENTRY)
 ADX_HALF_SIZE_BELOW = 18.0
 ADX_HALF_SIZE_MULT = 0.5
-RESEARCH_AI_THRESHOLD_DEFAULT = 50
+RESEARCH_AI_THRESHOLD_DEFAULT = 45
 LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard override is not clamped to this
 AI_THRESHOLD_MIN = 0
 AI_THRESHOLD_MAX = 100
@@ -3394,7 +3623,7 @@ DASHBOARD_AUTO_REFRESH_MS = 60000
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7800")
 DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
-DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "10.0.0.102")
+DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
 
 def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
@@ -3442,15 +3671,25 @@ EMA_FAST = 9
 EMA_SLOW = 21
 EMA_LONG = 200
 LIVE_TRADING_ENABLED = False
-MAX_PENDING_ORDERS = 2
+MAX_PENDING_ORDERS = 20
 MAX_EXPIRED_ORDERS = 20
 
 def _load_local_dotenv():
-    """Load Final Bots/.env into os.environ (does not override existing vars)."""
+    """Load .env into os.environ (does not override existing vars).
+    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        return
     root = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(root, ".env")
     if not os.path.isfile(path):
         return
+    secret_keys = frozenset({
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
+        "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
+        "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
+    })
     try:
         with open(path, encoding="utf-8") as f:
             for raw in f:
@@ -3459,8 +3698,11 @@ def _load_local_dotenv():
                     continue
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
+                if not key or key in os.environ:
+                    continue
+                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
+                    continue
+                os.environ[key] = val
     except Exception:
         pass
 
@@ -3469,13 +3711,14 @@ DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
-MAX_CONCURRENT_POSITIONS_DEFAULT = 6
+MAX_CONCURRENT_POSITIONS_DEFAULT = 20
+RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
-SIGNAL_TTL_SEC = 2700
+SIGNAL_TTL_SEC = 120 * 60
 REPLAY_TTL_SEC = 120 * 60
 MAX_EVENT_QUEUE = 10000
-LIMIT_ORDER_MAX_AGE_SEC = 1800
+LIMIT_ORDER_MAX_AGE_SEC = 120 * 60
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
 REVERSAL_STUDY_TTL_SEC = 3600  # 60m horizon for reversal_risk_score validation
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
@@ -3498,6 +3741,8 @@ MIN_CANDLES = 200
 READY_STABLE_SEC = 5.0
 STALE_SOFT_SEC = 20
 STALE_HARD_SEC = 180
+WS_EXEC_PAUSE_STALE_SEC = float(os.getenv("WS_EXEC_PAUSE_STALE_SEC", "300"))
+WS_STALE_STRIKES_FOR_PAUSE = int(os.getenv("WS_STALE_STRIKES_FOR_PAUSE", "60"))
 SR_ZONE_PCT = 0.0162
 PRICE_CHANGE_THRESHOLD = 0.0002
 MAX_WS_AGE = 3
@@ -3520,7 +3765,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v10.9.452-v96-research-datasets"
+EXECUTION_FIX_VERSION = "v1.0.3-execution-insights"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3536,8 +3781,7 @@ def csv_research_meta(signal: dict = None) -> dict:
         meta.update(csv_lane_meta(signal))
     return meta
 ORDER_PLACEMENT_GRACE_SEC = 30
-# Instant fill only when dashboard pullback is 0.0% (see execute_simulated_order / execute_order).
-RESEARCH_INSTANT_FILL = False
+# Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
 TERMINAL_SIGNAL_OUTCOMES = frozenset({"STALE_NO_EXPOSURE", "SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "CAPACITY_REPLACED", "WIN", "LOSS"})
 last_signal_hash = None
@@ -3733,7 +3977,7 @@ state = {
     "warmup_mode": True
 }
 shutdown_event = threading.Event()
-PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100}
+PAUSE_PRIORITIES = {"STALE_DATA_HARD_STOP": 50, "THREAD_CRASH": 1, "QUEUE_OVERFLOW": 60, "": 0, "CSV_FAILURE": 100, "PRELOAD_FAILED": 100, "ADMIN_MANUAL": 200}
 
 def get_edge_threshold():
     with state_lock:
@@ -3981,7 +4225,7 @@ def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
 def get_effective_ai_cooldown_sec() -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
     if _sole_ai_research_mode() and is_research_data_collection():
-        return RESEARCH_PERIODIC_AI_INTERVAL_SEC
+        return RESEARCH_AI_COOLDOWN_SEC
     return AI_COOLDOWN_SECONDS
 
 def ai_cooldown_remaining_sec() -> int:
@@ -4011,8 +4255,11 @@ def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple
             return False, "CONTINUOUS_AI_OFF"
         if ai_cooldown_remaining_sec() > 0:
             return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
-        if round(float(edge_score), 1) <= 0.0:
-            return False, "EDGE_ZERO"
+        rq = compute_research_quality_score(ctx)
+        if rq < RESEARCH_QUALITY_MIN:
+            return False, f"RESEARCH_QUALITY_{rq:.0f}"
+        with state_lock:
+            state["debug_state"]["research_quality_score"] = rq
         return True, "PERIODIC_RESEARCH_AI"
     if ai_cooldown_remaining_sec() > 0:
         return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
@@ -5263,6 +5510,27 @@ def compute_ai_quality_components_from_ctx(ctx: dict, health: dict, micro_eval: 
     }
 
 
+def compute_market_structure_shift(mc: dict, health: dict) -> str:
+    """Classify short-horizon structure shift for AI (not a hard gate)."""
+    mc = mc or {}
+    health = health or {}
+    ms = mc.get("market_structure") or {}
+    struct = float(ms.get("structure_score") or 0)
+    agreement = str((mc.get("multi_tf") or {}).get("agreement") or "")
+    trend = str(health.get("trend_state") or "")
+    if struct > 2 and agreement == "BULL_ALIGNED":
+        return "BULL_CONTINUATION"
+    if struct < -2 and agreement == "BEAR_ALIGNED":
+        return "BEAR_CONTINUATION"
+    if "BULL" in trend and trend.endswith("_WEAKENING"):
+        return "BULL_TO_BEAR_SHIFT"
+    if "BEAR" in trend and trend.endswith("_WEAKENING"):
+        return "BEAR_TO_BULL_SHIFT"
+    if agreement == "CONFLICTED":
+        return "BEAR_TO_BULL_SHIFT" if struct > 0 else "BULL_TO_BEAR_SHIFT"
+    return "BULL_CONTINUATION" if struct >= 0 else "BEAR_CONTINUATION"
+
+
 def enrich_ai_context_upgrade(ctx: dict) -> dict:
     """v94: Add trend health, entry timing, micro-SR, reversal risk, sweeps, quality, regime memory."""
     if not isinstance(ctx, dict):
@@ -5283,6 +5551,9 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     _record_regime_cycle(regime, trend_state)
     regime_mem = _regime_memory_snapshot()
     regime_tracker = update_market_regime_tracker(health, ctx, ms, regime_mem)
+    mc = ctx.get("market_context") or state.get("market_context") or {}
+    market_structure_shift = compute_market_structure_shift(mc, health)
+    reversal_probability = int(reversal_risk)
     dist_micro_support = None
     dist_micro_resistance = None
     if price > 0 and ms.get("micro_support"):
@@ -5302,6 +5573,11 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
         "distance_to_micro_support": dist_micro_support,
         "distance_to_micro_resistance": dist_micro_resistance,
         "reversal_risk_score": reversal_risk,
+        "reversal_probability": reversal_probability,
+        "market_structure_shift": market_structure_shift,
+        "micro_support": ms.get("micro_support"),
+        "micro_resistance": ms.get("micro_resistance"),
+        "mtf_informational_only": bool(is_research_data_collection() and not MTF_BLOCKING_RESEARCH),
         "liquidity_sweep_high": bool(sweeps.get("liquidity_sweep_high")),
         "liquidity_sweep_low": bool(sweeps.get("liquidity_sweep_low")),
         "quality_score_components": {
@@ -5336,8 +5612,10 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
             "recent_history": list(regime_tracker.get("history") or [])[-5:],
         },
         "edge_research_telemetry_only": EDGE_RESEARCH_TELEMETRY_ONLY,
+        "historically_profitable_patterns": load_historically_profitable_patterns(),
     }
     ctx["trend_health"] = health
+    ctx["historically_profitable_patterns"] = upgrade["historically_profitable_patterns"]
     ctx["ai_input_upgrade"] = upgrade
     ctx["trend_health_state"] = upgrade["trend_health_state"]
     ctx["weaken_signals"] = upgrade["weaken_signals"]
@@ -5351,6 +5629,11 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     ctx["distance_to_micro_support"] = upgrade["distance_to_micro_support"]
     ctx["distance_to_micro_resistance"] = upgrade["distance_to_micro_resistance"]
     ctx["reversal_risk_score"] = upgrade["reversal_risk_score"]
+    ctx["reversal_probability"] = upgrade["reversal_probability"]
+    ctx["market_structure_shift"] = upgrade["market_structure_shift"]
+    ctx["micro_support"] = upgrade["micro_support"]
+    ctx["micro_resistance"] = upgrade["micro_resistance"]
+    ctx["mtf_informational_only"] = upgrade["mtf_informational_only"]
     ctx["liquidity_sweep_high"] = upgrade["liquidity_sweep_high"]
     ctx["liquidity_sweep_low"] = upgrade["liquidity_sweep_low"]
     ctx["quality_score_components"] = upgrade["quality_score_components"]
@@ -5474,8 +5757,10 @@ def evaluate_sr_direction_filter(direction: str, sr_state: str, market_context: 
         if _structure_allows_bull_continuation(mc) or _ai_confirms_sr_continuation("LONG", ai, mc):
             return False, "SR_SOFT_ALLOW_BULL_CONTINUATION"
         if struct_score <= -2 and mtf_agree == "BEAR_ALIGNED":
+            if is_research_data_collection() and not MTF_BLOCKING_RESEARCH:
+                return False, "MTF_BEAR_WARN_NEAR_RESISTANCE"
             return True, "LONG_BLOCKED_NEAR_RESISTANCE"
-        if BLOCK_LONG_NEAR_RESISTANCE:
+        if BLOCK_LONG_NEAR_RESISTANCE and not (is_research_data_collection() and not MTF_BLOCKING_RESEARCH):
             return True, "LONG_BLOCKED_NEAR_RESISTANCE"
         return False, None
 
@@ -5487,12 +5772,47 @@ def evaluate_sr_direction_filter(direction: str, sr_state: str, market_context: 
         if _ai_confirms_sr_continuation("SHORT", ai, mc):
             return False, "SR_SOFT_ALLOW_AI_FACTOR_CONTINUATION"
         if struct_score >= 2 and mtf_agree == "BULL_ALIGNED":
+            if is_research_data_collection() and not MTF_BLOCKING_RESEARCH:
+                return False, "MTF_BULL_WARN_NEAR_SUPPORT"
             return True, "SHORT_BLOCKED_NEAR_SUPPORT"
         if BLOCK_SHORT_NEAR_SUPPORT:
             return True, "SHORT_BLOCKED_NEAR_SUPPORT_WEAK"
         return False, None
 
     return False, None
+
+def parse_ai_trade_planner(text: str, json_blob: dict = None) -> dict:
+    """Extract trade-planner fields from AI JSON block (entry zone, MFE/MAE expectations)."""
+    plan = {
+        "entry_zone_low": None,
+        "entry_zone_high": None,
+        "expected_mfe": None,
+        "expected_mae": None,
+        "reversal_probability": None,
+        "exit_style": None,
+        "confidence": None,
+    }
+    blob = json_blob
+    if blob is None and text:
+        jstart = text.find("```json")
+        if jstart >= 0:
+            brace = text.find("{", jstart)
+            jend = text.find("```", brace + 1)
+            chunk = text[brace:jend if jend > brace else len(text)]
+            try:
+                blob = json.loads(chunk.strip().rstrip("`"))
+            except Exception:
+                blob = None
+    if isinstance(blob, dict):
+        plan["entry_zone_low"] = blob.get("entry_zone_low")
+        plan["entry_zone_high"] = blob.get("entry_zone_high")
+        plan["expected_mfe"] = blob.get("expected_mfe")
+        plan["expected_mae"] = blob.get("expected_mae")
+        plan["reversal_probability"] = blob.get("reversal_probability")
+        plan["exit_style"] = blob.get("exit_style")
+        plan["confidence"] = blob.get("confidence")
+    return plan
+
 
 def parse_ai_factor_block(text: str) -> dict:
     """Extract Phase C bull/bear scores and reason lists from AI response."""
@@ -5550,8 +5870,43 @@ def parse_ai_factor_block(text: str) -> dict:
     factors["factor_parse_ok"] = (factors["bull_score"] > 0 or factors["bear_score"] > 0 or len(factors["reasons_for"]) > 0)
     return factors
 
+def ai_decision_should_execute(ai: dict) -> bool:
+    """True when AI tier maps to real limit-order execution."""
+    if not ai or ai.get("ai_error"):
+        return False
+    tier = str(ai.get("execution_tier") or ai.get("research_soft") or ai.get("decision") or "").upper()
+    if tier in AI_EXECUTE_TIERS:
+        return True
+    return bool(ai.get("approved")) and str(ai.get("decision", "")).upper() == "APPROVE"
+
+
+def normalize_research_ai_decision(ai_result: dict) -> dict:
+    """Research 5-tier AI: STRONG_APPROVE/APPROVE/SOFT_APPROVE execute; SOFT_REJECT/REJECT shadow."""
+    if not (is_research_data_collection() and AI_RESEARCH_MODE_ENABLED):
+        return ai_result
+    dec = str(ai_result.get("decision", "")).upper()
+    ai_result["raw_decision"] = dec
+    if dec in AI_EXECUTE_TIERS:
+        ai_result["pre_gate_decision"] = dec
+        ai_result["decision"] = "APPROVE"
+        ai_result["approved"] = True
+        ai_result["research_soft"] = dec
+        ai_result["execution_tier"] = dec
+    elif dec == "SOFT_REJECT":
+        ai_result["decision"] = "REJECT"
+        ai_result["approved"] = False
+        ai_result["research_soft"] = "SOFT_REJECT"
+        ai_result["execution_tier"] = "SOFT_REJECT"
+    elif dec == "REJECT":
+        ai_result["approved"] = False
+        ai_result["execution_tier"] = "REJECT"
+    return ai_result
+
+
 def apply_phase_c_factor_gate(ai_result: dict) -> dict:
     """Reject APPROVE when declared direction conflicts with bull/bear scores."""
+    if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+        return ai_result
     if not PHASE_C_FACTOR_GATE_ENABLED:
         return ai_result
     direction = ai_result.get("direction")
@@ -5728,26 +6083,26 @@ HORIZON_OUTCOME_SECS = {
 def compute_horizon_outcomes_from_replay(buf: dict) -> dict:
     """MFE/MAE and fixed-horizon outcome % from replay ticks where computable."""
     ticks = sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0))
-    start_price = float(buf.get("start_price") or 0)
-    direction = str(buf.get("direction", "LONG")).upper()
+    start_price = _buf_float(buf.get("start_price"), 0)
+    direction = str(buf.get("direction") or "LONG").upper()
     if not ticks or start_price <= 0:
         return {}
     dir_factor = 1 if direction == "LONG" else -1
-    leverage = int(buf.get("leverage", state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)))
+    leverage = _buf_int(buf.get("leverage"), _replay_leverage_default())
     mfe = 0.0
     mae = 0.0
     horizons = {}
     last_unreal = 0.0
     for tick in ticks:
-        t = float(tick.get("t", 0))
-        p = float(tick.get("price") or 0)
+        t = _buf_float(tick.get("t"), 0)
+        p = _buf_float(tick.get("price"), 0)
         if p <= 0:
             continue
         unreal = tick.get("unreal_pct")
         if unreal is None:
             unreal = ((p - start_price) / start_price) * dir_factor * leverage * 100
         else:
-            unreal = float(unreal)
+            unreal = _buf_float(unreal, 0)
         last_unreal = unreal
         mfe = max(mfe, unreal)
         mae = min(mae, unreal)
@@ -5791,12 +6146,8 @@ def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
         "price": price,
         "bot_version": EXECUTION_FIX_VERSION,
     }
-    try:
-        rotate_log(REVERSAL_STUDY_FILE)
-        with open(REVERSAL_STUDY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
-    except Exception as e:
-        logger.error(f"[REVERSAL_STUDY] start log failed: {e}")
+    if not _safe_append_jsonl(REVERSAL_STUDY_FILE, row, label="REVERSAL_STUDY"):
+        return
     start_replay_buffer(
         study_id,
         price,
@@ -5859,16 +6210,11 @@ def log_reversal_research(study_id: str, buf: dict, horizons: dict, phase: str =
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
     }
-    try:
-        rotate_log(REVERSAL_STUDY_FILE)
-        with open(REVERSAL_STUDY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
+    if _safe_append_jsonl(REVERSAL_STUDY_FILE, row, label="REVERSAL_RESEARCH"):
         logger.info(
             f"[REVERSAL_STUDY] {phase} study_id={study_id} risk={buf.get('reversal_risk')} "
             f"15m={o15} 30m={o30} 60m={o60} result={result} [PIPELINE ENFORCEMENT]"
         )
-    except Exception as e:
-        logger.error(f"[REVERSAL_RESEARCH] log failed: {e}")
 
 
 def finalize_reversal_study(study_id: str, buf: dict):
@@ -5883,31 +6229,50 @@ def log_ai_reason_research(ctx: dict, ai_result: dict, research_lane: str):
         return
     factors = ai_result.get("factors") or {}
     upgrade = ctx.get("ai_input_upgrade") or {}
+    mc = ctx.get("market_context") or {}
+    ms = mc.get("market_structure") or {}
+    mtf = mc.get("multi_tf") or {}
+    spread = int(compute_directional_spread(
+        str(ai_result.get("direction") or "").upper(), ai_result
+    )) if ai_result.get("direction") in ("LONG", "SHORT") else None
     row = {
-        "schema": "ai_reason_v1",
+        "schema": "ai_reason_v2",
         "ts": utc_iso(),
         "trade_id": ai_result.get("trade_id") or ctx.get("trade_id"),
         "research_lane": research_lane,
-        "ai_decision": ai_result.get("decision"),
+        "ai_decision": ai_result.get("raw_decision") or ai_result.get("decision"),
+        "execution_tier": ai_result.get("execution_tier"),
         "ai_prob": ai_result.get("win_prob"),
         "direction": ai_result.get("direction"),
         "reasons_for": factors.get("reasons_for") or [],
         "reasons_against": factors.get("reasons_against") or [],
         "bull_score": ai_result.get("bull_score"),
         "bear_score": ai_result.get("bear_score"),
-        "reversal_risk_score": upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score"),
+        "spread": spread,
+        "structure_score": ms.get("structure_score"),
+        "trend_health": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
+        "reversal_score": upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score"),
+        "reversal_probability": upgrade.get("reversal_probability") or ctx.get("reversal_probability"),
+        "sr_state": ctx.get("sr_state") or (state.get("support_resistance") or {}).get("sr_state"),
+        "regime": ctx.get("regime") or state.get("regime"),
+        "micro_structure_confirmed": upgrade.get("micro_structure_confirmed"),
+        "micro_support": upgrade.get("micro_support"),
+        "micro_resistance": upgrade.get("micro_resistance"),
+        "distance_to_micro_support": upgrade.get("distance_to_micro_support"),
+        "distance_to_micro_resistance": upgrade.get("distance_to_micro_resistance"),
+        "market_structure_shift": upgrade.get("market_structure_shift"),
+        "mtf_agreement": mtf.get("agreement"),
         "entry_stage": upgrade.get("entry_stage") or ctx.get("entry_stage"),
         "trend_health_state": upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
         "market_regime": (upgrade.get("market_regime_tracker") or {}).get("current"),
+        "trade_planner": ai_result.get("trade_planner"),
+        "shadow_pnl": None,
+        "mfe": None,
+        "mae": None,
         "outcome": None,
         "bot_version": EXECUTION_FIX_VERSION,
     }
-    try:
-        rotate_log(AI_REASON_RESEARCH_FILE)
-        with open(AI_REASON_RESEARCH_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-    except Exception as e:
-        logger.error(f"[AI_REASON] log failed: {e}")
+    _safe_append_jsonl(AI_REASON_RESEARCH_FILE, row, label="AI_REASON")
 
 
 def log_ai_reason_outcome(trade_id: str, net_pnl: float, exit_reason: str):
@@ -5923,19 +6288,14 @@ def log_ai_reason_outcome(trade_id: str, net_pnl: float, exit_reason: str):
         "exit_reason": exit_reason,
         "bot_version": EXECUTION_FIX_VERSION,
     }
-    try:
-        rotate_log(AI_REASON_RESEARCH_FILE)
-        with open(AI_REASON_RESEARCH_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-    except Exception as e:
-        logger.error(f"[AI_REASON] outcome log failed: {e}")
+    _safe_append_jsonl(AI_REASON_RESEARCH_FILE, row, label="AI_REASON_OUTCOME")
 
 
-def log_ai_confidence_calibration(trade_row: dict, net_pnl: float):
+def log_ai_confidence_calibration(trade_row: dict, net_pnl: float, source: str = "executed"):
     """AI win_prob vs actual outcome for calibration tables."""
     if not is_research_data_collection():
         return
-    ai_prob = int(trade_row.get("ai_win_prob") or 0)
+    ai_prob = int(trade_row.get("ai_win_prob") or trade_row.get("ai_prob") or 0)
     actual = "WIN" if net_pnl > 0 else "LOSS"
     bucket_lo = (ai_prob // 5) * 5
     row = {
@@ -5949,14 +6309,11 @@ def log_ai_confidence_calibration(trade_row: dict, net_pnl: float):
         "pnl_margin_pct": trade_row.get("pnl"),
         "exit_reason": trade_row.get("exit_reason"),
         "research_lane": trade_row.get("research_lane"),
+        "source": source,
+        "execution_tier": trade_row.get("execution_tier"),
         "bot_version": EXECUTION_FIX_VERSION,
     }
-    try:
-        rotate_log(AI_CONFIDENCE_CALIBRATION_FILE)
-        with open(AI_CONFIDENCE_CALIBRATION_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-    except Exception as e:
-        logger.error(f"[AI_CALIBRATION] log failed: {e}")
+    _safe_append_jsonl(AI_CONFIDENCE_CALIBRATION_FILE, row, label="AI_CALIBRATION")
 
 
 def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
@@ -5984,12 +6341,7 @@ def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
         "ai_prob": trade_row.get("ai_win_prob"),
         "bot_version": EXECUTION_FIX_VERSION,
     }
-    try:
-        rotate_log(TRADE_LIFECYCLE_FILE)
-        with open(TRADE_LIFECYCLE_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-    except Exception as e:
-        logger.error(f"[TRADE_LIFECYCLE] log failed: {e}")
+    _safe_append_jsonl(TRADE_LIFECYCLE_FILE, row, label="TRADE_LIFECYCLE")
 
 
 def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):
@@ -6551,6 +6903,8 @@ def evaluate_signal_with_ai(
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
         prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
+            prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
         text, latency_ms = call_deepseek_api([{"role": "user", "content": prompt}], temperature=temperature)
@@ -6567,8 +6921,13 @@ def evaluate_signal_with_ai(
             fallback = int(conf_json.group(1)) if conf_json else (int(conf_line.group(1)) if conf_line else 0)
             if 0 < fallback <= 100:
                 win_prob = fallback
-        decision_match = re.search(r"Decision:\s*(APPROVE|REJECT)", text, re.IGNORECASE)
+        decision_match = re.search(
+            r"Decision:\s*(STRONG_APPROVE|SOFT_APPROVE|SOFT_REJECT|APPROVE|REJECT)",
+            text,
+            re.IGNORECASE,
+        )
         decision = decision_match.group(1).upper() if decision_match else "REJECT"
+        trade_plan = parse_ai_trade_planner(text)
         override_match = re.search(r"Override:\s*(YES|NO)", text, re.IGNORECASE)
         override = override_match.group(1).upper() == "YES" if override_match else False
         if win_prob is None or win_prob <= 0:
@@ -6587,17 +6946,21 @@ def evaluate_signal_with_ai(
             "bull_score": factors.get("bull_score", 0),
             "bear_score": factors.get("bear_score", 0),
             "source": "FRESH",
-            "approved": decision == "APPROVE",
+            "approved": decision in AI_EXECUTE_TIERS,
             "trade_id": ctx.get("trade_id"),
             "latency_ms": latency_ms,
             "research_lane": research_lane,
             "shadow_only": shadow_only,
+            "trade_planner": trade_plan,
         }
+        ai_result = normalize_research_ai_decision(ai_result)
         if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
+            ai_result = normalize_research_ai_decision(ai_result)
             if DOUBLE_CONFIRM_AI:
                 ai_result = double_confirm_ai(ai_result, ctx)
                 ai_result = apply_phase_c_factor_gate(ai_result)
+                ai_result = normalize_research_ai_decision(ai_result)
         with state_lock:
             if not shadow_only:
                 state["pipeline_outcome"] = "AI_EVALUATED"
@@ -7026,6 +7389,10 @@ def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
+    if state.get("manual_admin_pause") or (
+        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
+    ):
+        return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
@@ -7150,6 +7517,11 @@ def _evict_oldest_pending_if_at_capacity(max_slots: int, lane: str = None) -> bo
             oldest = min(pending, key=lambda o: o.get("created_ts", time.time()))
             pending_orders.remove(oldest)
         expire_signal_for_order(oldest, "CAPACITY_REPLACED")
+        try:
+            from execution_funnel import funnel_on_expire
+            funnel_on_expire(oldest, "CAPACITY_REPLACED")
+        except Exception:
+            pass
         evicted = True
         logger.info(
             f"[CAPACITY] Evicted oldest pending trade_id={oldest.get('trade_id')} "
@@ -7164,6 +7536,19 @@ def ensure_signal_capacity() -> bool:
     max_active = get_effective_max_active_signals()
     _evict_oldest_pending_if_at_capacity(max_active)
     return get_active_signal_count() < max_active
+
+def apply_research_instant_fill(signal: dict):
+    """Research data collection: market-fill at signal price instead of waiting on micro/EMA limits."""
+    if not (is_research_data_collection() and RESEARCH_INSTANT_FILL):
+        return
+    signal["pullback_pct"] = 0.0
+    signal["await_micro_confirm"] = False
+    signal.pop("await_confirm", None)
+    logger.info(
+        f"[RESEARCH FILL] instant market fill trade_id={signal.get('trade_id')} "
+        f"mode={signal.get('entry_mode')} [PIPELINE ENFORCEMENT]"
+    )
+
 
 def execute_simulated_order(signal):
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
@@ -7212,13 +7597,14 @@ def execute_simulated_order(signal):
         f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
     )
     defer_instant_fill = False
+    research_instant = is_research_data_collection() and RESEARCH_INSTANT_FILL
     features = signal.get("features") or state.get("feature_snapshot") or {}
     direction = signal.get("final_direction")
-    if _tape_bounce_against(direction, features):
+    if not research_instant and _tape_bounce_against(direction, features):
         defer_instant_fill = True
         logger.info(f"[SIM] Bounce vs {direction} — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
     setup_type = signal.get("setup_type") or classify_setup(features)
-    if setup_type == "WEAK_SETUP":
+    if not research_instant and setup_type == "WEAK_SETUP":
         defer_instant_fill = True
         logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
     if signal.get("await_micro_confirm"):
@@ -7227,13 +7613,23 @@ def execute_simulated_order(signal):
             f"[SIM] await_micro_confirm trade_id={signal.get('trade_id')} "
             f"entry_mode={entry_mode} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]"
         )
-    if pullback_pct <= 0.0 and not defer_instant_fill and not order.get("await_micro_confirm") and entry_mode == ENTRY_MODE_MICRO_SR:
+    can_instant = (
+        pullback_pct <= 0.0
+        and not defer_instant_fill
+        and not order.get("await_micro_confirm")
+        and (
+            research_instant
+            or entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER)
+            or entry_mode != ENTRY_MODE_EMA_HYBRID
+        )
+    )
+    if can_instant and entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER):
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
         fill_order(order)
         logger.info(f"[SIM] Instant fill micro-SR at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-    elif pullback_pct <= 0.0 and not defer_instant_fill and not order.get("await_micro_confirm") and entry_mode != ENTRY_MODE_EMA_HYBRID:
+    elif can_instant:
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
@@ -7244,6 +7640,11 @@ def execute_simulated_order(signal):
         logger.info(f"[SIM] Pullback limit pending confirm trade_id={signal.get('trade_id')} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]")
     order["max_price_since_order"] = float(price)
     order["min_price_since_order"] = float(price)
+    try:
+        from execution_funnel import funnel_on_order
+        funnel_on_order(signal, order)
+    except Exception as _fe:
+        logger.debug(f"[FUNNEL] order log failed: {_fe}")
     pipeline_state_sync()
     return True
 
@@ -7261,6 +7662,11 @@ def _update_pending_order_price_extremes(price: float):
             else:
                 order["max_price_since_order"] = max(float(mx), float(price))
                 order["min_price_since_order"] = min(float(order.get("min_price_since_order", price)), float(price))
+            try:
+                from execution_funnel import funnel_update_touch
+                funnel_update_touch(order, float(price))
+            except Exception:
+                pass
 
 def _pending_limit_touched(order: dict, price: float) -> bool:
     limit = float(order["limit_price"])
@@ -7327,6 +7733,11 @@ def fill_order(order):
         f"[ORDER] FILLED trade_id={order['trade_id']} final_direction={order.get('signal_dir')} "
         f"tick={fmt(tick)} planned_limit={fmt(planned)} [PIPELINE ENFORCEMENT]"
     )
+    try:
+        from execution_funnel import funnel_on_fill
+        funnel_on_fill(order, tick)
+    except Exception:
+        pass
     with trade_lock:
         if order in pending_orders:
             pending_orders.remove(order)
@@ -7541,21 +7952,9 @@ def process_signal(event: dict):
             eff_thr = get_effective_edge_threshold()
             pipeline_eff_thr = eff_thr
             sole = _sole_ai_research_mode()
-            if sole:
-                if round(float(edge_score), 1) <= 0.0:
-                    logger.info(
-                        f"[EDGE GATE] edge_score={edge_score:.1f} <= 0 — NO_SIGNAL (v81 sole-AI) "
-                        f"[PIPELINE ENFORCEMENT]"
-                    )
-                    log_no_signal_with_context(reason="EDGE_FAIL")
-                    full_pipeline_trace("BLOCKED", "EDGE_FAIL", None)
-                    with state_lock:
-                        state["debug_state"]["last_block_reason"] = "EDGE_FAIL"
-                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                        state["debug_state"]["skip_reason"] = "EDGE_FAIL"
-                    update_debug_state_always("EDGE_FAIL", {"edge": edge_score})
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
+            if sole and is_research_data_collection():
+                with state_lock:
+                    state["debug_state"]["edge_telemetry_only"] = True
             elif edge_score < eff_thr:
                 logger.info(
                     f"[EDGE GATE] edge_score={edge_score:.1f} < effective_threshold={eff_thr} — NO_SIGNAL "
@@ -7657,8 +8056,11 @@ def process_signal(event: dict):
                 ai = copy.deepcopy(pre_ai)
                 ai["research_lane"] = research_lane
             else:
-                if research_lane == RESEARCH_LANE_CONTINUOUS and now - state.get("last_ai_call_ts", 0) < AI_COOLDOWN_SECONDS:
-                    logger.info(f"[AI] COOLDOWN ACTIVE - BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]")
+                ai_cd = get_effective_ai_cooldown_sec()
+                if research_lane == RESEARCH_LANE_CONTINUOUS and now - state.get("last_ai_call_ts", 0) < ai_cd:
+                    logger.info(
+                        f"[AI] COOLDOWN ACTIVE ({ai_cd}s) - BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]"
+                    )
                     log_no_signal_with_context(reason="AI_COOLDOWN_ACTIVE", skip_stage="COOLDOWN")
                     full_pipeline_trace("BLOCKED", "AI_COOLDOWN_ACTIVE", None)
                     with state_lock:
@@ -7696,7 +8098,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                if round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1):
+                if not (sole and is_research_data_collection()) and round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1):
                     logger.info(
                         f"[EDGE GATE] edge={edge_score:.1f} < frozen effective={pipeline_eff_thr:.1f} "
                         f"— skip before AI [PIPELINE ENFORCEMENT]"
@@ -7774,14 +8176,15 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            if ai.get("decision") != "APPROVE":
+            if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
                 if ai.get("decision") == "AI_ERROR":
                     block_tag = f"AI_ERROR:{ai.get('error_type', 'UNKNOWN')}"
                     skip_stage = "AI_ERROR"
                 else:
-                    block_tag = ai.get("factor_gate") or f"AI_{ai.get('decision')}"
+                    tier = ai.get("execution_tier") or ai.get("research_soft") or ai.get("raw_decision") or ai.get("decision")
+                    block_tag = ai.get("factor_gate") or f"AI_{tier}"
                     skip_stage = "AI"
                 _sync_ai_dashboard_debug(ai, trade_id)
                 reject_stub = {
@@ -7924,6 +8327,8 @@ def process_signal(event: dict):
             signal["_logged"] = False
             signal["_finalized"] = False
             signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
+            signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
+            signal["ai_output"] = copy.deepcopy(ai)
             compute_micro_sr_entry(signal)
             health = compute_trend_health(final_direction)
             signal["trend_health_at_entry"] = health
@@ -8207,6 +8612,11 @@ def process_signal(event: dict):
                         f"[MAX ACTIVE SIGNALS] lane={research_lane} block before finalize "
                         f"[PIPELINE ENFORCEMENT]"
                     )
+                    try:
+                        from execution_funnel import funnel_on_capacity_reject
+                        funnel_on_capacity_reject(signal, "MAX_ACTIVE_SIGNALS")
+                    except Exception:
+                        pass
                     exit_pipeline(signal, ai, "MAX_ACTIVE_SIGNALS")
                     with state_lock:
                         state["debug_state"]["last_block_reason"] = "MAX_ACTIVE_SIGNALS"
@@ -8243,7 +8653,10 @@ def process_signal(event: dict):
                 logger.info("[DEBOUNCE] continuing [PIPELINE ENFORCEMENT]")
             last_price_for_debounce = price
 
-            logger.info("[PIPELINE] → AI APPROVED → EXECUTION STAGE REACHED [PIPELINE ENFORCEMENT]")
+            logger.info(
+                f"[PIPELINE] → AI APPROVED tier={ai.get('execution_tier') or ai.get('research_soft') or 'APPROVE'} "
+                f"→ EXECUTION STAGE (patient limit entry) [PIPELINE ENFORCEMENT]"
+            )
             if not execution_allowed():
                 exec_reason = state.get("execution_reason") or "EXECUTION_BLOCK"
                 hard_exec_blocks = frozenset({"STALE_DATA_HARD_STOP", "NO_PRICE", "AI_FAIL"})
@@ -8261,6 +8674,11 @@ def process_signal(event: dict):
             full_pipeline_trace("[PIPELINE]", "EXECUTION_ALLOWED", trade_id)
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "EXECUTION_ALLOWED"
+            try:
+                from execution_funnel import funnel_on_approve
+                funnel_on_approve(signal, ai)
+            except Exception as _fe:
+                logger.debug(f"[FUNNEL] approve log failed: {_fe}")
             logger.info("[PIPELINE] → EXECUTION STAGE → ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
             if not success:
@@ -8532,8 +8950,15 @@ def ws_watchdog():
             elif ws_reconnecting:
                 ws_reconnecting = False
                 ws_retry = 1
+                if age <= WATCHDOG_WS_STALE_SEC and state.get("execution_reason") in (
+                    "WS_STALE", "STALE_DATA_HARD_STOP", "THREAD_CRASH", "PRICE_STALE_OR_MISSING"
+                ):
+                    set_execution_paused("")
+                    logger.info("[WS] Reconnect complete — execution resumed [PIPELINE ENFORCEMENT]")
             else:
-                if state.get("execution_reason") == "STALE_DATA_HARD_STOP":
+                if age <= WATCHDOG_WS_STALE_SEC and state.get("execution_reason") in (
+                    "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"
+                ):
                     set_execution_paused("")
     except Exception as e:
         logger.exception("[CRITICAL] WS watchdog crash")
@@ -8571,22 +8996,32 @@ def state_monitor_loop():
                     state["data_source"] = "ws_ready_waiting_bitfinex"
                 else:
                     state["data_source"] = "booting_bitfinex"
+                fresh_ts = state.get("price_ts") or state.get("ws_last_tick")
+                fresh_age = (time.time() - fresh_ts) if fresh_ts else 9999.0
                 ws_tick = state.get("ws_last_tick")
-                ws_age = (time.time() - ws_tick) if ws_tick else 0
-                state["diag"]["ws_status"] = "OK" if (ws_tick and ws_age < STALE_HARD_SEC) else ("BOOTING" if not ws_tick else "STALE")
+                ws_age = (time.time() - ws_tick) if ws_tick else fresh_age
+                state["diag"]["ws_status"] = (
+                    "OK" if fresh_age < STALE_HARD_SEC else ("BOOTING" if not fresh_ts else "STALE")
+                )
                 engine_age = time.time() - last_ohlcv_fetch
                 state["diag"]["engine_status"] = "OK" if engine_age < 300 else "STALE"
                 state["diag"]["ai_status"] = "OK" if state["ai_enabled"] else "OFF"
-                if ws_age > STALE_HARD_SEC:
+                if fresh_age > STALE_HARD_SEC:
                     state["ws_stale_count"] = state.get("ws_stale_count", 0) + 1
                 else:
                     state["ws_stale_count"] = 0
-                if state["ws_stale_count"] > 3:
+                    if state.get("execution_reason") in ("WS_STALE", "THREAD_CRASH"):
+                        set_execution_paused("")
+                        logger.info("[RECOVERY][STATE_SYNC] Price feed fresh — execution resumed")
+                if (
+                    state["ws_stale_count"] >= WS_STALE_STRIKES_FOR_PAUSE
+                    and fresh_age >= WS_EXEC_PAUSE_STALE_SEC
+                ):
                     logger.error(
-                        "[PIPELINE] WS DEAD -> THREAD_CRASH (monitor keeps running; WS watchdog will reconnect) "
-                        "[PIPELINE ENFORCEMENT]"
+                        f"[PIPELINE] WS sustained stale age={fmt(fresh_age)}s -> WS_STALE pause "
+                        f"(watchdog reconnecting; pending orders kept) [PIPELINE ENFORCEMENT]"
                     )
-                    set_execution_paused("THREAD_CRASH")
+                    set_execution_paused("WS_STALE")
                     state["ws_stale_count"] = 0
             fetch_ohlcv()
             update_ema()
@@ -8594,6 +9029,40 @@ def state_monitor_loop():
             update_support_resistance()
             update_market_context()
             log_trend_health_csv()
+            global _last_feature_drift_ts
+            if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
+                _last_feature_drift_ts = time.time()
+                try:
+                    from feature_drift_monitor import build_report as _build_feature_drift_report
+                    drift_report = _build_feature_drift_report()
+                    alerts = drift_report.get("alerts") or []
+                    if alerts:
+                        logger.warning(
+                            f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                            + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                            + " [PIPELINE ENFORCEMENT]"
+                        )
+                    else:
+                        logger.info(
+                            f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                            f"[PIPELINE ENFORCEMENT]"
+                        )
+                except Exception as e:
+                    logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
+            global _last_research_kpi_ts, _cached_research_kpis
+            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+                try:
+                    from research_kpi_engine import refresh_all_research_kpis
+                    _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
+                    _last_research_kpi_ts = time.time()
+                    fr = (_cached_research_kpis.get("false_reject") or {})
+                    logger.info(
+                        f"[RESEARCH_KPI] rejects={fr.get('rejects')} false_reject_rate="
+                        f"{fr.get('false_reject_rate_pct')}% missed=${fr.get('missed_profit_usd')} "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                except Exception as e:
+                    logger.warning(f"[RESEARCH_KPI] periodic run failed: {e}")
             price_ts = state.get("price_ts")
             if price_ts is None:
                 continue
@@ -8856,6 +9325,11 @@ def cleanup_expired_orders():
                 if len(expired_orders) > MAX_EXPIRED_ORDERS:
                     expired_orders.pop(0)
                 sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
+                try:
+                    from execution_funnel import funnel_on_expire
+                    funnel_on_expire(order, "TTL_EXPIRED")
+                except Exception:
+                    pass
                 expired_n += 1
                 _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": len(pending_orders)})
                 logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
@@ -8900,6 +9374,11 @@ def position_manager():
                         expired = {"trade_id": order.get("trade_id"),"dir": order.get("side"),"limit_price": order.get("limit_price"),"signal_price": order.get("signal_price"),"created_ts": order.get("created_ts"),"expired_ts": now,"age_min": int(age / 60),"conf": order.get("ai_win_prob", 0),"mode": state.get("strategy_mode"),"reason": "TTL_EXPIRED","research_lane": order.get("research_lane"),"research_model": order.get("research_model")}
                         expired_orders.append(expired)
                         expire_signal_for_order(order, "TTL_EXPIRED")
+                        try:
+                            from execution_funnel import funnel_on_expire
+                            funnel_on_expire(order, "TTL_EXPIRED")
+                        except Exception:
+                            pass
                         if len(expired_orders) > MAX_EXPIRED_ORDERS:
                             expired_orders.pop(0)
                         logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
@@ -8953,6 +9432,13 @@ def close_position(pos: dict, exit_reason: str):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
             return
 
+        entry_ts = float(pos.get("entry_ts") or 0)
+        hold_sec = round(time.time() - entry_ts, 2) if entry_ts else None
+        try:
+            from execution_funnel import funnel_on_close
+            funnel_on_close(trade_id, exit_reason, round(net_pnl, 4), hold_sec)
+        except Exception:
+            pass
         r_multiple = compute_r(entry, pos.get("sl", 0), price)
         ai_prob = pos.get("ai_win_prob", 0) or 0
         ai_band = "0-50" if ai_prob < 50 else "50-60" if ai_prob < 60 else "60-70" if ai_prob < 70 else "70+"
@@ -9153,53 +9639,44 @@ def close_position(pos: dict, exit_reason: str):
     pipeline_state_sync()
 
 AI_PROMPT_TEMPLATE = """
-You are a probabilistic trading decision engine.
+You are a probabilistic trade planner for short-duration (10-40 min) BTC perpetual trades.
 
 Given the following market data:
 
 {context}
 
-Tasks:
-1) Direction: LONG / SHORT / NO_TRADE
-2) Win probability (0–100)
-3) Explicit bull vs bear factor scoring (required)
-4) Decision: APPROVE only if your direction matches the stronger factor side
+You are NOT a long-hold trend follower. Trades often succeed against higher-timeframe direction via micro bounces, liquidity sweeps, and support/resistance reactions.
 
 Decision priority (highest weight first):
-1) Trend Direction — market_context.multi_tf agreement, bull_score vs bear_score, base trend_state
-2) Trend Health — trend_health_state, weaken_signals, bull_score_change_15m, bear_score_change_15m, trend_health_detail.interpretation (e.g. "Bullish but weakening" is NOT the same as "Bullish")
-3) Entry Timing — entry_stage (EARLY / MID / LATE); LATE often means chasing; EARLY favors pullback completion
-4) Reversal Risk — reversal_risk_score (0-100); high score = elevated fade/reversal risk even if trend direction looks good
-5) Micro Structure — micro_structure_confirmed, higher_low_detected, lower_high_detected, pivot_count, distance_to_micro_support/resistance, liquidity_sweep_high/low (sweep + reject is different from normal pullback)
-6) Trade Quality — quality_score_components (structure, micro_sr, trend, spread, edge) — inspect components, not only quality_score
-7) Regime Memory — regime_change_count_60m, trend_state_last_3_cycles, last_3_signals, market_regime_tracker (TRENDING/WEAKENING/TRANSITION/RANGE/COMPRESSION/EXPANSION + duration_sec)
-8) market_context.market_structure — HH/HL/LH/LL swing labels and structure_score (-10 to +10)
-9) market_context.trend_strength — ADX, trend_score, vwap_distance_pct
-10) orderflow — delta, imbalance, volume_ratio, velocity
-11) funding — positioning pressure (rate per 8h; longs pay when rate > 0)
-12) sr_state / dist_to_resistance / dist_to_support — LOCATION CONTEXT ONLY (never sole reason to fade)
+1) Micro Structure — micro_support, micro_resistance, distance_to_micro_support/resistance, micro_structure_confirmed, higher_low_detected, lower_high_detected, liquidity_sweep_high/low
+2) Reversal / Entry Timing — reversal_probability, reversal_risk_score, entry_stage (EARLY/MID/LATE), market_structure_shift
+3) Trend Health — trend_health_state, weaken_signals (BULL_WEAKENING / BEAR_WEAKENING matter for exits, not sole reject reason)
+4) Orderflow — delta, imbalance, volume_ratio, velocity
+5) Location — sr_state, dist_to_resistance, dist_to_support (context only)
+6) Trade Quality — quality_score_components
+7) Regime Memory — market_regime_tracker, regime_change_count_60m
+8) market_context.market_structure — structure_score, HH/HL/LH/LL (informational — NOT sole reject reason)
+9) market_context.multi_tf — INFORMATIONAL ONLY when mtf_informational_only=true. Do NOT reject solely because MTF disagrees with direction.
+10) funding, edge_score (telemetry only)
 
-Rules:
-- REJECT or NO_TRADE when entry_stage=LATE and reversal_risk_score>=60 unless micro_structure_confirmed and trend health is intact
-- REJECT when trend_health_state ends with _WEAKENING and reversal_risk_score>=50 unless liquidity sweep confirms continuation
-- REJECT when regime_change_count_60m>=3 and entry_stage is not EARLY (chop environment)
-- Do NOT APPROVE solely because bull_score > bear_score — check health, timing, and reversal risk first
-- Do NOT assume any predefined strategy or invert signals
-- Do NOT infer hidden variables
-- If multi_tf.agreement is CONFLICTED, prefer NO_TRADE or lower win probability unless orderflow strongly confirms one side
-- If structure shows hh_hl_sequence_active and higher TFs are BULLISH, do NOT SHORT solely because price is near resistance
-- If structure shows lh_ll_sequence_active and higher TFs are BEARISH, do NOT LONG solely because price is near support
-- edge_score (0-6) is gate strength only, not direction
-- Prefer NO_TRADE when data_quality is low or orderflow fields are near zero
-- APPROVE LONG only if bull_score >= bear_score + 1; APPROVE SHORT only if bear_score >= bull_score + 1
-- List at least 2 reasons_for and 2 reasons_against before deciding
+Historical research findings:
+- Profitable setups occurred despite bearish HTF structure and weak MTF alignment
+- LONG_BLOCKED_BEAR_STRUCTURE shadows were often winners — do not reject longs solely for bearish structure
+- Short holds (5-60 min) mean 4h trend is often background noise
+- Keep rejecting clear losers: extreme reversal_risk with LATE entry and no micro confirmation
 
-Return EXACTLY (include this JSON block before the Direction line):
+Return EXACTLY (JSON block before Direction line):
 
 ```json
 {{
   "direction": "LONG or SHORT or NO_TRADE",
   "confidence": 0,
+  "entry_zone_low": 0,
+  "entry_zone_high": 0,
+  "expected_mfe": 0,
+  "expected_mae": 0,
+  "reversal_probability": 0,
+  "exit_style": "AGGRESSIVE or PATIENT",
   "reasons_for_trade": ["...", "..."],
   "reasons_against_trade": ["...", "..."],
   "bull_score": 0,
@@ -9211,8 +9688,23 @@ Direction: LONG / SHORT / NO_TRADE
 Win probability: 0-100
 Bull score: 0-10
 Bear score: 0-10
-Decision: APPROVE / REJECT
+Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / SOFT_REJECT / REJECT
 Reason: ...
+"""
+
+RESEARCH_AI_PROMPT_ADDENDUM = """
+
+RESEARCH DATA COLLECTION MODE (active):
+- Target approval rate 20-40%
+- STRONG_APPROVE / APPROVE / SOFT_APPROVE → execute (patient limit entry at micro S/R or pullback)
+- SOFT_REJECT → shadow replay only (counterfactual study)
+- REJECT → hard reject + shadow replay
+- Use STRONG_APPROVE when win_prob >= 65 and micro structure confirms
+- Use APPROVE when win_prob >= 55
+- Use SOFT_APPROVE when win_prob 45-54 and direction + micro/orderflow support
+- Use SOFT_REJECT when uncertain but worth logging (win_prob 35-44)
+- MTF is informational — never the sole reject reason
+- Patient entry: bot waits for pullback/micro-SR — do not assume instant market fill
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -9255,13 +9747,14 @@ tick_prices = deque(maxlen=300)
 price_seq = 0
 logger = logging.getLogger("3factor-bot")
 logger.setLevel(logging.INFO)
+_log_fmt = '%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'
 stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
+stream_handler.setFormatter(AsciiSafeFormatter(_log_fmt))
 LOG_FILE = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
 file_handler = SafeRotatingFileHandler(
     LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding='utf-8'
 )
-file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'))
+file_handler.setFormatter(AsciiSafeFormatter(_log_fmt))
 file_handler.setLevel(logging.INFO)
 logger.handlers.clear()
 logger.addHandler(stream_handler)
@@ -9282,6 +9775,7 @@ def research_wipe_file_paths():
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
+        CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     return paths
@@ -9365,6 +9859,42 @@ def perform_fresh_collection_reset() -> dict:
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
+REPLAY_TICK_MAX = 2000
+FEATURE_DRIFT_INTERVAL_SEC = 3600
+_last_feature_drift_ts = 0.0
+_last_research_kpi_ts = 0.0
+_cached_research_kpis = {}
+RESEARCH_KPI_INTERVAL_SEC = 300
+
+
+def get_research_kpis_cached() -> dict:
+    """Dashboard KPIs — false reject rate, calibration, AI vs shadow."""
+    global _last_research_kpi_ts, _cached_research_kpis
+    if not is_research_data_collection():
+        return {}
+    now = time.time()
+    if now - _last_research_kpi_ts < RESEARCH_KPI_INTERVAL_SEC and _cached_research_kpis:
+        return _cached_research_kpis
+    try:
+        from research_kpi_engine import refresh_all_research_kpis
+        _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
+        _last_research_kpi_ts = now
+    except Exception as e:
+        logger.warning(f"[RESEARCH_KPI] refresh failed: {e}")
+    return _cached_research_kpis or {}
+
+
+def _buf_float(val, default=0.0):
+    """Replay buffer numeric — never pass None to float()."""
+    return nz(val, default)
+
+
+def _buf_int(val, default=0):
+    return int(_buf_float(val, default))
+
+
+def _replay_leverage_default() -> int:
+    return _buf_int(state.get("leverage"), DEFAULT_RESEARCH_LEVERAGE)
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
@@ -9641,6 +10171,11 @@ HTML = """<!DOCTYPE html>
     Independent ActiveSignal slots — does not block Stability or Golden Stack lanes.
   </p>
   <p id="continuousAiLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
+</div>
+
+<div id="researchKpiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <strong style="color:#58a6ff;font-size:1.05em;">Research KPIs (false rejects · calibration · shadow)</strong>
+  <p id="researchKpiLive" style="color:#8b949e;font-size:0.86em;margin:10px 0 0 0;line-height:1.5;"></p>
 </div>
 
 <div id="goldenStackPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -10221,6 +10756,35 @@ DASHBOARD_JS = """(function () {
           ];
           gsList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
+        const rkpi = document.getElementById('researchKpiLive');
+        const kpis = d.research_kpis || {};
+        const fr = kpis.false_reject || {};
+        const sc = kpis.ai_shadow_scorecard || {};
+        const cal = (kpis.confidence_calibration || {}).buckets || [];
+        if (rkpi) {
+          let ktxt = '<strong>False Reject Rate:</strong> ';
+          if (fr.rejects != null) {
+            ktxt += fr.profitable_rejects + '/' + fr.rejects + ' profitable (' + fr.false_reject_rate_pct + '%) · missed $' + (fr.missed_profit_usd || 0);
+          } else {
+            ktxt += 'collecting…';
+          }
+          if (sc.reject_shadow) {
+            ktxt += '<br><strong>AI Rejects (shadow):</strong> n=' + sc.reject_shadow.n + ' sum=$' + sc.reject_shadow.sum_pnl_usd + ' avg=$' + sc.reject_shadow.avg_pnl_usd;
+          }
+          if (sc.approve_shadow_blocked) {
+            ktxt += '<br><strong>Blocked Approves (shadow):</strong> n=' + sc.approve_shadow_blocked.n + ' sum=$' + sc.approve_shadow_blocked.sum_pnl_usd;
+          }
+          if (cal.length) {
+            ktxt += '<br><strong>Calibration (top buckets):</strong> ';
+            ktxt += cal.slice(0, 4).map(function (b) { return b.bucket + '=$' + b.sum_pnl_usd; }).join(' · ');
+          }
+          const pat = kpis.historically_profitable_patterns || {};
+          const pkeys = Object.keys(pat).slice(0, 4);
+          if (pkeys.length) {
+            ktxt += '<br><strong>Learned patterns:</strong> ' + pkeys.map(function (k) { return k + '=' + pat[k] + '%'; }).join(' · ');
+          }
+          rkpi.innerHTML = ktxt;
+        }
         const gsLive = document.getElementById('goldenStackLiveStatus');
         if (gsLive) {
           const ev = d.golden_stack_last_eval;
@@ -10722,6 +11286,12 @@ def api_state():
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
+        snapshot["equity"] = snapshot["account_balance"] + total_unreal
+        session_trades = _session_trades_only(trades_copy)
+        snapshot["trades"] = session_trades
+        snapshot["trade_count_session"] = len(session_trades)
+        snapshot["bot_start_time"] = bot_start_time
+        snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -10742,6 +11312,7 @@ def api_state():
         snapshot["funding_simulation_enabled"] = FUNDING_SIMULATION_ENABLED
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
+        snapshot["research_kpis"] = get_research_kpis_cached()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["ai_stability_config"] = ai_stability_config_for_dashboard()
         snapshot["candle_15m_elapsed_pct"] = _candle_15m_elapsed_pct()
@@ -10762,12 +11333,17 @@ def api_state():
 def health():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
+    status = "paused" if paused else "alive"
     return jsonify({
-        "status": "alive",
+        "status": status,
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
-        "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", "")
+        "execution_paused": paused,
+        "execution_reason": reason,
+        "manual_admin_pause": manual,
     })
 
 @app.route('/debug_state')
@@ -10775,10 +11351,24 @@ def get_debug_state():
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    with state_lock:
+        state["manual_admin_pause"] = True
+        state["live_armed"] = False
+        save_persistent_config()
+    set_execution_paused("ADMIN_MANUAL")
+    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    with state_lock:
+        state["manual_admin_pause"] = False
+        save_persistent_config()
     set_execution_paused("")
-    return jsonify({"status": "resumed"})
+    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "resumed", "execution_paused": False})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -10841,6 +11431,13 @@ def toggle_debug():
         save_persistent_config()
         update_logger_level()
     return jsonify({"debug_enabled": state["debug_enabled"]})
+
+@app.route('/api/reset', methods=['POST'])
+def api_reset_showcase():
+    """Admin/platform: wipe all research artifacts and restart session at $500."""
+    result = perform_fresh_collection_reset()
+    enforce_clean_research_session()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
@@ -11732,18 +12329,18 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
             buf["lane"] = "executed"
             buf["block_reason"] = None
             buf["virtual_entry"] = float(fill_price)
-            fill_t = time.time() - buf.get("start_ts", time.time())
+            fill_t = time.time() - _buf_float(buf.get("start_ts"), time.time())
             buf["virtual_fill_t"] = fill_t
-            start_price = float(buf.get("start_price") or fill_price)
-            direction = str(buf.get("direction", "LONG")).upper()
+            start_price = _buf_float(buf.get("start_price"), fill_price)
+            direction = str(buf.get("direction") or "LONG").upper()
             dir_factor = 1 if direction == "LONG" else -1
-            leverage = int(buf.get("leverage", state.get("leverage", 20)))
+            leverage = _buf_int(buf.get("leverage"), _replay_leverage_default())
             pre_fill_mae = 0.0
             for tick in sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0)):
-                t = float(tick.get("t", 0))
+                t = _buf_float(tick.get("t"), 0)
                 if t >= fill_t:
                     break
-                p = float(tick.get("price") or 0)
+                p = _buf_float(tick.get("price"), 0)
                 if p > 0 and start_price > 0:
                     unreal = ((p - start_price) / start_price) * dir_factor * leverage * 100
                     pre_fill_mae = min(pre_fill_mae, unreal)
@@ -11758,11 +12355,11 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
 
 
 def _shadow_unreal_pct(buf: dict, price: float) -> float:
-    entry = buf.get("virtual_entry")
-    if not entry or entry <= 0 or price <= 0:
+    entry = _buf_float(buf.get("virtual_entry"), 0)
+    if entry <= 0 or price <= 0:
         return 0.0
-    direction = buf.get("direction", "LONG")
-    leverage = int(buf.get("leverage", state.get("leverage", 20)))
+    direction = buf.get("direction") or "LONG"
+    leverage = _buf_int(buf.get("leverage"), _replay_leverage_default())
     dir_factor = 1 if direction == "LONG" else -1
     return ((price - entry) / entry) * dir_factor * leverage * 100
 
@@ -11770,10 +12367,10 @@ def _shadow_unreal_pct(buf: dict, price: float) -> float:
 def _try_shadow_limit_fill(buf: dict, price: float, t_rel: float):
     if buf.get("virtual_entry"):
         return
-    start_price = buf.get("start_price")
-    direction = buf.get("direction", "LONG")
-    pullback_pct = float(buf.get("pullback_pct", 0))
-    if not start_price or start_price <= 0:
+    start_price = _buf_float(buf.get("start_price"), 0)
+    direction = buf.get("direction") or "LONG"
+    pullback_pct = _buf_float(buf.get("pullback_pct"), 0)
+    if start_price <= 0:
         return
     if pullback_pct <= 0.0:
         buf["virtual_entry"] = float(price)
@@ -11794,26 +12391,32 @@ def tick_all_replay_buffers(price: float):
     with replay_lock:
         items = list(replay_buffers.items())
     for trade_id, buf in items:
-        if buf.get("closed") or buf.get("lane") == "executed":
-            continue
-        t_rel = now - buf.get("start_ts", now)
-        _try_shadow_limit_fill(buf, price, t_rel)
-        unreal = _shadow_unreal_pct(buf, price) if buf.get("virtual_entry") else None
-        append_replay_tick(trade_id, price, unreal)
+        try:
+            if buf.get("closed") or buf.get("lane") == "executed":
+                continue
+            t_rel = now - _buf_float(buf.get("start_ts"), now)
+            _try_shadow_limit_fill(buf, price, t_rel)
+            unreal = _shadow_unreal_pct(buf, price) if buf.get("virtual_entry") else None
+            append_replay_tick(trade_id, price, unreal)
+        except Exception as e:
+            logger.error(
+                f"[REPLAY_TICK] trade_id={trade_id} lane={buf.get('lane')} failed: {e} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
 
 
 def simulate_replay_outcome(buf: dict) -> dict:
     """Walk replay ticks with bot exit rules — used for blocked APPROVE shadow PnL."""
     ticks = sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0))
-    direction = str(buf.get("direction", "LONG")).upper()
-    leverage = int(buf.get("leverage", state.get("leverage", 20)))
-    margin_usdt = float(buf.get("margin_usdt", FIXED_MARGIN_USDT))
-    pullback_pct = float(buf.get("pullback_pct", 0))
-    start_price = float(buf.get("start_price") or 0)
+    direction = str(buf.get("direction") or "LONG").upper()
+    leverage = _buf_int(buf.get("leverage"), _replay_leverage_default())
+    margin_usdt = _buf_float(buf.get("margin_usdt"), FIXED_MARGIN_USDT)
+    pullback_pct = _buf_float(buf.get("pullback_pct"), 0)
+    start_price = _buf_float(buf.get("start_price"), 0)
     exit_config = buf.get("exit_config") or get_exit_config_snapshot()
     trail_ladder = exit_config.get("trail_ladder", TRAIL_LADDER)
-    fast_cut = float(exit_config.get("thesis_fast_exit_unreal_pct", THESIS_FAST_EXIT_UNREAL_PCT))
-    thesis_above = float(exit_config.get("thesis_exit_if_above_unreal_pct", THESIS_EXIT_IF_ABOVE_UNREAL_PCT))
+    fast_cut = _buf_float(exit_config.get("thesis_fast_exit_unreal_pct"), THESIS_FAST_EXIT_UNREAL_PCT)
+    thesis_above = _buf_float(exit_config.get("thesis_exit_if_above_unreal_pct"), THESIS_EXIT_IF_ABOVE_UNREAL_PCT)
     early_fail = bool(buf.get("early_fail_enabled", True))
     sl_pct = sl_price_pct(leverage)
     dir_factor = 1 if direction == "LONG" else -1
@@ -11822,20 +12425,20 @@ def simulate_replay_outcome(buf: dict) -> dict:
     fill_t = buf.get("virtual_fill_t")
     if entry is None:
         for tick in ticks:
-            price = tick.get("price")
-            t = float(tick.get("t", 0))
-            if price is None or price <= 0 or t > REPLAY_TTL_SEC:
+            price = _buf_float(tick.get("price"), 0)
+            t = _buf_float(tick.get("t"), 0)
+            if price <= 0 or t > REPLAY_TTL_SEC:
                 continue
             if pullback_pct <= 0.0:
-                entry = float(price)
+                entry = price
                 fill_t = t
                 break
             if direction == "LONG" and price <= start_price * (1 - pullback_pct):
-                entry = float(price)
+                entry = price
                 fill_t = t
                 break
             if direction == "SHORT" and price >= start_price * (1 + pullback_pct):
-                entry = float(price)
+                entry = price
                 fill_t = t
                 break
     if entry is None or fill_t is None:
@@ -11855,17 +12458,17 @@ def simulate_replay_outcome(buf: dict) -> dict:
     exit_reason = "MARK_TO_MARKET"
     exit_margin_pct = 0.0
     for tick in ticks:
-        t = float(tick.get("t", 0))
+        t = _buf_float(tick.get("t"), 0)
         if t < fill_t:
             continue
-        price = tick.get("price")
-        if price is None or price <= 0:
+        price = _buf_float(tick.get("price"), 0)
+        if price <= 0:
             continue
         unreal = tick.get("unreal_pct")
         if unreal is None:
             unreal = ((price - entry) / entry) * dir_factor * leverage * 100
         else:
-            unreal = float(unreal)
+            unreal = _buf_float(unreal, 0)
         peak = max(peak, unreal)
         mae = min(mae, unreal)
         age_min = (t - fill_t) / 60.0
@@ -11882,7 +12485,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
-        mfe_protect = float(exit_config.get("thesis_mfe_protect_pct", THESIS_MFE_PROTECT_PCT))
+        mfe_protect = _buf_float(exit_config.get("thesis_mfe_protect_pct"), THESIS_MFE_PROTECT_PCT)
         if peak < trail_ladder[0][0] and unreal <= fast_cut:
             if not (mfe_protect > 0 and unreal >= mfe_protect):
                 exit_reason = "THESIS_FAST_CUT"
@@ -11894,7 +12497,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
             break
         exit_margin_pct = unreal
     else:
-        exit_margin_pct = float(unreal) if ticks else 0.0
+        exit_margin_pct = _buf_float(unreal, 0) if ticks else 0.0
 
     net_usd = _margin_pct_to_usd(exit_margin_pct, margin_usdt)
     return {
@@ -11904,7 +12507,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
         "gross_pnl_margin_pct": round(exit_margin_pct, 4),
         "max_profit_margin_pct": round(peak, 4),
         "max_drawdown_margin_pct": round(mae, 4),
-        "fill_delay_sec": round(float(fill_t), 3),
+        "fill_delay_sec": round(_buf_float(fill_t, 0), 3),
         "entry": entry,
         "fill_price": entry,
     }
@@ -11912,16 +12515,16 @@ def simulate_replay_outcome(buf: dict) -> dict:
 
 def compute_post_block_research(buf: dict, gate_outcome: dict) -> dict:
     """Post-block price path + block quality metrics for analyzer."""
-    block_t = float(buf.get("block_t_rel") or 0)
+    block_t = _buf_float(buf.get("block_t_rel"), 0)
     ticks = sorted(buf.get("ticks", []), key=lambda x: x.get("seq", 0))
-    post_ticks = [t for t in ticks if float(t.get("t", 0)) >= block_t]
-    start_price = float(buf.get("start_price") or 0)
-    direction = str(buf.get("direction", "LONG")).upper()
+    post_ticks = [t for t in ticks if _buf_float(t.get("t"), 0) >= block_t]
+    start_price = _buf_float(buf.get("start_price"), 0)
+    direction = str(buf.get("direction") or "LONG").upper()
     dir_factor = 1 if direction == "LONG" else -1
     max_fav = 0.0
     max_adv = 0.0
     for tick in post_ticks:
-        p = float(tick.get("price") or 0)
+        p = _buf_float(tick.get("price"), 0)
         if p <= 0 or start_price <= 0:
             continue
         move_pct = ((p - start_price) / start_price) * dir_factor * 100
@@ -11929,7 +12532,7 @@ def compute_post_block_research(buf: dict, gate_outcome: dict) -> dict:
         max_adv = min(max_adv, move_pct)
     cf_pnl = gate_outcome.get("net_pnl_usd")
     filled = bool(gate_outcome.get("filled"))
-    post_end = max((float(t.get("t", 0)) for t in post_ticks), default=block_t)
+    post_end = max((_buf_float(t.get("t"), 0) for t in post_ticks), default=block_t)
     return {
         "block_t_rel_sec": round(block_t, 3),
         "post_block_tick_count": len(post_ticks),
@@ -11976,6 +12579,18 @@ def log_shadow_outcome_jsonl(
             f"[SHADOW_OUTCOME] trade_id={trade_id} reason={block_reason} filled={outcome.get('filled')} "
             f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
         )
+        if "SOFT_REJECT" in str(block_reason) or str(block_reason).startswith("AI_"):
+            log_ai_confidence_calibration(
+                {
+                    "trade_id": trade_id,
+                    "ai_win_prob": row.get("ai_win_prob"),
+                    "exit_reason": outcome.get("exit_reason"),
+                    "research_lane": buf.get("research_lane"),
+                    "execution_tier": (ai or {}).get("execution_tier"),
+                },
+                float(outcome.get("net_pnl_usd") or 0),
+                source="shadow_reject",
+            )
     except Exception as e:
         logger.error(f"[SHADOW_OUTCOME] log failed: {e}")
 
@@ -12033,28 +12648,31 @@ def finalize_shadow_research(trade_id: str, block_reason: str, signal: dict = No
 
 
 def start_replay_buffer(trade_id: str, start_price: float, **meta):
-    if not trade_id or not start_price:
+    sp = _buf_float(start_price, 0)
+    if not trade_id or sp <= 0:
         return
+    lev_default = _replay_leverage_default()
+    pullback_default = _buf_float(state.get("pullback_threshold"), 0.002)
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
         replay_buffers[trade_id] = {
             "start_ts": time.time(),
-            "start_price": float(start_price),
+            "start_price": sp,
             "ticks": [],
             "last_update": time.time(),
             "last_tick_ts": 0.0,
             "closed": False,
             "seq": 0,
             "lane": meta.get("lane", "executed"),
-            "direction": meta.get("direction"),
-            "leverage": meta.get("leverage"),
-            "margin_usdt": meta.get("margin_usdt"),
-            "pullback_pct": meta.get("pullback_pct"),
+            "direction": meta.get("direction") or "LONG",
+            "leverage": _buf_int(meta.get("leverage"), lev_default),
+            "margin_usdt": _buf_float(meta.get("margin_usdt"), FIXED_MARGIN_USDT),
+            "pullback_pct": _buf_float(meta.get("pullback_pct"), pullback_default),
             "early_fail_enabled": meta.get("early_fail_enabled", True),
             "exit_config": meta.get("exit_config"),
-            "virtual_entry": meta.get("virtual_entry"),
-            "virtual_fill_t": meta.get("virtual_fill_t"),
+            "virtual_entry": _buf_float(meta["virtual_entry"], 0) if meta.get("virtual_entry") is not None else None,
+            "virtual_fill_t": _buf_float(meta["virtual_fill_t"], 0) if meta.get("virtual_fill_t") is not None else None,
             "block_reason": meta.get("block_reason"),
             "ai_win_prob": meta.get("ai_win_prob"),
             "edge_score": meta.get("edge_score"),
@@ -12069,12 +12687,16 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
         buf = replay_buffers.get(trade_id)
         if not buf or buf.get("closed"):
             return
-        if now - buf.get("last_tick_ts", 0) < REPLAY_TICK_MIN_INTERVAL_SEC:
+        if now - _buf_float(buf.get("last_tick_ts"), 0) < REPLAY_TICK_MIN_INTERVAL_SEC:
             return
-        buf["seq"] = int(buf.get("seq", 0)) + 1
-        t_rel = round(now - buf["start_ts"], 3)
-        phase = "post_block" if buf.get("block_ts") and now >= float(buf["block_ts"]) else "pre_block"
-        buf["ticks"].append({
+        buf["seq"] = _buf_int(buf.get("seq"), 0) + 1
+        t_rel = round(now - _buf_float(buf.get("start_ts"), now), 3)
+        block_ts = _buf_float(buf.get("block_ts"), 0)
+        phase = "post_block" if block_ts > 0 and now >= block_ts else "pre_block"
+        ticks = buf.setdefault("ticks", [])
+        if len(ticks) >= REPLAY_TICK_MAX:
+            ticks.pop(0)
+        ticks.append({
             "seq": buf["seq"],
             "t": t_rel,
             "price": float(price),
@@ -12354,6 +12976,17 @@ def analytics_loop():
             try:
                 compute_analytics()
                 run_offline_research_sim()
+                try:
+                    from execution_funnel import refresh_all_execution_reports
+                    rep = refresh_all_execution_reports(os.getcwd())
+                    fs = rep.get("funnel_summary") or {}
+                    logger.info(
+                        f"[FUNNEL] approves={fs.get('approve_count')} orders={fs.get('order_submitted_count')} "
+                        f"fills={fs.get('filled_count')} approve_to_fill={fs.get('approve_to_fill_rate_pct')}% "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+                except Exception as fe:
+                    logger.debug(f"[FUNNEL] report refresh failed: {fe}")
             except Exception as e:
                 logger.error(f"Analytics error: {e}")
             time.sleep(ANALYTICS_INTERVAL_SEC)
@@ -12500,7 +13133,7 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "invert_signal", "debug_enabled", "live_armed", "account_balance",
+        "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
@@ -12510,6 +13143,62 @@ def _persistent_config_keys():
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
     return keys
+
+def enforce_clean_research_session():
+    """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
+    global bot_start_time
+    with trade_lock:
+        trades.clear()
+        pending_orders.clear()
+        expired_orders.clear()
+        open_positions.clear()
+        trades_map.clear()
+        recent_trades.clear()
+    with replay_lock:
+        replay_buffers.clear()
+    with state_lock:
+        state["account_balance"] = STARTING_BALANCE
+        state["daily_pnl_usd"] = 0.0
+        state["consecutive_losses"] = 0
+        state["loss_pause_until"] = 0.0
+        state["fresh_collection_mode"] = True
+        if not state.get("live_armed", False):
+            state["fresh_collection_mode"] = True
+    bot_start_time = time.time()
+    with state_lock:
+        state["bot_start_time"] = bot_start_time
+    logger.warning(
+        f"[STARTUP] Clean research session — balance={STARTING_BALANCE} fresh_collection=ON "
+        f"version={EXECUTION_FIX_VERSION} [PIPELINE ENFORCEMENT]"
+    )
+
+def _session_trades_only(trades_list):
+    """Only expose trades opened after this process started."""
+    start = bot_start_time or 0.0
+    if start <= 0:
+        return list(trades_list or [])
+    kept = []
+    for t in trades_list or []:
+        if not isinstance(t, dict):
+            continue
+        ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
+        if not ts:
+            raw_ts = t.get("ts")
+            if isinstance(raw_ts, str):
+                try:
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0.0
+            elif isinstance(raw_ts, (int, float)):
+                ts = float(raw_ts)
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts = 0.0
+        if float(ts or 0) >= start - 1.0:
+            kept.append(t)
+    return kept
 
 def load_persistent_config():
     if os.path.exists(CONFIG_FILE):
@@ -12548,10 +13237,30 @@ def save_persistent_config():
     logger.debug("Saved persistent config")
 
 def rotate_log(file):
-    if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
-        existing = sorted(glob.glob(file + ".*"))
-        next_index = len(existing) + 1
-        os.rename(file, f"{file}.{next_index}")
+    try:
+        if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
+            existing = sorted(glob.glob(file + ".*"))
+            next_index = len(existing) + 1
+            os.rename(file, f"{file}.{next_index}")
+    except OSError as e:
+        logger.error(f"[LOG ROTATION] failed for {file}: {e} [PIPELINE ENFORCEMENT]")
+
+
+def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
+    """Append one JSONL row with rotation + disk-failure guard (non-fatal for research logs)."""
+    try:
+        rotate_log(path)
+        line = json.dumps(row, default=str) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+        return True
+    except OSError as e:
+        logger.error(f"[{label}] disk write failed ({path}): {e} [PIPELINE ENFORCEMENT]")
+        return False
+    except Exception as e:
+        logger.error(f"[{label}] append failed ({path}): {e} [PIPELINE ENFORCEMENT]")
+        return False
 
 def _port_is_open(host: str, port: int) -> bool:
     import socket
@@ -12568,6 +13277,10 @@ def _ensure_flask_port_available(port: int = None):
     if os.name != "nt":
         return
     if not _port_is_open("127.0.0.1", port):
+        return
+    import sys
+    if sys.platform != "win32":
+        logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
     try:
         out = subprocess.check_output(
@@ -12637,7 +13350,7 @@ def system_health_check():
                 if not state.get("system_ready"):
                     logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
                 state["system_ready"] = True
-                if state.get("execution_paused"):
+                if state.get("execution_paused") and not state.get("manual_admin_pause"):
                     set_execution_paused("")
         else:
             state["last_ready_ts"] = 0
@@ -12695,9 +13408,13 @@ def startup_log_research_sync():
     )
 
 def recover_from_crash():
-    if state.get("execution_reason") == "THREAD_CRASH":
-        logger.warning("[RECOVERY] Attempting recovery from thread crash")
-        set_execution_paused("")
+    reason = state.get("execution_reason")
+    if reason in ("THREAD_CRASH", "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"):
+        if system_health_check():
+            logger.info(f"[RECOVERY] Health OK — clearing pause ({reason})")
+            set_execution_paused("")
+        else:
+            logger.debug(f"[RECOVERY] Pause kept ({reason}) — health not ready yet")
 
 def heartbeat_loop():
     global last_heartbeat
@@ -12711,8 +13428,12 @@ def heartbeat_loop():
         if not (state.get("ws_ready") and len(latest_candles) >= MIN_CANDLES):
             continue
         now = time.time()
-        if now - state.get("last_ai_call_ts", 0) < AI_COOLDOWN_SECONDS:
-            logger.debug(f"[HEARTBEAT] Skipped - AI cooldown active ({AI_COOLDOWN_SECONDS - (now - state.get('last_ai_call_ts', 0)):.0f}s left) [PIPELINE ENFORCEMENT]")
+        ai_cd = get_effective_ai_cooldown_sec()
+        if now - state.get("last_ai_call_ts", 0) < ai_cd:
+            logger.debug(
+                f"[HEARTBEAT] Skipped - AI cooldown active "
+                f"({ai_cd - (now - state.get('last_ai_call_ts', 0)):.0f}s left) [PIPELINE ENFORCEMENT]"
+            )
             continue
         if _sole_ai_research_mode():
             logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
@@ -12894,6 +13615,9 @@ def main():
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
@@ -12976,6 +13700,11 @@ def main():
         f"[PHASE-C] factor_gate={PHASE_C_FACTOR_GATE_ENABLED} min_margin={MIN_FACTOR_SCORE_MARGIN} [PIPELINE ENFORCEMENT]"
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
+    logger.warning(
+        f"[V103] post_fill_grace={POST_FILL_GRACE_SEC}s order_ttl={LIMIT_ORDER_MAX_AGE_SEC}s "
+        f"max_active={get_effective_max_active_signals()} ai_cooldown={get_effective_ai_cooldown_sec()}s "
+        f"funnel=execution_funnel.jsonl insights=execution_insight_report.py [PIPELINE ENFORCEMENT]"
+    )
     if golden_stack_enabled():
         logger.warning(
             f"[V86 GOLDEN_STACK] ENFORCED — chop<={GOLDEN_STACK_CHOP_MAX} | SHORT BEAR_ALIGNED | "
@@ -13025,8 +13754,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
