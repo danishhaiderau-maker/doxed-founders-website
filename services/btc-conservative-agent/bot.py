@@ -2679,6 +2679,8 @@ def refresh_dashboard_market_snapshot(force: bool = False):
             with state_lock:
                 state["price"] = rest_price
                 state["price_ts"] = now
+                state["ws_last_tick"] = now
+                state["last_data_ts"] = now
                 state["price_source"] = "REST"
                 state["price_seq"] = int(state.get("price_seq") or 0) + 1
                 diag = state.setdefault("diag", {})
@@ -3824,7 +3826,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.0.7-dashboard-sync"
+EXECUTION_FIX_VERSION = "v1.0.8-ws-stability"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -8963,7 +8965,7 @@ def _bitfinex_ws_trades_from_message(data) -> list:
                     out.append(t)
     return out
 
-def _process_ws_trade_tick(trade: dict):
+def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     global _last_ws_trade_fp, _last_ws_trade_fp_ts, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength
     trade_fp = (trade.get("T"), trade.get("p"), trade.get("v"), trade.get("S"))
     if trade_fp == _last_ws_trade_fp and (time.time() - _last_ws_trade_fp_ts) < 0.05:
@@ -8973,7 +8975,12 @@ def _process_ws_trade_tick(trade: dict):
     size = float(trade.get("v", 0))
     if price <= 0:
         return
-    if _is_stale_ws_trade(trade):
+    stale = _is_stale_ws_trade(trade)
+    if snapshot_seed:
+        trade_ts = _ws_trade_timestamp_sec(trade)
+        if max(0.0, time.time() - trade_ts) <= WS_BOOTSTRAP_MAX_AGE_SEC:
+            stale = False
+    if stale:
         trade_ts = _ws_trade_timestamp_sec(trade)
         logger.debug(
             f"[WS STALE SKIP] price={fmt(price)} trade_age={time.time() - trade_ts:.2f}s "
@@ -9065,8 +9072,11 @@ def safe_ws_handler(message):
         if not trades:
             return
         _agent_dbg("H2", "safe_ws_handler", "batch", {"trades_in_msg": len(trades), "msg_len": len(message)})
-        for trade in trades:
-            _process_ws_trade_tick(trade)
+        if len(trades) > 1:
+            newest = max(trades, key=_ws_trade_timestamp_sec)
+            _process_ws_trade_tick(newest, snapshot_seed=True)
+        else:
+            _process_ws_trade_tick(trades[0])
     except IndexError as ie:
         logger.error(f"[WS FIX] deque underflow prevented: {ie}")
         return
@@ -9095,7 +9105,11 @@ def on_open(ws):
     threading.Thread(target=ping_ws, args=(ws,), daemon=True).start()
 
 def on_error(ws, error):
-    logger.error(f"WS error: {error}")
+    err_str = str(error or "").lower()
+    if "already closed" in err_str or "'nonetype' object has no attribute 'sock'" in err_str:
+        logger.debug(f"WS error (benign): {error}")
+        return
+    logger.warning(f"WS error: {error}")
 
 def on_close(ws, code, reason):
     logger.warning(f"WS closed: code={code}, reason={reason}")
@@ -9104,23 +9118,37 @@ def on_close(ws, code, reason):
     ws_alive = False
     # Log only — do not pause execution on brief disconnects (watchdog handles stale/reconnect)
 
+def _close_ws_app():
+    """Centralized safe WS close — null ws_app before close to avoid races."""
+    global ws_app, ws_alive
+    with ws_lock:
+        app = ws_app
+        ws_app = None
+        ws_alive = False
+    if not app:
+        return
+    try:
+        app.keep_running = False
+        sock = getattr(app, "sock", None)
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        app.close()
+    except Exception:
+        pass
+
 def start_websocket():
     global ws_app, ws_alive
     ws_url = BITFINEX_WS_URL
     while not shutdown_event.is_set():
-        with ws_lock:
-            if ws_app:
-                try:
-                    ws_app.keep_running = False
-                    if ws_app.sock:
-                        ws_app.sock.close()
-                    ws_app.close()
-                except:
-                    pass
+        _close_ws_app()
         try:
             logger.info("Starting websocket connection")
-            ws_app = websocket.WebSocketApp(ws_url, on_message=on_message, on_open=on_open, on_error=on_error, on_close=on_close)
-            ws_alive = True
+            with ws_lock:
+                ws_app = websocket.WebSocketApp(ws_url, on_message=on_message, on_open=on_open, on_error=on_error, on_close=on_close)
+                ws_alive = True
             ws_app.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=20, ping_timeout=10)
         except Exception as e:
             logger.error(f"WS failure: {e}")
@@ -9155,19 +9183,21 @@ def ws_watchdog():
                 backoff = min(ws_retry * 2, 30)
                 # Re-nudge when still stale after backoff (ws_reconnecting alone blocked retries).
                 if not ws_reconnecting or (now - last_nudge_ts) >= backoff:
+                    refresh_dashboard_market_snapshot(force=True)
+                    price_ts = state.get("price_ts")
+                    if price_ts is not None:
+                        age = time.time() - price_ts
+                    if age <= WATCHDOG_WS_STALE_SEC:
+                        logger.info(
+                            f"[WS] REST fallback restored freshness age={fmt(age)}s — skip reconnect"
+                        )
+                        ws_reconnecting = False
+                        continue
                     ws_reconnecting = True
                     ws_stale_count = ws_stale_count + 1
                     last_nudge_ts = now
                     logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) — nudging reconnect")
-                    with ws_lock:
-                        if ws_app:
-                            try:
-                                ws_app.keep_running = False
-                                if ws_app.sock:
-                                    ws_app.sock.close()
-                                ws_app.close()
-                            except Exception:
-                                pass
+                    _close_ws_app()
                     ws_retry = min(ws_retry + 1, 8)
             elif ws_reconnecting:
                 ws_reconnecting = False
@@ -9189,8 +9219,10 @@ def ws_watchdog():
 def state_monitor_loop():
     try:
         last_stale_time = 0
+        last_rest_snapshot_ts = 0.0
         while not shutdown_event.is_set():
             time.sleep(1)
+            now = time.time()
             with state_lock:
                 state["heartbeat"] = int(time.time())
                 state["last_heartbeat"] = time.time()
@@ -9285,10 +9317,16 @@ def state_monitor_loop():
                     )
                 except Exception as e:
                     logger.warning(f"[RESEARCH_KPI] periodic run failed: {e}")
-            price_ts = state.get("price_ts")
-            if price_ts is None:
+            price_ts = state.get("price_ts") or 0
+            ws_tick = state.get("ws_last_tick") or 0
+            ref_ts = max(price_ts, ws_tick)
+            if not ref_ts:
                 continue
-            stale_age = time.time() - price_ts
+            price_age = now - ref_ts
+            if price_age > 8 and (now - last_rest_snapshot_ts) >= 10:
+                refresh_dashboard_market_snapshot(force=True)
+                last_rest_snapshot_ts = now
+            stale_age = price_age
             if stale_age > 300:
                 logger.warning(f"WS stale for {stale_age:.0f}s")
                 if time.time() - last_stale_time > 120:
@@ -11137,7 +11175,9 @@ DASHBOARD_JS = """(function () {
         }
         if (d.max_active_signals) {
           const mcp = document.getElementById('maxConcurrentPositions');
-          if (mcp) mcp.value = d.max_active_signals;
+          if (mcp && String(mcp.value) !== String(d.max_active_signals)) {
+            mcp.value = d.max_active_signals;
+          }
         }
         if (d.ai_threshold != null && d.ai_threshold !== '') {
           const aiThresh = document.getElementById('aiThreshold');
@@ -11361,6 +11401,9 @@ DASHBOARD_JS = """(function () {
             }
             if (id === 'edgeThreshold' || id === 'edgeThresholdMax') {
               updateEdgeRangeCustom();
+              return;
+            }
+            if (el.type === 'number') {
               return;
             }
             const val = this.value;
@@ -12128,7 +12171,10 @@ def validate_market_data():
     with state_lock:
         now = time.time()
         price_ok = state.get("price") is not None and state["price"] > 0
-        ws_ok = state.get("ws_last_tick") is not None and (now - state["ws_last_tick"] < STALE_HARD_SEC)
+        price_ts = state.get("price_ts") or 0
+        ws_tick = state.get("ws_last_tick") or 0
+        ref_ts = max(price_ts, ws_tick)
+        ws_ok = ref_ts > 0 and (now - ref_ts < STALE_HARD_SEC)
         ohlcv_ok = state.get("ohlcv_ready", False)
         ema_ok = all([state["ema_status"].get("ema9") is not None,state["ema_status"].get("ema21") is not None,state["ema_status"].get("ema200") is not None])
         candle_ok = (now - last_candle_ts < CANDLE_STALE_SEC) or (len(latest_candles) >= MIN_CANDLES)
