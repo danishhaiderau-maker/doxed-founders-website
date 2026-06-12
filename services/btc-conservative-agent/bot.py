@@ -2073,10 +2073,8 @@ def ensure_directional_capacity(direction: str) -> bool:
 def get_effective_max_active_signals() -> int:
     with state_lock:
         user_max = int(state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT)
-    if is_research_data_collection():
-        return min(user_max, RESEARCH_MAX_CONCURRENT_CAP)
-    prof = get_regime_risk_profile()
-    return min(user_max, int(prof["max_active"]))
+    # Dashboard value is authoritative (research capped at RESEARCH_MAX_CONCURRENT_CAP).
+    return min(user_max, RESEARCH_MAX_CONCURRENT_CAP)
 
 def _ws_trade_timestamp_sec(trade: dict) -> float:
     trade_ts_raw = trade.get("T")
@@ -2089,6 +2087,9 @@ def _is_stale_ws_trade(trade: dict) -> bool:
     now = time.time()
     trade_ts = _ws_trade_timestamp_sec(trade)
     age = max(0.0, now - trade_ts)
+    price = state.get("price")
+    if (not price or price <= 0) and age <= WS_BOOTSTRAP_MAX_AGE_SEC:
+        return False
     if age > WS_MAX_STALE_TRADE_SEC:
         return True
     ws_conn = float(state.get("ws_connected_ts") or 0)
@@ -2368,8 +2369,7 @@ def execution_allowed() -> bool:
         return False
     with trade_lock:
         active = get_active_signal_count()
-    with state_lock:
-        max_pos = state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
+    max_pos = get_effective_max_active_signals()
     if active >= max_pos:
         state["execution_reason"] = "MAX_ACTIVE_SIGNALS"
         logger.warning(f"[LIMIT] Max active signals reached: {active}/{max_pos} [PIPELINE ENFORCEMENT]")
@@ -2632,6 +2632,45 @@ def _effective_funding_rate_8h(current_funding: float, next_accrued: float) -> f
     if abs(acc) >= 1e-12:
         return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, acc))
     return 0.0
+
+def fetch_bitfinex_last_price_rest(symbol: str = BITFINEX_WS_SYMBOL) -> float:
+    """Latest trade price from Bitfinex REST ticker (dashboard fallback when WS stale)."""
+    url = f"{BITFINEX_REST_BASE}/ticker/{symbol}"
+    resp = _http_get_with_retry(url, timeout=10, label="TICKER")
+    data = resp.json()
+    if isinstance(data, list) and len(data) > 6:
+        return float(data[6])
+    raise ValueError(f"unexpected ticker response: {data!r}")
+
+
+def refresh_dashboard_market_snapshot(force: bool = False):
+    """Ensure /api/state serves a fresh price; REST fallback when WS feed is stale."""
+    now = time.time()
+    with state_lock:
+        price_ts = state.get("price_ts") or 0
+        ws_tick = state.get("ws_last_tick") or 0
+    ref_ts = max(price_ts, ws_tick)
+    age = (now - ref_ts) if ref_ts else 9999.0
+    threshold = 5.0 if force else 10.0
+    if age < threshold:
+        return
+    try:
+        rest_price = fetch_bitfinex_last_price_rest()
+        if rest_price and rest_price > 0:
+            with state_lock:
+                state["price"] = rest_price
+                state["price_ts"] = now
+                state["price_source"] = "REST"
+                state["price_seq"] = int(state.get("price_seq") or 0) + 1
+                diag = state.setdefault("diag", {})
+                diag["ws_status"] = "STALE" if age >= STALE_HARD_SEC else "REST_FALLBACK"
+            sync_dashboard_branding()
+            logger.debug(
+                f"[DASHBOARD] REST price refresh {fmt(rest_price)} feed_age={age:.0f}s [PIPELINE ENFORCEMENT]"
+            )
+    except Exception as e:
+        logger.debug(f"[DASHBOARD] REST price refresh failed: {e} [PIPELINE ENFORCEMENT]")
+
 
 def fetch_bitfinex_deriv_funding_rest(symbol: str = BITFINEX_WS_SYMBOL) -> dict:
     """Live perp funding from Bitfinex GET /v2/status/deriv?keys=... (public, no API key)."""
@@ -3536,6 +3575,7 @@ POSITION_MONITOR_INTERVAL_SEC = 1.0
 LADDER_ARMED_MONITOR_INTERVAL_SEC = 0.15
 WS_MAX_STALE_TRADE_SEC = 3.0
 WS_RECONNECT_STALE_GRACE_SEC = 8.0
+WS_BOOTSTRAP_MAX_AGE_SEC = float(os.getenv("WS_BOOTSTRAP_MAX_AGE_SEC", "300"))
 LADDER_AUDIT_LOG_INTERVAL_SEC = 0.25
 # v84.1: EMA9/EMA21 hybrid entry (+$offset long / -$offset short); fallback pullback
 ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
@@ -3715,10 +3755,10 @@ MAX_CONCURRENT_POSITIONS_DEFAULT = 20
 RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
-SIGNAL_TTL_SEC = 120 * 60
-REPLAY_TTL_SEC = 120 * 60
+SIGNAL_TTL_SEC = 60 * 60
+REPLAY_TTL_SEC = 60 * 60
 MAX_EVENT_QUEUE = 10000
-LIMIT_ORDER_MAX_AGE_SEC = 120 * 60
+LIMIT_ORDER_MAX_AGE_SEC = 60 * 60
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
 REVERSAL_STUDY_TTL_SEC = 3600  # 60m horizon for reversal_risk_score validation
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
@@ -3765,7 +3805,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.0.3-execution-insights"
+EXECUTION_FIX_VERSION = "v1.0.6-limit-touch-fill"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3782,6 +3822,7 @@ def csv_research_meta(signal: dict = None) -> dict:
     return meta
 ORDER_PLACEMENT_GRACE_SEC = 30
 # Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
+SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
 TERMINAL_SIGNAL_OUTCOMES = frozenset({"STALE_NO_EXPOSURE", "SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "CAPACITY_REPLACED", "WIN", "LOSS"})
 last_signal_hash = None
@@ -4369,6 +4410,13 @@ def build_full_feature_snapshot():
             candle_range = 0.0
             body_ratio = 0.0
             wick_ratio = 0.0
+        vol_agg = nz(get_aggregated(volume_buffer), 0.0)
+        delta_agg = nz(get_aggregated(delta_buffer), 0.0)
+        velocity_agg = nz(get_aggregated(velocity_buffer), 0.0)
+        imbalance_agg = nz(get_aggregated(imbalance_buffer), 0.0)
+        candle_range_agg = nz(get_aggregated(candle_range_buffer), 0.0)
+        body_ratio_agg = nz(get_aggregated(body_ratio_buffer), 0.0)
+        wick_ratio_agg = nz(get_aggregated(wick_ratio_buffer), 0.0)
         features = {
             "price": price,
             "ret_1m": compute_ret_1m(),
@@ -4378,18 +4426,18 @@ def build_full_feature_snapshot():
             "ema200": nz(ema_status.get("ema200")),
             "dist_to_support": nz(sr.get("dist_to_support")),
             "dist_to_resistance": nz(sr.get("dist_to_resistance")),
-            "volume": get_aggregated(volume_buffer),
+            "volume": vol_agg,
             "volume_ratio": volume_ratio,
-            "delta": get_aggregated(delta_buffer),
-            "velocity": get_aggregated(velocity_buffer),
-            "imbalance": get_aggregated(imbalance_buffer),
-            "candle_range": get_aggregated(candle_range_buffer),
-            "body_ratio": get_aggregated(body_ratio_buffer),
-            "wick_ratio": get_aggregated(wick_ratio_buffer)
+            "delta": delta_agg,
+            "velocity": velocity_agg,
+            "imbalance": imbalance_agg,
+            "candle_range": candle_range_agg,
+            "body_ratio": body_ratio_agg,
+            "wick_ratio": wick_ratio_agg
         }
         with state_lock:
             state["feature_snapshot"] = features
-        logger.info(f"[FEATURE BUILD] complete - keys: {list(features.keys())} price={price:.2f} volume={features['volume']:.4f} velocity={features['velocity']:.6f} volume_ratio={features['volume_ratio']:.4f} candle_range={features['candle_range']:.4f} body_ratio={features['body_ratio']:.4f} wick_ratio={features['wick_ratio']:.4f} [PIPELINE ENFORCEMENT]")
+        logger.info(f"[FEATURE BUILD] complete - keys: {list(features.keys())} price={price:.2f} volume={vol_agg:.4f} velocity={velocity_agg:.6f} volume_ratio={features['volume_ratio']:.4f} candle_range={candle_range_agg:.4f} body_ratio={body_ratio_agg:.4f} wick_ratio={wick_ratio_agg:.4f} [PIPELINE ENFORCEMENT]")
         return features
     except Exception as e:
         logger.error(f"[FEATURE BUILD ERROR] {e} [PIPELINE ENFORCEMENT]")
@@ -4822,6 +4870,11 @@ def reconcile_stale_signals():
                 fixed += 1
                 if _remove_pending_for_trade(tid, sig["outcome"]):
                     orphans_removed += 1
+            elif st == SIGNAL_STATUS_AWAITING_MICRO and ttl_expired:
+                sig["status"] = "EXPIRED"
+                sig["outcome"] = "SIGNAL_TTL_EXPIRED"
+                sig["exit_reason"] = sig["outcome"]
+                fixed += 1
         for order in list(pending_orders):
             tid = order.get("trade_id")
             if order.get("status") != "PENDING" or not tid:
@@ -4839,7 +4892,16 @@ def reconcile_stale_signals():
 def sync_signal_info_registry():
     pending_ids = _pending_trade_ids()
     open_ids = _open_trade_ids()
-    live_ids = pending_ids | open_ids
+    awaiting_micro_ids = set()
+    with trade_lock:
+        for entry in trades_map.values():
+            sig = entry.get("signal_ref")
+            if not isinstance(sig, dict):
+                continue
+            tid = sig.get("trade_id")
+            if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(sig):
+                awaiting_micro_ids.add(tid)
+    live_ids = pending_ids | open_ids | awaiting_micro_ids
     live_signals = []
     with trade_lock:
         for entry in trades_map.values():
@@ -5080,7 +5142,7 @@ def debug_snapshot(signal=None, ai=None, stage="UNKNOWN"):
             },
             "ai_gate": dbg.get("ai_gate"),
             "threshold": state.get("ai_threshold"),
-            "max_pos": state.get("max_active_signals"),
+            "max_pos": get_effective_max_active_signals(),
             "active_signals": get_active_signal_count(),
             "execution": {"allowed": execution_allowed(),"reason": state.get("execution_reason")},
             "signal": {"id": signal.get("trade_id") if signal else None,"status": signal.get("status") if signal else None,"direction": signal.get("final_direction") if signal else None},
@@ -7550,21 +7612,31 @@ def apply_research_instant_fill(signal: dict):
     )
 
 
-def execute_simulated_order(signal):
+def _resolve_awaiting_micro_limit(signal: dict) -> tuple:
+    """Return (limit_price, entry_mode, confirmed) for a deferred micro-confirm entry."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(state.get("price") or signal.get("signal_price") or 0)
+    limit_price, entry_mode = resolve_entry_limit_price(signal)
+    ms = build_micro_sr_levels()
+    micro = evaluate_micro_structure_confirm(direction, price, limit_price, ms)
+    if not micro.get("confirmed"):
+        return limit_price, entry_mode, False
+    if entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_EMA_HYBRID):
+        if direction == "LONG" and ms.get("micro_support"):
+            limit_price = float(ms["micro_support"]) + MICRO_SR_ENTRY_BUFFER_USD
+        elif direction == "SHORT" and ms.get("micro_resistance"):
+            limit_price = float(ms["micro_resistance"]) - MICRO_SR_ENTRY_BUFFER_USD
+    return limit_price, entry_mode, True
+
+
+def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
+    """Create a pending limit order after micro structure is confirmed."""
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
-    max_active = get_effective_max_active_signals()
-    _evict_oldest_pending_if_at_capacity(max_active, lane=lane if is_research_data_collection() else None)
-    logger.info(
-        f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
-        f"lane={lane} model={signal.get('research_model')} "
-        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
-    )
-    full_pipeline_trace("[EXECUTION]", "SIM_ORDER_CREATED", signal.get("trade_id"))
     price = state.get("price")
+    if not price or price <= 0:
+        return False
     pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
     signal_price = signal.get("signal_price", price)
-    limit_price, entry_mode = resolve_entry_limit_price(signal)
-    signal["entry_mode"] = entry_mode
     margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
     lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
     qty = margin_usdt * lev / price
@@ -7582,13 +7654,18 @@ def execute_simulated_order(signal):
         "created_ts": time.time(),
         "entry_type": "SIM_LIMIT",
         "signal_price": signal.get("signal_price"),
-        "fee_type": "MAKER"
+        "fee_type": "MAKER",
+        "micro_structure_confirmed": True,
     }
     signal["limit_price"] = limit_price
+    signal["planned_limit_price"] = limit_price
+    signal["entry_mode"] = entry_mode
     signal["qty"] = qty
     signal["order_created_ts"] = time.time()
     signal["status"] = "ORDERED"
     signal["order_placed"] = True
+    signal["await_micro_confirm"] = False
+    signal.pop("awaiting_micro_since", None)
     with trade_lock:
         pending_orders.append(order)
     logger.info(
@@ -7607,16 +7684,9 @@ def execute_simulated_order(signal):
     if not research_instant and setup_type == "WEAK_SETUP":
         defer_instant_fill = True
         logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
-    if signal.get("await_micro_confirm"):
-        order["await_micro_confirm"] = True
-        logger.info(
-            f"[SIM] await_micro_confirm trade_id={signal.get('trade_id')} "
-            f"entry_mode={entry_mode} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]"
-        )
     can_instant = (
         pullback_pct <= 0.0
         and not defer_instant_fill
-        and not order.get("await_micro_confirm")
         and (
             research_instant
             or entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER)
@@ -7635,7 +7705,10 @@ def execute_simulated_order(signal):
         order["fee_type"] = "TAKER"
         fill_order(order)
         logger.info(f"[SIM] Instant fill (pullback=0%) at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-    elif defer_instant_fill and entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR):
+    elif (
+        defer_instant_fill
+        and entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER)
+    ):
         order["await_confirm"] = True
         logger.info(f"[SIM] Pullback limit pending confirm trade_id={signal.get('trade_id')} limit={fmt(limit_price)} [PIPELINE ENFORCEMENT]")
     order["max_price_since_order"] = float(price)
@@ -7647,6 +7720,79 @@ def execute_simulated_order(signal):
         logger.debug(f"[FUNNEL] order log failed: {_fe}")
     pipeline_state_sync()
     return True
+
+
+def process_awaiting_micro_entries():
+    """Promote AWAITING_MICRO signals to real pending limit orders once micro confirms."""
+    price = state.get("price")
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    with trade_lock:
+        awaiting = [
+            (entry.get("signal_ref") or {})
+            for entry in trades_map.values()
+            if isinstance(entry.get("signal_ref"), dict)
+            and entry["signal_ref"].get("status") == SIGNAL_STATUS_AWAITING_MICRO
+            and not is_terminal_signal(entry["signal_ref"])
+        ]
+    for signal in awaiting:
+        tid = signal.get("trade_id")
+        if not tid:
+            continue
+        expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+        if expires_ts and now > expires_ts:
+            with trade_lock:
+                master = trades_map.get(tid, {}).get("signal_ref", signal)
+                master["status"] = "EXPIRED"
+                master["outcome"] = "SIGNAL_TTL_EXPIRED"
+                master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            logger.info(f"[SIM] awaiting_micro expired trade_id={tid} [PIPELINE ENFORCEMENT]")
+            continue
+        if not ensure_signal_capacity():
+            continue
+        limit_price, entry_mode, confirmed = _resolve_awaiting_micro_limit(signal)
+        if not confirmed:
+            continue
+        logger.info(
+            f"[SIM] micro_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
+            f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
+        )
+        _place_simulated_limit_order(signal, limit_price, entry_mode)
+
+
+def execute_simulated_order(signal):
+    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    max_active = get_effective_max_active_signals()
+    _evict_oldest_pending_if_at_capacity(max_active, lane=lane if is_research_data_collection() else None)
+    logger.info(
+        f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
+        f"lane={lane} model={signal.get('research_model')} "
+        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
+    )
+    full_pipeline_trace("[EXECUTION]", "SIM_ORDER_CREATED", signal.get("trade_id"))
+    price = state.get("price")
+    if not price or price <= 0:
+        return False
+    limit_price, entry_mode = resolve_entry_limit_price(signal)
+    signal["entry_mode"] = entry_mode
+    if signal.get("await_micro_confirm"):
+        signal["limit_price"] = limit_price
+        signal["planned_limit_price"] = limit_price
+        signal["status"] = SIGNAL_STATUS_AWAITING_MICRO
+        signal["awaiting_micro_since"] = time.time()
+        signal["order_placed"] = False
+        margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+        lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
+        signal["qty"] = margin_usdt * lev / price
+        logger.info(
+            f"[SIM] awaiting_micro_confirm trade_id={signal.get('trade_id')} "
+            f"entry_mode={entry_mode} target_limit={fmt(limit_price)} "
+            f"(no pending order until micro confirms) [PIPELINE ENFORCEMENT]"
+        )
+        pipeline_state_sync()
+        return True
+    return _place_simulated_limit_order(signal, limit_price, entry_mode)
 
 def _update_pending_order_price_extremes(price: float):
     if price is None or price <= 0:
@@ -7682,44 +7828,19 @@ def process_pending_orders():
     price = state.get("price")
     if price is None or price <= 0:
         return
+    process_awaiting_micro_entries()
     _update_pending_order_price_extremes(price)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
                 continue
-            if order.get("await_micro_confirm"):
-                direction = order.get("signal_dir")
-                ms = build_micro_sr_levels()
-                if direction == "LONG" and ms.get("micro_support"):
-                    limit = float(ms["micro_support"]) + MICRO_SR_ENTRY_BUFFER_USD
-                elif direction == "SHORT" and ms.get("micro_resistance"):
-                    limit = float(ms["micro_resistance"]) - MICRO_SR_ENTRY_BUFFER_USD
-                else:
-                    limit = float(order.get("limit_price") or 0)
-                micro = evaluate_micro_structure_confirm(direction, price, limit, ms)
-                if not micro.get("confirmed"):
-                    continue
-                order.pop("await_micro_confirm", None)
-                order["micro_structure_confirmed"] = True
-                order["entry_mode"] = ENTRY_MODE_MICRO_SR
-                order["limit_price"] = limit
-                order["planned_limit_price"] = limit
-                logger.info(
-                    f"[SIM] micro_structure confirmed trade_id={order.get('trade_id')} "
-                    f"dir={direction} limit={fmt(limit)} pivots={ms.get('pivot_count')} "
-                    f"[PIPELINE ENFORCEMENT]"
-                )
-            if order.get("await_confirm"):
-                direction = order.get("signal_dir")
-                fs = state.get("feature_snapshot") or {}
-                r1, _, vel = _signed_momentum_components(fs)
-                if direction == "SHORT" and vel > MOMENTUM_ALIGN_EPS and r1 > MOMENTUM_ALIGN_EPS:
-                    continue
-                if direction == "LONG" and vel < -MOMENTUM_ALIGN_EPS and r1 < -MOMENTUM_ALIGN_EPS:
-                    continue
-                order.pop("await_confirm", None)
             if not _pending_limit_touched(order, price):
                 continue
+            if order.pop("await_confirm", None):
+                logger.debug(
+                    f"[SIM] limit touched — filling despite prior await_confirm "
+                    f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
+                )
             fill_px = float(order["limit_price"])
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
@@ -7924,7 +8045,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "RUNNING"
 
             logger.info(
-                f"[PIPELINE] → ENTER lane={research_lane} model={research_lane_label(research_lane)} "
+                f"[PIPELINE] -> ENTER lane={research_lane} model={research_lane_label(research_lane)} "
                 f"skip_ai={skip_ai} — full pipeline enforced [PIPELINE ENFORCEMENT]"
             )
             update_debug_state_always("PIPELINE_ENTER")
@@ -7993,7 +8114,7 @@ def process_signal(event: dict):
                 return
 
             logger.info(
-                f"[PIPELINE] EDGE TRIGGER {trigger_reason} → candidate stage (AI only if pre-gates pass) "
+                f"[PIPELINE] EDGE TRIGGER {trigger_reason} -> candidate stage (AI only if pre-gates pass) "
                 f"[PIPELINE ENFORCEMENT]"
             )
 
@@ -8002,8 +8123,7 @@ def process_signal(event: dict):
             last_pipeline_run = now
             full_pipeline_trace("[PIPELINE]", "ENTER_process_signal", None)
 
-            with state_lock:
-                max_active = state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
+            max_active = get_effective_max_active_signals()
             if sole and is_research_data_collection():
                 if not ensure_lane_signal_capacity(research_lane):
                     active = get_active_signal_count(research_lane)
@@ -8686,7 +8806,12 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
             record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
-            final_status = signal.get("status") if signal.get("status") in ("FILLED", "OPEN") else "ORDERED"
+            if signal.get("status") in ("FILLED", "OPEN"):
+                final_status = signal.get("status")
+            elif signal.get("status") == SIGNAL_STATUS_AWAITING_MICRO:
+                final_status = SIGNAL_STATUS_AWAITING_MICRO
+            else:
+                final_status = "ORDERED"
             finalize_signal(signal, ai, final_status)
             with state_lock:
                 state.setdefault("last_signal_create_ts_by_lane", {})[research_lane] = time.time()
@@ -8858,6 +8983,12 @@ def safe_ws_handler(message):
     except IndexError as ie:
         logger.error(f"[WS FIX] deque underflow prevented: {ie}")
         return
+    except OSError as e:
+        if getattr(e, "winerror", None) == 32 or e.errno in (13, 32, 16):
+            logger.warning(f"[WS] non-fatal file lock: {e}")
+            return
+        logger.critical(f"[WS FATAL] {e}")
+        set_execution_paused("THREAD_CRASH")
     except Exception as e:
         logger.critical(f"[WS FATAL] {e}")
         set_execution_paused("THREAD_CRASH")
@@ -8924,6 +9055,7 @@ def ping_ws(ws):
 
 def ws_watchdog():
     global ws_app, ws_reconnecting, last_ws_reconnect, ws_alive, ws_stale_count, ws_retry
+    last_nudge_ts = 0.0
     try:
         while not shutdown_event.is_set():
             time.sleep(3)
@@ -8932,9 +9064,13 @@ def ws_watchdog():
                 continue
             age = time.time() - price_ts
             if age > WATCHDOG_WS_STALE_SEC:
-                if not ws_reconnecting:
+                now = time.time()
+                backoff = min(ws_retry * 2, 30)
+                # Re-nudge when still stale after backoff (ws_reconnecting alone blocked retries).
+                if not ws_reconnecting or (now - last_nudge_ts) >= backoff:
                     ws_reconnecting = True
                     ws_stale_count = ws_stale_count + 1
+                    last_nudge_ts = now
                     logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) — nudging reconnect")
                     with ws_lock:
                         if ws_app:
@@ -8946,7 +9082,6 @@ def ws_watchdog():
                             except Exception:
                                 pass
                     ws_retry = min(ws_retry + 1, 8)
-                    time.sleep(min(ws_retry * 2, 30))
             elif ws_reconnecting:
                 ws_reconnecting = False
                 ws_retry = 1
@@ -9726,6 +9861,9 @@ ws_lock = threading.RLock()
 console_lock = threading.Lock()
 pipeline_lock = threading.Lock()
 process_lock = threading.RLock()
+positions_file_lock = threading.RLock()
+config_file_lock = threading.RLock()
+signal_snapshot_lock = threading.RLock()
 last_ohlcv_fetch = time.time() - 60
 last_processed_candle_ts = 0.0
 last_ai_evaluation_ts = 0.0
@@ -10089,7 +10227,7 @@ HTML = """<!DOCTYPE html>
     Data Source: <span id="dataSource">Loading...</span>
 </div>
 
-<p><strong>Price:</strong> <span id="price">-</span></p>
+<p><strong>Price:</strong> <span id="price">-</span> <span id="priceFreshness" style="font-size:0.85em;"></span></p>
 <p><strong>Account Balance:</strong> <span id="accountBalance">-</span></p>
 <p><strong>Daily PnL:</strong> <span id="dailyPnl">-</span></p>
 <p><strong>Equity:</strong> <span id="equity">-</span></p>
@@ -10125,7 +10263,7 @@ HTML = """<!DOCTYPE html>
 <p id="why"></p>
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
 <p>Last Fetch: <span id="lastFetch"></span></p>
-<p>WS Age: <span id="ws_age"></span></p>
+<p>WS Age: <span id="ws_age">-</span> <span id="wsStaleBadge" style="font-size:0.85em;"></span></p>
 
 <div class="debug-panel">
     <h3>🔍 DEBUG STATE</h3>
@@ -10487,8 +10625,10 @@ DASHBOARD_JS = """(function () {
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        const r = await fetch('/api/state');
+        const r = await fetch('/api/state?_=' + Date.now(), { cache: 'no-store' });
         if (r.status === 204) {
+          const rs204 = document.getElementById('refreshStatus');
+          if (rs204) rs204.innerText = 'Refresh skipped (204) — click again';
           return;
         }
         const d = await r.json();
@@ -10554,13 +10694,38 @@ DASHBOARD_JS = """(function () {
           inst.innerText = syncTxt;
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
-        let wsAgeText = '-';
-        if (d.ws_last_tick) {
-          const age = Math.round((Date.now()/1000 - d.ws_last_tick));
-          wsAgeText = age + ' s';
-          if (age > 10) wsAgeText += ' (STALE!)';
+        let wsAgeSec = null;
+        if (d.ws_age != null) {
+          wsAgeSec = Math.round(d.ws_age);
+        } else if (d.ws_last_tick) {
+          wsAgeSec = Math.round((Date.now()/1000 - d.ws_last_tick));
+        } else if (d.price_age != null) {
+          wsAgeSec = Math.round(d.price_age);
         }
+        let wsAgeText = wsAgeSec != null ? wsAgeSec + ' s' : '-';
+        const wsStale = wsAgeSec != null && wsAgeSec > 10;
+        if (wsStale) wsAgeText += ' (STALE!)';
         safeText('ws_age', wsAgeText);
+        const wsBadge = document.getElementById('wsStaleBadge');
+        if (wsBadge) {
+          if (wsStale) {
+            wsBadge.innerHTML = '<span style="color:#f85149;font-weight:bold;"> · WS stale — price may be REST fallback</span>';
+          } else if (d.price_source === 'REST') {
+            wsBadge.innerHTML = '<span style="color:#fbbf24;"> · REST fallback</span>';
+          } else {
+            wsBadge.innerHTML = '';
+          }
+        }
+        const priceFresh = document.getElementById('priceFreshness');
+        if (priceFresh) {
+          let pf = '';
+          if (d.price_source) pf += d.price_source;
+          if (d.price_age != null) pf += (pf ? ' · ' : '') + Math.round(d.price_age) + 's old';
+          if (d.server_ts) pf += (pf ? ' · ' : '') + 'srv ' + d.server_ts.slice(11, 19);
+          priceFresh.innerHTML = pf
+            ? '<span style="color:' + (wsStale ? '#f85149' : '#8b949e') + ';">(' + pf + ')</span>'
+            : '';
+        }
         safeText('regime', d.regime || '-');
         safeText('price', d.price != null ? d.price.toLocaleString() : '-');
         safeText('accountBalance', '$' + (d.account_balance != null ? d.account_balance.toFixed(2) : '500.00'));
@@ -10896,7 +11061,7 @@ DASHBOARD_JS = """(function () {
           const pb = document.getElementById('pullbackThresh');
           if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED")).map(s => `
+        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
             <td>${laneBadge(s.research_lane, s.research_model)}</td>
@@ -10908,11 +11073,25 @@ DASHBOARD_JS = """(function () {
             <td>${s.pull_req != null ? s.pull_req.toFixed(2) : '-' }%</td>
             <td>${s.signal_price !== undefined ? s.signal_price.toFixed(2) : '-'}</td>
             <td>${s.max_pull != null ? s.max_pull.toFixed(2) : '-' }%</td>
-            <td>${s.outcome || '-'}</td>
+            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : (s.outcome || '-')}</td>
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
         `).join(''));
+        safeHTML('ordersTable', (d.orders||[]).map(o => {
+          let st = o.status || '-';
+          if (o.limit_touched && st === 'PENDING') st += ' (TOUCHED)';
+          return `
+          <tr${o.limit_touched ? ' style="color:#3fb950;"' : ''}>
+            <td>${o.age_min?.toFixed(1)||'-'}</td>
+            <td>${laneBadge(o.research_lane, o.research_model)}</td>
+            <td>${o.side || '-'}</td>
+            <td>${st}</td>
+            <td>${o.qty || '-'}</td>
+            <td>${o.limit_price?.toFixed(2)||'-'}</td>
+            <td>${o.signal_price?.toFixed(2)||'-'}</td>
+          </tr>`;
+        }).join(''));
         safeHTML('positionsTable', (d.positions||[]).map(l => `
           <tr>
             <td>${l.leg || '-'}</td>
@@ -10924,17 +11103,6 @@ DASHBOARD_JS = """(function () {
             <td>${l.sl != null ? l.sl.toFixed(2) : '-'}</td>
             <td>${l.tp || '-'}</td>
             <td>${l.pnl_pct_margin?.toFixed(2)||'-'}% $${l.unreal_usd?.toFixed(2)||'-'}</td>
-          </tr>
-        `).join(''));
-        safeHTML('ordersTable', (d.orders||[]).map(o => `
-          <tr>
-            <td>${o.age_min?.toFixed(1)||'-'}</td>
-            <td>${laneBadge(o.research_lane, o.research_model)}</td>
-            <td>${o.side || '-'}</td>
-            <td>${o.status || '-'}</td>
-            <td>${o.qty || '-'}</td>
-            <td>${o.limit_price?.toFixed(2)||'-'}</td>
-            <td>${o.signal_price?.toFixed(2)||'-'}</td>
           </tr>
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
@@ -11148,7 +11316,10 @@ def dashboard_js():
         DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__DASHBOARD_URL__", dashboard_public_url())
     )
-    return js, 200, {'Content-Type': 'application/javascript'}
+    return js, 200, {
+        'Content-Type': 'application/javascript',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+    }
 
 @app.route('/')
 def dashboard():
@@ -11162,6 +11333,7 @@ def dashboard():
 @app.route('/api/state')
 def api_state():
     try:
+        refresh_dashboard_market_snapshot(force=True)
         refresh_funding_state()
         now_ts = time.time()
         with trade_lock:
@@ -11215,10 +11387,13 @@ def api_state():
             snapshot["positions"].append(pos_copy)
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
         orders = []
+        tick_px = snapshot.get("price")
         for o in pending_orders_copy:
             age = (time.time() - o["created_ts"]) / 60 if o["created_ts"] else 0
             oc = copy.deepcopy(o)
             oc["age_min"] = age
+            if tick_px and tick_px > 0:
+                oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
             orders.append(oc)
         snapshot["orders"] = orders
         snapshot["trades"] = trades_copy
@@ -11235,6 +11410,9 @@ def api_state():
         snapshot.setdefault("heartbeat", 0)
         snapshot.setdefault("price_ts", 0)
         snapshot["server_ts"] = utc_iso()
+        price_ts = snapshot.get("price_ts") or snapshot.get("ws_last_tick") or 0
+        snapshot["price_age"] = (now_ts - price_ts) if price_ts else None
+        snapshot["ws_age"] = snapshot["price_age"]
         if snapshot.get("price") is None:
             snapshot["price"] = None
         sync_cooldown_debug_state()
@@ -11245,7 +11423,15 @@ def api_state():
         active_list = []
         pending_ids = {o.get("trade_id") for o in pending_orders_copy if o.get("trade_id")}
         open_ids = {p.get("trade_id") for p in positions_copy if p.get("trade_id")}
-        live_ids = pending_ids | open_ids
+        awaiting_micro_ids = set()
+        for t in trades_map_copy.values():
+            s = t.get("signal_ref")
+            if not isinstance(s, dict):
+                continue
+            tid = s.get("trade_id")
+            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(s):
+                awaiting_micro_ids.add(tid)
+        live_ids = pending_ids | open_ids | awaiting_micro_ids
         for t in trades_map_copy.values():
             s = t.get("signal_ref")
             if not isinstance(s, dict):
@@ -11280,7 +11466,10 @@ def api_state():
                 "fill_price": s.get("fill_price"),
                 "exit_reason": s.get("exit_reason"),
                 "trigger": s.get("trigger", "BASE"),
-                "signal_price": s.get("signal_price")
+                "signal_price": s.get("signal_price"),
+                "limit_price": s.get("limit_price") or s.get("planned_limit_price"),
+                "entry_mode": s.get("entry_mode"),
+                "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
             })
         exposure_count = max(len(active_list), len(live_ids))
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
@@ -11322,10 +11511,15 @@ def api_state():
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
         logger.info(f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} [PIPELINE ENFORCEMENT]")
-        return jsonify(snapshot)
+        resp = jsonify(snapshot)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
-        return jsonify({})
+        resp = jsonify({})
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return resp
 
 @app.route('/health')
 @app.route('/api/status')
@@ -11490,7 +11684,7 @@ def set_pullback_threshold():
 @app.route('/api/set_max_active_signals', methods=['POST'])
 def set_max_active_signals():
     data = request.get_json() or {}
-    val = max(1, min(20, int(data.get("value", 3))))
+    val = max(1, min(RESEARCH_MAX_CONCURRENT_CAP, int(data.get("value", MAX_CONCURRENT_POSITIONS_DEFAULT))))
     with state_lock:
         state["max_active_signals"] = val
         save_persistent_config()
@@ -11917,21 +12111,50 @@ def reset_runtime_state():
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
 
+def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label: str = "FILE") -> bool:
+    """Atomic write via per-thread temp file + os.replace with WinError 32 retry."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    last_err = None
+    with file_lock:
+        for attempt in range(6):
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    write_fn(f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+                return True
+            except OSError as e:
+                last_err = e
+                if getattr(e, "winerror", None) == 32 or e.errno in (13, 32, 16):
+                    time.sleep(min(0.05 * (2 ** attempt), 1.0))
+                    continue
+                break
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+    if last_err:
+        logger.warning(f"[{label}] atomic write failed after retries: {last_err}")
+    return False
+
 def load_positions():
     if state.get("strategy_mode") != "RESEARCH" and os.path.exists(POSITIONS_FILE):
-        with open(POSITIONS_FILE, 'r') as f:
-            with state_lock:
-                open_positions.extend(json.load(f))
+        with positions_file_lock:
+            with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
+                with state_lock:
+                    open_positions.extend(json.load(f))
 
 def save_positions():
     with state_lock:
         snapshot = copy.deepcopy(open_positions)
-    tmp = POSITIONS_FILE + ".tmp"
-    with open(tmp, 'w') as f:
-        json.dump(snapshot, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, POSITIONS_FILE)
+    _atomic_file_replace(
+        POSITIONS_FILE,
+        lambda f: json.dump(snapshot, f),
+        positions_file_lock,
+        "POSITIONS",
+    )
 
 def validate_state():
     now = time.time()
@@ -11999,38 +12222,48 @@ def patch_signal_snapshot_outcome(
     if not trade_id or not os.path.exists(SIGNAL_SNAPSHOT_FILE):
         return
     try:
-        lines = []
-        updated = False
-        with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                raw = line.strip()
-                if not raw:
-                    continue
-                row = json.loads(raw)
-                if row.get("trade_id") == trade_id:
-                    if executed is not None:
-                        row["executed"] = bool(executed)
-                    if block_reason is not None:
-                        row["block_reason"] = block_reason
-                    outcome = row.get("outcome") or {}
-                    if fill_price is not None:
-                        outcome["fill_price"] = float(fill_price)
-                    if fill_dynamics:
-                        outcome["fill_dynamics"] = fill_dynamics
-                    if post_block_research:
-                        row["post_block_research"] = post_block_research
-                        horizon = post_block_research.get("horizon_outcomes")
-                        if horizon:
-                            outcome["horizon_outcomes"] = horizon
-                            outcome["mfe_pct"] = horizon.get("mfe_pct")
-                            outcome["mae_pct"] = horizon.get("mae_pct")
-                    outcome["patched_ts"] = time.time()
-                    row["outcome"] = outcome
-                    updated = True
-                lines.append(json.dumps(row))
-        if updated:
-            with open(SIGNAL_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+        with signal_snapshot_lock:
+            lines = []
+            updated = False
+            with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        row = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning("[SIGNAL_SNAPSHOT] skip corrupt line during patch")
+                        continue
+                    if row.get("trade_id") == trade_id:
+                        if executed is not None:
+                            row["executed"] = bool(executed)
+                        if block_reason is not None:
+                            row["block_reason"] = block_reason
+                        outcome = row.get("outcome") or {}
+                        if fill_price is not None:
+                            outcome["fill_price"] = float(fill_price)
+                        if fill_dynamics:
+                            outcome["fill_dynamics"] = fill_dynamics
+                        if post_block_research:
+                            row["post_block_research"] = post_block_research
+                            horizon = post_block_research.get("horizon_outcomes")
+                            if horizon:
+                                outcome["horizon_outcomes"] = horizon
+                                outcome["mfe_pct"] = horizon.get("mfe_pct")
+                                outcome["mae_pct"] = horizon.get("mae_pct")
+                        outcome["patched_ts"] = time.time()
+                        row["outcome"] = outcome
+                        updated = True
+                    lines.append(json.dumps(row))
+            if updated:
+                content = "\n".join(lines) + "\n"
+                _atomic_file_replace(
+                    SIGNAL_SNAPSHOT_FILE,
+                    lambda f, c=content: f.write(c),
+                    signal_snapshot_lock,
+                    "SIGNAL_SNAPSHOT",
+                )
     except Exception as e:
         logger.error(f"[SIGNAL_SNAPSHOT] patch failed trade_id={trade_id}: {e}")
 
@@ -12147,9 +12380,10 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "volume_ratio": feat.get("volume_ratio"),
                 "imbalance": feat.get("imbalance"),
             }
-        rotate_log(SIGNAL_SNAPSHOT_FILE)
-        with open(SIGNAL_SNAPSHOT_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(snapshot) + "\n")
+        with signal_snapshot_lock:
+            rotate_log(SIGNAL_SNAPSHOT_FILE)
+            with open(SIGNAL_SNAPSHOT_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(snapshot) + "\n")
         logger.info(f"[SIGNAL_SNAPSHOT] trade_id={trade_id} dir={snapshot['direction']} price={fmt(price)} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"[SIGNAL_SNAPSHOT] failed: {e}")
@@ -13110,25 +13344,96 @@ def preload_candles():
         set_execution_paused("PRELOAD_FAILED")
         raise RuntimeError("No candles available — cannot continue")
 
+def _signal_from_snapshot(snap: dict, created_ts: float) -> dict:
+    """Rebuild in-memory signal_ref from an APPROVE-time snapshot (no pipeline replay)."""
+    ai = snap.get("ai") or {}
+    market = snap.get("market") or {}
+    direction = snap.get("direction") or ai.get("direction") or "LONG"
+    cfg = snap.get("config") or {}
+    return {
+        "trade_id": snap["trade_id"],
+        "final_direction": direction,
+        "direction": direction,
+        "regime": market.get("regime"),
+        "strategy": market.get("strategy"),
+        "created_ts": snap.get("ts"),
+        "created_ts_ts": created_ts,
+        "expires_ts": created_ts + SIGNAL_TTL_SEC,
+        "signal_price": snap.get("price"),
+        "status": "PENDING",
+        "research_lane": snap.get("research_lane") or RESEARCH_LANE_CONTINUOUS,
+        "research_model": snap.get("research_model"),
+        "edge_score_at_entry": snap.get("edge_score"),
+        "features": snap.get("features") or {},
+        "context": snap.get("context") or {},
+        "entry_mode": snap.get("entry_mode"),
+        "ai_win_prob": ai.get("win_prob"),
+        "ai_decision": ai.get("decision", "APPROVE"),
+        "margin_usdt": cfg.get("margin_usdt") or FIXED_MARGIN_USDT,
+        "_recovered_from_snapshot": True,
+    }
+
+
 def rebuild_state_from_snapshots():
+    """Register recent APPROVE snapshots in trades_map only — never replay full pipeline at boot."""
     if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
         return
-    restored = 0
-    with open(SIGNAL_SNAPSHOT_FILE, "r") as f:
+    now = time.time()
+    seen_ids = set()
+    pending_ids = _pending_trade_ids()
+    open_ids = _open_trade_ids()
+    candidates = []
+    skipped = {"expired": 0, "executed": 0, "blocked": 0, "duplicate": 0, "exposure": 0}
+    with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
         lines = deque(f, maxlen=500)
     for line in reversed(lines):
         try:
             snap = json.loads(line)
-            trade_id = snap["trade_id"]
-            created_ts = datetime.fromisoformat(snap["ts"]).timestamp()
-            if created_ts + SIGNAL_TTL_SEC < time.time():
+            trade_id = snap.get("trade_id")
+            if not trade_id or trade_id in seen_ids:
+                skipped["duplicate"] += 1
                 continue
-            payload = {"trade_id": trade_id,"dir": snap["direction"],"regime": snap["market"]["regime"],"strategy": snap["market"]["strategy"],"created_ts": snap["ts"],"created_ts_ts": created_ts,"expires_ts": created_ts + SIGNAL_TTL_SEC,"signal_price": snap["price"],"pull_req": 0,"max_pull": 0}
-            process_signal(payload)
-            restored += 1
-        except:
+            seen_ids.add(trade_id)
+            if snap.get("executed"):
+                skipped["executed"] += 1
+                continue
+            if snap.get("block_reason"):
+                skipped["blocked"] += 1
+                continue
+            approve_ts = snap.get("approve_ts")
+            if approve_ts:
+                created_ts = float(approve_ts)
+            else:
+                created_ts = datetime.fromisoformat(snap["ts"]).timestamp()
+            if created_ts + SIGNAL_TTL_SEC < now:
+                skipped["expired"] += 1
+                continue
+            if trade_id in pending_ids or trade_id in open_ids:
+                skipped["exposure"] += 1
+                continue
+            candidates.append((created_ts, snap))
+        except Exception:
             continue
-    logger.info(f"Recovered {restored} active signals from snapshot log")
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    max_keep = max(get_effective_max_active_signals() * 4, 16)
+    restored = 0
+    for created_ts, snap in candidates[:max_keep]:
+        try:
+            signal = _signal_from_snapshot(snap, created_ts)
+            ai = snap.get("ai") or {}
+            with trade_lock:
+                if signal["trade_id"] not in trades_map:
+                    trades_map[signal["trade_id"]] = {"signal_ref": signal, "ai": ai}
+                    restored += 1
+        except Exception as e:
+            logger.warning(f"[RECOVERY] skip trade_id={snap.get('trade_id')}: {e}")
+    deferred = max(0, len(candidates) - restored)
+    logger.info(
+        f"Recovered {restored} signal refs from snapshot log "
+        f"(deferred={deferred} no pipeline replay; "
+        f"skipped expired={skipped['expired']} executed={skipped['executed']} "
+        f"blocked={skipped['blocked']}) [PIPELINE ENFORCEMENT]"
+    )
 
 def _persistent_config_keys():
     keys = [
@@ -13228,13 +13533,13 @@ def load_persistent_config():
 
 def save_persistent_config():
     config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, 'w') as f:
-        json.dump(config, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, CONFIG_FILE)
-    logger.debug("Saved persistent config")
+    if _atomic_file_replace(
+        CONFIG_FILE,
+        lambda f: json.dump(config, f),
+        config_file_lock,
+        "CONFIG",
+    ):
+        logger.debug("Saved persistent config")
 
 def rotate_log(file):
     try:
@@ -13701,7 +14006,7 @@ def main():
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
     logger.warning(
-        f"[V103] post_fill_grace={POST_FILL_GRACE_SEC}s order_ttl={LIMIT_ORDER_MAX_AGE_SEC}s "
+        f"[V104] post_fill_grace={POST_FILL_GRACE_SEC}s order_ttl={LIMIT_ORDER_MAX_AGE_SEC}s "
         f"max_active={get_effective_max_active_signals()} ai_cooldown={get_effective_ai_cooldown_sec()}s "
         f"funnel=execution_funnel.jsonl insights=execution_insight_report.py [PIPELINE ENFORCEMENT]"
     )
