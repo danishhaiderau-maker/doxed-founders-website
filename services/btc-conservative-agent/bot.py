@@ -2230,12 +2230,15 @@ def circuit_breaker_cancel_pending(reason: str):
     if reason not in CIRCUIT_BREAKER_CANCEL_REASONS:
         return 0
     cancelled = 0
+    expire_reason = f"CIRCUIT_BREAKER_{reason}"
     with trade_lock:
         for o in list(pending_orders):
             if o.get("status") != "PENDING":
                 continue
+            pending_orders.remove(o)
             o["status"] = "CANCELLED"
-            expire_signal_for_order(o, f"CIRCUIT_BREAKER_{reason}")
+            _record_expired_order(o, expire_reason)
+            expire_signal_for_order(o, expire_reason)
             cancelled += 1
     if cancelled:
         logger.warning(
@@ -2399,6 +2402,22 @@ def map_signal_to_exchange_side(final_direction: str) -> str:
         return "sell"
     else:
         raise ValueError(f"Invalid final_direction: {final_direction}")
+
+def _normalize_order_side_to_dir(side) -> str:
+    if not side:
+        return "UNKNOWN"
+    s = str(side).strip()
+    su = s.upper()
+    if su in ("LONG", "BUY"):
+        return "LONG"
+    if su in ("SHORT", "SELL"):
+        return "SHORT"
+    sl = s.lower()
+    if sl == "buy":
+        return "LONG"
+    if sl == "sell":
+        return "SHORT"
+    return su if su in ("LONG", "SHORT") else "UNKNOWN"
 
 melbourne_tz = pytz.timezone("Australia/Melbourne")
 
@@ -3805,7 +3824,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.0.6-limit-touch-fill"
+EXECUTION_FIX_VERSION = "v1.0.7-dashboard-sync"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4844,6 +4863,16 @@ def reconcile_stale_signals():
     orphans_removed = 0
     now = time.time()
     with trade_lock:
+        for tid in open_ids:
+            sig = trades_map.get(tid, {}).get("signal_ref", {}) or {}
+            if not sig or is_terminal_signal(sig):
+                continue
+            if sig.get("outcome") != "OPEN":
+                sig["outcome"] = "OPEN"
+                fixed += 1
+            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO):
+                sig["status"] = "FILLED"
+                fixed += 1
         for s in trades_map.values():
             sig = s.get("signal_ref", {}) or {}
             tid = sig.get("trade_id")
@@ -7325,6 +7354,63 @@ def log_trade(trade):
     except Exception as e:
         logger.error(f"CSV TRADE WRITE FAILED: {e} [PIPELINE ENFORCEMENT]")
 
+def log_expired_order(row):
+    try:
+        with csv_lock:
+            dynamic_csv_writer(CSV_EXPIRED, row)
+    except Exception as e:
+        logger.error(f"[CSV EXPIRED] write failed: {e} [PIPELINE ENFORCEMENT]")
+
+def _trade_row_in_session(trade: dict, session_start: float) -> bool:
+    if not session_start:
+        return True
+    ts = parse_ts(trade.get("ts") or "")
+    if ts >= session_start - 1.0:
+        return True
+    try:
+        entry_ts = float(trade.get("entry_ts") or 0)
+        if entry_ts >= session_start - 1.0:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+def load_session_trades_from_csv():
+    """Load closed trades from CSV for the current session into in-memory trades list."""
+    if not bot_start_time or not os.path.exists(CSV_TRADES):
+        return 0
+    session_start = bot_start_time
+    existing_ids = {t.get("trade_id") for t in trades if t.get("trade_id")}
+    loaded = 0
+    float_fields = (
+        "entry", "exit", "dur_min", "pnl", "net_pnl_usd", "gross_pnl_usd",
+        "trading_fees_usd", "fees_usd", "funding_fees_usd", "entry_ts",
+    )
+    try:
+        with open(CSV_TRADES, "r", encoding="utf-8", errors="replace") as f:
+            for row in csv.DictReader(f):
+                tid = row.get("trade_id")
+                if not tid or tid in existing_ids:
+                    continue
+                if not _trade_row_in_session(row, session_start):
+                    continue
+                trade = dict(row)
+                for k in float_fields:
+                    if trade.get(k) not in (None, ""):
+                        try:
+                            trade[k] = float(trade[k])
+                        except (ValueError, TypeError):
+                            pass
+                trades.append(trade)
+                existing_ids.add(tid)
+                loaded += 1
+    except Exception as e:
+        logger.warning(f"[STARTUP] load_session_trades_from_csv failed: {e} [PIPELINE ENFORCEMENT]")
+        return 0
+    if loaded:
+        logger.info(f"[STARTUP] Loaded {loaded} session trade(s) from {CSV_TRADES} [PIPELINE ENFORCEMENT]")
+    return loaded
+
 def log_blocked_signal(signal, ai, reason):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_blocked_signal"
@@ -7578,6 +7664,7 @@ def _evict_oldest_pending_if_at_capacity(max_slots: int, lane: str = None) -> bo
                 break
             oldest = min(pending, key=lambda o: o.get("created_ts", time.time()))
             pending_orders.remove(oldest)
+        _record_expired_order(oldest, "CAPACITY_REPLACED")
         expire_signal_for_order(oldest, "CAPACITY_REPLACED")
         try:
             from execution_funnel import funnel_on_expire
@@ -9430,6 +9517,50 @@ def create_limit_order(signal):
     assert any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders), "Order append failed"
     return order
 
+def _record_expired_order(order: dict, reason: str):
+    now = time.time()
+    created = order.get("created_ts") or now
+    age = now - created if created else 0
+    tid = order.get("trade_id")
+    master = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+    conf = order.get("ai_win_prob")
+    if conf is None:
+        conf = master.get("ai_win_prob", 0)
+    row = {
+        "time": utc_iso(),
+        "trade_id": tid,
+        "dir": _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side")),
+        "limit_price": order.get("limit_price"),
+        "signal_price": order.get("signal_price"),
+        "created_ts": created,
+        "expired_ts": now,
+        "age_min": int(age / 60),
+        "conf": conf,
+        "mode": state.get("strategy_mode"),
+        "reason": reason,
+        "research_lane": order.get("research_lane"),
+        "research_model": order.get("research_model"),
+    }
+    with trade_lock:
+        expired_orders.append(row)
+        if len(expired_orders) > MAX_EXPIRED_ORDERS:
+            expired_orders.pop(0)
+    log_expired_order(row)
+    return row
+
+def _expired_order_api_row(row: dict) -> dict:
+    out = dict(row) if isinstance(row, dict) else {}
+    if not out.get("time"):
+        ts = out.get("expired_ts") or out.get("created_ts")
+        if ts:
+            try:
+                out["time"] = utc_iso(datetime.fromtimestamp(float(ts), tz=timezone.utc))
+            except Exception:
+                out["time"] = str(ts)
+    if out.get("dir"):
+        out["dir"] = _normalize_order_side_to_dir(out.get("dir"))
+    return out
+
 def cleanup_expired_orders():
     now = time.time()
     expired_n = 0
@@ -9443,22 +9574,7 @@ def cleanup_expired_orders():
             if age > LIMIT_ORDER_MAX_AGE_SEC:
                 if order in pending_orders:
                     pending_orders.remove(order)
-                expired_orders.append({
-                    "trade_id": order.get("trade_id"),
-                    "dir": order.get("side"),
-                    "limit_price": order.get("limit_price"),
-                    "signal_price": order.get("signal_price"),
-                    "created_ts": order.get("created_ts"),
-                    "expired_ts": now,
-                    "age_min": int(age / 60),
-                    "conf": order.get("ai_win_prob", 0),
-                    "mode": state.get("strategy_mode"),
-                    "reason": "TTL_EXPIRED",
-                    "research_lane": order.get("research_lane"),
-                    "research_model": order.get("research_model"),
-                })
-                if len(expired_orders) > MAX_EXPIRED_ORDERS:
-                    expired_orders.pop(0)
+                _record_expired_order(order, "TTL_EXPIRED")
                 sig_ok = expire_signal_for_order(order, "TTL_EXPIRED")
                 try:
                     from execution_funnel import funnel_on_expire
@@ -9489,34 +9605,12 @@ def position_manager():
             if not price or price <= 0:
                 time.sleep(1)
                 continue
-            now = time.time()
             prune_signals()
             update_signal_pull_metrics(price)
             cleanup_expired_orders()
             process_pending_orders()
             process_positions()
             tick_all_replay_buffers(price)
-
-            with trade_lock:
-                for order in list(pending_orders):
-                    if not isinstance(order, dict):
-                        continue
-                    age = now - order.get("created_ts", now)
-                    if age > LIMIT_ORDER_MAX_AGE_SEC:
-                        logger.warning(f"[TTL] ORDER EXPIRED {order.get('trade_id')} age={age:.1f}s [PIPELINE ENFORCEMENT]")
-                        if order in pending_orders:
-                            pending_orders.remove(order)
-                        expired = {"trade_id": order.get("trade_id"),"dir": order.get("side"),"limit_price": order.get("limit_price"),"signal_price": order.get("signal_price"),"created_ts": order.get("created_ts"),"expired_ts": now,"age_min": int(age / 60),"conf": order.get("ai_win_prob", 0),"mode": state.get("strategy_mode"),"reason": "TTL_EXPIRED","research_lane": order.get("research_lane"),"research_model": order.get("research_model")}
-                        expired_orders.append(expired)
-                        expire_signal_for_order(order, "TTL_EXPIRED")
-                        try:
-                            from execution_funnel import funnel_on_expire
-                            funnel_on_expire(order, "TTL_EXPIRED")
-                        except Exception:
-                            pass
-                        if len(expired_orders) > MAX_EXPIRED_ORDERS:
-                            expired_orders.pop(0)
-                        logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
 
             pipeline_state_sync()
             print_console_dashboard()
@@ -9983,6 +10077,7 @@ def perform_fresh_collection_reset() -> dict:
     reset_session_risk_state()
     bot_start_time = time.time()
     _last_fresh_maintain_ts = time.time()
+    load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     with state_lock:
         state["fresh_collection_mode"] = True
@@ -11348,6 +11443,10 @@ def api_state():
             expired_orders_copy = copy.deepcopy(expired_orders)
             ai_history_copy = copy.deepcopy(state["ai_history"])
             trades_map_copy = copy.deepcopy(trades_map)
+        session_start = bot_start_time or 0.0
+        if session_start:
+            trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
+        expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, 50)
         snapshot["ai_history"] = ai_history_copy
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
@@ -11356,7 +11455,7 @@ def api_state():
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
-        snapshot["ai_cooldown_sec"] = AI_COOLDOWN_SECONDS
+        snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
         snapshot["dashboard_port"] = DASHBOARD_PORT
         snapshot["dashboard_url"] = dashboard_public_url()
@@ -11762,32 +11861,54 @@ def _read_log_tail(path, max_lines=400):
     except Exception:
         return ""
 
+DEBUG_EXPORT_LOG_MAX = 1500
+
 @app.route('/api/export_debug')
 def export_debug():
     try:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-            debug_data = list(DEBUG_LOG_BUFFER)
-            z.writestr("debug.json", json.dumps(debug_data, indent=2, default=str))
+            debug_data = list(DEBUG_LOG_BUFFER)[-DEBUG_EXPORT_LOG_MAX:]
+
+            def _safe_zip_json(arcname, payload):
+                try:
+                    z.writestr(arcname, json.dumps(payload, default=str, separators=(',', ':')))
+                except Exception as ex:
+                    logger.warning(f"[EXPORT] skip {arcname}: {ex}")
+
+            _safe_zip_json("debug.json", debug_data)
             errors_only = [e for e in debug_data if e.get("ai_error") or (e.get("data") or {}).get("ai", {}).get("ai_error")]
-            z.writestr("debug_ai_errors.json", json.dumps(errors_only, indent=2, default=str))
+            _safe_zip_json("debug_ai_errors.json", errors_only)
             with state_lock:
                 snap = {
-                    "debug_state": copy.deepcopy(state.get("debug_state", {})),
+                    "debug_state": dict(state.get("debug_state") or {}),
                     "last_edge": state.get("last_edge"),
                     "pipeline_outcome": state.get("pipeline_outcome"),
                     "ai_call_count": state.get("ai_call_count"),
-                    "last_ai": copy.deepcopy(state.get("last_ai", {})),
+                    "last_ai": dict(state.get("last_ai") or {}),
                 }
-            z.writestr("debug_state_snapshot.json", json.dumps(snap, indent=2, default=str))
-            log_tail = _read_log_tail(os.getenv("BOT_LOG_FILE", "bot_runtime.log"))
-            if log_tail:
-                z.writestr("bot_runtime_tail.log", log_tail)
+            _safe_zip_json("debug_state_snapshot.json", snap)
+            try:
+                log_tail = _read_log_tail(os.getenv("BOT_LOG_FILE", "bot_runtime.log"))
+                if log_tail:
+                    z.writestr("bot_runtime_tail.log", log_tail)
+            except Exception as ex:
+                logger.warning(f"[EXPORT] skip bot_runtime_tail.log: {ex}")
             for csv_name in [CSV_PIPELINE_EVENTS, CSV_AI_ERRORS, CSV_DECISIONS, CSV_AI_TRANCHE]:
                 if os.path.exists(csv_name):
-                    z.write(csv_name, arcname=csv_name)
-        buf.seek(0)
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name='debug_export.zip')
+                    try:
+                        z.write(csv_name, arcname=csv_name)
+                    except Exception as ex:
+                        logger.warning(f"[EXPORT] skip {csv_name}: {ex}")
+        payload = buf.getvalue()
+        resp = send_file(
+            io.BytesIO(payload),
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='debug_export.zip',
+        )
+        resp.headers["Content-Length"] = str(len(payload))
+        return resp
     except Exception as e:
         logger.error(f"[EXPORT ERROR] {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -13920,9 +14041,7 @@ def main():
     last_edge_compute = 0.0
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
-    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
+    load_session_trades_from_csv()
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
