@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Sync btc-conservative-agent to v1.0.8-ws-stability from local research bot.
 
 ## Last Activity
 
