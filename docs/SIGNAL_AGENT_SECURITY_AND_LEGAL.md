@@ -63,15 +63,12 @@ Full text: exported as `SIGNAL_LEGAL_DISCLAIMER` and returned in `GET .../signal
 | Linktree | ⚠️ Promo | Optional link-in-bio to hub |
 | clawpump.tech / litcoin.app | ❌ Token launch | Not applicable unless token product |
 
-## x402 roadmap (Phase 2)
+## x402 roadmap (Phase 2 — shipped)
 
-Current: `x402Support: false` — settlement is **post-trade success fee** (not pay-before x402).
-
-Phase 2:
-
-- x402 on `GET /signals/latest` for autonomous agents (micropayment per poll)
-- SAID client cross-chain messaging with x402 tier
-- Keep success fee on `EXIT` for profit share
+- `GET /signals/intent` — **$0.10 USDC** per poll via x402 (`exact` on Base `eip155:8453`) or API key
+- `GET /signals/latest` — free preview (direction only); full payload with API key
+- Success fee on `EXIT` unchanged (10% profit)
+- Set `X402_EVM_PAY_TO` on Railway API service to enable live 402 responses
 
 ## GitHub hygiene
 

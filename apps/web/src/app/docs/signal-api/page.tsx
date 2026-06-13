@@ -39,6 +39,26 @@ export default function SignalApiDocsPage() {
       </section>
 
       <section className="mt-8 space-y-3">
+        <h2 className="text-xl font-semibold text-white">Agentic access (x402)</h2>
+        <p className="text-sm text-gray-300">
+          Autonomous agents can poll the full ENSE intent without an account:
+        </p>
+        <ul className="list-disc space-y-2 pl-5 text-sm text-gray-300">
+          <li>
+            Free preview:{' '}
+            <code className="text-green-400">GET .../signals/latest</code> (direction + status only)
+          </li>
+          <li>
+            Full intent:{' '}
+            <code className="text-green-400">GET .../signals/intent</code> —{' '}
+            <strong>$0.10 USDC</strong> per poll via x402 on Base (<code>eip155:8453</code>)
+          </li>
+          <li>Or use <code>X-Signal-Api-Key</code> on either endpoint (human / legacy integrators)</li>
+          <li>Success fee unchanged: 10% of profit on profitable <code>EXIT</code> only</li>
+        </ul>
+      </section>
+
+      <section className="mt-8 space-y-3">
         <h2 className="text-xl font-semibold text-white">Quick start</h2>
         <ol className="list-decimal space-y-2 pl-5 text-sm text-gray-300">
           <li>Sign in → open Agent Hub → create a Signal API key.</li>

@@ -9,7 +9,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TARGET = join(dirname(fileURLToPath(import.meta.url)), '..', 'services/btc-conservative-agent/bot.py');
+const TARGET =
+  process.env.BTC_BOT_PATCH_TARGET?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'services/btc-conservative-agent/bot.py');
 
 let src = readFileSync(TARGET, 'utf8');
 let changed = false;

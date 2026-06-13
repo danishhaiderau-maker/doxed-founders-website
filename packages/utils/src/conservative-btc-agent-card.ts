@@ -11,6 +11,7 @@ export type ConservativeBtcAgentUrls = {
   docs: string;
   mandate: string;
   latest: string;
+  intent: string;
 };
 
 export function resolveConservativeBtcAgentUrls(
@@ -28,6 +29,7 @@ export function resolveConservativeBtcAgentUrls(
     docs: `${baseSite}/docs/signal-api`,
     mandate: `${baseApi}/api/trading-agents/conservative-btc/signals/mandate`,
     latest: `${baseApi}/api/trading-agents/conservative-btc/signals/latest`,
+    intent: `${baseApi}/api/trading-agents/conservative-btc/signals/intent`,
   };
 }
 
@@ -41,13 +43,14 @@ export function buildConservativeBtcAgentCard(input?: {
   return {
     name: 'Conservative BTC Agent',
     description:
-      'Exchange-neutral BTC perp signal cycles from a transparent Bitfinex research pipeline. Pay success fee (10% of profit) only on winning closes.',
+      'Exchange-neutral BTC perp signal cycles from a transparent Bitfinex research pipeline. Pay $0.10 USDC per signal poll (x402) or use API key; success fee (10% of profit) only on winning closes.',
     url: urls.hub,
     version: '1.0.0',
     skills: ['btc-perp-signals', 'exchange-agnostic', 'signal-lifecycle', 'success-fee-settlement'],
     endpoints: [
       { name: 'signal-mandate', url: urls.mandate },
-      { name: 'signal-latest', url: urls.latest },
+      { name: 'signal-latest-preview', url: urls.latest },
+      { name: 'signal-intent-x402', url: urls.intent },
       {
         name: 'signal-events',
         url: `${urls.api}/api/trading-agents/conservative-btc/signals/cycles/{cycleId}/events`,
@@ -55,14 +58,31 @@ export function buildConservativeBtcAgentCard(input?: {
       { name: 'dashboard', url: urls.hub },
       { name: 'subscriber-docs', url: urls.docs },
     ],
-    x402Support: false,
+    x402Support: Boolean(input?.feeWalletEvm),
+    x402: input?.feeWalletEvm
+      ? {
+          intent_url: urls.intent,
+          price_usd: 0.1,
+          network: 'eip155:8453',
+          scheme: 'exact',
+          asset: 'USDC',
+          pay_to: input.feeWalletEvm,
+        }
+      : null,
     active: true,
     supportedTrust: ['reputation', 'on-chain-performance'],
     pricing: {
-      model: 'success_fee',
-      fee_pct: 0.1,
-      min_profit_fee_usd: 0.2,
-      charge_on_loss: false,
+      model: 'hybrid_x402_success_fee',
+      access: {
+        x402_per_poll_usd: 0.1,
+        intent_endpoint: urls.intent,
+        preview_endpoint: urls.latest,
+      },
+      success_fee: {
+        fee_pct: 0.1,
+        min_profit_fee_usd: 0.2,
+        charge_on_loss: false,
+      },
       settlement: {
         primary: 'solana_usdc',
         treasury_solana: input?.feeWalletSolana ?? null,
@@ -81,6 +101,7 @@ export function buildConservativeBtcErc8004AgentJson(input?: {
   api?: string;
   imageUrl?: string;
   feeWalletSolana?: string | null;
+  feeWalletEvm?: string | null;
   ownerAddress?: string | null;
 }) {
   const urls = resolveConservativeBtcAgentUrls(input?.site, input?.api);
@@ -109,15 +130,25 @@ export function buildConservativeBtcErc8004AgentJson(input?: {
         endpoint: urls.docs,
       },
     ],
-    capabilities: ['signal-intent', 'lifecycle-events', 'success-fee-settlement'],
-    x402Support: false,
+    capabilities: ['signal-intent', 'lifecycle-events', 'success-fee-settlement', 'x402-micropay'],
+    x402Support: Boolean(input?.feeWalletEvm),
+    x402: input?.feeWalletEvm
+      ? {
+          intent_url: urls.intent,
+          price_usd: 0.1,
+          network: 'eip155:8453',
+          pay_to: input.feeWalletEvm,
+        }
+      : null,
     payment: {
-      model: 'success_fee',
-      fee_pct: 0.1,
+      model: 'hybrid_x402_success_fee',
+      x402_per_poll_usd: 0.1,
+      success_fee_pct: 0.1,
       min_profit_fee_usd: 0.2,
       asset: 'USDC',
       chain: 'solana',
       treasury: input?.feeWalletSolana ?? null,
+      evm_treasury: input?.feeWalletEvm ?? null,
     },
     owner: input?.ownerAddress ?? null,
     agentCard: urls.agentCard,

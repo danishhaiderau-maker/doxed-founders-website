@@ -21,6 +21,7 @@ import { SignalCyclesService } from './signal-cycles.service';
 
 type SignalReq = {
   signalApiKey?: { userId: string; agentId: string; keyId: string };
+  x402SignalPaid?: boolean;
 };
 
 @Controller('trading-agents/:slug/signals')
@@ -38,6 +39,16 @@ export class SignalCyclesController {
   @Get('latest')
   latest(@Param('slug') slug: string, @Req() req: SignalReq) {
     return this.cycles.getLatest(slug, req.signalApiKey ?? null);
+  }
+
+  /** Full ENSE intent — x402 micropayment ($0.10) or X-Signal-Api-Key. Preview: use GET /latest without key. */
+  @Public()
+  @UseGuards(SignalApiKeyGuard)
+  @Get('intent')
+  intent(@Param('slug') slug: string, @Req() req: SignalReq) {
+    return this.cycles.getLatestFull(slug, req.signalApiKey ?? null, {
+      x402Paid: Boolean(req.x402SignalPaid),
+    });
   }
 
   @Public()

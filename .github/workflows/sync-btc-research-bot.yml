@@ -23,7 +23,14 @@ jobs:
       - name: Pull bybit_bot.py from research repo
         env:
           GITHUB_TOKEN: ${{ secrets.RESEARCH_BOT_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
-        run: node scripts/sync-btc-research-bot.mjs
+        run: |
+          node scripts/sync-btc-research-bot.mjs || {
+            code=$?
+            if [ "$code" = "1" ]; then
+              echo "::warning::Research bot sync failed (404 = private repo). Add RESEARCH_BOT_SYNC_TOKEN secret with a PAT that can read bybit-15m-research-bot."
+            fi
+            exit "$code"
+          }
 
       - name: Commit and push if changed
         run: |
