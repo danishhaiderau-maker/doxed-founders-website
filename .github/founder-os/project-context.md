@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix agent registration wizard build (restore refreshProfile).
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
