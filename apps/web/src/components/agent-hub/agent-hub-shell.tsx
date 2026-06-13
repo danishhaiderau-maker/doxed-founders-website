@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { SiteBrand } from '@/components/site-nav';
+import { AgentDirectoryBadges } from '@/components/agent-directory-badges';
 
 const NAV = [
   { href: '/founder-den', label: 'Founder OS' },
@@ -122,6 +123,9 @@ export function AgentHubShell({
           </div>
         </header>
         <div className="flex-1">{children}</div>
+        <footer className="border-t border-zinc-800/80 px-4 py-4 sm:px-6">
+          <AgentDirectoryBadges />
+        </footer>
       </div>
     </div>
   );

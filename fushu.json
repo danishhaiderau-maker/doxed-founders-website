@@ -1,0 +1,31 @@
+{
+  "name": "Conservative BTC Agent",
+  "tagline": "Exchange-neutral BTC perp signal API — success fee on profit only",
+  "type": "agent",
+  "version": "1.0.0",
+  "source_url": "https://doxxedcrypto.digital/agent-hub/conservative-btc",
+  "endpoint": "https://doxed-founders-website-production.up.railway.app/api/trading-agents/conservative-btc/signals/mandate",
+  "language": "typescript",
+  "protocols": ["rest", "openapi"],
+  "capabilities": [
+    "signal-intent",
+    "lifecycle-events",
+    "success-fee-settlement",
+    "btc-perp-signals",
+    "exchange-agnostic"
+  ],
+  "author": {
+    "name": "Doxxed Crypto Founder",
+    "url": "https://doxxedcrypto.digital"
+  },
+  "links": {
+    "website": "https://doxxedcrypto.digital/agent-hub/conservative-btc",
+    "docs": "https://doxxedcrypto.digital/docs/signal-api",
+    "agent_card": "https://doxxedcrypto.digital/.well-known/agent-card.json",
+    "agent_json": "https://doxxedcrypto.digital/.well-known/agent.json"
+  },
+  "pricing": {
+    "model": "freemium",
+    "details": "Free API key; 10% success fee on subscriber profit only"
+  }
+}
