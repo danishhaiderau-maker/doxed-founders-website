@@ -70,17 +70,33 @@ if (!src.includes('os.getenv("PORT"')) {
 }
 
 if (!src.includes('[RAILWAY] Early health server')) {
-  src = src.replace(
-    `    logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
-    _write_research_session(bot_start_time)
-    research_mode = state.get("strategy_mode") == "RESEARCH"`,
-    `    logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
-    _write_research_session(bot_start_time)
-    threading.Thread(target=run_flask, daemon=True).start()
+  const earlyFlaskBlock = `    threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
-    research_mode = state.get("strategy_mode") == "RESEARCH"`,
-  );
+`;
+  if (
+    src.includes('_write_research_session(bot_start_time)\n    load_session_trades_from_csv()\n    research_mode')
+  ) {
+    src = src.replace(
+      `_write_research_session(bot_start_time)
+    load_session_trades_from_csv()
+    research_mode`,
+      `_write_research_session(bot_start_time)
+    load_session_trades_from_csv()
+${earlyFlaskBlock}    research_mode`,
+    );
+    changed = true;
+  } else if (
+    src.includes('_write_research_session(bot_start_time)\n    research_mode')
+  ) {
+    src = src.replace(
+      `_write_research_session(bot_start_time)
+    research_mode`,
+      `_write_research_session(bot_start_time)
+${earlyFlaskBlock}    research_mode`,
+    );
+    changed = true;
+  }
   src = src.replace(
     `    logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
     threading.Thread(target=run_flask, daemon=True).start()
