@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add x402 Bazaar discovery metadata and CDP facilitator support.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
