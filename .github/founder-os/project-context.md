@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add mark-spawn-complete script for The Spawn registry tracking.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
