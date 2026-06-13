@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Sync research bot, SAID CLI path, and AAD submission pack.
 
 ## Last Activity
 
