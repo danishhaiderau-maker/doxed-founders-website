@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Complete SAID registration flow and fix automated registry script.
 
 ## Last Activity
 
