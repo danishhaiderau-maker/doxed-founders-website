@@ -2627,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.20-profit-lock-direction-fix-2026-06-13"
+ANALYZER_SYNC_ID = "v9.21-validate-state-deadlock-fix-2026-06-14"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4086,7 +4086,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.9-profit-lock-direction-fix"
+EXECUTION_FIX_VERSION = "v1.1.10-validate-state-deadlock-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -8680,6 +8680,7 @@ def process_pending_orders():
     process_awaiting_5m_entries()
     _update_pending_order_price_extremes(price)
     process_limit_chase(price)
+    fills = []
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
@@ -8695,7 +8696,9 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
-            fill_order(order)
+            fills.append(order)
+    for order in fills:
+        fill_order(order)
 
 def fill_order(order):
     planned = order.get("planned_limit_price") or order.get("signal_price")
@@ -13370,9 +13373,10 @@ def save_positions():
     )
 
 def validate_state():
-    now = time.time()
+    # prune_signals takes trade_lock — never call it under state_lock (deadlocks with
+    # pipeline_state_sync / sync_signal_info_registry: trade_lock -> state_lock).
+    prune_signals()
     with state_lock:
-        prune_signals()
         pending_orders[:] = [o for o in pending_orders if isinstance(o, dict) and o.get("created_ts", 0) > 0]
         expired_orders[:] = [o for o in expired_orders if isinstance(o, dict) and o.get("created_ts", 0) > 0]
         open_positions[:] = [p for p in open_positions if isinstance(p, dict) and p.get("entry", 0) > 0]
@@ -13911,6 +13915,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
     mae = 0.0
     exit_reason = "MARK_TO_MARKET"
     exit_margin_pct = 0.0
+    last_unreal = 0.0
     for tick in ticks:
         t = _buf_float(tick.get("t"), 0)
         if t < fill_t:
@@ -13923,6 +13928,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
             unreal = ((price - entry) / entry) * dir_factor * leverage * 100
         else:
             unreal = _buf_float(unreal, 0)
+        last_unreal = unreal
         peak = max(peak, unreal)
         mae = min(mae, unreal)
         age_min = (t - fill_t) / 60.0
@@ -13951,7 +13957,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
             break
         exit_margin_pct = unreal
     else:
-        exit_margin_pct = _buf_float(unreal, 0) if ticks else 0.0
+        exit_margin_pct = _buf_float(last_unreal, 0) if ticks else 0.0
 
     net_usd = _margin_pct_to_usd(exit_margin_pct, margin_usdt)
     return {
@@ -15150,6 +15156,9 @@ def main():
     logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
