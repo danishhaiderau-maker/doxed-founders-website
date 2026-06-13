@@ -19,6 +19,7 @@ apps/mobile-android/release/
 
 # Environment
 .env
+agent-wallet.json
 .env.local
 .env.*.local
 .env.tunnel.local

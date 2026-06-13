@@ -77,6 +77,7 @@
     "sync:all": "node scripts/sync-all-production.mjs",
     "sync:btc-research-bot": "node scripts/sync-btc-research-bot.mjs",
     "prepare:agent-registrations": "npm run build:utils && node scripts/prepare-agent-registrations.mjs",
+    "register:said-simple": "node scripts/said-register-simple.mjs",
     "stage-b:publish": "node scripts/stage-b-publish.mjs",
     "stage-c:probe": "node scripts/stage-c-vault-probe.mjs",
     "ensure:btc-bot-url": "node scripts/ensure-btc-bot-public-url.mjs",
