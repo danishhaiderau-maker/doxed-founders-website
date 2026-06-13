@@ -222,7 +222,7 @@ async function main() {
       X402_SIGNAL_INTENT_PRICE: localEnv.X402_SIGNAL_INTENT_PRICE?.trim() || '$0.10',
       X402_SIGNAL_NETWORK: localEnv.X402_SIGNAL_NETWORK?.trim() || 'eip155:8453',
       X402_FACILITATOR_URL:
-        localEnv.X402_FACILITATOR_URL?.trim() || 'https://x402.org/facilitator',
+        localEnv.X402_FACILITATOR_URL?.trim() || 'https://facilitator.x402.org',
       ...(x402PayTo ? { X402_EVM_PAY_TO: x402PayTo } : {}),
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),

@@ -319,7 +319,7 @@ export class SignalCyclesService implements OnModuleInit {
             network: process.env.X402_SIGNAL_NETWORK ?? 'eip155:8453',
             scheme: 'exact',
             pay_to_evm: evmTreasury ?? process.env.X402_EVM_PAY_TO?.trim() ?? null,
-            facilitator: process.env.X402_FACILITATOR_URL ?? 'https://x402.org/facilitator',
+            facilitator: process.env.X402_FACILITATOR_URL ?? 'https://facilitator.x402.org',
           }
         : { support: false },
       success_fee: {
