@@ -364,32 +364,48 @@ export function AgentRegistrationWizard({
 
       {step === 5 && (
         <section className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-6">
-          <h2 className="text-lg font-semibold text-emerald-100">Step 5 — Manual directories</h2>
+          <h2 className="text-lg font-semibold text-emerald-100">Step 5 — Free directory listings</h2>
+          <p className="mt-2 text-sm text-zinc-400">
+            Run locally:{' '}
+            <code className="rounded bg-zinc-900 px-1 text-violet-300">npm run submit:agent-directories -- --open</code>
+            {' '}— opens all free submit forms. Copy-paste pack:{' '}
+            <code className="rounded bg-zinc-900 px-1 text-ziolet-300">docs/ALL_AGENT_DIRECTORIES.md</code>
+          </p>
           <ul className="mt-3 space-y-2 text-sm text-zinc-300">
-            <li>
-              <a href="https://aiagentsdirectory.com/submit-agent" target="_blank" rel="noreferrer" className="text-violet-300 underline">
-                aiagentsdirectory.com/submit-agent
-              </a>{' '}
-              — submit AgentCard + hub URL (see docs/AIAGENTSDIRECTORY_SUBMISSION.md)
-            </li>
-            <li>
-              <a href="https://www.openserv.ai/" target="_blank" rel="noreferrer" className="text-violet-300 underline">
-                openserv.ai
-              </a>{' '}
-              — apply with API docs link
-            </li>
+            {[
+              ['AI Agents Directory', 'https://aiagentsdirectory.com/submit-agent'],
+              ['Pikagent', 'https://www.pikagent.com/submit'],
+              ['Fushu', 'https://fushu.dev/register'],
+              ['Agents.one', 'https://agents.one/submit-agent/'],
+              ['ListMyAgent', 'https://listmyagent.com/add-ai-agent-listing/'],
+              ['AI Agents Buzz', 'https://aiagentsbuzz.com/submit/'],
+              ['OpenServ', 'https://www.openserv.ai/'],
+            ].map(([label, href]) => (
+              <li key={href}>
+                <a href={href} target="_blank" rel="noreferrer" className="text-violet-300 underline">
+                  {label}
+                </a>
+              </li>
+            ))}
           </ul>
           <p className="mt-4 text-xs text-zinc-500">
-            DexScreener / Linktree / token sites are optional promo only — this agent is a signal API, not a token.
+            All free tiers. AAD badge is on Agent Hub footer. After each submit, click Mark registered below.
           </p>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void refreshProfile()}
-            className="mt-4 text-sm text-violet-300 underline"
-          >
-            Refresh wallet status
-          </button>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {['AGENTSCAN', 'PIKAGENT', 'FUSHU', 'AGENTS_ONE', 'LISTMYAGENT', 'AIAGENTS_BUZZ', 'SKILLS_SH'].map(
+              (reg) => (
+                <button
+                  key={reg}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void onMarkRegistered(reg)}
+                  className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:border-emerald-600/50"
+                >
+                  Mark {reg}
+                </button>
+              ),
+            )}
+          </div>
         </section>
       )}
 

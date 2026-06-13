@@ -189,6 +189,22 @@ export class AgentRegistryService {
           'Auto-indexed after Spawn/Base ERC-8004 mint.',
           'Check https://8004scan.io and https://agentscan.info after mint confirms.',
         ];
+      case 'AGENTSCAN':
+      case 'PIKAGENT':
+      case 'FUSHU':
+      case 'AGENTS_ONE':
+      case 'LISTMYAGENT':
+      case 'AIAGENTS_BUZZ':
+        return [
+          'Free web submit — run: npm run submit:agent-directories -- --open',
+          'Copy-paste pack: docs/ALL_AGENT_DIRECTORIES.md',
+          'Mark registered in admin after listing goes live.',
+        ];
+      case 'SKILLS_SH':
+        return [
+          'Apply at openserv.ai with API docs + mandate URL.',
+          'Review-based — not instant listing.',
+        ];
       default:
         return ['Complete prior registry steps first.'];
     }
