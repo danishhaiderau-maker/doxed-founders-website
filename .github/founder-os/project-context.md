@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add signal cycle API with success-fee settlement and subscriber mandate.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
