@@ -4,7 +4,12 @@ import Link from 'next/link';
 import bs58 from 'bs58';
 import { useCallback, useEffect, useState } from 'react';
 import { WalletPickerModal } from '@/components/settings/wallet-picker-modal';
-import { listSolanaWallets, SolanaWalletOption } from '@/lib/wallet-providers';
+import {
+  getPhantomSolanaProvider,
+  isPhantomSolanaAvailable,
+  listSolanaWallets,
+  SolanaWalletOption,
+} from '@/lib/wallet-providers';
 import { fetchSecurityProfile, walletChallenge, walletVerify } from '@/lib/api';
 
 const METADATA_URI = 'https://doxxedcrypto.digital/.well-known/agent-card.json';
@@ -37,6 +42,7 @@ export function AgentRegistrationWizard({
   const [saidTx, setSaidTx] = useState('');
   const [spawnTx, setSpawnTx] = useState('');
   const [evmTreasury, setEvmTreasury] = useState('');
+  const [phantomDetected, setPhantomDetected] = useState(false);
 
   const refreshProfile = useCallback(async () => {
     try {
@@ -54,11 +60,18 @@ export function AgentRegistrationWizard({
   }, [linkedSolana]);
 
   useEffect(() => {
+    const check = () => setPhantomDetected(isPhantomSolanaAvailable());
+    check();
+    const t = window.setInterval(check, 1500);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
     if (linked && treasurySolana) setStep((s) => (s < 3 ? 3 : s));
     else if (linked) setStep((s) => (s < 2 ? 2 : s));
   }, [linked, treasurySolana]);
 
-  async function connectPhantom(option: SolanaWalletOption) {
+  async function connectSolanaWallet(option: SolanaWalletOption) {
     setSolanaPickerOpen(false);
     setWalletBusy(true);
     setErr(null);
@@ -81,10 +94,36 @@ export function AgentRegistrationWizard({
       setMsg(`Phantom connected: ${address.slice(0, 8)}…${address.slice(-6)}`);
       setStep(2);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Phantom connect failed — approve the popup');
+      const message = e instanceof Error ? e.message : 'Wallet connect failed';
+      if (message.toLowerCase().includes('user rejected') || message.toLowerCase().includes('cancel')) {
+        setErr('You closed Phantom — click Connect again and approve Connect + Sign.');
+      } else {
+        setErr(`${message}. If no popup: unlock Phantom, allow popups for this site, refresh page.`);
+      }
     } finally {
       setWalletBusy(false);
     }
+  }
+
+  async function connectPhantomDirect() {
+    const phantom = getPhantomSolanaProvider();
+    if (!phantom) {
+      setErr(
+        'Phantom extension not detected. Install Phantom, unlock it, refresh this page, then try again.',
+      );
+      return;
+    }
+    await connectSolanaWallet({ id: 'phantom', name: 'Phantom', provider: phantom });
+  }
+
+  function openWalletPicker() {
+    const wallets = listSolanaWallets();
+    if (wallets.length === 1) {
+      void connectSolanaWallet(wallets[0]!);
+      return;
+    }
+    setSolanaWallets(wallets);
+    setSolanaPickerOpen(true);
   }
 
   async function saveTreasuryFromWizard() {
@@ -137,8 +176,15 @@ export function AgentRegistrationWizard({
         <section className="rounded-xl border border-violet-500/40 bg-violet-950/20 p-6">
           <h2 className="text-lg font-semibold">Step 1 — Connect Phantom (popup)</h2>
           <p className="mt-2 text-sm text-zinc-400">
-            This links your admin wallet to the platform. Phantom will ask you to <strong>sign a message</strong>{' '}
-            (free, no SOL spent).
+            Click the button below — Phantom should open <strong>twice</strong>: first <strong>Connect</strong>,
+            then <strong>Sign message</strong> (free, no SOL).
+          </p>
+          <p
+            className={`mt-3 text-xs ${phantomDetected ? 'text-emerald-400' : 'text-amber-400'}`}
+          >
+            {phantomDetected
+              ? '✓ Phantom extension detected in this browser'
+              : '⚠ Phantom not detected — install/unlock the extension and refresh'}
           </p>
           {linked ? (
             <div className="mt-4">
@@ -152,24 +198,35 @@ export function AgentRegistrationWizard({
               </button>
             </div>
           ) : (
-            <button
-              type="button"
-              disabled={walletBusy || busy}
-              onClick={() => {
-                setSolanaWallets(listSolanaWallets());
-                setSolanaPickerOpen(true);
-              }}
-              className="mt-4 rounded-lg bg-purple-600 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-            >
-              {walletBusy ? 'Waiting for Phantom…' : 'Connect Phantom — sign message'}
-            </button>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={walletBusy || busy}
+                onClick={() => void connectPhantomDirect()}
+                className="rounded-lg bg-purple-600 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                {walletBusy ? 'Check Phantom window…' : 'Connect Phantom now'}
+              </button>
+              <button
+                type="button"
+                disabled={walletBusy || busy}
+                onClick={openWalletPicker}
+                className="rounded-lg border border-zinc-600 px-4 py-2.5 text-sm text-zinc-300"
+              >
+                Other Solana wallet
+              </button>
+            </div>
           )}
+          <ul className="mt-4 list-disc space-y-1 pl-5 text-xs text-zinc-500">
+            <li>Look for the Phantom icon in your browser toolbar — popup may open behind this tab.</li>
+            <li>Disable popup blockers for doxxedcrypto.digital.</li>
+            <li>Use Chrome or Brave with the Phantom extension (not mobile in-app browser).</li>
+          </ul>
           <p className="mt-3 text-xs text-zinc-500">
-            Or use{' '}
+            Alternate path:{' '}
             <Link href="/account?tab=security" className="text-violet-300 underline">
-              Account → Security
-            </Link>{' '}
-            then return here.
+              Account → Security → Connect Solana wallet
+            </Link>
           </p>
         </section>
       )}
@@ -340,7 +397,7 @@ export function AgentRegistrationWizard({
         <WalletPickerModal
           title="Connect Phantom for admin registration"
           wallets={solanaWallets}
-          onPick={(w) => void connectPhantom(w as SolanaWalletOption)}
+          onPick={(w) => void connectSolanaWallet(w as SolanaWalletOption)}
           onClose={() => setSolanaPickerOpen(false)}
         />
       )}
