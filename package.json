@@ -79,6 +79,7 @@
     "prepare:agent-registrations": "npm run build:utils && node scripts/prepare-agent-registrations.mjs",
     "register:said-simple": "node scripts/said-register-simple.mjs",
     "submit:agent-directories": "npm run build:utils && node scripts/submit-agent-directories.mjs",
+    "provision:openserv": "npm run build:utils && node scripts/provision-openserv.mjs",
     "stage-b:publish": "node scripts/stage-b-publish.mjs",
     "stage-c:probe": "node scripts/stage-c-vault-probe.mjs",
     "ensure:btc-bot-url": "node scripts/ensure-btc-bot-public-url.mjs",
@@ -104,6 +105,7 @@
     "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs"
   },
   "devDependencies": {
+    "@openserv-labs/client": "^2.5.3",
     "prisma": "^6.8.2",
     "tsx": "^4.19.4",
     "turbo": "^2.5.4",
