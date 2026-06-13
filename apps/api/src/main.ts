@@ -48,7 +48,7 @@ async function bootstrap() {
   });
 
   const { attachX402SignalIntentMiddleware } = await import('./payments/x402-signal.setup');
-  attachX402SignalIntentMiddleware(app);
+  await attachX402SignalIntentMiddleware(app);
 
   const port = Number(process.env.PORT ?? process.env.API_PORT ?? 4000);
   const host = process.env.API_BIND_HOST ?? '0.0.0.0';
