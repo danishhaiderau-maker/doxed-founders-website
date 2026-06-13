@@ -369,7 +369,7 @@ export function AgentRegistrationWizard({
             Run locally:{' '}
             <code className="rounded bg-zinc-900 px-1 text-violet-300">npm run submit:agent-directories -- --open</code>
             {' '}— opens all free submit forms. Copy-paste pack:{' '}
-            <code className="rounded bg-zinc-900 px-1 text-ziolet-300">docs/ALL_AGENT_DIRECTORIES.md</code>
+            <code className="rounded bg-zinc-900 px-1 text-violet-300">docs/ALL_AGENT_DIRECTORIES.md</code>
           </p>
           <ul className="mt-3 space-y-2 text-sm text-zinc-300">
             {[
@@ -406,6 +406,14 @@ export function AgentRegistrationWizard({
               ),
             )}
           </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void refreshProfile()}
+            className="mt-4 text-sm text-violet-300 underline"
+          >
+            Refresh wallet status
+          </button>
         </section>
       )}
 
