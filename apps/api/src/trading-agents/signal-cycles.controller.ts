@@ -30,7 +30,7 @@ export class SignalCyclesController {
   @Public()
   @Get('mandate')
   mandate() {
-    return this.cycles.subscriberMandate();
+    return this.cycles.getSubscriberMandate();
   }
 
   @Public()
@@ -94,6 +94,19 @@ export class SignalCyclesController {
   ) {
     const ctx = this.cycles.requireApiKey(req.signalApiKey ?? null);
     return this.cycles.postEvent(slug, cycleId, ctx, body);
+  }
+
+  @Public()
+  @UseGuards(SignalApiKeyGuard)
+  @Post('cycles/:cycleId/settle')
+  settleFee(
+    @Param('slug') slug: string,
+    @Param('cycleId') cycleId: string,
+    @Req() req: SignalReq,
+    @Body() body: { tx_signature: string },
+  ) {
+    const ctx = this.cycles.requireApiKey(req.signalApiKey ?? null);
+    return this.cycles.confirmSolanaFeePayment(slug, cycleId, ctx, body.tx_signature);
   }
 
   @UseGuards(JwtAuthGuard)

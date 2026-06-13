@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server';
-import { buildConservativeBtcAgentCard } from '@dcf/utils';
+import { buildConservativeBtcErc8004AgentJson } from '@dcf/utils';
 
 export function GET() {
-  const card = buildConservativeBtcAgentCard({
+  const card = buildConservativeBtcErc8004AgentJson({
     feeWalletSolana: process.env.NEXT_PUBLIC_AGENT_FEE_WALLET_SOLANA?.trim() || null,
-    feeWalletEvm: process.env.NEXT_PUBLIC_AGENT_FEE_WALLET_EVM?.trim() || null,
   });
 
   return NextResponse.json(card, {

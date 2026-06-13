@@ -2413,6 +2413,60 @@ export function fetchTopUpPayments(token: string, limit = 50) {
   return apiFetch<TopUpPaymentRecord[]>(`/founder-den/platform/top-ups?limit=${limit}`, undefined, token);
 }
 
+export interface AgentRegistryOverview {
+  agent: { slug: string; name: string; id: string };
+  feeCollection: {
+    solanaTreasury: string | null;
+    evmTreasury: string | null;
+    adminLinkedSolana: string | null;
+    adminEmail: string | null;
+    ready: boolean;
+    message: string;
+  };
+  metadata: {
+    urls: Record<string, string>;
+    agentCard: Record<string, unknown>;
+    agentJson: Record<string, unknown>;
+  };
+  spawn: Record<string, unknown>;
+  said: Record<string, unknown>;
+  checklist: Array<{
+    registry: string;
+    label: string;
+    metadataUri: string;
+    status: string;
+    externalId: string | null;
+    registryUrl: string | null;
+    txSignature: string | null;
+    instructions: string[];
+  }>;
+}
+
+export function fetchAgentRegistryOverview(slug: string, token: string) {
+  return apiFetch<AgentRegistryOverview>(`/admin-control/agent-registry/${slug}`, undefined, token);
+}
+
+export function recordAgentRegistry(
+  slug: string,
+  body: {
+    registry: string;
+    status?: string;
+    externalId?: string;
+    ownerAddress?: string;
+    registryUrl?: string;
+    txSignature?: string;
+    notes?: string;
+    verified?: boolean;
+  },
+  token: string,
+) {
+  return apiFetch<{ ok: boolean }>(
+    `/admin-control/agent-registry/${slug}/record`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export function exportRaiseParticipants(raiseId: string, token: string) {
   return apiFetch<{
     projectName: string;

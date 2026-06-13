@@ -12,11 +12,20 @@ import {
   SignalCycleStatus,
   type Prisma,
 } from '@prisma/client';
-import { computeSignalSuccessFeeUsd, type SignalCycleEventType } from '@dcf/utils';
+import {
+  computeSignalSuccessFeeUsd,
+  SIGNAL_LEGAL_DISCLAIMER,
+  type SignalCycleEventType,
+} from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { BotBridgeService } from './bot-bridge.service';
+import {
+  resolveSolanaTreasuryAddress,
+  solanaRpcUrl,
+} from '../payments/platform-treasury';
+import { verifySolanaTopUpPayment } from '../payments/solana-tx-verify';
 import {
   buildIntentEnvelope,
   extractBotApproveSnapshot,
@@ -225,7 +234,7 @@ export class SignalCyclesService implements OnModuleInit {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (!cycle) return { cycle: null, mandate: this.subscriberMandate() };
+    if (!cycle) return { cycle: null, mandate: await this.getSubscriberMandate() };
 
     const envelope = cycle.intentEnvelope as Record<string, unknown>;
     if (!apiCtx) {
@@ -238,7 +247,7 @@ export class SignalCyclesService implements OnModuleInit {
           preview: true,
           message: 'Create a signal API key for full ENSE payload and lifecycle webhooks.',
         },
-        mandate: this.subscriberMandate(),
+        mandate: await this.getSubscriberMandate(),
       };
     }
 
@@ -252,10 +261,34 @@ export class SignalCyclesService implements OnModuleInit {
         botVersion: cycle.botVersion,
         createdAt: cycle.createdAt.toISOString(),
       },
-      mandate: this.subscriberMandate(),
+      mandate: await this.getSubscriberMandate(),
     };
   }
 
+  async getSubscriberMandate() {
+    const treasury = await resolveSolanaTreasuryAddress(this.prisma);
+    return {
+      stop_loss_at_fill: true,
+      use_subscriber_mark_at_receipt: true,
+      no_research_venue_absolute_prices: true,
+      success_fee: {
+        pct: 0.1,
+        min_profit_fee_usd: 0.2,
+        min_charge_usd: 0.1,
+        charge_on_loss: false,
+        settlement_order: ['ddollar_balance', 'solana_usdc'],
+        treasury_solana: treasury,
+        settle_endpoint: '/trading-agents/conservative-btc/signals/cycles/{cycleId}/settle',
+      },
+      docs: '/docs/signal-api',
+      disclaimer: SIGNAL_LEGAL_DISCLAIMER,
+      admin_owned: true,
+      hire_fee_ddollar: 2000,
+      hire_duration_days: 7,
+    };
+  }
+
+  /** @deprecated use getSubscriberMandate */
   subscriberMandate() {
     return {
       stop_loss_at_fill: true,
@@ -456,17 +489,45 @@ export class SignalCyclesService implements OnModuleInit {
       const feeUsd = computeSignalSuccessFeeUsd(pnlUsd);
       let settlementStatus: SignalCycleSettlementStatus = SignalCycleSettlementStatus.WAIVED;
       let settledAt: Date | null = null;
+      let feeSettlementMethod: string | null = null;
+      let feeTreasuryAddress: string | null = null;
+      let feePaymentReference: string | null = null;
+      let solanaPayment: {
+        treasuryAddress: string;
+        amountUsd: number;
+        reference: string;
+        asset: 'USDC';
+        memo: string;
+        instructions: string;
+      } | null = null;
 
       if (feeUsd > 0) {
-        settlementStatus = SignalCycleSettlementStatus.PENDING;
+        feePaymentReference = `SIG-${cycleId.replace(/^cyc_/, '').slice(0, 8).toUpperCase()}`;
+        feeTreasuryAddress = await resolveSolanaTreasuryAddress(this.prisma);
+
         try {
           const ddollar = Math.ceil(feeUsd * DDOLLAR_PER_USD);
           await this.points.spend(ctx.userId, ddollar, `SIGNAL_CYCLE_FEE:${cycleId}`);
           await this.points.creditAdminFee(ddollar, `signal-cycle:${cycleId}`);
           settlementStatus = SignalCycleSettlementStatus.PAID;
+          feeSettlementMethod = 'DDOLLAR';
           settledAt = new Date();
         } catch {
-          settlementStatus = SignalCycleSettlementStatus.FAILED;
+          if (feeTreasuryAddress) {
+            settlementStatus = SignalCycleSettlementStatus.PENDING;
+            feeSettlementMethod = 'SOLANA_USDC';
+            solanaPayment = {
+              treasuryAddress: feeTreasuryAddress,
+              amountUsd: feeUsd,
+              reference: feePaymentReference,
+              asset: 'USDC',
+              memo: feePaymentReference,
+              instructions: `Send $${feeUsd.toFixed(2)} USDC on Solana from your linked wallet to ${feeTreasuryAddress}. Memo: ${feePaymentReference}. Then POST tx_signature to .../cycles/${cycleId}/settle`,
+            };
+          } else {
+            settlementStatus = SignalCycleSettlementStatus.FAILED;
+            feeSettlementMethod = null;
+          }
         }
       }
 
@@ -479,6 +540,9 @@ export class SignalCyclesService implements OnModuleInit {
           pnlMarginPct: body.pnl_margin_pct ?? null,
           feeUsd,
           settlementStatus,
+          feeTreasuryAddress,
+          feePaymentReference,
+          feeSettlementMethod,
           settledAt,
         },
       });
@@ -497,9 +561,15 @@ export class SignalCyclesService implements OnModuleInit {
           pnl_usd: pnlUsd,
           fee_usd: feeUsd,
           settlement_status: settlementStatus,
+          settlement_method: feeSettlementMethod,
+          solana_payment: solanaPayment,
           message:
             feeUsd > 0
-              ? `Success fee $${feeUsd.toFixed(2)} (10% of profit, min thresholds applied).`
+              ? settlementStatus === SignalCycleSettlementStatus.PAID
+                ? `Success fee $${feeUsd.toFixed(2)} settled via DDollar.`
+                : settlementStatus === SignalCycleSettlementStatus.PENDING
+                  ? `Success fee $${feeUsd.toFixed(2)} due — pay USDC to admin treasury (Solana).`
+                  : `Success fee $${feeUsd.toFixed(2)} due — configure admin Solana treasury or add DDollar balance.`
               : pnlUsd <= 0
                 ? 'No fee — losing or flat trade.'
                 : 'No fee — profit share below $0.20 threshold.',
@@ -513,5 +583,82 @@ export class SignalCyclesService implements OnModuleInit {
   requireApiKey(ctx: SignalApiKeyContext | null): SignalApiKeyContext {
     if (!ctx) throw new UnauthorizedException('Missing or invalid X-Signal-Api-Key');
     return ctx;
+  }
+
+  async confirmSolanaFeePayment(
+    slug: string,
+    cycleId: string,
+    ctx: SignalApiKeyContext,
+    txSignature: string,
+  ) {
+    const agent = await this.resolveAgent(slug);
+    if (ctx.agentId !== agent.id) {
+      throw new ForbiddenException('API key is not valid for this agent');
+    }
+
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { cycleId_userId: { cycleId, userId: ctx.userId } },
+    });
+    if (!participant) throw new NotFoundException('Cycle participant not found');
+    if (participant.settlementStatus === SignalCycleSettlementStatus.PAID) {
+      return { ok: true, alreadyPaid: true };
+    }
+    if (participant.settlementStatus !== SignalCycleSettlementStatus.PENDING) {
+      throw new BadRequestException('No pending Solana fee for this cycle');
+    }
+
+    const feeUsd = participant.feeUsd != null ? Number(participant.feeUsd) : 0;
+    const treasury = participant.feeTreasuryAddress ?? (await resolveSolanaTreasuryAddress(this.prisma));
+    if (!treasury || feeUsd <= 0) {
+      throw new BadRequestException('Fee settlement not configured');
+    }
+
+    const wallet = await this.prisma.walletConnection.findFirst({
+      where: { userId: ctx.userId, chain: 'SOLANA' },
+    });
+    if (!wallet) {
+      throw new BadRequestException('Link Solana wallet in Account → Security before paying on-chain.');
+    }
+
+    const existingTx = await this.prisma.signalCycleParticipant.findFirst({
+      where: { feeTxSignature: txSignature.trim() },
+    });
+    if (existingTx && existingTx.id !== participant.id) {
+      throw new BadRequestException('Transaction signature already used');
+    }
+
+    const verification = await verifySolanaTopUpPayment({
+      rpcUrl: solanaRpcUrl(),
+      txSignature: txSignature.trim(),
+      treasuryAddress: treasury,
+      expectedPayerAddress: wallet.address,
+      minAmountUsd: feeUsd,
+      asset: 'USDC',
+    });
+    if (!verification.ok) {
+      throw new BadRequestException(verification.reason ?? 'Payment verification failed');
+    }
+
+    await this.prisma.signalCycleParticipant.update({
+      where: { id: participant.id },
+      data: {
+        settlementStatus: SignalCycleSettlementStatus.PAID,
+        feeSettlementMethod: 'SOLANA_USDC',
+        feeTxSignature: txSignature.trim(),
+        settledAt: new Date(),
+      },
+    });
+
+    return {
+      ok: true,
+      settlement: {
+        fee_usd: feeUsd,
+        settlement_status: SignalCycleSettlementStatus.PAID,
+        settlement_method: 'SOLANA_USDC',
+        treasury_address: treasury,
+        tx_signature: txSignature.trim(),
+        message: `Success fee $${feeUsd.toFixed(2)} received on Solana.`,
+      },
+    };
   }
 }

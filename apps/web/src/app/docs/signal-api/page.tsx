@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { SIGNAL_LEGAL_DISCLAIMER } from '@dcf/utils';
 
 export const metadata = {
   title: 'Signal Cycle API | Doxxed Crypto',
@@ -16,6 +17,11 @@ export default function SignalApiDocsPage() {
         Exchange-neutral intents. Mandatory exchange stop at fill. Success fee (10% of profit) only after
         profitable close.
       </p>
+
+      <section className="mt-8 space-y-4 rounded-lg border border-amber-700/40 bg-amber-950/20 p-6">
+        <h2 className="text-xl font-semibold text-amber-100">Legal disclaimer</h2>
+        <p className="text-sm text-amber-100/90">{SIGNAL_LEGAL_DISCLAIMER}</p>
+      </section>
 
       <section className="mt-8 space-y-4 rounded-lg border border-gray-700 bg-gray-900/60 p-6">
         <h2 className="text-xl font-semibold text-white">Subscriber mandate</h2>

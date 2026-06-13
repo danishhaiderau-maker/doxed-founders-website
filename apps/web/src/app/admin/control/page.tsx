@@ -702,9 +702,20 @@ export default function AdminControlPage() {
             <section className="space-y-4">
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Treasury & top-ups</h2>
-                <Link href="/admin/platform" className="mt-2 inline-block text-sm text-violet-400 hover:underline">
-                  Open treasury admin →
-                </Link>
+                <p className="mt-1 text-sm text-zinc-500">
+                  Connect Phantom under Account → Security first, then save that address as the Solana treasury.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-4">
+                  <Link href="/account?tab=security" className="text-sm text-violet-400 hover:underline">
+                    Connect Phantom (Account → Security) →
+                  </Link>
+                  <Link href="/admin/platform" className="text-sm text-violet-400 hover:underline">
+                    Save treasury address →
+                  </Link>
+                  <Link href="/admin/agent-registrations" className="text-sm text-violet-400 hover:underline">
+                    Agent registrations (SAID / Spawn) →
+                  </Link>
+                </div>
               </div>
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Listing inbox</h2>
