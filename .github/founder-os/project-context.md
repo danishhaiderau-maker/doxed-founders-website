@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add step-by-step agent registration wizard with Phantom popup.
 
 ## Last Activity
 
-15m ago
+Just now
