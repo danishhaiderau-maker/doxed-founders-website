@@ -1,5 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
+import { resolveEvmTreasuryAddress } from './platform-treasury';
+import { PrismaService } from '../prisma/prisma.service';
 import { SignalCyclesService } from '../trading-agents/signal-cycles.service';
 import { SIGNAL_API_KEY_HEADER } from '../trading-agents/signal-api-key.guard';
 
@@ -14,9 +16,9 @@ function intentPathMatch(path: string): boolean {
   return path === INTENT_PATH || path.endsWith('/signals/intent');
 }
 
-export function isX402SignalIntentEnabled(): boolean {
-  const payTo = process.env.X402_EVM_PAY_TO?.trim();
-  return process.env.X402_SIGNAL_ENABLED !== 'false' && Boolean(payTo);
+export function isX402SignalIntentEnabled(payTo?: string | null): boolean {
+  const addr = payTo?.trim() || process.env.X402_EVM_PAY_TO?.trim() || null;
+  return process.env.X402_SIGNAL_ENABLED !== 'false' && Boolean(addr);
 }
 
 type ExpressMiddleware = (req: Request, res: Response, next: NextFunction) => void | Promise<void>;
@@ -54,10 +56,14 @@ function loadX402Paywall(payTo: string): ExpressMiddleware {
   );
 }
 
-export function attachX402SignalIntentMiddleware(app: INestApplication): void {
-  const payTo = process.env.X402_EVM_PAY_TO?.trim();
-  if (!isX402SignalIntentEnabled() || !payTo) {
-    console.log('[x402] Signal intent payments disabled — set X402_EVM_PAY_TO to enable.');
+export async function attachX402SignalIntentMiddleware(app: INestApplication): Promise<void> {
+  const prisma = app.get(PrismaService);
+  const payTo = await resolveEvmTreasuryAddress(prisma);
+
+  if (!isX402SignalIntentEnabled(payTo) || !payTo) {
+    console.log(
+      '[x402] Signal intent payments disabled — set admin EVM treasury (Admin → Platform) or X402_EVM_PAY_TO.',
+    );
     return;
   }
 
@@ -86,6 +92,6 @@ export function attachX402SignalIntentMiddleware(app: INestApplication): void {
   });
 
   console.log(
-    `[x402] Signal intent enabled — ${X402_SIGNAL_INTENT_PRICE} on ${X402_SIGNAL_NETWORK} → ${payTo.slice(0, 10)}…`,
+    `[x402] Signal intent enabled — ${X402_SIGNAL_INTENT_PRICE} on ${X402_SIGNAL_NETWORK} → ${payTo.slice(0, 10)}… (${X402_FACILITATOR_URL})`,
   );
 }

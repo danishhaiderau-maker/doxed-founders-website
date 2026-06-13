@@ -199,6 +199,11 @@ async function main() {
 
   if (railwayToken && dbUrl) {
     const cors = `${SITE_URL},https://www.doxxedcrypto.digital,https://doxed-founders-website.vercel.app`;
+    const x402PayTo =
+      localEnv.X402_EVM_PAY_TO?.trim() ||
+      localEnv.PLATFORM_EVM_TREASURY?.trim() ||
+      vercelCheck.X402_EVM_PAY_TO?.trim() ||
+      '';
     await syncRailway(railwayToken, {
       DATABASE_URL: dbUrl,
       JWT_SECRET: jwtSecret,
@@ -213,10 +218,21 @@ async function main() {
       WEBAUTHN_RP_ID: 'doxxedcrypto.digital',
       TRADING_AGENT_BOT_URL: BTC_BOT_URL,
       CONSERVATIVE_BTC_BOT_URL: BTC_BOT_URL,
+      X402_SIGNAL_ENABLED: localEnv.X402_SIGNAL_ENABLED?.trim() || 'true',
+      X402_SIGNAL_INTENT_PRICE: localEnv.X402_SIGNAL_INTENT_PRICE?.trim() || '$0.10',
+      X402_SIGNAL_NETWORK: localEnv.X402_SIGNAL_NETWORK?.trim() || 'eip155:8453',
+      X402_FACILITATOR_URL:
+        localEnv.X402_FACILITATOR_URL?.trim() || 'https://x402.org/facilitator',
+      ...(x402PayTo ? { X402_EVM_PAY_TO: x402PayTo } : {}),
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
     });
+    if (!x402PayTo) {
+      console.warn(
+        'X402_EVM_PAY_TO not in vault — x402 uses admin EVM treasury from DB if set in Admin → Platform.',
+      );
+    }
   } else {
     console.warn('\nSkip Railway API sync — set RAILWAY_TOKEN in vault/.env.x.secrets');
   }
