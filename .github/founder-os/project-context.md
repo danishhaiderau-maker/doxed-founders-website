@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add said-sdk and @solana/web3.js for SAID agent registration CLI.
 
 ## Last Activity
 
