@@ -32,11 +32,28 @@ export type SolanaProvider = {
 declare global {
   interface Window {
     phantom?: { solana?: SolanaProvider & { isPhantom?: boolean } };
+    solana?: SolanaProvider & { isPhantom?: boolean; isConnected?: boolean };
     solflare?: SolanaProvider;
     backpack?: SolanaProvider;
     coinbaseWalletExtension?: Eip1193Provider;
     ethereum?: Eip1193Provider;
   }
+}
+
+/** Phantom injects as window.phantom.solana and/or window.solana (isPhantom). */
+export function getPhantomSolanaProvider(): (SolanaProvider & { isPhantom?: boolean }) | null {
+  if (typeof window === 'undefined') return null;
+  if (window.phantom?.solana?.isPhantom !== false && window.phantom?.solana) {
+    return window.phantom.solana;
+  }
+  if (window.solana?.isPhantom) {
+    return window.solana;
+  }
+  return null;
+}
+
+export function isPhantomSolanaAvailable(): boolean {
+  return getPhantomSolanaProvider() != null;
 }
 
 type Eip6963Detail = {
@@ -115,8 +132,9 @@ export function discoverEvmWallets(timeoutMs = 400): Promise<EvmWalletOption[]> 
 
 export function listSolanaWallets(): SolanaWalletOption[] {
   const wallets: SolanaWalletOption[] = [];
-  if (window.phantom?.solana) {
-    wallets.push({ id: 'phantom', name: 'Phantom', provider: window.phantom.solana });
+  const phantom = getPhantomSolanaProvider();
+  if (phantom) {
+    wallets.push({ id: 'phantom', name: 'Phantom', provider: phantom });
   }
   if (window.backpack) {
     wallets.push({ id: 'backpack', name: 'Backpack', provider: window.backpack });
