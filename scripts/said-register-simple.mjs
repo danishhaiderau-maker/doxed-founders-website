@@ -12,6 +12,7 @@
  *   2. You send ~0.02 SOL to the printed address (any exchange → Solana)
  *   3. Run again — registers + optional verify on SAID
  */
+import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,9 +70,18 @@ async function main() {
 
   if (!registered) {
     console.log('\nRegistering on SAID (free, ~0.001 SOL gas)...');
-    const result = await said.registerAgent(kp, METADATA_URI, kp);
-    console.log('Registered! Tx:', result.txSignature);
-    console.log('Agent PDA:', result.agentPDA);
+    try {
+      const result = await said.registerAgent(kp, METADATA_URI, kp);
+      console.log('Registered! Tx:', result.txSignature);
+      console.log('Agent PDA:', result.agentPDA);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already in use') || msg.includes('already registered')) {
+        console.log('\nAlready registered on SAID (PDA exists).');
+      } else {
+        throw err;
+      }
+    }
   } else {
     console.log('\nAlready registered on SAID.');
   }
@@ -93,6 +103,12 @@ async function main() {
   console.log('Add this address as admin Solana treasury in Admin → Agent registrations');
   console.log('Check: https://api.saidprotocol.com/api/verify/' + address);
   console.log('\nAdd agent-wallet.json to .gitignore (already should be). Never share it.\n');
+
+  try {
+    execSync('node scripts/mark-said-complete.mjs', { cwd: root, stdio: 'inherit' });
+  } catch {
+    console.log('(Neon registry update skipped — run: node scripts/mark-said-complete.mjs)');
+  }
 }
 
 main().catch((e) => {

@@ -78,6 +78,7 @@
     "sync:btc-research-bot": "node scripts/sync-btc-research-bot.mjs",
     "prepare:agent-registrations": "npm run build:utils && node scripts/prepare-agent-registrations.mjs",
     "register:said-simple": "node scripts/said-register-simple.mjs",
+    "mark:said-complete": "node scripts/mark-said-complete.mjs",
     "register:agents-automated": "npm run build:utils && node scripts/register-agents-automated.mjs",
     "provision:openserv": "npm run build:utils && node scripts/provision-openserv.mjs",
     "verify:x402": "node scripts/verify-x402-signal.mjs",

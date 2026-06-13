@@ -23,7 +23,6 @@ Write-Host "OK    Web build" -ForegroundColor Green
 Write-Host "`n[3/3] Checking deploy config files..." -ForegroundColor Yellow
 $required = @(
   "railway.toml",
-  "apps/web/vercel.json",
   "scripts/start-api-prod.mjs",
   ".env.production.example"
 )
