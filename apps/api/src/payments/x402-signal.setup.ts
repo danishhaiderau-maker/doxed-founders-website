@@ -4,11 +4,27 @@ import { resolveEvmTreasuryAddress } from './platform-treasury';
 import { PrismaService } from '../prisma/prisma.service';
 import { SignalCyclesService } from '../trading-agents/signal-cycles.service';
 import { SIGNAL_API_KEY_HEADER } from '../trading-agents/signal-api-key.guard';
+import {
+  buildBazaarRouteExtensions,
+  isX402BazaarEnabled,
+  isX402SignalIntentEnabled,
+  resolveFacilitatorClientConfig,
+  resolveX402FacilitatorUrl,
+  X402_BAZAAR_CATALOG_URL,
+  X402_SIGNAL_INTENT_PRICE,
+  X402_SIGNAL_NETWORK,
+} from './x402-signal.config';
 
-export const X402_SIGNAL_INTENT_PRICE = process.env.X402_SIGNAL_INTENT_PRICE ?? '$0.10';
-export const X402_SIGNAL_NETWORK = process.env.X402_SIGNAL_NETWORK ?? 'eip155:8453';
-export const X402_FACILITATOR_URL =
-  process.env.X402_FACILITATOR_URL ?? 'https://facilitator.x402.org';
+export {
+  isX402BazaarEnabled,
+  isX402SignalIntentEnabled,
+  resolveX402FacilitatorUrl,
+  X402_BAZAAR_CATALOG_URL,
+  X402_BAZAAR_SEARCH_URL,
+  X402_CDP_FACILITATOR_URL,
+  X402_SIGNAL_INTENT_PRICE,
+  X402_SIGNAL_NETWORK,
+} from './x402-signal.config';
 
 const INTENT_SUFFIX = '/trading-agents/conservative-btc/signals/intent';
 const INTENT_PATH_API = `/api${INTENT_SUFFIX}`;
@@ -25,11 +41,6 @@ function hasPaymentHeader(req: Request): boolean {
   );
 }
 
-export function isX402SignalIntentEnabled(payTo?: string | null): boolean {
-  const addr = payTo?.trim() || process.env.X402_EVM_PAY_TO?.trim() || null;
-  return process.env.X402_SIGNAL_ENABLED !== 'false' && Boolean(addr);
-}
-
 type ExpressMiddleware = (req: Request, res: Response, next: NextFunction) => void | Promise<void>;
 
 function routeConfig(payTo: string) {
@@ -40,8 +51,10 @@ function routeConfig(payTo: string) {
       network: X402_SIGNAL_NETWORK,
       payTo,
     },
-    description: 'Conservative BTC Agent — full ENSE signal intent (exchange-neutral)',
+    description:
+      'Conservative BTC Agent — full ENSE signal intent (exchange-neutral perp cycle payload + subscriber mandate). $0.10 USDC on Base per poll.',
     mimeType: 'application/json',
+    extensions: buildBazaarRouteExtensions(),
   };
 }
 
@@ -57,6 +70,7 @@ function sendManual402(res: Response, payTo: string): void {
         payTo,
       },
     ],
+    extensions: buildBazaarRouteExtensions(),
   });
 }
 
@@ -68,12 +82,13 @@ function loadX402Paywall(payTo: string): ExpressMiddleware {
   const { ExactEvmScheme } = require('@x402/evm/exact/server');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { HTTPFacilitatorClient } = require('@x402/core/server');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { bazaarResourceServerExtension } = require('@x402/extensions/bazaar');
 
-  const facilitatorClient = new HTTPFacilitatorClient({ url: X402_FACILITATOR_URL });
-  const resourceServer = new x402ResourceServer(facilitatorClient).register(
-    X402_SIGNAL_NETWORK,
-    new ExactEvmScheme(),
-  );
+  const facilitatorClient = new HTTPFacilitatorClient(resolveFacilitatorClientConfig());
+  const resourceServer = new x402ResourceServer(facilitatorClient)
+    .register(X402_SIGNAL_NETWORK, new ExactEvmScheme())
+    .registerExtension(bazaarResourceServerExtension);
 
   const routes = {
     [`GET ${INTENT_PATH_API}`]: routeConfig(payTo),
@@ -96,6 +111,8 @@ export async function attachX402SignalIntentMiddleware(app: INestApplication): P
 
   const cycles = app.get(SignalCyclesService);
   const x402Paywall = loadX402Paywall(payTo);
+  const facilitatorUrl = resolveX402FacilitatorUrl();
+  const bazaar = isX402BazaarEnabled();
 
   const expressApp = app.getHttpAdapter().getInstance();
   expressApp.use(async (req: Request, res: Response, next: NextFunction) => {
@@ -124,6 +141,13 @@ export async function attachX402SignalIntentMiddleware(app: INestApplication): P
   });
 
   console.log(
-    `[x402] Signal intent enabled — ${X402_SIGNAL_INTENT_PRICE} on ${X402_SIGNAL_NETWORK} → ${payTo.slice(0, 10)}… (${X402_FACILITATOR_URL})`,
+    `[x402] Signal intent enabled — ${X402_SIGNAL_INTENT_PRICE} on ${X402_SIGNAL_NETWORK} → ${payTo.slice(0, 10)}… (${facilitatorUrl})`,
   );
+  if (bazaar) {
+    console.log(`[x402] Bazaar discovery enabled — catalog at ${X402_BAZAAR_CATALOG_URL}`);
+  } else {
+    console.log(
+      '[x402] Bazaar discovery pending — set CDP_API_KEY_ID + CDP_API_KEY_SECRET in vault and redeploy.',
+    );
+  }
 }
