@@ -67,6 +67,11 @@ export function buildConservativeBtcAgentCard(input?: {
           scheme: 'exact',
           asset: 'USDC',
           pay_to: input.feeWalletEvm,
+          facilitator: 'https://api.cdp.coinbase.com/platform/v2/x402',
+          bazaar: {
+            catalog: 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources',
+            search: 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/search',
+          },
         }
       : null,
     active: true,

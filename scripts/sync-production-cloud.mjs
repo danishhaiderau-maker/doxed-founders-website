@@ -204,6 +204,13 @@ async function main() {
       localEnv.PLATFORM_EVM_TREASURY?.trim() ||
       vercelCheck.X402_EVM_PAY_TO?.trim() ||
       '';
+    const cdpKeyId = localEnv.CDP_API_KEY_ID?.trim() || '';
+    const cdpKeySecret = localEnv.CDP_API_KEY_SECRET?.trim() || '';
+    const x402FacilitatorUrl =
+      localEnv.X402_FACILITATOR_URL?.trim() ||
+      (cdpKeyId && cdpKeySecret
+        ? 'https://api.cdp.coinbase.com/platform/v2/x402'
+        : 'https://facilitator.x402.org');
     await syncRailway(railwayToken, {
       DATABASE_URL: dbUrl,
       JWT_SECRET: jwtSecret,
@@ -221,9 +228,10 @@ async function main() {
       X402_SIGNAL_ENABLED: localEnv.X402_SIGNAL_ENABLED?.trim() || 'true',
       X402_SIGNAL_INTENT_PRICE: localEnv.X402_SIGNAL_INTENT_PRICE?.trim() || '$0.10',
       X402_SIGNAL_NETWORK: localEnv.X402_SIGNAL_NETWORK?.trim() || 'eip155:8453',
-      X402_FACILITATOR_URL:
-        localEnv.X402_FACILITATOR_URL?.trim() || 'https://facilitator.x402.org',
+      X402_FACILITATOR_URL: x402FacilitatorUrl,
       ...(x402PayTo ? { X402_EVM_PAY_TO: x402PayTo } : {}),
+      ...(cdpKeyId ? { CDP_API_KEY_ID: cdpKeyId } : {}),
+      ...(cdpKeySecret ? { CDP_API_KEY_SECRET: cdpKeySecret } : {}),
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
@@ -231,6 +239,11 @@ async function main() {
     if (!x402PayTo) {
       console.warn(
         'X402_EVM_PAY_TO not in vault — x402 uses admin EVM treasury from DB if set in Admin → Platform.',
+      );
+    }
+    if (!cdpKeyId || !cdpKeySecret) {
+      console.warn(
+        'CDP_API_KEY_ID/SECRET not in vault — x402 paywall works but Bazaar discovery needs CDP keys.',
       );
     }
   } else {

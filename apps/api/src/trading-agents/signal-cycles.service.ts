@@ -26,6 +26,12 @@ import {
   resolveSolanaTreasuryAddress,
   solanaRpcUrl,
 } from '../payments/platform-treasury';
+import {
+  isX402BazaarEnabled,
+  resolveX402FacilitatorUrl,
+  X402_BAZAAR_CATALOG_URL,
+  X402_BAZAAR_SEARCH_URL,
+} from '../payments/x402-signal.config';
 import { verifySolanaTopUpPayment } from '../payments/solana-tx-verify';
 import {
   buildIntentEnvelope,
@@ -305,6 +311,8 @@ export class SignalCyclesService implements OnModuleInit {
     const treasury = await resolveSolanaTreasuryAddress(this.prisma);
     const evmTreasury = await resolveEvmTreasuryAddress(this.prisma);
     const x402Enabled = Boolean(evmTreasury || process.env.X402_EVM_PAY_TO?.trim());
+    const facilitator = resolveX402FacilitatorUrl();
+    const bazaarEnabled = isX402BazaarEnabled();
     return {
       stop_loss_at_fill: true,
       use_subscriber_mark_at_receipt: true,
@@ -319,7 +327,18 @@ export class SignalCyclesService implements OnModuleInit {
             network: process.env.X402_SIGNAL_NETWORK ?? 'eip155:8453',
             scheme: 'exact',
             pay_to_evm: evmTreasury ?? process.env.X402_EVM_PAY_TO?.trim() ?? null,
-            facilitator: process.env.X402_FACILITATOR_URL ?? 'https://facilitator.x402.org',
+            facilitator,
+            bazaar: bazaarEnabled
+              ? {
+                  discoverable: true,
+                  catalog_url: X402_BAZAAR_CATALOG_URL,
+                  search_url: X402_BAZAAR_SEARCH_URL,
+                  indexed_after: 'first_cdp_settlement',
+                }
+              : {
+                  discoverable: false,
+                  note: 'Set CDP_API_KEY_ID + CDP_API_KEY_SECRET for x402 Bazaar listing',
+                },
           }
         : { support: false },
       success_fee: {
