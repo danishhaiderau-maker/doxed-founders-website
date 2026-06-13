@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add Conservative BTC Agent logo icon and AAD thumbnail assets.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
