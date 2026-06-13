@@ -108,7 +108,9 @@
   },
   "devDependencies": {
     "@openserv-labs/client": "^2.5.3",
+    "@solana/web3.js": "^1.98.4",
     "prisma": "^6.8.2",
+    "said-sdk": "^0.3.4",
     "tsx": "^4.19.4",
     "turbo": "^2.5.4",
     "typescript": "^5.8.3"
