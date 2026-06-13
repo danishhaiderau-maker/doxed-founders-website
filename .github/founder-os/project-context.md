@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add x402 signal intent endpoint and fix research bot sync check.
+Add x402 Bazaar discovery metadata and CDP facilitator support.
 
 ## Last Activity
 
