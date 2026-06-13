@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync research bot, SAID CLI path, and AAD submission pack.
+Add Conservative BTC Agent logo icon and AAD thumbnail assets.
 
 ## Last Activity
 
