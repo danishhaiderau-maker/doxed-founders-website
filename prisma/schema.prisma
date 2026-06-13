@@ -2088,9 +2088,50 @@ model TradingAgent {
   instances       TradingAgentInstance[]
   signalApiKeys   SignalApiKey[]
   signalCycles    SignalCycle[]
+  registryEntries AgentRegistryEntry[]
 
   @@index([kind])
   @@index([sortOrder])
+}
+
+enum AgentRegistryKind {
+  AGENT_CARD
+  SAID
+  SPAWN
+  ERC8004_SCAN
+  AGENTSCAN
+  SKILLS_SH
+}
+
+enum AgentRegistryStatus {
+  PENDING
+  REGISTERED
+  VERIFIED
+  FAILED
+}
+
+/** On-chain / directory registration for trading agents (SAID, Spawn, etc.). */
+model AgentRegistryEntry {
+  id            String              @id @default(cuid())
+  agentId       String
+  registry      AgentRegistryKind
+  chainSlug     ChainSlug?
+  externalId    String?
+  ownerAddress  String?
+  metadataUri   String?
+  registryUrl   String?
+  txSignature   String?
+  status        AgentRegistryStatus @default(PENDING)
+  notes         String?             @db.Text
+  registeredAt  DateTime?
+  verifiedAt    DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, registry])
+  @@index([registry, status])
 }
 
 enum SignalCycleStatus {
@@ -2167,6 +2208,10 @@ model SignalCycleParticipant {
   pnlMarginPct        Decimal?                    @db.Decimal(8, 4)
   settlementStatus    SignalCycleSettlementStatus @default(NONE)
   feeUsd              Decimal?                    @db.Decimal(16, 4)
+  feeTreasuryAddress  String?
+  feePaymentReference String?
+  feeTxSignature      String?                     @unique
+  feeSettlementMethod String?
   settledAt           DateTime?
   createdAt           DateTime                    @default(now())
   updatedAt           DateTime                    @updatedAt
@@ -2177,6 +2222,7 @@ model SignalCycleParticipant {
 
   @@unique([cycleId, userId])
   @@index([userId])
+  @@index([feePaymentReference])
 }
 
 model SignalCycleEvent {

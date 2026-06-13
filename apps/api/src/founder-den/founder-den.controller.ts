@@ -4,6 +4,7 @@ import type { DiscoverTimeframe, DiscoverUniverseStageFilter } from '@dcf/utils'
 import { Public } from '../auth/public.decorator';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
+import { AdminGuard } from '../auth/guards';
 import { AuthUser } from '../auth/auth.types';
 import { FounderDenService } from './founder-den.service';
 import {
@@ -206,6 +207,7 @@ export class FounderDenController {
     return this.founderDen.getPlatformEconomy();
   }
 
+  @UseGuards(AdminGuard)
   @Post('platform/treasury')
   updateTreasury(
     @CurrentUser() user: AuthUser,

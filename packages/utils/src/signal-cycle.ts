@@ -44,6 +44,10 @@ export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
 export const SIGNAL_MIN_CHARGE_USD = 0.1;
 
+/** Shown on mandate, docs, and settlement responses — not investment advice. */
+export const SIGNAL_LEGAL_DISCLAIMER =
+  'Signals are informational only, not investment advice or a solicitation. You execute all trades on your own exchange account and bear full risk. Past showcase performance does not guarantee future results. Success fees apply only to reported profitable closes per the subscriber API contract.';
+
 /** Success fee: 10% of profit; $0 if loss; waive if 10% < $0.20; else max(10%, raw). */
 export function computeSignalSuccessFeeUsd(netProfitUsd: number): number {
   if (!Number.isFinite(netProfitUsd) || netProfitUsd <= 0) return 0;

@@ -80,19 +80,30 @@ FLAT_MOMENTUM_EDGE_FLOOR = 4.8
 FLAT_MOMENTUM_FLOOR_LOW_EDGE = 2.0
 FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 # v87 multi-lane research — early define (default args on helpers below are evaluated at import)
+# Pathway matrix (research_lane × entry_path):
+#   CONTINUOUS / AI_DIRECT — immediate AI limit (no 15m micro await)
+#   STABILITY / MICRO_SR — 15m pivot HL/LH + micro S/R await via latest_candles
+#   GOLDEN_STACK / MICRO_SR — 15m micro + golden-stack gates (spawned from CONTINUOUS/STABILITY)
+#   EXEC_5M / 5M_TRIGGER — 5m OHLC pivot HL/LH trigger (spawned from CONTINUOUS/STABILITY)
+# Optional future lanes (not implemented): SHADOW_MIRROR, WIDE_THESIS
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
 RESEARCH_LANE_STABILITY = "STABILITY"
 RESEARCH_LANE_GOLDEN_STACK = "GOLDEN_STACK"
+RESEARCH_LANE_5M_EXEC = "EXEC_5M"
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
     RESEARCH_LANE_STABILITY: "AI Stability Research",
     RESEARCH_LANE_GOLDEN_STACK: "Golden Stack",
+    RESEARCH_LANE_5M_EXEC: "5m Exec Trigger",
 }
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_STABILITY: threading.Lock(),
     RESEARCH_LANE_GOLDEN_STACK: threading.Lock(),
+    RESEARCH_LANE_5M_EXEC: threading.Lock(),
 }
+EXEC_5M_LANE_DEFAULT_ENABLED = True
+CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED = True
 CONTINUOUS_AI_DEFAULT_ENABLED = True
 AI_STABILITY_DEFAULT_ENABLED = True  # v90: stability lane optional; reduce impact via dashboard toggle
 RESEARCH_AI_TEMPERATURE = 0.0
@@ -102,8 +113,10 @@ AI_STABILITY_CANDLE_ALIGN_SEC = 120
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 REPLAY_MODEL_VERSION = "replay_v1_scorecard"
 REPLAY_MODEL_APPROVE_THRESHOLD = 0.52
-RESEARCH_PERIODIC_AI_INTERVAL_SEC = 120
-RESEARCH_AI_COOLDOWN_SEC = int(os.getenv("RESEARCH_AI_COOLDOWN_SEC", "60"))
+# Continuous/research AI periodic interval (default 180s / 3 min).
+# Override: RESEARCH_AI_COOLDOWN_SEC env, RESEARCH_PERIODIC_AI_INTERVAL_SEC env, or config.json research_ai_cooldown_sec.
+RESEARCH_AI_COOLDOWN_SEC = int(os.getenv("RESEARCH_AI_COOLDOWN_SEC", "180"))
+RESEARCH_PERIODIC_AI_INTERVAL_SEC = int(os.getenv("RESEARCH_PERIODIC_AI_INTERVAL_SEC", str(RESEARCH_AI_COOLDOWN_SEC)))
 RESEARCH_INSTANT_FILL = os.getenv("RESEARCH_INSTANT_FILL", "0").lower() not in ("0", "false", "no")
 RESEARCH_SOFT_APPROVE_MIN_PROB = int(os.getenv("RESEARCH_SOFT_APPROVE_MIN_PROB", "45"))
 AI_RESEARCH_MODE_ENABLED = os.getenv("AI_RESEARCH_MODE", "1").lower() not in ("0", "false", "no")
@@ -397,7 +410,24 @@ def _private_api_keys_ok() -> bool:
 def _compute_volatility_metric(features: dict) -> float:
     return round(abs(float(features.get("candle_range") or features.get("volatility") or 0)), 6)
 
+def _signal_age_bucket(age_sec: float) -> str:
+    """Bucket signal→fill age for v104 fill-quality analytics."""
+    m = float(age_sec or 0) / 60.0
+    if m < 5:
+        return "0-5m"
+    if m < 15:
+        return "5-15m"
+    if m < 30:
+        return "15-30m"
+    if m < 60:
+        return "30-60m"
+    return "60m+"
+
+
 def _compute_entry_delay_sec(pos: dict, master: dict = None) -> float:
+    """Seconds from AI approve (signal_ts) to fill."""
+    if pos.get("signal_age_sec") is not None:
+        return round(float(pos.get("signal_age_sec")), 3)
     if pos.get("entry_delay_sec") is not None:
         return round(float(pos.get("entry_delay_sec")), 3)
     fill_ts = pos.get("entry_ts")
@@ -408,6 +438,21 @@ def _compute_entry_delay_sec(pos: dict, master: dict = None) -> float:
         return round(max(0.0, float(fill_ts) - float(signal_ts)), 3)
     return 0.0
 
+def _resolve_fill_model(signal: dict, order: dict = None) -> str:
+    """Pathway fill model for analyzer: LIMIT_TOUCH | AI_DIRECT | 5M_TRIGGER | *_CHASE."""
+    order = order or {}
+    path = str(signal.get("entry_path") or "")
+    chased = int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0) > 0
+    if path == "5M_TRIGGER" or signal.get("entry_mode") == ENTRY_MODE_5M_TRIGGER:
+        return "5M_TRIGGER_CHASE" if chased else "5M_TRIGGER"
+    if path in ("AI_DIRECT", "AI_DIRECT_FALLBACK_MICRO") or signal.get("entry_mode") == ENTRY_MODE_AI_DIRECT:
+        return "AI_DIRECT_CHASE" if chased else "AI_DIRECT"
+    if chased:
+        return "LIMIT_CHASE"
+    if order.get("fill_model"):
+        return str(order["fill_model"])
+    return "LIMIT_TOUCH"
+
 def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     ai = ai or {}
     entry = order.get("fill_price") or order.get("limit_price") or order.get("entry") or signal.get("signal_price") or state.get("price")
@@ -415,7 +460,10 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
     signal_price = order.get("signal_price") or signal.get("signal_price") or entry
     fill_ts = time.time()
     order_created = signal.get("order_created_ts") or order.get("created_ts") or signal.get("created_ts_ts")
-    entry_delay_sec = max(0.0, fill_ts - float(order_created)) if order_created else 0.0
+    signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+    signal_age_sec = max(0.0, fill_ts - float(signal_ts)) if signal_ts else 0.0
+    order_age_sec = max(0.0, fill_ts - float(order_created)) if order_created else 0.0
+    entry_delay_sec = signal_age_sec
     features, context = _feature_bundle(signal, signal)
     return {
         "trade_id": order.get("trade_id") or signal.get("trade_id"),
@@ -453,6 +501,9 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "decision": copy.deepcopy(signal.get("decision") or {}),
         "edge_score_at_entry": signal.get("edge_score_at_entry"),
         "entry_delay_sec": round(entry_delay_sec, 3),
+        "order_age_sec": round(order_age_sec, 3),
+        "signal_age_sec": round(signal_age_sec, 3),
+        "signal_age_bucket": _signal_age_bucket(signal_age_sec),
         "research_lane": signal.get("research_lane") or order.get("research_lane"),
         "research_model": signal.get("research_model") or order.get("research_model"),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
@@ -480,6 +531,11 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "ema9_at_entry": signal.get("ema9_at_entry"),
         "ema21_at_entry": signal.get("ema21_at_entry"),
         "dist_to_ema_hybrid_pct": signal.get("dist_to_ema_hybrid_pct"),
+        "entry_path": signal.get("entry_path"),
+        "fill_model": order.get("fill_model") or _resolve_fill_model(signal, order),
+        "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
+        "original_limit_price": order.get("original_limit_price") or order.get("planned_limit_price"),
+        "last_chase_ts": order.get("last_chase_ts") or signal.get("last_chase_ts"),
     }
 
 def compute_live_factor_scores(mc: dict):
@@ -1048,11 +1104,11 @@ def _effective_profit_lock_floor(pos: dict, peak_pct: float):
         return None
     tighten = 0.0
     spread = int(pos.get("conviction_spread") or 0)
+    direction = str(pos.get("dir") or "").upper()
+    health = state.get("trend_health") or {}
     if spread_context_penalty_active(spread, direction, health=health):
         tighten += SPREAD_PENALTY_LOCK_TIGHTEN_PCT
-    health = state.get("trend_health") or {}
     ts = str(health.get("trend_state") or "")
-    direction = str(pos.get("dir") or "").upper()
     if TREND_WEAKENING_ENABLED:
         if direction == "LONG" and ts == "BULL_WEAKENING":
             tighten += TREND_WEAKENING_LOCK_TIGHTEN_PCT
@@ -1600,6 +1656,12 @@ def golden_stack_enabled() -> bool:
     with state_lock:
         return bool(state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED))
 
+def exec_5m_lane_enabled() -> bool:
+    with state_lock:
+        if "exec_5m_lane_enabled" in state:
+            return bool(state.get("exec_5m_lane_enabled"))
+    return os.getenv("EXEC_5M_LANE_ENABLED", "1").lower() not in ("0", "false", "no")
+
 def ai_stability_research_enabled() -> bool:
     with state_lock:
         return bool(state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED))
@@ -1652,12 +1714,26 @@ def get_active_signal_count(lane: str = None):
             positions = [p for p in open_positions if p.get("research_lane") == lane]
         open_count = len(positions)
         list_len = len(pending_orders)
-        active = pending_count + open_count
+        awaiting = []
+        for entry in trades_map.values():
+            sig = entry.get("signal_ref") or {}
+            if not isinstance(sig, dict) or is_terminal_signal(sig):
+                continue
+            st = sig.get("status")
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M):
+                continue
+            sig_lane = sig.get("research_lane")
+            if lane and sig_lane != lane:
+                continue
+            awaiting.append(sig)
+        awaiting_count = len(awaiting)
+        active = pending_count + open_count + awaiting_count
         exposure = [{"trade_id": o.get("trade_id"), "kind": "pending", "status": o.get("status"), "lane": o.get("research_lane")} for o in pending]
         exposure += [{"trade_id": p.get("trade_id"), "kind": "open", "lane": p.get("research_lane")} for p in positions]
+        exposure += [{"trade_id": s.get("trade_id"), "kind": "awaiting", "status": s.get("status"), "lane": s.get("research_lane")} for s in awaiting]
         stale_map = len([
             s for s in trades_map.values()
-            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING")
+            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M)
             and (s.get("signal_ref") or {}).get("trade_id") not in {e.get("trade_id") for e in exposure}
         ])
     _agent_dbg("H1", "get_active_signal_count", "counted", {"active": active, "lane": lane, "pending_pending_status": pending_count, "pending_list_len": list_len, "open_positions": open_count, "stale_map_orphans": stale_map, "exposure": exposure})
@@ -1669,8 +1745,7 @@ def ensure_lane_signal_capacity(lane: str) -> bool:
     if not is_research_data_collection():
         return ensure_signal_capacity()
     max_active = get_effective_max_active_signals()
-    _evict_oldest_pending_if_at_capacity(max_active, lane=lane)
-    return get_active_signal_count(lane) < max_active
+    return not _is_at_signal_capacity(max_active, lane=lane)
 
 def research_ai_temperature() -> float:
     """Research lanes use temp=0 for reproducible cross-lane comparison."""
@@ -1691,6 +1766,8 @@ def ai_stability_config_for_dashboard() -> dict:
         "stability_lane": RESEARCH_LANE_STABILITY,
         "continuous_lane": RESEARCH_LANE_CONTINUOUS,
         "golden_stack_lane": RESEARCH_LANE_GOLDEN_STACK,
+        "exec_5m_lane": RESEARCH_LANE_5M_EXEC,
+        "exec_5m_enabled": exec_5m_lane_enabled(),
         "lane_labels": RESEARCH_LANE_LABELS,
     }
 
@@ -1992,7 +2069,10 @@ def evaluate_golden_stack_filter(
     if spread > gs_thr["spread_max"]:
         return True, f"SPREAD_HIGH_{spread}"
     entry_mode = str(signal.get("entry_mode") or "")
-    if entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER):
+    if entry_mode not in (
+        ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER,
+        ENTRY_MODE_AI_DIRECT, ENTRY_MODE_5M_TRIGGER,
+    ):
         return True, f"ENTRY_MODE_{entry_mode or 'UNKNOWN'}"
     dist_pct = signal.get("dist_to_ema_hybrid_pct")
     if dist_pct is None:
@@ -2547,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.10-closed-loop-2026-06-11"
+ANALYZER_SYNC_ID = "v9.20-profit-lock-direction-fix-2026-06-13"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2879,6 +2959,7 @@ def get_funding_snapshot_for_ai():
 
 # --- Phase A: balanced market context (structure, MTF, EMA facts, trend strength) ---
 MTF_REFRESH_SEC = 300
+MTF_5M_REFRESH_SEC = 60
 STRUCTURE_PIVOT_BARS = 2
 _mtf_cache = {"1h": {"ts": 0.0, "candles": []}, "4h": {"ts": 0.0, "candles": []}}
 _last_market_context_ts = 0.0
@@ -3036,6 +3117,91 @@ def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
         "lh_ll_sequence_active": lower_high and bool(labels) and all(x in ("LH", "LL") for x in labels[-2:]),
         "last_swing_low": micro_support,
         "last_swing_high": micro_resistance,
+    }
+
+
+def build_micro_sr_levels_5m(candles=None, max_pivots: int = None) -> dict:
+    """5m pivot micro S/R — uses Bitfinex 5m OHLC, not WS tick buffer."""
+    if candles is None:
+        candles = fetch_mtf_candles("5m", limit=200)
+    return build_micro_sr_levels(candles=candles, max_pivots=max_pivots)
+
+
+def evaluate_5m_structure_confirm(direction: str, price: float, ms_5m: dict = None) -> dict:
+    """5m execution trigger: LONG=higher_low, SHORT=lower_high at 5m pivot level."""
+    direction = str(direction or "").upper()
+    price = float(price or 0)
+    if ms_5m is None:
+        ms_5m = build_micro_sr_levels_5m()
+    micro_support = ms_5m.get("micro_support")
+    micro_resistance = ms_5m.get("micro_resistance")
+    pattern_ok = False
+    micro_level = None
+    if direction == "LONG":
+        pattern_ok = bool(ms_5m.get("higher_low"))
+        micro_level = micro_support
+    elif direction == "SHORT":
+        pattern_ok = bool(ms_5m.get("lower_high"))
+        micro_level = micro_resistance
+    confirmed = bool(pattern_ok and micro_level)
+    return {
+        "confirmed": confirmed,
+        "pattern_ok": pattern_ok,
+        "micro_support": micro_support,
+        "micro_resistance": micro_resistance,
+        "micro_sr_level": micro_level,
+        "higher_low": ms_5m.get("higher_low"),
+        "lower_high": ms_5m.get("lower_high"),
+        "structure_score": ms_5m.get("structure_score"),
+        "pivot_count": ms_5m.get("pivot_count"),
+    }
+
+
+def compute_5m_exec_entry(signal: dict) -> dict:
+    """EXEC_5M lane — limit at 5m micro S/R; await 5m HL/LH confirmation."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(signal.get("signal_price") or state.get("price") or 0)
+    ms_5m = build_micro_sr_levels_5m()
+    eval_5m = evaluate_5m_structure_confirm(direction, price, ms_5m)
+    micro_support = ms_5m.get("micro_support")
+    micro_resistance = ms_5m.get("micro_resistance")
+    limit_price = None
+    if direction == "LONG" and micro_support:
+        limit_price = float(micro_support) + MICRO_SR_ENTRY_BUFFER_USD
+        if limit_price >= price:
+            limit_price = None
+    elif direction == "SHORT" and micro_resistance:
+        limit_price = float(micro_resistance) - MICRO_SR_ENTRY_BUFFER_USD
+        if limit_price <= price:
+            limit_price = None
+    await_5m_confirm = not eval_5m.get("confirmed") or limit_price is None
+    entry_reason = "5M_HL_LH_CONFIRMED" if eval_5m.get("confirmed") else "5M_AWAIT_HL_LH"
+    signal["entry_mode"] = ENTRY_MODE_5M_TRIGGER
+    signal["entry_path"] = "5M_TRIGGER"
+    signal["entry_reason"] = entry_reason
+    signal["micro_sr_limit"] = limit_price
+    signal["5m_micro_support"] = micro_support
+    signal["5m_micro_resistance"] = micro_resistance
+    signal["5m_higher_low"] = bool(ms_5m.get("higher_low"))
+    signal["5m_lower_high"] = bool(ms_5m.get("lower_high"))
+    signal["5m_structure_eval"] = eval_5m
+    signal["await_5m_confirm"] = await_5m_confirm
+    signal["await_micro_confirm"] = False
+    signal["micro_structure_confirmed"] = bool(eval_5m.get("confirmed"))
+    signal["order_placed"] = False
+    trade_id = signal.get("trade_id", "?")
+    logger.info(
+        f"[5M EXEC] trade_id={trade_id} dir={direction} reason={entry_reason} "
+        f"limit={fmt(limit_price)} support={fmt(micro_support)} resist={fmt(micro_resistance)} "
+        f"HL={ms_5m.get('higher_low')} LH={ms_5m.get('lower_high')} "
+        f"await_5m={await_5m_confirm} path=5M_TRIGGER [PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "entry_mode": ENTRY_MODE_5M_TRIGGER,
+        "entry_path": "5M_TRIGGER",
+        "entry_reason": entry_reason,
+        "micro_sr_limit": limit_price,
+        "await_5m_confirm": await_5m_confirm,
     }
 
 
@@ -3226,6 +3392,82 @@ def resolve_ai_planner_limit(
     return float(limit), "AI_ZONE_MICRO_VALIDATED"
 
 
+def continuous_ai_direct_entry_enabled() -> bool:
+    """CONTINUOUS lane: place AI-suggested limit immediately (no AWAITING_MICRO)."""
+    with state_lock:
+        if "continuous_ai_direct_entry_enabled" in state:
+            return bool(state.get("continuous_ai_direct_entry_enabled"))
+    return os.getenv("CONTINUOUS_AI_DIRECT_ENTRY", "1").lower() not in ("0", "false", "no")
+
+
+def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -> tuple:
+    """Pure AI limit — zone midpoint or explicit limit_price; no micro/EMA gates."""
+    plan = trade_planner or {}
+    limit = None
+    try:
+        if plan.get("limit_price") is not None:
+            limit = float(plan["limit_price"])
+        elif plan.get("entry_limit") is not None:
+            limit = float(plan["entry_limit"])
+        else:
+            zlo = float(plan["entry_zone_low"])
+            zhi = float(plan["entry_zone_high"])
+            if zhi > zlo:
+                limit = zlo + (zhi - zlo) * 0.5
+    except (TypeError, ValueError):
+        return None, "AI_PLANNER_MISSING"
+    if limit is None or price <= 0 or direction not in ("LONG", "SHORT"):
+        return None, "AI_PLANNER_MISSING"
+    max_dist = AI_DIRECT_MAX_DIST_PCT
+    if direction == "LONG":
+        if limit >= price:
+            limit = price * (1 - float(state.get("pullback_threshold", 0.002)))
+        if (price - limit) / price > max_dist:
+            limit = price * (1 - max_dist)
+    else:
+        if limit <= price:
+            limit = price * (1 + float(state.get("pullback_threshold", 0.002)))
+        if (limit - price) / price > max_dist:
+            limit = price * (1 + max_dist)
+    return float(limit), "AI_DIRECT_LIMIT"
+
+
+def compute_continuous_ai_direct_entry(signal: dict) -> dict:
+    """CONTINUOUS research lane — AI limit only; skip micro confirm / awaiting_micro."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(signal.get("signal_price") or state.get("price") or 0)
+    trade_planner = signal.get("trade_planner") or (signal.get("ai_output") or {}).get("trade_planner") or {}
+    limit_price, entry_reason = resolve_ai_direct_limit(direction, price, trade_planner)
+    if limit_price is None:
+        out = compute_micro_sr_entry(signal)
+        signal["entry_path"] = "AI_DIRECT_FALLBACK_MICRO"
+        return out
+    signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
+    signal["entry_reason"] = entry_reason
+    signal["entry_path"] = "AI_DIRECT"
+    signal["ai_direct_limit"] = limit_price
+    signal["ai_planner_limit"] = limit_price
+    signal["micro_sr_limit"] = limit_price
+    signal["ai_entry_zone_low"] = trade_planner.get("entry_zone_low")
+    signal["ai_entry_zone_high"] = trade_planner.get("entry_zone_high")
+    signal["await_micro_confirm"] = False
+    signal["micro_structure_confirmed"] = True
+    signal["order_placed"] = False
+    trade_id = signal.get("trade_id", "?")
+    logger.info(
+        f"[AI DIRECT] trade_id={trade_id} dir={direction} limit={fmt(limit_price)} "
+        f"zone={fmt(signal.get('ai_entry_zone_low'))}-{fmt(signal.get('ai_entry_zone_high'))} "
+        f"market={fmt(price)} path=AI_DIRECT [PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "entry_mode": ENTRY_MODE_AI_DIRECT,
+        "entry_reason": entry_reason,
+        "entry_path": "AI_DIRECT",
+        "ai_direct_limit": limit_price,
+        "await_micro_confirm": False,
+    }
+
+
 def compute_micro_sr_entry(signal: dict) -> dict:
     """v101: AI planner zone primary; micro S/R validates; EMA secondary confirmation only."""
     direction = str(signal.get("final_direction") or "").upper()
@@ -3299,6 +3541,7 @@ def compute_micro_sr_entry(signal: dict) -> dict:
 
     signal["entry_mode"] = entry_mode
     signal["entry_reason"] = entry_reason
+    signal["entry_path"] = signal.get("entry_path") or "MICRO_SR"
     signal["micro_support"] = micro_support
     signal["micro_resistance"] = micro_resistance
     signal["micro_sr_limit"] = limit_price
@@ -3366,6 +3609,10 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
         pullback_limit = signal_price
     signal["planned_pullback_limit"] = pullback_limit
     entry_mode = signal.get("entry_mode")
+    if entry_mode == ENTRY_MODE_AI_DIRECT and signal.get("ai_direct_limit") is not None:
+        return float(signal["ai_direct_limit"]), ENTRY_MODE_AI_DIRECT
+    if entry_mode == ENTRY_MODE_5M_TRIGGER and signal.get("micro_sr_limit") is not None:
+        return float(signal["micro_sr_limit"]), ENTRY_MODE_5M_TRIGGER
     if entry_mode == ENTRY_MODE_AI_PLANNER and signal.get("ai_planner_limit") is not None:
         return float(signal["ai_planner_limit"]), ENTRY_MODE_AI_PLANNER
     micro_limit = signal.get("micro_sr_limit")
@@ -3401,7 +3648,8 @@ def fetch_mtf_candles(timeframe: str, limit: int = 120):
     global _mtf_cache
     now = time.time()
     bucket = _mtf_cache.get(timeframe, {"ts": 0.0, "candles": []})
-    if bucket["candles"] and now - bucket["ts"] < MTF_REFRESH_SEC:
+    refresh_sec = MTF_5M_REFRESH_SEC if timeframe == "5m" else MTF_REFRESH_SEC
+    if bucket["candles"] and now - bucket["ts"] < refresh_sec:
         return bucket["candles"]
     try:
         candles = fetch_bitfinex_ohlcv(timeframe, limit=limit)
@@ -3603,6 +3851,9 @@ ENTRY_MODE_PULLBACK = "PULLBACK_LIMIT"
 ENTRY_MODE_EMA_HYBRID = "EMA_HYBRID_LIMIT"
 ENTRY_MODE_MICRO_SR = "MICRO_SR_LIMIT"
 ENTRY_MODE_AI_PLANNER = "AI_PLANNER_LIMIT"
+ENTRY_MODE_AI_DIRECT = "AI_DIRECT_LIMIT"
+ENTRY_MODE_5M_TRIGGER = "5M_TRIGGER_LIMIT"
+AI_DIRECT_MAX_DIST_PCT = float(os.getenv("AI_DIRECT_MAX_DIST_PCT", "0.01"))
 RESEARCH_QUALITY_MIN = 15.0
 PROFITABLE_REJECT_FEATURES_FILE = "profitable_reject_features.json"
 EMA_HYBRID_ENTRY_OFFSET_USD = 20.0
@@ -3640,6 +3891,7 @@ TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
+DUPLICATE_LIMIT_PRICE_TOL_USD = 2.0
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
 THESIS_INVALIDATION_ENABLED = True
@@ -3776,10 +4028,18 @@ MAX_CONCURRENT_POSITIONS_DEFAULT = 20
 RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
-SIGNAL_TTL_SEC = 60 * 60
-REPLAY_TTL_SEC = 60 * 60
+SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
+REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
 MAX_EVENT_QUEUE = 10000
-LIMIT_ORDER_MAX_AGE_SEC = 60 * 60
+LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(30 * 60)))
+# Limit chase — patient maker entry then gradual convergence toward market (research sim).
+LIMIT_CHASE_START_SEC_DEFAULT = 900
+LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 180
+LIMIT_CHASE_STEP_PCT_DEFAULT = 0.25
+LIMIT_CHASE_MAX_GAP_CLOSE_PCT = float(os.getenv("LIMIT_CHASE_MAX_GAP_CLOSE_PCT", "0.90"))
+LIMIT_CHASE_MIN_BUFFER_USD = float(os.getenv("LIMIT_CHASE_MIN_BUFFER_USD", str(MICRO_SR_ENTRY_BUFFER_USD)))
+LIMIT_CHASE_NEAR_FILL_USD = float(os.getenv("LIMIT_CHASE_NEAR_FILL_USD", "10"))
+LIMIT_CHASE_NEAR_FILL_PCT = float(os.getenv("LIMIT_CHASE_NEAR_FILL_PCT", "0.001"))  # 0.1% — chase until very close
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
 REVERSAL_STUDY_TTL_SEC = 3600  # 60m horizon for reversal_risk_score validation
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
@@ -3826,7 +4086,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.0.8-ws-stability"
+EXECUTION_FIX_VERSION = "v1.1.9-profit-lock-direction-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -3844,8 +4104,15 @@ def csv_research_meta(signal: dict = None) -> dict:
 ORDER_PLACEMENT_GRACE_SEC = 30
 # Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
+SIGNAL_STATUS_AWAITING_5M = "AWAITING_5M"
+DUPLICATE_LIMIT_ACTIVE_STATUSES = frozenset({
+    "PENDING", "ORDERED", "ACTIVE", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
+})
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
-TERMINAL_SIGNAL_OUTCOMES = frozenset({"STALE_NO_EXPOSURE", "SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "CAPACITY_REPLACED", "WIN", "LOSS"})
+TERMINAL_SIGNAL_OUTCOMES = frozenset({
+    "STALE_NO_EXPOSURE", "SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "CAPACITY_REPLACED",
+    "DUPLICATE_LIMIT_PRICE", "WIN", "LOSS",
+})
 last_signal_hash = None
 last_event_trigger = 0.0
 last_pipeline_run = 0.0
@@ -3886,10 +4153,16 @@ state = {
     "debug_enabled": False,
     "fresh_collection_mode": False,
     "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
+    "exec_5m_lane_enabled": EXEC_5M_LANE_DEFAULT_ENABLED,
+    "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
     "golden_stack_last_eval": None,
     "golden_stack_last_block_reason": None,
     "ai_stability_research_enabled": AI_STABILITY_DEFAULT_ENABLED,
     "continuous_ai_research_enabled": CONTINUOUS_AI_DEFAULT_ENABLED,
+    "research_ai_cooldown_sec": None,
+    "limit_chase_start_sec": None,
+    "limit_chase_interval_sec": None,
+    "limit_chase_step_pct": None,
     "last_ai_candle_bucket": -1,
     "last_stability_ai_ts": 0.0,
     "last_replay_model_eval": None,
@@ -4112,6 +4385,23 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
 
+def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
+    """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
+    if not signal or not ai or ai.get("decision") != "APPROVE":
+        return
+    tid = signal.get("trade_id")
+    with state_lock:
+        lao = state.get("last_approve_outcome") or {}
+    if lao.get("status") == "PENDING" and lao.get("trade_id") == tid:
+        record_approve_outcome(
+            "BLOCKED",
+            reason,
+            signal.get("effective_threshold_at_entry") or lao.get("effective_threshold") or get_effective_edge_threshold(),
+            tid,
+            signal.get("edge_score_at_entry") or lao.get("edge_at_approve"),
+            ai,
+        )
+
 def enforce_edge_threshold_options():
     with state_lock:
         current = round(state["edge_threshold"], 1)
@@ -4284,10 +4574,61 @@ def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
         return True, f"PRE_AI_LOW_ADX_{adx:.1f}"
     return False, None
 
+def get_research_ai_cooldown_sec() -> int:
+    """Continuous-lane AI interval (seconds). config.json research_ai_cooldown_sec > env RESEARCH_AI_COOLDOWN_SEC."""
+    with state_lock:
+        raw = state.get("research_ai_cooldown_sec")
+    if raw is not None:
+        try:
+            return max(60, min(600, int(raw)))
+        except (TypeError, ValueError):
+            pass
+    return RESEARCH_AI_COOLDOWN_SEC
+
+
+def _limit_chase_config_value(state_key: str, env_key: str, default, cast):
+    with state_lock:
+        raw = state.get(state_key)
+    if raw is not None:
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return cast(os.getenv(env_key, str(default)))
+    except (TypeError, ValueError):
+        return cast(default)
+
+
+def limit_chase_enabled() -> bool:
+    if not is_research_data_collection():
+        return False
+    if os.getenv("LIMIT_CHASE_ENABLED", "1").lower() in ("0", "false", "no"):
+        return False
+    return True
+
+
+def get_limit_chase_start_sec() -> int:
+    return max(60, _limit_chase_config_value(
+        "limit_chase_start_sec", "LIMIT_CHASE_START_SEC", LIMIT_CHASE_START_SEC_DEFAULT, int
+    ))
+
+
+def get_limit_chase_interval_sec() -> int:
+    return max(60, _limit_chase_config_value(
+        "limit_chase_interval_sec", "LIMIT_CHASE_INTERVAL_SEC", LIMIT_CHASE_INTERVAL_SEC_DEFAULT, int
+    ))
+
+
+def get_limit_chase_step_pct() -> float:
+    return max(0.05, min(1.0, _limit_chase_config_value(
+        "limit_chase_step_pct", "LIMIT_CHASE_STEP_PCT", LIMIT_CHASE_STEP_PCT_DEFAULT, float
+    )))
+
 def get_effective_ai_cooldown_sec() -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
     if _sole_ai_research_mode() and is_research_data_collection():
-        return RESEARCH_AI_COOLDOWN_SEC
+        return get_research_ai_cooldown_sec()
     return AI_COOLDOWN_SECONDS
 
 def ai_cooldown_remaining_sec() -> int:
@@ -4858,6 +5199,14 @@ def _remove_pending_for_trade(trade_id: str, reason: str = "ORPHAN_CLEANUP"):
                 logger.info(f"[ORDER CLEANUP] Removed pending order trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]")
     return removed
 
+def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED") -> None:
+    try:
+        from execution_funnel import funnel_on_signal_expire
+        funnel_on_signal_expire(signal_or_order, reason)
+    except Exception:
+        pass
+
+
 def reconcile_stale_signals():
     pending_ids = _pending_trade_ids()
     open_ids = _open_trade_ids()
@@ -4872,7 +5221,7 @@ def reconcile_stale_signals():
             if sig.get("outcome") != "OPEN":
                 sig["outcome"] = "OPEN"
                 fixed += 1
-            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO):
+            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M):
                 sig["status"] = "FILLED"
                 fixed += 1
         for s in trades_map.values():
@@ -4899,13 +5248,16 @@ def reconcile_stale_signals():
                 sig["outcome"] = "STALE_NO_EXPOSURE" if not ttl_expired else "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
                 fixed += 1
+                if ttl_expired:
+                    _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
                 if _remove_pending_for_trade(tid, sig["outcome"]):
                     orphans_removed += 1
-            elif st == SIGNAL_STATUS_AWAITING_MICRO and ttl_expired:
+            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
                 fixed += 1
+                _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
         for order in list(pending_orders):
             tid = order.get("trade_id")
             if order.get("status") != "PENDING" or not tid:
@@ -4924,6 +5276,7 @@ def sync_signal_info_registry():
     pending_ids = _pending_trade_ids()
     open_ids = _open_trade_ids()
     awaiting_micro_ids = set()
+    awaiting_5m_ids = set()
     with trade_lock:
         for entry in trades_map.values():
             sig = entry.get("signal_ref")
@@ -4932,7 +5285,9 @@ def sync_signal_info_registry():
             tid = sig.get("trade_id")
             if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(sig):
                 awaiting_micro_ids.add(tid)
-    live_ids = pending_ids | open_ids | awaiting_micro_ids
+            if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(sig):
+                awaiting_5m_ids.add(tid)
+    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids
     live_signals = []
     with trade_lock:
         for entry in trades_map.values():
@@ -5879,6 +6234,8 @@ def parse_ai_trade_planner(text: str, json_blob: dict = None) -> dict:
     plan = {
         "entry_zone_low": None,
         "entry_zone_high": None,
+        "limit_price": None,
+        "entry_limit": None,
         "expected_mfe": None,
         "expected_mae": None,
         "reversal_probability": None,
@@ -5899,6 +6256,8 @@ def parse_ai_trade_planner(text: str, json_blob: dict = None) -> dict:
     if isinstance(blob, dict):
         plan["entry_zone_low"] = blob.get("entry_zone_low")
         plan["entry_zone_high"] = blob.get("entry_zone_high")
+        plan["limit_price"] = blob.get("limit_price") or blob.get("entry_limit")
+        plan["entry_limit"] = blob.get("entry_limit") or blob.get("limit_price")
         plan["expected_mfe"] = blob.get("expected_mfe")
         plan["expected_mae"] = blob.get("expected_mae")
         plan["reversal_probability"] = blob.get("reversal_probability")
@@ -6896,6 +7255,39 @@ def spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, source_lan
         "pre_ctx": gs_ctx,
     })
 
+
+def spawn_5m_exec_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
+    """Independent EXEC_5M lane — 5m HL/LH trigger entry (spawned from CONTINUOUS/STABILITY on APPROVE)."""
+    if not exec_5m_lane_enabled() or not is_research_data_collection():
+        return
+    if ai.get("decision") != "APPROVE":
+        return
+    ai_direction = ai.get("direction")
+    final_direction = ai_direction
+    if state.get("invert_signal", False):
+        if ai_direction == "LONG":
+            final_direction = "SHORT"
+        elif ai_direction == "SHORT":
+            final_direction = "LONG"
+    exec_ctx = copy.deepcopy(ctx)
+    exec_ctx["trade_id"] = f"5m-{uuid.uuid4().hex[:12]}"
+    logger.info(
+        f"[EXEC_5M LANE] spawn execution from {source_lane} trade_id={exec_ctx['trade_id']} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    process_signal({
+        "event_trigger": True,
+        "research_lane": RESEARCH_LANE_5M_EXEC,
+        "edge_trigger_reason": f"EXEC_5M_FROM_{source_lane}",
+        "edge_score": round(float(edge_score), 1),
+        "price": nz(state.get("price")),
+        "timestamp": utc_iso(),
+        "features": features or {},
+        "skip_ai": True,
+        "pre_ai": copy.deepcopy(ai),
+        "pre_ctx": exec_ctx,
+    })
+
 def maybe_run_stability_research_ai():
     """Independent STABILITY lane: candle-aligned DeepSeek + real execution on APPROVE."""
     if not ai_stability_research_enabled() or not is_research_data_collection():
@@ -7651,42 +8043,21 @@ def detect_event_light():
 def monitor_positions():
     pass
 
-def _evict_oldest_pending_if_at_capacity(max_slots: int, lane: str = None) -> bool:
+def _refresh_order_and_signal_ttl() -> None:
+    """Run TTL expiry and stale-signal reconciliation without capacity eviction."""
     cleanup_expired_orders()
     reconcile_stale_signals()
+
+def _is_at_signal_capacity(max_slots: int = None, lane: str = None) -> bool:
+    _refresh_order_and_signal_ttl()
     with state_lock:
         max_active = max_slots or state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT
-    evicted = False
-    while get_active_signal_count(lane) >= max_active:
-        with trade_lock:
-            pending = [o for o in pending_orders if o.get("status") == "PENDING"]
-            if lane:
-                pending = [o for o in pending if o.get("research_lane") == lane]
-            if not pending:
-                break
-            oldest = min(pending, key=lambda o: o.get("created_ts", time.time()))
-            pending_orders.remove(oldest)
-        _record_expired_order(oldest, "CAPACITY_REPLACED")
-        expire_signal_for_order(oldest, "CAPACITY_REPLACED")
-        try:
-            from execution_funnel import funnel_on_expire
-            funnel_on_expire(oldest, "CAPACITY_REPLACED")
-        except Exception:
-            pass
-        evicted = True
-        logger.info(
-            f"[CAPACITY] Evicted oldest pending trade_id={oldest.get('trade_id')} "
-            f"lane={lane or 'ALL'} to make room ({max_active} max) [PIPELINE ENFORCEMENT]"
-        )
-    if evicted:
-        pipeline_state_sync()
-    return evicted
+    return get_active_signal_count(lane) >= max_active
 
 def ensure_signal_capacity() -> bool:
-    """Evict stale pending orders if needed, then return True if a new signal slot is available."""
+    """Return True if a new signal slot is available (TTL-only cleanup, no capacity eviction)."""
     max_active = get_effective_max_active_signals()
-    _evict_oldest_pending_if_at_capacity(max_active)
-    return get_active_signal_count() < max_active
+    return not _is_at_signal_capacity(max_active)
 
 def apply_research_instant_fill(signal: dict):
     """Research data collection: market-fill at signal price instead of waiting on micro/EMA limits."""
@@ -7718,8 +8089,184 @@ def _resolve_awaiting_micro_limit(signal: dict) -> tuple:
     return limit_price, entry_mode, True
 
 
+def _resolve_awaiting_5m_limit(signal: dict) -> tuple:
+    """Return (limit_price, entry_mode, confirmed) for a deferred 5m HL/LH entry."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(state.get("price") or signal.get("signal_price") or 0)
+    ms_5m = build_micro_sr_levels_5m()
+    eval_5m = evaluate_5m_structure_confirm(direction, price, ms_5m)
+    if not eval_5m.get("confirmed"):
+        signal["5m_structure_eval"] = eval_5m
+        signal["5m_higher_low"] = bool(ms_5m.get("higher_low"))
+        signal["5m_lower_high"] = bool(ms_5m.get("lower_high"))
+        return None, ENTRY_MODE_5M_TRIGGER, False
+    limit_price = None
+    if direction == "LONG" and ms_5m.get("micro_support"):
+        limit_price = float(ms_5m["micro_support"]) + MICRO_SR_ENTRY_BUFFER_USD
+    elif direction == "SHORT" and ms_5m.get("micro_resistance"):
+        limit_price = float(ms_5m["micro_resistance"]) - MICRO_SR_ENTRY_BUFFER_USD
+    if limit_price is None:
+        return None, ENTRY_MODE_5M_TRIGGER, False
+    signal["5m_micro_support"] = ms_5m.get("micro_support")
+    signal["5m_micro_resistance"] = ms_5m.get("micro_resistance")
+    signal["5m_higher_low"] = bool(ms_5m.get("higher_low"))
+    signal["5m_lower_high"] = bool(ms_5m.get("lower_high"))
+    signal["5m_structure_eval"] = eval_5m
+    signal["micro_sr_limit"] = limit_price
+    return limit_price, ENTRY_MODE_5M_TRIGGER, True
+
+
+def _limit_prices_near(a: float, b: float) -> bool:
+    if a is None or b is None:
+        return False
+    try:
+        fa, fb = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    if fa <= 0 or fb <= 0:
+        return False
+    if abs(fa - fb) <= DUPLICATE_LIMIT_PRICE_TOL_USD:
+        return True
+    ref = max(fa, fb, 1.0)
+    return abs(fa - fb) / ref < CLUSTER_MIN_DIST_PCT
+
+
+def _signal_direction(sig: dict) -> str:
+    return str(sig.get("final_direction") or sig.get("direction") or sig.get("signal_dir") or "").upper()
+
+
+def _signal_planned_limit(sig: dict) -> float:
+    for key in (
+        "planned_limit_price", "limit_price", "micro_sr_limit", "ai_direct_limit",
+        "ai_planner_limit", "ema_hybrid_limit", "planned_pullback_limit",
+    ):
+        v = sig.get(key)
+        if v is not None:
+            try:
+                px = float(v)
+            except (TypeError, ValueError):
+                continue
+            if px > 0:
+                return px
+    return 0.0
+
+
+def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_trade_id: str = None) -> dict:
+    """Return metadata for an active same-direction limit at/near limit_price, else {}."""
+    direction = str(direction or "").upper()
+    if direction not in ("LONG", "SHORT") or limit_price <= 0:
+        return {}
+    now = time.time()
+    with trade_lock:
+        for o in pending_orders:
+            if o.get("status") != "PENDING":
+                continue
+            tid = o.get("trade_id")
+            if not tid or tid == exclude_trade_id:
+                continue
+            odir = _normalize_order_side_to_dir(o.get("signal_dir") or o.get("side"))
+            if odir != direction:
+                continue
+            ref = o.get("planned_limit_price") or o.get("limit_price")
+            if _limit_prices_near(limit_price, ref):
+                return {
+                    "trade_id": tid,
+                    "source": "pending_order",
+                    "limit_price": ref,
+                    "research_lane": o.get("research_lane"),
+                    "status": "PENDING",
+                }
+        for p in open_positions:
+            tid = p.get("trade_id")
+            if not tid or tid == exclude_trade_id:
+                continue
+            if p.get("dir") != direction:
+                continue
+            ref = p.get("entry") or 0
+            if _limit_prices_near(limit_price, ref):
+                return {
+                    "trade_id": tid,
+                    "source": "open_position",
+                    "limit_price": ref,
+                    "research_lane": p.get("research_lane"),
+                    "status": "FILLED",
+                }
+        for entry in trades_map.values():
+            sig = entry.get("signal_ref") or {}
+            if not isinstance(sig, dict):
+                continue
+            tid = sig.get("trade_id")
+            if not tid or tid == exclude_trade_id:
+                continue
+            if is_terminal_signal(sig):
+                continue
+            st = sig.get("status")
+            if st not in DUPLICATE_LIMIT_ACTIVE_STATUSES:
+                continue
+            expires_ts = sig.get("expires_ts") or (sig.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+            if expires_ts and now > expires_ts:
+                continue
+            if _signal_direction(sig) != direction:
+                continue
+            ref = _signal_planned_limit(sig)
+            if ref <= 0 or not _limit_prices_near(limit_price, ref):
+                continue
+            return {
+                "trade_id": tid,
+                "source": "signal",
+                "limit_price": ref,
+                "research_lane": sig.get("research_lane"),
+                "status": st,
+            }
+    return {}
+
+
+def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
+    """Expire incoming signal when same direction+limit already active. Returns True if rejected."""
+    direction = _signal_direction(signal)
+    tid = signal.get("trade_id")
+    dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid)
+    if not dup:
+        return False
+    reason = "DUPLICATE_LIMIT_PRICE"
+    with trade_lock:
+        master = trades_map.get(tid, {}).get("signal_ref", signal)
+        master["status"] = "EXPIRED"
+        master["outcome"] = reason
+        master["exit_reason"] = reason
+        master["duplicate_of_trade_id"] = dup.get("trade_id")
+        master["duplicate_limit_price"] = limit_price
+        master["duplicate_existing_limit"] = dup.get("limit_price")
+        master["duplicate_existing_lane"] = dup.get("research_lane")
+        master["duplicate_existing_status"] = dup.get("status")
+        master["duplicate_existing_source"] = dup.get("source")
+        master["order_placed"] = False
+        master["await_micro_confirm"] = False
+        master["await_5m_confirm"] = False
+    signal.update({
+        "status": "EXPIRED",
+        "outcome": reason,
+        "exit_reason": reason,
+        "order_placed": False,
+        "await_micro_confirm": False,
+        "await_5m_confirm": False,
+    })
+    _funnel_signal_expired(signal, reason)
+    logger.info(
+        f"[SIM] DUPLICATE_LIMIT skip trade_id={tid} dir={direction} limit={fmt(limit_price)} "
+        f"entry_mode={entry_mode} lane={signal.get('research_lane')} "
+        f"existing_trade_id={dup.get('trade_id')} existing_limit={fmt(dup.get('limit_price'))} "
+        f"existing_lane={dup.get('research_lane')} existing_status={dup.get('status')} "
+        f"source={dup.get('source')} reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+    pipeline_state_sync()
+    return True
+
+
 def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
+    if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
+        return False
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
     price = state.get("price")
     if not price or price <= 0:
@@ -7738,23 +8285,34 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "limit_price": limit_price,
         "planned_limit_price": limit_price,
         "entry_mode": entry_mode,
+        "entry_path": signal.get("entry_path"),
         "qty": qty,
         "status": "PENDING",
         "created_ts": time.time(),
+        "signal_created_ts": signal.get("created_ts_ts") or (signal.get("timing") or {}).get("signal_ts"),
         "entry_type": "SIM_LIMIT",
         "signal_price": signal.get("signal_price"),
         "fee_type": "MAKER",
         "micro_structure_confirmed": True,
+        "original_limit_price": limit_price,
+        "limit_chase_count": 0,
+        "last_chase_ts": None,
     }
+    order["fill_model"] = _resolve_fill_model(signal, order)
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
+    signal["original_limit_price"] = limit_price
+    signal["limit_chase_count"] = 0
+    signal["last_chase_ts"] = None
     signal["entry_mode"] = entry_mode
     signal["qty"] = qty
     signal["order_created_ts"] = time.time()
     signal["status"] = "ORDERED"
     signal["order_placed"] = True
     signal["await_micro_confirm"] = False
+    signal["await_5m_confirm"] = False
     signal.pop("awaiting_micro_since", None)
+    signal.pop("awaiting_5m_since", None)
     with trade_lock:
         pending_orders.append(order)
     logger.info(
@@ -7776,6 +8334,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     can_instant = (
         pullback_pct <= 0.0
         and not defer_instant_fill
+        and entry_mode not in (ENTRY_MODE_AI_DIRECT, ENTRY_MODE_5M_TRIGGER)
         and (
             research_instant
             or entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER)
@@ -7836,6 +8395,7 @@ def process_awaiting_micro_entries():
                 master["status"] = "EXPIRED"
                 master["outcome"] = "SIGNAL_TTL_EXPIRED"
                 master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
             logger.info(f"[SIM] awaiting_micro expired trade_id={tid} [PIPELINE ENFORCEMENT]")
             continue
         if not ensure_signal_capacity():
@@ -7850,10 +8410,49 @@ def process_awaiting_micro_entries():
         _place_simulated_limit_order(signal, limit_price, entry_mode)
 
 
+def process_awaiting_5m_entries():
+    """Promote AWAITING_5M signals to pending limit orders once 5m HL/LH confirms."""
+    price = state.get("price")
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    with trade_lock:
+        awaiting = [
+            (entry.get("signal_ref") or {})
+            for entry in trades_map.values()
+            if isinstance(entry.get("signal_ref"), dict)
+            and entry["signal_ref"].get("status") == SIGNAL_STATUS_AWAITING_5M
+            and not is_terminal_signal(entry["signal_ref"])
+        ]
+    for signal in awaiting:
+        tid = signal.get("trade_id")
+        if not tid:
+            continue
+        expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+        if expires_ts and now > expires_ts:
+            with trade_lock:
+                master = trades_map.get(tid, {}).get("signal_ref", signal)
+                master["status"] = "EXPIRED"
+                master["outcome"] = "SIGNAL_TTL_EXPIRED"
+                master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
+            logger.info(f"[SIM] awaiting_5m expired trade_id={tid} [PIPELINE ENFORCEMENT]")
+            continue
+        if not ensure_signal_capacity():
+            continue
+        limit_price, entry_mode, confirmed = _resolve_awaiting_5m_limit(signal)
+        if not confirmed:
+            continue
+        logger.info(
+            f"[SIM] 5m_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
+            f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
+        )
+        _place_simulated_limit_order(signal, limit_price, entry_mode)
+
+
 def execute_simulated_order(signal):
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
-    max_active = get_effective_max_active_signals()
-    _evict_oldest_pending_if_at_capacity(max_active, lane=lane if is_research_data_collection() else None)
+    _refresh_order_and_signal_ttl()
     logger.info(
         f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
         f"lane={lane} model={signal.get('research_model')} "
@@ -7865,6 +8464,24 @@ def execute_simulated_order(signal):
         return False
     limit_price, entry_mode = resolve_entry_limit_price(signal)
     signal["entry_mode"] = entry_mode
+    if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
+        return True
+    if signal.get("await_5m_confirm"):
+        signal["limit_price"] = limit_price
+        signal["planned_limit_price"] = limit_price
+        signal["status"] = SIGNAL_STATUS_AWAITING_5M
+        signal["awaiting_5m_since"] = time.time()
+        signal["order_placed"] = False
+        margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+        lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
+        signal["qty"] = margin_usdt * lev / price
+        logger.info(
+            f"[SIM] awaiting_5m_confirm trade_id={signal.get('trade_id')} "
+            f"entry_mode={entry_mode} target_limit={fmt(limit_price)} "
+            f"(no pending order until 5m HL/LH confirms) [PIPELINE ENFORCEMENT]"
+        )
+        pipeline_state_sync()
+        return True
     if signal.get("await_micro_confirm"):
         signal["limit_price"] = limit_price
         signal["planned_limit_price"] = limit_price
@@ -7882,6 +8499,148 @@ def execute_simulated_order(signal):
         pipeline_state_sync()
         return True
     return _place_simulated_limit_order(signal, limit_price, entry_mode)
+
+def _limit_chase_market_gap(direction: str, limit_price: float, market_price: float) -> float:
+    direction = str(direction or "").upper()
+    if direction == "LONG":
+        return max(0.0, float(market_price) - float(limit_price))
+    if direction == "SHORT":
+        return max(0.0, float(limit_price) - float(market_price))
+    return 0.0
+
+
+def _limit_chase_near_fill_zone(direction: str, limit_price: float, market_price: float) -> bool:
+    gap = _limit_chase_market_gap(direction, limit_price, market_price)
+    if gap <= LIMIT_CHASE_NEAR_FILL_USD:
+        return True
+    ref = max(float(market_price), 1.0)
+    return (gap / ref) <= LIMIT_CHASE_NEAR_FILL_PCT
+
+
+def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
+    if not limit_chase_enabled():
+        return False
+    if order.get("status") != "PENDING":
+        return False
+    if order.get("entry_type") != "SIM_LIMIT":
+        return False
+    tid = order.get("trade_id")
+    if not tid:
+        return False
+    with trade_lock:
+        if any(p.get("trade_id") == tid and p.get("status") == "OPEN" for p in open_positions):
+            return False
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    if direction not in ("LONG", "SHORT"):
+        return False
+    created = float(order.get("created_ts") or 0)
+    if not created:
+        return False
+    age_sec = now - created
+    if age_sec < get_limit_chase_start_sec():
+        return False
+    if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
+        return False
+    last_chase = order.get("last_chase_ts")
+    if last_chase and (now - float(last_chase)) < get_limit_chase_interval_sec():
+        return False
+    limit_price = float(order.get("limit_price") or 0)
+    if limit_price <= 0 or price <= 0:
+        return False
+    if _limit_chase_near_fill_zone(direction, limit_price, price):
+        return False
+    if _pending_limit_touched(order, price):
+        return False
+    original = float(order.get("original_limit_price") or order.get("planned_limit_price") or limit_price)
+    orig_gap = _limit_chase_market_gap(direction, original, price)
+    if orig_gap <= LIMIT_CHASE_NEAR_FILL_USD:
+        return False
+    cur_gap = _limit_chase_market_gap(direction, limit_price, price)
+    if cur_gap <= 0:
+        return False
+    closed_pct = 1.0 - (cur_gap / orig_gap)
+    if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
+        return False
+    return True
+
+
+def _compute_limit_chase_target(
+    direction: str, current_limit: float, market_price: float, original_limit: float
+) -> tuple:
+    """Return (new_limit, reason) — nudge limit toward market without crossing."""
+    direction = str(direction or "").upper()
+    cur_gap = _limit_chase_market_gap(direction, current_limit, market_price)
+    if cur_gap <= 0:
+        return current_limit, "NO_GAP"
+    orig_gap = _limit_chase_market_gap(direction, original_limit, market_price)
+    if orig_gap <= 0:
+        return current_limit, "NO_ORIG_GAP"
+    closed_pct = 1.0 - (cur_gap / orig_gap)
+    if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
+        return current_limit, "MAX_CHASE_REACHED"
+    step = get_limit_chase_step_pct() * cur_gap
+    buffer = LIMIT_CHASE_MIN_BUFFER_USD
+    if direction == "LONG":
+        new_limit = min(current_limit + step, market_price - buffer)
+        new_limit = max(new_limit, current_limit)
+    else:
+        new_limit = max(current_limit - step, market_price + buffer)
+        new_limit = min(new_limit, current_limit)
+    if abs(new_limit - current_limit) < 0.01:
+        return current_limit, "NO_MOVE"
+    return round(new_limit, 2), "LIMIT_CHASE"
+
+
+def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> bool:
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    old_limit = float(order.get("limit_price") or 0)
+    original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
+    new_limit, reason = _compute_limit_chase_target(direction, old_limit, float(price), original)
+    if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
+        return False
+    age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
+    gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
+    chase_count = int(order.get("limit_chase_count") or 0) + 1
+    order["limit_price"] = new_limit
+    order["limit_chase_count"] = chase_count
+    order["last_chase_ts"] = now
+    order["fill_model"] = _resolve_fill_model(signal, order)
+    if signal:
+        signal["limit_price"] = new_limit
+        signal["limit_chase_count"] = chase_count
+        signal["last_chase_ts"] = now
+        signal["fill_model"] = order["fill_model"]
+    logger.info(
+        f"[SIM] LIMIT_CHASE trade_id={order.get('trade_id')} dir={direction} "
+        f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
+        f"gap_pct={gap_pct} chase_count={chase_count} reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+    try:
+        from execution_funnel import funnel_on_limit_chase
+        funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
+    except Exception as _fe:
+        logger.debug(f"[FUNNEL] limit chase log failed: {_fe}")
+    return True
+
+
+def process_limit_chase(price: float):
+    """Gradually move unfilled sim limits toward market after patient wait."""
+    if not limit_chase_enabled() or price is None or price <= 0:
+        return
+    now = time.time()
+    chased = 0
+    with trade_lock:
+        pending = [o for o in pending_orders if isinstance(o, dict) and o.get("status") == "PENDING"]
+    for order in pending:
+        if not _limit_chase_eligible_order(order, price, now):
+            continue
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        if _apply_limit_chase(order, signal, price, now):
+            chased += 1
+    if chased:
+        pipeline_state_sync()
+
 
 def _update_pending_order_price_extremes(price: float):
     if price is None or price <= 0:
@@ -7918,7 +8677,9 @@ def process_pending_orders():
     if price is None or price <= 0:
         return
     process_awaiting_micro_entries()
+    process_awaiting_5m_entries()
     _update_pending_order_price_extremes(price)
+    process_limit_chase(price)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
@@ -8426,6 +9187,7 @@ def process_signal(event: dict):
                 "status": "INIT",
                 "created_ts": utc_iso(),
                 "created_ts_ts": now,
+                "expires_ts": now + SIGNAL_TTL_SEC,
                 "snapshot_ts": time.time(),
                 "features_at_signal": copy.deepcopy(state.get("feature_snapshot", {})),
                 "ai_input": copy.deepcopy(ctx),
@@ -8492,6 +9254,7 @@ def process_signal(event: dict):
                     logger.warning("[EXECUTION BLOCK] Data quality too low [PIPELINE ENFORCEMENT]")
                     enforce_log(signal, "BLOCKED", "LOW_DATA_QUALITY")
                     full_pipeline_trace("BLOCKED", "LOW_DATA_QUALITY", trade_id)
+                    resolve_pending_approve_blocked(signal, ai, "LOW_DATA_QUALITY")
                     update_debug_state_always("LOW_DATA_QUALITY", {"edge": edge_score})
                     state["last_pipeline_stage"] = "IDLE"
                     return
@@ -8538,7 +9301,13 @@ def process_signal(event: dict):
             signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
-            compute_micro_sr_entry(signal)
+            if research_lane == RESEARCH_LANE_5M_EXEC:
+                compute_5m_exec_entry(signal)
+            elif research_lane == RESEARCH_LANE_CONTINUOUS and continuous_ai_direct_entry_enabled():
+                compute_continuous_ai_direct_entry(signal)
+            else:
+                signal["entry_path"] = "MICRO_SR"
+                compute_micro_sr_entry(signal)
             health = compute_trend_health(final_direction)
             signal["trend_health_at_entry"] = health
             signal["trend_health"] = health.get("trend_state")
@@ -8581,6 +9350,7 @@ def process_signal(event: dict):
                     state["golden_stack_last_block_reason"] = gs_reason
             if gs_blocked and research_lane == RESEARCH_LANE_GOLDEN_STACK:
                 if _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
+                    resolve_pending_approve_blocked(signal, ai, f"GOLDEN_STACK_{gs_reason}")
                     patch_signal_snapshot_outcome(
                         signal.get("trade_id"),
                         executed=False,
@@ -8890,6 +9660,11 @@ def process_signal(event: dict):
                 logger.debug(f"[FUNNEL] approve log failed: {_fe}")
             logger.info("[PIPELINE] → EXECUTION STAGE → ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
+            if signal.get("outcome") == "DUPLICATE_LIMIT_PRICE":
+                finalize_signal(signal, ai, "EXPIRED")
+                _set_lane_pipeline_stage(research_lane, "IDLE")
+                state["last_pipeline_stage"] = "IDLE"
+                return
             if not success:
                 exit_pipeline(signal, ai, "ORDER_FAILED")
                 state["last_pipeline_stage"] = "IDLE"
@@ -8897,6 +9672,8 @@ def process_signal(event: dict):
             record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
             if signal.get("status") in ("FILLED", "OPEN"):
                 final_status = signal.get("status")
+            elif signal.get("status") == SIGNAL_STATUS_AWAITING_5M:
+                final_status = SIGNAL_STATUS_AWAITING_5M
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_MICRO:
                 final_status = SIGNAL_STATUS_AWAITING_MICRO
             else:
@@ -8906,6 +9683,7 @@ def process_signal(event: dict):
                 state.setdefault("last_signal_create_ts_by_lane", {})[research_lane] = time.time()
             if research_lane in (RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_STABILITY):
                 spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, research_lane)
+                spawn_5m_exec_lane(ctx, ai, edge_score, event_obj, features, research_lane)
             logger.info(
                 f"[PIPELINE] → ORDER STAGE COMPLETE lane={research_lane} model={signal.get('research_model')} "
                 f"[PIPELINE ENFORCEMENT]"
@@ -8918,7 +9696,9 @@ def process_signal(event: dict):
             logger.error(f"[PIPELINE FATAL] lane={research_lane} {e} [PIPELINE ENFORCEMENT]")
             full_pipeline_trace("[PIPELINE]", f"CRASH_{str(e)}", trade_id if 'trade_id' in locals() else None)
             if 'signal' in locals():
-                exit_pipeline(signal, reason=f"PIPELINE_ERROR: {e}")
+                _crash_ai = ai if 'ai' in locals() else None
+                exit_pipeline(signal, _crash_ai, f"PIPELINE_ERROR: {e}")
+                resolve_pending_approve_blocked(signal, _crash_ai or {}, f"PIPELINE_ERROR: {e}")
             else:
                 logger.error("[PIPELINE] No signal object for crash recovery [PIPELINE ENFORCEMENT]")
             update_debug_state_always("PIPELINE_ERROR", {"error": str(e)})
@@ -9217,6 +9997,7 @@ def ws_watchdog():
         set_execution_paused("THREAD_CRASH")
 
 def state_monitor_loop():
+    global last_pipeline_run
     try:
         last_stale_time = 0
         last_rest_snapshot_ts = 0.0
@@ -9414,6 +10195,8 @@ def state_monitor_loop():
                                 "features": features,
                             })
                 maybe_run_stability_research_ai()
+                # Throttle analyzer/AI probe — independent of 1s order/position loop below.
+                last_pipeline_run = time.time()
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -9522,6 +10305,8 @@ def create_limit_order(signal):
     signal["entry_mode"] = entry_mode
     if limit_price <= 0:
         logger.error(f"[ORDER BLOCK] Invalid limit price {limit_price}")
+        return None
+    if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return None
     qty = calc_position_qty(price, state.get("leverage", 20))
     assert qty > 0, "INVALID QTY"
@@ -9787,6 +10572,11 @@ def close_position(pos: dict, exit_reason: str):
             "max_drawdown": pos.get("max_drawdown", 0.0),
             "max_profit": pos.get("max_pnl_pct", 0.0),
             "entry_delay": entry_delay,
+            "entry_delay_sec": pos.get("entry_delay_sec", entry_delay),
+            "signal_age_sec": pos.get("signal_age_sec", entry_delay),
+            "signal_age_bucket": pos.get("signal_age_bucket"),
+            "entry_path": master.get("entry_path") or pos.get("entry_path"),
+            "fill_model": pos.get("fill_model") or master.get("fill_model"),
             "slippage": round(float(slippage), 6),
             "maker_fees": pos.get("maker_fees", 0.0),
             "taker_fees": pos.get("taker_fees", 0.0),
@@ -9940,6 +10730,7 @@ Return EXACTLY (JSON block before Direction line):
   "confidence": 0,
   "entry_zone_low": 0,
   "entry_zone_high": 0,
+  "limit_price": 0,
   "expected_mfe": 0,
   "expected_mae": 0,
   "reversal_probability": 0,
@@ -9963,7 +10754,7 @@ RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
 - Target approval rate 20-40%
-- STRONG_APPROVE / APPROVE / SOFT_APPROVE → execute (patient limit entry at micro S/R or pullback)
+- STRONG_APPROVE / APPROVE / SOFT_APPROVE → execute limit entry
 - SOFT_REJECT → shadow replay only (counterfactual study)
 - REJECT → hard reject + shadow replay
 - Use STRONG_APPROVE when win_prob >= 65 and micro structure confirms
@@ -9971,7 +10762,10 @@ RESEARCH DATA COLLECTION MODE (active):
 - Use SOFT_APPROVE when win_prob 45-54 and direction + micro/orderflow support
 - Use SOFT_REJECT when uncertain but worth logging (win_prob 35-44)
 - MTF is informational — never the sole reject reason
-- Patient entry: bot waits for pullback/micro-SR — do not assume instant market fill
+- CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
+  LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
+  If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
+- STABILITY / GOLDEN_STACK lanes still use micro-structure confirmation (unchanged)
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -10136,6 +10930,42 @@ _last_feature_drift_ts = 0.0
 _last_research_kpi_ts = 0.0
 _cached_research_kpis = {}
 RESEARCH_KPI_INTERVAL_SEC = 300
+_cached_pathway_scorecard = {}
+
+
+def get_pathway_scorecard_cached() -> dict:
+    global _cached_pathway_scorecard
+    if not is_research_data_collection():
+        return _cached_pathway_scorecard or {}
+    try:
+        from pathway_scorecard_engine import load_pathway_scorecard
+        loaded = load_pathway_scorecard(os.getcwd())
+        if loaded:
+            _cached_pathway_scorecard = loaded
+        elif not _cached_pathway_scorecard:
+            _cached_pathway_scorecard = refresh_pathway_scorecard_live()
+    except Exception as e:
+        logger.debug(f"[PATHWAY_SCORECARD] load failed: {e}")
+    return _cached_pathway_scorecard or {}
+
+
+def refresh_pathway_scorecard_live() -> dict:
+    global _cached_pathway_scorecard
+    try:
+        from pathway_scorecard_engine import refresh_pathway_scorecard
+        _cached_pathway_scorecard = refresh_pathway_scorecard(
+            os.getcwd(),
+            bot_version=EXECUTION_FIX_VERSION,
+            lanes_live={
+                "CONTINUOUS": continuous_ai_research_enabled(),
+                "STABILITY": ai_stability_research_enabled(),
+                "GOLDEN_STACK": golden_stack_enabled(),
+                "EXEC_5M": exec_5m_lane_enabled(),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[PATHWAY_SCORECARD] refresh failed: {e}")
+    return _cached_pathway_scorecard or {}
 
 
 def get_research_kpis_cached() -> dict:
@@ -10347,13 +11177,83 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleContinuousAi()" title="v87: periodic ~5min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
+    <button onclick="toggleContinuousAi()" title="v87: periodic ~3min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
     <button onclick="toggleAiStability()" title="v87: candle-aligned shadow AI lane (log-only)">AI Stability: <span id="aiStabilityBtn">ON</span></button>
     <button onclick="toggleGoldenStack()" title="Enforce v86 quality gates after AI APPROVE">Golden Stack: <span id="goldenStackBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
+</div>
+
+<div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab</strong>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Lane toggles + live pathway stats from <code>pathway_scorecard.json</code></p>
+  <div id="pathwayLaneChips" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;"></div>
+  <div id="pathwayAiDirectRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;border-top:1px solid #30363d;">
+    <span style="color:#8b949e;font-size:0.88em;">Continuous entry path:</span>
+    <button type="button" onclick="toggleContinuousAiDirect()" id="continuousAiDirectBtn" style="padding:5px 12px;font-weight:bold;">AI_DIRECT: <span id="continuousAiDirectLabel">ON</span></button>
+    <span id="continuousAiDirectHint" style="color:#8b949e;font-size:0.82em;">Skip AWAITING_MICRO — place AI limit immediately</span>
+  </div>
+</div>
+
+<div id="tradingParamsPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <strong style="color:#58a6ff;">Trading Params</strong>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, and edge gates — saved to config.json</p>
+<label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
+<label>Pullback %:</label>
+<select id="pullbackThresh">
+  <option value="0.0">0.0% (instant)</option>
+  <option value="0.1" selected>0.1%</option>
+  <option value="0.2">0.2%</option>
+  <option value="0.3">0.3%</option>
+  <option value="0.4">0.4%</option>
+  <option value="0.5">0.5%</option>
+  <option value="0.6">0.6%</option>
+</select><br>
+<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3"><br>
+<label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
+<label>Edge range preset:</label>
+<select id="edgeRangePreset">
+  <option value="min_only" selected>Any ≥ min (no upper cap) — v80 collection</option>
+  <option value="2.0_2.5">2.0 – 2.5 (sweet spot experiment)</option>
+  <option value="2.0_3.0">2.0 – 3.0</option>
+  <option value="2.5_3.5">2.5 – 3.5</option>
+  <option value="3.0_4.0">3.0 – 4.0</option>
+  <option value="custom">Custom min / max</option>
+</select><br>
+<div id="edgeCustomRange" style="display:none;margin:6px 0;padding:8px;border:1px solid #30363d;border-radius:6px;">
+<label>Min edge:</label>
+<select id="edgeThreshold">
+  <option value="0.5" selected>0.5</option>
+  <option value="1.0">1.0</option>
+  <option value="1.5">1.5</option>
+  <option value="2.0">2.0</option>
+  <option value="2.5">2.5</option>
+  <option value="3.0">3.0</option>
+  <option value="3.5">3.5</option>
+  <option value="4.0">4.0</option>
+  <option value="4.5">4.5</option>
+  <option value="5.0">5.0</option>
+  <option value="5.5">5.5</option>
+  <option value="6.0">6.0</option>
+</select>
+<label style="margin-left:12px;">Max edge:</label>
+<select id="edgeThresholdMax">
+  <option value="no_cap" selected>No cap</option>
+  <option value="2.0">2.0</option>
+  <option value="2.5">2.5</option>
+  <option value="3.0">3.0</option>
+  <option value="3.5">3.5</option>
+  <option value="4.0">4.0</option>
+  <option value="4.5">4.5</option>
+  <option value="5.0">5.0</option>
+  <option value="5.5">5.5</option>
+  <option value="6.0">6.0</option>
+</select>
+</div>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
+<p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
 </div>
 
 <div id="dataBanner">
@@ -10427,15 +11327,18 @@ HTML = """<!DOCTYPE html>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
 <h2>Controls</h2>
-<p style="color:#8b949e;font-size:0.9em;">Changes apply live and save to config.json. Leverage / max positions update when you leave the field or press Enter.</p>
+<p style="color:#8b949e;font-size:0.9em;">Legacy lane detail panels (collapsed). Use Pathway Lab above for toggles.</p>
 
-<div id="continuousAiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+<details id="legacyControlsDetails" style="margin:12px 0;">
+<summary style="cursor:pointer;color:#8b949e;">Show legacy control panels</summary>
+
+<div id="continuousAiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;display:none;">
   <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
     <strong style="color:#58a6ff;font-size:1.05em;">Continuous AI Research (v87 execution lane)</strong>
     <button type="button" onclick="toggleContinuousAi()" id="continuousAiControlBtn" style="padding:6px 14px;font-weight:bold;">Continuous AI: <span id="continuousAiControlLabel">ON</span></button>
   </div>
   <p id="continuousAiModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
-  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — sole-AI research path (~every 5 min when edge &gt; 0):</p>
+  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — sole-AI research path (~every 3 min when edge &gt; 0):</p>
   <ul id="continuousAiFeatureList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
   <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
     <strong>Logs:</strong> <code>ai_tranche.csv</code>, <code>decisions</code>, pipeline events, <code>ai_input_log.jsonl</code> (lane=CONTINUOUS).
@@ -10444,7 +11347,7 @@ HTML = """<!DOCTYPE html>
   <p id="continuousAiLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
 </div>
 
-<div id="researchKpiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+<div id="researchKpiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;display:none;">
   <strong style="color:#58a6ff;font-size:1.05em;">Research KPIs (false rejects · calibration · shadow)</strong>
   <p id="researchKpiLive" style="color:#8b949e;font-size:0.86em;margin:10px 0 0 0;line-height:1.5;"></p>
 </div>
@@ -10482,64 +11385,11 @@ HTML = """<!DOCTYPE html>
   <p id="aiStabilityLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
 </div>
 
-<label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<label>Pullback %:</label>
-<select id="pullbackThresh">
-  <option value="0.0">0.0% (instant)</option>
-  <option value="0.1" selected>0.1%</option>
-  <option value="0.2">0.2%</option>
-  <option value="0.3">0.3%</option>
-  <option value="0.4">0.4%</option>
-  <option value="0.5">0.5%</option>
-  <option value="0.6">0.6%</option>
-</select><br>
-<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3"><br>
-<label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
-<label>Edge range preset:</label>
-<select id="edgeRangePreset">
-  <option value="min_only" selected>Any ≥ min (no upper cap) — v80 collection</option>
-  <option value="2.0_2.5">2.0 – 2.5 (sweet spot experiment)</option>
-  <option value="2.0_3.0">2.0 – 3.0</option>
-  <option value="2.5_3.5">2.5 – 3.5</option>
-  <option value="3.0_4.0">3.0 – 4.0</option>
-  <option value="custom">Custom min / max</option>
-</select><br>
-<div id="edgeCustomRange" style="display:none;margin:6px 0;padding:8px;border:1px solid #30363d;border-radius:6px;">
-<label>Min edge:</label>
-<select id="edgeThreshold">
-  <option value="0.5" selected>0.5</option>
-  <option value="1.0">1.0</option>
-  <option value="1.5">1.5</option>
-  <option value="2.0">2.0</option>
-  <option value="2.5">2.5</option>
-  <option value="3.0">3.0</option>
-  <option value="3.5">3.5</option>
-  <option value="4.0">4.0</option>
-  <option value="4.5">4.5</option>
-  <option value="5.0">5.0</option>
-  <option value="5.5">5.5</option>
-  <option value="6.0">6.0</option>
-</select>
-<label style="margin-left:12px;">Max edge:</label>
-<select id="edgeThresholdMax">
-  <option value="no_cap" selected>No cap</option>
-  <option value="2.0">2.0</option>
-  <option value="2.5">2.5</option>
-  <option value="3.0">3.0</option>
-  <option value="3.5">3.5</option>
-  <option value="4.0">4.0</option>
-  <option value="4.5">4.5</option>
-  <option value="5.0">5.0</option>
-  <option value="5.5">5.5</option>
-  <option value="6.0">6.0</option>
-</select>
-</div>
-<p style="color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
-<p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
+</details>
 
 <h2>Active Signals</h2>
 <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
+    <thead><tr><th>Time</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
 </table>
 
@@ -10551,7 +11401,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Pending Orders</h2>
 <table>
-    <thead><tr><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Signal Price</th></tr></thead>
+    <thead><tr><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th></tr></thead>
     <tbody id="ordersTable"></tbody>
 </table>
 
@@ -10573,9 +11423,27 @@ HTML = """<!DOCTYPE html>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
-<h2>Analytics</h2>
-<h3>AI Bands</h3><table id="aiBandsAnalytics"></table>
-<h3>Exit Reasons</h3><table id="exitReasonsAnalytics"></table>
+<h2>Pathway Analytics</h2>
+<div id="pathwayAnalyticsTabs" style="margin:8px 0;">
+  <button type="button" onclick="showPathwayTab('scorecard')" id="pathTabScorecard" style="margin-right:6px;font-weight:bold;">Scorecard</button>
+  <button type="button" onclick="showPathwayTab('funnel')" id="pathTabFunnel" style="margin-right:6px;">Funnel</button>
+  <button type="button" onclick="showPathwayTab('session')" id="pathTabSession" style="margin-right:6px;">Session</button>
+  <button type="button" onclick="showPathwayTab('kpis')" id="pathTabKpis">KPIs</button>
+</div>
+<div id="pathwayTabScorecard" class="pathway-tab-panel">
+  <div id="pathwayScorecardGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;"></div>
+</div>
+<div id="pathwayTabFunnel" class="pathway-tab-panel" style="display:none;">
+  <p id="pathwayFunnelSummary" style="color:#8b949e;line-height:1.6;"></p>
+</div>
+<div id="pathwayTabSession" class="pathway-tab-panel" style="display:none;">
+  <p id="pathwaySessionSummary" style="color:#8b949e;margin-bottom:10px;"></p>
+  <h3>AI Bands</h3><table id="aiBandsAnalytics"></table>
+  <h3>Exit Reasons</h3><table id="exitReasonsAnalytics"></table>
+</div>
+<div id="pathwayTabKpis" class="pathway-tab-panel" style="display:none;">
+  <p id="pathwayKpisPanel" style="color:#8b949e;font-size:0.86em;line-height:1.5;"></p>
+</div>
 
 </body>
 </html>
@@ -10610,10 +11478,11 @@ DASHBOARD_JS = """(function () {
       const colors = {
         'CONTINUOUS': '#58a6ff',
         'STABILITY': '#bc8cff',
-        'GOLDEN_STACK': '#d4a72c'
+        'GOLDEN_STACK': '#d4a72c',
+        'EXEC_5M': '#3fb950'
       };
       const c = colors[lane] || '#8b949e';
-      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : m;
+      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : lane === 'EXEC_5M' ? '5m Exec' : m;
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     async function post(url, obj={}) {
@@ -10726,6 +11595,119 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_ai_stability_research');
       refresh();
     }
+    async function toggleContinuousAiDirect() {
+      await post('/api/toggle_continuous_ai_direct');
+      refresh();
+    }
+    async function toggleExec5mLane() {
+      await post('/api/toggle_exec_5m_lane');
+      refresh();
+    }
+    function showPathwayTab(name) {
+      const tabs = ['scorecard', 'funnel', 'session', 'kpis'];
+      tabs.forEach(function (t) {
+        const panel = document.getElementById('pathwayTab' + t.charAt(0).toUpperCase() + t.slice(1));
+        const btn = document.getElementById('pathTab' + t.charAt(0).toUpperCase() + t.slice(1));
+        if (panel) panel.style.display = t === name ? 'block' : 'none';
+        if (btn) btn.style.fontWeight = t === name ? 'bold' : 'normal';
+      });
+    }
+    function pathwayLaneStats(scorecard, lane) {
+      const paths = (scorecard && scorecard.pathways) || [];
+      const lanePaths = paths.filter(function (p) { return p.lane === lane; });
+      if (!lanePaths.length) return 'n=0';
+      const n = lanePaths.reduce(function (s, p) { return s + (p.n || 0); }, 0);
+      const net = lanePaths.reduce(function (s, p) { return s + (p.net_usd || 0); }, 0);
+      const wrs = lanePaths.filter(function (p) { return p.n > 0; });
+      const wr = wrs.length ? (wrs.reduce(function (s, p) { return s + p.wr_pct; }, 0) / wrs.length).toFixed(0) : '0';
+      return 'n=' + n + ' · WR ' + wr + '% · $' + net.toFixed(2);
+    }
+    function renderPathwayLab(d) {
+      const sc = d.pathway_scorecard || {};
+      const lanes = [
+        { key: 'CONTINUOUS', label: 'Continuous', on: d.continuous_ai_research_enabled !== false, toggle: toggleContinuousAi, color: '#58a6ff' },
+        { key: 'STABILITY', label: 'Stability', on: d.ai_stability_research_enabled !== false, toggle: toggleAiStability, color: '#bc8cff' },
+        { key: 'GOLDEN_STACK', label: 'Golden Stack', on: d.golden_stack_enabled !== false, toggle: toggleGoldenStack, color: '#d4a72c' },
+        { key: 'EXEC_5M', label: '5m Exec', on: d.exec_5m_lane_enabled !== false, toggle: toggleExec5mLane, color: '#3fb950' },
+      ];
+      const chips = document.getElementById('pathwayLaneChips');
+      if (chips) {
+        chips.innerHTML = lanes.map(function (ln) {
+          const stats = pathwayLaneStats(sc, ln.key);
+          const bg = ln.on ? '#10b981' : '#ef4444';
+          return '<div style="padding:8px 12px;background:#0d1117;border:1px solid ' + ln.color + ';border-radius:8px;min-width:200px;">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
+            + '<strong style="color:' + ln.color + ';">' + ln.label + '</strong>'
+            + '<button type="button" onclick="' + (ln.key === 'EXEC_5M' ? 'toggleExec5mLane()' : ln.key === 'CONTINUOUS' ? 'toggleContinuousAi()' : ln.key === 'STABILITY' ? 'toggleAiStability()' : 'toggleGoldenStack()') + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">'
+            + (ln.on ? 'ON' : 'OFF') + '</button></div>'
+            + '<div style="color:#8b949e;font-size:0.82em;margin-top:6px;">' + stats + '</div></div>';
+        }).join('');
+      }
+      const aiDirectOn = d.continuous_ai_direct_entry_enabled !== false;
+      const aiDirectLabel = document.getElementById('continuousAiDirectLabel');
+      const aiDirectBtn = document.getElementById('continuousAiDirectBtn');
+      if (aiDirectLabel) aiDirectLabel.innerText = aiDirectOn ? 'ON' : 'OFF';
+      if (aiDirectBtn) aiDirectBtn.style.backgroundColor = aiDirectOn ? '#10b981' : '#ef4444';
+    }
+    function renderPathwayScorecard(d) {
+      const sc = d.pathway_scorecard || {};
+      const grid = document.getElementById('pathwayScorecardGrid');
+      if (grid) {
+        const paths = sc.pathways || [];
+        grid.innerHTML = paths.length ? paths.map(function (p) {
+          const net = p.net_usd || 0;
+          const border = net >= 0 ? '#3fb950' : '#f85149';
+          return '<div style="padding:10px 12px;background:#0d1117;border:1px solid ' + border + ';border-radius:8px;">'
+            + '<div style="font-weight:600;color:#c9d1d9;">' + (p.lane || '-') + ' · ' + (p.entry_path || '-') + '</div>'
+            + '<div style="color:#8b949e;font-size:0.82em;">' + (p.entry_mode || '-') + ' · ' + (p.fill_model || '-') + '</div>'
+            + '<div style="margin-top:8px;font-size:0.9em;">N=' + (p.n || 0) + ' · WR ' + (p.wr_pct != null ? p.wr_pct : 0) + '%</div>'
+            + '<div style="color:' + border + ';font-weight:600;">$' + net.toFixed(2) + '</div>'
+            + '<div style="color:#8b949e;font-size:0.82em;">delay ' + (p.avg_signal_age_min || 0) + 'm · exit ' + (p.top_exit || '-') + '</div>'
+            + '</div>';
+        }).join('') : '<p style="color:#8b949e;">Collecting pathway trades…</p>';
+      }
+      const funnelEl = document.getElementById('pathwayFunnelSummary');
+      const funnel = sc.funnel || {};
+      if (funnelEl) {
+        funnelEl.innerHTML = funnel.approve_count != null
+          ? '<strong>Approve → Order:</strong> ' + (funnel.approval_to_order_rate_pct || 0) + '% (' + funnel.order_submitted_count + '/' + funnel.approve_count + ')<br>'
+            + '<strong>Order → Fill:</strong> ' + (funnel.order_to_fill_rate_pct || 0) + '% (' + funnel.filled_count + '/' + (funnel.order_submitted_count || 0) + ')<br>'
+            + '<strong>Approve → Fill:</strong> ' + (funnel.approve_to_fill_rate_pct || 0) + '%<br>'
+            + '<strong>Signal expired:</strong> ' + (funnel.signal_expired_count || 0) + ' · <strong>Order expired:</strong> ' + (funnel.order_expired_count || 0)
+          : 'Funnel summary loading… (refreshed every 10 min)';
+      }
+      const sessEl = document.getElementById('pathwaySessionSummary');
+      const sess = sc.session || {};
+      if (sessEl) {
+        sessEl.innerText = 'Session: ' + (sess.total_trades || 0) + ' trades · WR ' + (sess.wr_pct || 0) + '% · Net $' + (sess.net_usd || 0);
+      }
+      const kpiEl = document.getElementById('pathwayKpisPanel');
+      const kpis = d.research_kpis || {};
+      const fr = kpis.false_reject || {};
+      const cal = (kpis.confidence_calibration || {}).buckets || [];
+      const shadow = kpis.ai_shadow_scorecard || {};
+      if (kpiEl) {
+        let ktxt = '';
+        if (fr.rejects != null) {
+          ktxt += '<strong>False Reject Rate:</strong> ' + fr.profitable_rejects + '/' + fr.rejects + ' profitable (' + fr.false_reject_rate_pct + '%) · missed $' + (fr.missed_profit_usd || 0);
+        } else {
+          ktxt += 'Research KPIs collecting…';
+        }
+        if (shadow.reject_shadow) {
+          ktxt += '<br><strong>AI Rejects (shadow):</strong> n=' + shadow.reject_shadow.n + ' sum=$' + shadow.reject_shadow.sum_pnl_usd;
+        }
+        if (shadow.approve_shadow_blocked) {
+          ktxt += '<br><strong>Blocked Approves (shadow):</strong> n=' + shadow.approve_shadow_blocked.n + ' sum=$' + shadow.approve_shadow_blocked.sum_pnl_usd;
+        }
+        if (cal.length) {
+          ktxt += '<br><strong>Calibration:</strong> ' + cal.slice(0, 4).map(function (b) { return b.bucket + '=$' + b.sum_pnl_usd; }).join(' · ');
+        }
+        kpiEl.innerHTML = ktxt;
+      }
+    }
+    window.showPathwayTab = showPathwayTab;
+    window.toggleContinuousAiDirect = toggleContinuousAiDirect;
+    window.toggleExec5mLane = toggleExec5mLane;
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
       await post('/api/toggle_debug', {enabled: cur});
@@ -10998,7 +11980,7 @@ DASHBOARD_JS = """(function () {
         const contAiMode = document.getElementById('continuousAiModeNote');
         if (contAiMode) {
           contAiMode.innerHTML = contAiOn
-            ? '<span style="color:#10b981">COLLECTING + EXECUTING</span> — temp=0, ~5 min sole-AI when edge &gt; 0; trades may execute on APPROVE.'
+            ? '<span style="color:#10b981">COLLECTING + EXECUTING</span> — temp=0, ~3 min sole-AI when edge &gt; 0; trades may execute on APPROVE.'
             : '<span style="color:#fbbf24">OFF</span> — no periodic sole-AI calls; AI Stability shadow and Golden Stack unaffected.';
         }
         const contAiList = document.getElementById('continuousAiFeatureList');
@@ -11125,7 +12107,7 @@ DASHBOARD_JS = """(function () {
             'Lane tag: STABILITY · independent ActiveSignal + pending orders',
             'Full sanitized AI context → ai_input_log.jsonl',
             'Deterministic replay scorecard (' + (asc.replay_model_version || 'replay_v1') + ', threshold ' + (asc.replay_approve_threshold || 0.52) + ')',
-            'Runs alongside Continuous AI (~5 min) — separate cooldown/bucket',
+            'Runs alongside Continuous AI (~3 min) — separate cooldown/bucket',
           ];
           aiStabList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
@@ -11196,9 +12178,10 @@ DASHBOARD_JS = """(function () {
           const pb = document.getElementById('pullbackThresh');
           if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO")).map(s => `
+        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
+            <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
             <td>${laneBadge(s.research_lane, s.research_model)}</td>
             <td>${s.final_direction || s.dir || '-'}</td>
             <td>${s.conf || '-'}</td>
@@ -11208,7 +12191,7 @@ DASHBOARD_JS = """(function () {
             <td>${s.pull_req != null ? s.pull_req.toFixed(2) : '-' }%</td>
             <td>${s.signal_price !== undefined ? s.signal_price.toFixed(2) : '-'}</td>
             <td>${s.max_pull != null ? s.max_pull.toFixed(2) : '-' }%</td>
-            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : (s.outcome || '-')}</td>
+            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : (s.outcome || '-')}</td>
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
@@ -11216,6 +12199,9 @@ DASHBOARD_JS = """(function () {
         safeHTML('ordersTable', (d.orders||[]).map(o => {
           let st = o.status || '-';
           if (o.limit_touched && st === 'PENDING') st += ' (TOUCHED)';
+          const chaseN = o.limit_chase_count || 0;
+          if (chaseN > 0 && st === 'PENDING') st += ' (CHASING)';
+          const chaseCell = chaseN > 0 ? (chaseN + '×') : '-';
           return `
           <tr${o.limit_touched ? ' style="color:#3fb950;"' : ''}>
             <td>${o.age_min?.toFixed(1)||'-'}</td>
@@ -11224,6 +12210,8 @@ DASHBOARD_JS = """(function () {
             <td>${st}</td>
             <td>${o.qty || '-'}</td>
             <td>${o.limit_price?.toFixed(2)||'-'}</td>
+            <td>${o.original_limit_price?.toFixed(2)||'-'}</td>
+            <td>${chaseCell}</td>
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
           </tr>`;
         }).join(''));
@@ -11301,6 +12289,8 @@ DASHBOARD_JS = """(function () {
             <td>${v}</td>
           </tr>
         `).join(''));
+        renderPathwayLab(d);
+        renderPathwayScorecard(d);
         safeText('wsLatency', d.diag?.ws_latency_ms ?? '-');
         safeText('engineLoop', d.diag?.engine_loop_ms ?? '-');
         safeText('aiLatency', d.diag?.ai_latency_ms ?? '-');
@@ -11566,6 +12556,8 @@ def api_state():
         pending_ids = {o.get("trade_id") for o in pending_orders_copy if o.get("trade_id")}
         open_ids = {p.get("trade_id") for p in positions_copy if p.get("trade_id")}
         awaiting_micro_ids = set()
+        awaiting_5m_ids = set()
+        ordered_placed_ids = set()
         for t in trades_map_copy.values():
             s = t.get("signal_ref")
             if not isinstance(s, dict):
@@ -11573,16 +12565,36 @@ def api_state():
             tid = s.get("trade_id")
             if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(s):
                 awaiting_micro_ids.add(tid)
-        live_ids = pending_ids | open_ids | awaiting_micro_ids
+            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(s):
+                awaiting_5m_ids.add(tid)
+            if (
+                tid
+                and s.get("status") == "ORDERED"
+                and s.get("order_placed")
+                and not is_terminal_signal(s)
+            ):
+                ordered_placed_ids.add(tid)
+        live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | ordered_placed_ids
         for t in trades_map_copy.values():
             s = t.get("signal_ref")
             if not isinstance(s, dict):
                 continue
             tid = s.get("trade_id")
             st = s.get("status")
-            if tid not in live_ids or is_terminal_signal(s):
+            if is_terminal_signal(s):
+                continue
+            in_live = tid in live_ids
+            belt_ordered = st == "ORDERED" and s.get("order_placed")
+            if not in_live and not belt_ordered:
                 continue
             created_ts = s.get("created_ts_ts") or 0
+            if not created_ts:
+                timing_ts = (s.get("timing") or {}).get("signal_ts")
+                if timing_ts:
+                    try:
+                        created_ts = float(timing_ts)
+                    except (TypeError, ValueError):
+                        created_ts = 0
             expires_ts = s.get("expires_ts", 0)
             active_list.append({
                 "trade_id": s.get("trade_id"),
@@ -11597,6 +12609,7 @@ def api_state():
                 "expires_ts": expires_ts,
                 "ttl_remaining": (expires_ts - time.time()),
                 "age": time.time() - created_ts,
+                "age_min": (time.time() - created_ts) / 60.0 if created_ts else 0,
                 "pullback_pct": s.get("pull_req", 0),
                 "pull_req": s.get("pull_req"),
                 "max_pull": s.get("max_pull"),
@@ -11610,8 +12623,12 @@ def api_state():
                 "trigger": s.get("trigger", "BASE"),
                 "signal_price": s.get("signal_price"),
                 "limit_price": s.get("limit_price") or s.get("planned_limit_price"),
+                "original_limit_price": s.get("original_limit_price") or s.get("planned_limit_price"),
+                "limit_chase_count": s.get("limit_chase_count") or 0,
                 "entry_mode": s.get("entry_mode"),
                 "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
+                "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
+                "entry_path": s.get("entry_path"),
             })
         exposure_count = max(len(active_list), len(live_ids))
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
@@ -11644,6 +12661,9 @@ def api_state():
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached()
+        snapshot["pathway_scorecard"] = get_pathway_scorecard_cached()
+        snapshot["exec_5m_lane_enabled"] = exec_5m_lane_enabled()
+        snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["ai_stability_config"] = ai_stability_config_for_dashboard()
         snapshot["candle_15m_elapsed_pct"] = _candle_15m_elapsed_pct()
@@ -11758,6 +12778,32 @@ def toggle_continuous_ai_research():
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
+
+@app.route('/api/toggle_exec_5m_lane', methods=['POST'])
+def toggle_exec_5m_lane():
+    with state_lock:
+        state["exec_5m_lane_enabled"] = not bool(
+            state.get("exec_5m_lane_enabled", EXEC_5M_LANE_DEFAULT_ENABLED)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[EXEC_5M] toggled {'ON' if state['exec_5m_lane_enabled'] else 'OFF'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"exec_5m_lane_enabled": state["exec_5m_lane_enabled"]})
+
+@app.route('/api/toggle_continuous_ai_direct', methods=['POST'])
+def toggle_continuous_ai_direct():
+    with state_lock:
+        state["continuous_ai_direct_entry_enabled"] = not bool(
+            state.get("continuous_ai_direct_entry_enabled", CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[AI_DIRECT] toggled {'ON' if state['continuous_ai_direct_entry_enabled'] else 'OFF'} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"continuous_ai_direct_entry_enabled": state["continuous_ai_direct_entry_enabled"]})
 
 @app.route('/api/toggle_debug', methods=['POST'])
 def toggle_debug():
@@ -12494,6 +13540,13 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             },
             "entry_thesis": capture_entry_thesis(signal),
             "entry_mode": signal.get("entry_mode", ENTRY_MODE_PULLBACK),
+            "entry_path": signal.get("entry_path"),
+            "5m_micro_support": signal.get("5m_micro_support"),
+            "5m_micro_resistance": signal.get("5m_micro_resistance"),
+            "5m_higher_low": signal.get("5m_higher_low"),
+            "5m_lower_high": signal.get("5m_lower_high"),
+            "5m_structure_eval": signal.get("5m_structure_eval"),
+            "await_5m_confirm": signal.get("await_5m_confirm"),
             "ema_hybrid_base": signal.get("ema_hybrid_base"),
             "ema_hybrid_limit": signal.get("ema_hybrid_limit"),
             "ema_hybrid_offset_usd": signal.get("ema_hybrid_offset_usd"),
@@ -13388,6 +14441,10 @@ def analytics_loop():
                     )
                 except Exception as fe:
                     logger.debug(f"[FUNNEL] report refresh failed: {fe}")
+                try:
+                    refresh_pathway_scorecard_live()
+                except Exception as pe:
+                    logger.debug(f"[PATHWAY_SCORECARD] analytics refresh failed: {pe}")
             except Exception as e:
                 logger.error(f"Analytics error: {e}")
             time.sleep(ANALYTICS_INTERVAL_SEC)
@@ -13609,8 +14666,13 @@ def _persistent_config_keys():
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
+        "exec_5m_lane_enabled", "continuous_ai_direct_entry_enabled",
         "ai_stability_research_enabled",
         "continuous_ai_research_enabled",
+        "research_ai_cooldown_sec",
+        "limit_chase_start_sec",
+        "limit_chase_interval_sec",
+        "limit_chase_step_pct",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -14186,19 +15248,20 @@ def main():
     elif RESEARCH_AI_SOLE_AUTHORITY:
         logger.warning(
             f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
-            f"{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
+            f"{get_research_ai_cooldown_sec()}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
         f"[V87 MULTI-LANE] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
         f"| stability_shadow={'ON' if ai_stability_research_enabled() else 'OFF'} "
         f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
+        f"| exec_5m={'ON' if exec_5m_lane_enabled() else 'OFF'} "
         f"| research_temp={RESEARCH_AI_TEMPERATURE} "
         f"[PIPELINE ENFORCEMENT]"
     )
     if continuous_ai_research_enabled():
         logger.warning(
-            f"[V87 CONTINUOUS_AI] ON — ~{RESEARCH_PERIODIC_AI_INTERVAL_SEC}s sole-AI when edge>0 "
+            f"[V87 CONTINUOUS_AI] ON — ~{get_research_ai_cooldown_sec()}s sole-AI when edge>0 "
             f"| temp={RESEARCH_AI_TEMPERATURE} | executes trades | lane={RESEARCH_LANE_CONTINUOUS} "
             f"[PIPELINE ENFORCEMENT]"
         )

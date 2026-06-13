@@ -55,6 +55,8 @@ const PROFILE_LINKS = [
 const ADMIN_PROFILE_LINKS = [
   { href: '/admin/control', label: 'Admin Control' },
   { href: '/admin/applications', label: 'Listing inbox' },
+  { href: '/admin/agent-registrations', label: 'Agent registrations' },
+  { href: '/account?tab=security', label: 'Connect Phantom wallet' },
 ] as const;
 
 function AdminProfileLinks({ onNavigate }: { onNavigate: () => void }) {

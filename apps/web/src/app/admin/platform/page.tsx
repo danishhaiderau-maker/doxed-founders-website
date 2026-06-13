@@ -95,8 +95,11 @@ export default function AdminPlatformPage() {
         <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
           <h2 className="font-semibold">On-chain treasury</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            USDC/SOL paper-trading top-ups land here. Users pay from their linked Solana wallet; we match by wallet + payment reference.
+            USDC/SOL paper-trading top-ups and signal success fees land here. Users pay from their linked Solana wallet.
           </p>
+          <Link href="/admin/agent-registrations" className="mt-2 inline-block text-sm text-violet-300 underline">
+            Agent registrations (SAID, Spawn) →
+          </Link>
           <form onSubmit={handleSave} className="mt-4 space-y-3">
             <label className="block text-sm">
               <span className="text-zinc-400">Solana treasury address</span>
