@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { buildTradingAgentFollowShareText, type TradingAgentDashboardState } from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
+import { SignalApiPanel } from '@/components/agent-hub/signal-api-panel';
 import { AgentHubShell } from '@/components/agent-hub/agent-hub-shell';
 import { useShareOrigin } from '@/components/share-on-x-button';
 import {
@@ -288,6 +289,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           instanceBusy={instanceBusy}
           copyBusy={paperBusy}
         />
+      )}
+      {agent && slug === 'conservative-btc' && (
+        <SignalApiPanel slug={slug} token={session?.accessToken} signedIn={signedIn} />
       )}
     </AgentHubShell>
   );

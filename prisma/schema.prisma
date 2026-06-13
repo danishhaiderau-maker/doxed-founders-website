@@ -426,6 +426,8 @@ model User {
   agentFollows         AgentFollow[]
   tradingAgentFollows  TradingAgentFollow[]
   tradingAgentInstances TradingAgentInstance[]
+  signalApiKeys        SignalApiKey[]
+  signalCycleParticipants SignalCycleParticipant[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
   founderNodes              FounderNode[]
@@ -2083,10 +2085,112 @@ model TradingAgent {
 
   activities TradingAgentActivity[]
   followers  TradingAgentFollow[]
-  instances  TradingAgentInstance[]
+  instances       TradingAgentInstance[]
+  signalApiKeys   SignalApiKey[]
+  signalCycles    SignalCycle[]
 
   @@index([kind])
   @@index([sortOrder])
+}
+
+enum SignalCycleStatus {
+  INTENT
+  PENDING_ENTRY
+  OPEN
+  CLOSED
+  EXPIRED
+}
+
+enum SignalCycleSettlementStatus {
+  NONE
+  WAIVED
+  PENDING
+  PAID
+  FAILED
+}
+
+/** API keys for signal-cycle webhooks (hashed at rest). */
+model SignalApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  agentId    String
+  label      String?
+  keyPrefix  String
+  keyHash    String
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent TradingAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([agentId])
+  @@index([keyHash])
+}
+
+/** One research APPROVE → close lifecycle (showcase + subscriber tracking). */
+model SignalCycle {
+  id               String            @id @default(cuid())
+  agentId          String
+  tradeId          String
+  status           SignalCycleStatus @default(INTENT)
+  botVersion       String?
+  intentEnvelope   Json
+  researchVenue    String            @default("bitfinex")
+  expiresAt        DateTime?
+  showcasePnlUsd   Decimal?          @db.Decimal(16, 4)
+  showcaseExitReason String?
+  closedAt         DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  agent        TradingAgent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  participants SignalCycleParticipant[]
+  events       SignalCycleEvent[]
+
+  @@unique([agentId, tradeId])
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+model SignalCycleParticipant {
+  id                  String                      @id @default(cuid())
+  cycleId             String
+  userId              String
+  venue               String?
+  status              SignalCycleStatus           @default(PENDING_ENTRY)
+  stopLossConfirmedAt DateTime?
+  fillPrice           Decimal?                    @db.Decimal(16, 4)
+  exitPrice           Decimal?                    @db.Decimal(16, 4)
+  pnlUsd              Decimal?                    @db.Decimal(16, 4)
+  pnlMarginPct        Decimal?                    @db.Decimal(8, 4)
+  settlementStatus    SignalCycleSettlementStatus @default(NONE)
+  feeUsd              Decimal?                    @db.Decimal(16, 4)
+  settledAt           DateTime?
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+
+  cycle  SignalCycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  user   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events SignalCycleEvent[]
+
+  @@unique([cycleId, userId])
+  @@index([userId])
+}
+
+model SignalCycleEvent {
+  id            String   @id @default(cuid())
+  cycleId       String
+  participantId String?
+  eventType     String
+  payload       Json?
+  createdAt     DateTime @default(now())
+
+  cycle       SignalCycle             @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  participant SignalCycleParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+
+  @@index([cycleId, createdAt(sort: Desc)])
 }
 
 model TradingAgentActivity {
