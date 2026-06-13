@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { AgentRegistrationWizard } from '@/components/admin/agent-registration-wizard';
 import { SiteNav } from '@/components/site-nav';
 import {
   AgentRegistryOverview,
@@ -53,8 +54,7 @@ export default function AdminAgentRegistrationsPage() {
     load().catch((e) => setError(e instanceof Error ? e.message : 'Load failed'));
   }, [token, isAdmin, load]);
 
-  async function saveTreasury(e: FormEvent) {
-    e.preventDefault();
+  async function saveTreasuryAddresses(solana: string, evm: string) {
     if (!token) return;
     setBusy(true);
     setError(null);
@@ -62,18 +62,26 @@ export default function AdminAgentRegistrationsPage() {
     try {
       await updatePlatformTreasury(
         {
-          solanaTreasuryAddress: solanaTreasury.trim() || undefined,
-          evmTreasuryAddress: evmTreasury.trim() || undefined,
+          solanaTreasuryAddress: solana.trim() || undefined,
+          evmTreasuryAddress: evm.trim() || undefined,
         },
         token,
       );
-      setMsg('Fee treasury saved — signal success fees will route to your Solana wallet.');
+      setSolanaTreasury(solana);
+      setEvmTreasury(evm);
+      setMsg('Fee treasury saved.');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
+      throw err;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function saveTreasury(e: FormEvent) {
+    e.preventDefault();
+    await saveTreasuryAddresses(solanaTreasury, evmTreasury);
   }
 
   async function markRegistered(registry: string, txSignature?: string) {
@@ -137,15 +145,21 @@ export default function AdminAgentRegistrationsPage() {
           </Link>
         </section>
 
+        {token && (
+          <AgentRegistrationWizard
+            accessToken={token}
+            linkedSolana={overview?.feeCollection.adminLinkedSolana ?? null}
+            treasurySolana={solanaTreasury}
+            onTreasurySaved={saveTreasuryAddresses}
+            onMarkRegistered={markRegistered}
+            busy={busy}
+          />
+        )}
+
         <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
-          <h2 className="font-semibold">1. Connect Phantom (admin fee wallet)</h2>
+          <h2 className="font-semibold">Treasury (manual edit)</h2>
           <p className="mt-2 text-sm text-zinc-400">
-            Link your Phantom wallet on{' '}
-            <Link href="/account?tab=security" className="text-violet-300 underline">
-              Account → Security
-            </Link>
-            {' '}(profile menu → Security, not Admin Control).
-            , then paste the same address below as the Solana treasury. All signal success fees (USDC) land here.
+            Use the step wizard above for Phantom popup connect. Edit addresses here if needed.
           </p>
           {overview && (
             <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-sm">
