@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add step-by-step agent registration wizard with Phantom popup.
+Fix Phantom detection and direct connect popup for agent registration.
 
 ## Last Activity
 
