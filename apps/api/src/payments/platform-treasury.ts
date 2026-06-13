@@ -24,6 +24,15 @@ export async function resolveSolanaTreasuryAddress(
   return row?.solanaTreasuryAddress?.trim() || treasuryAddressFromEnv();
 }
 
+export function evmTreasuryAddressFromEnv(): string | null {
+  return process.env.X402_EVM_PAY_TO?.trim() || process.env.PLATFORM_EVM_TREASURY?.trim() || null;
+}
+
+export async function resolveEvmTreasuryAddress(prisma: PrismaService): Promise<string | null> {
+  const row = await prisma.platformTreasury.findUnique({ where: { id: 'default' } });
+  return row?.evmTreasuryAddress?.trim() || evmTreasuryAddressFromEnv();
+}
+
 export function isSolanaTopUpConfigured(treasuryAddress: string | null): boolean {
   return Boolean(solanaRpcUrl() && treasuryAddress);
 }

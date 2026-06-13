@@ -87,8 +87,20 @@ async function main() {
   const oldHash = existsSync(TARGET) ? sha256(readFileSync(TARGET, 'utf8')) : null;
 
   if (checkOnly) {
-    const patched = patchForProduction(raw);
-    const probeHash = sha256(patched);
+    const probePath = join(ROOT, 'services/btc-conservative-agent/.sync-probe.py');
+    writeFileSync(probePath, patchForProduction(raw), 'utf8');
+    execSync('node scripts/patch-btc-bot-production.mjs', {
+      cwd: ROOT,
+      stdio: 'pipe',
+      env: { ...process.env, BTC_BOT_PATCH_TARGET: probePath },
+    });
+    const probeHash = sha256(readFileSync(probePath, 'utf8'));
+    try {
+      const { unlinkSync } = await import('node:fs');
+      unlinkSync(probePath);
+    } catch {
+      /* ignore */
+    }
     if (oldHash === probeHash) {
       console.log('Already up to date — no changes.');
       return;

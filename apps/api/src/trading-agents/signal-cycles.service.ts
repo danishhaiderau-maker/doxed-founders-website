@@ -22,6 +22,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { BotBridgeService } from './bot-bridge.service';
 import {
+  resolveEvmTreasuryAddress,
   resolveSolanaTreasuryAddress,
   solanaRpcUrl,
 } from '../payments/platform-treasury';
@@ -245,12 +246,47 @@ export class SignalCyclesService implements OnModuleInit {
           direction: envelope?.direction ?? null,
           createdAt: cycle.createdAt.toISOString(),
           preview: true,
-          message: 'Create a signal API key for full ENSE payload and lifecycle webhooks.',
+          message: 'Create a signal API key or pay via x402 on GET /signals/intent for full ENSE payload.',
         },
         mandate: await this.getSubscriberMandate(),
       };
     }
 
+    return this.buildLatestFullResponse(cycle);
+  }
+
+  /** Full ENSE intent — caller must pass API key or have paid via x402 middleware on /signals/intent. */
+  async getLatestFull(
+    slug: string,
+    apiCtx: SignalApiKeyContext | null,
+    opts?: { x402Paid?: boolean },
+  ) {
+    if (!apiCtx && !opts?.x402Paid) {
+      throw new UnauthorizedException(
+        'Full signal intent requires X-Signal-Api-Key or x402 payment (GET /signals/intent).',
+      );
+    }
+    const agent = await this.resolveAgent(slug);
+    const cycle = await this.prisma.signalCycle.findFirst({
+      where: {
+        agentId: agent.id,
+        status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!cycle) return { cycle: null, mandate: await this.getSubscriberMandate() };
+    return this.buildLatestFullResponse(cycle);
+  }
+
+  private async buildLatestFullResponse(cycle: {
+    id: string;
+    tradeId: string;
+    status: SignalCycleStatus;
+    intentEnvelope: unknown;
+    expiresAt: Date | null;
+    botVersion: string | null;
+    createdAt: Date;
+  }) {
     return {
       cycle: {
         cycleId: cycle.id,
@@ -267,10 +303,25 @@ export class SignalCyclesService implements OnModuleInit {
 
   async getSubscriberMandate() {
     const treasury = await resolveSolanaTreasuryAddress(this.prisma);
+    const evmTreasury = await resolveEvmTreasuryAddress(this.prisma);
+    const x402Enabled = Boolean(evmTreasury || process.env.X402_EVM_PAY_TO?.trim());
     return {
       stop_loss_at_fill: true,
       use_subscriber_mark_at_receipt: true,
       no_research_venue_absolute_prices: true,
+      x402: x402Enabled
+        ? {
+            support: true,
+            intent_endpoint: '/trading-agents/conservative-btc/signals/intent',
+            preview_endpoint: '/trading-agents/conservative-btc/signals/latest',
+            price_usd: 0.1,
+            price_label: '$0.10',
+            network: process.env.X402_SIGNAL_NETWORK ?? 'eip155:8453',
+            scheme: 'exact',
+            pay_to_evm: evmTreasury ?? process.env.X402_EVM_PAY_TO?.trim() ?? null,
+            facilitator: process.env.X402_FACILITATOR_URL ?? 'https://x402.org/facilitator',
+          }
+        : { support: false },
       success_fee: {
         pct: 0.1,
         min_profit_fee_usd: 0.2,
