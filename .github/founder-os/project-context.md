@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix Phantom detection and direct connect popup for agent registration.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
