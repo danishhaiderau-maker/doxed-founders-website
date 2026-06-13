@@ -107,6 +107,7 @@ export * from './prediction-constitution';
 export * from './project-name';
 export * from './repo-starter-templates';
 export * from './trading-agents';
+export * from './signal-cycle';
 export * from './trading-agent-adapters';
 export * from './exchange-adapters';
 export * from './exchange-api-guides';

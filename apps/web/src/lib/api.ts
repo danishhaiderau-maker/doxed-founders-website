@@ -3368,6 +3368,30 @@ export function fetchPublicAgentStatus() {
   return apiFetch<{ status: PublicAgentStatus; label: string }>('/admin-control/agent-status');
 }
 
+export interface SignalApiKeySummary {
+  id: string;
+  keyPrefix: string;
+  label: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+}
+
+export function createSignalApiKey(slug: string, token: string, label?: string) {
+  return apiFetch<{ id: string; apiKey: string; keyPrefix: string; message: string }>(
+    `/trading-agents/${slug}/signals/api-keys`,
+    { method: 'POST', body: JSON.stringify({ label }) },
+    token,
+  );
+}
+
+export function fetchSignalApiKeys(slug: string, token: string) {
+  return apiFetch<SignalApiKeySummary[]>(`/trading-agents/${slug}/signals/api-keys`, undefined, token);
+}
+
+export function revokeSignalApiKey(slug: string, keyId: string, token: string) {
+  return apiFetch<{ ok: boolean }>(`/trading-agents/${slug}/signals/api-keys/${keyId}`, { method: 'DELETE' }, token);
+}
+
 export function fetchGlobalShareFooter() {
   return apiFetch<{ footer: string }>('/admin-control/share-footer');
 }

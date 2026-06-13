@@ -33,6 +33,7 @@ export type BotApiState = {
   last_ai?: {
     win_prob?: number | null;
     direction?: string | null;
+    final_direction?: string | null;
     decision?: string | null;
     comment?: string | null;
     reason?: string | null;
@@ -149,6 +150,15 @@ export type BotApiState = {
     trades_since_last_loss?: number;
     approve_index?: number;
   };
+  last_approve_outcome?: {
+    status?: string;
+    reason?: string;
+    trade_id?: string;
+    edge_at_approve?: number;
+    effective_threshold?: number;
+  };
+  pullback_threshold?: number;
+  leverage?: number;
   live_armed?: boolean;
 };
 
