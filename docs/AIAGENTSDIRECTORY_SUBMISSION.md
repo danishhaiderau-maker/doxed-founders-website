@@ -54,11 +54,17 @@ https://doxxedcrypto.digital/docs/signal-api
 https://doxed-founders-website-production.up.railway.app/api/trading-agents/conservative-btc/signals/mandate
 ```
 
-### Logo / image URL
+### Logo / icon (square — upload as logo/icon)
 ```
 https://doxxedcrypto.digital/icons/conservative-btc-agent.png
 ```
-*(This URL is referenced in `agent.json` but currently returns 404 — upload a 512×512 PNG on the submit form, or add the file to the site before listing goes live.)*
+Local file: `apps/web/public/icons/conservative-btc-agent.png`
+
+### Thumbnail / banner (wide — upload as cover/thumbnail)
+```
+https://doxxedcrypto.digital/icons/conservative-btc-agent-thumbnail.png
+```
+Local file: `apps/web/public/icons/conservative-btc-agent-thumbnail.png`
 
 ### Company / builder
 ```
