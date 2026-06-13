@@ -367,10 +367,10 @@ export function AgentRegistrationWizard({
           <h2 className="text-lg font-semibold text-emerald-100">Step 5 — Manual directories</h2>
           <ul className="mt-3 space-y-2 text-sm text-zinc-300">
             <li>
-              <a href="https://aiagentsdirectory.com/" target="_blank" rel="noreferrer" className="text-violet-300 underline">
-                aiagentsdirectory.com
+              <a href="https://aiagentsdirectory.com/submit-agent" target="_blank" rel="noreferrer" className="text-violet-300 underline">
+                aiagentsdirectory.com/submit-agent
               </a>{' '}
-              — submit AgentCard + hub URL
+              — submit AgentCard + hub URL (see docs/AIAGENTSDIRECTORY_SUBMISSION.md)
             </li>
             <li>
               <a href="https://www.openserv.ai/" target="_blank" rel="noreferrer" className="text-violet-300 underline">
