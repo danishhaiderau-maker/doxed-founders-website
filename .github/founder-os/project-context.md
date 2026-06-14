@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Redesign site navigation and streamline agent registry automation.
 
 ## Last Activity
 
