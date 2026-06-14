@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(railway): resolve npm lock drift and use npm install in Docker build.
 
 ## Last Activity
 
-15m ago
+Just now
