@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(agent-hub): exchange relay kill switch + fix duplicate limit deadlock
 
 ## Last Activity
 
