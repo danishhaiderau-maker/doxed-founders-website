@@ -12,6 +12,7 @@ import {
 } from '@/lib/api';
 
 const WAYS_TO_EARN = [
+  { label: 'Create account', amount: POINTS.REGISTER, href: '/register' },
   { label: 'Vote on listing', amount: POINTS.LISTING_VOTE, href: '/trust-center?tab=scout-voting' },
   { label: 'Helpful review', amount: POINTS.VALIDATION_HELPFUL, href: '/trust-center?tab=reviews' },
   { label: 'Correct validation', amount: POINTS.VALIDATION_CORRECT, href: '/trust-center?tab=scout-voting' },

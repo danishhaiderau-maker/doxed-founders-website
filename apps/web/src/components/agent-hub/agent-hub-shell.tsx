@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { SiteBrand } from '@/components/site-nav';
 import { AgentDirectoryBadges } from '@/components/agent-directory-badges';
+import { DdollarBalanceSidebar } from '@/components/ddollar/ddollar-balance-sidebar';
 
 const NAV = [
   { href: '/founder-den', label: 'Founder OS' },
@@ -64,10 +65,7 @@ export function AgentHubShell({
         </nav>
         <div className="border-t border-zinc-800/80 p-4">
           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">DDollar balance</p>
-          <Link href="/ddollar" className="mt-1 block">
-            <span className="text-lg font-bold text-emerald-400">₿ 12,450</span>
-            <span className="mt-0.5 block text-xs text-zinc-500">$1,245.00 · +3.45% 24h</span>
-          </Link>
+          <DdollarBalanceSidebar />
           <Link
             href="/list-your-project"
             className="mt-4 block rounded-xl border border-violet-500/30 bg-violet-950/30 p-3 text-xs text-violet-200 hover:border-violet-400/50"

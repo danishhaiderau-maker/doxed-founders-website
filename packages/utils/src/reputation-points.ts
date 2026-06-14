@@ -1,6 +1,9 @@
+/** One-time welcome grant on sign-up (DDollar / reputationPoints). */
+export const WELCOME_DDOLLAR_GRANT = 10_000;
+
 /** DDollar reward amounts — single ecosystem currency (stored as reputationPoints). */
 export const POINTS = {
-  REGISTER: 50,
+  REGISTER: WELCOME_DDOLLAR_GRANT,
   DAILY_LOGIN: 5,
   PAPER_TRADE: 10,
   FEED_COMMENT: 2,
@@ -244,6 +247,7 @@ export function pointActionLabel(actionKey: string): string {
   if (base === 'AGENT_RENTAL') return 'Trading agent rental';
   if (base === 'AGENT_HIRE') return 'Agent hire fee (1 week)';
   if (base === 'PLATFORM_FEE') return 'Platform fee collected';
+  if (base === 'WELCOME_UPGRADE') return 'Welcome bonus upgrade';
   return base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
