@@ -650,6 +650,109 @@ export class SignalCyclesService implements OnModuleInit {
     return { ok: true };
   }
 
+  /** Platform hire runner — records lifecycle without Signal API key; no success fee on hire tier. */
+  async recordHireExecutionEvent(
+    userId: string,
+    agentId: string,
+    cycleId: string,
+    event: SignalCycleEventType,
+    body: Record<string, unknown>,
+  ) {
+    const cycle = await this.prisma.signalCycle.findFirst({
+      where: { id: cycleId, agentId },
+    });
+    if (!cycle) throw new NotFoundException('Cycle not found');
+
+    let participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { cycleId_userId: { cycleId, userId } },
+    });
+
+    if (!participant) {
+      participant = await this.prisma.signalCycleParticipant.create({
+        data: {
+          cycleId,
+          userId,
+          venue: typeof body.venue === 'string' ? body.venue : 'bitfinex',
+          status: SignalCycleStatus.PENDING_ENTRY,
+        },
+      });
+    }
+
+    await this.prisma.signalCycleEvent.create({
+      data: {
+        cycleId,
+        participantId: participant.id,
+        eventType: event,
+        payload: body as Prisma.InputJsonValue,
+      },
+    });
+
+    if (event === 'ORDER_PLACED') {
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: participant.id },
+        data: {
+          venue: typeof body.venue === 'string' ? body.venue : participant.venue,
+          status: SignalCycleStatus.PENDING_ENTRY,
+        },
+      });
+      if (cycle.status === SignalCycleStatus.INTENT) {
+        await this.prisma.signalCycle.update({
+          where: { id: cycleId },
+          data: { status: SignalCycleStatus.PENDING_ENTRY },
+        });
+      }
+    }
+
+    if (event === 'FILLED' || event === 'STOP_LOSS_ARMED') {
+      const stopPlaced = body.stop_loss_placed === true;
+      if (!stopPlaced) {
+        throw new BadRequestException('stop_loss_placed=true required for FILLED');
+      }
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: participant.id },
+        data: {
+          status: SignalCycleStatus.OPEN,
+          stopLossConfirmedAt: new Date(),
+          fillPrice:
+            typeof body.fill_price === 'number' ? body.fill_price : null,
+          venue: typeof body.venue === 'string' ? body.venue : participant.venue,
+        },
+      });
+      await this.prisma.signalCycle.update({
+        where: { id: cycleId },
+        data: { status: SignalCycleStatus.OPEN },
+      });
+    }
+
+    if (event === 'EXIT' || event === 'EXPIRED') {
+      const pnlUsd = typeof body.pnl_usd === 'number' ? body.pnl_usd : 0;
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: participant.id },
+        data: {
+          status: event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED,
+          exitPrice: typeof body.exit_price === 'number' ? body.exit_price : null,
+          pnlUsd,
+          pnlMarginPct:
+            typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null,
+          settlementStatus: SignalCycleSettlementStatus.WAIVED,
+          feeUsd: 0,
+          settledAt: new Date(),
+        },
+      });
+      if (cycle.status !== SignalCycleStatus.CLOSED && cycle.status !== SignalCycleStatus.EXPIRED) {
+        await this.prisma.signalCycle.update({
+          where: { id: cycleId },
+          data: {
+            status: event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED,
+            closedAt: new Date(),
+          },
+        });
+      }
+    }
+
+    return { ok: true, participantId: participant.id };
+  }
+
   requireApiKey(ctx: SignalApiKeyContext | null): SignalApiKeyContext {
     if (!ctx) throw new UnauthorizedException('Missing or invalid X-Signal-Api-Key');
     return ctx;

@@ -9,11 +9,10 @@ import {
   type ExchangeProvider,
   type TradingAgentAiProvider,
 } from '@dcf/utils';
-import { TradingAgentInstanceStatus } from '@prisma/client';
+import { TradingAgentInstanceStatus, SignalCycleStatus, NotificationType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { NotificationType } from '@prisma/client';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import {
   USER_INSTANCE_STARTING_BALANCE,
@@ -118,7 +117,7 @@ export class TradingAgentInstancesService {
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
-      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account will mirror admin ${TRADING_AGENT_AI_PROVIDER_LABELS[aiProvider as TradingAgentAiProvider] ?? aiProvider} trades when the live tier executes.`,
+      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex live; max $500 margin).`,
       link: `/agent-hub/${agent.slug}`,
     });
 
@@ -141,6 +140,17 @@ export class TradingAgentInstancesService {
     }
 
     const isCopy = instance.exchangeProvider === 'paper';
+    const openHirePositions = isCopy
+      ? 0
+      : await this.prisma.signalCycleParticipant.count({
+          where: {
+            userId,
+            status: SignalCycleStatus.OPEN,
+            cycle: { agentId: agent.id },
+          },
+        });
+
+    const executionLive = process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
     const scope = readInstanceScope(instance);
     const exchangeStatus = isCopy
@@ -182,8 +192,10 @@ export class TradingAgentInstancesService {
         connected: instance.status === TradingAgentInstanceStatus.ACTIVE,
         message: isCopy
           ? 'Copy-trading admin DeepSeek decisions with DDollar — no API keys required.'
-          : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
-        openPositions: 0,
+          : executionLive
+            ? 'Live copy execution active — platform places Bitfinex limit orders from admin signals on your account (max $500 margin).'
+            : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
+        openPositions: openHirePositions,
         pnlPct: 0,
       },
     };
