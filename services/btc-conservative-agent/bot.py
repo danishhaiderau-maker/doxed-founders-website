@@ -507,6 +507,9 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "research_lane": signal.get("research_lane") or order.get("research_lane"),
         "research_model": signal.get("research_model") or order.get("research_model"),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
+        "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
+        "entry_levels_consumed": int((order.get("fill_sim") or {}).get("levels_consumed") or 0),
+        "entry_partial_fill": bool(order.get("partial_fill")),
         "entry_sr_state": context.get("sr_state", "UNKNOWN"),
         "entry_dist_to_resistance": context.get("dist_to_resistance", 0.0),
         "entry_dist_to_support": context.get("dist_to_support", 0.0),
@@ -1263,12 +1266,13 @@ def check_trend_weakening_exit(pos: dict, unreal_pct: float, now: float) -> bool
     close_position(pos, "TREND_WEAKENING")
     return True
 
-def unrealized_margin_pct(pos: dict, price: float) -> float:
+def unrealized_margin_pct(pos: dict, price: float = None) -> float:
     entry = pos.get("entry", 0)
-    if entry <= 0 or price <= 0:
+    mark = price if price is not None and price > 0 else get_mark_price(pos.get("dir"))
+    if entry <= 0 or mark <= 0:
         return 0.0
     dir_factor = 1 if pos.get("dir") == "LONG" else -1
-    price_move = ((price - entry) / entry) * dir_factor
+    price_move = ((mark - entry) / entry) * dir_factor
     return price_move * pos.get("leverage", 20) * 100
 
 def check_thesis_invalidation(pos: dict, price: float) -> bool:
@@ -2627,12 +2631,17 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.26-duplicate-minage-fix-2026-06-15"
+ANALYZER_SYNC_ID = "v9.29-realism-complete-2026-06-15"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
+BBO_REFRESH_SEC = 3
+BOOK_REFRESH_SEC = 3
+BOOK_STALE_SEC = 10
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
+_last_bbo_refresh_ts = 0.0
+_last_book_refresh_ts = 0.0
 bitfinex_public = None
 bitfinex_private = None
 
@@ -2732,14 +2741,294 @@ def _effective_funding_rate_8h(current_funding: float, next_accrued: float) -> f
         return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, acc))
     return 0.0
 
-def fetch_bitfinex_last_price_rest(symbol: str = BITFINEX_WS_SYMBOL) -> float:
-    """Latest trade price from Bitfinex REST ticker (dashboard fallback when WS stale)."""
+def fetch_bitfinex_ticker_rest(symbol: str = BITFINEX_WS_SYMBOL) -> dict:
+    """Bitfinex v2 ticker: BID, ASK, LAST (and daily stats)."""
     url = f"{BITFINEX_REST_BASE}/ticker/{symbol}"
     resp = _http_get_with_retry(url, timeout=10, label="TICKER")
     data = resp.json()
     if isinstance(data, list) and len(data) > 6:
-        return float(data[6])
+        bid = float(data[0])
+        ask = float(data[2])
+        last = float(data[6])
+        return {
+            "bid": bid,
+            "ask": ask,
+            "last": last,
+            "spread_usd": round(ask - bid, 2),
+            "spread_pct": round((ask - bid) / bid * 100.0, 5) if bid > 0 else 0.0,
+        }
     raise ValueError(f"unexpected ticker response: {data!r}")
+
+
+def fetch_bitfinex_last_price_rest(symbol: str = BITFINEX_WS_SYMBOL) -> float:
+    """Latest trade price from Bitfinex REST ticker (dashboard fallback when WS stale)."""
+    return fetch_bitfinex_ticker_rest(symbol)["last"]
+
+
+def refresh_bbo_state(force: bool = False):
+    """Cache live bid/ask from Bitfinex for realistic sim fills and PnL marks."""
+    global _last_bbo_refresh_ts
+    now = time.time()
+    if not force and (now - _last_bbo_refresh_ts) < BBO_REFRESH_SEC:
+        return
+    try:
+        t = fetch_bitfinex_ticker_rest()
+        with state_lock:
+            state["bid"] = t["bid"]
+            state["ask"] = t["ask"]
+            state["spread_usd"] = t["spread_usd"]
+            state["spread_pct"] = t["spread_pct"]
+            state["bbo_ts"] = now
+            state["last_trade_price"] = t["last"]
+            ws_age = now - float(state.get("ws_last_tick") or 0)
+            if not state.get("price") or ws_age > STALE_HARD_SEC:
+                state["price"] = t["last"]
+                state["price_ts"] = now
+                state["price_source"] = "REST_BBO"
+        _last_bbo_refresh_ts = now
+    except Exception as e:
+        logger.debug(f"[BBO] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+
+
+def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = "P0") -> dict:
+    """Bitfinex v2 book: rows are [PRICE, COUNT, AMOUNT]; amount>0 bid, amount<0 ask."""
+    url = f"{BITFINEX_REST_BASE}/book/{symbol}/{precision}"
+    resp = _http_get_with_retry(url, timeout=12, label="BOOK")
+    rows = resp.json()
+    if not isinstance(rows, list):
+        raise ValueError(f"unexpected book response: {rows!r}")
+    bids, asks = [], []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        price = float(row[0])
+        count = int(row[1])
+        amount = float(row[2])
+        if amount > 0:
+            bids.append([price, count, amount])
+        elif amount < 0:
+            asks.append([price, count, abs(amount)])
+    bids.sort(key=lambda x: -x[0])
+    asks.sort(key=lambda x: x[0])
+    return {"bids": bids, "asks": asks, "level_count": len(rows)}
+
+
+def refresh_order_book_state(force: bool = False):
+    """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence)."""
+    global _last_book_refresh_ts
+    now = time.time()
+    if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+        return
+    try:
+        book = fetch_bitfinex_book_rest()
+        with state_lock:
+            state["order_book"] = book
+            state["book_ts"] = now
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+            state["bid_size_btc"] = round(float(bids[0][2]), 6) if bids else None
+            state["ask_size_btc"] = round(float(asks[0][2]), 6) if asks else None
+        _last_book_refresh_ts = now
+    except Exception as e:
+        logger.debug(f"[BOOK] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+
+
+def simulate_market_fill(side: str, qty_btc: float) -> dict:
+    """Walk cached book for taker fill: buy consumes asks, sell consumes bids."""
+    side = str(side or "").lower()
+    qty_btc = float(qty_btc or 0)
+    empty = {
+        "avg_price": 0.0,
+        "filled_qty": 0.0,
+        "slippage_usd": 0.0,
+        "fully_filled": False,
+        "levels_consumed": 0,
+        "partial_fill": False,
+        "best_price": 0.0,
+        "unfilled_qty": qty_btc,
+    }
+    if qty_btc <= 0:
+        return dict(empty, fully_filled=True, unfilled_qty=0.0)
+    with state_lock:
+        book_age = time.time() - float(state.get("book_ts") or 0)
+    refresh_order_book_state(force=book_age > BOOK_STALE_SEC)
+    with state_lock:
+        book = state.get("order_book") or {}
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
+        last = float(state.get("price") or 0)
+    if side == "buy":
+        levels = book.get("asks") or []
+        best = float(levels[0][0]) if levels else ask
+    elif side == "sell":
+        levels = book.get("bids") or []
+        best = float(levels[0][0]) if levels else bid
+    else:
+        return dict(empty, fully_filled=True, unfilled_qty=0.0)
+    if not levels:
+        px = best if best > 0 else last
+        if px <= 0:
+            return empty
+        logger.debug(f"[BOOK] no cached levels side={side} — BBO fallback px={px} [PIPELINE ENFORCEMENT]")
+        return {
+            "avg_price": round(px, 2),
+            "filled_qty": round(qty_btc, 8),
+            "slippage_usd": 0.0,
+            "fully_filled": True,
+            "levels_consumed": 0,
+            "partial_fill": False,
+            "best_price": round(px, 2),
+            "unfilled_qty": 0.0,
+            "book_empty": True,
+        }
+    remaining = qty_btc
+    cost = 0.0
+    filled = 0.0
+    levels_consumed = 0
+    for price, _count, size in levels:
+        if remaining <= 1e-12:
+            break
+        take = min(remaining, float(size))
+        cost += take * float(price)
+        filled += take
+        remaining -= take
+        levels_consumed += 1
+    if filled <= 0:
+        px = best if best > 0 else last
+        return {
+            "avg_price": round(px, 2),
+            "filled_qty": 0.0,
+            "slippage_usd": 0.0,
+            "fully_filled": False,
+            "levels_consumed": 0,
+            "partial_fill": False,
+            "best_price": round(px, 2),
+            "unfilled_qty": round(qty_btc, 8),
+        }
+    avg_price = cost / filled
+    slip_per_btc = (avg_price - best) if side == "buy" else (best - avg_price)
+    slippage_usd = max(0.0, slip_per_btc * filled)
+    fully_filled = remaining <= 1e-9
+    partial_fill = not fully_filled and filled > 0
+    if partial_fill:
+        logger.warning(
+            f"[BOOK] partial fill side={side} req={qty_btc:.6f} filled={filled:.6f} "
+            f"levels={levels_consumed} vwap={avg_price:.2f} [PIPELINE ENFORCEMENT]"
+        )
+    elif levels_consumed > 1 or slippage_usd > 0.01:
+        logger.info(
+            f"[BOOK] depth fill side={side} qty={qty_btc:.6f} vwap={avg_price:.2f} "
+            f"best={best:.2f} slip=${slippage_usd:.4f} levels={levels_consumed} [PIPELINE ENFORCEMENT]"
+        )
+    return {
+        "avg_price": round(avg_price, 2),
+        "filled_qty": round(filled, 8),
+        "slippage_usd": round(slippage_usd, 4),
+        "fully_filled": fully_filled,
+        "levels_consumed": levels_consumed,
+        "partial_fill": partial_fill,
+        "best_price": round(best, 2),
+        "unfilled_qty": round(remaining, 8) if partial_fill else 0.0,
+    }
+
+
+def get_mark_price(direction: str, fallback: float = None) -> float:
+    """Realistic mark for PnL/exits: LONG marks at bid (sellable), SHORT at ask (cover buy)."""
+    direction = str(direction or "").upper()
+    with state_lock:
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
+        last = float(fallback if fallback is not None else (state.get("price") or 0))
+    if direction == "LONG" and bid > 0:
+        return bid
+    if direction == "SHORT" and ask > 0:
+        return ask
+    return last if last > 0 else 0.0
+
+
+def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
+    """Depth-weighted exit VWAP for open positions; BBO mark when book empty."""
+    direction = str((pos or {}).get("dir") or "").upper()
+    qty = float((pos or {}).get("qty") or 0)
+    if qty > 0 and direction in ("LONG", "SHORT"):
+        exit_side = "sell" if direction == "LONG" else "buy"
+        sim = simulate_market_fill(exit_side, qty)
+        vwap = float(sim.get("avg_price") or 0)
+        if vwap > 0:
+            return vwap
+    return get_mark_price(direction, fallback=fallback)
+
+
+def resolve_sim_fill_with_depth(order: dict) -> dict:
+    """Depth-aware sim fill: taker walks book; maker fills at limit."""
+    limit = float(order.get("limit_price") or 0)
+    side = str(order.get("side") or "").lower()
+    qty = float(order.get("qty") or 0)
+    refresh_bbo_state()
+    refresh_order_book_state()
+    with state_lock:
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
+        last = float(state.get("price") or limit or 0)
+    is_taker = (
+        order.get("entry_type") in ("SIM_MARKET", "MARKET")
+        or (
+            (side == "buy" and ask > 0 and limit >= ask)
+            or (side == "sell" and bid > 0 and limit <= bid)
+        )
+    )
+    if is_taker and qty > 0:
+        sim = simulate_market_fill(side, qty)
+        fill_px = sim["avg_price"]
+        filled_qty = sim["filled_qty"]
+        if filled_qty <= 0:
+            fill_px = ask if side == "buy" else bid
+            filled_qty = qty
+            sim = dict(sim, avg_price=round(fill_px, 2), filled_qty=qty, fully_filled=True, partial_fill=False)
+        return {"fill_price": fill_px, "filled_qty": filled_qty, "is_taker": True, **sim}
+    fill_px = round(limit, 2) if limit > 0 else last
+    return {
+        "fill_price": fill_px,
+        "filled_qty": qty,
+        "is_taker": False,
+        "avg_price": fill_px,
+        "best_price": fill_px,
+        "slippage_usd": 0.0,
+        "fully_filled": True,
+        "partial_fill": False,
+        "levels_consumed": 0,
+        "unfilled_qty": 0.0,
+    }
+
+
+def resolve_sim_fill_price(order: dict) -> float:
+    """Sim fill: depth-aware taker VWAP when crossing spread; else maker at limit."""
+    result = resolve_sim_fill_with_depth(order)
+    order["fill_sim"] = {k: v for k, v in result.items() if k not in ("fill_price", "filled_qty")}
+    if result.get("partial_fill"):
+        order["partial_fill"] = True
+        order["qty"] = result["filled_qty"]
+    elif result.get("is_taker") and result.get("slippage_usd"):
+        order["book_slippage_usd"] = result["slippage_usd"]
+    return result["fill_price"]
+
+
+def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
+    """Exit price: maker at TP/limit; taker walks book for market-style exits."""
+    qty = float(pos.get("qty") or 0)
+    direction = str(pos.get("dir") or "").upper()
+    refresh_bbo_state()
+    refresh_order_book_state()
+    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
+    if exit_is_maker:
+        tp_px = float(pos.get("tp") or 0)
+        if tp_px > 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
+            return tp_px, None
+        return fallback, None
+    exit_side = "sell" if direction == "LONG" else "buy"
+    sim = simulate_market_fill(exit_side, qty)
+    px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
+    return px, sim
 
 
 def refresh_dashboard_market_snapshot(force: bool = False):
@@ -2752,8 +3041,12 @@ def refresh_dashboard_market_snapshot(force: bool = False):
     age = (now - ref_ts) if ref_ts else 9999.0
     threshold = 5.0 if force else 10.0
     if age < threshold:
+        refresh_bbo_state(force=force)
+        refresh_order_book_state(force=force)
         return
     try:
+        refresh_bbo_state(force=True)
+        refresh_order_book_state(force=True)
         rest_price = fetch_bitfinex_last_price_rest()
         if rest_price and rest_price > 0:
             with state_lock:
@@ -4092,7 +4385,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.15-duplicate-minage-fix"
+EXECUTION_FIX_VERSION = "v1.1.18-realism-complete"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4211,6 +4504,16 @@ state = {
     "engine_reason": "",
     "ai_reason": "",
     "price": None,
+    "bid": None,
+    "ask": None,
+    "spread_usd": None,
+    "spread_pct": None,
+    "bbo_ts": None,
+    "order_book": None,
+    "book_ts": None,
+    "bid_size_btc": None,
+    "ask_size_btc": None,
+    "last_trade_price": None,
     "price_ts": None,
     "price_source": "NONE",
     "execution_paused": False,
@@ -9012,13 +9315,22 @@ def _pending_limit_touched(order: dict, price: float) -> bool:
     limit = float(order["limit_price"])
     max_p = float(order.get("max_price_since_order", price) or price)
     min_p = float(order.get("min_price_since_order", price) or price)
+    with state_lock:
+        bid = float(state.get("bid") or 0)
+        ask = float(state.get("ask") or 0)
     if order["side"] == "buy":
+        if ask > 0 and ask <= limit:
+            return True
         return min_p <= limit or price <= limit
     if order["side"] == "sell":
+        if bid > 0 and bid >= limit:
+            return True
         return max_p >= limit or price >= limit
     return False
 
 def process_pending_orders():
+    refresh_bbo_state()
+    refresh_order_book_state()
     price = state.get("price")
     if price is None or price <= 0:
         return
@@ -9039,7 +9351,7 @@ def process_pending_orders():
                     f"[SIM] limit touched — filling despite prior await_confirm "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
-            fill_px = float(order["limit_price"])
+            fill_px = resolve_sim_fill_price(order)
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
@@ -9048,11 +9360,25 @@ def process_pending_orders():
         fill_order(order)
 
 def fill_order(order):
+    if not order.get("fill_price"):
+        is_taker = (
+            order.get("fee_type") == "TAKER"
+            or order.get("entry_type") in ("SIM_MARKET", "MARKET")
+        )
+        if is_taker and order.get("qty"):
+            order.setdefault("side", map_signal_to_exchange_side(order.get("signal_dir")))
+            fill_px = resolve_sim_fill_price(order)
+            order["fill_price"] = fill_px
+            order["limit_price"] = fill_px
     planned = order.get("planned_limit_price") or order.get("signal_price")
     tick = order.get("fill_price") or order.get("limit_price")
+    fill_sim = order.get("fill_sim") or {}
+    slip_note = f" book_slip=${fill_sim.get('slippage_usd', 0)}" if fill_sim.get("slippage_usd") else ""
+    if order.get("partial_fill"):
+        slip_note += " PARTIAL"
     logger.info(
         f"[ORDER] FILLED trade_id={order['trade_id']} final_direction={order.get('signal_dir')} "
-        f"tick={fmt(tick)} planned_limit={fmt(planned)} [PIPELINE ENFORCEMENT]"
+        f"tick={fmt(tick)} planned_limit={fmt(planned)}{slip_note} [PIPELINE ENFORCEMENT]"
     )
     try:
         from execution_funnel import funnel_on_fill
@@ -9086,6 +9412,8 @@ def fill_order(order):
     pipeline_state_sync()
 
 def process_positions():
+    refresh_bbo_state()
+    refresh_order_book_state()
     price = state.get("price")
     if price is None or price <= 0:
         return
@@ -9095,7 +9423,8 @@ def process_positions():
         for pos in list(open_positions):
             if not isinstance(pos, dict) or pos.get("status") != "OPEN":
                 continue
-            _apply_position_exits(pos, price, now)
+            mark = get_executable_mark_price(pos, fallback=price)
+            _apply_position_exits(pos, mark, now)
 
 def place_postonly_tp(pos, target_pct):
     entry = pos.get("entry", 0)
@@ -10353,9 +10682,13 @@ def state_monitor_loop():
     try:
         last_stale_time = 0
         last_rest_snapshot_ts = 0.0
+        last_bbo_mon_ts = 0.0
         while not shutdown_event.is_set():
             time.sleep(1)
             now = time.time()
+            if now - last_bbo_mon_ts >= BBO_REFRESH_SEC:
+                refresh_bbo_state()
+                last_bbo_mon_ts = now
             with state_lock:
                 state["heartbeat"] = int(time.time())
                 state["last_heartbeat"] = time.time()
@@ -10621,23 +10954,30 @@ def execute_market_order(signal):
         return
     qty = calc_position_qty(price, state.get("leverage", 20), signal.get("margin_usdt"))
     assert qty > 0, "INVALID QTY"
+    side = map_signal_to_exchange_side(signal["final_direction"])
+    sim = simulate_market_fill(side, qty)
+    fill_px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else price
     order = {
         "trade_id": signal["trade_id"],
         "signal_dir": signal["final_direction"],
-        "limit_price": price,
+        "side": side,
+        "limit_price": fill_px,
+        "fill_price": fill_px,
         "qty": qty,
         "entry_type": "MARKET",
         "signal_price": signal.get("signal_price"),
         "created_ts": signal.get("order_created_ts") or time.time(),
         "fee_type": "TAKER",
+        "fill_sim": {k: v for k, v in sim.items() if k not in ("avg_price", "filled_qty")},
+        "book_slippage_usd": sim.get("slippage_usd", 0),
     }
     with trade_lock:
         pos = _build_open_position(order, signal, signal.get("ai", {}))
         open_positions.append(pos)
-    mark_approve_research_executed(pos.get("trade_id"), price)
+    mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(signal["trade_id"], {}).get("signal_ref")
     if master:
-        master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": price,"outcome": "OPEN"})
+        master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": fill_px,"outcome": "OPEN"})
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED {signal['final_direction']} qty={qty} [PIPELINE ENFORCEMENT]")
     pipeline_state_sync()
@@ -10841,13 +11181,21 @@ def position_manager():
 def close_position(pos: dict, exit_reason: str):
     if not validate_state():
         return
+    exit_is_maker = (
+        pos.get("exit_fee_type") == "MAKER"
+        or exit_reason in ("TAKE_PROFIT", "PROFIT_LOCK_LADDER", "TP_HIT")
+        or ("PROFIT" in exit_reason and "FAST" not in exit_reason)
+        or "POSTONLY" in exit_reason
+    )
+    price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
+    if exit_sim:
+        pos["exit_fill_sim"] = exit_sim
     with state_lock:
         if pos not in open_positions:
             return
         trade_id = pos.get("trade_id")
         if not trade_id:
             return
-        price = state.get("price", pos.get("entry", 0))
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)
         assert entry > 0, f"[EXIT VALIDATION FAIL] entry={entry} <=0"
@@ -10861,12 +11209,6 @@ def close_position(pos: dict, exit_reason: str):
         position_value_entry = entry * qty
         position_value_exit = price * qty
         entry_is_maker = pos.get("entry_fee_type") == "MAKER"
-        exit_is_maker = (
-            pos.get("exit_fee_type") == "MAKER"
-            or exit_reason in ("TAKE_PROFIT", "PROFIT_LOCK_LADDER", "TP_HIT")
-            or ("PROFIT" in exit_reason and "FAST" not in exit_reason)
-            or "POSTONLY" in exit_reason
-        )
         maker_fee, taker_fee = get_trading_fee_rates()
         entry_fee = position_value_entry * (maker_fee if entry_is_maker else taker_fee)
         exit_fee = position_value_exit * (maker_fee if exit_is_maker else taker_fee)
@@ -10897,6 +11239,8 @@ def close_position(pos: dict, exit_reason: str):
         slippage = pos.get("entry_slippage")
         if slippage is None:
             slippage = abs(float(entry) - float(pos.get("signal_price", entry)))
+        book_slip = float(pos.get("book_slippage_usd") or (pos.get("fill_sim") or {}).get("slippage_usd") or 0)
+        exit_book_slip = float((exit_sim or {}).get("slippage_usd") or 0)
         momentum_val = _compute_momentum_metric(features)
         volatility_val = _compute_volatility_metric(features)
         entry_sr_state = pos.get("entry_sr_state") or context.get("sr_state", "UNKNOWN")
@@ -10974,6 +11318,10 @@ def close_position(pos: dict, exit_reason: str):
             "entry_path": master.get("entry_path") or pos.get("entry_path"),
             "fill_model": pos.get("fill_model") or master.get("fill_model"),
             "slippage": round(float(slippage), 6),
+            "book_slippage_usd_entry": round(book_slip, 4),
+            "book_slippage_usd_exit": round(exit_book_slip, 4),
+            "book_slippage_usd_total": round(book_slip + exit_book_slip, 4),
+            "entry_partial_fill": bool(pos.get("partial_fill")),
             "maker_fees": pos.get("maker_fees", 0.0),
             "taker_fees": pos.get("taker_fees", 0.0),
             "funding_fees": pos.get("funding_fees", 0.0),
@@ -11664,7 +12012,7 @@ HTML = """<!DOCTYPE html>
     Data Source: <span id="dataSource">Loading...</span>
 </div>
 
-<p><strong>Price:</strong> <span id="price">-</span> <span id="priceFreshness" style="font-size:0.85em;"></span></p>
+<p><strong>Price:</strong> Last <span id="price">-</span> · Bid <span id="bid">-</span> (<span id="bidSizeBtc">-</span> BTC) · Ask <span id="ask">-</span> (<span id="askSizeBtc">-</span> BTC) · Spread $<span id="spreadUsd">-</span> <span id="priceFreshness" style="font-size:0.85em;"></span></p>
 <p><strong>Account Balance:</strong> <span id="accountBalance">-</span></p>
 <p><strong>Daily PnL:</strong> <span id="dailyPnl">-</span></p>
 <p><strong>Equity:</strong> <span id="equity">-</span></p>
@@ -12198,6 +12546,11 @@ DASHBOARD_JS = """(function () {
         }
         safeText('regime', d.regime || '-');
         safeText('price', d.price != null ? d.price.toLocaleString() : '-');
+        safeText('bid', d.bid != null ? d.bid.toLocaleString() : '-');
+        safeText('ask', d.ask != null ? d.ask.toLocaleString() : '-');
+        safeText('spreadUsd', d.spread_usd != null ? d.spread_usd.toFixed(2) : '-');
+        safeText('bidSizeBtc', d.bid_size_btc != null ? d.bid_size_btc.toFixed(4) : '-');
+        safeText('askSizeBtc', d.ask_size_btc != null ? d.ask_size_btc.toFixed(4) : '-');
         safeText('accountBalance', '$' + (d.account_balance != null ? d.account_balance.toFixed(2) : '500.00'));
         safeText('dailyPnl', '$' + (d.daily_pnl_usd != null ? d.daily_pnl_usd.toFixed(2) : '0.00') + ' net (UTC day)');
         safeText('equity', '$' + (d.equity != null ? d.equity.toFixed(2) : '500.00'));
@@ -12857,14 +13210,27 @@ def api_state():
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
         snapshot["dashboard_port"] = DASHBOARD_PORT
         snapshot["dashboard_url"] = dashboard_public_url()
+        snapshot["sim_realism"] = {
+            "bbo": True,
+            "book_depth_vwap": True,
+            "executable_marks": True,
+            "fee_profile": EXCHANGE_FEE_PROFILE,
+            "funding_sim": FUNDING_SIMULATION_ENABLED,
+            "book_ts": snapshot.get("book_ts"),
+            "bid_size_btc": snapshot.get("bid_size_btc"),
+            "ask_size_btc": snapshot.get("ask_size_btc"),
+            "deriv_mark_price": (snapshot.get("funding") or {}).get("mark_price"),
+        }
         snapshot["positions"] = []
         total_unreal = 0.0
         funding_snap = snapshot.get("funding") or {}
         for pos in positions_copy:
             pos_copy = copy.deepcopy(pos)
-            pos_copy["current_price"] = snapshot["price"]
+            mark = get_executable_mark_price(pos, fallback=snapshot.get("price"))
+            pos_copy["current_price"] = mark
+            pos_copy["mark_side"] = "depth_vwap" if float(pos.get("qty") or 0) > 0 else ("bid" if pos.get("dir") == "LONG" else "ask")
             dir_factor = 1 if pos["dir"] == "LONG" else -1
-            move_pct = ((snapshot["price"] - pos["entry"]) / pos["entry"] * 100 * dir_factor) if snapshot["price"] and pos["entry"] else 0
+            move_pct = ((mark - pos["entry"]) / pos["entry"] * 100 * dir_factor) if mark and pos["entry"] else 0
             pnl_usd = (move_pct / 100) * FIXED_MARGIN_USDT * pos.get("leverage", 20)
             pnl_pct_margin = move_pct * pos.get("leverage", 20)
             funding_acc = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
@@ -12891,6 +13257,15 @@ def api_state():
             oc["age_min"] = age
             if tick_px and tick_px > 0:
                 oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
+            oqty = float(o.get("qty") or 0)
+            if oqty > 0 and o.get("side"):
+                try:
+                    est = resolve_sim_fill_with_depth(o)
+                    oc["book_slippage_est_usd"] = est.get("slippage_usd", 0)
+                    oc["book_fully_filled_est"] = est.get("fully_filled", True)
+                    oc["book_levels_est"] = est.get("levels_consumed", 0)
+                except Exception:
+                    pass
             orders.append(oc)
         snapshot["orders"] = orders
         snapshot["trades"] = trades_copy
@@ -15675,6 +16050,14 @@ def main():
         f"[PHASE-C] factor_gate={PHASE_C_FACTOR_GATE_ENABLED} min_margin={MIN_FACTOR_SCORE_MARGIN} [PIPELINE ENFORCEMENT]"
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
+    logger.info(
+        f"[BBO SIM] bid/ask marks enabled — LONG exits at bid, SHORT at ask; "
+        f"taker fills at ask (buy) / bid (sell) [PIPELINE ENFORCEMENT]"
+    )
+    logger.info(
+        f"[BOOK SIM] depth VWAP fills + executable marks; partial fill on thin book; "
+        f"fee_profile={EXCHANGE_FEE_PROFILE} funding_sim={FUNDING_SIMULATION_ENABLED} [PIPELINE ENFORCEMENT]"
+    )
     logger.warning(
         f"[V104] post_fill_grace={POST_FILL_GRACE_SEC}s order_ttl={LIMIT_ORDER_MAX_AGE_SEC}s "
         f"max_active={get_effective_max_active_signals()} ai_cooldown={get_effective_ai_cooldown_sec()}s "
