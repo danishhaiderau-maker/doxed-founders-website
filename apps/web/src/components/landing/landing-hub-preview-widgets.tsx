@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useEffect, useMemo, useState } from 'react';
-import { POINTS, formatUsd } from '@dcf/utils';
+import { POINTS, formatUsd, formatDdollarCompact } from '@dcf/utils';
 import {
   AppNotification,
   AccountOverview,
@@ -23,6 +23,7 @@ import { LandingAiStackPreview } from '@/components/landing/landing-ai-stack-pre
 const FEED_FILTERS = ['All', 'Projects', 'Announcements', 'Listings', 'Investigations', 'Agent'] as const;
 
 const WAYS_TO_EARN = [
+  { label: 'Create account', amount: POINTS.REGISTER },
   { label: 'Vote on listing', amount: POINTS.LISTING_VOTE },
   { label: 'Helpful review', amount: POINTS.VALIDATION_HELPFUL },
   { label: 'Correct validation', amount: POINTS.VALIDATION_CORRECT },
@@ -263,7 +264,7 @@ export function LandingHubPreviewWidgets({
               </span>
               <div>
                 <p className="text-[9px] uppercase tracking-wide text-zinc-500">Current balance</p>
-                <p className="text-lg font-bold text-white">{ddStats.balance.toLocaleString()} DD</p>
+                <p className="text-lg font-bold text-white">{formatDdollarCompact(ddStats.balance)}</p>
               </div>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-1.5">

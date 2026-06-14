@@ -12,10 +12,13 @@ import {
   EXCHANGE_API_GUIDES,
   EXCHANGE_CREDENTIAL_CONFIG,
   exchangeRequiresPassphrase,
+  POINTS,
+  formatDdollarCompact,
   type ExchangeProvider,
 } from '@dcf/utils';
 import {
   ExchangeProviderOption,
+  fetchAccountOverview,
   fetchExchangeProviders,
   fetchTradingAgent,
   hireTradingAgent,
@@ -43,17 +46,20 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ddollarBalance, setDdollarBalance] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [agent, ex] = await Promise.all([
+      const [agent, ex, overview] = await Promise.all([
         fetchTradingAgent(slug, token),
         fetchExchangeProviders(),
+        token ? fetchAccountOverview(token).catch(() => null) : Promise.resolve(null),
       ]);
       setAgentName(agent.name);
       setAgentId(agent.id);
       setCostWeek(agent.costDdollarWeek ?? agent.costDdollarDay ?? 2000);
       setProviders(ex);
+      setDdollarBalance(overview?.reputation.reputationPoints ?? null);
       if (agent.hired && agent.instanceMode === 'live') {
         router.replace(`/agent-hub/${slug}`);
       }
@@ -124,6 +130,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const exchangeGuide = exchange ? EXCHANGE_API_GUIDES[exchange as ExchangeProvider] : null;
 
   const steps: Step[] = ['exchange', 'credentials', 'risk'];
+  const canAffordHire = ddollarBalance == null || ddollarBalance >= costWeek;
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
@@ -155,11 +162,30 @@ export default function AgentHireClient({ slug }: { slug: string }) {
           — no exchange or API keys.
         </div>
         {costWeek > 0 && (
-          <p className="mt-3 text-sm text-zinc-300">
-            Hiring fee:{' '}
-            <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week (deducted on
-            activation).
-          </p>
+          <div className="mt-3 space-y-2 text-sm text-zinc-300">
+            <p>
+              Hiring fee:{' '}
+              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week (deducted on
+              activation).
+            </p>
+            {ddollarBalance != null && (
+              <p className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                Your balance:{' '}
+                <strong className={canAffordHire ? 'text-emerald-300' : 'text-amber-300'}>
+                  {formatDdollarCompact(ddollarBalance)}
+                </strong>
+                {!canAffordHire && (
+                  <span className="mt-1 block text-xs text-amber-200/90">
+                    Need {(costWeek - ddollarBalance).toLocaleString()} more DDollar to activate.{' '}
+                    <Link href="/ddollar" className="underline">
+                      Open wallet
+                    </Link>{' '}
+                    — new accounts receive {POINTS.REGISTER.toLocaleString()} DDollar welcome bonus.
+                  </span>
+                )}
+              </p>
+            )}
+          </div>
         )}
 
         {error && (
@@ -349,10 +375,10 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               </button>
               <button
                 type="submit"
-                disabled={busy || !riskAccepted}
+                disabled={busy || !riskAccepted || !canAffordHire}
                 className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold hover:bg-violet-500 disabled:opacity-50"
               >
-                {busy ? 'Activating…' : 'Activate live copy trading'}
+                {busy ? 'Activating…' : canAffordHire ? 'Activate live copy trading' : 'Insufficient DDollar'}
               </button>
             </div>
           </form>
