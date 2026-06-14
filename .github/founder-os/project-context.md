@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(showcase): preserve trade history across restarts and bot upgrades
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
