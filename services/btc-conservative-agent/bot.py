@@ -1720,7 +1720,7 @@ def get_active_signal_count(lane: str = None):
             if not isinstance(sig, dict) or is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M):
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
                 continue
             sig_lane = sig.get("research_lane")
             if lane and sig_lane != lane:
@@ -1733,7 +1733,7 @@ def get_active_signal_count(lane: str = None):
         exposure += [{"trade_id": s.get("trade_id"), "kind": "awaiting", "status": s.get("status"), "lane": s.get("research_lane")} for s in awaiting]
         stale_map = len([
             s for s in trades_map.values()
-            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M)
+            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE)
             and (s.get("signal_ref") or {}).get("trade_id") not in {e.get("trade_id") for e in exposure}
         ])
     _agent_dbg("H1", "get_active_signal_count", "counted", {"active": active, "lane": lane, "pending_pending_status": pending_count, "pending_list_len": list_len, "open_positions": open_count, "stale_map_orphans": stale_map, "exposure": exposure})
@@ -2627,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.22-csv-write-retry-fix-2026-06-14"
+ANALYZER_SYNC_ID = "v9.23-smart-submit-chase-fix-2026-06-14"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4040,6 +4040,12 @@ LIMIT_CHASE_MAX_GAP_CLOSE_PCT = float(os.getenv("LIMIT_CHASE_MAX_GAP_CLOSE_PCT",
 LIMIT_CHASE_MIN_BUFFER_USD = float(os.getenv("LIMIT_CHASE_MIN_BUFFER_USD", str(MICRO_SR_ENTRY_BUFFER_USD)))
 LIMIT_CHASE_NEAR_FILL_USD = float(os.getenv("LIMIT_CHASE_NEAR_FILL_USD", "10"))
 LIMIT_CHASE_NEAR_FILL_PCT = float(os.getenv("LIMIT_CHASE_NEAR_FILL_PCT", "0.001"))  # 0.1% — chase until very close
+# v1.1.12 — patient APPROVE→submit wait, smart limit re-anchor, immediate chase on gap.
+MIN_SIGNAL_AGE_SEC_DEFAULT = int(os.getenv("MIN_SIGNAL_AGE_SEC", "600"))
+MIN_SIGNAL_AGE_ENABLED_DEFAULT = os.getenv("MIN_SIGNAL_AGE_ENABLED", "1").lower() not in ("0", "false", "no")
+SMART_SUBMIT_ENABLED_DEFAULT = os.getenv("SMART_SUBMIT_ENABLED", "1").lower() not in ("0", "false", "no")
+SMART_SUBMIT_REANCHOR_PCT_DEFAULT = float(os.getenv("SMART_SUBMIT_REANCHOR_PCT", "0.001"))
+DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT = True
 SHADOW_REPLAY_TTL_SEC = 2 * 3600  # 2h blocked-APPROVE counterfactual replay (long-position what-if)
 REVERSAL_STUDY_TTL_SEC = 3600  # 60m horizon for reversal_risk_score validation
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
@@ -4086,7 +4092,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.11-csv-write-retry-fix"
+EXECUTION_FIX_VERSION = "v1.1.12-smart-submit-chase-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4105,8 +4111,10 @@ ORDER_PLACEMENT_GRACE_SEC = 30
 # Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
 SIGNAL_STATUS_AWAITING_5M = "AWAITING_5M"
+SIGNAL_STATUS_AWAITING_MIN_AGE = "AWAITING_MIN_AGE"
 DUPLICATE_LIMIT_ACTIVE_STATUSES = frozenset({
-    "PENDING", "ORDERED", "ACTIVE", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
+    "PENDING", "ORDERED", "ACTIVE",
+    SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE,
 })
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
 TERMINAL_SIGNAL_OUTCOMES = frozenset({
@@ -4163,6 +4171,11 @@ state = {
     "limit_chase_start_sec": None,
     "limit_chase_interval_sec": None,
     "limit_chase_step_pct": None,
+    "min_signal_age_sec": None,
+    "min_signal_age_enabled": MIN_SIGNAL_AGE_ENABLED_DEFAULT,
+    "smart_submit_enabled": SMART_SUBMIT_ENABLED_DEFAULT,
+    "smart_submit_reanchor_pct": SMART_SUBMIT_REANCHOR_PCT_DEFAULT,
+    "duplicate_limit_block_enabled": DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT,
     "last_ai_candle_bucket": -1,
     "last_stability_ai_ts": 0.0,
     "last_replay_model_eval": None,
@@ -4624,6 +4637,150 @@ def get_limit_chase_step_pct() -> float:
     return max(0.05, min(1.0, _limit_chase_config_value(
         "limit_chase_step_pct", "LIMIT_CHASE_STEP_PCT", LIMIT_CHASE_STEP_PCT_DEFAULT, float
     )))
+
+
+def min_signal_age_enabled() -> bool:
+    if not is_research_data_collection():
+        return False
+    with state_lock:
+        raw = state.get("min_signal_age_enabled")
+    if raw is not None:
+        return bool(raw)
+    return MIN_SIGNAL_AGE_ENABLED_DEFAULT
+
+
+def get_min_signal_age_sec() -> int:
+    return max(0, _limit_chase_config_value(
+        "min_signal_age_sec", "MIN_SIGNAL_AGE_SEC", MIN_SIGNAL_AGE_SEC_DEFAULT, int
+    ))
+
+
+def smart_submit_enabled() -> bool:
+    if not is_research_data_collection():
+        return False
+    with state_lock:
+        raw = state.get("smart_submit_enabled")
+    if raw is not None:
+        return bool(raw)
+    return SMART_SUBMIT_ENABLED_DEFAULT
+
+
+def get_smart_submit_reanchor_pct() -> float:
+    return max(0.0001, min(0.02, _limit_chase_config_value(
+        "smart_submit_reanchor_pct", "SMART_SUBMIT_REANCHOR_PCT", SMART_SUBMIT_REANCHOR_PCT_DEFAULT, float
+    )))
+
+
+def duplicate_limit_block_enabled() -> bool:
+    with state_lock:
+        if "duplicate_limit_block_enabled" in state:
+            return bool(state.get("duplicate_limit_block_enabled"))
+    return DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT
+
+
+def _signal_age_sec(signal: dict) -> float:
+    now = time.time()
+    signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+    if signal_ts:
+        try:
+            return max(0.0, now - float(signal_ts))
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _refresh_signal_price_for_submit(signal: dict) -> float:
+    """Use current market at submit time (not stale APPROVE-time price)."""
+    price = state.get("price")
+    if price and float(price) > 0:
+        signal["signal_price"] = float(price)
+        signal["signal_price_submit"] = float(price)
+        return float(price)
+    return float(signal.get("signal_price") or 0)
+
+
+def _entry_limit_would_fill_immediately(direction: str, market_price: float, limit_price: float) -> bool:
+    """True when a resting maker limit at limit_price would take immediately vs market."""
+    direction = str(direction or "").upper()
+    if limit_price <= 0 or market_price <= 0:
+        return False
+    if direction == "LONG":
+        return market_price <= limit_price
+    if direction == "SHORT":
+        return market_price >= limit_price
+    return False
+
+
+def _apply_smart_submit_limit(
+    signal: dict, planned_limit: float, entry_mode: str, market_price: float
+) -> tuple:
+    """Re-anchor below/above market when price crossed planned limit; enable immediate chase."""
+    direction = _signal_direction(signal)
+    original = float(planned_limit)
+    if not _entry_limit_would_fill_immediately(direction, market_price, original):
+        signal["smart_submit_reanchored"] = False
+        return original, entry_mode, {
+            "reanchored": False,
+            "immediate_chase": False,
+            "original_planned": original,
+        }
+    reanchor_pct = get_smart_submit_reanchor_pct()
+    if direction == "LONG":
+        new_limit = round(market_price * (1 - reanchor_pct), 2)
+    elif direction == "SHORT":
+        new_limit = round(market_price * (1 + reanchor_pct), 2)
+    else:
+        return original, entry_mode, {"reanchored": False, "immediate_chase": False, "original_planned": original}
+    signal["smart_submit_reanchored"] = True
+    signal["smart_submit_original_planned"] = original
+    signal["planned_limit_price"] = original
+    logger.info(
+        f"[SMART_SUBMIT] re-anchor trade_id={signal.get('trade_id')} dir={direction} "
+        f"market={fmt(market_price)} planned={fmt(original)} new_limit={fmt(new_limit)} "
+        f"reanchor_pct={reanchor_pct*100:.2f}% immediate_chase=ON [PIPELINE ENFORCEMENT]"
+    )
+    return new_limit, entry_mode, {
+        "reanchored": True,
+        "immediate_chase": True,
+        "original_planned": original,
+    }
+
+
+def _resolve_submit_limit_price(signal: dict) -> tuple:
+    """Refresh market, resolve entry limit, apply smart-submit re-anchor when needed."""
+    if smart_submit_enabled():
+        _refresh_signal_price_for_submit(signal)
+    planned, entry_mode = resolve_entry_limit_price(signal)
+    market = float(state.get("price") or signal.get("signal_price") or 0)
+    if smart_submit_enabled() and market > 0:
+        return _apply_smart_submit_limit(signal, planned, entry_mode, market) + (planned,)
+    return planned, entry_mode, {"reanchored": False, "immediate_chase": False, "original_planned": planned}, planned
+
+
+def _instant_entry_path(signal: dict) -> bool:
+    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002)))
+    return pullback_pct <= 0.0
+
+
+def _should_defer_min_signal_age(signal: dict) -> bool:
+    if not min_signal_age_enabled():
+        return False
+    if _instant_entry_path(signal):
+        return False
+    return _signal_age_sec(signal) < get_min_signal_age_sec()
+
+
+def _defer_signal_min_age(signal: dict) -> bool:
+    signal["status"] = SIGNAL_STATUS_AWAITING_MIN_AGE
+    signal["awaiting_min_age_since"] = time.time()
+    signal["order_placed"] = False
+    logger.info(
+        f"[SIM] awaiting_min_age trade_id={signal.get('trade_id')} "
+        f"age_sec={round(_signal_age_sec(signal), 1)} need={get_min_signal_age_sec()}s "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    pipeline_state_sync()
+    return True
 
 def get_effective_ai_cooldown_sec() -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
@@ -5273,7 +5430,7 @@ def reconcile_stale_signals():
             if sig.get("outcome") != "OPEN":
                 sig["outcome"] = "OPEN"
                 fixed += 1
-            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M):
+            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
                 sig["status"] = "FILLED"
                 fixed += 1
         for s in trades_map.values():
@@ -5304,7 +5461,7 @@ def reconcile_stale_signals():
                     _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
                 if _remove_pending_for_trade(tid, sig["outcome"]):
                     orphans_removed += 1
-            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M) and ttl_expired:
+            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
@@ -5329,6 +5486,7 @@ def sync_signal_info_registry():
     open_ids = _open_trade_ids()
     awaiting_micro_ids = set()
     awaiting_5m_ids = set()
+    awaiting_min_age_ids = set()
     with trade_lock:
         for entry in trades_map.values():
             sig = entry.get("signal_ref")
@@ -5339,7 +5497,9 @@ def sync_signal_info_registry():
                 awaiting_micro_ids.add(tid)
             if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(sig):
                 awaiting_5m_ids.add(tid)
-    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids
+            if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(sig):
+                awaiting_min_age_ids.add(tid)
+    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids
     live_signals = []
     with trade_lock:
         for entry in trades_map.values():
@@ -8274,6 +8434,8 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
 
 def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
     """Expire incoming signal when same direction+limit already active. Returns True if rejected."""
+    if not duplicate_limit_block_enabled():
+        return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
     dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid)
@@ -8314,8 +8476,9 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
     return True
 
 
-def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
+def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str, smart_meta: dict = None) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
+    smart_meta = smart_meta or {}
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return False
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
@@ -8349,12 +8512,21 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "limit_chase_count": 0,
         "last_chase_ts": None,
     }
+    if smart_meta.get("immediate_chase"):
+        order["immediate_chase"] = True
+        order["chase_start_sec"] = 0
     order["fill_model"] = _resolve_fill_model(signal, order)
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
     signal["original_limit_price"] = limit_price
     signal["limit_chase_count"] = 0
     signal["last_chase_ts"] = None
+    if smart_meta.get("immediate_chase"):
+        signal["immediate_chase"] = True
+        signal["chase_start_sec"] = 0
+    if smart_meta.get("reanchored"):
+        signal["smart_submit_reanchored"] = True
+        signal["smart_submit_original_planned"] = smart_meta.get("original_planned")
     signal["entry_mode"] = entry_mode
     signal["qty"] = qty
     signal["order_created_ts"] = time.time()
@@ -8364,6 +8536,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     signal["await_5m_confirm"] = False
     signal.pop("awaiting_micro_since", None)
     signal.pop("awaiting_5m_since", None)
+    signal.pop("awaiting_min_age_since", None)
     with trade_lock:
         pending_orders.append(order)
     logger.info(
@@ -8458,7 +8631,13 @@ def process_awaiting_micro_entries():
             f"[SIM] micro_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
             f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
         )
-        _place_simulated_limit_order(signal, limit_price, entry_mode)
+        market = float(price)
+        smart_meta = {"reanchored": False, "immediate_chase": False, "original_planned": limit_price}
+        if smart_submit_enabled() and market > 0:
+            limit_price, entry_mode, smart_meta = _apply_smart_submit_limit(
+                signal, limit_price, entry_mode, market
+            )
+        _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
 
 
 def process_awaiting_5m_entries():
@@ -8498,22 +8677,21 @@ def process_awaiting_5m_entries():
             f"[SIM] 5m_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
             f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
         )
-        _place_simulated_limit_order(signal, limit_price, entry_mode)
+        market = float(price)
+        smart_meta = {"reanchored": False, "immediate_chase": False, "original_planned": limit_price}
+        if smart_submit_enabled() and market > 0:
+            limit_price, entry_mode, smart_meta = _apply_smart_submit_limit(
+                signal, limit_price, entry_mode, market
+            )
+        _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
 
 
-def execute_simulated_order(signal):
-    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
-    _refresh_order_and_signal_ttl()
-    logger.info(
-        f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
-        f"lane={lane} model={signal.get('research_model')} "
-        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
-    )
-    full_pipeline_trace("[EXECUTION]", "SIM_ORDER_CREATED", signal.get("trade_id"))
+def _promote_signal_to_limit_order(signal: dict) -> bool:
+    """Resolve limit at submit time (smart submit), then place or defer to micro/5m."""
     price = state.get("price")
     if not price or price <= 0:
         return False
-    limit_price, entry_mode = resolve_entry_limit_price(signal)
+    limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
     signal["entry_mode"] = entry_mode
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return True
@@ -8549,7 +8727,65 @@ def execute_simulated_order(signal):
         )
         pipeline_state_sync()
         return True
-    return _place_simulated_limit_order(signal, limit_price, entry_mode)
+    return _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
+
+
+def process_awaiting_min_age_entries():
+    """Promote AWAITING_MIN_AGE signals once min signal age elapses, then smart-submit limit."""
+    price = state.get("price")
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    min_age = get_min_signal_age_sec()
+    with trade_lock:
+        awaiting = [
+            (entry.get("signal_ref") or {})
+            for entry in trades_map.values()
+            if isinstance(entry.get("signal_ref"), dict)
+            and entry["signal_ref"].get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE
+            and not is_terminal_signal(entry["signal_ref"])
+        ]
+    for signal in awaiting:
+        tid = signal.get("trade_id")
+        if not tid:
+            continue
+        expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+        if expires_ts and now > expires_ts:
+            with trade_lock:
+                master = trades_map.get(tid, {}).get("signal_ref", signal)
+                master["status"] = "EXPIRED"
+                master["outcome"] = "SIGNAL_TTL_EXPIRED"
+                master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
+            logger.info(f"[SIM] awaiting_min_age expired trade_id={tid} [PIPELINE ENFORCEMENT]")
+            continue
+        if _signal_age_sec(signal) < min_age:
+            continue
+        if not ensure_signal_capacity():
+            continue
+        logger.info(
+            f"[SIM] min_signal_age reached trade_id={tid} age_sec={round(_signal_age_sec(signal), 1)} "
+            f"need={min_age}s — submitting limit [PIPELINE ENFORCEMENT]"
+        )
+        _promote_signal_to_limit_order(signal)
+
+
+def execute_simulated_order(signal):
+    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    _refresh_order_and_signal_ttl()
+    logger.info(
+        f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
+        f"lane={lane} model={signal.get('research_model')} "
+        f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
+    )
+    full_pipeline_trace("[EXECUTION]", "SIM_ORDER_CREATED", signal.get("trade_id"))
+    price = state.get("price")
+    if not price or price <= 0:
+        return False
+    if _should_defer_min_signal_age(signal):
+        return _defer_signal_min_age(signal)
+    return _promote_signal_to_limit_order(signal)
+
 
 def _limit_chase_market_gap(direction: str, limit_price: float, market_price: float) -> float:
     direction = str(direction or "").upper()
@@ -8588,7 +8824,12 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
     if not created:
         return False
     age_sec = now - created
-    if age_sec < get_limit_chase_start_sec():
+    chase_start = order.get("chase_start_sec")
+    if chase_start is None:
+        chase_start = 0 if order.get("immediate_chase") else get_limit_chase_start_sec()
+    else:
+        chase_start = float(chase_start)
+    if age_sec < chase_start:
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
         return False
@@ -8729,6 +8970,7 @@ def process_pending_orders():
         return
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
+    process_awaiting_min_age_entries()
     _update_pending_order_price_extremes(price)
     process_limit_chase(price)
     fills = []
@@ -9730,6 +9972,8 @@ def process_signal(event: dict):
                 final_status = SIGNAL_STATUS_AWAITING_5M
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_MICRO:
                 final_status = SIGNAL_STATUS_AWAITING_MICRO
+            elif signal.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE:
+                final_status = SIGNAL_STATUS_AWAITING_MIN_AGE
             else:
                 final_status = "ORDERED"
             finalize_signal(signal, ai, final_status)
@@ -11234,6 +11478,7 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleContinuousAi()" title="v87: periodic ~3min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
     <button onclick="toggleAiStability()" title="v87: candle-aligned shadow AI lane (log-only)">AI Stability: <span id="aiStabilityBtn">ON</span></button>
     <button onclick="toggleGoldenStack()" title="Enforce v86 quality gates after AI APPROVE">Golden Stack: <span id="goldenStackBtn">ON</span></button>
+    <button onclick="toggleDuplicateLimitBlock()" title="When OFF, allow duplicate same-direction limits at same price">Dup Limit Block: <span id="duplicateLimitBlockBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
@@ -11657,6 +11902,10 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_exec_5m_lane');
       refresh();
     }
+    async function toggleDuplicateLimitBlock() {
+      await post('/api/toggle_duplicate_limit_block');
+      refresh();
+    }
     function showPathwayTab(name) {
       const tabs = ['scorecard', 'funnel', 'session', 'kpis'];
       tabs.forEach(function (t) {
@@ -11860,6 +12109,9 @@ DASHBOARD_JS = """(function () {
           else syncTxt += ' | AI Stability ON';
           if (d.golden_stack_enabled === false) syncTxt += ' | Golden Stack OFF';
           else syncTxt += ' | Golden Stack ON';
+          if (d.duplicate_limit_block_enabled === false) syncTxt += ' | Dup limit ALLOWED';
+          else syncTxt += ' | Dup limit BLOCK';
+          if (d.min_signal_age_enabled !== false) syncTxt += ' | min_age=' + (d.min_signal_age_sec || 600) + 's';
           inst.innerText = syncTxt;
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
@@ -12067,6 +12319,12 @@ DASHBOARD_JS = """(function () {
         const gsCtrlBtn = document.getElementById('goldenStackControlBtn');
         if (gsCtrlLabel) gsCtrlLabel.innerText = gsOn ? 'ON' : 'OFF';
         if (gsCtrlBtn) gsCtrlBtn.style.backgroundColor = gsOn ? '#10b981' : '#ef4444';
+        const dupOn = d.duplicate_limit_block_enabled !== false;
+        const dupBtn = document.getElementById('duplicateLimitBlockBtn');
+        if (dupBtn) {
+          dupBtn.innerText = dupOn ? 'ON' : 'OFF';
+          dupBtn.parentElement.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
+        }
         const gsMode = document.getElementById('goldenStackModeNote');
         if (gsMode) {
           gsMode.innerHTML = gsOn
@@ -12232,7 +12490,7 @@ DASHBOARD_JS = """(function () {
           const pb = document.getElementById('pullbackThresh');
           if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M")).map(s => `
+        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -12245,7 +12503,7 @@ DASHBOARD_JS = """(function () {
             <td>${s.pull_req != null ? s.pull_req.toFixed(2) : '-' }%</td>
             <td>${s.signal_price !== undefined ? s.signal_price.toFixed(2) : '-'}</td>
             <td>${s.max_pull != null ? s.max_pull.toFixed(2) : '-' }%</td>
-            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : (s.outcome || '-')}</td>
+            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_MIN_AGE' ? 'AWAITING MIN AGE (' + (s.age_min != null ? s.age_min.toFixed(1) : '?') + 'm)' : (s.outcome || '-')}</td>
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
@@ -12611,6 +12869,7 @@ def api_state():
         open_ids = {p.get("trade_id") for p in positions_copy if p.get("trade_id")}
         awaiting_micro_ids = set()
         awaiting_5m_ids = set()
+        awaiting_min_age_ids = set()
         ordered_placed_ids = set()
         for t in trades_map_copy.values():
             s = t.get("signal_ref")
@@ -12621,6 +12880,8 @@ def api_state():
                 awaiting_micro_ids.add(tid)
             if tid and s.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(s):
                 awaiting_5m_ids.add(tid)
+            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(s):
+                awaiting_min_age_ids.add(tid)
             if (
                 tid
                 and s.get("status") == "ORDERED"
@@ -12628,7 +12889,7 @@ def api_state():
                 and not is_terminal_signal(s)
             ):
                 ordered_placed_ids.add(tid)
-        live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | ordered_placed_ids
+        live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | ordered_placed_ids
         for t in trades_map_copy.values():
             s = t.get("signal_ref")
             if not isinstance(s, dict):
@@ -12682,6 +12943,7 @@ def api_state():
                 "entry_mode": s.get("entry_mode"),
                 "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
                 "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
+                "awaiting_min_age": s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE,
                 "entry_path": s.get("entry_path"),
             })
         exposure_count = max(len(active_list), len(live_ids))
@@ -12719,6 +12981,10 @@ def api_state():
         snapshot["exec_5m_lane_enabled"] = exec_5m_lane_enabled()
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
+        snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()
+        snapshot["min_signal_age_enabled"] = min_signal_age_enabled()
+        snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
+        snapshot["smart_submit_enabled"] = smart_submit_enabled()
         snapshot["ai_stability_config"] = ai_stability_config_for_dashboard()
         snapshot["candle_15m_elapsed_pct"] = _candle_15m_elapsed_pct()
         snapshot["candle_aligned_window"] = is_candle_aligned_ai_window()
@@ -12806,6 +13072,19 @@ def toggle_golden_stack():
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"golden_stack_enabled": state["golden_stack_enabled"]})
+
+@app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
+def toggle_duplicate_limit_block():
+    with state_lock:
+        state["duplicate_limit_block_enabled"] = not bool(
+            state.get("duplicate_limit_block_enabled", DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT)
+        )
+        save_persistent_config()
+        logger.info(
+            f"[DUPLICATE_LIMIT] block toggled {'ON' if state['duplicate_limit_block_enabled'] else 'OFF'} "
+            f"(OFF=allow duplicates) [PIPELINE ENFORCEMENT]"
+        )
+    return jsonify({"duplicate_limit_block_enabled": state["duplicate_limit_block_enabled"]})
 
 @app.route('/api/toggle_ai_stability_research', methods=['POST'])
 def toggle_ai_stability_research():
@@ -14730,6 +15009,7 @@ def _persistent_config_keys():
         "limit_chase_start_sec",
         "limit_chase_interval_sec",
         "limit_chase_step_pct",
+        "duplicate_limit_block_enabled",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -15301,6 +15581,12 @@ def main():
         f"[V104] post_fill_grace={POST_FILL_GRACE_SEC}s order_ttl={LIMIT_ORDER_MAX_AGE_SEC}s "
         f"max_active={get_effective_max_active_signals()} ai_cooldown={get_effective_ai_cooldown_sec()}s "
         f"funnel=execution_funnel.jsonl insights=execution_insight_report.py [PIPELINE ENFORCEMENT]"
+    )
+    logger.warning(
+        f"[V112 SMART_SUBMIT] min_age_wait={'ON' if min_signal_age_enabled() else 'OFF'} "
+        f"({get_min_signal_age_sec()}s) | smart_submit={'ON' if smart_submit_enabled() else 'OFF'} "
+        f"| dup_limit_block={'ON' if duplicate_limit_block_enabled() else 'OFF'} "
+        f"[PIPELINE ENFORCEMENT]"
     )
     if golden_stack_enabled():
         logger.warning(
