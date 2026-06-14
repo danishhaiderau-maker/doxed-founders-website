@@ -9,10 +9,13 @@ import {
 import {
   TradingAgentDashboardState,
   buildTradingAgentActionShareText,
+  EXCHANGE_PROVIDER_LABELS,
+  type ExchangeProvider,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ExchangesService } from '../exchanges/exchanges.service';
 import { BotBridgeService } from './bot-bridge.service';
 import {
   mapBotStateToPublicDashboard,
@@ -120,6 +123,9 @@ function serializeAgent(
     hired?: boolean;
     instanceStatus?: string | null;
     instanceMode?: 'copy' | 'live' | null;
+    exchangeProvider?: string | null;
+    exchangeLabel?: string | null;
+    exchangeConnected?: boolean;
     viewScope?: 'showcase' | 'user';
     userSessionStartedAt?: string | null;
     liveStats?: {
@@ -162,6 +168,9 @@ function serializeAgent(
     hired: extra?.hired ?? false,
     instanceStatus: extra?.instanceStatus ?? null,
     instanceMode: extra?.instanceMode ?? null,
+    exchangeProvider: extra?.exchangeProvider ?? null,
+    exchangeLabel: extra?.exchangeLabel ?? null,
+    exchangeConnected: extra?.exchangeConnected ?? false,
     viewScope: extra?.viewScope ?? 'showcase',
     userSessionStartedAt: extra?.userSessionStartedAt ?? null,
     botConnected: extra?.botConnected ?? false,
@@ -180,6 +189,7 @@ export class TradingAgentsService implements OnModuleInit {
     private readonly botBridge: BotBridgeService,
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
+    private readonly exchanges: ExchangesService,
   ) {}
 
   async onModuleInit() {
@@ -495,6 +505,9 @@ export class TradingAgentsService implements OnModuleInit {
     let hired = false;
     let instanceStatus: string | null = null;
     let instanceMode: 'copy' | 'live' | null = null;
+    let exchangeProvider: string | null = null;
+    let exchangeLabel: string | null = null;
+    let exchangeConnected = false;
     if (userId) {
       const [followRow, instanceRow] = await Promise.all([
         this.prisma.tradingAgentFollow.findUnique({
@@ -516,6 +529,17 @@ export class TradingAgentsService implements OnModuleInit {
               : instanceRow.exchangeProvider === 'paper'
                 ? 'copy'
                 : 'live';
+        if (instanceRow.exchangeProvider !== 'paper') {
+          exchangeProvider = instanceRow.exchangeProvider;
+          exchangeLabel =
+            EXCHANGE_PROVIDER_LABELS[instanceRow.exchangeProvider as ExchangeProvider] ??
+            instanceRow.exchangeProvider;
+          const exStatus = await this.exchanges.getUserExchangeStatus(
+            userId,
+            instanceRow.exchangeProvider,
+          );
+          exchangeConnected = Boolean(exStatus.connected);
+        }
       }
       hired =
         instanceRow?.status === 'ACTIVE' || instanceRow?.status === 'PAUSED';
@@ -530,6 +554,9 @@ export class TradingAgentsService implements OnModuleInit {
       hired,
       instanceStatus,
       instanceMode,
+      exchangeProvider,
+      exchangeLabel,
+      exchangeConnected,
       ...(userOverlay ?? {}),
     });
   }

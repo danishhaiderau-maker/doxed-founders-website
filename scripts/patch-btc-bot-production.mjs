@@ -756,3 +756,25 @@ if (histChanged) {
   writeFileSync(TARGET, histFix, 'utf8');
   console.log('Applied showcase history persistence patches to bot.py');
 }
+
+// ─── Fix duplicate-limit deadlock: AWAITING_MIN_AGE signals blocking each other ───
+let dupFix = readFileSync(TARGET, 'utf8');
+if (
+  dupFix.includes('SIGNAL_STATUS_AWAITING_MIN_AGE,') &&
+  dupFix.includes('DUPLICATE_LIMIT_ACTIVE_STATUSES')
+) {
+  dupFix = dupFix.replace(
+    `DUPLICATE_LIMIT_ACTIVE_STATUSES = frozenset({
+    "PENDING", "ORDERED", "ACTIVE",
+    SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE,
+})`,
+    `DUPLICATE_LIMIT_ACTIVE_STATUSES = frozenset({
+    "PENDING", "ORDERED", "ACTIVE",
+    SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
+    # AWAITING_MIN_AGE excluded — dual lanes (CONTINUOUS + 5M) share the same AI limit;
+    # treating pre-order queue as duplicate caused mutual expiry with zero pending orders.
+})`,
+  );
+  writeFileSync(TARGET, dupFix, 'utf8');
+  console.log('Applied duplicate-limit AWAITING_MIN_AGE fix to bot.py');
+}
