@@ -3258,6 +3258,9 @@ export interface TradingAgentSummary {
   hired?: boolean;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
+  exchangeProvider?: string | null;
+  exchangeLabel?: string | null;
+  exchangeConnected?: boolean;
   viewScope?: 'showcase' | 'user';
   userSessionStartedAt?: string | null;
   botConnected?: boolean;
@@ -3384,7 +3387,7 @@ export function hireTradingAgent(
 }
 
 export interface PrivateAgentDashboard {
-  kind: 'private';
+  kind: 'copy' | 'live';
   agent: { id: string; slug: string; name: string; assetSymbol: string };
   instance: {
     id: string;

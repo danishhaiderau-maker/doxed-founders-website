@@ -5,8 +5,14 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { formatPercent } from '@dcf/utils';
+import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
-import { fetchMyAgentDashboard, type PrivateAgentDashboard } from '@/lib/api';
+import {
+  fetchMyAgentDashboard,
+  pauseMyAgentInstance,
+  resumeMyAgentInstance,
+  type PrivateAgentDashboard,
+} from '@/lib/api';
 
 export default function AgentMyDashboardClient({ slug }: { slug: string }) {
   const { data: session, status } = useSession();
@@ -16,6 +22,7 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
   const [data, setData] = useState<PrivateAgentDashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [relayBusy, setRelayBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -45,6 +52,40 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
     const interval = setInterval(load, 30_000);
     return () => clearInterval(interval);
   }, [status, router, slug, load]);
+
+  async function handleStopRelay() {
+    if (!token) return;
+    setRelayBusy(true);
+    try {
+      await pauseMyAgentInstance(slug, token);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Stop failed');
+    } finally {
+      setRelayBusy(false);
+    }
+  }
+
+  async function handleStartRelay() {
+    if (!token) return;
+    setRelayBusy(true);
+    try {
+      await resumeMyAgentInstance(slug, token);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Start failed');
+    } finally {
+      setRelayBusy(false);
+    }
+  }
+
+  const isLive = data?.kind === 'live' || data?.instance.exchangeProvider !== 'paper';
+  const relayState =
+    data?.instance.status === 'PAUSED'
+      ? ('paused' as const)
+      : isLive
+        ? ('active' as const)
+        : ('copy' as const);
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
@@ -79,6 +120,23 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
                 View public showcase →
               </Link>
             </div>
+
+            {isLive && (
+              <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <ExchangeRelayControl
+                  slug={slug}
+                  signedIn
+                  exchange={data.instance.exchangeProvider}
+                  exchangeLabel={data.instance.exchangeLabel}
+                  exchangeConnected={data.exchange.connected}
+                  relayState={relayState}
+                  busy={relayBusy}
+                  onStop={handleStopRelay}
+                  onStart={handleStartRelay}
+                  showSelector={false}
+                />
+              </div>
+            )}
 
             <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Stat label="Status" value={data.instance.status} />

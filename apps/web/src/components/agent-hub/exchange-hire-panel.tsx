@@ -10,6 +10,7 @@ import {
   type ExchangeProvider,
 } from '@dcf/utils';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
+import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
 import { ExchangeProviderOption, fetchExchangeProviders } from '@/lib/api';
 
 function sortProviders(list: ExchangeProviderOption[]): ExchangeProviderOption[] {
@@ -31,14 +32,38 @@ export function ExchangeHirePanel({
   slug,
   signedIn,
   costWeek,
+  hired,
+  instanceMode,
+  instanceStatus,
+  exchangeProvider,
+  exchangeLabel,
+  exchangeConnected,
+  onStopRelay,
+  onStartRelay,
+  relayBusy,
 }: {
   slug: string;
   signedIn: boolean;
   costWeek: number;
+  hired?: boolean;
+  instanceMode?: 'copy' | 'live' | null;
+  instanceStatus?: string | null;
+  exchangeProvider?: string | null;
+  exchangeLabel?: string | null;
+  exchangeConnected?: boolean;
+  onStopRelay?: () => void;
+  onStartRelay?: () => void;
+  relayBusy?: boolean;
 }) {
-  const [exchange, setExchange] = useState<ExchangeProvider>('bitfinex');
+  const [exchange, setExchange] = useState<ExchangeProvider>(
+    (exchangeProvider as ExchangeProvider) || 'bitfinex',
+  );
   const [providers, setProviders] = useState<ExchangeProviderOption[]>(FALLBACK_PROVIDERS);
   const [guideOpen, setGuideOpen] = useState(false);
+
+  useEffect(() => {
+    if (exchangeProvider) setExchange(exchangeProvider as ExchangeProvider);
+  }, [exchangeProvider]);
 
   useEffect(() => {
     fetchExchangeProviders()
@@ -53,10 +78,21 @@ export function ExchangeHirePanel({
   const sorted = useMemo(() => sortProviders(providers), [providers]);
   const guide = EXCHANGE_API_GUIDES[exchange];
   const selectedLabel =
-    sorted.find((p) => p.id === exchange)?.label ?? EXCHANGE_PROVIDER_LABELS[exchange];
+    exchangeLabel ??
+    sorted.find((p) => p.id === exchange)?.label ??
+    EXCHANGE_PROVIDER_LABELS[exchange];
   const hireHref = signedIn
     ? `/agent-hub/${slug}/hire?exchange=${exchange}`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=${exchange}`)}`;
+
+  const relayState =
+    hired && instanceMode === 'live'
+      ? instanceStatus === 'PAUSED'
+        ? ('paused' as const)
+        : ('active' as const)
+      : hired && instanceMode === 'copy'
+        ? ('copy' as const)
+        : ('idle' as const);
 
   const steps = [
     { n: 1, label: 'Choose exchange', detail: `${selectedLabel}${exchange === 'bitfinex' ? ' (Recommended)' : ''}` },
@@ -83,48 +119,79 @@ export function ExchangeHirePanel({
           <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week of live copy
           trading
         </p>
-        <ol className="mt-4 space-y-3">
-          {steps.map((s) => (
-            <li key={s.n} className="flex gap-3 text-xs">
-              <span
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                  s.n === 1 ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-500'
-                }`}
+
+        <div className="mt-4 rounded-xl border border-zinc-800 bg-black/25 p-4">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Exchange & relay control</p>
+          <div className="mt-3">
+            <ExchangeRelayControl
+              slug={slug}
+              signedIn={signedIn}
+              exchange={exchange}
+              exchangeLabel={selectedLabel}
+              exchangeConnected={exchangeConnected ?? (hired && instanceMode === 'live')}
+              relayState={relayState}
+              busy={relayBusy}
+              onStop={onStopRelay}
+              onStart={onStartRelay}
+              showSelector={!hired || instanceMode !== 'live'}
+              providers={sorted}
+              onExchangeChange={(id) => setExchange(id as ExchangeProvider)}
+            />
+          </div>
+        </div>
+
+        {relayState === 'idle' && (
+          <>
+            <ol className="mt-4 space-y-3">
+              {steps.map((s) => (
+                <li key={s.n} className="flex gap-3 text-xs">
+                  <span
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                      s.n === 1 ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-500'
+                    }`}
+                  >
+                    {s.n}
+                  </span>
+                  <div>
+                    <p className={s.n === 1 ? 'font-semibold text-zinc-200' : 'text-zinc-500'}>{s.label}</p>
+                    {s.detail && <p className="text-zinc-500">{s.detail}</p>}
+                  </div>
+                </li>
+              ))}
+            </ol>
+
+            <Link
+              href={hireHref}
+              className="mt-4 block rounded-lg bg-violet-600 py-2.5 text-center text-sm font-semibold hover:bg-violet-500"
+            >
+              Start setup on {selectedLabel}
+            </Link>
+          </>
+        )}
+
+        {relayState === 'copy' && signedIn && (onStopRelay || onStartRelay) && (
+          <div className="mt-4 flex gap-2">
+            {instanceStatus === 'PAUSED' ? (
+              <button
+                type="button"
+                disabled={relayBusy}
+                onClick={onStartRelay}
+                className="flex-1 rounded-lg border border-emerald-500/50 bg-emerald-600 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
               >
-                {s.n}
-              </span>
-              <div>
-                <p className={s.n === 1 ? 'font-semibold text-zinc-200' : 'text-zinc-500'}>{s.label}</p>
-                {s.detail && <p className="text-zinc-500">{s.detail}</p>}
-              </div>
-            </li>
-          ))}
-        </ol>
-
-        <label className="mt-4 block text-xs text-zinc-400">
-          Your exchange
-          <select
-            value={exchange}
-            onChange={(e) => setExchange(e.target.value as ExchangeProvider)}
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
-            aria-label="Exchange"
-          >
-            {sorted.map((p) => (
-              <option key={p.id} value={p.id} disabled={!p.available}>
-                {p.label}
-                {p.id === 'bitfinex' ? ' — Recommended' : ''}
-                {!p.available ? ' (Coming soon)' : ''}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <Link
-          href={hireHref}
-          className="mt-4 block rounded-lg bg-violet-600 py-2.5 text-center text-sm font-semibold hover:bg-violet-500"
-        >
-          Start setup on {selectedLabel}
-        </Link>
+                {relayBusy ? '…' : 'Resume paper copy'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={relayBusy}
+                onClick={onStopRelay}
+                className="flex-1 rounded-lg border border-amber-500/50 bg-amber-900/40 py-2 text-sm font-semibold text-amber-100 hover:bg-amber-900/60 disabled:opacity-50"
+              >
+                {relayBusy ? '…' : 'Pause paper copy'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">

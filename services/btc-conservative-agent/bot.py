@@ -2627,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.24-dashboard-toggle-fix-2026-06-14"
+ANALYZER_SYNC_ID = "v9.26-duplicate-minage-fix-2026-06-15"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4092,7 +4092,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.13-dashboard-toggle-fix"
+EXECUTION_FIX_VERSION = "v1.1.15-duplicate-minage-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4112,9 +4112,12 @@ ORDER_PLACEMENT_GRACE_SEC = 30
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
 SIGNAL_STATUS_AWAITING_5M = "AWAITING_5M"
 SIGNAL_STATUS_AWAITING_MIN_AGE = "AWAITING_MIN_AGE"
+# Only statuses with a committed limit on the path to a real book order count as duplicate exposure.
+# AWAITING_MIN_AGE is intentionally excluded — no order on book yet; dual-lane signals share ai_direct_limit
+# and would deadlock each other at promotion if counted here.
 DUPLICATE_LIMIT_ACTIVE_STATUSES = frozenset({
-    "PENDING", "ORDERED", "ACTIVE",
-    SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE,
+    "PENDING", "ACTIVE",
+    SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
 })
 TERMINAL_SIGNAL_STATUSES = frozenset({"EXPIRED", "BLOCKED", "REJECTED", "COMPLETE", "CANCELLED", "CLOSED", "FILLED"})
 TERMINAL_SIGNAL_OUTCOMES = frozenset({
@@ -5443,6 +5446,7 @@ def reconcile_stale_signals():
             if outcome in TERMINAL_SIGNAL_OUTCOMES and st not in TERMINAL_SIGNAL_STATUSES:
                 sig["status"] = "EXPIRED"
                 fixed += 1
+                _record_expired_order(sig, outcome)
                 if _remove_pending_for_trade(tid, "OUTCOME_TERMINAL_SYNC"):
                     orphans_removed += 1
                 continue
@@ -5457,6 +5461,7 @@ def reconcile_stale_signals():
                 sig["outcome"] = "STALE_NO_EXPOSURE" if not ttl_expired else "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
                 fixed += 1
+                _record_expired_order(sig, sig["outcome"])
                 if ttl_expired:
                     _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
                 if _remove_pending_for_trade(tid, sig["outcome"]):
@@ -5466,6 +5471,7 @@ def reconcile_stale_signals():
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
                 fixed += 1
+                _record_expired_order(sig, "SIGNAL_TTL_EXPIRED")
                 _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
         for order in list(pending_orders):
             tid = order.get("trade_id")
@@ -5473,6 +5479,8 @@ def reconcile_stale_signals():
                 continue
             master = trades_map.get(tid, {}).get("signal_ref", {}) or {}
             if is_terminal_signal(master) or (master.get("created_ts_ts", 0) and now - master.get("created_ts_ts", 0) > SIGNAL_TTL_SEC):
+                expire_reason = master.get("outcome") or master.get("exit_reason") or "TTL_EXPIRED"
+                _record_expired_order(order, expire_reason)
                 pending_orders.remove(order)
                 orphans_removed += 1
                 logger.info(f"[ORDER CLEANUP] Dropped orphan pending trade_id={tid} signal_status={master.get('status')} outcome={master.get('outcome')} [PIPELINE ENFORCEMENT]")
@@ -8451,7 +8459,10 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in DUPLICATE_LIMIT_ACTIVE_STATUSES:
+            if st == "ORDERED":
+                if not sig.get("order_placed"):
+                    continue
+            elif st not in DUPLICATE_LIMIT_ACTIVE_STATUSES:
                 continue
             expires_ts = sig.get("expires_ts") or (sig.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
             if expires_ts and now > expires_ts:
@@ -8503,6 +8514,7 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         "await_micro_confirm": False,
         "await_5m_confirm": False,
     })
+    _record_expired_order(signal, reason)
     _funnel_signal_expired(signal, reason)
     logger.info(
         f"[SIM] DUPLICATE_LIMIT skip trade_id={tid} dir={direction} limit={fmt(limit_price)} "
@@ -8658,6 +8670,7 @@ def process_awaiting_micro_entries():
                 master["status"] = "EXPIRED"
                 master["outcome"] = "SIGNAL_TTL_EXPIRED"
                 master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _record_expired_order(signal, "SIGNAL_TTL_EXPIRED")
             _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
             logger.info(f"[SIM] awaiting_micro expired trade_id={tid} [PIPELINE ENFORCEMENT]")
             continue
@@ -8704,6 +8717,7 @@ def process_awaiting_5m_entries():
                 master["status"] = "EXPIRED"
                 master["outcome"] = "SIGNAL_TTL_EXPIRED"
                 master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _record_expired_order(signal, "SIGNAL_TTL_EXPIRED")
             _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
             logger.info(f"[SIM] awaiting_5m expired trade_id={tid} [PIPELINE ENFORCEMENT]")
             continue
@@ -8795,6 +8809,7 @@ def process_awaiting_min_age_entries():
                 master["status"] = "EXPIRED"
                 master["outcome"] = "SIGNAL_TTL_EXPIRED"
                 master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _record_expired_order(signal, "SIGNAL_TTL_EXPIRED")
             _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
             logger.info(f"[SIM] awaiting_min_age expired trade_id={tid} [PIPELINE ENFORCEMENT]")
             continue
@@ -10677,29 +10692,73 @@ def create_limit_order(signal):
     assert any(o.get("trade_id") == signal.get("trade_id") for o in pending_orders), "Order append failed"
     return order
 
-def _record_expired_order(order: dict, reason: str):
+def _expired_entry_created_ts(source: dict) -> float:
+    raw = (
+        source.get("created_ts")
+        or source.get("created_ts_ts")
+        or source.get("order_created_ts")
+        or source.get("signal_created_ts")
+    )
+    if not raw:
+        timing_ts = (source.get("timing") or {}).get("signal_ts")
+        if timing_ts:
+            raw = timing_ts
+    if raw:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return time.time()
+
+
+def _expired_already_recorded(trade_id: str) -> bool:
+    if not trade_id:
+        return False
+    with trade_lock:
+        return any(e.get("trade_id") == trade_id for e in expired_orders)
+
+
+def _record_expired_order(source: dict, reason: str):
+    """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
+    tid = source.get("trade_id")
+    if _expired_already_recorded(tid):
+        return None
     now = time.time()
-    created = order.get("created_ts") or now
+    created = _expired_entry_created_ts(source)
     age = now - created if created else 0
-    tid = order.get("trade_id")
-    master = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
-    conf = order.get("ai_win_prob")
+    with trade_lock:
+        master = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+    conf = source.get("ai_win_prob")
     if conf is None:
         conf = master.get("ai_win_prob", 0)
+    limit_price = (
+        source.get("limit_price")
+        or source.get("planned_limit_price")
+        or master.get("limit_price")
+        or master.get("planned_limit_price")
+    )
+    signal_price = source.get("signal_price") or master.get("signal_price") or master.get("price")
     row = {
         "time": utc_iso(),
         "trade_id": tid,
-        "dir": _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side")),
-        "limit_price": order.get("limit_price"),
-        "signal_price": order.get("signal_price"),
+        "dir": _normalize_order_side_to_dir(
+            source.get("signal_dir")
+            or source.get("side")
+            or source.get("final_direction")
+            or source.get("dir")
+            or master.get("final_direction")
+            or master.get("dir")
+        ),
+        "limit_price": limit_price,
+        "signal_price": signal_price,
         "created_ts": created,
         "expired_ts": now,
         "age_min": int(age / 60),
         "conf": conf,
         "mode": state.get("strategy_mode"),
         "reason": reason,
-        "research_lane": order.get("research_lane"),
-        "research_model": order.get("research_model"),
+        "research_lane": source.get("research_lane") or master.get("research_lane"),
+        "research_model": source.get("research_model") or master.get("research_model"),
     }
     with trade_lock:
         expired_orders.append(row)

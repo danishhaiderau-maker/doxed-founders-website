@@ -44,6 +44,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [instanceBusy, setInstanceBusy] = useState(false);
   const [instanceStatus, setInstanceStatus] = useState<string | null>(null);
   const [instanceMode, setInstanceMode] = useState<'copy' | 'live' | null>(null);
+  const [exchangeProvider, setExchangeProvider] = useState<string | null>(null);
+  const [exchangeLabel, setExchangeLabel] = useState<string | null>(null);
+  const [exchangeConnected, setExchangeConnected] = useState(false);
   const [agent, setAgent] = useState<TradingAgentSummary | null>(null);
   const [allAgents, setAllAgents] = useState<TradingAgentSummary[]>([]);
   const [dashboard, setDashboard] = useState<TradingAgentDashboardState | null>(null);
@@ -66,6 +69,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setHired(Boolean(meta.hired));
     setInstanceStatus(meta.instanceStatus ?? null);
     setInstanceMode(meta.instanceMode ?? null);
+    setExchangeProvider(meta.exchangeProvider ?? null);
+    setExchangeLabel(meta.exchangeLabel ?? null);
+    setExchangeConnected(Boolean(meta.exchangeConnected));
   }, []);
 
   const loadLive = useCallback(async () => {
@@ -278,6 +284,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           publicStatus={publicStatus.status}
           instanceStatus={instanceStatus}
           instanceMode={instanceMode}
+          exchangeProvider={exchangeProvider ?? agent.exchangeProvider}
+          exchangeLabel={exchangeLabel ?? agent.exchangeLabel}
+          exchangeConnected={exchangeConnected || Boolean(agent.exchangeConnected)}
           viewScope={viewScope}
           showcaseNote={showcaseNote}
           onFollow={toggleFollow}

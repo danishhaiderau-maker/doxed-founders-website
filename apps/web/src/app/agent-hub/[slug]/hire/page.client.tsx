@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
+import { ExchangeRelayControl, exchangeLabelFor } from '@/components/agent-hub/exchange-relay-control';
 import {
   AGENT_BETA_RISK_COPY,
   BITFINEX_RECOMMEND_BANNER,
@@ -216,6 +217,23 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             <p className="text-xs text-zinc-500">
               Live tier places real orders on your account when admin AI trades. Never enable withdraw permissions.
             </p>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+              <ExchangeRelayControl
+                slug={slug}
+                signedIn={Boolean(token)}
+                exchange={exchange}
+                exchangeLabel={selectedProvider?.label ?? exchangeLabelFor(exchange)}
+                relayState="idle"
+                showSelector
+                providers={sortedProviders}
+                onExchangeChange={(id) => {
+                  setExchange(id);
+                  setPassphrase('');
+                }}
+              />
+            </div>
+
             <div className="grid gap-2 sm:grid-cols-2">
               {sortedProviders.map((p) => {
                 const recommended = p.id === 'bitfinex';

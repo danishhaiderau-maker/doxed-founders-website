@@ -68,6 +68,9 @@ function HireSidebar({
   hired,
   instanceStatus,
   instanceMode,
+  exchangeProvider,
+  exchangeLabel,
+  exchangeConnected,
   onCopyAllocate,
   onPauseInstance,
   onResumeInstance,
@@ -80,6 +83,9 @@ function HireSidebar({
   hired: boolean;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
+  exchangeProvider?: string | null;
+  exchangeLabel?: string | null;
+  exchangeConnected?: boolean;
   onCopyAllocate?: () => void;
   onPauseInstance?: () => void;
   onResumeInstance?: () => void;
@@ -94,6 +100,15 @@ function HireSidebar({
         slug={slug}
         signedIn={signedIn}
         costWeek={agent.costDdollarWeek ?? 2000}
+        hired={hired}
+        instanceMode={instanceMode}
+        instanceStatus={instanceStatus}
+        exchangeProvider={exchangeProvider}
+        exchangeLabel={exchangeLabel}
+        exchangeConnected={exchangeConnected}
+        onStopRelay={onPauseInstance}
+        onStartRelay={onResumeInstance}
+        relayBusy={instanceBusy}
       />
 
       <div className="rounded-2xl border border-red-500/40 bg-red-950/25 p-5">
@@ -119,24 +134,6 @@ function HireSidebar({
         )}
       </div>
 
-      {hired && signedIn && (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4 text-xs">
-          <p className="font-semibold text-white">Your copy instance</p>
-          <p className="mt-1 text-zinc-500">
-            {instanceMode === 'live' ? 'Live' : 'DDollar'} ·{' '}
-            {instanceStatus === 'PAUSED' ? 'Paused' : 'Active'}
-          </p>
-          <button
-            type="button"
-            disabled={instanceBusy}
-            onClick={instanceStatus === 'PAUSED' ? onResumeInstance : onPauseInstance}
-            className="mt-2 rounded-lg border border-zinc-600 px-3 py-1.5 text-zinc-300 hover:text-white disabled:opacity-50"
-          >
-            {instanceStatus === 'PAUSED' ? 'Resume copying' : 'Pause copying'}
-          </button>
-        </div>
-      )}
-
     </aside>
   );
 }
@@ -157,6 +154,9 @@ export function AgentPublicProfile({
   publicStatus,
   instanceStatus,
   instanceMode,
+  exchangeProvider,
+  exchangeLabel,
+  exchangeConnected,
   viewScope = 'showcase',
   showcaseNote,
   onFollow,
@@ -183,6 +183,9 @@ export function AgentPublicProfile({
   publicStatus: PublicAgentStatus;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
+  exchangeProvider?: string | null;
+  exchangeLabel?: string | null;
+  exchangeConnected?: boolean;
   viewScope?: 'showcase' | 'user';
   showcaseNote?: string | null;
   onFollow?: () => void;
@@ -196,25 +199,34 @@ export function AgentPublicProfile({
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const isCopySession = hired && instanceMode === 'copy';
+  const isLiveSession = hired && instanceMode === 'live';
   const isUserSession = viewScope === 'user' || isCopySession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
   const allocationUsd = agent.startingBalance || 500;
-  const heroBadge = isUserSession
+  const heroBadge = isLiveSession
     ? instanceStatus === 'PAUSED'
-      ? { label: 'Paused', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
-      : {
-          label: 'Paper tracking',
-          className: 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40',
-        }
+      ? { label: 'Relay off', className: 'bg-red-500/20 text-red-200 ring-1 ring-red-500/40' }
+      : { label: 'Live copy', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
+    : isUserSession
+      ? instanceStatus === 'PAUSED'
+        ? { label: 'Paused', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
+        : {
+            label: 'Paper tracking',
+            className: 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40',
+          }
     : isLive
       ? { label: 'Live', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
       : publicStatus === 'updating'
         ? { label: 'Updating', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
         : { label: 'Offline', className: 'bg-zinc-800 text-zinc-400' };
-  const statusLabel = isUserSession
-    ? instanceMode === 'live'
-      ? 'Your live copy session'
-      : `Your copy track · ${formatUsd(agent.startingBalance || 500, 0)} start`
+  const statusLabel = isLiveSession
+    ? instanceStatus === 'PAUSED'
+      ? `Relay stopped · ${exchangeLabel ?? 'Exchange'} protected`
+      : `Live copy on ${exchangeLabel ?? 'your exchange'}`
+    : isUserSession
+      ? instanceMode === 'live'
+        ? 'Your live copy session'
+        : `Your copy track · ${formatUsd(agent.startingBalance || 500, 0)} start`
     : isLive
       ? 'Admin showcase (observe only)'
       : publicStatus === 'offline' && !botConnected
@@ -234,6 +246,31 @@ export function AgentPublicProfile({
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
+      {isLiveSession && (
+        <div className="mb-4 rounded-2xl border border-emerald-500/45 bg-gradient-to-r from-emerald-950/50 via-zinc-950/30 to-zinc-950/50 px-5 py-4 shadow-lg shadow-emerald-950/20">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-base font-bold text-emerald-100">
+                Live copy active on {exchangeLabel ?? 'your exchange'}
+              </p>
+              <p className="mt-1 text-sm text-zinc-300">
+                Admin showcase signals relay to your {exchangeLabel ?? 'exchange'} account (max $500 margin).
+                Use <strong className="text-white">Stop</strong> in the sidebar to sever the relay instantly.
+              </p>
+            </div>
+            <span
+              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wide ${
+                instanceStatus === 'PAUSED'
+                  ? 'bg-red-500/20 text-red-200'
+                  : 'bg-emerald-500/20 text-emerald-200'
+              }`}
+            >
+              {instanceStatus === 'PAUSED' ? 'Relay off' : 'Relay on'}
+            </span>
+          </div>
+        </div>
+      )}
+
       {isCopySession && (
         <div className="mb-4 rounded-2xl border border-emerald-500/45 bg-gradient-to-r from-emerald-950/50 via-violet-950/30 to-zinc-950/50 px-5 py-4 shadow-lg shadow-emerald-950/20">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -513,6 +550,9 @@ export function AgentPublicProfile({
           hired={hired}
           instanceStatus={instanceStatus}
           instanceMode={instanceMode}
+          exchangeProvider={exchangeProvider}
+          exchangeLabel={exchangeLabel}
+          exchangeConnected={exchangeConnected}
           onCopyAllocate={onCopyAllocate}
           onPauseInstance={onPauseInstance}
           onResumeInstance={onResumeInstance}

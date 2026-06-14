@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   TRADING_AGENT_AI_PROVIDER_LABELS,
   EXCHANGE_PROVIDER_LABELS,
@@ -14,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
+import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import {
   USER_INSTANCE_STARTING_BALANCE,
   buildFreshInstanceDashboardState,
@@ -22,6 +19,9 @@ import {
 
 @Injectable()
 export class TradingAgentInstancesService {
+  private readonly logger = new Logger(TradingAgentInstancesService.name);
+  private readonly bitfinex = new BitfinexTradingClient();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly points: PointsService,
@@ -151,6 +151,7 @@ export class TradingAgentInstancesService {
         });
 
     const executionLive = process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
+    const relayPaused = instance.status === TradingAgentInstanceStatus.PAUSED;
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
     const scope = readInstanceScope(instance);
     const exchangeStatus = isCopy
@@ -192,9 +193,11 @@ export class TradingAgentInstancesService {
         connected: instance.status === TradingAgentInstanceStatus.ACTIVE,
         message: isCopy
           ? 'Copy-trading admin DeepSeek decisions with DDollar — no API keys required.'
-          : executionLive
-            ? 'Live copy execution active — platform places Bitfinex limit orders from admin signals on your account (max $500 margin).'
-            : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
+          : relayPaused
+            ? 'Relay stopped — showcase signals will not execute on your exchange until you press Start.'
+            : executionLive
+              ? 'Live copy execution active — platform places Bitfinex limit orders from admin signals on your account (max $500 margin).'
+              : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
         openPositions: openHirePositions,
         pnlPct: 0,
       },
@@ -286,18 +289,82 @@ export class TradingAgentInstancesService {
     }
 
     const status = paused ? TradingAgentInstanceStatus.PAUSED : TradingAgentInstanceStatus.ACTIVE;
+    let relayAction: { cancelledOrders?: number } | undefined;
+
+    if (paused && instance.exchangeProvider !== 'paper') {
+      relayAction = await this.severShowcaseRelay(userId, instance.exchangeProvider);
+    }
+
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: { status, lastError: null },
     });
 
+    if (paused) {
+      await this.notifications.notifyUser(userId, {
+        type: NotificationType.TRADING_AGENT_UPDATE,
+        title: `${agent.name} relay stopped`,
+        body:
+          relayAction?.cancelledOrders != null && relayAction.cancelledOrders > 0
+            ? `Showcase copy severed — ${relayAction.cancelledOrders} pending order(s) cancelled on your exchange.`
+            : 'Showcase copy severed — no new trades until you press Start.',
+        link: `/agent-hub/${agent.slug}`,
+      });
+    } else {
+      await this.notifications.notifyUser(userId, {
+        type: NotificationType.TRADING_AGENT_UPDATE,
+        title: `${agent.name} relay resumed`,
+        body: 'Live copy trading active again — mirroring admin showcase signals on your exchange.',
+        link: `/agent-hub/${agent.slug}`,
+      });
+    }
+
     return {
       ok: true,
       status,
+      relay: relayAction,
       message: paused
-        ? 'Your agent instance is paused — no new trades until you resume.'
-        : 'Your agent instance is active again.',
+        ? relayAction?.cancelledOrders
+          ? `Relay severed — ${relayAction.cancelledOrders} pending order(s) cancelled. No new showcase trades until you Start.`
+          : 'Relay severed — no new showcase trades until you Start.'
+        : 'Relay resumed — copying admin showcase signals on your exchange again.',
     };
+  }
+
+  /** Kill switch: cancel pending exchange orders so showcase relay cannot fill new trades. */
+  private async severShowcaseRelay(
+    userId: string,
+    provider: string,
+  ): Promise<{ cancelledOrders: number }> {
+    if (provider !== 'bitfinex') {
+      return { cancelledOrders: 0 };
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, provider);
+    if (!creds) return { cancelledOrders: 0 };
+
+    let cancelled = 0;
+    try {
+      const orders = await this.bitfinex.listActiveOrders(creds);
+      for (const order of orders) {
+        try {
+          await this.bitfinex.cancelOrder(creds, order.id);
+          cancelled += 1;
+        } catch (err) {
+          this.logger.warn(
+            `Kill switch: failed to cancel order ${order.id} for ${userId}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Kill switch: could not list Bitfinex orders for ${userId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+    return { cancelledOrders: cancelled };
   }
 
   private formatInstance(
