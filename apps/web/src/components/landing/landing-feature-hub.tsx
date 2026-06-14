@@ -13,7 +13,7 @@ type HubProps = {
   platformStats?: PlatformStats | null;
 };
 
-function NavPill({
+function NavTile({
   href,
   label,
   icon,
@@ -28,28 +28,28 @@ function NavPill({
 }) {
   const accentClass =
     accent === 'gold'
-      ? 'hover:border-amber-500/50 hover:bg-amber-950/40'
+      ? 'border-amber-500/15 bg-amber-950/15 hover:border-amber-500/40 hover:bg-amber-950/30'
       : accent === 'purple'
-        ? 'hover:border-violet-500/50 hover:bg-violet-950/40'
-        : 'hover:border-zinc-500 hover:bg-zinc-900';
+        ? 'border-violet-500/15 bg-violet-950/15 hover:border-violet-500/40 hover:bg-violet-950/30'
+        : 'border-zinc-800/80 bg-zinc-950/40 hover:border-zinc-600 hover:bg-zinc-900/60';
 
   return (
     <Link
       href={href}
-      className={`group inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-950/60 px-2.5 py-1.5 transition ${accentClass}`}
+      className={`group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 transition ${accentClass}`}
     >
-      <span className="text-sm leading-none opacity-90" aria-hidden>
+      <span className="text-lg leading-none opacity-90" aria-hidden>
         {icon}
       </span>
-      <span className="text-[11px] font-semibold text-zinc-100 group-hover:text-white">{label}</span>
+      <span className="min-w-0 flex-1 text-xs font-semibold text-zinc-100 group-hover:text-white">{label}</span>
       {badge ? (
-        <span className="rounded-full bg-amber-500/25 px-1.5 py-0.5 text-[8px] font-bold text-amber-100">{badge}</span>
+        <span className="rounded-full bg-violet-500/90 px-1.5 py-0.5 text-[8px] font-bold text-white">{badge}</span>
       ) : null}
     </Link>
   );
 }
 
-/** Three-row navigation table (Explore · Community · Build). */
+/** Grouped quick-link hub — three columns instead of stacked rows. */
 export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number }) {
   const { data: session } = useSession();
   const { count: feedNewCount } = useFeedNewCount();
@@ -73,52 +73,44 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-      <div className="grid lg:grid-cols-[1fr_minmax(11rem,13rem)]">
-        <div className="divide-y divide-zinc-800/70">
-          {HUB_NAV_ROWS.map((row) => (
-            <div key={row.id} className={`flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:gap-4 sm:px-4 ${row.rowBgClass}`}>
-              <div className="shrink-0 sm:w-[7.5rem]">
-                <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-zinc-600">{row.rowNumber}</p>
-                <p className={`text-xs font-bold uppercase tracking-wide ${row.labelClass}`}>{row.label}</p>
-              </div>
-              <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
-                {row.items.map((item) => {
-                  const badge =
-                    item.label === 'Feed' && feedNewCount > 0
-                      ? feedNewCount > 9
-                        ? '9+'
-                        : String(feedNewCount)
-                      : item.label === 'Trust Center' && scoutPending > 0
-                        ? String(scoutPending)
-                        : undefined;
-                  return (
-                    <NavPill
-                      key={item.label}
-                      href={resolveHref(item)}
-                      label={item.label}
-                      icon={item.icon}
-                      badge={badge}
-                      accent={rowAccent(row.id)}
-                    />
-                  );
-                })}
-              </div>
-              <p className="text-[10px] text-zinc-500 lg:hidden">{row.subtitle}</p>
+      <div className="border-b border-zinc-800/70 px-4 py-3 sm:px-5">
+        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500">Platform hub</p>
+        <p className="mt-0.5 text-sm text-zinc-400">Everything on Doxxed Crypto — grouped for quick access</p>
+      </div>
+      <div className="grid gap-3 p-3 sm:p-4 lg:grid-cols-3">
+        {HUB_NAV_ROWS.map((row) => (
+          <div
+            key={row.id}
+            className={`flex flex-col rounded-xl border p-3 ${row.borderClass} ${row.rowBgClass}`}
+          >
+            <div className="mb-3">
+              <p className={`text-xs font-bold uppercase tracking-wide ${row.labelClass}`}>{row.label}</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">{row.sidebarDescription}</p>
             </div>
-          ))}
-        </div>
-
-        <aside className="hidden border-l border-zinc-800/70 bg-black/20 px-3 py-4 lg:block">
-          <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-600">Navigation</p>
-          <ul className="mt-3 space-y-4">
-            {HUB_NAV_ROWS.map((row) => (
-              <li key={row.id}>
-                <p className={`text-[10px] font-bold uppercase tracking-wide ${row.labelClass}`}>{row.label}</p>
-                <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">{row.sidebarDescription}</p>
-              </li>
-            ))}
-          </ul>
-        </aside>
+            <div className="grid flex-1 gap-1.5 sm:grid-cols-1">
+              {row.items.map((item) => {
+                const badge =
+                  item.label === 'Feed' && feedNewCount > 0
+                    ? feedNewCount > 9
+                      ? '9+'
+                      : String(feedNewCount)
+                    : item.label === 'Trust Center' && scoutPending > 0
+                      ? String(scoutPending)
+                      : undefined;
+                return (
+                  <NavTile
+                    key={`${item.label}-${item.href}`}
+                    href={resolveHref(item)}
+                    label={item.label}
+                    icon={item.icon}
+                    badge={badge}
+                    accent={rowAccent(row.id)}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );

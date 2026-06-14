@@ -103,6 +103,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/trust-center', label: 'Trust Center', icon: '🛡' },
       { href: '/agent-hub', label: 'Agents', icon: '🤖' },
       { href: '/builder-rewards', label: 'Builder Rewards', icon: '🏗' },
+      { href: '/mobile', label: 'Android app', icon: '📱' },
     ],
   },
   {

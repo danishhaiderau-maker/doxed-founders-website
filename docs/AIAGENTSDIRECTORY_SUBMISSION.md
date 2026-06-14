@@ -1,4 +1,8 @@
-# AI Agents Directory — submission pack
+# DEPRECATED — manual web form only (no CLI/API)
+
+Use `docs/AGENT_REGISTRY_AUTOMATION.md` instead. Kept for reference if you submit AAD manually once.
+
+# AI Agents Directory — submission pack (legacy)
 
 **Submit here:** [https://aiagentsdirectory.com/submit-agent](https://aiagentsdirectory.com/submit-agent)
 

@@ -364,47 +364,45 @@ export function AgentRegistrationWizard({
 
       {step === 5 && (
         <section className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-6">
-          <h2 className="text-lg font-semibold text-emerald-100">Step 5 — Free directory listings</h2>
+          <h2 className="text-lg font-semibold text-emerald-100">Step 5 — Automated registries (CLI / API)</h2>
           <p className="mt-2 text-sm text-zinc-400">
-            Run locally:{' '}
-            <code className="rounded bg-zinc-900 px-1 text-violet-300">npm run submit:agent-directories -- --open</code>
-            {' '}— opens all free submit forms. Copy-paste pack:{' '}
-            <code className="rounded bg-zinc-900 px-1 text-violet-300">docs/ALL_AGENT_DIRECTORIES.md</code>
+            Manual web directories removed (no CLI/API). One command:
           </p>
-          <ul className="mt-3 space-y-2 text-sm text-zinc-300">
-            {[
-              ['AI Agents Directory', 'https://aiagentsdirectory.com/submit-agent'],
-              ['Pikagent', 'https://www.pikagent.com/submit'],
-              ['Fushu', 'https://fushu.dev/register'],
-              ['Agents.one', 'https://agents.one/submit-agent/'],
-              ['ListMyAgent', 'https://listmyagent.com/add-ai-agent-listing/'],
-              ['AI Agents Buzz', 'https://aiagentsbuzz.com/submit/'],
-              ['OpenServ', 'https://www.openserv.ai/'],
-            ].map(([label, href]) => (
-              <li key={href}>
-                <a href={href} target="_blank" rel="noreferrer" className="text-violet-300 underline">
-                  {label}
-                </a>
-              </li>
-            ))}
+          <code className="mt-2 block rounded-lg bg-zinc-950 px-3 py-2 text-xs text-violet-300">
+            npm run register:agents-automated
+          </code>
+          <ul className="mt-4 space-y-2 text-sm text-zinc-300">
+            <li>
+              <span className="text-zinc-500">SAID:</span>{' '}
+              <code className="text-violet-300">npm run register:said-simple</code>
+            </li>
+            <li>
+              <span className="text-zinc-500">Spawn:</span>{' '}
+              <code className="text-violet-300">npm run prepare:agent-registrations</code>
+            </li>
+            <li>
+              <span className="text-zinc-500">OpenServ:</span>{' '}
+              <code className="text-violet-300">npm run provision:openserv</code>
+            </li>
+            <li>
+              <span className="text-zinc-500">Fushu:</span> fushu.json + register script
+            </li>
           </ul>
           <p className="mt-4 text-xs text-zinc-500">
-            All free tiers. AAD badge is on Agent Hub footer. After each submit, click Mark registered below.
+            Docs: docs/AGENT_REGISTRY_AUTOMATION.md · x402: docs/X402_INTEGRATION.md
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            {['AGENTSCAN', 'PIKAGENT', 'FUSHU', 'AGENTS_ONE', 'LISTMYAGENT', 'AIAGENTS_BUZZ', 'SKILLS_SH'].map(
-              (reg) => (
-                <button
-                  key={reg}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void onMarkRegistered(reg)}
-                  className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:border-emerald-600/50"
-                >
-                  Mark {reg}
-                </button>
-              ),
-            )}
+            {['FUSHU', 'SKILLS_SH', 'SAID', 'SPAWN', 'ERC8004_SCAN'].map((reg) => (
+              <button
+                key={reg}
+                type="button"
+                disabled={busy}
+                onClick={() => void onMarkRegistered(reg)}
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:border-emerald-600/50"
+              >
+                Mark {reg}
+              </button>
+            ))}
           </div>
           <button
             type="button"

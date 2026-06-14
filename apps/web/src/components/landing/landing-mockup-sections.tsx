@@ -1,11 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useSession } from 'next-auth/react';
 import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
-import { SiteBrand } from '@/components/site-nav';
-import { NotificationBell } from '@/components/notification-bell';
-import { PlatformMessagesBell } from '@/components/platform-messages-bell';
+import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/landing-feature-hub';
 import { LandingPlatformAdoption } from '@/components/landing/landing-platform-adoption';
 import { LandingValueGrid } from '@/components/landing/landing-value-grid';
@@ -106,28 +103,11 @@ function Card({
 }
 
 export function LandingHeader() {
-  const { data: session } = useSession();
-
   return (
-    <header className="border-b border-zinc-800/80 bg-[#050508]">
-      <div className="mx-auto flex w-full max-w-[88rem] items-center justify-between gap-3 px-4 py-3 lg:px-8">
-        <SiteBrand className="text-sm font-bold tracking-tight uppercase" />
-        <div className="flex items-center gap-2">
-          <PlatformMessagesBell />
-          <NotificationBell />
-          {session ? (
-            <Link
-              href="/account"
-              className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-200 hover:text-white"
-            >
-              Profile
-            </Link>
-          ) : (
-            <Link href="/login" className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm text-zinc-200">
-              Login
-            </Link>
-          )}
-        </div>
+    <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/90 backdrop-blur-xl">
+      <div className="mx-auto flex w-full max-w-[88rem] items-center justify-between gap-4 px-4 py-2.5 lg:px-8">
+        <SiteBrand className="shrink-0 text-sm font-bold tracking-tight uppercase" />
+        <SiteNav />
       </div>
     </header>
   );
