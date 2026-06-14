@@ -1,4 +1,4 @@
-/** Copy-paste + submit URLs for Conservative BTC Agent directory listings. */
+/** Automated agent registry targets + profile metadata (CLI / API / manifest only). */
 
 export const CONSERVATIVE_BTC_DIRECTORY_PROFILE = {
   name: 'Conservative BTC Agent',
@@ -16,96 +16,74 @@ export const CONSERVATIVE_BTC_DIRECTORY_PROFILE = {
     'https://doxed-founders-website-production.up.railway.app/api/trading-agents/conservative-btc/signals/mandate',
   company: 'Doxxed Crypto Founder',
   authorEmail: 'danish.haider.au@gmail.com',
-  categories: ['Research', 'Data Analysis', 'Workflow Automation', 'Finance'],
-  tags: [
-    'BTC',
-    'bitcoin',
-    'trading',
-    'signals',
-    'API',
-    'exchange-agnostic',
-    'workflow',
-    'data analysis',
-    'AI agent',
-  ],
-  pricingModel: 'Freemium',
-  features: [
-    'Exchange-neutral ENSE signal intents',
-    'Mandatory stop-loss-at-fill for subscribers',
-    'Success-fee billing only on profitable closes',
-    'Live public showcase dashboard',
-    'AgentCard + subscriber docs',
-  ],
 } as const;
 
-export type AgentDirectoryTarget = {
+export type AgentAutomationKind = 'live' | 'cli' | 'api' | 'manifest' | 'auto';
+
+export type AgentAutomatedRegistry = {
   id: string;
   label: string;
-  submitUrl: string;
-  free: boolean;
-  automated: boolean;
-  categoryHints: string[];
-  notes?: string;
+  kind: AgentAutomationKind;
+  command?: string;
+  docs?: string;
+  note?: string;
 };
 
-export const AGENT_DIRECTORY_WEB_TARGETS: AgentDirectoryTarget[] = [
+/** Registries we automate — no manual web forms. */
+export const AGENT_AUTOMATED_REGISTRIES: AgentAutomatedRegistry[] = [
   {
-    id: 'AGENTSCAN',
-    label: 'AI Agents Directory',
-    submitUrl: 'https://aiagentsdirectory.com/submit-agent',
-    free: true,
-    automated: false,
-    categoryHints: ['Research', 'Data Analysis', 'Workflow'],
-    notes: 'Free tier requires AAD badge on site (added to Agent Hub footer).',
+    id: 'AGENT_CARD',
+    label: 'AgentCard (canonical metadata)',
+    kind: 'live',
+    docs: CONSERVATIVE_BTC_DIRECTORY_PROFILE.agentCardUrl,
+    note: 'Already served at /.well-known/agent-card.json',
   },
   {
-    id: 'PIKAGENT',
-    label: 'Pikagent',
-    submitUrl: 'https://www.pikagent.com/submit',
-    free: true,
-    automated: false,
-    categoryHints: ['Data Analysis', 'Workflow Automation', 'Other'],
+    id: 'SAID',
+    label: 'SAID Protocol (Solana)',
+    kind: 'cli',
+    command: 'npm run register:said-simple',
+    docs: 'https://www.saidprotocol.com',
+    note: 'Fund agent-wallet.json with ~0.02 SOL, then re-run.',
+  },
+  {
+    id: 'SPAWN',
+    label: 'The Spawn / ERC-8004 (Base)',
+    kind: 'api',
+    command: 'npm run prepare:agent-registrations',
+    docs: 'https://thespawn.io',
+    note: 'Set THESPAWN_API_KEY in vault; sign Base mint tx.',
+  },
+  {
+    id: 'ERC8004_SCAN',
+    label: '8004scan / agentscan.info',
+    kind: 'auto',
+    docs: 'https://8004scan.io',
+    note: 'Indexed automatically after Spawn mint confirms.',
   },
   {
     id: 'FUSHU',
-    label: 'Fushu',
-    submitUrl: 'https://fushu.dev/register',
-    free: true,
-    automated: true,
-    categoryHints: ['agent', 'REST'],
-    notes: 'Also ships fushu.json in repo root; API submit when available.',
-  },
-  {
-    id: 'AGENTS_ONE',
-    label: 'Agents.one',
-    submitUrl: 'https://agents.one/submit-agent/',
-    free: true,
-    automated: false,
-    categoryHints: ['Finance', 'Automation'],
-  },
-  {
-    id: 'LISTMYAGENT',
-    label: 'ListMyAgent',
-    submitUrl: 'https://listmyagent.com/add-ai-agent-listing/',
-    free: true,
-    automated: false,
-    categoryHints: ['Research', 'Finance', 'Workflow'],
-  },
-  {
-    id: 'AIAGENTS_BUZZ',
-    label: 'AI Agents Buzz',
-    submitUrl: 'https://aiagentsbuzz.com/submit/',
-    free: true,
-    automated: false,
-    categoryHints: ['Finance', 'Research', 'Workflow', 'Data'],
+    label: 'Fushu (manifest + API)',
+    kind: 'manifest',
+    command: 'npm run register:agents-automated',
+    docs: 'https://fushu.dev',
+    note: 'fushu.json in repo root; API submit when fushu.dev is up.',
   },
   {
     id: 'SKILLS_SH',
-    label: 'OpenServ',
-    submitUrl: 'https://www.openserv.ai/',
-    free: true,
-    automated: false,
-    categoryHints: ['API marketplace apply'],
-    notes: 'Application review — attach docs + mandate URL.',
+    label: 'OpenServ (platform API)',
+    kind: 'api',
+    command: 'npm run provision:openserv',
+    docs: 'https://platform.openserv.ai',
+    note: 'Set OPENSERV_USER_API_KEY in vault, then provision agent + workflow.',
   },
 ];
+
+/** Manual web directories removed — no CLI/API, not worth ops time. */
+export const DEPRECATED_MANUAL_DIRECTORIES = [
+  'aiagentsdirectory.com',
+  'pikagent.com',
+  'agents.one',
+  'listmyagent.com',
+  'aiagentsbuzz.com',
+] as const;
