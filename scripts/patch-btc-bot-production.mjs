@@ -264,16 +264,15 @@ def load_persistent_config():`,
 }
 
 if (!src.includes('enforce_clean_research_session()')) {
-  const mainInject = `    load_persistent_config()
+  const legacyMainInject = `    load_persistent_config()
     if state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed", False):
         enforce_clean_research_session()
     startup_hard_fix_ai_threshold()`;
-  if (src.includes(mainInject)) {
-    // already patched
-  } else if (src.includes('    load_persistent_config()\n    startup_hard_fix_ai_threshold()')) {
+  if (src.includes(legacyMainInject)) {
     src = src.replace(
-      '    load_persistent_config()\n    startup_hard_fix_ai_threshold()',
-      mainInject,
+      legacyMainInject,
+      `    load_persistent_config()
+    startup_hard_fix_ai_threshold()`,
     );
     changed = true;
   }
@@ -305,7 +304,6 @@ def toggle_fresh_collection():`,
 def api_reset_showcase():
     """Admin/platform: wipe all research artifacts and restart session at $500."""
     result = perform_fresh_collection_reset()
-    enforce_clean_research_session()
     return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
@@ -488,4 +486,273 @@ if (
   );
   writeFileSync(TARGET, dashFix, 'utf8');
   console.log('Applied Golden Stack dashboard toggle fix to bot.py');
+}
+
+// ─── Showcase history: preserve trades/balance across restarts; wipe only on Fresh Collection ON ───
+let histFix = readFileSync(TARGET, 'utf8');
+let histChanged = false;
+
+const legacyStartupWipe = `    load_persistent_config()
+    if state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed", False):
+        enforce_clean_research_session()
+    startup_hard_fix_ai_threshold()`;
+if (histFix.includes(legacyStartupWipe)) {
+  histFix = histFix.replace(
+    legacyStartupWipe,
+    `    load_persistent_config()
+    startup_hard_fix_ai_threshold()`,
+  );
+  histChanged = true;
+}
+
+if (!histFix.includes('def _showcase_trade_session_start()')) {
+  histFix = histFix.replace(
+    'def load_session_trades_from_csv():',
+    `def _showcase_trade_session_start() -> float:
+    """Epoch for trade filtering: full CSV history unless fresh-collection mode is on."""
+    if not state.get("fresh_collection_mode", False):
+        return 0.0
+    return float(bot_start_time or 0.0)
+
+def _recompute_research_balance_from_trades():
+    """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
+    if state.get("strategy_mode") != "RESEARCH" or state.get("live_armed"):
+        return
+    session_start = _showcase_trade_session_start()
+    with trade_lock:
+        rows = list(trades)
+    if not rows:
+        with state_lock:
+            state["account_balance"] = STARTING_BALANCE
+        return
+    total_pnl = 0.0
+    counted = 0
+    for t in rows:
+        if session_start and not _trade_row_in_session(t, session_start):
+            continue
+        try:
+            pnl = float(t.get("net_pnl_usd") or t.get("pnl") or 0.0)
+        except (ValueError, TypeError):
+            pnl = 0.0
+        total_pnl += pnl
+        counted += 1
+    restored = round(STARTING_BALANCE + total_pnl, 4)
+    with state_lock:
+        state["account_balance"] = restored
+    logger.info(
+        f"[STARTUP] Restored showcase balance={restored} from {counted} trade(s) "
+        f"fresh_collection={bool(state.get('fresh_collection_mode', False))} [PIPELINE ENFORCEMENT]"
+    )
+
+def load_session_trades_from_csv():`,
+  );
+  histChanged = true;
+}
+
+if (histFix.includes('if not bot_start_time or not os.path.exists(CSV_TRADES):')) {
+  histFix = histFix.replace(
+    `def load_session_trades_from_csv():
+    """Load closed trades from CSV for the current session into in-memory trades list."""
+    if not bot_start_time or not os.path.exists(CSV_TRADES):
+        return 0
+    session_start = bot_start_time`,
+    `def load_session_trades_from_csv():
+    """Load closed trades from CSV into in-memory trades list (full history unless fresh-collection)."""
+    if not os.path.exists(CSV_TRADES):
+        return 0
+    session_start = _showcase_trade_session_start()`,
+  );
+  histChanged = true;
+}
+
+if (histFix.includes('Only expose trades opened after this process started')) {
+  histFix = histFix.replace(
+    `def _session_trades_only(trades_list):
+    """Only expose trades opened after this process started."""
+    start = bot_start_time or 0.0`,
+    `def _session_trades_only(trades_list):
+    """Expose showcase trades — full history unless fresh-collection mode filters to current epoch."""
+    start = _showcase_trade_session_start()`,
+  );
+  histChanged = true;
+}
+
+if (!histFix.includes('def reset_transient_runtime_state():')) {
+  histFix = histFix.replace(
+    'def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label: str = "FILE") -> bool:',
+    `def reset_transient_runtime_state():
+    """Clear volatile runtime fields on startup without wiping showcase trades or balance."""
+    logger.info("[STARTUP] Transient runtime reset — preserving showcase trade history [PIPELINE ENFORCEMENT]")
+    with state_lock:
+        state.update({
+            "daily_pnl_usd": 0.0,
+            "consecutive_losses": 0,
+            "loss_pause_until": 0.0,
+            "last_ai": {"win_prob": 0, "direction": None, "trade_id": None, "comment": "NO_SIGNAL", "ai_error": False, "factors": {}, "source": "NONE", "decision": None},
+            "last_ai_ts": 0.0,
+            "last_ai_fp": "",
+            "ai_history": [],
+            "regime": "UNKNOWN",
+            "strategy": "SR",
+            "direction": "FLAT",
+            "signal_direction": "FLAT",
+            "signal_info": {"active": False, "count": 0, "signals": []},
+            "execution_status": "BLOCKED",
+            "last_block_time": 0.0,
+            "last_setup_time": 0.0,
+            "last_engine_error": "None",
+            "execution_paused": False,
+            "execution_reason": "",
+            "_pause_priority": 0,
+            "last_event_ts": 0.0,
+            "bootstrap_done": False,
+            "edge_prev": 0.0,
+            "edge_trigger_armed": True,
+            "last_edge_trigger_candle_bucket": -1,
+            "debug_state": _fresh_debug_state(),
+            "last_pipeline_stage": "IDLE",
+            "ai_call_count": 0,
+            "stability_ai_call_count": 0,
+        })
+
+def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label: str = "FILE") -> bool:`,
+  );
+  histChanged = true;
+}
+
+const legacyMainStartup = `    _wipe_research_on_startup_if_needed()
+    reset_runtime_state()
+    update_logger_level()
+    validate_startup()
+    load_persistent_config()
+    startup_hard_fix_ai_threshold()
+    startup_log_research_sync()
+    if state.get("strategy_mode") == "RESEARCH":
+        reset_session_risk_state()
+    bot_start_time = time.time()
+    with state_lock:
+        state["ai_history"] = []`;
+
+const showcaseMainStartup = `    _wipe_research_on_startup_if_needed()
+    load_persistent_config()
+    reset_transient_runtime_state()
+    update_logger_level()
+    validate_startup()
+    startup_hard_fix_ai_threshold()
+    startup_log_research_sync()
+    if state.get("strategy_mode") == "RESEARCH":
+        reset_session_risk_state()
+    session_meta = _load_research_session_meta()
+    persisted_start = session_meta.get("bot_start_time")
+    if persisted_start:
+        bot_start_time = float(persisted_start)
+        logger.info(
+            f"[STARTUP] Restored showcase session from research_session.json start={bot_start_time} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        bot_start_time = time.time()
+        logger.info(f"[STARTUP] New showcase session start={bot_start_time} [PIPELINE ENFORCEMENT]")
+    with state_lock:
+        state["ai_history"] = []
+        state["bot_start_time"] = bot_start_time`;
+
+if (histFix.includes(legacyMainStartup)) {
+  histFix = histFix.replace(legacyMainStartup, showcaseMainStartup);
+  histChanged = true;
+}
+
+if (histFix.includes('bot_start_time locked at') && histFix.includes('load_session_trades_from_csv()')) {
+  histFix = histFix.replace(
+    /    logger\.info\(f"\[STARTUP\] bot_start_time locked at \{bot_start_time\} - old data blocked"\)\n    _write_research_session\(bot_start_time\)\n    load_session_trades_from_csv\(\)/,
+    `    _write_research_session(bot_start_time)
+    load_session_trades_from_csv()
+    _recompute_research_balance_from_trades()`,
+  );
+  histChanged = true;
+}
+
+if (histFix.includes('session_start = bot_start_time or 0.0\n        if session_start:')) {
+  histFix = histFix.replace(
+    `        session_start = bot_start_time or 0.0
+        if session_start:`,
+    `        session_start = _showcase_trade_session_start()
+        if session_start:`,
+  );
+  histChanged = true;
+}
+
+if (
+  histFix.includes('perform_fresh_collection_reset()') &&
+  histFix.includes('enforce_clean_research_session()') &&
+  histFix.includes("api_reset_showcase")
+) {
+  histFix = histFix.replace(
+    `    result = perform_fresh_collection_reset()
+    enforce_clean_research_session()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})`,
+    `    result = perform_fresh_collection_reset()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})`,
+  );
+  histChanged = true;
+}
+
+if (histFix.includes('bot_start_time = time.time()\n    _last_fresh_maintain_ts = time.time()')) {
+  histFix = histFix.replace(
+    `    bot_start_time = time.time()
+    _last_fresh_maintain_ts = time.time()
+    load_session_trades_from_csv()
+    summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    with state_lock:
+        state["fresh_collection_mode"] = True`,
+    `    bot_start_time = time.time()
+    _write_research_session(bot_start_time)
+    _last_fresh_maintain_ts = time.time()
+    load_session_trades_from_csv()
+    summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    with state_lock:
+        state["bot_start_time"] = bot_start_time
+        state["fresh_collection_mode"] = True`,
+  );
+  histChanged = true;
+}
+
+const legacyResearchBalanceBlock = `        if research_mode and not state.get("live_armed"):
+            logger.warning(
+                "[STARTUP] BITFINEX private API keys missing — RESEARCH public-data mode "
+                f"(balance={STARTING_BALANCE}) [PIPELINE ENFORCEMENT]"
+            )
+            state["account_balance"] = STARTING_BALANCE`;
+
+const showcaseResearchBalanceBlock = `        if research_mode and not state.get("live_armed"):
+            logger.warning(
+                "[STARTUP] BITFINEX private API keys missing — RESEARCH public-data mode "
+                f"(showcase balance={state.get('account_balance', STARTING_BALANCE)}) [PIPELINE ENFORCEMENT]"
+            )`;
+
+if (histFix.includes(legacyResearchBalanceBlock)) {
+  histFix = histFix.replace(legacyResearchBalanceBlock, showcaseResearchBalanceBlock);
+  histChanged = true;
+}
+
+if (histFix.includes('            else:\n                state["account_balance"] = STARTING_BALANCE\n        except Exception as e:\n            logger.error(f"Bitfinex API key test failed: {e}")\n            state["account_balance"] = STARTING_BALANCE')) {
+  histFix = histFix.replace(
+    `            else:
+                state["account_balance"] = STARTING_BALANCE
+        except Exception as e:
+            logger.error(f"Bitfinex API key test failed: {e}")
+            state["account_balance"] = STARTING_BALANCE`,
+    `            elif not research_mode:
+                state["account_balance"] = STARTING_BALANCE
+        except Exception as e:
+            logger.error(f"Bitfinex API key test failed: {e}")
+            if not research_mode or state.get("live_armed"):
+                state["account_balance"] = STARTING_BALANCE`,
+  );
+  histChanged = true;
+}
+
+if (histChanged) {
+  writeFileSync(TARGET, histFix, 'utf8');
+  console.log('Applied showcase history persistence patches to bot.py');
 }
