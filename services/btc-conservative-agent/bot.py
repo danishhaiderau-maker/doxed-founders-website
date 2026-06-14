@@ -2627,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.21-validate-state-deadlock-fix-2026-06-14"
+ANALYZER_SYNC_ID = "v9.22-csv-write-retry-fix-2026-06-14"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4086,7 +4086,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.10-validate-state-deadlock-fix"
+EXECUTION_FIX_VERSION = "v1.1.11-csv-write-retry-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -5142,37 +5142,89 @@ def update_logger_level():
     except Exception as e:
         logger.error(f"[LOGGER ERROR] {e} [PIPELINE ENFORCEMENT]")
 
-def dynamic_csv_writer(filename, row):
-    try:
-        file_exists = os.path.exists(filename)
-        if not file_exists:
-            with open(filename, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-                writer.writeheader()
-                writer.writerow(safe_csv_row(row))
-            return
+CSV_WRITE_RETRIES = 8
+CSV_WRITE_RETRY_BASE_SEC = 0.05
+CSV_FALLBACK_JSONL = "csv_write_fallback.jsonl"
+
+
+def _transient_csv_lock_error(exc: BaseException) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, OSError):
+        if getattr(exc, "errno", None) in (11, 13):
+            return True
+        if getattr(exc, "winerror", None) in (32, 33):
+            return True
+    return False
+
+
+def _dynamic_csv_writer_once(filename, row):
+    file_exists = os.path.exists(filename)
+    if not file_exists:
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            writer.writeheader()
+            writer.writerow(safe_csv_row(row))
+        return
+    with open(filename, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        existing = reader.fieldnames or []
+    new_fields = list(set(existing) | set(row.keys()))
+    if set(new_fields) != set(existing):
         with open(filename, "r", encoding="utf-8", errors="replace") as f:
-            reader = csv.DictReader(f)
-            existing = reader.fieldnames or []
-        new_fields = list(set(existing) | set(row.keys()))
-        if set(new_fields) != set(existing):
-            with open(filename, "r", encoding="utf-8", errors="replace") as f:
-                old_rows = list(csv.DictReader(f))
-            with open(filename, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=new_fields)
-                writer.writeheader()
-                for old in old_rows:
-                    writer.writerow(old)
-                writer.writerow(safe_csv_row(row))
-        else:
-            with open(filename, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=existing)
-                writer.writerow(safe_csv_row(row))
-        logger.info(f"[CSV WRITE] {filename} row added - edge={row.get('edge_score', 'N/A')} experiment={row.get('experiment_tag','NONE')} stage={row.get('stage','N/A')} [PIPELINE ENFORCEMENT]")
-    except Exception as e:
-        logger.critical(f"[FATAL CSV FAILURE] {e} - HALTING ENGINE [PIPELINE ENFORCEMENT]")
-        set_execution_paused("CSV_FAILURE")
-        raise
+            old_rows = list(csv.DictReader(f))
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=new_fields)
+            writer.writeheader()
+            for old in old_rows:
+                writer.writerow(old)
+            writer.writerow(safe_csv_row(row))
+    else:
+        with open(filename, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=existing)
+            writer.writerow(safe_csv_row(row))
+
+
+def _csv_write_fallback(filename, row, err: BaseException) -> None:
+    try:
+        payload = {
+            "ts": utc_iso(),
+            "target": filename,
+            "row": safe_csv_row(row),
+            "error": str(err),
+            "bot_version": EXECUTION_FIX_VERSION,
+        }
+        with open(CSV_FALLBACK_JSONL, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception as fe:
+        logger.error(f"[CSV FALLBACK FAILED] {fe} [PIPELINE ENFORCEMENT]")
+
+
+def dynamic_csv_writer(filename, row):
+    last_err = None
+    with csv_lock:
+        for attempt in range(CSV_WRITE_RETRIES):
+            try:
+                _dynamic_csv_writer_once(filename, row)
+                if state.get("execution_reason") == "CSV_FAILURE":
+                    set_execution_paused("")
+                logger.info(
+                    f"[CSV WRITE] {filename} row added - edge={row.get('edge_score', 'N/A')} "
+                    f"experiment={row.get('experiment_tag', 'NONE')} stage={row.get('stage', 'N/A')} "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                return
+            except Exception as e:
+                last_err = e
+                if attempt < CSV_WRITE_RETRIES - 1 and _transient_csv_lock_error(e):
+                    time.sleep(CSV_WRITE_RETRY_BASE_SEC * (attempt + 1))
+                    continue
+                break
+    logger.critical(
+        f"[CSV WRITE FAILED] {filename} after {CSV_WRITE_RETRIES} tries: {last_err} "
+        f"(fallback={CSV_FALLBACK_JSONL}) [PIPELINE ENFORCEMENT]"
+    )
+    _csv_write_fallback(filename, row, last_err)
 
 def prune_signals():
     now = time.time()
@@ -6468,8 +6520,7 @@ def log_approved_but_rejected(signal, ai, block_reason, edge_score):
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
         rotate_log(APPROVED_BUT_REJECTED_FILE)
-        with open(APPROVED_BUT_REJECTED_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(APPROVED_BUT_REJECTED_FILE, row, label="APPROVED_BUT_REJECTED")
     except Exception as e:
         logger.error(f"[APPROVED_BUT_REJECTED] log failed: {e}")
 
@@ -10784,7 +10835,7 @@ trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
-csv_lock = threading.Lock()
+csv_lock = threading.RLock()
 replay_lock = threading.RLock()
 ws_lock = threading.RLock()
 console_lock = threading.Lock()
@@ -14787,20 +14838,25 @@ def rotate_log(file):
 
 
 def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
-    """Append one JSONL row with rotation + disk-failure guard (non-fatal for research logs)."""
-    try:
-        rotate_log(path)
-        line = json.dumps(row, default=str) + "\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-        return True
-    except OSError as e:
-        logger.error(f"[{label}] disk write failed ({path}): {e} [PIPELINE ENFORCEMENT]")
-        return False
-    except Exception as e:
-        logger.error(f"[{label}] append failed ({path}): {e} [PIPELINE ENFORCEMENT]")
-        return False
+    """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    line = json.dumps(row, default=str) + "\n"
+    last_err = None
+    for attempt in range(CSV_WRITE_RETRIES):
+        try:
+            rotate_log(path)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+            return True
+        except Exception as e:
+            last_err = e
+            if attempt < CSV_WRITE_RETRIES - 1 and _transient_csv_lock_error(e):
+                time.sleep(CSV_WRITE_RETRY_BASE_SEC * (attempt + 1))
+                continue
+            break
+    logger.error(f"[{label}] append failed ({path}): {last_err} [PIPELINE ENFORCEMENT]")
+    _csv_write_fallback(path, row, last_err)
+    return False
 
 def _port_is_open(host: str, port: int) -> bool:
     import socket
