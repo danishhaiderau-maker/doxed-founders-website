@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(railway): restore npm ci now that lockfile includes utf-8-validate.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
