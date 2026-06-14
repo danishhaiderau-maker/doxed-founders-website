@@ -7,11 +7,11 @@ import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import {
-  POINTS,
   generatePlatformHandle,
   isReservedPlatformHandle,
   normalizeTwitterHandle,
 } from '@dcf/utils';
+import { bootstrapUserEconomy } from '../account/user-economy.bootstrap';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { hashToken, randomToken } from '../security/security-crypto.util';
@@ -43,16 +43,10 @@ export class AuthService {
         passwordHash,
         name: dto.name?.trim() || null,
         role: UserRole.USER,
-        paperPortfolio: {
-          create: {
-            cashBalance: 10_000,
-            totalValue: 10_000,
-          },
-        },
       },
     });
 
-    await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
+    await bootstrapUserEconomy(this.prisma, this.points, user.id);
     await this.assignPlatformHandleIfNeeded(user.id);
 
     return await this.buildAuthResponse(user);
@@ -181,15 +175,7 @@ export class AuthService {
         },
       });
 
-      await this.prisma.paperPortfolio.upsert({
-        where: { userId: existingUser.id },
-        update: {},
-        create: {
-          userId: existingUser.id,
-          cashBalance: 10_000,
-          totalValue: 10_000,
-        },
-      });
+      await bootstrapUserEconomy(this.prisma, this.points, existingUser.id);
 
       const updates: {
         name?: string;
@@ -227,16 +213,10 @@ export class AuthService {
             accessTokenSecret: tokenData?.accessTokenSecret,
           },
         },
-        paperPortfolio: {
-          create: {
-            cashBalance: 10_000,
-            totalValue: 10_000,
-          },
-        },
       },
     });
 
-    await this.points.award(user.id, POINTS.REGISTER, 'REGISTER');
+    await bootstrapUserEconomy(this.prisma, this.points, user.id);
     await this.assignPlatformHandleIfNeeded(user.id);
 
     return await this.buildAuthResponse(user);
