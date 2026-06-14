@@ -63,7 +63,7 @@ export function ExchangeHirePanel({
     { n: 2, label: 'Connect exchange API', detail: 'Read + trade only — no withdraw' },
     { n: 3, label: 'Admin DeepSeek copy', detail: 'No AI key needed' },
     { n: 4, label: 'Risk acknowledgement', detail: 'Max $500 allocation' },
-    { n: 5, label: 'Activate agent', detail: `${costWeek.toLocaleString()} DDollar / week` },
+    { n: 5, label: 'Activate agent', detail: `${costWeek.toLocaleString()} DDollar / week · auto Bitfinex execution` },
   ];
 
   return (

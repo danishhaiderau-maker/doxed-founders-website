@@ -8,6 +8,7 @@ import { BotBridgeService } from './bot-bridge.service';
 import { SignalApiKeyGuard } from './signal-api-key.guard';
 import { SignalCyclesController } from './signal-cycles.controller';
 import { SignalCyclesService } from './signal-cycles.service';
+import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 import { TradingAgentsService } from './trading-agents.service';
@@ -20,6 +21,7 @@ import { TradingAgentsService } from './trading-agents.service';
     TradingAgentInstancesService,
     BotBridgeService,
     SignalCyclesService,
+    SignalSubscriberExecutionService,
     SignalApiKeyGuard,
     AgentRegistryService,
   ],

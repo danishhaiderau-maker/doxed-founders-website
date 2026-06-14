@@ -105,4 +105,22 @@ export class ExchangesService {
     });
     return { disconnected: true };
   }
+
+  async getUserCredentials(
+    userId: string,
+    provider: string,
+  ): Promise<ExchangeCredentials | null> {
+    const providerKey = exchangeCredentialProvider(provider as ExchangeProvider);
+    const row = await this.prisma.integrationCredential.findUnique({
+      where: { userId_provider: { userId, provider: providerKey } },
+    });
+    if (!row?.token) return null;
+    try {
+      const parsed = JSON.parse(this.crypto.decrypt(row.token)) as ExchangeCredentials;
+      if (!parsed.apiKey || !parsed.apiSecret) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
 }
