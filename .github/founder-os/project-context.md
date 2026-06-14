@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add Bitfinex hire subscriber runner for live copy execution.
 
 ## Last Activity
 
