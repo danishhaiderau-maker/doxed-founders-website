@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(auth): grant signup DDollar and paper cash on all OAuth paths.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
