@@ -9,7 +9,7 @@ COPY packages ./packages
 COPY prisma ./prisma
 COPY scripts/start-api-prod.mjs scripts/prisma-run.mjs ./scripts/
 
-RUN npm ci \
+RUN npm ci --omit=optional \
   && npm run build:utils \
   && npx prisma generate --schema=prisma/schema.prisma \
   && npm run build --workspace=@dcf/api
