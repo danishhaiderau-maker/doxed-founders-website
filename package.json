@@ -127,5 +127,8 @@
   "packageManager": "npm@10.9.2",
   "prisma": {
     "seed": "tsx prisma/seed.ts"
+  },
+  "optionalDependencies": {
+    "utf-8-validate": "^5.0.10"
   }
 }
