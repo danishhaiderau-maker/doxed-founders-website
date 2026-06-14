@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(railway): resolve npm lock drift and use npm install in Docker build.
+fix(railway): restore npm ci now that lockfile includes utf-8-validate.
 
 ## Last Activity
 
