@@ -2627,7 +2627,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.23-smart-submit-chase-fix-2026-06-14"
+ANALYZER_SYNC_ID = "v9.24-dashboard-toggle-fix-2026-06-14"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4092,7 +4092,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.12-smart-submit-chase-fix"
+EXECUTION_FIX_VERSION = "v1.1.13-dashboard-toggle-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -7980,11 +7980,47 @@ def _trade_row_in_session(trade: dict, session_start: float) -> bool:
         pass
     return False
 
+def _showcase_trade_session_start() -> float:
+    """Epoch for trade filtering: full CSV history unless fresh-collection mode is on."""
+    if not state.get("fresh_collection_mode", False):
+        return 0.0
+    return float(bot_start_time or 0.0)
+
+def _recompute_research_balance_from_trades():
+    """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
+    if state.get("strategy_mode") != "RESEARCH" or state.get("live_armed"):
+        return
+    session_start = _showcase_trade_session_start()
+    with trade_lock:
+        rows = list(trades)
+    if not rows:
+        with state_lock:
+            state["account_balance"] = STARTING_BALANCE
+        return
+    total_pnl = 0.0
+    counted = 0
+    for t in rows:
+        if session_start and not _trade_row_in_session(t, session_start):
+            continue
+        try:
+            pnl = float(t.get("net_pnl_usd") or t.get("pnl") or 0.0)
+        except (ValueError, TypeError):
+            pnl = 0.0
+        total_pnl += pnl
+        counted += 1
+    restored = round(STARTING_BALANCE + total_pnl, 4)
+    with state_lock:
+        state["account_balance"] = restored
+    logger.info(
+        f"[STARTUP] Restored showcase balance={restored} from {counted} trade(s) "
+        f"fresh_collection={bool(state.get('fresh_collection_mode', False))} [PIPELINE ENFORCEMENT]"
+    )
+
 def load_session_trades_from_csv():
-    """Load closed trades from CSV for the current session into in-memory trades list."""
-    if not bot_start_time or not os.path.exists(CSV_TRADES):
+    """Load closed trades from CSV into in-memory trades list (full history unless fresh-collection)."""
+    if not os.path.exists(CSV_TRADES):
         return 0
-    session_start = bot_start_time
+    session_start = _showcase_trade_session_start()
     existing_ids = {t.get("trade_id") for t in trades if t.get("trade_id")}
     loaded = 0
     float_fields = (
@@ -8099,7 +8135,10 @@ def validate_pipeline_completion(signal: dict):
     if not signal or not signal.get("trade_id"):
         logger.error("[PIPELINE VALIDATION] CRITICAL - Missing trade_id at completion [PIPELINE ENFORCEMENT]")
         return False
-    VALID_FINAL_STATES = ["ACTIVE", "ORDERED", "REJECTED", "BLOCKED", "EXPIRED", "COMPLETE"]
+    VALID_FINAL_STATES = [
+        "ACTIVE", "ORDERED", "REJECTED", "BLOCKED", "EXPIRED", "COMPLETE",
+        SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
+    ]
     if signal.get("status") not in VALID_FINAL_STATES:
         logger.warning(f"[PIPELINE WARNING] Non-terminal state: {signal.get('status')} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
         enforce_log(signal, "PIPELINE_WARNING")
@@ -11206,10 +11245,12 @@ def perform_fresh_collection_reset() -> dict:
     reset_runtime_state()
     reset_session_risk_state()
     bot_start_time = time.time()
+    _write_research_session(bot_start_time)
     _last_fresh_maintain_ts = time.time()
     load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     with state_lock:
+        state["bot_start_time"] = bot_start_time
         state["fresh_collection_mode"] = True
         state["last_fresh_reset_ts"] = time.time()
         state["last_fresh_reset_summary"] = summary
@@ -11494,6 +11535,11 @@ HTML = """<!DOCTYPE html>
     <button type="button" onclick="toggleContinuousAiDirect()" id="continuousAiDirectBtn" style="padding:5px 12px;font-weight:bold;">AI_DIRECT: <span id="continuousAiDirectLabel">ON</span></button>
     <span id="continuousAiDirectHint" style="color:#8b949e;font-size:0.82em;">Skip AWAITING_MICRO — place AI limit immediately</span>
   </div>
+  <div id="pathwayDupLimitRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;margin-top:8px;border-top:1px solid #30363d;">
+    <span style="color:#8b949e;font-size:0.88em;">Duplicate limit block:</span>
+    <button type="button" onclick="toggleDuplicateLimitBlock()" id="duplicateLimitPathwayBtn" style="padding:5px 12px;font-weight:bold;">BLOCK: <span id="duplicateLimitPathwayLabel">ON</span></button>
+    <span id="duplicateLimitPathwayHint" style="color:#8b949e;font-size:0.82em;">OFF = allow same-direction limits at same price</span>
+  </div>
 </div>
 
 <div id="tradingParamsPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -11624,67 +11670,6 @@ HTML = """<!DOCTYPE html>
   <strong>Fresh Collection:</strong> turn ON to delete research CSVs, jsonl logs, debug/log files, and reset in-memory trades/session counters. The bot keeps running and starts collecting clean data. While ON, oversized aux logs are trimmed hourly.
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
-
-<h2>Controls</h2>
-<p style="color:#8b949e;font-size:0.9em;">Legacy lane detail panels (collapsed). Use Pathway Lab above for toggles.</p>
-
-<details id="legacyControlsDetails" style="margin:12px 0;">
-<summary style="cursor:pointer;color:#8b949e;">Show legacy control panels</summary>
-
-<div id="continuousAiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;display:none;">
-  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
-    <strong style="color:#58a6ff;font-size:1.05em;">Continuous AI Research (v87 execution lane)</strong>
-    <button type="button" onclick="toggleContinuousAi()" id="continuousAiControlBtn" style="padding:6px 14px;font-weight:bold;">Continuous AI: <span id="continuousAiControlLabel">ON</span></button>
-  </div>
-  <p id="continuousAiModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
-  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — sole-AI research path (~every 3 min when edge &gt; 0):</p>
-  <ul id="continuousAiFeatureList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
-  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
-    <strong>Logs:</strong> <code>ai_tranche.csv</code>, <code>decisions</code>, pipeline events, <code>ai_input_log.jsonl</code> (lane=CONTINUOUS).
-    Independent ActiveSignal slots — does not block Stability or Golden Stack lanes.
-  </p>
-  <p id="continuousAiLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
-</div>
-
-<div id="researchKpiPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;display:none;">
-  <strong style="color:#58a6ff;font-size:1.05em;">Research KPIs (false rejects · calibration · shadow)</strong>
-  <p id="researchKpiLive" style="color:#8b949e;font-size:0.86em;margin:10px 0 0 0;line-height:1.5;"></p>
-</div>
-
-<div id="goldenStackPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
-    <strong style="color:#58a6ff;font-size:1.05em;">Golden Stack (v86 quality gates)</strong>
-    <button type="button" onclick="toggleGoldenStack()" id="goldenStackControlBtn" style="padding:6px 14px;font-weight:bold;">Golden Stack: <span id="goldenStackControlLabel">ON</span></button>
-  </div>
-  <p id="goldenStackModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
-  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — after AI APPROVE, blocks execution unless <em>all</em> checks pass:</p>
-  <ul id="goldenStackGateList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
-  <p style="color:#8b949e;font-size:0.85em;margin:0 0 6px 0;">
-    <strong>Not gated</strong> (dashboard-flexible): edge score floor, AI win % threshold.
-  </p>
-  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
-    <strong>Data collection:</strong> pipeline + AI + <code>golden_stack_eval</code> snapshots are logged either way.
-    ON = <code>GOLDEN_STACK_*</code> blocks trade execution. OFF = logs <code>WOULD_BLOCK_GOLDEN_STACK_*</code> but sole-AI research may still execute for A/B comparison.
-  </p>
-  <p id="goldenStackLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
-</div>
-
-<div id="aiStabilityPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
-    <strong style="color:#58a6ff;font-size:1.05em;">AI Stability Research (v87 shadow lane)</strong>
-    <button type="button" onclick="toggleAiStability()" id="aiStabilityControlBtn" style="padding:6px 14px;font-weight:bold;">AI Stability: <span id="aiStabilityControlLabel">ON</span></button>
-  </div>
-  <p id="aiStabilityModeNote" style="color:#8b949e;font-size:0.88em;margin:6px 0 10px 0;"></p>
-  <p style="color:#c9d1d9;font-size:0.9em;margin:0 0 6px 0;"><strong>When ON</strong> — research collection mode (does not block AI threshold / edge):</p>
-  <ul id="aiStabilityFeatureList" style="color:#8b949e;font-size:0.86em;margin:0 0 10px 20px;line-height:1.45;"></ul>
-  <p style="color:#8b949e;font-size:0.85em;margin:0 0 8px 0;">
-    <strong>Logs:</strong> <code>ai_input_log.jsonl</code> (full context per call), <code>replay_model_eval</code> on APPROVE snapshots.
-    Analyzer compares DeepSeek vs deterministic replay scorecard vs trade PnL after session.
-  </p>
-  <p id="aiStabilityLiveStatus" style="color:#58a6ff;font-size:0.85em;margin:0;"></p>
-</div>
-
-</details>
 
 <h2>Active Signals</h2>
 <table>
@@ -11951,6 +11936,11 @@ DASHBOARD_JS = """(function () {
       const aiDirectBtn = document.getElementById('continuousAiDirectBtn');
       if (aiDirectLabel) aiDirectLabel.innerText = aiDirectOn ? 'ON' : 'OFF';
       if (aiDirectBtn) aiDirectBtn.style.backgroundColor = aiDirectOn ? '#10b981' : '#ef4444';
+      const dupOn = d.duplicate_limit_block_enabled !== false;
+      const dupPathLabel = document.getElementById('duplicateLimitPathwayLabel');
+      const dupPathBtn = document.getElementById('duplicateLimitPathwayBtn');
+      if (dupPathLabel) dupPathLabel.innerText = dupOn ? 'ON' : 'OFF';
+      if (dupPathBtn) dupPathBtn.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
     }
     function renderPathwayScorecard(d) {
       const sc = d.pathway_scorecard || {};
@@ -12741,6 +12731,10 @@ DASHBOARD_JS = """(function () {
     window.toggleInvert = toggleInvert;
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
+    window.toggleContinuousAi = toggleContinuousAi;
+    window.toggleGoldenStack = toggleGoldenStack;
+    window.toggleAiStability = toggleAiStability;
+    window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
     window.updateEdge = updateEdge;
@@ -12788,7 +12782,7 @@ def api_state():
             expired_orders_copy = copy.deepcopy(expired_orders)
             ai_history_copy = copy.deepcopy(state["ai_history"])
             trades_map_copy = copy.deepcopy(trades_map)
-        session_start = bot_start_time or 0.0
+        session_start = _showcase_trade_session_start()
         if session_start:
             trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
@@ -13151,7 +13145,6 @@ def toggle_debug():
 def api_reset_showcase():
     """Admin/platform: wipe all research artifacts and restart session at $500."""
     result = perform_fresh_collection_reset()
-    enforce_clean_research_session()
     return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
@@ -13656,6 +13649,41 @@ def reset_runtime_state():
     "stability_ai_call_count": 0,
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
+
+def reset_transient_runtime_state():
+    """Clear volatile runtime fields on startup without wiping showcase trades or balance."""
+    logger.info("[STARTUP] Transient runtime reset — preserving showcase trade history [PIPELINE ENFORCEMENT]")
+    with state_lock:
+        state.update({
+            "daily_pnl_usd": 0.0,
+            "consecutive_losses": 0,
+            "loss_pause_until": 0.0,
+            "last_ai": {"win_prob": 0, "direction": None, "trade_id": None, "comment": "NO_SIGNAL", "ai_error": False, "factors": {}, "source": "NONE", "decision": None},
+            "last_ai_ts": 0.0,
+            "last_ai_fp": "",
+            "ai_history": [],
+            "regime": "UNKNOWN",
+            "strategy": "SR",
+            "direction": "FLAT",
+            "signal_direction": "FLAT",
+            "signal_info": {"active": False, "count": 0, "signals": []},
+            "execution_status": "BLOCKED",
+            "last_block_time": 0.0,
+            "last_setup_time": 0.0,
+            "last_engine_error": "None",
+            "execution_paused": False,
+            "execution_reason": "",
+            "_pause_priority": 0,
+            "last_event_ts": 0.0,
+            "bootstrap_done": False,
+            "edge_prev": 0.0,
+            "edge_trigger_armed": True,
+            "last_edge_trigger_candle_bucket": -1,
+            "debug_state": _fresh_debug_state(),
+            "last_pipeline_stage": "IDLE",
+            "ai_call_count": 0,
+            "stability_ai_call_count": 0,
+        })
 
 def _atomic_file_replace(path: str, write_fn, file_lock: threading.RLock, label: str = "FILE") -> bool:
     """Atomic write via per-thread temp file + os.replace with WinError 32 retry."""
@@ -15044,8 +15072,8 @@ def enforce_clean_research_session():
     )
 
 def _session_trades_only(trades_list):
-    """Only expose trades opened after this process started."""
-    start = bot_start_time or 0.0
+    """Expose showcase trades — full history unless fresh-collection mode filters to current epoch."""
+    start = _showcase_trade_session_start()
     if start <= 0:
         return list(trades_list or [])
     kept = []
@@ -15459,17 +15487,28 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
-    reset_runtime_state()
+    load_persistent_config()
+    reset_transient_runtime_state()
     update_logger_level()
     validate_startup()
-    load_persistent_config()
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
-    bot_start_time = time.time()
+    session_meta = _load_research_session_meta()
+    persisted_start = session_meta.get("bot_start_time")
+    if persisted_start:
+        bot_start_time = float(persisted_start)
+        logger.info(
+            f"[STARTUP] Restored showcase session from research_session.json start={bot_start_time} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        bot_start_time = time.time()
+        logger.info(f"[STARTUP] New showcase session start={bot_start_time} [PIPELINE ENFORCEMENT]")
     with state_lock:
         state["ai_history"] = []
+        state["bot_start_time"] = bot_start_time
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
@@ -15489,9 +15528,9 @@ def main():
     last_pipeline_run = 0.0
     last_heartbeat = time.time()
     last_edge_compute = 0.0
-    logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
+    _recompute_research_balance_from_trades()
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
@@ -15501,9 +15540,8 @@ def main():
         if research_mode and not state.get("live_armed"):
             logger.warning(
                 "[STARTUP] BITFINEX private API keys missing — RESEARCH public-data mode "
-                f"(balance={STARTING_BALANCE}) [PIPELINE ENFORCEMENT]"
+                f"(showcase balance={state.get('account_balance', STARTING_BALANCE)}) [PIPELINE ENFORCEMENT]"
             )
-            state["account_balance"] = STARTING_BALANCE
         else:
             raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
     else:
@@ -15515,11 +15553,12 @@ def main():
                 if isinstance(balance, dict):
                     usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
                 state["account_balance"] = usdt
-            else:
+            elif not research_mode:
                 state["account_balance"] = STARTING_BALANCE
         except Exception as e:
             logger.error(f"Bitfinex API key test failed: {e}")
-            state["account_balance"] = STARTING_BALANCE
+            if not research_mode or state.get("live_armed"):
+                state["account_balance"] = STARTING_BALANCE
     if not _deepseek_api_key():
         logger.warning("AI disabled: DEEPSEEK_API_KEY missing (see Final Bots\\.env)")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
