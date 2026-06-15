@@ -102,7 +102,13 @@ _lane_locks = {
     RESEARCH_LANE_GOLDEN_STACK: threading.Lock(),
     RESEARCH_LANE_5M_EXEC: threading.Lock(),
 }
-EXEC_5M_LANE_DEFAULT_ENABLED = True
+EXEC_5M_LANE_DEFAULT_ENABLED = False
+PROFIT_GATES_ENFORCED_DEFAULT = True
+# Profit gates follow dashboard edge/AI thresholds (not hard-coded floors).
+PROFIT_MIN_ENTRY_EDGE = 3.0  # legacy fallback only when dashboard unset
+PROFIT_MIN_AI_PROB = 50
+PROFIT_MIN_LONG_EDGE = 3.0
+RUNNER_BREATHE_MIN_PEAK_PCT = 5.0
 CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED = True
 CONTINUOUS_AI_DEFAULT_ENABLED = True
 AI_STABILITY_DEFAULT_ENABLED = True  # v90: stability lane optional; reduce impact via dashboard toggle
@@ -998,6 +1004,9 @@ def get_exit_config_snapshot() -> dict:
         "thesis_score_flip_margin": THESIS_SCORE_FLIP_MARGIN,
         "thesis_early_decay_delta": THESIS_EARLY_DECAY_DELTA,
         "early_fail_pct_threshold": EARLY_FAIL_PCT_THRESHOLD,
+        "type_a_first_candle_enabled": TYPE_A_FIRST_CANDLE_ENABLED,
+        "type_a_early_fail_enabled": TYPE_A_EARLY_FAIL_ENABLED,
+        "scenario_c_exit_profile": SCENARIO_C_EXIT_PROFILE,
         "type_a_stall_enabled": TYPE_A_STALL_ENABLED,
         "type_a_stall_min_age_sec": TYPE_A_STALL_MIN_AGE_SEC,
         "type_a_stall_min_candles": TYPE_A_STALL_MIN_CANDLES,
@@ -1135,6 +1144,8 @@ def _type_a_stall_weak_tape(direction: str, fs: dict) -> bool:
 
 def check_type_a_first_candle_exit(pos: dict, unreal_pct: float, now: float) -> bool:
     """Exit after first candle when tape is weak and trade never developed."""
+    if not TYPE_A_FIRST_CANDLE_ENABLED:
+        return False
     entry_ts = float(pos.get("entry_ts") or 0)
     if entry_ts <= 0:
         return False
@@ -1144,6 +1155,8 @@ def check_type_a_first_candle_exit(pos: dict, unreal_pct: float, now: float) -> 
     if pos.get("_type_a_first_candle_checked"):
         return False
     peak = float(pos.get("max_pnl_pct") or 0)
+    if peak >= RUNNER_BREATHE_MIN_PEAK_PCT:
+        return False
     mae = float(pos.get("max_drawdown") or 0)
     if peak >= TYPE_A_FIRST_CANDLE_MAX_MFE_PCT:
         return False
@@ -1166,6 +1179,8 @@ def check_type_a_first_candle_exit(pos: dict, unreal_pct: float, now: float) -> 
 
 def check_type_a_early_fail_exit(pos: dict, unreal_pct: float, now: float) -> bool:
     """Exit Type-A failures after 3 candles: low MFE, high MAE, weakening trend."""
+    if not TYPE_A_EARLY_FAIL_ENABLED:
+        return False
     entry_ts = float(pos.get("entry_ts") or 0)
     if entry_ts <= 0:
         return False
@@ -1293,19 +1308,19 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
-        if THESIS_MFE_PROTECT_PCT > 0 and unreal_pct >= THESIS_MFE_PROTECT_PCT:
+        if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
             logger.info(
                 f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
                 f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
                 f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
             )
-        else:
-            logger.info(
-                f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-                f"unreal={unreal_pct:.1f}% peak={peak:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
-            )
-            close_position(pos, "THESIS_FAST_CUT")
-            return True
+            return False
+        logger.info(
+            f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+            f"unreal={unreal_pct:.1f}% peak={peak:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
+        )
+        close_position(pos, "THESIS_FAST_CUT")
+        return True
     if age_sec < THESIS_MIN_AGE_SEC:
         return False
     update_market_context()
@@ -1664,7 +1679,7 @@ def exec_5m_lane_enabled() -> bool:
     with state_lock:
         if "exec_5m_lane_enabled" in state:
             return bool(state.get("exec_5m_lane_enabled"))
-    return os.getenv("EXEC_5M_LANE_ENABLED", "1").lower() not in ("0", "false", "no")
+    return os.getenv("EXEC_5M_LANE_ENABLED", "0" if not EXEC_5M_LANE_DEFAULT_ENABLED else "1").lower() not in ("0", "false", "no")
 
 def ai_stability_research_enabled() -> bool:
     with state_lock:
@@ -2095,7 +2110,7 @@ def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
     tag = f"GOLDEN_STACK_{reason}"
     gs_eval = signal.get("golden_stack_eval") or {}
     log_golden_stack_rejection(signal, ai, gs_eval, edge_score, block_reason=reason)
-    if is_research_data_collection():
+    if is_research_data_collection() and not (profit_gates_enforced() and golden_stack_enabled()):
         _research_log_would_block(signal, ai, tag, edge_score)
         if trade_id:
             defer_shadow_research(trade_id, tag)
@@ -2268,6 +2283,7 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             f"lock={lock_floor:.1f}% now={unreal_pct:.1f}% entry={fmt(entry)} exit={fmt(price)} "
             f"source={state.get('price_source', 'WS')} [PIPELINE ENFORCEMENT]"
         )
+        pos["_ladder_lock_floor_pct"] = lock_floor
         close_position(pos, "PROFIT_LOCK_LADDER")
         return True
     pos["_prev_unreal_pct"] = unreal_pct
@@ -2631,7 +2647,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.29-realism-complete-2026-06-15"
+ANALYZER_SYNC_ID = "v9.32-scenario-c-exit-profile-2026-06-17"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3014,15 +3030,20 @@ def resolve_sim_fill_price(order: dict) -> float:
 
 
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
-    """Exit price: maker at TP/limit; taker walks book for market-style exits."""
+    """Exit price: ladder/taker walks book; maker only for explicit TP limit hits."""
     qty = float(pos.get("qty") or 0)
     direction = str(pos.get("dir") or "").upper()
     refresh_bbo_state()
     refresh_order_book_state()
     fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
+    if exit_reason == "PROFIT_LOCK_LADDER":
+        exit_side = "sell" if direction == "LONG" else "buy"
+        sim = simulate_market_fill(exit_side, qty)
+        px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
+        return px, sim
     if exit_is_maker:
         tp_px = float(pos.get("tp") or 0)
-        if tp_px > 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
+        if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
             return tp_px, None
         return fallback, None
     exit_side = "sell" if direction == "LONG" else "buy"
@@ -4129,10 +4150,13 @@ CANDLE_INTERVAL_SEC = 15 * 60
 # --- v6 exit / risk (evidence-driven: MFE positive, TIME_EXIT losses) ---
 FIXED_TIME_EXIT_ENABLED = False
 EMERGENCY_MAX_HOLD_SEC = 24 * 3600
-# v90: tighter ladder rungs (replay-backed)
+# v1.1.21 Scenario C: first rung 12→8% (replay-optimal risk-adjusted profile)
 TRAIL_LADDER = [
-    (8, 5), (12, 8), (20, 15), (35, 25),
+    (12, 8), (15, 10), (25, 18), (40, 28),
 ]
+SCENARIO_C_EXIT_PROFILE = True
+TYPE_A_FIRST_CANDLE_ENABLED = not SCENARIO_C_EXIT_PROFILE
+TYPE_A_EARLY_FAIL_ENABLED = not SCENARIO_C_EXIT_PROFILE
 POSITION_MONITOR_INTERVAL_SEC = 1.0
 LADDER_ARMED_MONITOR_INTERVAL_SEC = 0.15
 WS_MAX_STALE_TRADE_SEC = 3.0
@@ -4156,18 +4180,18 @@ MICRO_SR_ENTRY_BUFFER_USD = 15.0
 MICRO_SR_EMA_ZONE_PCT = 0.004
 OVEREXTENSION_STRUCT_THRESHOLD = 6.0
 TYPE_A_FIRST_CANDLE_MAX_MFE_PCT = 2.0
-TYPE_A_FIRST_CANDLE_MIN_MAE_PCT = 4.0
+TYPE_A_FIRST_CANDLE_MIN_MAE_PCT = 3.0
 TYPE_A_EARLY_FAIL_MIN_CANDLES = 3
 TYPE_A_EARLY_FAIL_MAX_MFE_PCT = 3.0
 TYPE_A_EARLY_FAIL_MIN_MAE_PCT = 4.0
 # v85 P0: time-based Type-A stall (v83 candle gate was too slow for sim session)
-TYPE_A_STALL_ENABLED = True
+TYPE_A_STALL_ENABLED = not SCENARIO_C_EXIT_PROFILE
 TYPE_A_STALL_MIN_AGE_SEC = 8 * 60
 TYPE_A_STALL_MIN_CANDLES = 3  # legacy reference / analyzer label
 TYPE_A_STALL_MAX_MFE_PCT = 5.0
 TYPE_A_STALL_WEAK_VOLUME_RATIO = 0.5
 TYPE_A_STALL_WEAK_DELTA = 0.0
-TREND_WEAKENING_ENABLED = True
+TREND_WEAKENING_ENABLED = not SCENARIO_C_EXIT_PROFILE
 TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
 TREND_WEAKENING_MIN_SIGNALS = 1
 TREND_WEAKENING_SCRATCH_UNREAL_PCT = 6.0
@@ -4192,17 +4216,17 @@ THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
 THESIS_MIN_AGE_SEC = 5 * 60
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -6.0  # v90: replay-backed fast cut; was -20%
-THESIS_MFE_PROTECT_PCT = 8.0  # v85: skip thesis fast-cut only while unreal still >= 8% margin
+THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
+THESIS_MFE_PROTECT_PCT = 2.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 2% margin
 ADX_BLOCK_NEW_ENTRY = 15.0
 RESEARCH_ADX_MIN = 12.0  # v93: logging reference in sole research (live block still ADX_BLOCK_NEW_ENTRY)
 ADX_HALF_SIZE_BELOW = 18.0
 ADX_HALF_SIZE_MULT = 0.5
-RESEARCH_AI_THRESHOLD_DEFAULT = 45
+RESEARCH_AI_THRESHOLD_DEFAULT = 50
 LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard override is not clamped to this
 AI_THRESHOLD_MIN = 0
 AI_THRESHOLD_MAX = 100
-RESEARCH_EDGE_THRESHOLD_DEFAULT = 2.0
+RESEARCH_EDGE_THRESHOLD_DEFAULT = 3.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
 RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
@@ -4385,7 +4409,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.18-realism-complete"
+EXECUTION_FIX_VERSION = "v1.1.21-scenario-c-exit-profile"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4449,7 +4473,7 @@ state = {
     "ai_threshold": 50,
     "consecutive_losses": 0,
     "loss_pause_until": 0.0,
-    "edge_threshold": 0.0,
+    "edge_threshold": 3.0,
     "edge_threshold_max": None,
     "edge_range_preset": DEFAULT_EDGE_RANGE_PRESET,
     "min_confidence": 0,
@@ -4457,6 +4481,7 @@ state = {
     "debug_enabled": False,
     "fresh_collection_mode": False,
     "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
+    "profit_gates_enforced": PROFIT_GATES_ENFORCED_DEFAULT,
     "exec_5m_lane_enabled": EXEC_5M_LANE_DEFAULT_ENABLED,
     "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
     "golden_stack_last_eval": None,
@@ -4626,7 +4651,7 @@ state = {
     "edge_prev": 0.0,
     "edge_trigger_armed": True,
     "last_edge_trigger_candle_bucket": -1,
-    "edge_threshold": 2.0,
+    "edge_threshold": 3.0,
     "last_pipeline_stage": "IDLE",
     "warmup_mode": True
 }
@@ -4725,7 +4750,7 @@ def enforce_edge_threshold_options():
     with state_lock:
         current = round(state["edge_threshold"], 1)
         research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-        if research_collect and RESEARCH_AI_SOLE_AUTHORITY:
+        if research_collect and RESEARCH_AI_SOLE_AUTHORITY and not profit_gates_enforced():
             fallback = 0.0
         else:
             fallback = RESEARCH_EDGE_THRESHOLD_DEFAULT if research_collect else 3.0
@@ -4855,8 +4880,53 @@ def should_trigger_edge_event(edge_score: float) -> tuple:
         return True, "EDGE_PASS"
     return True, "EDGE_PASS"
 
+def profit_gates_enforced() -> bool:
+    """When True, post-AI gates block execution (edge≥3, AI≥55, golden stack) instead of log-only."""
+    with state_lock:
+        if "profit_gates_enforced" in state:
+            return bool(state.get("profit_gates_enforced"))
+    return PROFIT_GATES_ENFORCED_DEFAULT
+
+
+def _post_ai_gate_blocks(sole: bool) -> bool:
+    return profit_gates_enforced() or not sole
+
+
+def evaluate_profitability_entry_gates(signal: dict, ai: dict, edge_score: float) -> tuple:
+    """Profit gates mirror dashboard edge/AI thresholds — no extra AI floor above toggle."""
+    if not profit_gates_enforced():
+        return False, None
+    edge_score = round(float(edge_score or 0), 1)
+    edge_min = round(float(get_edge_threshold()), 1)
+    if edge_score < edge_min:
+        return True, f"PROFIT_GATE_EDGE_LT_{edge_min}"
+    prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
+    ai_min = round(float(get_ai_threshold()), 1)
+    if prob < ai_min:
+        return True, f"PROFIT_GATE_AI_LT_{ai_min}"
+    return False, None
+
+
+def _exit_post_ai_profit_gate(signal, ai, reason: str, edge_score: float, sole: bool) -> bool:
+    """Block APPROVE on profitability gate; return True if pipeline should stop."""
+    logger.info(f"[PROFIT GATE] BLOCK {reason} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+    log_blocked_signal(signal, ai, reason)
+    log_pipeline_event("POST_AI", "BLOCKED", reason, signal.get("trade_id"), edge_score, force=True)
+    exit_pipeline(signal, ai, reason)
+    with state_lock:
+        state["debug_state"]["last_block_reason"] = reason
+        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+        state["debug_state"]["skip_reason"] = reason
+    update_debug_state_always(reason, {"edge": edge_score})
+    state["last_pipeline_stage"] = "IDLE"
+    return True
+
+
 def _sole_ai_research_mode() -> bool:
+    if profit_gates_enforced():
+        return False
     return RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection()
+
 
 def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
     """Cheap structural gate — blocks AI without an API call."""
@@ -6496,6 +6566,8 @@ def compute_market_structure_shift(mc: dict, health: dict) -> str:
     if "BULL" in trend and trend.endswith("_WEAKENING"):
         return "BULL_TO_BEAR_SHIFT"
     if "BEAR" in trend and trend.endswith("_WEAKENING"):
+        if struct <= -2:
+            return "BEAR_CONTINUATION"
         return "BEAR_TO_BULL_SHIFT"
     if agreement == "CONFLICTED":
         return "BEAR_TO_BULL_SHIFT" if struct > 0 else "BULL_TO_BEAR_SHIFT"
@@ -6512,7 +6584,17 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     score_changes = _bull_bear_score_changes_15m()
     ms = build_micro_sr_levels()
     base = str(health.get("base_state") or "MIXED")
-    hint_dir = "LONG" if base == "BULL" else ("SHORT" if base == "BEAR" else "LONG")
+    struct_hint = float(health.get("structure_score") or (ms.get("structure_score") or 0))
+    if base == "BULL":
+        hint_dir = "LONG"
+    elif base == "BEAR":
+        hint_dir = "SHORT"
+    elif struct_hint < 0:
+        hint_dir = "SHORT"
+    elif struct_hint > 0:
+        hint_dir = "LONG"
+    else:
+        hint_dir = "LONG"
     micro_eval = evaluate_micro_structure_confirm(hint_dir, price, None, ms)
     entry_stage, entry_meta = compute_entry_stage(price, ms, ctx)
     sweeps = detect_liquidity_sweep(None, price, ms, ctx)
@@ -6525,6 +6607,19 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     mc = ctx.get("market_context") or state.get("market_context") or {}
     market_structure_shift = compute_market_structure_shift(mc, health)
     reversal_probability = int(reversal_risk)
+    ema_regime = str(ctx.get("regime") or "UNKNOWN")
+    trend_base = str(health.get("base_state") or "MIXED")
+    struct_for_regime = float(
+        (ctx.get("market_context") or {}).get("market_structure", {}).get("structure_score")
+        or health.get("structure_score")
+        or 0
+    )
+    if struct_for_regime <= -3 or trend_base == "BEAR":
+        trend_regime = "BEAR"
+    elif struct_for_regime >= 3 or trend_base == "BULL":
+        trend_regime = "BULL"
+    else:
+        trend_regime = "RANGE"
     dist_micro_support = None
     dist_micro_resistance = None
     if price > 0 and ms.get("micro_support"):
@@ -6545,6 +6640,9 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
         "distance_to_micro_resistance": dist_micro_resistance,
         "reversal_risk_score": reversal_risk,
         "reversal_probability": reversal_probability,
+        "reversal_risk_note": "Higher score = more reversal risk (not approval probability)",
+        "regime_ema200": ema_regime,
+        "regime_trend_health": trend_regime,
         "market_structure_shift": market_structure_shift,
         "micro_support": ms.get("micro_support"),
         "micro_resistance": ms.get("micro_resistance"),
@@ -10016,6 +10114,17 @@ def process_signal(event: dict):
                 signal["replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             begin_approve_research(signal, ai, pipeline_eff_thr)
             capture_near_miss_on_approve(signal, ai, edge_score, signal.get("context", {}) or ctx)
+            pg_blocked, pg_reason = evaluate_profitability_entry_gates(signal, ai, edge_score)
+            if pg_blocked:
+                if _exit_post_ai_profit_gate(signal, ai, pg_reason, edge_score, sole):
+                    resolve_pending_approve_blocked(signal, ai, pg_reason)
+                    patch_signal_snapshot_outcome(
+                        signal.get("trade_id"),
+                        executed=False,
+                        block_reason=pg_reason,
+                    )
+                    _set_lane_pipeline_stage(research_lane, "IDLE")
+                    return
             gs_blocked, gs_reason = evaluate_golden_stack_filter(
                 final_direction,
                 signal.get("context", {}) or ctx,
@@ -10038,8 +10147,20 @@ def process_signal(event: dict):
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
                     return
-            elif gs_blocked and research_lane != RESEARCH_LANE_GOLDEN_STACK and sole:
-                _research_log_would_block(signal, ai, f"GOLDEN_STACK_{gs_reason}", edge_score)
+            elif gs_blocked and research_lane != RESEARCH_LANE_GOLDEN_STACK:
+                if golden_stack_enabled() and _post_ai_gate_blocks(sole):
+                    if _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
+                        resolve_pending_approve_blocked(signal, ai, f"GOLDEN_STACK_{gs_reason}")
+                        patch_signal_snapshot_outcome(
+                            signal.get("trade_id"),
+                            executed=False,
+                            block_reason=f"GOLDEN_STACK_{gs_reason}",
+                        )
+                        _set_lane_pipeline_stage(research_lane, "IDLE")
+                        state["last_pipeline_stage"] = "IDLE"
+                        return
+                elif sole:
+                    _research_log_would_block(signal, ai, f"GOLDEN_STACK_{gs_reason}", edge_score)
 
             if not signal.get("final_direction"):
                 raise RuntimeError("PIPELINE BREAK: AI returned no direction")
@@ -10048,7 +10169,7 @@ def process_signal(event: dict):
             mc = signal.get("context", {}).get("market_context") or state.get("market_context", {})
             sr_blocked, sr_block_reason = evaluate_sr_direction_filter(final_direction, sr_state, mc, ai)
             if sr_blocked:
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, sr_block_reason, edge_score)
                 else:
                     logger.info(f"[SR FILTER] {sr_block_reason} mode={SR_FILTER_MODE} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10068,7 +10189,7 @@ def process_signal(event: dict):
                 final_direction, signal.get("context", {}) or ctx, ai
             )
             if loc_blocked:
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, loc_reason, edge_score)
                 else:
                     logger.info(f"[ENTRY FILTER] {loc_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10086,7 +10207,7 @@ def process_signal(event: dict):
                 final_direction, signal.get("context", {}) or ctx, ai, signal.get("features")
             )
             if qual_blocked:
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, qual_reason, edge_score)
                 else:
                     logger.info(f"[ENTRY QUALITY] {qual_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10108,7 +10229,7 @@ def process_signal(event: dict):
                 edge_score,
             )
             if ev_blocked:
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, ev_reason, edge_score)
                 else:
                     logger.info(f"[EVIDENCE GATE] {ev_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10123,7 +10244,7 @@ def process_signal(event: dict):
                     return
 
             setup_type = signal.get("setup_type") or classify_setup(signal.get("features") or {})
-            if not is_research_data_collection():
+            if profit_gates_enforced() or not is_research_data_collection():
                 weak_min_edge = get_weak_setup_min_edge()
                 if setup_type == "WEAK_SETUP" and edge_score < weak_min_edge:
                     weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
@@ -10173,7 +10294,7 @@ def process_signal(event: dict):
                 final_direction, ai, signal.get("context", {}) or ctx
             )
             if margin_reason:
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     if str(margin_reason).startswith("WOULD_FAIL_SPREAD"):
                         _research_log_would_block(signal, ai, "SPREAD_LOW", edge_score)
                     elif str(margin_reason).startswith("ADX"):
@@ -10198,7 +10319,7 @@ def process_signal(event: dict):
             signal["spread_penalty_mult"] = spread_penalty_margin_mult(spread)
             health = signal.get("trend_health_at_entry") or compute_trend_health(final_direction)
             if final_direction == "LONG" and health.get("trend_state") == "BULL_WEAKENING":
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
                     exit_pipeline(signal, ai, "TREND_WEAKENING")
@@ -10210,7 +10331,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
             if final_direction == "SHORT" and health.get("trend_state") == "BEAR_WEAKENING":
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
                     exit_pipeline(signal, ai, "TREND_WEAKENING")
@@ -10239,7 +10360,7 @@ def process_signal(event: dict):
             )
 
             if ai.get("win_prob", 0) < get_ai_threshold():
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
                 else:
                     exit_pipeline(signal, ai, "BELOW_THRESHOLD")
@@ -10252,7 +10373,7 @@ def process_signal(event: dict):
                     return
 
             if is_clustered_entry(final_direction, price):
-                if sole:
+                if not _post_ai_gate_blocks(sole):
                     _research_log_would_block(signal, ai, "CLUSTER_ENTRY", edge_score)
                 else:
                     exit_pipeline(signal, ai, "CLUSTER_ENTRY")
@@ -11183,9 +11304,8 @@ def close_position(pos: dict, exit_reason: str):
         return
     exit_is_maker = (
         pos.get("exit_fee_type") == "MAKER"
-        or exit_reason in ("TAKE_PROFIT", "PROFIT_LOCK_LADDER", "TP_HIT")
-        or ("PROFIT" in exit_reason and "FAST" not in exit_reason)
-        or "POSTONLY" in exit_reason
+        or exit_reason in ("TAKE_PROFIT", "TP_HIT")
+        or ("POSTONLY" in exit_reason)
     )
     price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
@@ -16081,6 +16201,19 @@ def main():
         logger.warning(
             f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
             f"{get_research_ai_cooldown_sec()}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    logger.warning(
+        f"[V121 SCENARIO-C] exit profile ON — thesis_stop={THESIS_FAST_EXIT_UNREAL_PCT}% "
+        f"ladder {TRAIL_LADDER[0][0]}→{TRAIL_LADDER[0][1]}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
+        f"| type_a={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} trend_scratch={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    if profit_gates_enforced():
+        logger.warning(
+            f"[V121 SCENARIO-C] neutral AI — profit gates edge≥{get_edge_threshold()} "
+            f"AI≥{get_ai_threshold()}% (dashboard) | golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
+            f"| exec_5m={'ON' if exec_5m_lane_enabled() else 'OFF'} | honest context labels "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
