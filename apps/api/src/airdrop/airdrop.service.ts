@@ -476,6 +476,16 @@ export class AirdropService {
       daysSince(user.createdAt.toISOString()) ?? 0,
     );
 
+    const circulating = await this.prisma.user.aggregate({
+      _sum: { reputationPoints: true },
+      where: { banned: false, reputationPoints: { gt: 0 } },
+    });
+    const totalCirculatingDdollar = circulating._sum.reputationPoints ?? 0;
+    const ddollarCirculatingSharePercent =
+      totalCirculatingDdollar > 0
+        ? (user.reputationPoints / totalCirculatingDdollar) * 100
+        : 0;
+
     return {
       ...(mine ?? {
         userId: user.id,
@@ -517,6 +527,8 @@ export class AirdropService {
             }
           : null,
       rules: board.rules,
+      totalCirculatingDdollar,
+      ddollarCirculatingSharePercent,
     };
   }
 

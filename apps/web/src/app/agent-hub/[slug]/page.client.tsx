@@ -3,8 +3,13 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
-import { buildTradingAgentFollowShareText, type TradingAgentDashboardState } from '@dcf/utils';
+import {
+  buildTradingAgentFollowShareText,
+  type AgentShowcaseFlash,
+  type TradingAgentDashboardState,
+} from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
+import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import { SignalApiPanel } from '@/components/agent-hub/signal-api-panel';
 import { AgentHubShell } from '@/components/agent-hub/agent-hub-shell';
 import { useShareOrigin } from '@/components/share-on-x-button';
@@ -61,6 +66,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   });
   const [viewScope, setViewScope] = useState<'showcase' | 'user'>('showcase');
   const [showcaseNote, setShowcaseNote] = useState<string | null>(null);
+  const [showcaseFlash, setShowcaseFlash] = useState<AgentShowcaseFlash | null>(null);
   const [liveLoading, setLiveLoading] = useState(true);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
@@ -95,6 +101,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExecutionPaused(Boolean(dashR.value.executionPaused));
         setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
         setShowcaseNote(dashR.value.showcaseNote ?? null);
+        setShowcaseFlash(dashR.value.showcaseFlash ?? null);
         setError(null);
       } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
@@ -244,6 +251,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   return (
     <AgentHubShell>
+      {slug === 'conservative-btc' && viewScope === 'showcase' && (
+        <AgentShowcaseFlashBanner flash={showcaseFlash} />
+      )}
       {error && (
         <p className="mx-4 mt-4 rounded-lg border border-amber-500/30 bg-amber-950/30 px-4 py-2 text-sm text-amber-200 sm:mx-6">
           {error}

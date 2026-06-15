@@ -25,6 +25,9 @@ import {
   type BotActivityEntry,
 } from './bot-state.mapper';
 import {
+  buildShowcaseFlashFromBot,
+} from './showcase-flash.util';
+import {
   readInstanceScope,
   scopeActivityToUserSession,
   statsFromScopedActivity,
@@ -642,12 +645,23 @@ export class TradingAgentsService implements OnModuleInit {
       }
     }
 
+    let showcaseFlash = null;
+    if (slug === 'conservative-btc' && viewScope === 'showcase') {
+      const bot =
+        this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+      showcaseFlash = buildShowcaseFlashFromBot(bot, {
+        botConnected: Boolean(rest.botConnected),
+        executionPaused: Boolean(rest.executionPaused),
+      });
+    }
+
     return {
       ...rest,
       agent,
       kind: 'public' as const,
       viewScope,
       userInstance,
+      showcaseFlash,
       showcaseNote:
         viewScope === 'user'
           ? 'Your isolated copy session — stats and trades only from when you started testing.'

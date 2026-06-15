@@ -68,6 +68,8 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
+    await bootstrapUserEconomy(this.prisma, this.points, user.id);
+
     if (await this.userRequires2Fa(user.id)) {
       const pendingToken = randomToken();
       await this.prisma.authPendingChallenge.create({
@@ -143,6 +145,7 @@ export class AuthService {
       if (linked.user.banned) {
         throw new UnauthorizedException('This account has been suspended');
       }
+      await bootstrapUserEconomy(this.prisma, this.points, linked.user.id);
       if (tokenData) {
         await upsertOAuthTokens(linked.id);
       }

@@ -243,6 +243,13 @@ export function BuilderRewardsPage() {
             {me.rewardSharePercent.toFixed(2)}% (~{formatTokenAmount(me.estimatedTokens)} tokens ·{' '}
             {formatUsd(me.estimatedUsd, 0)} at example FDV)
           </p>
+          {me.totalCirculatingDdollar > 0 && (
+            <p className="mt-2 text-sm text-amber-200/90">
+              {me.reputationPoints.toLocaleString()} DDollar ·{' '}
+              {me.ddollarCirculatingSharePercent.toFixed(4)}% of platform circulating supply (
+              {me.totalCirculatingDdollar.toLocaleString()} total)
+            </p>
+          )}
           <PoolEstimateDisclaimer compact />
         </div>
       )}

@@ -53,7 +53,6 @@ const prisma = new PrismaClient();
 try {
   const users = await prisma.user.findMany({
     where: {
-      role: 'USER',
       banned: false,
       email: { not: { contains: '@guest.local' } },
     },
