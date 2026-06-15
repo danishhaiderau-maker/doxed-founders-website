@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(bot): sync bybit-15m-research-bot bebf880fbe06
+fix(agent-hub): always show admin research flash when paper-tracking
 
 ## Last Activity
 
