@@ -101,7 +101,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExecutionPaused(Boolean(dashR.value.executionPaused));
         setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
         setShowcaseNote(dashR.value.showcaseNote ?? null);
-        setShowcaseFlash(dashR.value.showcaseFlash ?? null);
+        setShowcaseFlash((prev) => dashR.value.showcaseFlash ?? prev);
         setError(null);
       } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
@@ -251,7 +251,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   return (
     <AgentHubShell>
-      {slug === 'conservative-btc' && viewScope === 'showcase' && (
+      {slug === 'conservative-btc' && (
         <AgentShowcaseFlashBanner flash={showcaseFlash} />
       )}
       {error && (

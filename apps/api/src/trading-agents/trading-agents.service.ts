@@ -646,9 +646,8 @@ export class TradingAgentsService implements OnModuleInit {
     }
 
     let showcaseFlash = null;
-    if (slug === 'conservative-btc' && viewScope === 'showcase') {
-      const bot =
-        this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    if (slug === 'conservative-btc') {
+      const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
       showcaseFlash = buildShowcaseFlashFromBot(bot, {
         botConnected: Boolean(rest.botConnected),
         executionPaused: Boolean(rest.executionPaused),

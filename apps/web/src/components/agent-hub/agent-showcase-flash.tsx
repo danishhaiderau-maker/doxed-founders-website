@@ -19,14 +19,20 @@ const TONE_STYLES = {
 } as const;
 
 /** Explains why the admin showcase reset — builds trust that strategy is actively tested. */
-export function AgentShowcaseFlashBanner({ flash }: { flash: AgentShowcaseFlash | null }) {
+export function AgentShowcaseFlashBanner({
+  flash,
+  className = 'mx-4 mb-4 sm:mx-6',
+}: {
+  flash: AgentShowcaseFlash | null;
+  className?: string;
+}) {
   if (!flash) return null;
 
   const style = TONE_STYLES[flash.tone];
 
   return (
     <div
-      className={`mx-4 mb-4 overflow-hidden rounded-2xl border px-5 py-4 sm:mx-6 ${style.wrap}`}
+      className={`overflow-hidden rounded-2xl border px-5 py-4 ${className} ${style.wrap}`}
       role="status"
       aria-live="polite"
     >

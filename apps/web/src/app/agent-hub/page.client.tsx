@@ -8,9 +8,11 @@ import {
   AGENT_RUN_CREDITS,
   WORKFORCE_TEMPLATES,
   formatRelativeTime,
+  type AgentShowcaseFlash,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
+import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import { AgentCard } from '@/components/agent-card';
 import { AgentBubbleMap } from '@/components/agent-hub/agent-bubble-map';
 import {
@@ -54,6 +56,7 @@ export default function AgentHubPageClient() {
   const [featuredLiveBook, setFeaturedLiveBook] = useState<
     TradingAgentDashboardState['liveBook'] | null
   >(null);
+  const [showcaseFlash, setShowcaseFlash] = useState<AgentShowcaseFlash | null>(null);
   const [featuredLiveLoading, setFeaturedLiveLoading] = useState(false);
 
   const loadFeaturedLive = useCallback(async () => {
@@ -61,6 +64,7 @@ export default function AgentHubPageClient() {
     try {
       const dash = await fetchTradingAgentDashboard('conservative-btc', session?.accessToken);
       setFeaturedLiveBook(dash.dashboard.liveBook ?? null);
+      setShowcaseFlash((prev) => dash.showcaseFlash ?? prev);
     } catch {
       setFeaturedLiveBook(null);
     } finally {
@@ -143,6 +147,7 @@ export default function AgentHubPageClient() {
         )}
 
         <AgentMarketplaceStats agents={tradingAgents} />
+        <AgentShowcaseFlashBanner flash={showcaseFlash} className="mb-4" />
         <AgentBetaWarningBanner />
         <AgentMarketplaceTabs active={kind} onChange={setKind} />
 
