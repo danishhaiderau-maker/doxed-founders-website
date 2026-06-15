@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): always show admin research flash when paper-tracking
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
