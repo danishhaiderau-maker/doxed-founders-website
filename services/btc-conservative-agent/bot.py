@@ -12617,7 +12617,6 @@ DASHBOARD_JS = """(function () {
     }
     window.showPathwayTab = showPathwayTab;
     window.toggleContinuousAiDirect = toggleContinuousAiDirect;
-    window.toggleExec5mLane = toggleExec5mLane;
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
       await post('/api/toggle_debug', {enabled: cur});
