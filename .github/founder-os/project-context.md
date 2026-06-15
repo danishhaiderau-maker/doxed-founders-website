@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat: DDollar fixes, showcase flash banner, sync research bot 1b85df1d1992
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
