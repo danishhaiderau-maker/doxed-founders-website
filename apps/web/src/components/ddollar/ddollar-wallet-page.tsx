@@ -91,6 +91,16 @@ export function DdollarWalletPage() {
         <p className="mt-1 text-sm text-zinc-400">
           Current balance — in-game {DDOLLAR_CURRENCY_NAME} for participation, agents, and paper trading
         </p>
+        {overview && overview.reputation.totalPoints > 0 && (
+          <p className="mt-2 text-sm text-amber-200/90">
+            {(
+              (overview.reputation.reputationPoints / overview.reputation.totalPoints) *
+              100
+            ).toFixed(4)}
+            % of platform circulating supply (
+            {overview.reputation.totalPoints.toLocaleString()} {DDOLLAR_CURRENCY_NAME} total)
+          </p>
+        )}
 
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
           <Stat label="Lifetime earned" value={formatDdollar(stats.lifetimeEarned || overview?.reputation.reputationPoints || 0)} />

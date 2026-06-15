@@ -1,5 +1,5 @@
 import { apiUrl, describeApiTarget } from './api-base';
-import type { GamifiedRole, NotificationPreferenceGroups, SecurityScoreResult } from '@dcf/utils';
+import type { AgentShowcaseFlash, GamifiedRole, NotificationPreferenceGroups, SecurityScoreResult } from '@dcf/utils';
 
 export interface DexScreenerPreview {
   dexscreenerUrl: string;
@@ -1512,6 +1512,8 @@ export function fetchBuilderRewardsMe(token: string) {
       twitterConnected: boolean;
       needsTwitter: boolean;
       activeDaysEstimate: number;
+      totalCirculatingDdollar: number;
+      ddollarCirculatingSharePercent: number;
       warning: { level: 'warn' | 'critical'; message: string } | null;
       rules: BuilderRewardsResponse['rules'];
     }
@@ -3289,6 +3291,7 @@ export interface TradingAgentDashboard {
     instanceMode: 'copy' | 'live';
   } | null;
   showcaseNote?: string;
+  showcaseFlash?: AgentShowcaseFlash | null;
 }
 
 export interface TradingAgentActivityEntry {

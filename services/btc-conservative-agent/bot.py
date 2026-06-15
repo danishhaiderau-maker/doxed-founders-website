@@ -84,25 +84,20 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 #   CONTINUOUS / AI_DIRECT — immediate AI limit (no 15m micro await)
 #   STABILITY / MICRO_SR — 15m pivot HL/LH + micro S/R await via latest_candles
 #   GOLDEN_STACK / MICRO_SR — 15m micro + golden-stack gates (spawned from CONTINUOUS/STABILITY)
-#   EXEC_5M / 5M_TRIGGER — 5m OHLC pivot HL/LH trigger (spawned from CONTINUOUS/STABILITY)
 # Optional future lanes (not implemented): SHADOW_MIRROR, WIDE_THESIS
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
 RESEARCH_LANE_STABILITY = "STABILITY"
 RESEARCH_LANE_GOLDEN_STACK = "GOLDEN_STACK"
-RESEARCH_LANE_5M_EXEC = "EXEC_5M"
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
     RESEARCH_LANE_STABILITY: "AI Stability Research",
     RESEARCH_LANE_GOLDEN_STACK: "Golden Stack",
-    RESEARCH_LANE_5M_EXEC: "5m Exec Trigger",
 }
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_STABILITY: threading.Lock(),
     RESEARCH_LANE_GOLDEN_STACK: threading.Lock(),
-    RESEARCH_LANE_5M_EXEC: threading.Lock(),
 }
-EXEC_5M_LANE_DEFAULT_ENABLED = False
 PROFIT_GATES_ENFORCED_DEFAULT = True
 # Profit gates follow dashboard edge/AI thresholds (not hard-coded floors).
 PROFIT_MIN_ENTRY_EDGE = 3.0  # legacy fallback only when dashboard unset
@@ -318,11 +313,14 @@ def _load_research_session_meta() -> dict:
     return {}
 
 def _write_research_session(start_ts: float):
+    with state_lock:
+        fcm = bool(state.get("fresh_collection_mode", False))
     payload = {
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "bot_start_time": start_ts,
         "bot_start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "fresh_collection_mode": fcm,
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
     }
@@ -1675,12 +1673,6 @@ def golden_stack_enabled() -> bool:
     with state_lock:
         return bool(state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED))
 
-def exec_5m_lane_enabled() -> bool:
-    with state_lock:
-        if "exec_5m_lane_enabled" in state:
-            return bool(state.get("exec_5m_lane_enabled"))
-    return os.getenv("EXEC_5M_LANE_ENABLED", "0" if not EXEC_5M_LANE_DEFAULT_ENABLED else "1").lower() not in ("0", "false", "no")
-
 def ai_stability_research_enabled() -> bool:
     with state_lock:
         return bool(state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED))
@@ -1785,8 +1777,6 @@ def ai_stability_config_for_dashboard() -> dict:
         "stability_lane": RESEARCH_LANE_STABILITY,
         "continuous_lane": RESEARCH_LANE_CONTINUOUS,
         "golden_stack_lane": RESEARCH_LANE_GOLDEN_STACK,
-        "exec_5m_lane": RESEARCH_LANE_5M_EXEC,
-        "exec_5m_enabled": exec_5m_lane_enabled(),
         "lane_labels": RESEARCH_LANE_LABELS,
     }
 
@@ -2647,7 +2637,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.32-scenario-c-exit-profile-2026-06-17"
+ANALYZER_SYNC_ID = "v9.33-execution-realism-v104-2026-06-17"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3471,54 +3461,6 @@ def evaluate_5m_structure_confirm(direction: str, price: float, ms_5m: dict = No
     }
 
 
-def compute_5m_exec_entry(signal: dict) -> dict:
-    """EXEC_5M lane — limit at 5m micro S/R; await 5m HL/LH confirmation."""
-    direction = str(signal.get("final_direction") or "").upper()
-    price = float(signal.get("signal_price") or state.get("price") or 0)
-    ms_5m = build_micro_sr_levels_5m()
-    eval_5m = evaluate_5m_structure_confirm(direction, price, ms_5m)
-    micro_support = ms_5m.get("micro_support")
-    micro_resistance = ms_5m.get("micro_resistance")
-    limit_price = None
-    if direction == "LONG" and micro_support:
-        limit_price = float(micro_support) + MICRO_SR_ENTRY_BUFFER_USD
-        if limit_price >= price:
-            limit_price = None
-    elif direction == "SHORT" and micro_resistance:
-        limit_price = float(micro_resistance) - MICRO_SR_ENTRY_BUFFER_USD
-        if limit_price <= price:
-            limit_price = None
-    await_5m_confirm = not eval_5m.get("confirmed") or limit_price is None
-    entry_reason = "5M_HL_LH_CONFIRMED" if eval_5m.get("confirmed") else "5M_AWAIT_HL_LH"
-    signal["entry_mode"] = ENTRY_MODE_5M_TRIGGER
-    signal["entry_path"] = "5M_TRIGGER"
-    signal["entry_reason"] = entry_reason
-    signal["micro_sr_limit"] = limit_price
-    signal["5m_micro_support"] = micro_support
-    signal["5m_micro_resistance"] = micro_resistance
-    signal["5m_higher_low"] = bool(ms_5m.get("higher_low"))
-    signal["5m_lower_high"] = bool(ms_5m.get("lower_high"))
-    signal["5m_structure_eval"] = eval_5m
-    signal["await_5m_confirm"] = await_5m_confirm
-    signal["await_micro_confirm"] = False
-    signal["micro_structure_confirmed"] = bool(eval_5m.get("confirmed"))
-    signal["order_placed"] = False
-    trade_id = signal.get("trade_id", "?")
-    logger.info(
-        f"[5M EXEC] trade_id={trade_id} dir={direction} reason={entry_reason} "
-        f"limit={fmt(limit_price)} support={fmt(micro_support)} resist={fmt(micro_resistance)} "
-        f"HL={ms_5m.get('higher_low')} LH={ms_5m.get('lower_high')} "
-        f"await_5m={await_5m_confirm} path=5M_TRIGGER [PIPELINE ENFORCEMENT]"
-    )
-    return {
-        "entry_mode": ENTRY_MODE_5M_TRIGGER,
-        "entry_path": "5M_TRIGGER",
-        "entry_reason": entry_reason,
-        "micro_sr_limit": limit_price,
-        "await_5m_confirm": await_5m_confirm,
-    }
-
-
 def _ema_zone_reached(direction: str, price: float, ema9: float, ema21: float) -> tuple:
     """EMA zone arms setup when price is near the EMA hybrid reference."""
     hybrid_base = compute_ema_hybrid_base(direction, price, ema9, ema21)
@@ -3694,7 +3636,7 @@ def resolve_ai_planner_limit(
                 limit = ms_lim
         limit = min(limit, price)
         if limit >= price:
-            limit = price * (1 - float(state.get("pullback_threshold", 0.002)))
+            limit = price * (1 - float(state.get("pullback_threshold", 0.001)))
     else:
         if micro_resistance:
             ms_lim = float(micro_resistance) - MICRO_SR_ENTRY_BUFFER_USD
@@ -3702,7 +3644,7 @@ def resolve_ai_planner_limit(
                 limit = ms_lim
         limit = max(limit, price)
         if limit <= price:
-            limit = price * (1 + float(state.get("pullback_threshold", 0.002)))
+            limit = price * (1 + float(state.get("pullback_threshold", 0.001)))
     return float(limit), "AI_ZONE_MICRO_VALIDATED"
 
 
@@ -3735,12 +3677,12 @@ def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -
     max_dist = AI_DIRECT_MAX_DIST_PCT
     if direction == "LONG":
         if limit >= price:
-            limit = price * (1 - float(state.get("pullback_threshold", 0.002)))
+            limit = price * (1 - float(state.get("pullback_threshold", 0.001)))
         if (price - limit) / price > max_dist:
             limit = price * (1 - max_dist)
     else:
         if limit <= price:
-            limit = price * (1 + float(state.get("pullback_threshold", 0.002)))
+            limit = price * (1 + float(state.get("pullback_threshold", 0.001)))
         if (limit - price) / price > max_dist:
             limit = price * (1 + max_dist)
     return float(limit), "AI_DIRECT_LIMIT"
@@ -3914,7 +3856,7 @@ def resolve_entry_limit_price(signal: dict) -> tuple:
     """Return (limit_price, entry_mode) — micro S/R level, EMA armed, or pullback %."""
     direction = str(signal.get("final_direction") or "").upper()
     signal_price = float(signal.get("signal_price") or state.get("price") or 0)
-    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002)))
+    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.001)))
     if direction == "LONG":
         pullback_limit = signal_price * (1 - pullback_pct)
     elif direction == "SHORT":
@@ -4208,7 +4150,16 @@ TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
-DUPLICATE_LIMIT_PRICE_TOL_USD = 2.0
+_LANE_DUPLICATE_TOL_USD = {
+    RESEARCH_LANE_STABILITY: 10.0,
+    RESEARCH_LANE_CONTINUOUS: 15.0,
+    RESEARCH_LANE_GOLDEN_STACK: 20.0,
+}
+_LANE_LIMIT_OFFSET_USD = {
+    RESEARCH_LANE_STABILITY: 0.0,
+    RESEARCH_LANE_CONTINUOUS: 5.0,
+    RESEARCH_LANE_GOLDEN_STACK: 10.0,
+}
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
 THESIS_INVALIDATION_ENABLED = True
@@ -4290,6 +4241,7 @@ EARLY_FAIL_MINUTES = 40
 CSV_DECISIONS = "decisions_3factor.csv"
 CSV_TRADES = "trades_3factor.csv"
 CSV_EXPIRED = "expired_orders_3factor.csv"
+FILL_QUALITY_FILE = "fill_quality.jsonl"
 CSV_BLOCKS = "blocked_signals_3factor.csv"
 CSV_AI_TRANCHE = "ai_tranche_log.csv"
 CSV_SETUP_LOG = "setup_log_3factor.csv"
@@ -4350,8 +4302,11 @@ REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(30 * 60)))
 # Limit chase — patient maker entry then gradual convergence toward market (research sim).
-LIMIT_CHASE_START_SEC_DEFAULT = 900
-LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 180
+LIMIT_CHASE_START_SEC_DEFAULT = 300
+LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
+LIMIT_CHASE_HOLD_SEC = 300
+MARKETABLE_CHASE_SEC = 900
+MARKETABLE_CHASE_DISTANCE_USD = 10.0
 LIMIT_CHASE_STEP_PCT_DEFAULT = 0.25
 LIMIT_CHASE_MAX_GAP_CLOSE_PCT = float(os.getenv("LIMIT_CHASE_MAX_GAP_CLOSE_PCT", "0.90"))
 LIMIT_CHASE_MIN_BUFFER_USD = float(os.getenv("LIMIT_CHASE_MIN_BUFFER_USD", str(MICRO_SR_ENTRY_BUFFER_USD)))
@@ -4409,7 +4364,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.21-scenario-c-exit-profile"
+EXECUTION_FIX_VERSION = "v1.1.22-execution-realism-v104"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4482,7 +4437,6 @@ state = {
     "fresh_collection_mode": False,
     "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
     "profit_gates_enforced": PROFIT_GATES_ENFORCED_DEFAULT,
-    "exec_5m_lane_enabled": EXEC_5M_LANE_DEFAULT_ENABLED,
     "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
     "golden_stack_last_eval": None,
     "golden_stack_last_block_reason": None,
@@ -5134,7 +5088,7 @@ def _resolve_submit_limit_price(signal: dict) -> tuple:
 
 
 def _instant_entry_path(signal: dict) -> bool:
-    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002)))
+    pullback_pct = float(signal.get("pullback_pct", state.get("pullback_threshold", 0.001)))
     return pullback_pct <= 0.0
 
 
@@ -7457,7 +7411,7 @@ def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_ta
         direction=direction,
         leverage=lev,
         margin_usdt=float(FIXED_MARGIN_USDT),
-        pullback_pct=float(state.get("pullback_threshold", 0.002)),
+        pullback_pct=float(state.get("pullback_threshold", 0.001)),
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
         exit_config=get_exit_config_snapshot(),
         ai_win_prob=ai.get("win_prob"),
@@ -7875,38 +7829,6 @@ def spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, source_lan
         "pre_ctx": gs_ctx,
     })
 
-
-def spawn_5m_exec_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Independent EXEC_5M lane — 5m HL/LH trigger entry (spawned from CONTINUOUS/STABILITY on APPROVE)."""
-    if not exec_5m_lane_enabled() or not is_research_data_collection():
-        return
-    if ai.get("decision") != "APPROVE":
-        return
-    ai_direction = ai.get("direction")
-    final_direction = ai_direction
-    if state.get("invert_signal", False):
-        if ai_direction == "LONG":
-            final_direction = "SHORT"
-        elif ai_direction == "SHORT":
-            final_direction = "LONG"
-    exec_ctx = copy.deepcopy(ctx)
-    exec_ctx["trade_id"] = f"5m-{uuid.uuid4().hex[:12]}"
-    logger.info(
-        f"[EXEC_5M LANE] spawn execution from {source_lane} trade_id={exec_ctx['trade_id']} "
-        f"[PIPELINE ENFORCEMENT]"
-    )
-    process_signal({
-        "event_trigger": True,
-        "research_lane": RESEARCH_LANE_5M_EXEC,
-        "edge_trigger_reason": f"EXEC_5M_FROM_{source_lane}",
-        "edge_score": round(float(edge_score), 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features or {},
-        "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": exec_ctx,
-    })
 
 def maybe_run_stability_research_ai():
     """Independent STABILITY lane: candle-aligned DeepSeek + real execution on APPROVE."""
@@ -8775,7 +8697,22 @@ def _resolve_awaiting_5m_limit(signal: dict) -> tuple:
     return limit_price, ENTRY_MODE_5M_TRIGGER, True
 
 
-def _limit_prices_near(a: float, b: float) -> bool:
+def _lane_duplicate_tolerance(lane: str = None) -> float:
+    lane = str(lane or "").upper()
+    return float(_LANE_DUPLICATE_TOL_USD.get(lane, _LANE_DUPLICATE_TOL_USD.get(RESEARCH_LANE_CONTINUOUS, 15.0)))
+
+
+def _apply_lane_limit_offset(limit: float, lane: str, direction: str) -> float:
+    direction = str(direction or "").upper()
+    offset = float(_LANE_LIMIT_OFFSET_USD.get(str(lane or "").upper(), 0.0))
+    if direction == "LONG":
+        return round(float(limit) + offset, 2)
+    if direction == "SHORT":
+        return round(float(limit) - offset, 2)
+    return round(float(limit), 2)
+
+
+def _limit_prices_near(a: float, b: float, lane: str = None, tolerance: float = None) -> bool:
     if a is None or b is None:
         return False
     try:
@@ -8784,7 +8721,8 @@ def _limit_prices_near(a: float, b: float) -> bool:
         return False
     if fa <= 0 or fb <= 0:
         return False
-    if abs(fa - fb) <= DUPLICATE_LIMIT_PRICE_TOL_USD:
+    tol = float(tolerance) if tolerance is not None else _lane_duplicate_tolerance(lane)
+    if abs(fa - fb) <= tol:
         return True
     ref = max(fa, fb, 1.0)
     return abs(fa - fb) / ref < CLUSTER_MIN_DIST_PCT
@@ -8810,7 +8748,7 @@ def _signal_planned_limit(sig: dict) -> float:
     return 0.0
 
 
-def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_trade_id: str = None) -> dict:
+def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_trade_id: str = None, lane: str = None) -> dict:
     """Return metadata for an active same-direction limit at/near limit_price, else {}."""
     direction = str(direction or "").upper()
     if direction not in ("LONG", "SHORT") or limit_price <= 0:
@@ -8827,7 +8765,9 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if odir != direction:
                 continue
             ref = o.get("planned_limit_price") or o.get("limit_price")
-            if _limit_prices_near(limit_price, ref):
+            o_lane = o.get("research_lane")
+            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(o_lane))
+            if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
                     "trade_id": tid,
                     "source": "pending_order",
@@ -8842,7 +8782,9 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if p.get("dir") != direction:
                 continue
             ref = p.get("entry") or 0
-            if _limit_prices_near(limit_price, ref):
+            p_lane = p.get("research_lane")
+            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(p_lane))
+            if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
                     "trade_id": tid,
                     "source": "open_position",
@@ -8871,7 +8813,9 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if _signal_direction(sig) != direction:
                 continue
             ref = _signal_planned_limit(sig)
-            if ref <= 0 or not _limit_prices_near(limit_price, ref):
+            sig_lane = sig.get("research_lane")
+            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(sig_lane))
+            if ref <= 0 or not _limit_prices_near(limit_price, ref, tolerance=tol):
                 continue
             return {
                 "trade_id": tid,
@@ -8889,7 +8833,7 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
-    dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid)
+    dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid, lane=signal.get("research_lane"))
     if not dup:
         return False
     reason = "DUPLICATE_LIMIT_PRICE"
@@ -8934,10 +8878,12 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return False
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    direction = signal.get("final_direction") or _signal_direction(signal)
+    limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
     price = state.get("price")
     if not price or price <= 0:
         return False
-    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
+    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.001))
     signal_price = signal.get("signal_price", price)
     margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
     lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
@@ -9242,6 +9188,43 @@ def execute_simulated_order(signal):
     return _promote_signal_to_limit_order(signal)
 
 
+def _chase_structure_valid(direction: str) -> bool:
+    price = float(state.get("price") or 0)
+    if price <= 0:
+        return False
+    ms_5m = build_micro_sr_levels_5m()
+    eval_5m = evaluate_5m_structure_confirm(direction, price, ms_5m)
+    return bool(eval_5m.get("confirmed"))
+
+
+def _fill_distance_metrics(order: dict) -> dict:
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    limit_price = float(order.get("limit_price") or order.get("planned_limit_price") or 0)
+    min_p = order.get("min_price_since_order")
+    max_p = order.get("max_price_since_order")
+    closest_price = None
+    missed_by_usd = None
+    touched_limit = False
+    if limit_price > 0 and min_p is not None and max_p is not None:
+        min_p = float(min_p)
+        max_p = float(max_p)
+        if direction == "LONG":
+            closest_price = min_p
+            missed_by_usd = round(max(0.0, limit_price - min_p), 2)
+            touched_limit = min_p <= limit_price
+        elif direction == "SHORT":
+            closest_price = max_p
+            missed_by_usd = round(max(0.0, max_p - limit_price), 2)
+            touched_limit = max_p >= limit_price
+    return {
+        "closest_price": closest_price,
+        "missed_by_usd": missed_by_usd,
+        "min_price_since_order": min_p,
+        "max_price_since_order": max_p,
+        "touched_limit": touched_limit,
+    }
+
+
 def _limit_chase_market_gap(direction: str, limit_price: float, market_price: float) -> float:
     direction = str(direction or "").upper()
     if direction == "LONG":
@@ -9279,12 +9262,18 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
     if not created:
         return False
     age_sec = now - created
+    if age_sec < LIMIT_CHASE_HOLD_SEC:
+        return False
     chase_start = order.get("chase_start_sec")
     if chase_start is None:
         chase_start = 0 if order.get("immediate_chase") else get_limit_chase_start_sec()
     else:
         chase_start = float(chase_start)
     if age_sec < chase_start:
+        return False
+    if age_sec >= MARKETABLE_CHASE_SEC:
+        return False
+    if not _chase_structure_valid(direction):
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
         return False
@@ -9370,6 +9359,58 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     return True
 
 
+def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, now: float) -> bool:
+    """After patient chase, set marketable limit at ask/bid when structure still valid."""
+    if order.get("status") != "PENDING":
+        return False
+    created = float(order.get("created_ts") or 0)
+    if not created or (now - created) < MARKETABLE_CHASE_SEC:
+        return False
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    if direction not in ("LONG", "SHORT"):
+        return False
+    if not _chase_structure_valid(direction):
+        return False
+    old_limit = float(order.get("limit_price") or 0)
+    if old_limit <= 0 or price <= 0:
+        return False
+    gap = _limit_chase_market_gap(direction, old_limit, float(price))
+    if gap < MARKETABLE_CHASE_DISTANCE_USD:
+        return False
+    refresh_bbo_state()
+    with state_lock:
+        ask = float(state.get("ask") or price)
+        bid = float(state.get("bid") or price)
+    new_limit = round(ask, 2) if direction == "LONG" else round(bid, 2)
+    if abs(new_limit - old_limit) < 0.01:
+        return False
+    age_min = round((now - created) / 60.0, 2)
+    gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
+    chase_count = int(order.get("limit_chase_count") or 0) + 1
+    order["limit_price"] = new_limit
+    order["limit_chase_count"] = chase_count
+    order["last_chase_ts"] = now
+    order["marketable_fallback"] = True
+    order["fill_model"] = _resolve_fill_model(signal, order)
+    if signal:
+        signal["limit_price"] = new_limit
+        signal["limit_chase_count"] = chase_count
+        signal["last_chase_ts"] = now
+        signal["marketable_fallback"] = True
+        signal["fill_model"] = order["fill_model"]
+    logger.info(
+        f"[SIM] MARKETABLE_LIMIT trade_id={order.get('trade_id')} dir={direction} "
+        f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
+        f"gap_usd={gap:.2f} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+    )
+    try:
+        from execution_funnel import funnel_on_limit_chase
+        funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
+    except Exception as _fe:
+        logger.debug(f"[FUNNEL] marketable limit log failed: {_fe}")
+    return True
+
+
 def process_limit_chase(price: float):
     """Gradually move unfilled sim limits toward market after patient wait."""
     if not limit_chase_enabled() or price is None or price <= 0:
@@ -9384,6 +9425,11 @@ def process_limit_chase(price: float):
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
         if _apply_limit_chase(order, signal, price, now):
+            chased += 1
+    for order in pending:
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        if _apply_marketable_limit_fallback(order, signal, price, now):
             chased += 1
     if chased:
         pipeline_state_sync()
@@ -10075,12 +10121,10 @@ def process_signal(event: dict):
             signal["strategy"] = state.get("strategy")
             signal["_logged"] = False
             signal["_finalized"] = False
-            signal["pullback_pct"] = state.get("pullback_threshold", 0.002)
+            signal["pullback_pct"] = state.get("pullback_threshold", 0.001)
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
-            if research_lane == RESEARCH_LANE_5M_EXEC:
-                compute_5m_exec_entry(signal)
-            elif research_lane == RESEARCH_LANE_CONTINUOUS and continuous_ai_direct_entry_enabled():
+            if research_lane == RESEARCH_LANE_CONTINUOUS and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
             else:
                 signal["entry_path"] = "MICRO_SR"
@@ -10148,19 +10192,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
             elif gs_blocked and research_lane != RESEARCH_LANE_GOLDEN_STACK:
-                if golden_stack_enabled() and _post_ai_gate_blocks(sole):
-                    if _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
-                        resolve_pending_approve_blocked(signal, ai, f"GOLDEN_STACK_{gs_reason}")
-                        patch_signal_snapshot_outcome(
-                            signal.get("trade_id"),
-                            executed=False,
-                            block_reason=f"GOLDEN_STACK_{gs_reason}",
-                        )
-                        _set_lane_pipeline_stage(research_lane, "IDLE")
-                        state["last_pipeline_stage"] = "IDLE"
-                        return
-                elif sole:
-                    _research_log_would_block(signal, ai, f"GOLDEN_STACK_{gs_reason}", edge_score)
+                _research_log_would_block(signal, ai, f"GOLDEN_STACK_{gs_reason}", edge_score)
 
             if not signal.get("final_direction"):
                 raise RuntimeError("PIPELINE BREAK: AI returned no direction")
@@ -10263,6 +10295,9 @@ def process_signal(event: dict):
             if not sole and not ensure_directional_capacity(final_direction):
                 block_reason = f"MAX_{final_direction}S"
                 logger.info(f"[DIRECTION CAP] {block_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                with state_lock:
+                    state["last_direction_cap_block"] = block_reason
+                    state["last_direction_cap_block_ts"] = time.time()
                 log_blocked_signal(signal, ai, block_reason)
                 exit_pipeline(signal, ai, block_reason)
                 with state_lock:
@@ -10485,7 +10520,6 @@ def process_signal(event: dict):
                 state.setdefault("last_signal_create_ts_by_lane", {})[research_lane] = time.time()
             if research_lane in (RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_STABILITY):
                 spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, research_lane)
-                spawn_5m_exec_lane(ctx, ai, edge_score, event_obj, features, research_lane)
             logger.info(
                 f"[PIPELINE] → ORDER STAGE COMPLETE lane={research_lane} model={signal.get('research_model')} "
                 f"[PIPELINE ENFORCEMENT]"
@@ -11035,7 +11069,7 @@ def execute_order(signal, ai=None):
         logger.info(f"[EXECUTION] Routing order trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
         full_pipeline_trace("[EXECUTION]", "ROUTING_START", signal.get("trade_id"))
         track_event(signal.get("trade_id"), "EXECUTION_ROUTED")
-        pullback_pct = float(state.get("pullback_threshold", 0.002))
+        pullback_pct = float(state.get("pullback_threshold", 0.001))
         use_instant = pullback_pct <= 0.0
         if use_instant or not state.get("allow_compression", True):
             execute_market_order(signal)
@@ -11112,7 +11146,7 @@ def create_limit_order(signal):
         enforce_log(signal, "BLOCKED_INSUFFICIENT_CAPITAL")
         exit_pipeline(signal, None, "BLOCKED_INSUFFICIENT_CAPITAL")
         return None
-    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.002))
+    pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.001))
     signal_price = signal.get("signal_price", price)
     limit_price, entry_mode = resolve_entry_limit_price(signal)
     signal["entry_mode"] = entry_mode
@@ -11199,6 +11233,9 @@ def _record_expired_order(source: dict, reason: str):
         or master.get("planned_limit_price")
     )
     signal_price = source.get("signal_price") or master.get("signal_price") or master.get("price")
+    fill_metrics = _fill_distance_metrics(source) if source.get("status") == "PENDING" or source.get("entry_type") == "SIM_LIMIT" else {}
+    if not fill_metrics and master:
+        fill_metrics = _fill_distance_metrics({**master, **source})
     row = {
         "time": utc_iso(),
         "trade_id": tid,
@@ -11220,12 +11257,29 @@ def _record_expired_order(source: dict, reason: str):
         "reason": reason,
         "research_lane": source.get("research_lane") or master.get("research_lane"),
         "research_model": source.get("research_model") or master.get("research_model"),
+        "closest_price": fill_metrics.get("closest_price"),
+        "missed_by_usd": fill_metrics.get("missed_by_usd"),
+        "min_price_since_order": fill_metrics.get("min_price_since_order"),
+        "max_price_since_order": fill_metrics.get("max_price_since_order"),
+        "touched_limit": fill_metrics.get("touched_limit"),
     }
     with trade_lock:
         expired_orders.append(row)
         if len(expired_orders) > MAX_EXPIRED_ORDERS:
             expired_orders.pop(0)
     log_expired_order(row)
+    fq_row = {
+        "schema": "fill_quality_v1",
+        "ts": row["time"],
+        "trade_id": tid,
+        "research_lane": row.get("research_lane"),
+        "direction": row.get("dir"),
+        "limit_price": limit_price,
+        "reason": reason,
+        **{k: fill_metrics.get(k) for k in ("closest_price", "missed_by_usd", "min_price_since_order", "max_price_since_order", "touched_limit")},
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
     return row
 
 def _expired_order_api_row(row: dict) -> dict:
@@ -11302,6 +11356,8 @@ def position_manager():
 def close_position(pos: dict, exit_reason: str):
     if not validate_state():
         return
+    if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+        return
     exit_is_maker = (
         pos.get("exit_fee_type") == "MAKER"
         or exit_reason in ("TAKE_PROFIT", "TP_HIT")
@@ -11313,6 +11369,9 @@ def close_position(pos: dict, exit_reason: str):
     with state_lock:
         if pos not in open_positions:
             return
+        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+            return
+        pos["_close_in_progress"] = True
         trade_id = pos.get("trade_id")
         if not trade_id:
             return
@@ -11702,6 +11761,7 @@ def research_wipe_file_paths():
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
+        "pathway_scorecard.json", FILL_QUALITY_FILE, "execution_funnel.jsonl", "execution_funnel_summary.json",
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
         CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
@@ -11755,7 +11815,7 @@ def maintain_fresh_collection_files():
 
 def perform_fresh_collection_reset() -> dict:
     """Dashboard-triggered archive+wipe: never delete without archiving first."""
-    global bot_start_time, _last_fresh_maintain_ts
+    global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     archive_path = archive_research_session(reason="fresh_collection_dashboard")
     logger.warning(f"[FRESH COLLECTION] Reset requested — archived to {archive_path}, wiping session state")
     with replay_lock:
@@ -11768,6 +11828,7 @@ def perform_fresh_collection_reset() -> dict:
         trades.clear()
         recent_trades.clear()
     deleted, errors = reset_all_research_files()
+    _cached_pathway_scorecard = {}
     _reset_runtime_log_handlers()
     reset_runtime_state()
     reset_session_risk_state()
@@ -11804,12 +11865,24 @@ def get_pathway_scorecard_cached() -> dict:
     if not is_research_data_collection():
         return _cached_pathway_scorecard or {}
     try:
-        from pathway_scorecard_engine import load_pathway_scorecard
-        loaded = load_pathway_scorecard(os.getcwd())
-        if loaded:
-            _cached_pathway_scorecard = loaded
-        elif not _cached_pathway_scorecard:
-            _cached_pathway_scorecard = refresh_pathway_scorecard_live()
+        from pathway_scorecard_engine import load_pathway_scorecard, scorecard_is_stale, refresh_pathway_scorecard
+        if scorecard_is_stale(os.getcwd()):
+            _cached_pathway_scorecard = refresh_pathway_scorecard(
+                os.getcwd(),
+                bot_version=EXECUTION_FIX_VERSION,
+                lanes_live={
+                    "CONTINUOUS": continuous_ai_research_enabled(),
+                    "STABILITY": ai_stability_research_enabled(),
+                    "GOLDEN_STACK": golden_stack_enabled(),
+                },
+                fresh_collection_mode=bool(state.get("fresh_collection_mode", False)),
+            )
+        else:
+            loaded = load_pathway_scorecard(os.getcwd())
+            if loaded:
+                _cached_pathway_scorecard = loaded
+            elif not _cached_pathway_scorecard:
+                _cached_pathway_scorecard = refresh_pathway_scorecard_live()
     except Exception as e:
         logger.debug(f"[PATHWAY_SCORECARD] load failed: {e}")
     return _cached_pathway_scorecard or {}
@@ -11826,8 +11899,8 @@ def refresh_pathway_scorecard_live() -> dict:
                 "CONTINUOUS": continuous_ai_research_enabled(),
                 "STABILITY": ai_stability_research_enabled(),
                 "GOLDEN_STACK": golden_stack_enabled(),
-                "EXEC_5M": exec_5m_lane_enabled(),
             },
+            fresh_collection_mode=bool(state.get("fresh_collection_mode", False)),
         )
     except Exception as e:
         logger.warning(f"[PATHWAY_SCORECARD] refresh failed: {e}")
@@ -12083,7 +12156,9 @@ HTML = """<!DOCTYPE html>
   <option value="0.5">0.5%</option>
   <option value="0.6">0.6%</option>
 </select><br>
-<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3"><br>
+<label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
+<p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). <code>MAX_LONGS=3</code> caps LONG count separately — not controlled by this field.</p>
+<div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
 <label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
 <label>Edge range preset:</label>
 <select id="edgeRangePreset">
@@ -12289,11 +12364,10 @@ DASHBOARD_JS = """(function () {
       const colors = {
         'CONTINUOUS': '#58a6ff',
         'STABILITY': '#bc8cff',
-        'GOLDEN_STACK': '#d4a72c',
-        'EXEC_5M': '#3fb950'
+        'GOLDEN_STACK': '#d4a72c'
       };
       const c = colors[lane] || '#8b949e';
-      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : lane === 'EXEC_5M' ? '5m Exec' : m;
+      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : m;
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     async function post(url, obj={}) {
@@ -12410,10 +12484,6 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_continuous_ai_direct');
       refresh();
     }
-    async function toggleExec5mLane() {
-      await post('/api/toggle_exec_5m_lane');
-      refresh();
-    }
     async function toggleDuplicateLimitBlock() {
       await post('/api/toggle_duplicate_limit_block');
       refresh();
@@ -12432,7 +12502,7 @@ DASHBOARD_JS = """(function () {
       const lanePaths = paths.filter(function (p) { return p.lane === lane; });
       if (!lanePaths.length) return 'n=0';
       const n = lanePaths.reduce(function (s, p) { return s + (p.n || 0); }, 0);
-      const net = lanePaths.reduce(function (s, p) { return s + (p.net_usd || 0); }, 0);
+      const net = lanePaths.reduce(function (s, p) { return s + (p.real_net_usd != null ? p.real_net_usd : p.net_usd || 0); }, 0);
       const wrs = lanePaths.filter(function (p) { return p.n > 0; });
       const wr = wrs.length ? (wrs.reduce(function (s, p) { return s + p.wr_pct; }, 0) / wrs.length).toFixed(0) : '0';
       return 'n=' + n + ' · WR ' + wr + '% · $' + net.toFixed(2);
@@ -12443,7 +12513,6 @@ DASHBOARD_JS = """(function () {
         { key: 'CONTINUOUS', label: 'Continuous', on: d.continuous_ai_research_enabled !== false, toggle: toggleContinuousAi, color: '#58a6ff' },
         { key: 'STABILITY', label: 'Stability', on: d.ai_stability_research_enabled !== false, toggle: toggleAiStability, color: '#bc8cff' },
         { key: 'GOLDEN_STACK', label: 'Golden Stack', on: d.golden_stack_enabled !== false, toggle: toggleGoldenStack, color: '#d4a72c' },
-        { key: 'EXEC_5M', label: '5m Exec', on: d.exec_5m_lane_enabled !== false, toggle: toggleExec5mLane, color: '#3fb950' },
       ];
       const chips = document.getElementById('pathwayLaneChips');
       if (chips) {
@@ -12453,7 +12522,7 @@ DASHBOARD_JS = """(function () {
           return '<div style="padding:8px 12px;background:#0d1117;border:1px solid ' + ln.color + ';border-radius:8px;min-width:200px;">'
             + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
             + '<strong style="color:' + ln.color + ';">' + ln.label + '</strong>'
-            + '<button type="button" onclick="' + (ln.key === 'EXEC_5M' ? 'toggleExec5mLane()' : ln.key === 'CONTINUOUS' ? 'toggleContinuousAi()' : ln.key === 'STABILITY' ? 'toggleAiStability()' : 'toggleGoldenStack()') + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">'
+            + '<button type="button" onclick="' + (ln.key === 'CONTINUOUS' ? 'toggleContinuousAi()' : ln.key === 'STABILITY' ? 'toggleAiStability()' : 'toggleGoldenStack()') + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">'
             + (ln.on ? 'ON' : 'OFF') + '</button></div>'
             + '<div style="color:#8b949e;font-size:0.82em;margin-top:6px;">' + stats + '</div></div>';
         }).join('');
@@ -12475,13 +12544,18 @@ DASHBOARD_JS = """(function () {
       if (grid) {
         const paths = sc.pathways || [];
         grid.innerHTML = paths.length ? paths.map(function (p) {
-          const net = p.net_usd || 0;
+          const net = p.real_net_usd != null ? p.real_net_usd : (p.net_usd || 0);
+          const headline = p.net_usd || 0;
+          const bugNote = (p.ladder_bug_n > 0) ? ' <span style="color:#d4a72c;">(' + p.ladder_bug_n + ' ladder-corrected)</span>' : '';
+          const headlineNote = (p.real_net_usd != null && Math.abs(headline - net) > 0.5)
+            ? '<div style="color:#6e7681;font-size:0.78em;">headline $' + headline.toFixed(2) + bugNote + '</div>' : '';
           const border = net >= 0 ? '#3fb950' : '#f85149';
           return '<div style="padding:10px 12px;background:#0d1117;border:1px solid ' + border + ';border-radius:8px;">'
             + '<div style="font-weight:600;color:#c9d1d9;">' + (p.lane || '-') + ' · ' + (p.entry_path || '-') + '</div>'
             + '<div style="color:#8b949e;font-size:0.82em;">' + (p.entry_mode || '-') + ' · ' + (p.fill_model || '-') + '</div>'
             + '<div style="margin-top:8px;font-size:0.9em;">N=' + (p.n || 0) + ' · WR ' + (p.wr_pct != null ? p.wr_pct : 0) + '%</div>'
-            + '<div style="color:' + border + ';font-weight:600;">$' + net.toFixed(2) + '</div>'
+            + '<div style="color:' + border + ';font-weight:600;">real $' + net.toFixed(2) + '</div>'
+            + headlineNote
             + '<div style="color:#8b949e;font-size:0.82em;">delay ' + (p.avg_signal_age_min || 0) + 'm · exit ' + (p.top_exit || '-') + '</div>'
             + '</div>';
         }).join('') : '<p style="color:#8b949e;">Collecting pathway trades…</p>';
@@ -12499,7 +12573,23 @@ DASHBOARD_JS = """(function () {
       const sessEl = document.getElementById('pathwaySessionSummary');
       const sess = sc.session || {};
       if (sessEl) {
-        sessEl.innerText = 'Session: ' + (sess.total_trades || 0) + ' trades · WR ' + (sess.wr_pct || 0) + '% · Net $' + (sess.net_usd || 0);
+        const real = sess.real_net_usd != null ? sess.real_net_usd : (sess.net_usd || 0);
+        const headline = sess.net_usd || 0;
+        const bugs = sess.ladder_bug_trades || 0;
+        let txt = 'Session (deduped): ' + (sess.total_trades || 0) + ' trades · WR ' + (sess.wr_pct || 0) + '% · Real $' + real;
+        if (Math.abs(headline - real) > 0.5) {
+          txt += ' (headline $' + headline + ')';
+        }
+        if (bugs > 0) {
+          txt += ' · ' + bugs + ' ladder-booking rows corrected';
+        }
+        if (sc.bot_version) {
+          txt += ' · ' + sc.bot_version;
+        }
+        if (sc.generated_at) {
+          txt += ' · updated ' + sc.generated_at.slice(0, 19).replace('T', ' ');
+        }
+        sessEl.innerText = txt;
       }
       const kpiEl = document.getElementById('pathwayKpisPanel');
       const kpis = d.research_kpis || {};
@@ -13012,6 +13102,21 @@ DASHBOARD_JS = """(function () {
           const pb = document.getElementById('pullbackThresh');
           if (pb) pb.value = (d.pullback_threshold * 100).toFixed(1);
         }
+        const capWarn = document.getElementById('capacityWarningBanner');
+        if (capWarn) {
+          const maxAct = d.max_active_signals != null ? d.max_active_signals : 3;
+          const maxLongs = d.max_longs != null ? d.max_longs : 3;
+          const msgs = [];
+          if (maxAct <= 3) {
+            msgs.push('Low max concurrent (' + maxAct + ') — increase Max Concurrent Signals for more fills.');
+          }
+          msgs.push('Note: MAX_LONGS=' + maxLongs + ' also caps same-direction LONG exposure separately from total slots.');
+          if (d.last_direction_cap_block) {
+            msgs.push('Recent direction cap: ' + d.last_direction_cap_block + ' — same-direction limit hit.');
+          }
+          capWarn.style.display = msgs.length ? 'block' : 'none';
+          capWarn.innerText = msgs.join(' ');
+        }
         safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
@@ -13517,6 +13622,9 @@ def api_state():
         snapshot["edge_options"] = EDGE_OPTIONS
         snapshot["edge_range_presets"] = EDGE_RANGE_PRESETS
         snapshot["max_active_signals"] = state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT)
+        snapshot["max_longs"] = MAX_LONGS
+        snapshot["max_shorts"] = MAX_SHORTS
+        snapshot["last_direction_cap_block"] = state.get("last_direction_cap_block")
         m_fee, t_fee = get_trading_fee_rates()
         snapshot["fee_profile"] = EXCHANGE_FEE_PROFILE
         snapshot["maker_fee_pct"] = m_fee
@@ -13526,7 +13634,6 @@ def api_state():
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached()
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached()
-        snapshot["exec_5m_lane_enabled"] = exec_5m_lane_enabled()
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()
@@ -13659,19 +13766,6 @@ def toggle_continuous_ai_research():
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
-
-@app.route('/api/toggle_exec_5m_lane', methods=['POST'])
-def toggle_exec_5m_lane():
-    with state_lock:
-        state["exec_5m_lane_enabled"] = not bool(
-            state.get("exec_5m_lane_enabled", EXEC_5M_LANE_DEFAULT_ENABLED)
-        )
-        save_persistent_config()
-        logger.info(
-            f"[EXEC_5M] toggled {'ON' if state['exec_5m_lane_enabled'] else 'OFF'} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-    return jsonify({"exec_5m_lane_enabled": state["exec_5m_lane_enabled"]})
 
 @app.route('/api/toggle_continuous_ai_direct', methods=['POST'])
 def toggle_continuous_ai_direct():
@@ -14437,7 +14531,7 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "source": ai.get("source"),
             },
             "config": {
-                "pullback_threshold": float(state.get("pullback_threshold", 0.002)),
+                "pullback_threshold": float(state.get("pullback_threshold", 0.001)),
                 "leverage": lev,
                 "sl_pct": sl_price_pct(lev),
                 "margin_usdt": margin_usdt,
@@ -14677,7 +14771,7 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
         direction=signal.get("final_direction"),
         leverage=lev,
         margin_usdt=margin_usdt,
-        pullback_pct=float(signal.get("pullback_pct", state.get("pullback_threshold", 0.002))),
+        pullback_pct=float(signal.get("pullback_pct", state.get("pullback_threshold", 0.001))),
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
         exit_config=get_exit_config_snapshot(),
         ai_win_prob=ai.get("win_prob"),
@@ -15024,7 +15118,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
     if not trade_id or sp <= 0:
         return
     lev_default = _replay_leverage_default()
-    pullback_default = _buf_float(state.get("pullback_threshold"), 0.002)
+    pullback_default = _buf_float(state.get("pullback_threshold"), 0.001)
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -15416,7 +15510,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "direction": snapshot.get("direction") or replay.get("direction"),
             "leverage": cfg.get("leverage", state.get("leverage", 20)),
             "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
-            "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.002)),
+            "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
             "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
             "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
                 "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
@@ -15584,7 +15678,7 @@ def _persistent_config_keys():
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
-        "exec_5m_lane_enabled", "continuous_ai_direct_entry_enabled",
+        "continuous_ai_direct_entry_enabled",
         "ai_stability_research_enabled",
         "continuous_ai_research_enabled",
         "research_ai_cooldown_sec",
@@ -16148,7 +16242,7 @@ def main():
         f"funding_sim={FUNDING_SIMULATION_ENABLED} rate_8h={f.get('rate_pct_per_8h', 0)}% source={f.get('source')} [PIPELINE ENFORCEMENT]"
     )
     logger.info(
-        f"[V75 EXIT] pullback_default={state.get('pullback_threshold', 0.002)*100:.2f}% "
+        f"[V75 EXIT] pullback_default={state.get('pullback_threshold', 0.001)*100:.2f}% "
         f"ladder_1st={TRAIL_LADDER[0][0]}%→lock{TRAIL_LADDER[0][1]}% "
         f"thesis_fast_cut={THESIS_FAST_EXIT_UNREAL_PCT}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
         f"(0.0% pullback toggle=instant fill) [PIPELINE ENFORCEMENT]"
@@ -16213,14 +16307,13 @@ def main():
         logger.warning(
             f"[V121 SCENARIO-C] neutral AI — profit gates edge≥{get_edge_threshold()} "
             f"AI≥{get_ai_threshold()}% (dashboard) | golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
-            f"| exec_5m={'ON' if exec_5m_lane_enabled() else 'OFF'} | honest context labels "
+            f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} | honest context labels "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
         f"[V87 MULTI-LANE] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
         f"| stability_shadow={'ON' if ai_stability_research_enabled() else 'OFF'} "
         f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
-        f"| exec_5m={'ON' if exec_5m_lane_enabled() else 'OFF'} "
         f"| research_temp={RESEARCH_AI_TEMPERATURE} "
         f"[PIPELINE ENFORCEMENT]"
     )
