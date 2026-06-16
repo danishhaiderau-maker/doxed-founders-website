@@ -571,6 +571,11 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
   else if ((bot.orders?.length ?? 0) > 0) currentAction = 'ORDER PENDING';
 
   const sessionTradeCount = trades.length || bot.trade_count_session || 0;
+  const sessionPnlUsd = equity - startingBalance;
+  const dailyPnlUsd =
+    typeof bot.daily_pnl_usd === 'number' && Number.isFinite(bot.daily_pnl_usd)
+      ? bot.daily_pnl_usd
+      : sessionPnlUsd;
 
   return {
     balanceUsd: Number(balance.toFixed(2)),
@@ -578,6 +583,9 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
     netReturnPct: Number(netReturnPct.toFixed(2)),
     tradeCount: sessionTradeCount,
     winRatePct: Number(winRate.toFixed(1)),
+    dailyPnlUsd: Number(dailyPnlUsd.toFixed(2)),
+    sessionPnlUsd: Number(sessionPnlUsd.toFixed(2)),
+    unrealizedPnlUsd: Number(openUnreal.toFixed(2)),
     liveSinceDays,
     currentPosition: openCount === 0 ? 'NONE' : (bot.positions?.[0]?.dir ?? 'OPEN'),
     currentAction,

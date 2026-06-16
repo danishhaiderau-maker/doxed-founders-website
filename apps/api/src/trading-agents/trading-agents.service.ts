@@ -137,6 +137,9 @@ function serializeAgent(
       netReturnPct?: number;
       tradeCount?: number;
       winRatePct?: number;
+      dailyPnlUsd?: number;
+      sessionPnlUsd?: number;
+      unrealizedPnlUsd?: number;
       liveSinceDays?: number;
       currentPosition?: string;
       currentAction?: string;
@@ -159,6 +162,9 @@ function serializeAgent(
     netReturnPct: live?.netReturnPct ?? Number(agent.netReturnPct),
     tradeCount: live?.tradeCount ?? agent.tradeCount,
     winRatePct: live?.winRatePct ?? Number(agent.winRatePct),
+    dailyPnlUsd: live?.dailyPnlUsd ?? 0,
+    sessionPnlUsd: live?.sessionPnlUsd ?? 0,
+    unrealizedPnlUsd: live?.unrealizedPnlUsd ?? 0,
     costDdollarDay: agent.costDdollarDay,
     costDdollarWeek: agent.costDdollarWeek,
     liveSince: agent.liveSince.toISOString(),
@@ -617,6 +623,7 @@ export class TradingAgentsService implements OnModuleInit {
     let userInstance: UserInstanceStats | null = null;
     let viewScope: 'showcase' | 'user' = 'showcase';
     let agent = rest.agent;
+    const showcaseAgent = { ...rest.agent };
 
     if (userId) {
       const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
@@ -661,6 +668,7 @@ export class TradingAgentsService implements OnModuleInit {
       viewScope,
       userInstance,
       showcaseFlash,
+      showcaseAgent: viewScope === 'user' ? showcaseAgent : undefined,
       showcaseNote:
         viewScope === 'user'
           ? 'Your isolated copy session — stats and trades only from when you started testing.'
