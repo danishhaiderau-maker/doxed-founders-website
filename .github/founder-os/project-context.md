@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): restore marketplace tab exports for Vercel build
+sync(btc-bot): pull latest bybit-15m-research-bot (2813cf7c9493)
 
 ## Last Activity
 
