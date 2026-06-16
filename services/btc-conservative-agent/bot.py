@@ -1533,20 +1533,22 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
     spread = compute_directional_spread(direction, ai)
     conv = conviction_size_multiplier(spread)
     research_max = _sole_ai_research_mode() and is_research_data_collection()
+    research_sim = is_research_data_collection() and not state.get("live_armed")
     if conv <= 0:
-        if research_max:
+        if research_max or research_sim:
             return float(FIXED_MARGIN_USDT), f"WOULD_FAIL_SPREAD_{spread}"
         return None, f"CONVICTION_SPREAD_LOW_{spread}"
     mc = ctx.get("market_context") or {}
     adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
     if golden_stack_enabled():
         if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
-            if research_max:
+            # v1.1.24: GS ADX dead-zone is log-only on CONTINUOUS research — do not block limit placement.
+            if research_sim or research_max:
                 pass
             else:
                 return None, f"ADX_BAND_{adx:.1f}"
     elif adx < ADX_BLOCK_NEW_ENTRY:
-        if research_max:
+        if research_max or research_sim:
             pass
         else:
             return None, f"ADX_NO_ENTRY_{adx:.1f}"
@@ -2646,7 +2648,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.34-fills-first-v105-2026-06-04"
+ANALYZER_SYNC_ID = "v9.35-adx-research-execute-2026-06-16"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4383,7 +4385,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.23-fills-first-v105"
+EXECUTION_FIX_VERSION = "v1.1.24-fills-first-v105"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
