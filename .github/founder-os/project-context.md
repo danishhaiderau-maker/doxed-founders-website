@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-sync(btc-bot): pull latest bybit-15m-research-bot (2813cf7c9493)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
