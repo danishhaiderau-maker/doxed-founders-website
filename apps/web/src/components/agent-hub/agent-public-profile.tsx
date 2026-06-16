@@ -10,6 +10,7 @@ import {
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
+import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
@@ -159,6 +160,7 @@ export function AgentPublicProfile({
   exchangeConnected,
   viewScope = 'showcase',
   showcaseNote,
+  showcaseAgent,
   onFollow,
   followBusy,
   onCopyAllocate,
@@ -188,6 +190,7 @@ export function AgentPublicProfile({
   exchangeConnected?: boolean;
   viewScope?: 'showcase' | 'user';
   showcaseNote?: string | null;
+  showcaseAgent?: TradingAgentSummary;
   onFollow?: () => void;
   followBusy?: boolean;
   onCopyAllocate?: () => void;
@@ -241,7 +244,6 @@ export function AgentPublicProfile({
       : executionPaused && publicStatus !== 'offline'
         ? 'text-amber-400'
         : 'text-zinc-400';
-  const equityLabel = isUserSession ? 'Your equity' : 'Showcase equity';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
 
   return (
@@ -309,7 +311,26 @@ export function AgentPublicProfile({
           {showcaseNote}
         </p>
       )}
-      <AgentMarketplaceStats agents={allAgents ?? [agent]} builderCount={14} />
+
+      {isCopySession && showcaseAgent && (
+        <div className="mb-4">
+          <AgentShowcaseEquity agent={showcaseAgent} title="Admin showcase (public research run)" />
+        </div>
+      )}
+
+      {!isCopySession && (
+        <div className="mb-4">
+          <AgentShowcaseEquity agent={showcaseAgent ?? agent} title="Admin showcase paper desk" />
+        </div>
+      )}
+
+      {isCopySession && (
+        <div className="mb-4">
+          <AgentShowcaseEquity agent={agent} title="Your paper-track session" compact />
+        </div>
+      )}
+
+      <AgentMarketplaceStats agents={allAgents ?? [showcaseAgent ?? agent]} builderCount={14} />
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_300px]">
         <div className="min-w-0 space-y-6">
@@ -380,7 +401,13 @@ export function AgentPublicProfile({
                   <MetricPill label="Max drawdown" value="6.2%" />
                   <MetricPill label="Total trades" value={String(agent.tradeCount)} />
                   <MetricPill label="Followers" value={agent.followerCount.toLocaleString()} />
-                  <MetricPill label={equityLabel} value={formatUsd(agent.equityUsd, 0)} />
+                  <MetricPill
+                    label="Session P&L"
+                    value={`${(agent.sessionPnlUsd ?? agent.equityUsd - (agent.startingBalance || 500)) >= 0 ? '+' : ''}${formatUsd(agent.sessionPnlUsd ?? agent.equityUsd - (agent.startingBalance || 500), 0)}`}
+                    accent={
+                      (agent.sessionPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }
+                  />
                 </div>
               </div>
             </div>

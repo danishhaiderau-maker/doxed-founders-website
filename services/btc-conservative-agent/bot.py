@@ -349,11 +349,17 @@ def archive_research_session(reason: str = "manual") -> str:
     dest = os.path.join(RESEARCH_ARCHIVE_DIR, f"session_{next_num:03d}")
     os.makedirs(dest, exist_ok=True)
     copied = []
-    for path in research_wipe_file_paths():
+    for path in all_research_wipe_paths():
         if path and os.path.isfile(path):
             try:
-                shutil.copy2(path, os.path.join(dest, os.path.basename(path)))
-                copied.append(os.path.basename(path))
+                dest_name = os.path.basename(path)
+                dest_path = os.path.join(dest, dest_name)
+                if os.path.exists(dest_path):
+                    stem, ext = os.path.splitext(dest_name)
+                    dest_name = f"{stem}_{len(copied)}{ext or ''}"
+                    dest_path = os.path.join(dest, dest_name)
+                shutil.copy2(path, dest_path)
+                copied.append(dest_name)
             except Exception as e:
                 logger.error(f"[ARCHIVE] copy failed {path}: {e}")
     meta = {
@@ -2154,6 +2160,9 @@ def risk_trading_allowed() -> bool:
 
 def ensure_directional_capacity(direction: str) -> bool:
     direction = direction.upper()
+    if is_research_data_collection():
+        cap = get_effective_max_active_signals()
+        return count_directional_exposure(direction) < cap
     prof = get_regime_risk_profile()
     cap = prof["max_long"] if direction == "LONG" else prof["max_short"]
     cap = min(cap, MAX_LONGS if direction == "LONG" else MAX_SHORTS)
@@ -2637,7 +2646,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.33-execution-realism-v104-2026-06-17"
+ANALYZER_SYNC_ID = "v9.34-fills-first-v105-2026-06-04"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3656,6 +3665,14 @@ def continuous_ai_direct_entry_enabled() -> bool:
     return os.getenv("CONTINUOUS_AI_DIRECT_ENTRY", "1").lower() not in ("0", "false", "no")
 
 
+def fills_first_continuous_enabled(signal: dict = None) -> bool:
+    """v1.1.23: immediate limit + no min-age/micro/5m queues on CONTINUOUS research lane."""
+    if not is_research_data_collection():
+        return False
+    lane = (signal or {}).get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    return lane == RESEARCH_LANE_CONTINUOUS
+
+
 def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -> tuple:
     """Pure AI limit — zone midpoint or explicit limit_price; no micro/EMA gates."""
     plan = trade_planner or {}
@@ -4242,6 +4259,8 @@ CSV_DECISIONS = "decisions_3factor.csv"
 CSV_TRADES = "trades_3factor.csv"
 CSV_EXPIRED = "expired_orders_3factor.csv"
 FILL_QUALITY_FILE = "fill_quality.jsonl"
+SHADOW_VS_LIVE_ENTRY_FILE = "shadow_vs_live_entry.jsonl"
+SHADOW_VS_LIVE_ENTRY_REPORT = "shadow_vs_live_entry_report.json"
 CSV_BLOCKS = "blocked_signals_3factor.csv"
 CSV_AI_TRANCHE = "ai_tranche_log.csv"
 CSV_SETUP_LOG = "setup_log_3factor.csv"
@@ -4302,10 +4321,10 @@ REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
 MAX_EVENT_QUEUE = 10000
 LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(30 * 60)))
 # Limit chase — patient maker entry then gradual convergence toward market (research sim).
-LIMIT_CHASE_START_SEC_DEFAULT = 300
+LIMIT_CHASE_START_SEC_DEFAULT = 0  # v1.1.23 fills-first: chase from order creation
 LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
-LIMIT_CHASE_HOLD_SEC = 300
-MARKETABLE_CHASE_SEC = 900
+LIMIT_CHASE_HOLD_SEC = 0  # v1.1.23: no post-submit hold before chase
+MARKETABLE_CHASE_SEC = 600  # v1.1.23: marketable limit fallback at 10m
 MARKETABLE_CHASE_DISTANCE_USD = 10.0
 LIMIT_CHASE_STEP_PCT_DEFAULT = 0.25
 LIMIT_CHASE_MAX_GAP_CLOSE_PCT = float(os.getenv("LIMIT_CHASE_MAX_GAP_CLOSE_PCT", "0.90"))
@@ -4314,7 +4333,7 @@ LIMIT_CHASE_NEAR_FILL_USD = float(os.getenv("LIMIT_CHASE_NEAR_FILL_USD", "10"))
 LIMIT_CHASE_NEAR_FILL_PCT = float(os.getenv("LIMIT_CHASE_NEAR_FILL_PCT", "0.001"))  # 0.1% — chase until very close
 # v1.1.12 — patient APPROVE→submit wait, smart limit re-anchor, immediate chase on gap.
 MIN_SIGNAL_AGE_SEC_DEFAULT = int(os.getenv("MIN_SIGNAL_AGE_SEC", "600"))
-MIN_SIGNAL_AGE_ENABLED_DEFAULT = os.getenv("MIN_SIGNAL_AGE_ENABLED", "1").lower() not in ("0", "false", "no")
+MIN_SIGNAL_AGE_ENABLED_DEFAULT = os.getenv("MIN_SIGNAL_AGE_ENABLED", "0").lower() not in ("0", "false", "no")
 SMART_SUBMIT_ENABLED_DEFAULT = os.getenv("SMART_SUBMIT_ENABLED", "1").lower() not in ("0", "false", "no")
 SMART_SUBMIT_REANCHOR_PCT_DEFAULT = float(os.getenv("SMART_SUBMIT_REANCHOR_PCT", "0.001"))
 DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT = True
@@ -4364,7 +4383,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.22-execution-realism-v104"
+EXECUTION_FIX_VERSION = "v1.1.23-fills-first-v105"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4952,7 +4971,7 @@ def limit_chase_enabled() -> bool:
 
 
 def get_limit_chase_start_sec() -> int:
-    return max(60, _limit_chase_config_value(
+    return max(0, _limit_chase_config_value(
         "limit_chase_start_sec", "LIMIT_CHASE_START_SEC", LIMIT_CHASE_START_SEC_DEFAULT, int
     ))
 
@@ -5093,6 +5112,8 @@ def _instant_entry_path(signal: dict) -> bool:
 
 
 def _should_defer_min_signal_age(signal: dict) -> bool:
+    if fills_first_continuous_enabled(signal):
+        return False
     if not min_signal_age_enabled():
         return False
     if _instant_entry_path(signal):
@@ -5784,15 +5805,24 @@ def reconcile_stale_signals():
             ttl_expired = expires_ts and now > expires_ts
             missing_exposure = tid not in pending_ids and tid not in open_ids
             if st in ("ORDERED", "ACTIVE", "PENDING") and (missing_exposure or ttl_expired):
-                sig["status"] = "EXPIRED"
-                sig["outcome"] = "STALE_NO_EXPOSURE" if not ttl_expired else "SIGNAL_TTL_EXPIRED"
-                sig["exit_reason"] = sig["outcome"]
-                fixed += 1
-                _record_expired_order(sig, sig["outcome"])
                 if ttl_expired:
+                    sig["status"] = "EXPIRED"
+                    sig["outcome"] = "SIGNAL_TTL_EXPIRED"
+                    sig["exit_reason"] = sig["outcome"]
+                    fixed += 1
+                    _record_expired_order(sig, sig["outcome"])
                     _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
-                if _remove_pending_for_trade(tid, sig["outcome"]):
-                    orphans_removed += 1
+                    if _remove_pending_for_trade(tid, sig["outcome"]):
+                        orphans_removed += 1
+                elif sig.get("order_placed") and missing_exposure:
+                    sig["status"] = "EXPIRED"
+                    sig["outcome"] = "STALE_NO_EXPOSURE"
+                    sig["exit_reason"] = sig["outcome"]
+                    fixed += 1
+                    _record_expired_order(sig, sig["outcome"])
+                    if _remove_pending_for_trade(tid, sig["outcome"]):
+                        orphans_removed += 1
+                continue
             elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
@@ -8913,13 +8943,16 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     if smart_meta.get("immediate_chase"):
         order["immediate_chase"] = True
         order["chase_start_sec"] = 0
+    elif fills_first_continuous_enabled(signal):
+        order["immediate_chase"] = True
+        order["chase_start_sec"] = 0
     order["fill_model"] = _resolve_fill_model(signal, order)
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
     signal["original_limit_price"] = limit_price
     signal["limit_chase_count"] = 0
     signal["last_chase_ts"] = None
-    if smart_meta.get("immediate_chase"):
+    if smart_meta.get("immediate_chase") or fills_first_continuous_enabled(signal):
         signal["immediate_chase"] = True
         signal["chase_start_sec"] = 0
     if smart_meta.get("reanchored"):
@@ -8988,6 +9021,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         funnel_on_order(signal, order)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] order log failed: {_fe}")
+    _log_shadow_vs_live_entry(signal, limit_price, entry_mode)
     pipeline_state_sync()
     return True
 
@@ -9091,11 +9125,18 @@ def _promote_signal_to_limit_order(signal: dict) -> bool:
     price = state.get("price")
     if not price or price <= 0:
         return False
+    if fills_first_continuous_enabled(signal):
+        signal["await_micro_confirm"] = False
+        signal["await_5m_confirm"] = False
     limit_price, entry_mode, smart_meta, _planned = _resolve_submit_limit_price(signal)
     signal["entry_mode"] = entry_mode
+    if fills_first_continuous_enabled(signal):
+        smart_meta = dict(smart_meta or {})
+        smart_meta.setdefault("immediate_chase", True)
+        smart_meta["chase_start_sec"] = 0
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return True
-    if signal.get("await_5m_confirm"):
+    if signal.get("await_5m_confirm") and not fills_first_continuous_enabled(signal):
         signal["limit_price"] = limit_price
         signal["planned_limit_price"] = limit_price
         signal["status"] = SIGNAL_STATUS_AWAITING_5M
@@ -9111,7 +9152,7 @@ def _promote_signal_to_limit_order(signal: dict) -> bool:
         )
         pipeline_state_sync()
         return True
-    if signal.get("await_micro_confirm"):
+    if signal.get("await_micro_confirm") and not fills_first_continuous_enabled(signal):
         signal["limit_price"] = limit_price
         signal["planned_limit_price"] = limit_price
         signal["status"] = SIGNAL_STATUS_AWAITING_MICRO
@@ -9435,6 +9476,29 @@ def process_limit_chase(price: float):
         pipeline_state_sync()
 
 
+def _update_awaiting_signal_price_extremes(price: float):
+    """Track min/max while pre-order awaiting (fill distance on TTL expire without pending order)."""
+    if price is None or price <= 0:
+        return
+    with trade_lock:
+        for entry in trades_map.values():
+            sig = entry.get("signal_ref") or {}
+            if not isinstance(sig, dict) or is_terminal_signal(sig):
+                continue
+            st = sig.get("status")
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
+                continue
+            if not (sig.get("limit_price") or sig.get("planned_limit_price")):
+                continue
+            mx = sig.get("max_price_since_signal")
+            if mx is None:
+                sig["max_price_since_signal"] = float(price)
+                sig["min_price_since_signal"] = float(price)
+            else:
+                sig["max_price_since_signal"] = max(float(mx), float(price))
+                sig["min_price_since_signal"] = min(float(sig.get("min_price_since_signal", price)), float(price))
+
+
 def _update_pending_order_price_extremes(price: float):
     if price is None or price <= 0:
         return
@@ -9481,6 +9545,7 @@ def process_pending_orders():
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
     process_awaiting_min_age_entries()
+    _update_awaiting_signal_price_extremes(price)
     _update_pending_order_price_extremes(price)
     process_limit_chase(price)
     fills = []
@@ -10129,6 +10194,10 @@ def process_signal(event: dict):
             else:
                 signal["entry_path"] = "MICRO_SR"
                 compute_micro_sr_entry(signal)
+            if fills_first_continuous_enabled(signal):
+                signal["await_micro_confirm"] = False
+                signal["await_5m_confirm"] = False
+            signal["signal_price_at_approve"] = float(signal.get("signal_price") or state.get("price") or 0)
             health = compute_trend_health(final_direction)
             signal["trend_health_at_entry"] = health
             signal["trend_health"] = health.get("trend_state")
@@ -11234,8 +11303,18 @@ def _record_expired_order(source: dict, reason: str):
     )
     signal_price = source.get("signal_price") or master.get("signal_price") or master.get("price")
     fill_metrics = _fill_distance_metrics(source) if source.get("status") == "PENDING" or source.get("entry_type") == "SIM_LIMIT" else {}
+    if fill_metrics.get("missed_by_usd") is None and source.get("min_price_since_signal") is not None:
+        fill_metrics = _fill_distance_metrics({
+            **source,
+            "min_price_since_order": source.get("min_price_since_signal"),
+            "max_price_since_order": source.get("max_price_since_signal"),
+        })
     if not fill_metrics and master:
-        fill_metrics = _fill_distance_metrics({**master, **source})
+        merged = {**master, **source}
+        if merged.get("min_price_since_signal") is not None and not merged.get("min_price_since_order"):
+            merged["min_price_since_order"] = merged.get("min_price_since_signal")
+            merged["max_price_since_order"] = merged.get("max_price_since_signal")
+        fill_metrics = _fill_distance_metrics(merged)
     row = {
         "time": utc_iso(),
         "trade_id": tid,
@@ -11281,6 +11360,89 @@ def _record_expired_order(source: dict, reason: str):
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
     return row
+
+
+def _log_shadow_vs_live_entry(signal: dict, live_limit_price: float, entry_mode: str):
+    """Per-APPROVE audit: shadow (approve-time) price vs live resting limit."""
+    tid = signal.get("trade_id")
+    if not tid:
+        return
+    shadow_price = float(
+        signal.get("signal_price_at_approve")
+        or signal.get("signal_price")
+        or state.get("price")
+        or 0
+    )
+    live_limit = float(live_limit_price or 0)
+    if shadow_price <= 0 or live_limit <= 0:
+        return
+    direction = str(signal.get("final_direction") or "").upper()
+    signed_delta = round(live_limit - shadow_price, 2)
+    row = {
+        "schema": "shadow_vs_live_entry_v1",
+        "ts": utc_iso(),
+        "trade_id": tid,
+        "research_lane": signal.get("research_lane"),
+        "research_model": signal.get("research_model"),
+        "direction": direction,
+        "shadow_entry_price": shadow_price,
+        "live_limit_price": live_limit,
+        "delta_usd": round(abs(signed_delta), 2),
+        "signed_delta_usd": signed_delta,
+        "entry_mode": entry_mode,
+        "entry_path": signal.get("entry_path"),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+    }
+    _safe_append_jsonl(SHADOW_VS_LIVE_ENTRY_FILE, row, label="SHADOW_VS_LIVE_ENTRY")
+
+
+def refresh_shadow_vs_live_entry_report(cwd: str = None) -> dict:
+    """Aggregate shadow_vs_live_entry.jsonl into shadow_vs_live_entry_report.json."""
+    cwd = cwd or os.getcwd()
+    path = os.path.join(cwd, SHADOW_VS_LIVE_ENTRY_FILE)
+    rows = []
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    deltas = [float(r["delta_usd"]) for r in rows if r.get("delta_usd") is not None]
+    signed = [float(r["signed_delta_usd"]) for r in rows if r.get("signed_delta_usd") is not None]
+    by_lane = {}
+    for r in rows:
+        lane = r.get("research_lane") or "UNKNOWN"
+        by_lane.setdefault(lane, []).append(float(r.get("delta_usd") or 0))
+    report = {
+        "schema": "shadow_vs_live_entry_report_v1",
+        "generated_ts": utc_iso(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "sample_count": len(rows),
+        "avg_delta_usd": round(sum(deltas) / len(deltas), 2) if deltas else None,
+        "median_delta_usd": round(sorted(deltas)[len(deltas) // 2], 2) if deltas else None,
+        "avg_signed_delta_usd": round(sum(signed) / len(signed), 2) if signed else None,
+        "by_lane": {
+            lane: {
+                "n": len(vals),
+                "avg_delta_usd": round(sum(vals) / len(vals), 2) if vals else None,
+            }
+            for lane, vals in sorted(by_lane.items())
+        },
+        "recent": rows[-20:],
+    }
+    out_path = os.path.join(cwd, SHADOW_VS_LIVE_ENTRY_REPORT)
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+    except OSError as e:
+        logger.debug(f"[SHADOW_VS_LIVE] report write failed: {e}")
+    return report
 
 def _expired_order_api_row(row: dict) -> dict:
     out = dict(row) if isinstance(row, dict) else {}
@@ -11761,12 +11923,38 @@ def research_wipe_file_paths():
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
-        "pathway_scorecard.json", FILL_QUALITY_FILE, "execution_funnel.jsonl", "execution_funnel_summary.json",
+        "pathway_scorecard.json", FILL_QUALITY_FILE, "fill_quality_report.json",
+        SHADOW_VS_LIVE_ENTRY_FILE, SHADOW_VS_LIVE_ENTRY_REPORT,
+        "execution_funnel.jsonl", "execution_funnel_summary.json",
+        "approval_ev_report.json", "confidence_calibration_report.json",
+        "feature_drift_report.json", "profitable_reject_report.json", PROFITABLE_REJECT_FEATURES_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
         CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     return paths
+
+
+def _research_wipe_rotated_jsonl_paths() -> list:
+    """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
+    bases = [
+        "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
+        SHADOW_VS_LIVE_ENTRY_FILE,
+        APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
+        GOLDEN_STACK_REJECTIONS_FILE, REVERSAL_STUDY_FILE, AI_REASON_RESEARCH_FILE,
+        AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE, AI_INPUT_LOG_FILE, EDGE_CENSUS_FILE,
+    ]
+    found = []
+    for base in bases:
+        for path in glob.glob(base + ".*"):
+            if os.path.isfile(path):
+                found.append(path)
+    return sorted(set(found))
+
+
+def all_research_wipe_paths() -> list:
+    return sorted(set(research_wipe_file_paths()) | set(_research_wipe_rotated_jsonl_paths()))
 
 def _delete_paths(paths) -> tuple:
     deleted = []
@@ -11803,7 +11991,7 @@ def _reset_runtime_log_handlers():
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files() -> tuple:
-    deleted, errors = _delete_paths(research_wipe_file_paths())
+    deleted, errors = _delete_paths(all_research_wipe_paths())
     return deleted, errors
 
 def maintain_fresh_collection_files():
@@ -11833,12 +12021,11 @@ def perform_fresh_collection_reset() -> dict:
     reset_runtime_state()
     reset_session_risk_state()
     bot_start_time = time.time()
-    _write_research_session(bot_start_time)
     _last_fresh_maintain_ts = time.time()
+    _write_research_session(bot_start_time)
     load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     with state_lock:
-        state["bot_start_time"] = bot_start_time
         state["fresh_collection_mode"] = True
         state["last_fresh_reset_ts"] = time.time()
         state["last_fresh_reset_summary"] = summary
@@ -12157,7 +12344,7 @@ HTML = """<!DOCTYPE html>
   <option value="0.6">0.6%</option>
 </select><br>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
-<p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). <code>MAX_LONGS=3</code> caps LONG count separately — not controlled by this field.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
 <label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
 <label>Edge range preset:</label>
@@ -13109,7 +13296,7 @@ DASHBOARD_JS = """(function () {
           if (maxAct <= 3) {
             msgs.push('Low max concurrent (' + maxAct + ') — increase Max Concurrent Signals for more fills.');
           }
-          msgs.push('Note: MAX_LONGS=' + maxLongs + ' also caps same-direction LONG exposure separately from total slots.');
+          msgs.push('Research mode: direction cap follows max concurrent slots (dashboard value).');
           if (d.last_direction_cap_block) {
             msgs.push('Recent direction cap: ' + d.last_direction_cap_block + ' — same-direction limit hit.');
           }
@@ -15456,6 +15643,15 @@ def analytics_loop():
                     refresh_pathway_scorecard_live()
                 except Exception as pe:
                     logger.debug(f"[PATHWAY_SCORECARD] analytics refresh failed: {pe}")
+                try:
+                    rep = refresh_shadow_vs_live_entry_report(os.getcwd())
+                    if rep.get("sample_count"):
+                        logger.info(
+                            f"[SHADOW_VS_LIVE] n={rep['sample_count']} "
+                            f"avg_delta=${rep.get('avg_delta_usd')} [PIPELINE ENFORCEMENT]"
+                        )
+                except Exception as se:
+                    logger.debug(f"[SHADOW_VS_LIVE] report refresh failed: {se}")
             except Exception as e:
                 logger.error(f"Analytics error: {e}")
             time.sleep(ANALYTICS_INTERVAL_SEC)

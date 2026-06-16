@@ -13,6 +13,7 @@ import {
 } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
+import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
 import { AgentCard } from '@/components/agent-card';
 import { AgentBubbleMap } from '@/components/agent-hub/agent-bubble-map';
 import {
@@ -169,6 +170,7 @@ export default function AgentHubPageClient() {
                   onFollow={() => handleFollow(featured)}
                   followBusy={followBusy === featured.id}
                 />
+                <AgentShowcaseEquity agent={featured} title="Featured agent · paper desk" compact />
                 <div className="rounded-2xl border border-zinc-800/80 bg-zinc-950/40 p-4 sm:p-5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-400">

@@ -3250,6 +3250,9 @@ export interface TradingAgentSummary {
   netReturnPct: number;
   tradeCount: number;
   winRatePct: number;
+  dailyPnlUsd?: number;
+  sessionPnlUsd?: number;
+  unrealizedPnlUsd?: number;
   costDdollarDay: number;
   costDdollarWeek?: number;
   liveSince: string;
@@ -3292,6 +3295,7 @@ export interface TradingAgentDashboard {
   } | null;
   showcaseNote?: string;
   showcaseFlash?: AgentShowcaseFlash | null;
+  showcaseAgent?: TradingAgentSummary;
 }
 
 export interface TradingAgentActivityEntry {

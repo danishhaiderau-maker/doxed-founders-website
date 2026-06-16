@@ -67,6 +67,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [viewScope, setViewScope] = useState<'showcase' | 'user'>('showcase');
   const [showcaseNote, setShowcaseNote] = useState<string | null>(null);
   const [showcaseFlash, setShowcaseFlash] = useState<AgentShowcaseFlash | null>(null);
+  const [showcaseAgent, setShowcaseAgent] = useState<TradingAgentSummary | null>(null);
   const [liveLoading, setLiveLoading] = useState(true);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
@@ -102,6 +103,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setViewScope(dashR.value.viewScope ?? dashR.value.agent.viewScope ?? 'showcase');
         setShowcaseNote(dashR.value.showcaseNote ?? null);
         setShowcaseFlash((prev) => dashR.value.showcaseFlash ?? prev);
+        setShowcaseAgent(dashR.value.showcaseAgent ?? dashR.value.agent);
         setError(null);
       } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
@@ -299,6 +301,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           exchangeConnected={exchangeConnected || Boolean(agent.exchangeConnected)}
           viewScope={viewScope}
           showcaseNote={showcaseNote}
+          showcaseAgent={showcaseAgent ?? agent}
           onFollow={toggleFollow}
           followBusy={followBusy}
           onCopyAllocate={handleCopyTrack}

@@ -88,8 +88,23 @@ export function AgentMarketplaceCard({
               <dd className="font-semibold text-zinc-200">{agent.followerCount.toLocaleString()}</dd>
             </div>
             <div>
+              <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Runway</dt>
+              <dd className="font-semibold text-zinc-200">{formatUsd(agent.startingBalance || 500, 0)}</dd>
+            </div>
+            <div>
               <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Equity</dt>
               <dd className="font-semibold text-zinc-200">{formatUsd(agent.equityUsd, 0)}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Today P&L</dt>
+              <dd
+                className={`font-semibold ${
+                  (agent.dailyPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                }`}
+              >
+                {(agent.dailyPnlUsd ?? 0) >= 0 ? '+' : ''}
+                {formatUsd(agent.dailyPnlUsd ?? 0, 2)}
+              </dd>
             </div>
             <div>
               <dt className="text-[10px] uppercase tracking-widest text-zinc-500">Position</dt>
