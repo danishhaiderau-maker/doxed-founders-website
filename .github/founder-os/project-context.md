@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(agent-hub): restore marketplace tab exports for Vercel build
 
 ## Last Activity
 
