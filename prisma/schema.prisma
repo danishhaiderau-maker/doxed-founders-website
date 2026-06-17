@@ -319,6 +319,22 @@ enum ControlPlaneMode {
   FULL_STACK
 }
 
+/** Phase 1 — onboarding path chosen at Founder Den activation. */
+enum OnboardingPath {
+  SOVEREIGN
+  BYO_CLOUD
+  MIGRATE_PRIVATE
+  FREE_STARTER
+  FOUNDER_CLOUD
+}
+
+/** Where compute + memory primarily run for this founder. */
+enum ComputePlaneMode {
+  LOCAL
+  CLOUD
+  HYBRID
+}
+
 enum FounderEventType {
   GITHUB_COMMIT
   GITHUB_PR_MERGED
@@ -1624,6 +1640,12 @@ model FounderBuilderSettings {
   autopilotEnabled       Boolean    @default(false)
   autopilotRedeployHosts Boolean    @default(false)
   controlPlaneMode       ControlPlaneMode @default(FULL_STACK)
+  onboardingPath         OnboardingPath?
+  computePlaneMode       ComputePlaneMode @default(CLOUD)
+  /** render | railway | vercel_neon | supabase — recommendation only (FREE_STARTER path). */
+  starterPack            String?
+  /** Phase 2+ connect hub: per-destination publish/sync/ai-context toggles. */
+  platformConnections    Json?
   currentGoalFocus       String?
   /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
   memoryGraph            Json?

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Patch, Post, Req } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -27,6 +27,24 @@ export class FounderOsController {
   @Get('onboarding')
   onboarding(@CurrentUser() user: AuthUser) {
     return this.founderOs.getOnboardingStatus(user.id);
+  }
+
+  @Patch('onboarding')
+  updateOnboarding(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      onboardingPath?: string;
+      computePlaneMode?: string;
+      starterPack?: string | null;
+    },
+  ) {
+    return this.founderOs.updateOnboardingPath(user.id, body);
+  }
+
+  @Get('platform-status')
+  platformStatus(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getPlatformStatus(user.id);
   }
 
   @Post('github/connect')

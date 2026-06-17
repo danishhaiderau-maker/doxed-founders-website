@@ -1,8 +1,10 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   AiProvider,
+  ComputePlaneMode,
   ControlPlaneMode,
   MemoryStorageMode,
+  OnboardingPath,
   Prisma,
   SecretsStorageMode,
 } from '@prisma/client';
@@ -129,6 +131,9 @@ export class BuilderService {
       autopilotEnabled: settings.autopilotEnabled,
       autopilotRedeployHosts: settings.autopilotRedeployHosts,
       controlPlaneMode: settings.controlPlaneMode,
+      onboardingPath: settings.onboardingPath,
+      computePlaneMode: settings.computePlaneMode,
+      starterPack: settings.starterPack,
       currentGoalFocus: settings.currentGoalFocus,
       memoryStorageMode: settings.memoryStorageMode,
       secretsStorageMode: settings.secretsStorageMode,
@@ -165,6 +170,9 @@ export class BuilderService {
       autopilotEnabled?: boolean;
       autopilotRedeployHosts?: boolean;
       controlPlaneMode?: ControlPlaneMode;
+      onboardingPath?: OnboardingPath;
+      computePlaneMode?: ComputePlaneMode;
+      starterPack?: string | null;
       currentGoalFocus?: string;
       memoryStorageMode?: 'PLATFORM' | 'GITHUB' | 'LOCAL_DEVICE' | 'LOCAL_SYNC' | 'FOUNDER_NODE';
       secretsStorageMode?: SecretsStorageMode;
@@ -238,6 +246,11 @@ export class BuilderService {
         ...(input.controlPlaneMode !== undefined
           ? { controlPlaneMode: input.controlPlaneMode }
           : {}),
+        ...(input.onboardingPath !== undefined ? { onboardingPath: input.onboardingPath } : {}),
+        ...(input.computePlaneMode !== undefined
+          ? { computePlaneMode: input.computePlaneMode }
+          : {}),
+        ...(input.starterPack !== undefined ? { starterPack: input.starterPack } : {}),
         ...(input.currentGoalFocus !== undefined ? { currentGoalFocus: input.currentGoalFocus } : {}),
         ...(input.memoryStorageMode !== undefined
           ? { memoryStorageMode: input.memoryStorageMode as MemoryStorageMode }

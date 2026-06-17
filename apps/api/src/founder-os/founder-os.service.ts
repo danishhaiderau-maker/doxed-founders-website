@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { BountyStatus, FounderEventType, NotificationType, Prisma, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
+import { BountyStatus, ComputePlaneMode, FounderEventType, NotificationType, OnboardingPath, Prisma, SuggestedUpdateStatus, UserBadgeKind } from '@prisma/client';
 import {
   COMMUNITY_REWARD_POOL_DEFAULT,
   CURSOR_BUILD_SESSION_CREDITS,
@@ -22,8 +22,14 @@ import {
   buildFeedPostBody,
   buildSuggestionFromBuildPrompt,
   buildXUpdateTweet,
+  defaultComputePlaneForPath,
+  getPathDefinition,
   getRepoStarterTemplate,
+  pathLabel,
+  pathStepOptional,
   REPO_STARTER_TEMPLATES,
+  type OnboardingPathId,
+  type OnboardingStepId,
 } from '@dcf/utils';
 import {
   publicBuildDayNumberForFounder,
@@ -290,6 +296,118 @@ export class FounderOsService {
     return this.githubAutoSync.syncForUser(userId, { force: true });
   }
 
+  async updateOnboardingPath(
+    userId: string,
+    input: {
+      onboardingPath?: string;
+      computePlaneMode?: string;
+      starterPack?: string | null;
+    },
+  ) {
+    const pathInput = input.onboardingPath?.trim().toUpperCase().replace(/-/g, '_');
+    const validPaths = Object.values(OnboardingPath);
+    const onboardingPath =
+      pathInput && validPaths.includes(pathInput as OnboardingPath)
+        ? (pathInput as OnboardingPath)
+        : undefined;
+
+    const computeInput = input.computePlaneMode?.trim().toUpperCase();
+    const validCompute = Object.values(ComputePlaneMode);
+    let computePlaneMode =
+      computeInput && validCompute.includes(computeInput as ComputePlaneMode)
+        ? (computeInput as ComputePlaneMode)
+        : undefined;
+
+    if (onboardingPath && !computePlaneMode) {
+      computePlaneMode = defaultComputePlaneForPath(onboardingPath as OnboardingPathId) as ComputePlaneMode;
+    }
+
+    const starterPack =
+      input.starterPack === null
+        ? null
+        : input.starterPack?.trim()
+          ? input.starterPack.trim().toLowerCase()
+          : undefined;
+
+    const settings = await this.prisma.founderBuilderSettings.upsert({
+      where: { userId },
+      create: {
+        userId,
+        ...(onboardingPath ? { onboardingPath } : {}),
+        ...(computePlaneMode ? { computePlaneMode } : {}),
+        ...(starterPack !== undefined ? { starterPack } : {}),
+      },
+      update: {
+        ...(onboardingPath ? { onboardingPath } : {}),
+        ...(computePlaneMode ? { computePlaneMode } : {}),
+        ...(starterPack !== undefined ? { starterPack } : {}),
+      },
+    });
+
+    return {
+      onboardingPath: settings.onboardingPath,
+      computePlaneMode: settings.computePlaneMode,
+      starterPack: settings.starterPack,
+      pathLabel: pathLabel(settings.onboardingPath as OnboardingPathId | null),
+    };
+  }
+
+  async getPlatformStatus(userId: string) {
+    const settings = await this.prisma.founderBuilderSettings.findUnique({ where: { userId } });
+    const gh = await this.prisma.gitHubConnection.findUnique({ where: { userId } });
+    const creds = await this.prisma.integrationCredential.findMany({ where: { userId } });
+    const founderNode = await this.prisma.founderNode.findFirst({
+      where: { userId },
+      orderBy: { lastSeenAt: 'desc' },
+    });
+
+    const path = (settings?.onboardingPath ?? null) as OnboardingPathId | null;
+    const pathDef = getPathDefinition(path);
+    const githubConnected = Boolean(gh?.repoFullName && !gh.repoFullName.endsWith('/pending-setup'));
+    const hostProviders = ['railway', 'vercel', 'render', 'neon', 'supabase'];
+    const hostConnected = creds.some((c) => hostProviders.includes(c.provider) && c.verifiedAt);
+    const llmConnected = creds.some(
+      (c) =>
+        c.verifiedAt &&
+        ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala', 'jatevo'].includes(
+          c.provider,
+        ),
+    );
+    const nodeOnline =
+      Boolean(founderNode?.lastSeenAt) &&
+      Date.now() - (founderNode!.lastSeenAt?.getTime() ?? 0) < 300_000;
+
+    return {
+      onboardingPath: path,
+      pathLabel: pathLabel(path),
+      computePlaneMode: settings?.computePlaneMode ?? 'CLOUD',
+      starterPack: settings?.starterPack ?? null,
+      topology: {
+        memory: {
+          mode: settings?.memoryStorageMode ?? 'PLATFORM',
+          label: pathDef.topology.memory,
+          connected: nodeOnline || settings?.memoryStorageMode === 'FOUNDER_NODE',
+        },
+        compute: {
+          mode: settings?.computePlaneMode ?? pathDef.computePlane,
+          label: pathDef.topology.compute,
+          connected: nodeOnline || hostConnected || githubConnected,
+        },
+        publish: {
+          label: pathDef.topology.publish,
+          connected: settings?.autoPublishOnEvent ?? false,
+        },
+      },
+      connections: [
+        { id: 'github', label: 'GitHub', connected: githubConnected, optional: pathStepOptional(path ?? 'BYO_CLOUD', 'github') },
+        { id: 'host', label: 'Cloud host', connected: hostConnected, optional: path !== 'FREE_STARTER' },
+        { id: 'llm', label: 'AI Stack', connected: llmConnected, optional: false },
+        { id: 'founder_node', label: 'Founder Node', connected: nodeOnline, optional: pathStepOptional(path ?? 'BYO_CLOUD', 'founder_node') },
+      ],
+      platformConnections: settings?.platformConnections ?? {},
+    };
+  }
+
   async getOnboardingStatus(userId: string) {
     const founder = await this.prisma.founder.findUnique({
       where: { userId },
@@ -306,71 +424,125 @@ export class FounderOsService {
     const llmConnected = creds.some(
       (c) =>
         c.verifiedAt &&
-        ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala'].includes(c.provider),
+        ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala', 'jatevo'].includes(
+          c.provider,
+        ),
     );
     const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
     const githubConnected = Boolean(
       (gh?.repoFullName ?? founder?.githubRepoFullName) &&
         !String(gh?.repoFullName ?? founder?.githubRepoFullName).endsWith('/pending-setup'),
     );
-    const goalSet = Boolean(settings?.currentGoalFocus?.trim());
-    const founderActive = Boolean(founder);
+    const hostProviders = ['railway', 'vercel', 'render', 'neon', 'supabase'];
+    const hostConnected = creds.some((c) => hostProviders.includes(c.provider) && c.verifiedAt);
     const nodeOnline =
       Boolean(founderNode?.lastSeenAt) &&
       Date.now() - (founderNode!.lastSeenAt?.getTime() ?? 0) < 300_000;
+    const platformConnected =
+      hostConnected ||
+      githubConnected ||
+      nodeOnline ||
+      settings?.memoryStorageMode === 'FOUNDER_NODE';
+    const goalSet = Boolean(settings?.currentGoalFocus?.trim());
+    const founderActive = Boolean(founder);
+    const starterPackSet = Boolean(settings?.starterPack?.trim());
 
-    const steps = [
-      {
-        id: 'founder',
-        label: 'Activate founder profile',
-        complete: founderActive,
-        href: '/founder-den?tab=analytics',
+    const storedPath = settings?.onboardingPath as OnboardingPathId | null;
+    const effectivePath: OnboardingPathId =
+      storedPath ?? (founderActive ? 'BYO_CLOUD' : 'BYO_CLOUD');
+    const pathComplete = Boolean(storedPath) || founderActive;
+    const pathDef = getPathDefinition(storedPath ?? effectivePath);
+
+    const stepComplete: Record<OnboardingStepId, boolean> = {
+      path: pathComplete,
+      founder: founderActive,
+      starter_pack: effectivePath !== 'FREE_STARTER' || starterPackSet,
+      github: githubConnected,
+      platform: platformConnected,
+      ai_stack: llmConnected,
+      goal: goalSet,
+      founder_node: nodeOnline,
+      migrate: githubConnected && nodeOnline,
+    };
+
+    const STEP_META: Record<
+      OnboardingStepId,
+      { label: string; href?: string; detail?: string | null }
+    > = {
+      path: { label: 'Choose your path', href: '/founder-den' },
+      founder: { label: 'Activate founder profile', href: '/founder-den?tab=analytics' },
+      starter_pack: {
+        label: 'Pick a starter pack (recommended: Render)',
+        href: '/founder-den',
+        detail: settings?.starterPack ?? null,
       },
-      {
-        id: 'github',
+      github: {
         label: 'Connect GitHub repo',
-        complete: githubConnected,
-        detail: gh?.repoFullName ?? founder?.githubRepoFullName ?? null,
         href: '/founder-den?tab=build',
+        detail: gh?.repoFullName ?? founder?.githubRepoFullName ?? null,
       },
-      {
-        id: 'llm',
-        label: 'Connect chat LLM (required for Founder Brain)',
-        complete: llmConnected,
-        detail: llmConnected
-          ? 'Tailored answers enabled'
-          : 'Without an LLM, Copilot uses generic rule-based replies',
+      platform: {
+        label: 'Connect cloud host or vault',
         href: '/settings/builder',
+        detail: hostConnected ? 'Host credentials connected' : null,
       },
-      {
-        id: 'builder_worker',
-        label: 'Connect Builder (Cursor or OpenHands)',
-        complete: cursorConnected,
-        optional: true,
-        detail: cursorConnected ? 'Remote code agent ready' : 'Optional for in-browser builds',
+      ai_stack: {
+        label: 'Connect AI Stack (required for Founder Brain)',
         href: '/settings/builder',
+        detail: llmConnected ? 'Tailored answers enabled' : 'Without an LLM, Brain uses rule-based replies',
       },
-      {
-        id: 'goal',
+      goal: {
         label: 'Set your current goal',
-        complete: goalSet,
-        detail: settings?.currentGoalFocus?.slice(0, 80) ?? null,
         href: '/settings/builder',
+        detail: settings?.currentGoalFocus?.slice(0, 80) ?? null,
       },
-      {
-        id: 'founder_node',
-        label: 'Pair Founder Node (Windows vault)',
-        complete: nodeOnline,
-        optional: true,
+      founder_node: {
+        label: 'Pair Founder Node (local vault)',
         href: '/founder-node',
+        detail: nodeOnline ? 'Node online' : null,
       },
-    ];
+      migrate: {
+        label: 'Connect sources to import',
+        href: '/settings/builder',
+        detail: githubConnected ? 'GitHub ready for import' : null,
+      },
+    };
 
-    const requiredComplete = steps.filter((s) => !('optional' in s && s.optional)).every((s) => s.complete);
-    const brainReady = githubConnected && llmConnected;
+    const steps = (pathComplete ? pathDef.stepOrder : ['path', ...pathDef.stepOrder.filter((id) => id !== 'path')]).map(
+      (id) => {
+        const stepId = id as OnboardingStepId;
+        const optional = pathStepOptional(effectivePath, stepId);
+        const meta = STEP_META[stepId];
+        return {
+          id: stepId === 'ai_stack' ? 'ai_stack' : stepId,
+          label: meta.label,
+          complete: stepComplete[stepId],
+          optional,
+          detail: meta.detail ?? null,
+          href: meta.href,
+        };
+      },
+    );
+
+    const requiredComplete = steps.filter((s) => !s.optional).every((s) => s.complete);
+    const githubOptional = pathStepOptional(effectivePath, 'github');
+    const brainReady =
+      llmConnected &&
+      (effectivePath === 'SOVEREIGN' || effectivePath === 'FOUNDER_CLOUD'
+        ? true
+        : githubOptional
+          ? platformConnected
+          : githubConnected && llmConnected);
 
     return {
       steps,
+      onboardingPath: storedPath,
+      effectivePath,
+      pathLabel: pathLabel(storedPath ?? effectivePath),
+      computePlaneMode: settings?.computePlaneMode ?? pathDef.computePlane,
+      starterPack: settings?.starterPack ?? null,
+      playbook: pathDef.playbook,
+      topology: pathDef.topology,
       requiredComplete,
       allComplete: steps.every((s) => s.complete),
       brainReady,
@@ -381,11 +553,13 @@ export class FounderOsService {
       projectName: founder?.projects[0]?.name ?? null,
       brainHint: brainReady
         ? null
-        : !githubConnected && !llmConnected
-          ? 'Connect GitHub and a chat LLM in Settings → Builder for a real command center (not generic templates).'
-          : !githubConnected
-            ? 'Connect your GitHub repo so Founder Brain sees commits, PRs, and can run builds.'
-            : 'Connect DeepSeek, OpenAI, or Claude so Founder Brain gives tailored answers — not rule-based fallbacks.',
+        : !llmConnected
+          ? 'Connect DeepSeek, OpenAI, Claude, Jatevo, or Ollama in Settings → Builder so Founder Brain gives tailored answers.'
+          : effectivePath === 'SOVEREIGN' || effectivePath === 'FOUNDER_CLOUD'
+            ? 'Pair Founder Node and connect a local or cloud LLM — GitHub is optional on this path.'
+            : !githubConnected && !platformConnected
+              ? 'Connect GitHub or your cloud host so Founder Brain sees project state — not generic templates.'
+              : 'Connect your GitHub repo so Founder Brain sees commits, PRs, and can run builds.',
     };
   }
 
