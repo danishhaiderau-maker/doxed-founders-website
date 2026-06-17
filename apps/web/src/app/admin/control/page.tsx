@@ -8,8 +8,10 @@ import { PLATFORM_X_SHARE_FOOTER, formatPercent, formatUsd, TRADING_AGENT_AI_PRO
 import { SiteNav } from '@/components/site-nav';
 import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { useShareFooterActions } from '@/components/share-footer-provider';
+import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 import {
   AdminControlOverview,
+  fetchAccountOverview,
   fetchAdminControlOverview,
   fetchAdminResearchDashboard,
   fetchGlobalShareFooter,
@@ -37,7 +39,9 @@ export default function AdminControlPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const token = session?.accessToken;
-  const isAdmin = session?.user?.role === 'ADMIN';
+  const sessionAdmin = session?.user?.role === 'ADMIN';
+  const [accountAdmin, setAccountAdmin] = useState(false);
+  const isAdmin = sessionAdmin || accountAdmin;
   const { reload: reloadShareFooter } = useShareFooterActions();
 
   const [section, setSection] = useState<SectionId>('agent');
@@ -88,6 +92,16 @@ export default function AdminControlPage() {
       router.replace('/login?callbackUrl=/admin/control');
       return;
     }
+    if (token && !sessionAdmin) {
+      fetchAccountOverview(token)
+        .then((ov) => setAccountAdmin(ov.isAdmin))
+        .catch(() => setAccountAdmin(false));
+    }
+  }, [status, token, sessionAdmin, router]);
+
+  useEffect(() => {
+    if (status === 'loading') return;
+    if (status === 'unauthenticated') return;
     if (!isAdmin) {
       router.replace('/');
       return;
@@ -243,6 +257,14 @@ export default function AdminControlPage() {
     return () => clearInterval(id);
   }, [section, researchAutoRefresh, token, refreshResearch]);
 
+  if (status === 'loading') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#050508] text-zinc-400">
+        Loading admin control…
+      </div>
+    );
+  }
+
   if (!isAdmin) return null;
 
   const runtime = overview?.runtime;
@@ -289,6 +311,24 @@ export default function AdminControlPage() {
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
+          <div className="rounded-xl border border-amber-500/40 bg-amber-950/20 px-4 py-3 text-sm text-amber-100">
+            <p className="font-semibold text-amber-50">Neon database compute</p>
+            <p className="mt-1 text-xs text-amber-200/90">
+              If Neon emailed that your monthly CU-hours are exhausted, admin panels and DB writes may fail until you
+              upgrade to the{' '}
+              <a
+                href="https://console.neon.tech"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold underline"
+              >
+                Neon Launch plan
+              </a>{' '}
+              or the quota resets next month. GitHub + Vercel deploys still work; Railway API needs Postgres for admin
+              data.
+            </p>
+          </div>
+
           {msg && (
             <p className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-sm text-emerald-200">
               {msg}
@@ -700,6 +740,7 @@ export default function AdminControlPage() {
 
           {section === 'platform' && (
             <section className="space-y-4">
+              {token && <AdminFounderPromoPanel accessToken={token} />}
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
                 <h2 className="font-semibold">Treasury & top-ups</h2>
                 <p className="mt-1 text-sm text-zinc-500">

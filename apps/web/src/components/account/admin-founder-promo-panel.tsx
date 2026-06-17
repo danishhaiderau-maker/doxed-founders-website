@@ -47,6 +47,14 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
     }
   }
 
+  if (!settings && !err) {
+    return (
+      <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 px-4 py-3 text-sm text-amber-100/80">
+        Loading Founder AI promo settings…
+      </div>
+    );
+  }
+
   if (!settings) return null;
 
   return (
