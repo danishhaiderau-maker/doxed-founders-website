@@ -84,44 +84,64 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 #   CONTINUOUS / AI_DIRECT — frozen Scenario C benchmark
 #   spawn lanes from CONTINUOUS APPROVE — AI_DIRECT + AI_DIRECT_CHASE fill
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
-RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"
 RESEARCH_LANE_HIGH_EDGE_RUNNER = "HIGH_EDGE_RUNNER"
 RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
 RESEARCH_LANE_EDGE_ACCELERATION = "EDGE_ACCELERATION"
 RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
 RESEARCH_LANE_SHADOW_RUNNER = "SHADOW_RUNNER"
+RESEARCH_LANE_EDGE_ALPHA_4 = "EDGE_ALPHA_4"
+RESEARCH_LANE_TYPE_B_HUNTER = "TYPE_B_HUNTER"
+RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
-    RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: "High Edge Runner",
     RESEARCH_LANE_EXTREME_EDGE: "Extreme Edge",
     RESEARCH_LANE_EDGE_ACCELERATION: "Edge Acceleration",
     RESEARCH_LANE_EDGE_PLUS_STACK: "Edge Plus Stack",
     RESEARCH_LANE_SHADOW_RUNNER: "Shadow Runner",
+    RESEARCH_LANE_EDGE_ALPHA_4: "Edge Alpha 4",
+    RESEARCH_LANE_TYPE_B_HUNTER: "Type B Hunter",
+    RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
 }
 RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
     RESEARCH_LANE_EDGE_ACCELERATION,
     RESEARCH_LANE_EDGE_PLUS_STACK,
+    RESEARCH_LANE_EDGE_ALPHA_4,
+    RESEARCH_LANE_TYPE_B_HUNTER,
 )
+_RESEARCH_LANE_TOGGLE_DEFAULTS = {
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: True,
+    RESEARCH_LANE_EXTREME_EDGE: True,
+    RESEARCH_LANE_EDGE_ACCELERATION: True,
+    RESEARCH_LANE_EDGE_PLUS_STACK: True,
+    RESEARCH_LANE_SHADOW_RUNNER: True,
+    RESEARCH_LANE_EDGE_ALPHA_4: True,
+    RESEARCH_LANE_TYPE_B_HUNTER: True,
+}
 AI_DIRECT_RESEARCH_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_PROFIT_GATES,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
     RESEARCH_LANE_EDGE_ACCELERATION,
     RESEARCH_LANE_EDGE_PLUS_STACK,
+    RESEARCH_LANE_EDGE_ALPHA_4,
+    RESEARCH_LANE_TYPE_B_HUNTER,
 })
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
-    RESEARCH_LANE_PROFIT_GATES: threading.Lock(),
     RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
     RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
     RESEARCH_LANE_EDGE_ACCELERATION: threading.Lock(),
     RESEARCH_LANE_EDGE_PLUS_STACK: threading.Lock(),
     RESEARCH_LANE_SHADOW_RUNNER: threading.Lock(),
+    RESEARCH_LANE_EDGE_ALPHA_4: threading.Lock(),
+    RESEARCH_LANE_TYPE_B_HUNTER: threading.Lock(),
 }
+# Binance USDT-M VIP0 reference (for dashboard fee-stress box — bot sim uses BITFINEX_ZERO)
+BINANCE_USDT_M_TAKER_FEE = 0.0005   # 0.05% per side
+BINANCE_USDT_M_MAKER_FEE = 0.0002   # 0.02% per side
 BENCHMARK_PROFILE_ID = "CONTINUOUS_SCENARIO_C_v1"
 PROFIT_GATES_LANE_DEFAULT_ENABLED = False
 PROFIT_GATES_ENFORCED_DEFAULT = PROFIT_GATES_LANE_DEFAULT_ENABLED  # legacy config key alias
@@ -1741,6 +1761,25 @@ def continuous_ai_research_enabled() -> bool:
     with state_lock:
         return bool(state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED))
 
+def research_lane_enabled_map() -> dict:
+    with state_lock:
+        stored = state.get("research_lane_enabled") or {}
+        merged = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
+        for lane, val in stored.items():
+            if lane in merged:
+                merged[lane] = bool(val)
+        return merged
+
+def is_research_lane_enabled(lane: str) -> bool:
+    lane = str(lane or "").upper()
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        return continuous_ai_research_enabled()
+    if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
+        return True
+    with state_lock:
+        enabled = state.get("research_lane_enabled") or {}
+        return bool(enabled.get(lane, _RESEARCH_LANE_TOGGLE_DEFAULTS.get(lane, True)))
+
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
 
@@ -2106,7 +2145,7 @@ def evaluate_golden_stack_filter(
     return False, None
 
 def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
-    """Golden-stack eval is log-only — never blocks benchmark/spawn lanes (EDGE_PLUS_STACK gates at spawn)."""
+    """Golden-stack eval is log-only — never blocks benchmark/spawn lanes."""
     trade_id = signal.get("trade_id")
     tag = f"GOLDEN_STACK_{reason}"
     gs_eval = signal.get("golden_stack_eval") or {}
@@ -2637,7 +2676,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.39-research-lanes-2026-06-17"
+ANALYZER_SYNC_ID = "v9.42-dashboard-resilience-2026-06-17"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3042,8 +3081,13 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
     return px, sim
 
 
+_last_dashboard_rest_refresh_ts = 0.0
+DASHBOARD_REST_MIN_INTERVAL_SEC = 12.0
+
+
 def refresh_dashboard_market_snapshot(force: bool = False):
     """Ensure /api/state serves a fresh price; REST fallback when WS feed is stale."""
+    global _last_dashboard_rest_refresh_ts
     now = time.time()
     with state_lock:
         price_ts = state.get("price_ts") or 0
@@ -3055,10 +3099,13 @@ def refresh_dashboard_market_snapshot(force: bool = False):
         refresh_bbo_state(force=force)
         refresh_order_book_state(force=force)
         return
+    if now - _last_dashboard_rest_refresh_ts < DASHBOARD_REST_MIN_INTERVAL_SEC:
+        return
     try:
         refresh_bbo_state(force=True)
         refresh_order_book_state(force=True)
         rest_price = fetch_bitfinex_last_price_rest()
+        _last_dashboard_rest_refresh_ts = now
         if rest_price and rest_price > 0:
             with state_lock:
                 state["price"] = rest_price
@@ -4166,21 +4213,23 @@ MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
 _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
-    RESEARCH_LANE_PROFIT_GATES: 15.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
     RESEARCH_LANE_EXTREME_EDGE: 15.0,
     RESEARCH_LANE_EDGE_ACCELERATION: 15.0,
     RESEARCH_LANE_EDGE_PLUS_STACK: 15.0,
     RESEARCH_LANE_SHADOW_RUNNER: 15.0,
+    RESEARCH_LANE_EDGE_ALPHA_4: 15.0,
+    RESEARCH_LANE_TYPE_B_HUNTER: 15.0,
 }
 _LANE_LIMIT_OFFSET_USD = {
     RESEARCH_LANE_CONTINUOUS: 5.0,
-    RESEARCH_LANE_PROFIT_GATES: 5.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 5.0,
     RESEARCH_LANE_EXTREME_EDGE: 5.0,
     RESEARCH_LANE_EDGE_ACCELERATION: 5.0,
     RESEARCH_LANE_EDGE_PLUS_STACK: 5.0,
     RESEARCH_LANE_SHADOW_RUNNER: 5.0,
+    RESEARCH_LANE_EDGE_ALPHA_4: 5.0,
+    RESEARCH_LANE_TYPE_B_HUNTER: 5.0,
 }
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
@@ -4206,7 +4255,7 @@ RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
 RESEARCH_FREE_RUN_DISABLE_CHOP_GATE = True
 RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN = True
 RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; post-AI gates log-only except PROFIT_GATES spawn
-# Golden Stack eval thresholds (EDGE_PLUS_STACK spawn gate — not a separate lane)
+# Golden Stack eval thresholds (log-only telemetry — not a separate lane)
 GOLDEN_STACK_CHOP_MAX = 0.8
 GOLDEN_STACK_ADX_MIN = 15.0
 GOLDEN_STACK_ADX_ALT_MAX = 20.0
@@ -4387,7 +4436,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.28-research-lanes-v109"
+EXECUTION_FIX_VERSION = "v1.1.32-dashboard-js-syntax-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4464,6 +4513,7 @@ state = {
     "golden_stack_last_eval": None,
     "golden_stack_last_block_reason": None,
     "continuous_ai_research_enabled": CONTINUOUS_AI_DEFAULT_ENABLED,
+    "research_lane_enabled": dict(_RESEARCH_LANE_TOGGLE_DEFAULTS),
     "research_ai_cooldown_sec": None,
     "limit_chase_start_sec": None,
     "limit_chase_interval_sec": None,
@@ -7592,6 +7642,8 @@ def _csv_row_to_ai_history(row: dict) -> dict:
         "comment": comment[:2000],
         "source": row.get("source", "CSV"),
         "ai_error": str(row.get("ai_error", "")).lower() in ("true", "1", "yes") or dec == "AI_ERROR",
+        "research_lane": row.get("research_lane"),
+        "research_model": row.get("research_model") or research_lane_label(row.get("research_lane")),
     }
 
 def _load_recent_ai_history_from_csv(limit: int = 5) -> list:
@@ -7797,6 +7849,7 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 "ts": utc_iso(),
                 "trade_id": ai_result.get("trade_id") or "",
                 "research_lane": ai_result.get("research_lane", RESEARCH_LANE_CONTINUOUS),
+                "research_model": ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane")),
                 "shadow_only": ai_result.get("shadow_only", False),
                 "ai_direction_raw": ai_result.get("direction"),
                 "decision": ai_result.get("decision"),
@@ -7826,6 +7879,8 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_EDGE_ACCELERATION: "eacc",
     RESEARCH_LANE_EDGE_PLUS_STACK: "eps",
     RESEARCH_LANE_SHADOW_RUNNER: "shrun",
+    RESEARCH_LANE_EDGE_ALPHA_4: "ea4",
+    RESEARCH_LANE_TYPE_B_HUNTER: "tbh",
     RESEARCH_LANE_PROFIT_GATES: "pg",
 }
 
@@ -7835,6 +7890,60 @@ SHADOW_RUNNER_HORIZON_SECS = {
     "60m": 3600,
     "90m": 5400,
 }
+
+
+def _spawn_near_support(ctx, features) -> bool:
+    sr = (
+        (features or {}).get("sr_state")
+        or (ctx or {}).get("sr_state")
+        or (state.get("support_resistance") or {}).get("sr_state")
+    )
+    return _sr_location_bucket(sr) == "NEAR_SUPPORT"
+
+
+def _spawn_ai_prob_in_band(ai, lo: int = 50, hi: int = 55) -> bool:
+    try:
+        prob = int(ai.get("win_prob") or 0)
+    except (TypeError, ValueError):
+        return False
+    return lo <= prob <= hi
+
+
+def compute_binance_fee_stress(trades: list) -> dict:
+    """Reference PnL after Binance USDT-M VIP0 taker round-trip (not live exchange)."""
+    lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE))
+    margin = float(FIXED_MARGIN_USDT)
+    notional = margin * lev
+    fee_per_trade = round(notional * BINANCE_USDT_M_TAKER_FEE * 2, 4)
+    lanes_out = {}
+    for lane_key, lane_label in RESEARCH_LANE_LABELS.items():
+        if lane_key == RESEARCH_LANE_PROFIT_GATES:
+            continue
+        lt = [t for t in (trades or []) if str(t.get("research_lane") or "") == lane_key]
+        n = len(lt)
+        gross = round(sum(float(t.get("net_pnl_usd") or t.get("net") or 0) for t in lt), 2)
+        fees = round(n * fee_per_trade, 2)
+        net = round(gross - fees, 2)
+        lanes_out[lane_key] = {
+            "label": lane_label,
+            "trades": n,
+            "gross_pnl_usd": gross,
+            "est_fees_usd": fees,
+            "net_after_fees_usd": net,
+            "profitable": net > 0,
+            "fee_per_trade_usd": fee_per_trade,
+        }
+    return {
+        "exchange": "binance_usdt_m",
+        "fee_model": "VIP0 taker 0.05% entry + 0.05% exit (reference)",
+        "maker_fee_pct": BINANCE_USDT_M_MAKER_FEE * 100,
+        "taker_fee_pct": BINANCE_USDT_M_TAKER_FEE * 100,
+        "margin_usd": margin,
+        "leverage": lev,
+        "notional_usd": round(notional, 2),
+        "fee_per_round_trip_usd": fee_per_trade,
+        "lanes": lanes_out,
+    }
 
 
 def _golden_stack_pass_for_spawn(final_direction, ctx, ai, features, edge_score, signal_stub=None) -> tuple:
@@ -7858,6 +7967,9 @@ def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target
     if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
         return
     if not is_research_data_collection():
+        return
+    if not is_research_lane_enabled(target_lane):
+        logger.info(f"[{target_lane} LANE] spawn skipped — lane OFF [PIPELINE ENFORCEMENT]")
         return
     prefix = _SPAWN_LANE_ID_PREFIX.get(target_lane, "lane")
     spawn_ctx = copy.deepcopy(ctx)
@@ -7886,6 +7998,8 @@ def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
     if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
         return
     if not is_research_data_collection():
+        return
+    if not is_research_lane_enabled(RESEARCH_LANE_SHADOW_RUNNER):
         return
     edge = round(float(edge_score), 1)
     if edge < 3.5:
@@ -7928,6 +8042,14 @@ def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
         horizon_secs=SHADOW_RUNNER_HORIZON_SECS,
         exit_config=get_exit_config_snapshot(RESEARCH_LANE_CONTINUOUS),
     )
+    spawn_ai = copy.deepcopy(ai)
+    spawn_ai["trade_id"] = study_id
+    spawn_ai["research_lane"] = RESEARCH_LANE_SHADOW_RUNNER
+    spawn_ai["research_model"] = research_lane_label(RESEARCH_LANE_SHADOW_RUNNER)
+    spawn_ai["source"] = "SPAWN"
+    spawn_ai["shadow_only"] = True
+    log_ai_tranche_outcome(spawn_ai, event="AI_SPAWN")
+    _append_ai_history_row(spawn_ai)
     logger.info(
         f"[SHADOW_RUNNER] horizon study started study_id={study_id} edge={edge} "
         f"horizons=+15/+30/+60/+90m [PIPELINE ENFORCEMENT]"
@@ -7951,6 +8073,7 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
             final_direction = "SHORT"
         elif ai_direction == "SHORT":
             final_direction = "LONG"
+    near_support = _spawn_near_support(ctx, features)
 
     if edge >= 3.5 and vol_ratio >= 1.5:
         _spawn_research_lane(
@@ -7980,8 +8103,17 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
             logger.info(
                 f"[EDGE_PLUS_STACK] skip spawn — GS fail {gs_reason} edge={edge} [PIPELINE ENFORCEMENT]"
             )
+    if edge >= 4.0 and near_support:
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_EDGE_ALPHA_4, "EDGE_ALPHA_4_FROM_CONTINUOUS",
+        )
+    if edge >= 3.5 and vol_ratio > 1.2 and near_support and _spawn_ai_prob_in_band(ai, 50, 55):
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_TYPE_B_HUNTER, "TYPE_B_HUNTER_FROM_CONTINUOUS",
+        )
     spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
-    spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane)
 
 
 def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
@@ -8102,6 +8234,7 @@ def evaluate_signal_with_ai(
             "trade_id": ctx.get("trade_id"),
             "latency_ms": latency_ms,
             "research_lane": research_lane,
+            "research_model": research_lane_label(research_lane),
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
         }
@@ -10007,6 +10140,10 @@ def process_signal(event: dict):
                 ctx = copy.deepcopy(pre_ctx)
                 ai = copy.deepcopy(pre_ai)
                 ai["research_lane"] = research_lane
+                ai["research_model"] = research_lane_label(research_lane)
+                ai["source"] = "SPAWN"
+                log_ai_tranche_outcome(ai, event="AI_SPAWN")
+                _append_ai_history_row(ai)
             else:
                 ai_cd = get_effective_ai_cooldown_sec()
                 if research_lane == RESEARCH_LANE_CONTINUOUS and now - state.get("last_ai_call_ts", 0) < ai_cd:
@@ -11945,7 +12082,7 @@ RESEARCH DATA COLLECTION MODE (active):
 - CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
   LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
   If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
-- Spawn lanes (HIGH_EDGE_RUNNER, EXTREME_EDGE, etc.) inherit CONTINUOUS AI_DIRECT entry unless noted
+- Spawn lanes inherit CONTINUOUS AI_DIRECT entry unless noted (HIGH_EDGE_RUNNER uses runner exit profile)
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -12150,14 +12287,16 @@ PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_EDGE_ACCELERATION,
     RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_SHADOW_RUNNER,
-    RESEARCH_LANE_PROFIT_GATES,
+    RESEARCH_LANE_EDGE_ALPHA_4,
+    RESEARCH_LANE_TYPE_B_HUNTER,
 )
 
 
 def _pathway_lanes_live() -> dict:
-    live = {lane: True for lane in PATHWAY_LANE_ORDER}
-    live[RESEARCH_LANE_CONTINUOUS] = continuous_ai_research_enabled()
-    live[RESEARCH_LANE_PROFIT_GATES] = profit_gates_lane_enabled()
+    enabled = research_lane_enabled_map()
+    live = {RESEARCH_LANE_CONTINUOUS: continuous_ai_research_enabled()}
+    for lane in _RESEARCH_LANE_TOGGLE_DEFAULTS:
+        live[lane] = bool(enabled.get(lane, True))
     return live
 
 
@@ -12202,7 +12341,7 @@ def build_static_pathway_lane_specs() -> dict:
     kill_ev = "EV <= CONTINUOUS benchmark over rolling window"
     return {
         "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": "v110-research-lanes",
+        "analyzer_version": "v111-full-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": RESEARCH_LANE_CONTINUOUS,
         "benchmark_profile_id": BENCHMARK_PROFILE_ID,
@@ -12230,9 +12369,10 @@ def build_static_pathway_lane_specs() -> dict:
             {
                 "lane": RESEARCH_LANE_HIGH_EDGE_RUNNER,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_HIGH_EDGE_RUNNER],
-                "subtitle": "EDGE≥3.5 • VOL≥1.5 • RUNNER EXIT PROFILE",
+                "subtitle": "EDGE≥3.5 · VOL≥1.5 · RUNNER EXIT PROFILE",
                 "role": "high-edge + volume continuation with wider runner exits",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "toggle_key": "research_lane_enabled",
                 "hypothesis": "Strong edge + elevated volume deserves wider profit ladder rungs.",
                 "research_question": "Does runner exit capture more tail on high-edge/high-volume approves?",
                 "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥3.5 & vol_ratio≥1.5", **ai_direct_entry},
@@ -12251,6 +12391,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "subtitle": "EDGE≥4.5 ONLY",
                 "role": "extreme edge subset — same exit as benchmark",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "toggle_key": "research_lane_enabled",
                 "hypothesis": "Tail-edge approves outperform average edge band.",
                 "research_question": "Is edge≥4.5 sufficient alone for superior EV?",
                 "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥4.5", **ai_direct_entry},
@@ -12266,12 +12407,13 @@ def build_static_pathway_lane_specs() -> dict:
             {
                 "lane": RESEARCH_LANE_EDGE_ACCELERATION,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_ACCELERATION],
-                "subtitle": "EDGE RISING • MOMENTUM BUILDING",
+                "subtitle": "EDGE RISING · MOMENTUM BUILDING",
                 "role": "edge momentum — current edge rising vs prior snapshot",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "toggle_key": "research_lane_enabled",
                 "hypothesis": "Rising edge signals improving setup quality mid-candle.",
                 "research_question": "Does edge acceleration predict better forward returns?",
-                "entry": {"trigger": "spawn when edge≥3.0 AND edge > edge_prev (trigger snapshot)", **ai_direct_entry},
+                "entry": {"trigger": "spawn when edge≥3.0 AND edge > edge_prev", **ai_direct_entry},
                 "exit": scenario_c,
                 "exit_path": "Scenario C frozen",
                 "promotion_criteria": f"{promote_ev}; {promote_pnl}",
@@ -12284,9 +12426,10 @@ def build_static_pathway_lane_specs() -> dict:
             {
                 "lane": RESEARCH_LANE_EDGE_PLUS_STACK,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_PLUS_STACK],
-                "subtitle": "EDGE≥3.5 • GS PASS REQUIRED",
+                "subtitle": "EDGE≥3.5 · GS PASS REQUIRED",
                 "role": "edge + golden-stack quality pass (eval only, no GS lane)",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "toggle_key": "research_lane_enabled",
                 "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
                 "research_question": "Does GS-pass subset beat raw edge≥3.5?",
                 "entry": {"trigger": "spawn when edge≥3.5 AND golden_stack_eval pass", **ai_direct_entry},
@@ -12306,6 +12449,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "role": "shadow-only — no live orders",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
                 "live_trading": False,
+                "toggle_key": "research_lane_enabled",
                 "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
                 "research_question": "What is +15/+30/+60/+90m outcome after APPROVE at edge≥3.5?",
                 "entry": {"trigger": "shadow log on CONTINUOUS APPROVE edge≥3.5", "entry_path": "SHADOW", "fill_path": "NONE", "ai_path": "same as CONTINUOUS", "execution": "no orders — replay horizons only"},
@@ -12319,23 +12463,53 @@ def build_static_pathway_lane_specs() -> dict:
                 "diff_vs_benchmark": ["Live trading OFF", "Measures post-approve horizons"],
             },
             {
-                "lane": RESEARCH_LANE_PROFIT_GATES,
-                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_PROFIT_GATES],
-                "subtitle": "HARD POST-AI FILTER STACK",
-                "role": "isolated post-AI filter experiment (spawn lane)",
+                "lane": RESEARCH_LANE_EDGE_ALPHA_4,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_ALPHA_4],
+                "subtitle": "EDGE >= 4.0 · NEAR_SUPPORT · Scenario C",
+                "role": "high-edge concentration near support",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
-                "toggle_key": "profit_gates_lane_enabled",
-                "hypothesis": "Hard post-AI gates improve EV vs log-only benchmark.",
-                "research_question": "Does enforced gate stack beat CONTINUOUS on per-approve EV?",
-                "entry": {"trigger": "spawn on CONTINUOUS APPROVE (toggle)", **ai_direct_entry, "post_ai_gates": "hard enforcement"},
+                "status": "LIVE TEST",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "Edge 4+ near support outperforms the broad CONTINUOUS cohort.",
+                "research_question": "Can Edge 4+ outperform benchmark?",
+                "entry": {
+                    "trigger": "spawn on CONTINUOUS APPROVE when edge>=4.0 & NEAR_SUPPORT",
+                    **ai_direct_entry,
+                },
                 "exit": scenario_c,
                 "exit_path": "Scenario C frozen",
                 "promotion_criteria": f"{promote_ev}; {promote_pnl}",
                 "kill_criteria": kill_ev,
-                "expected_advantage": "Fewer low-quality fills",
-                "expected_risk": "Lower fill rate",
+                "expected_advantage": "Elite edge band (session WR ~74% on edge 4+)",
+                "expected_risk": "Lower spawn rate vs CONTINUOUS",
                 "benchmark_comparison": "vs CONTINUOUS Scenario C",
-                "diff_vs_benchmark": ["Spawn on parent APPROVE", "Hard post-AI filter stack only"],
+                "diff_vs_benchmark": ["Activation: edge>=4.0 & NEAR_SUPPORT", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_TYPE_B_HUNTER,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER],
+                "subtitle": "Edge>=3.5 · Vol>1.2 · NEAR_SUPPORT · AI 50-55",
+                "role": "pre-Type-B fingerprint before entry",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "LIVE TEST",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "Type-B winners share edge, volume, SR, and AI-prob fingerprints.",
+                "research_question": "Can we predict Type B before entry?",
+                "entry": {
+                    "trigger": "spawn when edge>=3.5, vol_ratio>1.2, NEAR_SUPPORT, AI 50-55%",
+                    **ai_direct_entry,
+                },
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Capture Type-B runner profile early",
+                "expected_risk": "Strict filter — sparse samples",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": [
+                    "Activation: edge>=3.5, vol>1.2, NEAR_SUPPORT, AI 50-55",
+                    "Exit: frozen Scenario C",
+                ],
             },
         ],
     }
@@ -12353,21 +12527,25 @@ def write_static_pathway_lane_specs(cwd: str = None) -> dict:
 
 
 def get_pathway_lane_specs_cached() -> dict:
-    """Load pathway_lane_specs.json written by analyzer (Pathway Lab tiles)."""
+    """Pathway Lab tiles — prefer live static specs when file missing or stale."""
     global _cached_pathway_lane_specs
     path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
-    if not os.path.isfile(path):
-        return _cached_pathway_lane_specs or {}
-    try:
-        mtime = os.path.getmtime(path)
-        cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
-        if cached_at != mtime:
-            with open(path, encoding="utf-8") as f:
-                _cached_pathway_lane_specs = json.load(f)
-            _cached_pathway_lane_specs["_cached_mtime"] = mtime
-    except Exception as e:
-        logger.debug(f"[PATHWAY_LANE_SPECS] load failed: {e}")
-    return _cached_pathway_lane_specs or {}
+    loaded = {}
+    if os.path.isfile(path):
+        try:
+            mtime = os.path.getmtime(path)
+            cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
+            if cached_at != mtime:
+                with open(path, encoding="utf-8") as f:
+                    _cached_pathway_lane_specs = json.load(f)
+                _cached_pathway_lane_specs["_cached_mtime"] = mtime
+            loaded = _cached_pathway_lane_specs or {}
+        except Exception as e:
+            logger.debug(f"[PATHWAY_LANE_SPECS] load failed: {e}")
+    if not loaded.get("lanes") or loaded.get("bot_version") != EXECUTION_FIX_VERSION:
+        loaded = build_static_pathway_lane_specs()
+        _cached_pathway_lane_specs = loaded
+    return loaded
 
 
 def get_pathway_scorecard_cached() -> dict:
@@ -12584,7 +12762,6 @@ HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <title>3-Factor Research Bot — Bitfinex · __BOT_VERSION__</title>
-    <script src="/static/dashboard.js?v=__BOT_VERSION__"></script>
     <style>
         body { background:#0d1117; color:#c9d1d9; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin:20px; }
         h1, h2, h3 { color:#58a6ff; }
@@ -12618,9 +12795,7 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleProfitGates()" title="ON: spawn PROFIT_GATES lane with hard post-AI filters. OFF: spawn lanes log-only on benchmark.">Profit Gates Lane: <span id="profitGatesBtn">ON</span></button>
-    <button onclick="toggleContinuousAi()" title="Periodic ~3min CONTINUOUS benchmark lane">Continuous AI: <span id="continuousAiBtn">ON</span></button>
-    <button onclick="toggleDuplicateLimitBlock()" title="When OFF, allow duplicate same-direction limits at same price">Dup Limit Block: <span id="duplicateLimitBlockBtn">ON</span></button>
+    <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark lane (~180s AI when edge>0)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
@@ -12629,24 +12804,8 @@ HTML = """<!DOCTYPE html>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Lane specs from <code>pathway_lane_specs.json</code> · stats from <code>pathway_scorecard.json</code></p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">8-lane Pathway Lab — CONTINUOUS benchmark + 7 spawn/shadow lanes · stats from session trades</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:12px;"></div>
-  <div id="pathwayLaneChips" style="display:none;flex-wrap:wrap;gap:10px;margin-bottom:10px;"></div>
-  <div id="pathwayAiDirectRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;border-top:1px solid #30363d;">
-    <span style="color:#8b949e;font-size:0.88em;">Continuous entry path:</span>
-    <button type="button" onclick="toggleContinuousAiDirect()" id="continuousAiDirectBtn" style="padding:5px 12px;font-weight:bold;">AI_DIRECT: <span id="continuousAiDirectLabel">ON</span></button>
-    <span id="continuousAiDirectHint" style="color:#8b949e;font-size:0.82em;">Skip AWAITING_MICRO — place AI limit immediately</span>
-  </div>
-  <div id="pathwayProfitGatesRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;margin-top:8px;border-top:1px solid #30363d;">
-    <span style="color:#8b949e;font-size:0.88em;">Profit Gates lane:</span>
-    <button type="button" onclick="toggleProfitGatesLane()" id="profitGatesPathwayBtn" style="padding:5px 12px;font-weight:bold;">Profit Gates: <span id="profitGatesPathwayLabel">OFF</span></button>
-    <span id="profitGatesPathwayHint" style="color:#8b949e;font-size:0.82em;">Spawn experiment with hard post-AI filters on parent APPROVE</span>
-  </div>
-  <div id="pathwayDupLimitRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;margin-top:8px;border-top:1px solid #30363d;">
-    <span style="color:#8b949e;font-size:0.88em;">Duplicate limit block:</span>
-    <button type="button" onclick="toggleDuplicateLimitBlock()" id="duplicateLimitPathwayBtn" style="padding:5px 12px;font-weight:bold;">BLOCK: <span id="duplicateLimitPathwayLabel">ON</span></button>
-    <span id="duplicateLimitPathwayHint" style="color:#8b949e;font-size:0.82em;">OFF = allow same-direction limits at same price</span>
-  </div>
 </div>
 
 <div id="tradingParamsPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -12746,6 +12905,12 @@ HTML = """<!DOCTYPE html>
 <p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (UTC):</strong> <span id="fundingNextSettle">-</span></p>
 <p><strong>Funding meaning:</strong> <span id="fundingMeaning">-</span> · <strong>Open-interest:</strong> <span id="fundingOpenInterest">-</span></p>
 
+<div id="binanceFeePanel" style="margin:16px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <strong style="color:#fbbf24;">Binance USDT-M Fee Stress (reference)</strong>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 8px 0;">VIP0 taker 0.05% per side (entry+exit) on notional = margin × leverage. Bitfinex sim uses zero fees — this box shows if lanes would still be green on Binance.</p>
+  <div id="binanceFeeContent" style="font-size:0.88em;color:#c9d1d9;">Loading…</div>
+</div>
+
 <h3>System Status</h3>
 <p id="why"></p>
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
@@ -12838,6 +13003,17 @@ HTML = """<!DOCTYPE html>
   <p id="pathwayKpisPanel" style="color:#8b949e;font-size:0.86em;line-height:1.5;"></p>
 </div>
 
+<script src="/static/dashboard.js?v=__BOT_VERSION__"></script>
+<script>
+  if (typeof window.refresh !== 'function') {
+    var sb = document.getElementById('serverBanner');
+    if (sb) {
+      sb.style.borderColor = '#f85149';
+      sb.style.color = '#f85149';
+      sb.innerText = 'Dashboard JS failed to load — hard refresh (Ctrl+F5). Check browser console for DASHBOARD BOOT FAILURE.';
+    }
+  }
+</script>
 </body>
 </html>
 """
@@ -12875,15 +13051,19 @@ DASHBOARD_JS = """(function () {
         'EDGE_ACCELERATION': '#a78bfa',
         'EDGE_PLUS_STACK': '#d4a72c',
         'SHADOW_RUNNER': '#6e7681',
+        'EDGE_ALPHA_4': '#2ea043',
+        'TYPE_B_HUNTER': '#bc8cff',
         'PROFIT_GATES': '#bc8cff'
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
-        'HIGH_EDGE_RUNNER': 'High Edge',
+        'HIGH_EDGE_RUNNER': 'High Edge Runner',
         'EXTREME_EDGE': 'Extreme Edge',
         'EDGE_ACCELERATION': 'Edge Accel',
-        'EDGE_PLUS_STACK': 'Edge+GS',
-        'SHADOW_RUNNER': 'Shadow',
+        'EDGE_PLUS_STACK': 'Edge+Stack',
+        'SHADOW_RUNNER': 'Shadow Runner',
+        'EDGE_ALPHA_4': 'Edge Alpha 4',
+        'TYPE_B_HUNTER': 'Type B Hunter',
         'PROFIT_GATES': 'Profit Gates'
       };
       const c = colors[lane] || '#8b949e';
@@ -12995,11 +13175,12 @@ DASHBOARD_JS = """(function () {
     async function toggleProfitGatesLane() {
       await toggleProfitGates();
     }
-    async function toggleProfitGatesLane() {
-      await toggleProfitGates();
-    }
     async function toggleContinuousAi() {
       await post('/api/toggle_continuous_ai_research');
+      refresh();
+    }
+    async function toggleResearchLane(lane) {
+      await post('/api/toggle_research_lane', {lane: lane});
       refresh();
     }
     async function toggleContinuousAiDirect() {
@@ -13030,28 +13211,58 @@ DASHBOARD_JS = """(function () {
       return 'n=' + n + ' · WR ' + wr + '% · $' + net.toFixed(2);
     }
     function pathwayLaneToggleState(d, spec) {
-      if (!spec || spec.planned || spec.live_trading === false) return null;
+      if (!spec || spec.planned) return null;
       const key = spec.toggle_key;
       if (key === 'continuous_ai_research_enabled') return d.continuous_ai_research_enabled !== false;
-      if (key === 'profit_gates_lane_enabled') return d.profit_gates_lane_enabled !== false;
+      if (key === 'research_lane_enabled') {
+        const m = d.research_lane_enabled || {};
+        return m[spec.lane] !== false;
+      }
       return null;
     }
     function pathwayLaneToggleFn(spec) {
-      if (!spec || spec.planned || spec.live_trading === false) return '';
+      if (!spec || spec.planned) return '';
       if (spec.lane === 'CONTINUOUS') return 'toggleContinuousAi()';
-      if (spec.lane === 'PROFIT_GATES') return 'toggleProfitGatesLane()';
+      if (spec.toggle_key === 'research_lane_enabled') return "toggleResearchLane('" + spec.lane + "')";
       return '';
     }
     function pathwayLaneBorderColor(spec) {
       if (spec.is_benchmark) return '#d4a72c';
-      if (spec.lane === 'PROFIT_GATES') return '#f85149';
       if (spec.lane === 'SHADOW_RUNNER') return '#6e7681';
       if (spec.lane === 'HIGH_EDGE_RUNNER') return '#3fb950';
       if (spec.lane === 'EXTREME_EDGE') return '#f97316';
       if (spec.lane === 'EDGE_ACCELERATION') return '#a78bfa';
       if (spec.lane === 'EDGE_PLUS_STACK') return '#d4a72c';
+      if (spec.lane === 'EDGE_ALPHA_4') return '#2ea043';
+      if (spec.lane === 'TYPE_B_HUNTER') return '#bc8cff';
       if (spec.planned) return '#6e7681';
       return '#58a6ff';
+    }
+    function renderBinanceFeeStress(d) {
+      const el = document.getElementById('binanceFeeContent');
+      if (!el) return;
+      const b = d.binance_fee_stress || {};
+      const lanes = b.lanes || {};
+      const keys = Object.keys(lanes);
+      if (!keys.length) {
+        el.innerHTML = '<span style="color:#8b949e;">No session trades yet</span>';
+        return;
+      }
+      let html = '<div style="color:#8b949e;margin-bottom:8px;">'
+        + (b.fee_model || 'Binance reference') + ' · notional $' + (b.notional_usd || '-')
+        + ' · ~$' + (b.fee_per_round_trip_usd || '-') + '/round-trip</div>';
+      html += keys.map(function (k) {
+        const L = lanes[k];
+        const net = L.net_after_fees_usd != null ? L.net_after_fees_usd : 0;
+        const col = net >= 0 ? '#3fb950' : '#f85149';
+        const tag = L.profitable ? 'PROFITABLE' : 'NOT PROFITABLE';
+        return '<div style="margin:6px 0;padding:8px;border-left:3px solid ' + col + ';">'
+          + '<strong>' + (L.label || k) + '</strong> · ' + tag
+          + '<br>n=' + (L.trades || 0) + ' · gross $' + (L.gross_pnl_usd || 0).toFixed(2)
+          + ' · est fees $' + (L.est_fees_usd || 0).toFixed(2)
+          + ' · <span style="color:' + col + ';font-weight:600;">net $' + net.toFixed(2) + '</span></div>';
+      }).join('');
+      el.innerHTML = html;
     }
     function renderPathwayLab(d) {
       const specsPayload = d.pathway_lane_specs || {};
@@ -13068,13 +13279,14 @@ DASHBOARD_JS = """(function () {
           const stats = spec.session_stats || {};
           const delta = spec.delta_vs_benchmark || {};
           let toggleHtml = '';
-          if (spec.live_trading === false) {
-            toggleHtml = '<span style="color:#6e7681;font-size:0.82em;">SHADOW ONLY</span>';
-          } else if (spec.planned) {
+          if (spec.planned) {
             toggleHtml = '<span style="color:#6e7681;font-size:0.82em;">PLANNED</span>';
           } else if (toggleFn) {
             const bg = on ? '#10b981' : '#ef4444';
             toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">' + (on ? 'ON' : 'OFF') + '</button>';
+            if (spec.live_trading === false) {
+              toggleHtml += ' <span style="color:#6e7681;font-size:0.78em;">SHADOW ONLY</span>';
+            }
           }
           let vsBench = '';
           if (!spec.is_benchmark && delta.verdict) {
@@ -13118,33 +13330,7 @@ DASHBOARD_JS = """(function () {
             + '</div>';
         }).join('');
       } else if (tiles) {
-        tiles.innerHTML = '<p style="color:#8b949e;font-size:0.85em;">Pathway specs loading — restart bot or run analyzer</p>';
-      }
-      const aiDirectOn = d.continuous_ai_direct_entry_enabled !== false;
-      const aiDirectLabel = document.getElementById('continuousAiDirectLabel');
-      const aiDirectBtn = document.getElementById('continuousAiDirectBtn');
-      if (aiDirectLabel) aiDirectLabel.innerText = aiDirectOn ? 'ON' : 'OFF';
-      if (aiDirectBtn) aiDirectBtn.style.backgroundColor = aiDirectOn ? '#10b981' : '#ef4444';
-      const dupOn = d.duplicate_limit_block_enabled !== false;
-      const dupPathLabel = document.getElementById('duplicateLimitPathwayLabel');
-      const dupPathBtn = document.getElementById('duplicateLimitPathwayBtn');
-      if (dupPathLabel) dupPathLabel.innerText = dupOn ? 'ON' : 'OFF';
-      if (dupPathBtn) dupPathBtn.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
-      const pgOn = d.profit_gates_lane_enabled !== false;
-      const pgBtn = document.getElementById('profitGatesBtn');
-      if (pgBtn) {
-        pgBtn.innerText = pgOn ? 'ON' : 'OFF';
-        pgBtn.parentElement.style.backgroundColor = pgOn ? '#10b981' : '#ef4444';
-      }
-      const pgPathLabel = document.getElementById('profitGatesPathwayLabel');
-      const pgPathBtn = document.getElementById('profitGatesPathwayBtn');
-      if (pgPathLabel) pgPathLabel.innerText = pgOn ? 'ON' : 'OFF';
-      if (pgPathBtn) pgPathBtn.style.backgroundColor = pgOn ? '#10b981' : '#ef4444';
-      const pgHint = document.getElementById('profitGatesPathwayHint');
-      if (pgHint) {
-        pgHint.innerText = pgOn
-          ? 'ON — spawn PROFIT_GATES lane with hard post-AI filters (edge/AI/spread/cluster) on parent APPROVE'
-          : 'OFF — no PROFIT_GATES spawn; CONTINUOUS benchmark stays log-only on post-AI gates';
+        tiles.innerHTML = '<p style="color:#8b949e;font-size:0.85em;">Pathway specs loading — restart bot on ' + (d.bot_version || 'latest') + '</p>';
       }
     }
     function renderPathwayScorecard(d) {
@@ -13259,13 +13445,27 @@ DASHBOARD_JS = """(function () {
       if (refreshInFlight) return;
       refreshInFlight = true;
       try {
-        const r = await fetch('/api/state?_=' + Date.now(), { cache: 'no-store' });
+        const controller = new AbortController();
+        const fetchTimeout = setTimeout(function () { controller.abort(); }, 15000);
+        let r;
+        try {
+          r = await fetch('/api/state?_=' + Date.now(), { cache: 'no-store', signal: controller.signal });
+        } finally {
+          clearTimeout(fetchTimeout);
+        }
         if (r.status === 204) {
           const rs204 = document.getElementById('refreshStatus');
           if (rs204) rs204.innerText = 'Refresh skipped (204) — click again';
           return;
         }
+        if (!r.ok) {
+          throw new Error('API HTTP ' + r.status);
+        }
         const d = await r.json();
+        if (d.api_state_error) {
+          throw new Error(d.api_state_error);
+        }
+        const skipBlk = d.display_skip_block || {};
         const rs = document.getElementById('refreshStatus');
         if (rs) rs.innerText = 'Last updated ' + new Date().toLocaleTimeString() + ' (live)';
         const sb = document.getElementById('serverBanner');
@@ -13321,11 +13521,6 @@ DASHBOARD_JS = """(function () {
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous AI OFF';
           else syncTxt += ' | Continuous AI ON';
-          if (d.profit_gates_lane_enabled === false) syncTxt += ' | Profit Gates OFF';
-          else syncTxt += ' | Profit Gates ON';
-          if (d.duplicate_limit_block_enabled === false) syncTxt += ' | Dup limit ALLOWED';
-          else syncTxt += ' | Dup limit BLOCK';
-          if (d.min_signal_age_enabled !== false) syncTxt += ' | min_age=' + (d.min_signal_age_sec || 600) + 's';
           inst.innerText = syncTxt;
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
@@ -13417,7 +13612,8 @@ DASHBOARD_JS = """(function () {
           'EDGE_ACCELERATION': 'Edge Acceleration',
           'EDGE_PLUS_STACK': 'Edge Plus Stack',
           'SHADOW_RUNNER': 'Shadow Runner',
-          'PROFIT_GATES': 'Profit Gates'
+          'EDGE_ALPHA_4': 'Edge Alpha 4',
+          'TYPE_B_HUNTER': 'Type B Hunter'
         };
         safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
         const aiProbEl = document.getElementById('aiProb');
@@ -13463,10 +13659,8 @@ DASHBOARD_JS = """(function () {
           const prob = d.last_ai?.win_prob;
           const thr = d.ai_threshold;
           const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
-          const pgOn = d.profit_gates_lane_enabled !== false;
           const modeLine = '<span style="color:#10b981">Independent lanes</span> — CONTINUOUS benchmark ~'
-            + (d.ai_cooldown_sec || 180) + 's AI · PROFIT_GATES spawn '
-            + (pgOn ? '<span style="color:#58a6ff">ON</span>' : '<span style="color:#8b949e">OFF</span>');
+            + (d.ai_cooldown_sec || 180) + 's AI · 7 spawn/shadow lanes on CONTINUOUS APPROVE';
           if (dec === 'APPROVE') {
             if (lao.status === 'EXECUTED') {
               gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
@@ -13508,7 +13702,7 @@ DASHBOARD_JS = """(function () {
         const contAiBtn = document.getElementById('continuousAiBtn');
         if (contAiBtn) {
           contAiBtn.innerText = contAiOn ? 'ON' : 'OFF';
-          contAiBtn.parentElement.style.backgroundColor = contAiOn ? '#10b981' : '#ef4444';
+          if (contAiBtn.parentElement) contAiBtn.parentElement.style.backgroundColor = contAiOn ? '#10b981' : '#ef4444';
         }
         const contAiCtrlLabel = document.getElementById('continuousAiControlLabel');
         const contAiCtrlBtn = document.getElementById('continuousAiControlBtn');
@@ -13528,7 +13722,7 @@ DASHBOARD_JS = """(function () {
             'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
             'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
             'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
-            'Spawns HER / XEDGE / EACC / EPS / SHRUN on APPROVE',
+            'Spawns 7 experiment lanes on CONTINUOUS APPROVE',
           ];
           contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
@@ -13544,7 +13738,7 @@ DASHBOARD_JS = """(function () {
         const dupBtn = document.getElementById('duplicateLimitBlockBtn');
         if (dupBtn) {
           dupBtn.innerText = dupOn ? 'ON' : 'OFF';
-          dupBtn.parentElement.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
+          if (dupBtn.parentElement) dupBtn.parentElement.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
         }
         const rkpi = document.getElementById('researchKpiLive');
         const kpis = d.research_kpis || {};
@@ -13581,13 +13775,13 @@ DASHBOARD_JS = """(function () {
           if (ev && ev.golden_stack_pass != null) {
             const pass = ev.golden_stack_pass;
             const br = d.golden_stack_last_block_reason;
-            let txt = 'Last GS eval (EDGE_PLUS_STACK gate): ' + (pass ? '<span style="color:#10b981">PASS</span>' : '<span style="color:#ef4444">FAIL</span>');
+            let txt = 'Last Golden Stack eval (log-only): ' + (pass ? '<span style="color:#10b981">PASS</span>' : '<span style="color:#ef4444">FAIL</span>');
             if (br) txt += ' (' + br + ')';
             if (ev.mom != null) txt += ' · chop ' + ev.mom + '/' + ev.chop_max;
             if (ev.spread != null) txt += ' · spread ' + ev.spread;
             gsLive.innerHTML = txt;
           } else {
-            gsLive.innerText = 'No GS eval yet — logged on each APPROVE for EDGE_PLUS_STACK spawn gate.';
+            gsLive.innerText = 'No Golden Stack eval yet — logged on each APPROVE (log-only telemetry).';
           }
         }
         const debugBtn = document.getElementById('debugToggle');
@@ -13768,6 +13962,7 @@ DASHBOARD_JS = """(function () {
           </tr>
         `).join(''));
         renderPathwayLab(d);
+        renderBinanceFeeStress(d);
         renderPathwayScorecard(d);
         safeText('wsLatency', d.diag?.ws_latency_ms ?? '-');
         safeText('engineLoop', d.diag?.engine_loop_ms ?? '-');
@@ -13786,7 +13981,6 @@ DASHBOARD_JS = """(function () {
         safeText('flags', JSON.stringify(dbg.last_flags || {}));
         const pipeTrig = dbg.pipeline_event_trigger;
         safeText('trigger', pipeTrig === true ? 'YES' : (pipeTrig === false ? 'NO' : (dbg.edge_above_threshold ? 'edge≥thr only' : '-')));
-        const skipBlk = d.display_skip_block || {};
         const ag = dbg.ai_gate || {};
         const agTxt = ag.called
           ? ('CALLED — ' + (ag.reason || 'ok'))
@@ -13819,11 +14013,12 @@ DASHBOARD_JS = """(function () {
             sb.innerHTML = 'Wrong port :' + window.location.port + ' — use <strong>__DASHBOARD_URL__</strong> (bot listens on ' + dashPort + ')';
           }
         }
-        safeText('dataQuality', (d.data_quality * 100).toFixed(1) + '%');
+        safeText('dataQuality', ((d.data_quality != null ? d.data_quality : 0) * 100).toFixed(1) + '%');
       } catch(e) {
         console.error("Refresh failed:", e);
         const rs = document.getElementById('refreshStatus');
-        if (rs) rs.innerText = 'OFFLINE — no bot on this address (' + new Date().toLocaleTimeString() + ')';
+        const isTimeout = (e && e.name === 'AbortError');
+        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >15s' : 'OFFLINE — refresh failed') + ' (' + new Date().toLocaleTimeString() + ')';
         const sb = document.getElementById('serverBanner');
         if (sb) {
           sb.style.borderColor = '#f85149';
@@ -13908,6 +14103,7 @@ DASHBOARD_JS = """(function () {
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.toggleContinuousAi = toggleContinuousAi;
+    window.toggleResearchLane = toggleResearchLane;
     window.toggleProfitGates = toggleProfitGates;
     window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
@@ -13915,6 +14111,12 @@ DASHBOARD_JS = """(function () {
     window.updateEdge = updateEdge;
   } catch (e) {
     console.error("DASHBOARD BOOT FAILURE", e);
+    var bootSb = document.getElementById('serverBanner');
+    if (bootSb) {
+      bootSb.style.borderColor = '#f85149';
+      bootSb.style.color = '#f85149';
+      bootSb.innerText = 'DASHBOARD BOOT FAILURE: ' + (e && e.message ? e.message : String(e));
+    }
   }
   console.info("dashboard.js loaded: true");
 })();"""
@@ -13942,8 +14144,8 @@ def dashboard():
 @app.route('/api/state')
 def api_state():
     try:
-        refresh_dashboard_market_snapshot(force=True)
-        refresh_funding_state()
+        refresh_dashboard_market_snapshot(force=False)
+        refresh_funding_state(force=False)
         now_ts = time.time()
         with trade_lock:
             for pos in open_positions:
@@ -13973,6 +14175,7 @@ def api_state():
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
         snapshot["profit_gates_lane_enabled"] = profit_gates_lane_enabled()
         snapshot["profit_gates_enforced"] = profit_gates_enforced()
+        snapshot["research_lane_enabled"] = research_lane_enabled_map()
         snapshot["research_lanes_independent"] = research_lanes_independent()
         snapshot["research_execution_mode"] = (
             "INDEPENDENT_LANES" if is_research_data_collection() else "LIVE"
@@ -14038,6 +14241,7 @@ def api_state():
             orders.append(oc)
         snapshot["orders"] = orders
         snapshot["trades"] = trades_copy
+        snapshot["binance_fee_stress"] = compute_binance_fee_stress(trades_copy)
         snapshot["expired_orders"] = expired_orders_copy
         snapshot["ai_history"] = ai_history_copy
         snapshot["trades_map"] = trades_map_copy
@@ -14145,6 +14349,7 @@ def api_state():
             })
         exposure_count = max(len(active_list), len(live_ids))
         snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
+        snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
@@ -14196,9 +14401,21 @@ def api_state():
         return resp
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
-        resp = jsonify({})
+        err_payload = {
+            "api_state_error": str(e)[:500],
+            "bot_version": EXECUTION_FIX_VERSION,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "bot_pid": os.getpid(),
+            "bot_cwd": os.getcwd(),
+            "dashboard_port": DASHBOARD_PORT,
+            "dashboard_url": dashboard_public_url(),
+            "deepseek_key_present": bool(_deepseek_api_key()),
+            "research_lane_enabled": research_lane_enabled_map(),
+            "continuous_ai_research_enabled": continuous_ai_research_enabled(),
+        }
+        resp = jsonify(err_payload)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        return resp
+        return resp, 500
 
 @app.route('/health')
 @app.route('/api/status')
@@ -14306,6 +14523,22 @@ def toggle_continuous_ai_research():
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
+
+@app.route('/api/toggle_research_lane', methods=['POST'])
+def toggle_research_lane():
+    data = request.get_json(silent=True) or {}
+    lane = str(data.get("lane") or "").upper()
+    if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
+        return jsonify({"error": f"Unknown lane: {lane}"}), 400
+    with state_lock:
+        enabled = dict(research_lane_enabled_map())
+        enabled[lane] = not bool(enabled.get(lane, True))
+        state["research_lane_enabled"] = enabled
+    save_persistent_config()
+    logger.info(
+        f"[RESEARCH_LANE] {lane} toggled {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({"lane": lane, "enabled": enabled[lane], "research_lane_enabled": enabled})
 
 @app.route('/api/toggle_continuous_ai_direct', methods=['POST'])
 def toggle_continuous_ai_direct():
@@ -16228,6 +16461,7 @@ def _persistent_config_keys():
         "profit_gates_enforced",
         "continuous_ai_direct_entry_enabled",
         "continuous_ai_research_enabled",
+        "research_lane_enabled",
         "research_ai_cooldown_sec",
         "limit_chase_start_sec",
         "limit_chase_interval_sec",
@@ -16308,6 +16542,12 @@ def load_persistent_config():
                 elif "profit_gates_lane_enabled" not in state:
                     state["profit_gates_lane_enabled"] = PROFIT_GATES_LANE_DEFAULT_ENABLED
                 state["profit_gates_enforced"] = bool(state.get("profit_gates_lane_enabled", PROFIT_GATES_LANE_DEFAULT_ENABLED))
+                merged_lanes = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
+                if isinstance(config.get("research_lane_enabled"), dict):
+                    for lane, val in config["research_lane_enabled"].items():
+                        if lane in merged_lanes:
+                            merged_lanes[lane] = bool(val)
+                state["research_lane_enabled"] = merged_lanes
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
         with state_lock:
@@ -16416,7 +16656,7 @@ def _ensure_flask_port_available(port: int = None):
 
 def run_flask():
     _ensure_flask_port_available(DASHBOARD_PORT)
-    app.run(host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, use_reloader=False)
+    app.run(host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, use_reloader=False, threaded=True)
 
 def is_ai_active():
     return state.get("ai_enabled", False) and bool(_deepseek_api_key())
@@ -16851,7 +17091,7 @@ def main():
         logger.warning(
             f"[BENCHMARK] {BENCHMARK_PROFILE_ID} — CONTINUOUS frozen yardstick | "
             f"~{get_research_ai_cooldown_sec()}s AI | AI_DIRECT | Scenario C exits | post-AI gates log-only "
-            f"| spawn lanes: {', '.join(RESEARCH_SPAWN_LANES + (RESEARCH_LANE_SHADOW_RUNNER,))} "
+            f"| spawn lanes: {', '.join(RESEARCH_SPAWN_LANES)} "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
