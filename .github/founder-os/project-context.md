@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-promo): platform-billed AI promo for new founders
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
