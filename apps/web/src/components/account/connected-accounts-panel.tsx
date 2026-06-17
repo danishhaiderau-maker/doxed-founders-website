@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { signIn, signOut } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { getIntegrationConnectGuide } from '@dcf/utils';
+import { getIntegrationConnectGuide, INTEGRATION_PROVIDERS } from '@dcf/utils';
 import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
 import {
   connectGitHubRepo,
@@ -86,18 +86,22 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
 
   const load = useCallback(async () => {
     setErr(null);
-    const [dashResult, memory, prov, x, overview, builder, promoStatus] = await Promise.all([
+    try {
+    const [dashResult, memory, provResult, x, overview, builder, promoStatus] = await Promise.all([
       fetchFounderOsDashboard(accessToken)
         .then((value) => ({ ok: true as const, value }))
         .catch((e: unknown) => ({ ok: false as const, error: e })),
       fetchCopilotMemory(accessToken).catch(() => null),
-      fetchIntegrationProviders(),
+      fetchIntegrationProviders()
+        .then((value) => ({ ok: true as const, value }))
+        .catch(() => ({ ok: false as const, value: INTEGRATION_PROVIDERS })),
       fetchXConnectionStatus(accessToken).catch(() => null),
       fetchAccountOverview(accessToken).catch(() => null),
       fetchBuilderSettings(accessToken).catch(() => null),
       fetchFounderPromoStatus(accessToken).catch(() => null),
     ]);
 
+    const prov = provResult.value;
     setProviders(prov);
     setXStatus(x);
     setIsAdmin(overview?.isAdmin ?? false);
@@ -160,6 +164,21 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         ? dashResult.error.message
         : 'Dashboard partial load — account list shown from integration registry';
     if (!message.includes('partial')) setErr(message);
+    if (!provResult.ok) {
+      setErr((prev) => prev ?? 'Integration registry loaded from offline catalog — API sync pending.');
+    }
+    } catch (e) {
+      setProviders(INTEGRATION_PROVIDERS);
+      setData({
+        founderCredits: 0,
+        communityRewardPool: 0,
+        primaryProject: null,
+        connectedApps: buildAppsFromProviders(INTEGRATION_PROVIDERS, undefined, null, new Set()),
+        pendingSuggestions: [],
+        openBounties: [],
+      });
+      setErr(e instanceof Error ? e.message : 'Failed to load connected accounts');
+    }
   }, [accessToken, buildAppsFromProviders]);
 
   useEffect(() => {

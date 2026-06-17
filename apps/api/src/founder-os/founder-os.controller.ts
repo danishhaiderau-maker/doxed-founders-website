@@ -19,6 +19,7 @@ export class FounderOsController {
     return this.founderOs.getDashboard(user.id);
   }
 
+  @Public()
   @Get('integrations')
   integrations() {
     return this.founderOs.getIntegrationProviders();
