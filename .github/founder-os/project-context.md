@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix empty admin/connected pages and sync research bot.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
