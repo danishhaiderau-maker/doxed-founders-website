@@ -3252,6 +3252,14 @@ export type FounderPromoPlatformSettings = {
   windowDays: number;
   message: string;
   credentialsConfigured: boolean;
+  credentialsStatus?: {
+    gemini: boolean;
+    deepseek: boolean;
+    cursor: boolean;
+    openai: boolean;
+    anthropic: boolean;
+  };
+  credentialsUpdatedAt?: string | null;
 };
 
 export type FounderPromoUserStatus = {
@@ -3284,6 +3292,23 @@ export function updateAdminFounderPromoSettings(
   return apiFetch<FounderPromoPlatformSettings>(
     '/admin-control/founder-promo',
     { method: 'PATCH', body: JSON.stringify(body) },
+    token,
+  );
+}
+
+export function saveAdminFounderPromoCredentials(
+  token: string,
+  body: Partial<{
+    gemini: string | null;
+    deepseek: string | null;
+    cursor: string | null;
+    openai: string | null;
+    anthropic: string | null;
+  }>,
+) {
+  return apiFetch<FounderPromoPlatformSettings>(
+    '/admin-control/founder-promo/credentials',
+    { method: 'POST', body: JSON.stringify(body) },
     token,
   );
 }

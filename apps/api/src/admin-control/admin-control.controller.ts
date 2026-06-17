@@ -146,4 +146,20 @@ export class AdminControlController {
   ) {
     return this.founderPromo.updatePlatformPromoSettings(user.id, body);
   }
+
+  @UseGuards(AdminGuard)
+  @Post('founder-promo/credentials')
+  saveFounderPromoCredentials(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      gemini?: string | null;
+      deepseek?: string | null;
+      cursor?: string | null;
+      openai?: string | null;
+      anthropic?: string | null;
+    },
+  ) {
+    return this.founderPromo.savePromoCredentials(user.id, body);
+  }
 }
