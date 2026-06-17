@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-feat(founder-promo): add platform API keys with hard 1-month cutoff
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
