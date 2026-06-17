@@ -66,8 +66,7 @@ export class FounderCommandCenterService {
   ) {}
 
   async getActiveAgentRun(userId: string) {
-    const run = await this.agentRuns.getActive(userId);
-    return { run, active: isAgentRunActive(run) };
+    return this.builder.refreshActiveAgentRun(userId);
   }
 
   async getFounderQueue(userId: string) {
@@ -574,28 +573,6 @@ export class FounderCommandCenterService {
         cursorPrompt: task.cursorPrompt ?? task.spec ?? task.title,
         repository: memory.repoFullName ?? undefined,
       });
-      if (dispatch.status === 'dispatched' && dispatch.worker === 'CURSOR' && dispatch.agentId && dispatch.runId) {
-        await this.agentRuns.start(userId, {
-          worker: 'CURSOR',
-          status: 'CREATING',
-          task: task.spec ?? task.title,
-          repository: memory.repoFullName,
-          agentId: dispatch.agentId,
-          runId: dispatch.runId,
-        });
-      } else if (
-        dispatch.status === 'dispatched' &&
-        dispatch.worker === 'OPENHANDS' &&
-        dispatch.conversationId
-      ) {
-        await this.agentRuns.start(userId, {
-          worker: 'OPENHANDS',
-          status: 'WORKING',
-          task: task.spec ?? task.title,
-          repository: memory.repoFullName,
-          conversationId: dispatch.conversationId,
-        });
-      }
 
       return {
         action: 'dispatch_build' as const,

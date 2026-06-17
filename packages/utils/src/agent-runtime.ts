@@ -9,6 +9,18 @@ export type AgentRuntimeStep = {
   active: boolean;
 };
 
+/** Phase 3 — 8-step command center pipeline (CodeGrid-style visibility). */
+export const COMMAND_CENTER_PIPELINE = [
+  'Reading repository',
+  'Analyzing architecture',
+  'Updating context',
+  'Creating branch',
+  'Writing code',
+  'Running tests',
+  'Creating PR',
+  'Waiting approval',
+] as const;
+
 const CURSOR_PIPELINE = [
   'Reading repository',
   'Creating plan',
@@ -28,6 +40,50 @@ const OPENHANDS_PIPELINE = [
 
 function normalizeStatus(status: string): string {
   return status.toUpperCase().replace(/\s+/g, '_');
+}
+
+/** Map Cursor/OpenHands status → 0-based index in COMMAND_CENTER_PIPELINE. */
+export function mapWorkerStatusToCommandCenterStepIndex(
+  worker: 'CURSOR' | 'OPENHANDS',
+  status: string,
+  hasPr: boolean,
+): number {
+  const s = normalizeStatus(status);
+  if (['FINISHED', 'COMPLETED', 'DONE'].includes(s)) return hasPr ? 7 : 6;
+  if (['ERROR', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(s)) return 7;
+  if (hasPr) return 6;
+  if (worker === 'CURSOR') {
+    if (s === 'RUNNING' || s === 'IN_PROGRESS' || s === 'WORKING') return 4;
+    if (s === 'CREATING' || s === 'PENDING' || s === 'QUEUED') return 1;
+    return 3;
+  }
+  if (s === 'WORKING' || s === 'RUNNING') return 4;
+  return 2;
+}
+
+export function buildCommandCenterRuntimeSteps(input: {
+  worker: 'CURSOR' | 'OPENHANDS';
+  status: string;
+  prUrl?: string | null;
+  branch?: string | null;
+}): AgentRuntimeStep[] {
+  const hasPr = Boolean(input.prUrl?.trim());
+  const activeIdx = mapWorkerStatusToCommandCenterStepIndex(input.worker, input.status, hasPr);
+  const total = COMMAND_CENTER_PIPELINE.length;
+
+  return COMMAND_CENTER_PIPELINE.map((label, index) => ({
+    index: index + 1,
+    total,
+    label,
+    detail:
+      index === 6 && hasPr
+        ? input.prUrl!.trim()
+        : index === 3 && input.branch?.trim()
+          ? `Branch: ${input.branch.trim()}`
+          : undefined,
+    done: index < activeIdx,
+    active: index === activeIdx,
+  }));
 }
 
 export function mapCursorStatusToStepIndex(status: string, hasPr: boolean): number {
@@ -53,7 +109,12 @@ export function buildAgentRuntimeSteps(input: {
   status: string;
   prUrl?: string | null;
   branch?: string | null;
+  /** Phase 3 — use 8-step command center pipeline in UI. */
+  commandCenter?: boolean;
 }): AgentRuntimeStep[] {
+  if (input.commandCenter !== false) {
+    return buildCommandCenterRuntimeSteps(input);
+  }
   const pipeline =
     input.worker === 'CURSOR' ? [...CURSOR_PIPELINE] : [...OPENHANDS_PIPELINE];
   const hasPr = Boolean(input.prUrl?.trim());
@@ -78,11 +139,11 @@ export function buildAgentRuntimeSteps(input: {
   }));
 }
 
-export function formatAgentRuntimeStepsBlock(steps: AgentRuntimeStep[]): string {
+export function formatAgentRuntimeStepsBlock(steps: AgentRuntimeStep[], title = 'Builder Agent'): string {
   const lines = steps.map((s) => {
     const mark = s.done ? '✓' : s.active ? '→' : '○';
     const detail = s.detail ? ` — ${s.detail}` : '';
     return `${mark} **${s.index}/${s.total}** ${s.label}${detail}`;
   });
-  return ['**Agent run**', '', ...lines].join('\n');
+  return [`**${title}**`, '', ...lines].join('\n');
 }

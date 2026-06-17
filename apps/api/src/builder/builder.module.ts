@@ -7,6 +7,7 @@ import { FounderMemoryGraphModule } from '../founder-memory/founder-memory-graph
 import { FounderAgentRunModule } from '../founder-agent-run/founder-agent-run.module';
 import { BuilderController } from './builder.controller';
 import { BuilderService } from './builder.service';
+import { AgentRuntimeService } from './agent-runtime.service';
 
 @Module({
   imports: [
@@ -18,7 +19,7 @@ import { BuilderService } from './builder.service';
     FounderAgentRunModule,
   ],
   controllers: [BuilderController],
-  providers: [BuilderService],
-  exports: [BuilderService],
+  providers: [BuilderService, AgentRuntimeService],
+  exports: [BuilderService, AgentRuntimeService],
 })
 export class BuilderModule {}

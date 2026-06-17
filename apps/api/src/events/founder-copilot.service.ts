@@ -1289,19 +1289,26 @@ export class FounderCopilotService {
         current_branch: memory.currentBranch ?? undefined,
       });
 
-      const dispatch = await this.builder.dispatchCursorBuildTask(userId, {
+      const dispatch = await this.builder.executeBuildTask(userId, {
         spec: taskPrompt,
         cursorPrompt: taskPrompt,
         repository: memory.repoFullName ?? undefined,
-      });
-      await this.agentRuns.start(userId, {
         worker: 'CURSOR',
-        status: dispatch.status ?? 'CREATING',
-        task: taskPrompt,
-        repository: memory.repoFullName,
-        agentId: dispatch.agentId,
-        runId: dispatch.runId,
       });
+      if (dispatch.status !== 'dispatched') {
+        return {
+          answer: dispatch.message ?? dispatch.error ?? 'Builder Agent could not start.',
+          answerProvider: 'RULE_BASED',
+          stats: {
+            commits: 0,
+            deploys: 0,
+            followers: 0,
+            featureRequests: 0,
+            launchReadiness: memory.launchReadiness,
+            buildStreak: memory.buildStreakDays,
+          },
+        };
+      }
       const founder = await this.prisma.founder.findUnique({ where: { userId } });
       await this.events.emit({
         founderId: founder!.id,
@@ -1309,16 +1316,19 @@ export class FounderCopilotService {
         userId,
         type: FounderEventType.CURSOR_BUILD_SESSION,
         source: 'copilot',
-        title: `Cursor: ${taskPrompt.slice(0, 60)}`,
+        title: `Builder: ${taskPrompt.slice(0, 60)}`,
         payload: { agentUrl: dispatch.agentUrl, mode: dispatch.mode },
       });
       const repo = memory.repoFullName ?? undefined;
       return {
         answer: [
-          `**Cursor** · ${dispatch.mode === 'follow_up' ? 'continuing on repo' : 'coding on your repo'}`,
+          `**Builder Agent** · ${dispatch.mode === 'follow_up' ? 'continuing on repo' : 'coding on your repo'}`,
           repo ? `Repository: \`${repo}\`` : '',
           '',
-          `**Your task**`,
+          'Step progress streams in Mission Control (1/8 … 8/8).',
+          dispatch.agentUrl ? `[Optional advanced view](${dispatch.agentUrl})` : '',
+          '',
+          '**Your task**',
           taskPrompt.slice(0, 1200),
           '',
           `**Status:** ${dispatch.status}`,
@@ -1327,7 +1337,7 @@ export class FounderCopilotService {
         ]
           .filter(Boolean)
           .join('\n'),
-        answerProvider: 'CURSOR',
+        answerProvider: 'BUILDER_AGENT',
         runtime: {
           toolsUsed: ['cursor_agent'],
           githubIssuesCreated: 0,

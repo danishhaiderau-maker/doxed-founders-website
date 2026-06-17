@@ -127,3 +127,4 @@ export * from './data-classification';
 export * from './task-router';
 export * from './founder-onboarding-paths';
 export * from './platform-connections';
+export * from './provider-adapters';
