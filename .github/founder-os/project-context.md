@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-feat(builder): wire Surplus Intelligence into production API.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
