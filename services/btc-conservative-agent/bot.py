@@ -238,6 +238,17 @@ def _ascii_fold_csv_text(s: str) -> str:
     return out
 
 
+def _console_log_stream():
+    """UTF-8 console stream on Windows so StreamHandler never hits cp1252 encode errors."""
+    if sys.platform == "win32":
+        buf = getattr(sys.stdout, "buffer", None)
+        if buf is not None:
+            return io.TextIOWrapper(
+                buf, encoding="utf-8", errors="replace", line_buffering=True,
+            )
+    return sys.stdout
+
+
 def safe_csv_row(row: dict) -> dict:
     clean = {}
     for k, v in row.items():
@@ -423,7 +434,7 @@ def _wipe_research_on_startup_if_needed():
         )
         return
     archive_research_session(reason="startup_wipe_env")
-    logger.warning("[STARTUP] WIPE_CSV_ON_STARTUP=1 — wiping research files after archive [PIPELINE ENFORCEMENT]")
+    logger.warning("[STARTUP] WIPE_CSV_ON_STARTUP=1 - wiping research files after archive [PIPELINE ENFORCEMENT]")
     reset_all_research_files()
 
 def _log_credential_sources():
@@ -2676,7 +2687,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.42-dashboard-resilience-2026-06-17"
+ANALYZER_SYNC_ID = "v9.45-trend-hierarchy-direction-attribution-2026-06-17"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -2703,7 +2714,7 @@ def _http_get_with_retry(url: str, params=None, timeout: float = 30, label: str 
             resp = requests.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
                 wait = min(2 ** attempt, 30)
-                logger.warning(f"[{label}] HTTP 429 rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+                logger.warning(f"[{label}] HTTP 429 rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -2711,14 +2722,14 @@ def _http_get_with_retry(url: str, params=None, timeout: float = 30, label: str 
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = e
             wait = min(2 ** attempt, 15)
-            logger.warning(f"[{label}] network error ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            logger.warning(f"[{label}] network error ({e}) - retry {attempt + 1}/{max_attempts} in {wait}s")
             time.sleep(wait)
         except requests.RequestException as e:
             last_err = e
             if attempt + 1 >= max_attempts:
                 raise
             wait = min(2 ** attempt, 15)
-            logger.warning(f"[{label}] request error ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            logger.warning(f"[{label}] request error ({e}) - retry {attempt + 1}/{max_attempts} in {wait}s")
             time.sleep(wait)
     raise last_err or RuntimeError(f"{label} failed after {max_attempts} attempts")
 
@@ -2732,19 +2743,19 @@ def _exchange_call_with_retry(fn, label: str = "EXCHANGE", max_attempts: int = 5
         except ccxt.RateLimitExceeded as e:
             last_err = e
             wait = min(2 ** attempt, 30)
-            logger.warning(f"[{label}] ccxt rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+            logger.warning(f"[{label}] ccxt rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
             time.sleep(wait)
         except (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable) as e:
             last_err = e
             wait = min(2 ** attempt, 15)
-            logger.warning(f"[{label}] ccxt network ({e}) — retry {attempt + 1}/{max_attempts} in {wait}s")
+            logger.warning(f"[{label}] ccxt network ({e}) - retry {attempt + 1}/{max_attempts} in {wait}s")
             time.sleep(wait)
         except ccxt.ExchangeError as e:
             msg = str(e).lower()
             if "429" in msg or "rate" in msg:
                 last_err = e
                 wait = min(2 ** attempt, 30)
-                logger.warning(f"[{label}] exchange rate limit — retry {attempt + 1}/{max_attempts} in {wait}s")
+                logger.warning(f"[{label}] exchange rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
                 time.sleep(wait)
                 continue
             raise
@@ -2914,7 +2925,7 @@ def simulate_market_fill(side: str, qty_btc: float) -> dict:
         px = best if best > 0 else last
         if px <= 0:
             return empty
-        logger.debug(f"[BOOK] no cached levels side={side} — BBO fallback px={px} [PIPELINE ENFORCEMENT]")
+        logger.debug(f"[BOOK] no cached levels side={side} - BBO fallback px={px} [PIPELINE ENFORCEMENT]")
         return {
             "avg_price": round(px, 2),
             "filled_qty": round(qty_btc, 8),
@@ -3178,7 +3189,7 @@ def refresh_funding_state(force: bool = False):
         index = meta.get("index_price")
         source = meta.get("source", "BITFINEX_DERIV_STATUS")
     except Exception as e:
-        logger.warning(f"[FUNDING] Bitfinex deriv status failed: {e} — trying ccxt [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[FUNDING] Bitfinex deriv status failed: {e} - trying ccxt [PIPELINE ENFORCEMENT]")
         try:
             fr = get_bitfinex_public().fetch_funding_rate(SYMBOL_CCXT)
             rate = fr.get("fundingRate")
@@ -3191,7 +3202,7 @@ def refresh_funding_state(force: bool = False):
             index = fr.get("indexPrice")
             source = "BITFINEX_CCXT"
         except Exception as e2:
-            logger.warning(f"[FUNDING] ccxt funding failed: {e2} — using synthetic [PIPELINE ENFORCEMENT]")
+            logger.warning(f"[FUNDING] ccxt funding failed: {e2} - using synthetic [PIPELINE ENFORCEMENT]")
     if rate is None:
         rate = synthetic_funding_rate_8h()
         source = "SYNTHETIC"
@@ -3235,7 +3246,7 @@ def refresh_funding_state(force: bool = False):
             )
         if short_n:
             logger.info(
-                f"[FUNDING MONITOR] positive rate with {short_n} open SHORT(s) — favorable carry (monitor only) "
+                f"[FUNDING MONITOR] positive rate with {short_n} open SHORT(s) - favorable carry (monitor only) "
                 f"[PIPELINE ENFORCEMENT]"
             )
 
@@ -4436,7 +4447,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.32-dashboard-js-syntax-fix"
+EXECUTION_FIX_VERSION = "v1.1.34-trend-hierarchy-direction-attribution"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -6083,7 +6094,7 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         current = signal.get("status")
         if status and current != status:
             if current in TERMINAL_SIGNAL_STATUSES or is_terminal_signal(signal):
-                logger.debug(f"[FINALIZE SKIP] trade_id={signal.get('trade_id')} terminal status={current} — not downgrading to {status} [PIPELINE ENFORCEMENT]")
+                logger.debug(f"[FINALIZE SKIP] trade_id={signal.get('trade_id')} terminal status={current} - not downgrading to {status} [PIPELINE ENFORCEMENT]")
             else:
                 signal["status"] = status
                 logger.info(f"[FINALIZE UPDATE] trade_id={signal.get('trade_id')} status={status} [PIPELINE ENFORCEMENT]")
@@ -6110,7 +6121,7 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
             elif ai_direction == "SHORT":
                 final_direction = "LONG"
             inverted = True
-            logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED raw_ai={ai_direction} → final_direction={final_direction} inverted={inverted} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+            logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED raw_ai={ai_direction} -> final_direction={final_direction} inverted={inverted} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
         signal["final_direction"] = final_direction
         signal["direction"] = final_direction
         signal["inverted"] = inverted
@@ -6962,6 +6973,9 @@ def parse_ai_factor_block(text: str) -> dict:
         "reasons_against": [],
         "bull_score": 0,
         "bear_score": 0,
+        "long_score": 0,
+        "short_score": 0,
+        "preferred_direction": None,
         "factor_parse_ok": False,
     }
     if not text:
@@ -6992,6 +7006,15 @@ def parse_ai_factor_block(text: str) -> dict:
         factors["reasons_against"] = json_blob.get("reasons_against_trade") or json_blob.get("reasons_against") or []
         factors["bull_score"] = int(json_blob.get("bull_score", 0) or 0)
         factors["bear_score"] = int(json_blob.get("bear_score", 0) or 0)
+        factors["long_score"] = int(json_blob.get("long_score", 0) or 0)
+        factors["short_score"] = int(json_blob.get("short_score", 0) or 0)
+        if factors["long_score"] <= 0 and factors["bull_score"] > 0:
+            factors["long_score"] = factors["bull_score"] * 10
+        if factors["short_score"] <= 0 and factors["bear_score"] > 0:
+            factors["short_score"] = factors["bear_score"] * 10
+        pref = json_blob.get("preferred_direction")
+        if pref:
+            factors["preferred_direction"] = str(pref).upper()
         factors["factor_parse_ok"] = True
         return factors
     bull_m = re.search(r"Bull\s*score:\s*(\d+)", text, re.IGNORECASE)
@@ -7000,6 +7023,16 @@ def parse_ai_factor_block(text: str) -> dict:
         factors["bull_score"] = int(bull_m.group(1))
     if bear_m:
         factors["bear_score"] = int(bear_m.group(1))
+    long_m = re.search(r"Long\s*score:\s*(\d+)", text, re.IGNORECASE)
+    short_m = re.search(r"Short\s*score:\s*(\d+)", text, re.IGNORECASE)
+    if long_m:
+        factors["long_score"] = int(long_m.group(1))
+    if short_m:
+        factors["short_score"] = int(short_m.group(1))
+    if factors["long_score"] <= 0 and factors["bull_score"] > 0:
+        factors["long_score"] = factors["bull_score"] * 10
+    if factors["short_score"] <= 0 and factors["bear_score"] > 0:
+        factors["short_score"] = factors["bear_score"] * 10
     if re.search(r"reasons?_for", text, re.IGNORECASE):
         block = re.search(r"reasons?_for(?:_trade)?[:\s]+(.*?)(?:reasons?_against|Bull\s*score|$)", text, re.IGNORECASE | re.DOTALL)
         if block:
@@ -7063,11 +7096,90 @@ def apply_phase_c_factor_gate(ai_result: dict) -> dict:
     elif direction == "SHORT" and bear < bull + margin:
         gate_reason = f"FACTOR_GATE_SHORT bull={bull} bear={bear}"
     if gate_reason:
-        logger.warning(f"[PHASE-C] {gate_reason} — overriding APPROVE to REJECT [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[PHASE-C] {gate_reason} - overriding APPROVE to REJECT [PIPELINE ENFORCEMENT]")
         ai_result["decision"] = "REJECT"
         ai_result["approved"] = False
         ai_result["factor_gate"] = gate_reason
         ai_result["pre_gate_decision"] = "APPROVE"
+    return ai_result
+
+
+def apply_trend_hierarchy_gate(ctx: dict, ai_result: dict) -> dict:
+    """Research: downgrade weak counter-trend APPROVEs to SOFT_REJECT (shadow study, no live fill)."""
+    if not (is_research_data_collection() and AI_RESEARCH_MODE_ENABLED):
+        return ai_result
+    if ai_result.get("ai_error"):
+        return ai_result
+    tier = str(ai_result.get("execution_tier") or ai_result.get("research_soft") or ai_result.get("decision") or "").upper()
+    if tier not in AI_EXECUTE_TIERS:
+        return ai_result
+    direction = str(ai_result.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return ai_result
+
+    mc = ctx.get("market_context") or {}
+    mtf = mc.get("multi_tf") or {}
+    ms = mc.get("market_structure") or {}
+    ts = mc.get("trend_strength") or {}
+    adx = float(ts.get("adx") or ctx.get("adx") or 0)
+    mtf_agree = str(mtf.get("agreement") or "").upper()
+    struct_bias = str(ms.get("bias") or ms.get("structure_bias") or "").upper()
+    struct_score = float(ms.get("structure_score") or 0)
+    ema_stack = str((mc.get("ema_alignment") or {}).get("stack") or "").upper()
+
+    factors = ai_result.get("factors") or {}
+    long_s = int(factors.get("long_score") or ai_result.get("long_score") or 0)
+    short_s = int(factors.get("short_score") or ai_result.get("short_score") or 0)
+    if long_s <= 0 and short_s <= 0:
+        bull = int(factors.get("bull_score") or ai_result.get("bull_score") or 0)
+        bear = int(factors.get("bear_score") or ai_result.get("bear_score") or 0)
+        long_s = bull * 10
+        short_s = bear * 10
+
+    bear_continuation = (
+        mtf_agree == "BEAR_ALIGNED"
+        and ("BEAR" in struct_bias or struct_score <= -2)
+        and ("BEAR" in ema_stack or ema_stack in ("BEARISH", "BEAR"))
+        and adx >= 25
+    )
+    bull_continuation = (
+        mtf_agree == "BULL_ALIGNED"
+        and ("BULL" in struct_bias or struct_score >= 2)
+        and ("BULL" in ema_stack or ema_stack in ("BULLISH", "BULL"))
+        and adx >= 25
+    )
+
+    struct_shift = str(ctx.get("market_structure_shift") or "").upper()
+    higher_low = bool(ctx.get("higher_low_detected"))
+    lower_high = bool(ctx.get("lower_high_detected"))
+    sr_bias = str(ctx.get("sr_bias") or "").upper()
+
+    gate = None
+    if direction == "LONG" and bear_continuation:
+        weak_reversal = higher_low and "BULL" not in struct_shift and "REVERSAL" not in struct_shift
+        if long_s < short_s + 10 or weak_reversal or (sr_bias == "SHORT_PREFERRED" and long_s < short_s + 5):
+            gate = (
+                f"TREND_HIERARCHY_COUNTER_TREND_LONG long={long_s} short={short_s} "
+                f"adx={adx:.0f} mtf={mtf_agree} struct={struct_bias}"
+            )
+    elif direction == "SHORT" and bull_continuation:
+        weak_reversal = lower_high and "BEAR" not in struct_shift and "REVERSAL" not in struct_shift
+        if short_s < long_s + 10 or weak_reversal or (sr_bias == "LONG_PREFERRED" and short_s < long_s + 5):
+            gate = (
+                f"TREND_HIERARCHY_COUNTER_TREND_SHORT long={long_s} short={short_s} "
+                f"adx={adx:.0f} mtf={mtf_agree} struct={struct_bias}"
+            )
+
+    if gate:
+        logger.warning(
+            f"[TREND_HIERARCHY] {gate} - downgrade to SOFT_REJECT (shadow study) [PIPELINE ENFORCEMENT]"
+        )
+        ai_result["pre_trend_hierarchy_decision"] = ai_result.get("decision")
+        ai_result["trend_hierarchy_gate"] = gate
+        ai_result["decision"] = "SOFT_REJECT"
+        ai_result["approved"] = False
+        ai_result["research_soft"] = "SOFT_REJECT"
+        ai_result["execution_tier"] = "SOFT_REJECT"
     return ai_result
 
 def double_confirm_ai(original_ai, ctx):
@@ -7084,11 +7196,11 @@ Verify if still correct. Return same format."""
         decision_match = re.search(r"Decision:\s*(APPROVE|REJECT)", text, re.IGNORECASE)
         decision = decision_match.group(1).upper() if decision_match else original_ai.get("decision")
         if decision != original_ai.get("decision"):
-            logger.warning(f"[AI CONFLICT] Original {original_ai.get('decision')} vs Confirm {decision} — safer REJECT [PIPELINE ENFORCEMENT]")
+            logger.warning(f"[AI CONFLICT] Original {original_ai.get('decision')} vs Confirm {decision} - safer REJECT [PIPELINE ENFORCEMENT]")
             return {"win_prob": min(original_ai.get("win_prob",0), win_prob), "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": text, "ai_error": False, "factors": {}, "source": "DOUBLE_CONFIRM", "approved": False}
         return original_ai
     except Exception as e:
-        logger.error(f"[DOUBLE AI] Failed: {e} — using original [PIPELINE ENFORCEMENT]")
+        logger.error(f"[DOUBLE AI] Failed: {e} - using original [PIPELINE ENFORCEMENT]")
         return original_ai
 
 def _format_melbourne_hm(ts_str: str) -> str:
@@ -7969,7 +8081,7 @@ def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target
     if not is_research_data_collection():
         return
     if not is_research_lane_enabled(target_lane):
-        logger.info(f"[{target_lane} LANE] spawn skipped — lane OFF [PIPELINE ENFORCEMENT]")
+        logger.info(f"[{target_lane} LANE] spawn skipped - lane OFF [PIPELINE ENFORCEMENT]")
         return
     prefix = _SPAWN_LANE_ID_PREFIX.get(target_lane, "lane")
     spawn_ctx = copy.deepcopy(ctx)
@@ -8101,7 +8213,7 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
             )
         else:
             logger.info(
-                f"[EDGE_PLUS_STACK] skip spawn — GS fail {gs_reason} edge={edge} [PIPELINE ENFORCEMENT]"
+                f"[EDGE_PLUS_STACK] skip spawn - GS fail {gs_reason} edge={edge} [PIPELINE ENFORCEMENT]"
             )
     if edge >= 4.0 and near_support:
         _spawn_research_lane(
@@ -8229,6 +8341,9 @@ def evaluate_signal_with_ai(
             "factors": factors,
             "bull_score": factors.get("bull_score", 0),
             "bear_score": factors.get("bear_score", 0),
+            "long_score": factors.get("long_score", 0),
+            "short_score": factors.get("short_score", 0),
+            "preferred_direction": factors.get("preferred_direction"),
             "source": "FRESH",
             "approved": decision in AI_EXECUTE_TIERS,
             "trade_id": ctx.get("trade_id"),
@@ -8238,6 +8353,7 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
         }
+        ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
@@ -9208,11 +9324,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     direction = signal.get("final_direction")
     if not research_instant and _tape_bounce_against(direction, features):
         defer_instant_fill = True
-        logger.info(f"[SIM] Bounce vs {direction} — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
+        logger.info(f"[SIM] Bounce vs {direction} - using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
     setup_type = signal.get("setup_type") or classify_setup(features)
     if not research_instant and setup_type == "WEAK_SETUP":
         defer_instant_fill = True
-        logger.info("[SIM] WEAK_SETUP — using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
+        logger.info("[SIM] WEAK_SETUP - using pullback limit instead of instant fill [PIPELINE ENFORCEMENT]")
     can_instant = (
         pullback_pct <= 0.0
         and not defer_instant_fill
@@ -9289,7 +9405,7 @@ def process_awaiting_micro_entries():
             continue
         logger.info(
             f"[SIM] micro_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
-            f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
+            f"limit={fmt(limit_price)} entry_mode={entry_mode} - placing limit order [PIPELINE ENFORCEMENT]"
         )
         market = float(price)
         smart_meta = {"reanchored": False, "immediate_chase": False, "original_planned": limit_price}
@@ -9336,7 +9452,7 @@ def process_awaiting_5m_entries():
             continue
         logger.info(
             f"[SIM] 5m_structure confirmed trade_id={tid} dir={signal.get('final_direction')} "
-            f"limit={fmt(limit_price)} entry_mode={entry_mode} — placing limit order [PIPELINE ENFORCEMENT]"
+            f"limit={fmt(limit_price)} entry_mode={entry_mode} - placing limit order [PIPELINE ENFORCEMENT]"
         )
         market = float(price)
         smart_meta = {"reanchored": False, "immediate_chase": False, "original_planned": limit_price}
@@ -9434,7 +9550,7 @@ def process_awaiting_min_age_entries():
             continue
         logger.info(
             f"[SIM] min_signal_age reached trade_id={tid} age_sec={round(_signal_age_sec(signal), 1)} "
-            f"need={min_age}s — submitting limit [PIPELINE ENFORCEMENT]"
+            f"need={min_age}s - submitting limit [PIPELINE ENFORCEMENT]"
         )
         _promote_signal_to_limit_order(signal)
 
@@ -9784,7 +9900,7 @@ def process_pending_orders():
                 continue
             if order.pop("await_confirm", None):
                 logger.debug(
-                    f"[SIM] limit touched — filling despite prior await_confirm "
+                    f"[SIM] limit touched - filling despite prior await_confirm "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
             fill_px = resolve_sim_fill_price(order)
@@ -9999,7 +10115,7 @@ def process_signal(event: dict):
         try:
             if _lane_pipeline_running(research_lane):
                 logger.warning(
-                    f"[PIPELINE] RE-ENTRY BLOCKED lane={research_lane} — logging as no_signal "
+                    f"[PIPELINE] RE-ENTRY BLOCKED lane={research_lane} - logging as no_signal "
                     f"[PIPELINE ENFORCEMENT]"
                 )
                 log_no_signal_with_context(reason=f"REENTRY_GUARD_{research_lane}")
@@ -10011,7 +10127,7 @@ def process_signal(event: dict):
 
             logger.info(
                 f"[PIPELINE] -> ENTER lane={research_lane} model={research_lane_label(research_lane)} "
-                f"skip_ai={skip_ai} — full pipeline enforced [PIPELINE ENFORCEMENT]"
+                f"skip_ai={skip_ai} - full pipeline enforced [PIPELINE ENFORCEMENT]"
             )
             update_debug_state_always("PIPELINE_ENTER")
             if not is_buffer_ready():
@@ -10043,7 +10159,7 @@ def process_signal(event: dict):
                     state["debug_state"]["edge_telemetry_only"] = True
             elif edge_score < eff_thr:
                 logger.info(
-                    f"[EDGE GATE] edge_score={edge_score:.1f} < effective_threshold={eff_thr} — NO_SIGNAL "
+                    f"[EDGE GATE] edge_score={edge_score:.1f} < effective_threshold={eff_thr} - NO_SIGNAL "
                     f"[PIPELINE ENFORCEMENT]"
                 )
                 log_no_signal_with_context(reason="EDGE_FAIL")
@@ -10066,7 +10182,7 @@ def process_signal(event: dict):
                 trigger_ok, trigger_reason = should_trigger_edge_event(edge_score)
             if not trigger_ok:
                 logger.info(
-                    f"[EDGE GATE] edge={edge_score:.1f} >= {eff_thr} but no trigger ({trigger_reason}) — skip AI "
+                    f"[EDGE GATE] edge={edge_score:.1f} >= {eff_thr} but no trigger ({trigger_reason}) - skip AI "
                     f"[PIPELINE ENFORCEMENT]"
                 )
                 log_no_signal_with_context(reason=trigger_reason)
@@ -10190,7 +10306,7 @@ def process_signal(event: dict):
                 if not (sole and is_research_data_collection()) and round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1):
                     logger.info(
                         f"[EDGE GATE] edge={edge_score:.1f} < frozen effective={pipeline_eff_thr:.1f} "
-                        f"— skip before AI [PIPELINE ENFORCEMENT]"
+                        f"- skip before AI [PIPELINE ENFORCEMENT]"
                     )
                     log_no_signal_with_context(reason=f"EDGE_BELOW_{pipeline_eff_thr}", skip_stage="PRE_AI")
                     full_pipeline_trace("BLOCKED", "EDGE_BELOW_THRESHOLD", None)
@@ -10205,7 +10321,7 @@ def process_signal(event: dict):
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
                     logger.info(
-                        f"[AI GATE] Skipped DeepSeek — {ai_gate_reason} edge={edge_score:.1f} "
+                        f"[AI GATE] Skipped DeepSeek - {ai_gate_reason} edge={edge_score:.1f} "
                         f"[PIPELINE ENFORCEMENT]"
                     )
                     log_no_signal_with_context(reason=ai_gate_reason, skip_stage="PRE_AI")
@@ -10234,7 +10350,7 @@ def process_signal(event: dict):
                     }
                 reserved, reserve_reason = reserve_ai_cooldown_slot()
                 if not reserved:
-                    logger.info(f"[AI] COOLDOWN RESERVE BLOCKED — {reserve_reason} [PIPELINE ENFORCEMENT]")
+                    logger.info(f"[AI] COOLDOWN RESERVE BLOCKED - {reserve_reason} [PIPELINE ENFORCEMENT]")
                     log_no_signal_with_context(reason=reserve_reason, skip_stage="COOLDOWN")
                     full_pipeline_trace("BLOCKED", reserve_reason, None)
                     with state_lock:
@@ -10335,7 +10451,7 @@ def process_signal(event: dict):
                 state["debug_state"]["last_ai_call"] = utc_iso()
                 state["debug_state"]["ai_gate"] = {"called": True, "reason": "AI_CALLED", "edge": edge_score, "threshold": pipeline_eff_thr}
             full_pipeline_trace("[PIPELINE]", "START", trade_id)
-            logger.info("[PIPELINE] EDGE+AI GATES PASSED (frozen eff_thr) → EXECUTION PATH [PIPELINE ENFORCEMENT]")
+            logger.info("[PIPELINE] EDGE+AI GATES PASSED (frozen eff_thr) -> EXECUTION PATH [PIPELINE ENFORCEMENT]")
             logger.info(f"[PIPELINE START] timestamp={utc_iso()} event_trigger={event_obj.get('event_trigger', False)} edge={edge_score:.1f} eff={pipeline_eff_thr:.1f} [PIPELINE ENFORCEMENT]")
 
             with state_lock:
@@ -10403,7 +10519,7 @@ def process_signal(event: dict):
                 elif ai_direction_raw == "SHORT":
                     final_direction = "LONG"
                 inverted = True
-                logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED immediately after AI - raw_ai={ai_direction_raw} → final_direction={final_direction} inverted={inverted} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
+                logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED immediately after AI - raw_ai={ai_direction_raw} -> final_direction={final_direction} inverted={inverted} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
             signal["ai_direction_raw"] = ai_direction_raw
             signal["final_direction"] = final_direction
             signal["direction"] = final_direction
@@ -10772,8 +10888,8 @@ def process_signal(event: dict):
             last_price_for_debounce = price
 
             logger.info(
-                f"[PIPELINE] → AI APPROVED tier={ai.get('execution_tier') or ai.get('research_soft') or 'APPROVE'} "
-                f"→ EXECUTION STAGE (patient limit entry) [PIPELINE ENFORCEMENT]"
+                f"[PIPELINE] -> AI APPROVED tier={ai.get('execution_tier') or ai.get('research_soft') or 'APPROVE'} "
+                f"-> EXECUTION STAGE (patient limit entry) [PIPELINE ENFORCEMENT]"
             )
             if not execution_allowed():
                 exec_reason = state.get("execution_reason") or "EXECUTION_BLOCK"
@@ -10797,7 +10913,7 @@ def process_signal(event: dict):
                 funnel_on_approve(signal, ai)
             except Exception as _fe:
                 logger.debug(f"[FUNNEL] approve log failed: {_fe}")
-            logger.info("[PIPELINE] → EXECUTION STAGE → ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
+            logger.info("[PIPELINE] -> EXECUTION STAGE -> ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
             if signal.get("outcome") == "DUPLICATE_LIMIT_PRICE":
                 finalize_signal(signal, ai, "EXPIRED")
@@ -10823,7 +10939,7 @@ def process_signal(event: dict):
             with state_lock:
                 state.setdefault("last_signal_create_ts_by_lane", {})[research_lane] = time.time()
             logger.info(
-                f"[PIPELINE] → ORDER STAGE COMPLETE lane={research_lane} model={signal.get('research_model')} "
+                f"[PIPELINE] -> ORDER STAGE COMPLETE lane={research_lane} model={signal.get('research_model')} "
                 f"[PIPELINE ENFORCEMENT]"
             )
             _set_lane_pipeline_stage(research_lane, "IDLE")
@@ -10899,6 +11015,7 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
         if max(0.0, time.time() - trade_ts) <= WS_BOOTSTRAP_MAX_AGE_SEC:
             stale = False
     if stale:
+        # Normal when Bitfinex replays aged ticks after reconnect; not a crash indicator.
         trade_ts = _ws_trade_timestamp_sec(trade)
         logger.debug(
             f"[WS STALE SKIP] price={fmt(price)} trade_age={time.time() - trade_ts:.2f}s "
@@ -10930,9 +11047,6 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
         data_quality = 0.0
     with state_lock:
         state["data_quality"] = data_quality
-    if state.get("debug_enabled"):
-        logger.debug(f"[FEATURES] {state['feature_snapshot']}")
-        logger.debug(f"[DATA QUALITY] {data_quality:.3f}")
     trade_ts_raw = trade.get("T")
     trade_ts = trade_ts_raw / 1000 if trade_ts_raw and trade_ts_raw > 1e12 else (trade_ts_raw or time.time())
     latency = max(0, (time.time() - trade_ts) * 1000)
@@ -11016,7 +11130,7 @@ def on_message(ws, message):
 
 def on_open(ws):
     global ws_alive, ws_app
-    logger.info(f"WS: Connected — subscribing Bitfinex trades {BITFINEX_WS_SYMBOL}")
+    logger.info(f"WS: Connected - subscribing Bitfinex trades {BITFINEX_WS_SYMBOL}")
     ws.send(json.dumps({"event": "subscribe", "channel": "trades", "symbol": BITFINEX_WS_SYMBOL}))
     with state_lock:
         state["ws_connected_ts"] = time.time()
@@ -11107,14 +11221,14 @@ def ws_watchdog():
                         age = time.time() - price_ts
                     if age <= WATCHDOG_WS_STALE_SEC:
                         logger.info(
-                            f"[WS] REST fallback restored freshness age={fmt(age)}s — skip reconnect"
+                            f"[WS] REST fallback restored freshness age={fmt(age)}s - skip reconnect"
                         )
                         ws_reconnecting = False
                         continue
                     ws_reconnecting = True
                     ws_stale_count = ws_stale_count + 1
                     last_nudge_ts = now
-                    logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) — nudging reconnect")
+                    logger.warning(f"[WS] STALE DETECTED age={fmt(age)}s (count={ws_stale_count}) - nudging reconnect")
                     _close_ws_app()
                     ws_retry = min(ws_retry + 1, 8)
             elif ws_reconnecting:
@@ -11124,7 +11238,7 @@ def ws_watchdog():
                     "WS_STALE", "STALE_DATA_HARD_STOP", "THREAD_CRASH", "PRICE_STALE_OR_MISSING"
                 ):
                     set_execution_paused("")
-                    logger.info("[WS] Reconnect complete — execution resumed [PIPELINE ENFORCEMENT]")
+                    logger.info("[WS] Reconnect complete - execution resumed [PIPELINE ENFORCEMENT]")
             else:
                 if age <= WATCHDOG_WS_STALE_SEC and state.get("execution_reason") in (
                     "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"
@@ -11189,7 +11303,7 @@ def state_monitor_loop():
                     state["ws_stale_count"] = 0
                     if state.get("execution_reason") in ("WS_STALE", "THREAD_CRASH"):
                         set_execution_paused("")
-                        logger.info("[RECOVERY][STATE_SYNC] Price feed fresh — execution resumed")
+                        logger.info("[RECOVERY][STATE_SYNC] Price feed fresh - execution resumed")
                 if (
                     state["ws_stale_count"] >= WS_STALE_STRIKES_FOR_PAUSE
                     and fresh_age >= WS_EXEC_PAUSE_STALE_SEC
@@ -11258,7 +11372,7 @@ def state_monitor_loop():
                 with state_lock:
                     if state["execution_paused"] and state["execution_reason"] in ["WS_STALE", "PRICE_STALE_OR_MISSING"]:
                         set_execution_paused("")
-                        logger.info("[RECOVERY][STATE_SYNC] WS no longer stale — execution resumed")
+                        logger.info("[RECOVERY][STATE_SYNC] WS no longer stale - execution resumed")
             expired_ids = []
             with replay_lock:
                 for tid, buf in list(replay_buffers.items()):
@@ -11363,7 +11477,7 @@ def build_signal(signal: dict, context: dict, ai: dict) -> dict:
 
 def execute_order(signal, ai=None):
     if not state.get("live_armed", False) and state.get("strategy_mode") != "RESEARCH":
-        logger.warning("[LIVE ARM BLOCK] execute_order skipped — live_armed=False")
+        logger.warning("[LIVE ARM BLOCK] execute_order skipped - live_armed=False")
         full_pipeline_trace("[EXECUTION]", "LIVE_ARM_BLOCKED", signal.get("trade_id"))
         return False
     try:
@@ -12013,31 +12127,75 @@ def close_position(pos: dict, exit_reason: str):
     pipeline_state_sync()
 
 AI_PROMPT_TEMPLATE = """
-You are a probabilistic trade planner for short-duration (10-40 min) BTC perpetual trades.
+You are a probabilistic trading decision engine for short-duration (10-40 min) BTC perpetual trades.
 
 Given the following market data:
 
 {context}
 
-You are NOT a long-hold trend follower. Trades often succeed against higher-timeframe direction via micro bounces, liquidity sweeps, and support/resistance reactions.
+=== TREND HIERARCHY RULES (MANDATORY) ===
 
-Decision priority (highest weight first):
-1) Micro Structure — micro_support, micro_resistance, distance_to_micro_support/resistance, micro_structure_confirmed, higher_low_detected, lower_high_detected, liquidity_sweep_high/low
-2) Reversal / Entry Timing — reversal_probability, reversal_risk_score, entry_stage (EARLY/MID/LATE), market_structure_shift
-3) Trend Health — trend_health_state, weaken_signals (BULL_WEAKENING / BEAR_WEAKENING matter for exits, not sole reject reason)
-4) Orderflow — delta, imbalance, volume_ratio, velocity
-5) Location — sr_state, dist_to_resistance, dist_to_support (context only)
-6) Trade Quality — quality_score_components
-7) Regime Memory — market_regime_tracker, regime_change_count_60m
-8) market_context.market_structure — structure_score, HH/HL/LH/LL (informational — NOT sole reject reason)
-9) market_context.multi_tf — INFORMATIONAL ONLY when mtf_informational_only=true. Do NOT reject solely because MTF disagrees with direction.
-10) funding, edge_score (telemetry only)
+Higher priority than support/resistance:
+1. Multi-timeframe agreement (market_context.multi_tf)
+2. Market structure bias / structure_score (market_context.market_structure)
+3. EMA stack alignment (market_context.ema_alignment)
+4. Trend health state (trend_health_state)
+5. ADX / trend strength (ADX >= 25 = trending; favor continuation)
+6. SR location (sr_state, dist_to_support/resistance) - CONTEXT ONLY
 
-Historical research findings:
-- Profitable setups occurred despite bearish HTF structure and weak MTF alignment
-- LONG_BLOCKED_BEAR_STRUCTURE shadows were often winners — do not reject longs solely for bearish structure
-- Short holds (5-60 min) mean 4h trend is often background noise
-- Keep rejecting clear losers: extreme reversal_risk with LATE entry and no micro confirmation
+Support and resistance are LOCATION context only.
+NEVER approve LONG solely because price is near support.
+NEVER approve SHORT solely because price is near resistance.
+SR becomes directional only with reversal confirmation (see below).
+
+=== CONTINUATION PRIORITY ===
+
+When MTF agreement is BEAR_ALIGNED AND structure bias is BEARISH AND EMA stack is bearish AND ADX > 25:
+- Default assumption: bear continuation.
+- SHORT is preferred; LONG requires strong reversal evidence.
+- If reversal evidence is weak, choose SHORT or REJECT (not LONG at ~50% confidence).
+
+Symmetric for BULL_ALIGNED + BULLISH structure + bullish EMA + ADX > 25: favor LONG continuation.
+
+=== VALID REVERSAL REQUIREMENTS ===
+
+A reversal is NOT: near support alone, one higher low, small bounce.
+
+A reversal SHOULD include multiple confirmations:
+- Structure shift (market_structure_shift)
+- Higher high after higher low (LONG) or lower low after lower high (SHORT)
+- Momentum expansion in reversal direction (orderflow delta/imbalance)
+- Trend health improvement
+- MTF starting to disagree with prior trend
+
+Without these, assume continuation - do not counter-trend trade.
+
+=== DIRECTIONAL SCORING (REQUIRED BEFORE DECISION) ===
+
+Before selecting direction:
+1. Build the bullish case (list reasons).
+2. Build the bearish case (list reasons).
+3. Score each side independently (0-100).
+4. Choose direction from higher score; confidence should reflect score gap.
+
+=== DECISION PRIORITY (after scoring) ===
+
+Weight for direction:
+1) MTF agreement + structure bias
+2) Trend health + ADX
+3) EMA alignment
+4) Orderflow (delta, imbalance, volume_ratio, velocity)
+5) Micro structure (higher_low, lower_high, liquidity sweeps) - timing only, not override of strong HTF trend
+6) SR location - context only
+7) edge_score - gate strength telemetry, not direction
+
+Rules:
+- APPROVE LONG only if long_score >= short_score + 5
+- APPROVE SHORT only if short_score >= long_score + 5
+- Counter-trend trades (LONG in BEAR_ALIGNED or SHORT in BULL_ALIGNED) require winning score >= opposing score + 15 AND reversal confirmations listed
+- Prefer NO_TRADE/REJECT when scores are within 5 points
+- MTF informational when mtf_informational_only=true in context
+- Do NOT infer hidden variables; use only provided data
 
 Return EXACTLY (JSON block before Direction line):
 
@@ -12045,6 +12203,9 @@ Return EXACTLY (JSON block before Direction line):
 {{
   "direction": "LONG or SHORT or NO_TRADE",
   "confidence": 0,
+  "long_score": 0,
+  "short_score": 0,
+  "preferred_direction": "LONG or SHORT or NO_TRADE",
   "entry_zone_low": 0,
   "entry_zone_high": 0,
   "limit_price": 0,
@@ -12059,8 +12220,12 @@ Return EXACTLY (JSON block before Direction line):
 }}
 ```
 
+long_score and short_score are 0-100. bull_score and bear_score are 0-10 summaries of the same cases.
+
 Direction: LONG / SHORT / NO_TRADE
 Win probability: 0-100
+Long score: 0-100
+Short score: 0-100
 Bull score: 0-10
 Bear score: 0-10
 Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / SOFT_REJECT / REJECT
@@ -12071,14 +12236,15 @@ RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
 - Target approval rate 20-40%
-- STRONG_APPROVE / APPROVE / SOFT_APPROVE → execute limit entry
-- SOFT_REJECT → shadow replay only (counterfactual study)
-- REJECT → hard reject + shadow replay
-- Use STRONG_APPROVE when win_prob >= 65 and micro structure confirms
-- Use APPROVE when win_prob >= 55
-- Use SOFT_APPROVE when win_prob 45-54 and direction + micro/orderflow support
+- STRONG_APPROVE / APPROVE / SOFT_APPROVE -> execute limit entry
+- SOFT_REJECT -> shadow replay only (counterfactual study)
+- REJECT -> hard reject + shadow replay
+- TREND HIERARCHY still applies: weak counter-trend APPROVEs may be downgraded to SOFT_REJECT by bot gate
+- Use STRONG_APPROVE when win_prob >= 65 and trend + micro structure confirm same direction
+- Use APPROVE when win_prob >= 55 and long_score/short_score gap >= 10 with trend alignment
+- Use SOFT_APPROVE when win_prob 45-54 and direction + orderflow support continuation (not lone SR bounce)
 - Use SOFT_REJECT when uncertain but worth logging (win_prob 35-44)
-- MTF is informational — never the sole reject reason
+- MTF is informational for gating - but BEAR_ALIGNED + ADX>25 means support alone is NOT a LONG signal
 - CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
   LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
   If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
@@ -12128,8 +12294,9 @@ tick_prices = deque(maxlen=300)
 price_seq = 0
 logger = logging.getLogger("3factor-bot")
 logger.setLevel(logging.INFO)
+logger.propagate = False
 _log_fmt = '%(asctime)s %(levelname)-5s [%(threadName)s] %(message)s'
-stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler = logging.StreamHandler(_console_log_stream())
 stream_handler.setFormatter(AsciiSafeFormatter(_log_fmt))
 LOG_FILE = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
 file_handler = SafeRotatingFileHandler(
@@ -12238,7 +12405,7 @@ def perform_fresh_collection_reset() -> dict:
     """Dashboard-triggered archive+wipe: never delete without archiving first."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     archive_path = archive_research_session(reason="fresh_collection_dashboard")
-    logger.warning(f"[FRESH COLLECTION] Reset requested — archived to {archive_path}, wiping session state")
+    logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, wiping session state")
     with replay_lock:
         replay_buffers.clear()
     with trade_lock:
@@ -12266,7 +12433,7 @@ def perform_fresh_collection_reset() -> dict:
         state["execution_reason"] = ""
         state["_pause_priority"] = 0
     save_persistent_config()
-    logger.info(f"[FRESH COLLECTION] Reset complete — {summary} [PIPELINE ENFORCEMENT]")
+    logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
     return {"deleted": deleted, "errors": errors, "summary": summary, "archive_path": archive_path, "ts": utc_iso()}
 
 replay_buffers: Dict[str, Dict] = {}
@@ -12278,6 +12445,8 @@ _last_research_kpi_ts = 0.0
 _cached_research_kpis = {}
 RESEARCH_KPI_INTERVAL_SEC = 300
 _cached_pathway_scorecard = {}
+_last_pathway_scorecard_api_ts = 0.0
+PATHWAY_SCORECARD_API_MIN_SEC = 90
 _cached_pathway_lane_specs = {}
 PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
 PATHWAY_LANE_ORDER = (
@@ -12548,10 +12717,24 @@ def get_pathway_lane_specs_cached() -> dict:
     return loaded
 
 
-def get_pathway_scorecard_cached() -> dict:
-    global _cached_pathway_scorecard
+def get_pathway_scorecard_cached(for_api: bool = False) -> dict:
+    global _cached_pathway_scorecard, _last_pathway_scorecard_api_ts
     if not is_research_data_collection():
         return _cached_pathway_scorecard or {}
+    if for_api:
+        if _cached_pathway_scorecard:
+            return _cached_pathway_scorecard
+        try:
+            from pathway_scorecard_engine import load_pathway_scorecard
+            loaded = load_pathway_scorecard(os.getcwd())
+            if loaded:
+                return loaded
+        except Exception as e:
+            logger.debug(f"[PATHWAY_SCORECARD] api load failed: {e}")
+        return {}
+    now = time.time()
+    if _cached_pathway_scorecard and now - _last_pathway_scorecard_api_ts < PATHWAY_SCORECARD_API_MIN_SEC:
+        return _cached_pathway_scorecard
     try:
         from pathway_scorecard_engine import load_pathway_scorecard, scorecard_is_stale, refresh_pathway_scorecard
         if scorecard_is_stale(os.getcwd()):
@@ -12561,12 +12744,15 @@ def get_pathway_scorecard_cached() -> dict:
                 lanes_live=_pathway_lanes_live(),
                 fresh_collection_mode=bool(state.get("fresh_collection_mode", False)),
             )
+            _last_pathway_scorecard_api_ts = now
         else:
             loaded = load_pathway_scorecard(os.getcwd())
             if loaded:
                 _cached_pathway_scorecard = loaded
+                _last_pathway_scorecard_api_ts = now
             elif not _cached_pathway_scorecard:
                 _cached_pathway_scorecard = refresh_pathway_scorecard_live()
+                _last_pathway_scorecard_api_ts = now
     except Exception as e:
         logger.debug(f"[PATHWAY_SCORECARD] load failed: {e}")
     return _cached_pathway_scorecard or {}
@@ -12587,11 +12773,13 @@ def refresh_pathway_scorecard_live() -> dict:
     return _cached_pathway_scorecard or {}
 
 
-def get_research_kpis_cached() -> dict:
+def get_research_kpis_cached(for_api: bool = False) -> dict:
     """Dashboard KPIs — false reject rate, calibration, AI vs shadow."""
     global _last_research_kpi_ts, _cached_research_kpis
     if not is_research_data_collection():
         return {}
+    if for_api:
+        return _cached_research_kpis or {}
     now = time.time()
     if now - _last_research_kpi_ts < RESEARCH_KPI_INTERVAL_SEC and _cached_research_kpis:
         return _cached_research_kpis
@@ -12730,7 +12918,7 @@ def watchdog_loop():
         ws_age = time.time() - ws_ts
         if hb_age > WATCHDOG_HEARTBEAT_STALE_SEC and ws_age > WATCHDOG_WS_STALE_SEC:
             logger.critical(
-                f"[WATCHDOG] Pipeline stale {hb_age:.0f}s (WS {ws_age:.0f}s) — dumping state [PIPELINE ENFORCEMENT]"
+                f"[WATCHDOG] Pipeline stale {hb_age:.0f}s (WS {ws_age:.0f}s) - dumping state [PIPELINE ENFORCEMENT]"
             )
             dump_system_state()
             dump_threads()
@@ -13446,7 +13634,7 @@ DASHBOARD_JS = """(function () {
       refreshInFlight = true;
       try {
         const controller = new AbortController();
-        const fetchTimeout = setTimeout(function () { controller.abort(); }, 15000);
+        const fetchTimeout = setTimeout(function () { controller.abort(); }, 45000);
         let r;
         try {
           r = await fetch('/api/state?_=' + Date.now(), { cache: 'no-store', signal: controller.signal });
@@ -14018,16 +14206,20 @@ DASHBOARD_JS = """(function () {
         console.error("Refresh failed:", e);
         const rs = document.getElementById('refreshStatus');
         const isTimeout = (e && e.name === 'AbortError');
-        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >15s' : 'OFFLINE — refresh failed') + ' (' + new Date().toLocaleTimeString() + ')';
+        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >45s (bot may still be running)' : 'OFFLINE — refresh failed') + ' (' + new Date().toLocaleTimeString() + ')';
         const sb = document.getElementById('serverBanner');
         if (sb) {
           sb.style.borderColor = '#f85149';
           sb.style.color = '#f85149';
-          sb.innerHTML = 'BOT OFFLINE — nothing listening or network error. Use <strong>__DASHBOARD_URL__</strong> (not :5000 or old IPs). Start: <code>start_bot.ps1</code> · Stop: <code>stop_bot.ps1</code>';
+          if (isTimeout) {
+            sb.innerHTML = 'API SLOW — /api/state timed out. Bot may still be running; wait and click Refresh now. If this repeats, restart with <code>python 15minu_bot.py</code>.';
+          } else {
+            sb.innerHTML = 'BOT OFFLINE — nothing listening or network error. Use <strong>__DASHBOARD_URL__</strong> (not :5000 or old IPs). Start: <code>start_bot.ps1</code> · Stop: <code>stop_bot.ps1</code>';
+          }
         }
         const src = document.getElementById('dataSource');
         if (src) {
-          src.innerHTML = 'OFFLINE — start bot or fix URL';
+          src.innerHTML = isTimeout ? 'API TIMEOUT — bot may still be running' : 'OFFLINE — start bot or fix URL';
           src.className = 'text-red-500 font-bold';
         }
       } finally {
@@ -14141,24 +14333,138 @@ def dashboard():
     )
     return render_template_string(page)
 
+
+def _collect_dashboard_active_signals(
+    pending_orders_list,
+    positions_list,
+    trades_map_src,
+    default_strategy: str = "-",
+    default_regime: str = "-",
+):
+    """Build active signal rows without deep-copying trades_map (keeps /api/state fast)."""
+    pending_ids = {o.get("trade_id") for o in pending_orders_list if o.get("trade_id")}
+    open_ids = {p.get("trade_id") for p in positions_list if p.get("trade_id")}
+    awaiting_micro_ids = set()
+    awaiting_5m_ids = set()
+    awaiting_min_age_ids = set()
+    ordered_placed_ids = set()
+    for entry in trades_map_src.values():
+        s = entry.get("signal_ref")
+        if not isinstance(s, dict):
+            continue
+        tid = s.get("trade_id")
+        if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(s):
+            awaiting_micro_ids.add(tid)
+        if tid and s.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(s):
+            awaiting_5m_ids.add(tid)
+        if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(s):
+            awaiting_min_age_ids.add(tid)
+        if (
+            tid
+            and s.get("status") == "ORDERED"
+            and s.get("order_placed")
+            and not is_terminal_signal(s)
+        ):
+            ordered_placed_ids.add(tid)
+    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | ordered_placed_ids
+    active_list = []
+    now = time.time()
+    for entry in trades_map_src.values():
+        s = entry.get("signal_ref")
+        if not isinstance(s, dict):
+            continue
+        tid = s.get("trade_id")
+        st = s.get("status")
+        if is_terminal_signal(s):
+            continue
+        in_live = tid in live_ids
+        belt_ordered = st == "ORDERED" and s.get("order_placed")
+        if not in_live and not belt_ordered:
+            continue
+        created_ts = s.get("created_ts_ts") or 0
+        if not created_ts:
+            timing_ts = (s.get("timing") or {}).get("signal_ts")
+            if timing_ts:
+                try:
+                    created_ts = float(timing_ts)
+                except (TypeError, ValueError):
+                    created_ts = 0
+        expires_ts = s.get("expires_ts", 0)
+        active_list.append({
+            "trade_id": s.get("trade_id"),
+            "research_lane": s.get("research_lane"),
+            "research_model": s.get("research_model"),
+            "dir": s.get("final_direction") or s.get("dir"),
+            "final_direction": s.get("final_direction") or s.get("dir"),
+            "conf": s.get("ai_win_prob", 0),
+            "regime": s.get("regime"),
+            "strategy": s.get("strategy") or s.get("strategy_birth", default_strategy),
+            "created_ts": s.get("created_ts"),
+            "expires_ts": expires_ts,
+            "ttl_remaining": (expires_ts - now),
+            "age": now - created_ts,
+            "age_min": (now - created_ts) / 60.0 if created_ts else 0,
+            "pullback_pct": s.get("pull_req", 0),
+            "pull_req": s.get("pull_req"),
+            "max_pull": s.get("max_pull"),
+            "regime_birth": s.get("regime_birth", default_regime),
+            "strategy_birth": s.get("strategy_birth", default_strategy),
+            "status": s.get("status", "UNKNOWN"),
+            "outcome": s.get("outcome", "PENDING"),
+            "terminal": is_terminal_signal(s),
+            "fill_price": s.get("fill_price"),
+            "exit_reason": s.get("exit_reason"),
+            "trigger": s.get("trigger", "BASE"),
+            "signal_price": s.get("signal_price"),
+            "limit_price": s.get("limit_price") or s.get("planned_limit_price"),
+            "original_limit_price": s.get("original_limit_price") or s.get("planned_limit_price"),
+            "limit_chase_count": s.get("limit_chase_count") or 0,
+            "entry_mode": s.get("entry_mode"),
+            "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
+            "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
+            "awaiting_min_age": s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE,
+            "entry_path": s.get("entry_path"),
+        })
+    exposure_count = max(len(active_list), len(live_ids))
+    return active_list, exposure_count
+
+
+@app.route('/api/ping')
+def api_ping():
+    """Lightweight liveness probe — returns immediately without heavy analytics."""
+    return jsonify({
+        "ok": True,
+        "bot_pid": os.getpid(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "server_ts": utc_iso(),
+    }), 200
+
+
 @app.route('/api/state')
 def api_state():
+    t0 = time.perf_counter()
     try:
-        refresh_dashboard_market_snapshot(force=False)
-        refresh_funding_state(force=False)
+        # Never block HTTP on Bitfinex REST here — state_monitor_loop refreshes price/funding in background.
         now_ts = time.time()
         with trade_lock:
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
                     accrue_position_funding(pos, now_ts)
-        with state_lock:
-            snapshot = copy.deepcopy(state)
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
+        with state_lock:
+            snapshot = copy.deepcopy(state)
             trades_copy = copy.deepcopy(trades)
             expired_orders_copy = copy.deepcopy(expired_orders)
             ai_history_copy = copy.deepcopy(state["ai_history"])
-            trades_map_copy = copy.deepcopy(trades_map)
+        with trade_lock:
+            active_list, exposure_count = _collect_dashboard_active_signals(
+                pending_orders_copy,
+                positions_copy,
+                trades_map,
+                default_strategy=snapshot.get("strategy", "-"),
+                default_regime=snapshot.get("regime", "-"),
+            )
         session_start = _showcase_trade_session_start()
         if session_start:
             trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
@@ -14229,22 +14535,12 @@ def api_state():
             oc["age_min"] = age
             if tick_px and tick_px > 0:
                 oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
-            oqty = float(o.get("qty") or 0)
-            if oqty > 0 and o.get("side"):
-                try:
-                    est = resolve_sim_fill_with_depth(o)
-                    oc["book_slippage_est_usd"] = est.get("slippage_usd", 0)
-                    oc["book_fully_filled_est"] = est.get("fully_filled", True)
-                    oc["book_levels_est"] = est.get("levels_consumed", 0)
-                except Exception:
-                    pass
             orders.append(oc)
         snapshot["orders"] = orders
         snapshot["trades"] = trades_copy
         snapshot["binance_fee_stress"] = compute_binance_fee_stress(trades_copy)
         snapshot["expired_orders"] = expired_orders_copy
         snapshot["ai_history"] = ai_history_copy
-        snapshot["trades_map"] = trades_map_copy
         snapshot["ai_verdict"] = f"AI reviewer {'ON' if snapshot['ai_enabled'] else 'OFF'} | Threshold {snapshot.get('ai_threshold','WAITING')}%"
         snapshot.setdefault("regime", "UNKNOWN")
         snapshot.setdefault("strategy", "SR")
@@ -14265,90 +14561,7 @@ def api_state():
         snapshot.update(branding)
         with state_lock:
             state.update(branding)
-        active_list = []
-        pending_ids = {o.get("trade_id") for o in pending_orders_copy if o.get("trade_id")}
-        open_ids = {p.get("trade_id") for p in positions_copy if p.get("trade_id")}
-        awaiting_micro_ids = set()
-        awaiting_5m_ids = set()
-        awaiting_min_age_ids = set()
-        ordered_placed_ids = set()
-        for t in trades_map_copy.values():
-            s = t.get("signal_ref")
-            if not isinstance(s, dict):
-                continue
-            tid = s.get("trade_id")
-            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MICRO and not is_terminal_signal(s):
-                awaiting_micro_ids.add(tid)
-            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_5M and not is_terminal_signal(s):
-                awaiting_5m_ids.add(tid)
-            if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(s):
-                awaiting_min_age_ids.add(tid)
-            if (
-                tid
-                and s.get("status") == "ORDERED"
-                and s.get("order_placed")
-                and not is_terminal_signal(s)
-            ):
-                ordered_placed_ids.add(tid)
-        live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | ordered_placed_ids
-        for t in trades_map_copy.values():
-            s = t.get("signal_ref")
-            if not isinstance(s, dict):
-                continue
-            tid = s.get("trade_id")
-            st = s.get("status")
-            if is_terminal_signal(s):
-                continue
-            in_live = tid in live_ids
-            belt_ordered = st == "ORDERED" and s.get("order_placed")
-            if not in_live and not belt_ordered:
-                continue
-            created_ts = s.get("created_ts_ts") or 0
-            if not created_ts:
-                timing_ts = (s.get("timing") or {}).get("signal_ts")
-                if timing_ts:
-                    try:
-                        created_ts = float(timing_ts)
-                    except (TypeError, ValueError):
-                        created_ts = 0
-            expires_ts = s.get("expires_ts", 0)
-            active_list.append({
-                "trade_id": s.get("trade_id"),
-                "research_lane": s.get("research_lane"),
-                "research_model": s.get("research_model"),
-                "dir": s.get("final_direction") or s.get("dir"),
-                "final_direction": s.get("final_direction") or s.get("dir"),
-                "conf": s.get("ai_win_prob", 0),
-                "regime": s.get("regime"),
-                "strategy": s.get("strategy") or s.get("strategy_birth", snapshot.get("strategy", "-")),
-                "created_ts": s.get("created_ts"),
-                "expires_ts": expires_ts,
-                "ttl_remaining": (expires_ts - time.time()),
-                "age": time.time() - created_ts,
-                "age_min": (time.time() - created_ts) / 60.0 if created_ts else 0,
-                "pullback_pct": s.get("pull_req", 0),
-                "pull_req": s.get("pull_req"),
-                "max_pull": s.get("max_pull"),
-                "regime_birth": s.get("regime_birth", snapshot.get("regime", "-")),
-                "strategy_birth": s.get("strategy_birth", snapshot.get("strategy", "-")),
-                "status": s.get("status", "UNKNOWN"),
-                "outcome": s.get("outcome", "PENDING"),
-                "terminal": is_terminal_signal(s),
-                "fill_price": s.get("fill_price"),
-                "exit_reason": s.get("exit_reason"),
-                "trigger": s.get("trigger", "BASE"),
-                "signal_price": s.get("signal_price"),
-                "limit_price": s.get("limit_price") or s.get("planned_limit_price"),
-                "original_limit_price": s.get("original_limit_price") or s.get("planned_limit_price"),
-                "limit_chase_count": s.get("limit_chase_count") or 0,
-                "entry_mode": s.get("entry_mode"),
-                "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
-                "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
-                "awaiting_min_age": s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE,
-                "entry_path": s.get("entry_path"),
-            })
-        exposure_count = max(len(active_list), len(live_ids))
-        snapshot["signal_info"] = {"active": len(active_list) > 0,"count": exposure_count,"signals": active_list}
+        snapshot["signal_info"] = {"active": len(active_list) > 0, "count": exposure_count, "signals": active_list}
         snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
@@ -14381,8 +14594,8 @@ def api_state():
         snapshot["funding_simulation_enabled"] = FUNDING_SIMULATION_ENABLED
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
-        snapshot["research_kpis"] = get_research_kpis_cached()
-        snapshot["pathway_scorecard"] = get_pathway_scorecard_cached()
+        snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
+        snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
         snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached()
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
@@ -14394,7 +14607,10 @@ def api_state():
         with state_lock:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
-        logger.info(f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} [PIPELINE ENFORCEMENT]")
+        logger.info(
+            f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
+            f"elapsed_ms={int((time.perf_counter() - t0) * 1000)} [PIPELINE ENFORCEMENT]"
+        )
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
@@ -14583,7 +14799,7 @@ def toggle_fresh_collection():
     with state_lock:
         state["fresh_collection_mode"] = False
         save_persistent_config()
-    logger.info("[FRESH COLLECTION] Mode turned OFF — no file wipe [PIPELINE ENFORCEMENT]")
+    logger.info("[FRESH COLLECTION] Mode turned OFF - no file wipe [PIPELINE ENFORCEMENT]")
     return jsonify({"fresh_collection_mode": False})
 
 @app.route('/api/live_arm', methods=['POST'])
@@ -14842,7 +15058,7 @@ def fetch_ohlcv():
     with state_lock:
         state["ohlcv_ready"] = False
         state["data_error"] = "OHLCV_FETCH_FAILED"
-    logger.critical("[STARTUP] PRELOAD FAILED — SYSTEM HALTED")
+    logger.critical("[STARTUP] PRELOAD FAILED - SYSTEM HALTED")
     set_execution_paused("PRELOAD_FAILED")
     raise RuntimeError("No candles available — cannot continue")
 
@@ -15026,7 +15242,7 @@ def reset_session_risk_state():
         state["execution_reason"] = ""
         state["_pause_priority"] = 0
         state["current_trading_day"] = datetime.now(timezone.utc).date()
-    logger.info("[STARTUP] Session risk reset — daily PnL and loss streak cleared [PIPELINE ENFORCEMENT]")
+    logger.info("[STARTUP] Session risk reset - daily PnL and loss streak cleared [PIPELINE ENFORCEMENT]")
 
 def reset_runtime_state():
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
@@ -16101,7 +16317,7 @@ def safe_event_put(event):
         try:
             event_queue.put(event, timeout=0.01)
         except Full:
-            logger.error("[QUEUE] Overflow — dropping safely")
+            logger.error("[QUEUE] Overflow - dropping safely")
             try:
                 event_queue.get_nowait()
                 event_queue.put(event)
@@ -16355,7 +16571,7 @@ def preload_candles():
             logger.warning(f"[PRELOAD ATTEMPT {attempt+1}/5] {e}")
             time.sleep(2)
     if preload_failed:
-        logger.critical("[STARTUP] PRELOAD FAILED — SYSTEM HALTED")
+        logger.critical("[STARTUP] PRELOAD FAILED - SYSTEM HALTED")
         set_execution_paused("PRELOAD_FAILED")
         raise RuntimeError("No candles available — cannot continue")
 
@@ -16705,7 +16921,7 @@ def system_health_check():
                 if ws_age >= STALE_HARD_SEC:
                     state["execution_paused"] = True
                     state["execution_reason"] = "STALE_DATA_HARD_STOP"
-                    logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s — execution paused")
+                    logger.error(f"[HARD STOP] WS STALE age={fmt(ws_age)}s - execution paused")
     if not healthy:
         logger.warning(f"[HEALTH] NOT READY ws={ws_ok} price={price_ok} candle={candle_ok}")
     else:
@@ -16730,7 +16946,7 @@ def startup_hard_fix_ai_threshold():
         save_persistent_config()
         logger.info(
             f"[INIT] AI threshold default {default} "
-            f"({'research flexible 0–100' if research else 'live suggested floor'}) "
+            f"({'research flexible 0-100' if research else 'live suggested floor'}) "
             f"[PIPELINE ENFORCEMENT]"
         )
 
@@ -16739,14 +16955,14 @@ def startup_log_research_sync():
     enforce_edge_threshold_options()
     if not is_research_data_collection():
         logger.info(
-            f"[INIT] Live mode — AI={get_ai_threshold()} (suggested floor {LIVE_AI_THRESHOLD_FLOOR}) | "
+            f"[INIT] Live mode - AI={get_ai_threshold()} (suggested floor {LIVE_AI_THRESHOLD_FLOOR}) | "
             f"edge={get_edge_threshold()} effective={get_effective_edge_threshold()} "
             f"[PIPELINE ENFORCEMENT]"
         )
         return
     logger.info(
-        f"[INIT] RESEARCH DATA COLLECTION — flexible thresholds | "
-        f"AI={get_ai_threshold()} (flexible {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}) | "
+        f"[INIT] RESEARCH DATA COLLECTION - flexible thresholds | "
+        f"AI={get_ai_threshold()} (flexible {AI_THRESHOLD_MIN}-{AI_THRESHOLD_MAX}) | "
         f"edge={get_edge_threshold()} effective={get_effective_edge_threshold()} (dashboard-only) | "
         f"live_armed={'ON' if state.get('live_armed') else 'OFF'} [PIPELINE ENFORCEMENT]"
     )
@@ -16755,10 +16971,10 @@ def recover_from_crash():
     reason = state.get("execution_reason")
     if reason in ("THREAD_CRASH", "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"):
         if system_health_check():
-            logger.info(f"[RECOVERY] Health OK — clearing pause ({reason})")
+            logger.info(f"[RECOVERY] Health OK - clearing pause ({reason})")
             set_execution_paused("")
         else:
-            logger.debug(f"[RECOVERY] Pause kept ({reason}) — health not ready yet")
+            logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
 def heartbeat_loop():
     global last_heartbeat
@@ -16904,13 +17120,13 @@ def apply_trade_pnl(trade_row):
             state["loss_pause_until"] = time.time() + LOSS_PAUSE_SEC
             set_execution_paused("LOSS_STREAK")
             logger.warning(
-                f"[RISK] {state['consecutive_losses']} consecutive losses — pausing {LOSS_PAUSE_SEC/3600:.0f}h "
+                f"[RISK] {state['consecutive_losses']} consecutive losses - pausing {LOSS_PAUSE_SEC/3600:.0f}h "
                 f"[PIPELINE ENFORCEMENT]"
             )
         if state.get("daily_pnl_usd", 0) <= -DAILY_DRAWDOWN_PAUSE_USD:
             set_execution_paused("DAILY_DRAWDOWN")
             logger.warning(
-                f"[RISK] Daily PnL {state['daily_pnl_usd']:.2f} <= -{DAILY_DRAWDOWN_PAUSE_USD} — new trades paused "
+                f"[RISK] Daily PnL {state['daily_pnl_usd']:.2f} <= -{DAILY_DRAWDOWN_PAUSE_USD} - new trades paused "
                 f"[PIPELINE ENFORCEMENT]"
             )
 
@@ -16923,7 +17139,7 @@ def main():
     logger.info(f"[AI INIT] KEY PRESENT: {bool(DEEPSEEK_API_KEY)} cwd={os.getcwd()} [PIPELINE ENFORCEMENT]")
     if not DEEPSEEK_API_KEY:
         logger.warning(
-            "[AI INIT] DEEPSEEK_API_KEY missing — copy .env.example to .env in this folder "
+            "[AI INIT] DEEPSEEK_API_KEY missing - copy .env.example to .env in this folder "
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
@@ -16979,9 +17195,10 @@ def main():
     if not keys_ok:
         if research_mode and not state.get("live_armed"):
             logger.warning(
-                "[STARTUP] BITFINEX private API keys missing — RESEARCH public-data mode "
-                f"(showcase balance={state.get('account_balance', STARTING_BALANCE)}) [PIPELINE ENFORCEMENT]"
+                "[STARTUP] BITFINEX private API keys missing - RESEARCH public-data mode "
+                f"(balance={STARTING_BALANCE}) [PIPELINE ENFORCEMENT]"
             )
+            state["account_balance"] = STARTING_BALANCE
         else:
             raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
     else:
@@ -17035,7 +17252,7 @@ def main():
     )
     logger.info(
         f"[V75 EXIT] pullback_default={state.get('pullback_threshold', 0.001)*100:.2f}% "
-        f"ladder_1st={TRAIL_LADDER[0][0]}%→lock{TRAIL_LADDER[0][1]}% "
+        f"ladder_1st={TRAIL_LADDER[0][0]}%->lock{TRAIL_LADDER[0][1]}% "
         f"thesis_fast_cut={THESIS_FAST_EXIT_UNREAL_PCT}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
         f"(0.0% pullback toggle=instant fill) [PIPELINE ENFORCEMENT]"
     )
@@ -17057,7 +17274,7 @@ def main():
     )
     logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] startup exposure={boot_exposure} pending={len(pending_orders)} positions={len(open_positions)}")
     logger.info(
-        f"[BBO SIM] bid/ask marks enabled — LONG exits at bid, SHORT at ask; "
+        f"[BBO SIM] bid/ask marks enabled - LONG exits at bid, SHORT at ask; "
         f"taker fills at ask (buy) / bid (sell) [PIPELINE ENFORCEMENT]"
     )
     logger.info(
@@ -17076,20 +17293,20 @@ def main():
         f"[PIPELINE ENFORCEMENT]"
     )
     logger.warning(
-        f"[V121 SCENARIO-C] exit profile ON — thesis_stop={THESIS_FAST_EXIT_UNREAL_PCT}% "
-        f"ladder {TRAIL_LADDER[0][0]}→{TRAIL_LADDER[0][1]}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
+        f"[V121 SCENARIO-C] exit profile ON - thesis_stop={THESIS_FAST_EXIT_UNREAL_PCT}% "
+        f"ladder {TRAIL_LADDER[0][0]}->{TRAIL_LADDER[0][1]}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
         f"| type_a={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} trend_scratch={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} "
         f"[PIPELINE ENFORCEMENT]"
     )
     if profit_gates_lane_enabled():
         logger.warning(
-            f"[PROFIT_GATES LANE] ON — spawn experiment with hard post-AI filters "
-            f"(edge≥{get_edge_threshold()} AI≥{get_ai_threshold()}%) on parent APPROVE "
+            f"[PROFIT_GATES LANE] ON - spawn experiment with hard post-AI filters "
+            f"(edge>={get_edge_threshold()} AI>={get_ai_threshold()}%) on parent APPROVE "
             f"[PIPELINE ENFORCEMENT]"
         )
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(
-            f"[BENCHMARK] {BENCHMARK_PROFILE_ID} — CONTINUOUS frozen yardstick | "
+            f"[BENCHMARK] {BENCHMARK_PROFILE_ID} - CONTINUOUS frozen yardstick | "
             f"~{get_research_ai_cooldown_sec()}s AI | AI_DIRECT | Scenario C exits | post-AI gates log-only "
             f"| spawn lanes: {', '.join(RESEARCH_SPAWN_LANES)} "
             f"[PIPELINE ENFORCEMENT]"
@@ -17101,21 +17318,21 @@ def main():
     )
     if continuous_ai_research_enabled():
         logger.warning(
-            f"[CONTINUOUS_AI] ON — ~{get_research_ai_cooldown_sec()}s sole-AI when edge>0 "
+            f"[CONTINUOUS_AI] ON - ~{get_research_ai_cooldown_sec()}s sole-AI when edge>0 "
             f"| temp={RESEARCH_AI_TEMPERATURE} | executes trades | lane={RESEARCH_LANE_CONTINUOUS} "
             f"[PIPELINE ENFORCEMENT]"
         )
     write_static_pathway_lane_specs()
     if RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
         logger.warning(
-            f"[FREE_RUN] Post-AI gates OFF — mtf={RESEARCH_FREE_RUN_DISABLE_MTF_GATE} "
+            f"[FREE_RUN] Post-AI gates OFF - mtf={RESEARCH_FREE_RUN_DISABLE_MTF_GATE} "
             f"chop={RESEARCH_FREE_RUN_DISABLE_CHOP_GATE} "
             f"mom_align={RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN} "
             f"(strict v75 thresholds still logged in snapshots) [PIPELINE ENFORCEMENT]"
         )
     if FLAT_MARGIN_EVERY_TRADE:
         logger.warning(
-            f"[FLAT_MARGIN] Every trade uses ${FIXED_MARGIN_USDT} — conviction/regime/ADX size scaling OFF "
+            f"[FLAT_MARGIN] Every trade uses ${FIXED_MARGIN_USDT} - conviction/regime/ADX size scaling OFF "
             f"(reference scaled margin logged in snapshots) [PIPELINE ENFORCEMENT]"
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
