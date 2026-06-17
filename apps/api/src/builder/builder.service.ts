@@ -67,6 +67,10 @@ import { FounderMemoryGraphService } from '../founder-memory/founder-memory-grap
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import { AgentRuntimeService } from './agent-runtime.service';
 import { isAgentRunActive } from '@dcf/utils';
+import {
+  FounderPromoService,
+  type PromoCredentialProvider,
+} from '../founder-os/founder-promo.service';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -84,6 +88,7 @@ export class BuilderService {
     private readonly memoryGraph: FounderMemoryGraphService,
     private readonly agentRuns: FounderAgentRunService,
     private readonly agentRuntime: AgentRuntimeService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -595,16 +600,20 @@ export class BuilderService {
     userId: string,
     input: { spec: string; cursorPrompt?: string; repository?: string },
   ) {
+    const resolved = await this.resolveLlmApiKey(userId, 'cursor');
+    if (!resolved) {
+      const promo = await this.founderPromo.getUserPromoStatus(userId);
+      if (promo.enabled && promo.founderRegistered && !promo.eligible) {
+        throw new BadRequestException(this.founderPromo.promoEndedMessage(promo));
+      }
+      throw new BadRequestException('Connect Cursor in AI Stack first — or use your founder promo if active');
+    }
+
+    const { apiKey, billingSource } = resolved;
     const cred = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: 'cursor' } },
     });
-    if (!cred?.token) {
-      throw new BadRequestException('Connect Cursor in AI Stack first');
-    }
-
-    const meta = (cred.metadata as CursorCredentialMeta | null) ?? {};
-    const apiKey = await this.sealed.unwrap(userId, 'cursor', 'cursor_dispatch');
-    if (!apiKey) throw new BadRequestException('Cursor API key invalid — reconnect');
+    const meta = (cred?.metadata as CursorCredentialMeta | null) ?? {};
 
     const activity = await this.workspaceActivity.getActivity(userId, input.repository);
     const workspaceContext = this.workspaceActivity.buildPromptContext(activity);
@@ -627,17 +636,32 @@ export class BuilderService {
       agentRepoUrl: meta.agentRepoUrl,
     });
 
-    await this.prisma.integrationCredential.update({
-      where: { userId_provider: { userId, provider: 'cursor' } },
-      data: {
-        metadata: {
-          ...meta,
-          agentId: result.agentId,
-          agentRepoUrl: repoUrl ?? meta.agentRepoUrl ?? null,
-          latestRunId: result.runId,
-        } as Prisma.InputJsonValue,
-      },
-    });
+    if (billingSource === 'platform_promo') {
+      await this.logAiTokenUsage(
+        userId,
+        AiProvider.CURSOR,
+        taskPrompt,
+        '',
+        taskPrompt.slice(0, 500),
+        'cursor_promo_dispatch',
+        { promptTokens: estimateLlmTokensFromText(taskPrompt), completionTokens: 0 },
+        'platform_promo',
+      );
+    }
+
+    if (cred) {
+      await this.prisma.integrationCredential.update({
+        where: { userId_provider: { userId, provider: 'cursor' } },
+        data: {
+          metadata: {
+            ...meta,
+            agentId: result.agentId,
+            agentRepoUrl: repoUrl ?? meta.agentRepoUrl ?? null,
+            latestRunId: result.runId,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
 
     return result;
   }
@@ -1106,13 +1130,11 @@ export class BuilderService {
         continue;
       }
       if (cfg.connectMode !== 'api_key') continue;
-      if (!usable.has(cfg.credentialProvider)) continue;
 
-      const cred = await this.prisma.integrationCredential.findUnique({
-        where: { userId_provider: { userId, provider: cfg.credentialProvider } },
-      });
-      const apiKey = await this.sealed.unwrap(userId, cfg.credentialProvider, 'copilot_llm');
-      if (!apiKey) continue;
+      const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
+      if (!resolved) continue;
+
+      const { apiKey, billingSource } = resolved;
 
       const model =
         provider === settings.defaultProvider
@@ -1136,6 +1158,7 @@ export class BuilderService {
             result.text.trim(),
             'copilot',
             result.usage,
+            billingSource,
           );
           return { ok: true, text: result.text.trim(), provider, founderBrainTask };
         }
@@ -1145,6 +1168,11 @@ export class BuilderService {
           `${provider}: ${err instanceof Error ? err.message : 'request failed'}`,
         );
       }
+    }
+
+    const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+    if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
+      llmErrors.push(this.founderPromo.promoEndedMessage(promoStatus));
     }
 
     return llmErrors.length > 0 ? { ok: false, llmErrors } : { ok: false, llmErrors: ['No LLM API key configured'] };
@@ -1235,16 +1263,16 @@ export class BuilderService {
       return { ok: false, llmErrors: [`${forceProvider}: not available as chat provider`] };
     }
 
-    const usable = await this.listUsableLlmCredentialProviders(userId);
-    if (!usable.has(cfg.credentialProvider)) {
+    const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
+    if (!resolved) {
+      const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+      if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
+        return { ok: false, llmErrors: [this.founderPromo.promoEndedMessage(promoStatus)] };
+      }
       return { ok: false, llmErrors: [`${forceProvider}: connect API key in AI Stack`] };
     }
 
-    const cred = await this.prisma.integrationCredential.findUnique({
-      where: { userId_provider: { userId, provider: cfg.credentialProvider } },
-    });
-    const apiKey = await this.sealed.unwrap(userId, cfg.credentialProvider, 'copilot_llm');
-    if (!apiKey) return { ok: false, llmErrors: [`${forceProvider}: invalid credential`] };
+    const { apiKey, billingSource } = resolved;
 
     const model =
       settings.defaultProvider === forceProvider
@@ -1262,6 +1290,7 @@ export class BuilderService {
           result.text.trim(),
           'copilot_forced',
           result.usage,
+          billingSource,
         );
         return { ok: true, text: result.text.trim(), provider: forceProvider };
       }
@@ -1309,6 +1338,7 @@ export class BuilderService {
     text: string,
     source: string,
     usage?: LlmUsage | null,
+    billingSource: 'byok' | 'platform_promo' = 'byok',
   ) {
     const promptTokens =
       usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
@@ -1322,6 +1352,7 @@ export class BuilderService {
         promptTokens,
         completionTokens,
         projectId,
+        billingSource,
       })
       .catch(() => undefined);
   }
@@ -1566,6 +1597,31 @@ export class BuilderService {
     return new Set(creds.map((c) => c.provider));
   }
 
+  /** User BYOK first; platform promo keys only while eligible (1-month window + token cap). */
+  private async resolveLlmApiKey(
+    userId: string,
+    credentialProvider: PromoCredentialProvider,
+  ): Promise<{ apiKey: string; billingSource: 'byok' | 'platform_promo' } | null> {
+    let userKey: string | null = null;
+    if (credentialProvider === 'cursor') {
+      userKey =
+        (await this.sealed.unwrap(userId, 'cursor', 'cursor_dispatch')) ??
+        (await this.sealed.unwrap(userId, 'cursor', 'copilot_llm'));
+    } else {
+      userKey = await this.sealed.unwrap(userId, credentialProvider, 'copilot_llm');
+    }
+    if (userKey?.trim()) {
+      return { apiKey: userKey.trim(), billingSource: 'byok' };
+    }
+
+    const promoKey = await this.founderPromo.resolvePromoApiKey(userId, credentialProvider);
+    if (promoKey) {
+      return { apiKey: promoKey, billingSource: 'platform_promo' };
+    }
+
+    return null;
+  }
+
   /** LLM keys with a stored token (verified optional — chat should still attempt). */
   private async listUsableLlmCredentialProviders(userId: string) {
     const creds = await this.prisma.integrationCredential.findMany({
@@ -1581,6 +1637,19 @@ export class BuilderService {
     for (const c of creds) {
       if (c.token?.trim()) out.add(c.provider);
     }
+
+    const promoProviders: PromoCredentialProvider[] = [
+      'gemini',
+      'deepseek',
+      'openai',
+      'anthropic',
+    ];
+    for (const p of promoProviders) {
+      if (await this.founderPromo.hasPromoProvider(userId, p)) {
+        out.add(p);
+      }
+    }
+
     return out;
   }
 

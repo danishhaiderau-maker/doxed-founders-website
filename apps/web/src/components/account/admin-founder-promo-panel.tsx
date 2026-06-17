@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   fetchAdminFounderPromoSettings,
+  saveAdminFounderPromoCredentials,
   updateAdminFounderPromoSettings,
   type FounderPromoPlatformSettings,
 } from '@/lib/api';
@@ -11,9 +12,18 @@ type Props = {
   accessToken: string;
 };
 
+const PROMO_KEY_FIELDS = [
+  { key: 'gemini' as const, label: 'Google Gemini API key', placeholder: 'AIza…' },
+  { key: 'deepseek' as const, label: 'DeepSeek API key', placeholder: 'sk-…' },
+  { key: 'cursor' as const, label: 'Cursor API key', placeholder: 'key_…' },
+  { key: 'openai' as const, label: 'OpenAI API key', placeholder: 'sk-…' },
+  { key: 'anthropic' as const, label: 'Anthropic API key', placeholder: 'sk-ant-…' },
+];
+
 export function AdminFounderPromoPanel({ accessToken }: Props) {
   const [settings, setSettings] = useState<FounderPromoPlatformSettings | null>(null);
   const [message, setMessage] = useState('');
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -47,6 +57,23 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
     }
   }
 
+  async function saveKey(provider: (typeof PROMO_KEY_FIELDS)[number]['key']) {
+    const value = keyDrafts[provider]?.trim();
+    if (!value) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const data = await saveAdminFounderPromoCredentials(accessToken, { [provider]: value });
+      setSettings(data);
+      setKeyDrafts((prev) => ({ ...prev, [provider]: '' }));
+      setMsg(`${PROMO_KEY_FIELDS.find((f) => f.key === provider)?.label ?? provider} saved`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Save key failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!settings && !err) {
     return (
       <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 px-4 py-3 text-sm text-amber-100/80">
@@ -57,6 +84,8 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
 
   if (!settings) return null;
 
+  const keysMissing = settings.enabled && !settings.credentialsConfigured;
+
   return (
     <div className="rounded-xl border border-amber-500/40 bg-gradient-to-br from-amber-950/30 to-zinc-950/50 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -64,8 +93,9 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
           <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Admin only</p>
           <h3 className="mt-1 text-lg font-semibold text-white">Founder AI promo</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Turn on to offer new founders 1 month of platform-billed AI (Gemini, DeepSeek, Cursor, Ollama). Timer
-            starts at founder registration. Cap: {(settings.tokenCap / 1_000_000).toFixed(0)}M tokens per user.
+            Offer new founders 1 month of platform-billed AI (Gemini, DeepSeek, Cursor, OpenAI, Anthropic). Timer
+            starts at founder registration. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
+            tokens — founders must connect their own keys to continue.
           </p>
         </div>
         <button
@@ -81,6 +111,13 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
           {settings.enabled ? 'Promo ON' : 'Promo OFF'}
         </button>
       </div>
+
+      {keysMissing && (
+        <div className="mt-4 rounded-lg border border-amber-500/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-100">
+          Promo is ON but no platform API keys are saved yet. Add at least one key below — founders cannot use free AI
+          until keys are configured.
+        </div>
+      )}
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <label className="block text-xs">
@@ -123,14 +160,49 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
         />
       </label>
 
-      <p className="mt-3 text-[11px] text-zinc-500">
-        Platform keys: configure Gemini / DeepSeek / Cursor in{' '}
-        <a href="/admin/control" className="text-amber-300 underline">
-          Admin Control
-        </a>
-        . Usage is logged to platform adoption metrics with <code className="text-zinc-400">platform_promo</code>{' '}
-        billing source.
-      </p>
+      <div className="mt-5 border-t border-zinc-800 pt-4">
+        <p className="text-xs font-semibold text-white">Platform API keys (promo only)</p>
+        <p className="mt-1 text-[11px] text-zinc-500">
+          These keys are used only for eligible founders during the promo window. Never shared with users. Usage is logged
+          as <code className="text-zinc-400">platform_promo</code> billing.
+        </p>
+        <ul className="mt-3 space-y-3">
+          {PROMO_KEY_FIELDS.map((field) => {
+            const configured = settings.credentialsStatus?.[field.key] ?? false;
+            return (
+              <li key={field.key} className="rounded-lg border border-zinc-800 bg-black/40 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-zinc-300">{field.label}</span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      configured ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-500'
+                    }`}
+                  >
+                    {configured ? 'Saved' : 'Not set'}
+                  </span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <input
+                    type="password"
+                    value={keyDrafts[field.key] ?? ''}
+                    onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                    placeholder={configured ? 'Enter new key to replace…' : field.placeholder}
+                    className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-white"
+                  />
+                  <button
+                    type="button"
+                    disabled={busy || !keyDrafts[field.key]?.trim()}
+                    onClick={() => saveKey(field.key)}
+                    className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-40"
+                  >
+                    Save key
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
 
       {msg && <p className="mt-2 text-xs text-emerald-300">{msg}</p>}
       {err && <p className="mt-2 text-xs text-red-300">{err}</p>}

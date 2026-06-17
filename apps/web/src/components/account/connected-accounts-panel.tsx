@@ -297,6 +297,14 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
               Register as founder →
             </Link>
           )}
+          {promo.founderRegistered && !promo.eligible && (
+            <Link
+              href="/settings/builder#connect-ai"
+              className="mt-2 inline-flex rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10"
+            >
+              Connect your own API keys →
+            </Link>
+          )}
         </div>
       )}
 

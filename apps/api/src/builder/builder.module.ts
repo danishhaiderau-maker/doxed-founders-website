@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { AttestationModule } from '../attestation/attestation.module';
 import { FounderNodeModule } from '../founder-node/founder-node.module';
+import { FounderOsModule } from '../founder-os/founder-os.module';
 import { GitHubModule } from '../github/github.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { FounderMemoryGraphModule } from '../founder-memory/founder-memory-graph.module';
@@ -13,6 +14,7 @@ import { AgentRuntimeService } from './agent-runtime.service';
   imports: [
     GitHubModule,
     forwardRef(() => FounderNodeModule),
+    FounderOsModule,
     AttestationModule,
     ProjectsModule,
     FounderMemoryGraphModule,

@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type FounderPromoStatus = {
@@ -16,14 +17,40 @@ export type FounderPromoStatus = {
   providers: string[];
 };
 
+export type PromoCredentialProvider = 'gemini' | 'deepseek' | 'cursor' | 'openai' | 'anthropic';
+
+export type PromoCredentialsMap = Partial<Record<PromoCredentialProvider, string>>;
+
+export type PromoCredentialsStatus = Record<PromoCredentialProvider, boolean>;
+
 const PROMO_PROVIDERS = ['GEMINI', 'DEEPSEEK', 'CURSOR', 'OLLAMA_LOCAL', 'OPENAI', 'ANTHROPIC'] as const;
+
+const PROMO_CREDENTIAL_KEYS: PromoCredentialProvider[] = [
+  'gemini',
+  'deepseek',
+  'cursor',
+  'openai',
+  'anthropic',
+];
+
+const PROMO_PROVIDER_LABELS: Record<PromoCredentialProvider, string> = {
+  gemini: 'Google Gemini',
+  deepseek: 'DeepSeek',
+  cursor: 'Cursor',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+};
 
 @Injectable()
 export class FounderPromoService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly crypto: CredentialsCryptoService,
+  ) {}
 
   async getPlatformPromoSettings() {
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const credentialsStatus = this.credentialsStatusFromRow(row?.founderPromoAiCredentialsEnc);
     return {
       enabled: row?.founderPromoAiEnabled ?? false,
       tokenCap: row?.founderPromoTokenCap ?? 10_000_000,
@@ -31,7 +58,9 @@ export class FounderPromoService {
       message:
         row?.founderPromoMessage?.trim() ||
         'Join as a founder — get 1 month free access to Cursor, Gemini, DeepSeek & more on Founder OS.',
-      credentialsConfigured: Boolean(row?.founderPromoAiCredentialsEnc),
+      credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
+      credentialsStatus,
+      credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
     };
   }
 
@@ -44,7 +73,7 @@ export class FounderPromoService {
       message?: string;
     },
   ) {
-    const row = await this.prisma.platformSettings.upsert({
+    await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
       create: { id: 'default' },
       update: {},
@@ -60,6 +89,75 @@ export class FounderPromoService {
       },
     });
     return this.getPlatformPromoSettings();
+  }
+
+  async savePromoCredentials(
+    userId: string,
+    input: Partial<Record<PromoCredentialProvider, string | null>>,
+  ) {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const current = this.decryptCredentialsMap(row?.founderPromoAiCredentialsEnc);
+    const next: PromoCredentialsMap = { ...current };
+
+    for (const key of PROMO_CREDENTIAL_KEYS) {
+      if (!(key in input)) continue;
+      const raw = input[key];
+      if (raw == null || raw === '') {
+        delete next[key];
+        continue;
+      }
+      const trimmed = String(raw).trim();
+      if (trimmed.length < 8) {
+        throw new BadRequestException(`${PROMO_PROVIDER_LABELS[key]} API key is too short`);
+      }
+      next[key] = trimmed;
+    }
+
+    const enc =
+      Object.keys(next).length > 0 ? this.crypto.encrypt(JSON.stringify(next)) : null;
+
+    await this.prisma.platformSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default' },
+      update: {},
+    });
+    await this.prisma.platformSettings.update({
+      where: { id: 'default' },
+      data: {
+        founderPromoAiCredentialsEnc: enc,
+        updatedByUserId: userId,
+      },
+    });
+    return this.getPlatformPromoSettings();
+  }
+
+  /** Platform-hosted key for promo users — never returns a key unless promo is eligible. */
+  async resolvePromoApiKey(
+    userId: string,
+    provider: PromoCredentialProvider,
+  ): Promise<string | null> {
+    const status = await this.getUserPromoStatus(userId);
+    if (!status.eligible) return null;
+    const map = await this.loadDecryptedCredentials();
+    return map[provider]?.trim() || null;
+  }
+
+  /** Whether a provider can be used via promo (eligible + platform key saved). */
+  async hasPromoProvider(userId: string, provider: PromoCredentialProvider): Promise<boolean> {
+    const status = await this.getUserPromoStatus(userId);
+    if (!status.eligible) return false;
+    const map = await this.loadDecryptedCredentials();
+    return Boolean(map[provider]?.trim());
+  }
+
+  promoEndedMessage(status: FounderPromoStatus): string {
+    if (!status.enabled || !status.founderRegistered) {
+      return 'Connect your own API keys in Settings → Builder (Step 3) to use Founder Brain.';
+    }
+    if (status.exhausted) {
+      return `You've used your free ${(status.tokenCap / 1_000_000).toFixed(0)}M token promo. Connect your own API keys in Settings → Builder (Step 3) to continue.`;
+    }
+    return 'Your 1-month founder AI promo has ended. Connect your own API keys in Settings → Builder (Step 3) to keep using Founder Brain.';
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
@@ -120,9 +218,9 @@ export class FounderPromoService {
     const daysRemaining = withinWindow
       ? Math.max(0, Math.ceil((expiresAt.getTime() - now) / (24 * 60 * 60 * 1000)))
       : 0;
-    const eligible = withinWindow && !exhausted;
+    const eligible = withinWindow && !exhausted && settings.credentialsConfigured;
 
-    return {
+    const baseStatus: FounderPromoStatus = {
       enabled: true,
       eligible,
       founderRegistered: true,
@@ -133,13 +231,23 @@ export class FounderPromoService {
       tokensUsed,
       tokensRemaining,
       exhausted,
-      message: eligible
-        ? settings.message
-        : exhausted
-          ? `You've used your free ${(tokenCap / 1_000_000).toFixed(0)}M token demo. Connect your own API keys in Connected Accounts to continue.`
-          : `Your 1-month founder promo ended. Connect your own keys to keep using Founder Brain.`,
+      message: eligible ? settings.message : null,
       providers: [...PROMO_PROVIDERS],
     };
+
+    if (eligible) {
+      baseStatus.message = settings.message;
+      return baseStatus;
+    }
+
+    if (!settings.credentialsConfigured) {
+      baseStatus.message =
+        'Founder AI promo is enabled but platform API keys are not configured yet. Ask your admin to add keys in Connected Accounts.';
+      return baseStatus;
+    }
+
+    baseStatus.message = this.promoEndedMessage(baseStatus);
+    return baseStatus;
   }
 
   async getPromoUsageByProvider(userId: string) {
@@ -152,5 +260,33 @@ export class FounderPromoService {
       provider: l.provider,
       tokens: (l._sum.promptTokens ?? 0) + (l._sum.completionTokens ?? 0),
     }));
+  }
+
+  private credentialsStatusFromRow(enc: string | null | undefined): PromoCredentialsStatus {
+    const map = this.decryptCredentialsMap(enc);
+    return {
+      gemini: Boolean(map.gemini),
+      deepseek: Boolean(map.deepseek),
+      cursor: Boolean(map.cursor),
+      openai: Boolean(map.openai),
+      anthropic: Boolean(map.anthropic),
+    };
+  }
+
+  private decryptCredentialsMap(enc: string | null | undefined): PromoCredentialsMap {
+    if (!enc) return {};
+    try {
+      const decrypted = this.crypto.decrypt(enc);
+      if (!decrypted) return {};
+      const parsed = JSON.parse(decrypted) as PromoCredentialsMap;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private async loadDecryptedCredentials(): Promise<PromoCredentialsMap> {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    return this.decryptCredentialsMap(row?.founderPromoAiCredentialsEnc);
   }
 }
