@@ -125,10 +125,10 @@ export function HybridControlPlane({
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-indigo-300">
-            Hybrid control plane
+            Infrastructure control plane
           </p>
           <p className="mt-0.5 text-[11px] text-zinc-500">
-            Founder OS orchestrates · Cursor/LLMs execute · GitHub is source of truth
+            Founder Brain orchestrates · providers execute · toggles control publish & context
           </p>
         </div>
         <button
@@ -180,7 +180,7 @@ export function HybridControlPlane({
 
       <div className="flex flex-wrap items-center gap-2">
         {status.platforms
-          .filter((p) => ['github', 'neon', 'vercel', 'railway'].includes(p.key))
+          .filter((p) => ['github', 'neon', 'vercel', 'railway', 'render'].includes(p.key))
           .map((p) => (
             <span
               key={p.key}

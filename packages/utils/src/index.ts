@@ -126,3 +126,4 @@ export * from './founder-event-feed';
 export * from './data-classification';
 export * from './task-router';
 export * from './founder-onboarding-paths';
+export * from './platform-connections';

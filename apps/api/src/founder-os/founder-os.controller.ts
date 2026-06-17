@@ -47,6 +47,25 @@ export class FounderOsController {
     return this.founderOs.getPlatformStatus(user.id);
   }
 
+  @Get('platform-connections')
+  platformConnections(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getPlatformConnectionsHub(user.id);
+  }
+
+  @Patch('platform-connections/:provider')
+  updatePlatformConnection(
+    @CurrentUser() user: AuthUser,
+    @Param('provider') provider: string,
+    @Body() body: { publish?: boolean; syncBack?: boolean; aiContext?: boolean },
+  ) {
+    return this.founderOs.updatePlatformConnectionToggles(user.id, provider, body);
+  }
+
+  @Post('platform-connections/:provider/health')
+  platformConnectionHealth(@CurrentUser() user: AuthUser, @Param('provider') provider: string) {
+    return this.founderOs.checkPlatformConnectionHealth(user.id, provider);
+  }
+
   @Post('github/connect')
   connectGitHub(@CurrentUser() user: AuthUser, @Body() body: { repoFullName: string }) {
     return this.founderOs.connectGitHubRepo(user.id, body.repoFullName);

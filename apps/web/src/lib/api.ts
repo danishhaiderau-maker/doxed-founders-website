@@ -2736,6 +2736,48 @@ export function fetchFounderPlatformStatus(token: string) {
   return apiFetch<FounderPlatformStatus>('/founder-os/platform-status', undefined, token);
 }
 
+export interface PlatformConnectionsHubProvider {
+  key: string;
+  label: string;
+  description: string;
+  connectType: string;
+  connected: boolean;
+  accountName: string | null;
+  webhookUrl: string | null;
+  toggles: { publish: boolean; syncBack: boolean; aiContext: boolean };
+  health: { ok?: boolean; detail: string | null; checkedAt: string | null };
+}
+
+export interface PlatformConnectionsHub {
+  providers: PlatformConnectionsHubProvider[];
+  onboardingPath: string | null;
+  computePlaneMode: string;
+}
+
+export function fetchFounderPlatformConnectionsHub(token: string) {
+  return apiFetch<PlatformConnectionsHub>('/founder-os/platform-connections', undefined, token);
+}
+
+export function updatePlatformConnectionToggles(
+  data: { publish?: boolean; syncBack?: boolean; aiContext?: boolean },
+  token: string,
+  provider: string,
+) {
+  return apiFetch<{ provider: string; toggles: { publish: boolean; syncBack: boolean; aiContext: boolean } }>(
+    `/founder-os/platform-connections/${provider}`,
+    { method: 'PATCH', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function checkPlatformConnectionHealth(token: string, provider: string) {
+  return apiFetch<{ provider: string; ok: boolean; detail: string; checkedAt: string }>(
+    `/founder-os/platform-connections/${provider}/health`,
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function connectGitHubRepo(repoFullName: string, token: string) {
   return apiFetch<{ success: boolean; repoFullName: string }>(
     '/founder-os/github/connect',

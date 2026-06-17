@@ -13,7 +13,7 @@ export function infraConnectHref(providerKey: string): string {
 
 export function aiStackConnectHref(providerKey?: string): string {
   if (!providerKey) return AI_STACK_HREF;
-  if (['OLLAMA_LOCAL', 'DEEPSEEK', 'OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER', 'JATEVO', 'PHALA'].includes(providerKey)) {
+  if (['OLLAMA_LOCAL', 'DEEPSEEK', 'OPENAI', 'ANTHROPIC', 'GEMINI', 'OPENROUTER', 'JATEVO', 'SURPLUS', 'PHALA'].includes(providerKey)) {
     return `${AI_STACK_HREF}#connect-ai`;
   }
   if (providerKey === 'CURSOR' || providerKey === 'OPENHANDS') {
@@ -31,6 +31,7 @@ export const CHAT_LLM_KEYS = [
   'GEMINI',
   'OPENROUTER',
   'JATEVO',
+  'SURPLUS',
   'PHALA',
 ] as const;
 
@@ -51,6 +52,7 @@ export function shortProviderName(provider: { key: string; label: string }): str
     PHALA: 'Phala TEE',
     OPENROUTER: 'OpenRouter',
     JATEVO: 'Jatevo ($JTVO)',
+    SURPLUS: 'Surplus',
     OPENHANDS: 'OpenHands',
     OLLAMA_LOCAL: 'Ollama',
     RULE_BASED: 'Project memory',

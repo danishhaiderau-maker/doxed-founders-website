@@ -500,7 +500,7 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, ini
                 href="/settings/builder"
                 className="mt-4 inline-flex rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
               >
-                Open AI Stack →
+                Open connect hub →
               </Link>
             </>
           )}

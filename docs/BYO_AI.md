@@ -8,6 +8,7 @@ After Step 1 (Founder Vault), founders pick **who runs inference** for Copilot a
 
 | Provider | How it connects | Best for |
 |----------|-----------------|----------|
+| **Surplus Intelligence** | API key in Builder settings (Step 3) | Marketplace inference — one inf_ key, cheapest healthy seller |
 | **OpenRouter** | API key in Builder settings | One key, many models (Claude, GPT, Llama, DeepSeek…) |
 | **Jatevo** | API key in Builder settings (Step 3) | One gateway — multi-model routing; $JTVO quota on your account |
 | **Ollama (Founder Node)** | Founder Node tray app + local Ollama | Zero cloud inference — prompts stay on desktop |
@@ -36,7 +37,7 @@ See [JATEVO_BYOK.md](./JATEVO_BYOK.md) for endpoints, errors, and env overrides.
 
 | Provider | API key? | What you do in Settings → Step 3 |
 |----------|----------|----------------------------------|
-| Jatevo / OpenRouter / OpenAI / DeepSeek / etc. | **Yes** | Paste key in that provider’s card → **Connect & activate** |
+| Jatevo / Surplus / OpenRouter / OpenAI / Anthropic / Gemini / DeepSeek | **Yes** | Paste key in Step 3 → **Connect & activate** → **Set as default** |
 | **Ollama (local)** | **No** | Install [Ollama](https://ollama.com) on your PC, pair Founder Node (Step 2), wait for **Ollama ready**, set **Default brain** → Ollama — **do not** use `http://127.0.0.1:11434` in the browser (cloud cannot reach your laptop) |
 | Phala TEE | Yes (+ optional inference URL) | Phala card → Connect |
 

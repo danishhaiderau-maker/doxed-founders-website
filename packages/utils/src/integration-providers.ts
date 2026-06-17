@@ -63,6 +63,17 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderConfig[] = [
     ],
   },
   {
+    key: 'render',
+    label: 'Render',
+    reputationBoost: 4,
+    connectType: 'token',
+    billTip: 'All-in-one hobby stack — web + Postgres. Free tier spins down after idle.',
+    fields: [
+      { key: 'token', label: 'API key', placeholder: 'rnd_…', required: true, secret: true },
+      { key: 'projectName', label: 'Service name', placeholder: 'my-app', required: false },
+    ],
+  },
+  {
     key: 'neon',
     label: 'Neon',
     reputationBoost: 3,

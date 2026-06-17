@@ -117,7 +117,7 @@ export function FounderNodeHubPanel({
           step={3}
           id="connect-ai"
           title="AI on your stack"
-          summary="Connect cloud keys (Jatevo, OpenRouter, DeepSeek…) or local Ollama via Founder Node — Step 3 has the full walkthrough."
+          summary="Connect cloud keys (Surplus, OpenRouter, OpenAI, Anthropic, Gemini…) or local Ollama — all providers in one place below."
         >
           <FounderNodeAiSection {...aiSection} settings={settings} />
         </HubStep>
