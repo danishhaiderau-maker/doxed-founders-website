@@ -10,14 +10,19 @@ import {
   connectGitHubRepo,
   connectIntegration,
   disconnectIntegration,
+  fetchAccountOverview,
   fetchBuilderSettings,
   fetchCopilotMemory,
   fetchFounderOsDashboard,
+  fetchFounderPromoStatus,
   fetchIntegrationProviders,
   fetchXConnectionStatus,
   FounderOsDashboard,
+  FounderPromoUserStatus,
   IntegrationProviderConfig,
 } from '@/lib/api';
+import { AI_PROVIDERS } from '@dcf/utils';
+import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 
 type Props = {
   accessToken: string;
@@ -43,63 +48,119 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [promo, setPromo] = useState<FounderPromoUserStatus | null>(null);
+  const [aiProviders, setAiProviders] = useState<
+    { key: string; label: string; connected: boolean; billTip: string; defaultModel: string | null }[]
+  >([]);
+
+  const buildAppsFromProviders = useCallback(
+    (
+      prov: IntegrationProviderConfig[],
+      dashApps: FounderOsDashboard['connectedApps'] | undefined,
+      repo: string | null,
+      credentialKeys: Set<string>,
+    ) => {
+      const dashMap = new Map((dashApps ?? []).map((a) => [a.provider, a]));
+      return prov.map((p) => {
+        const fromDash = dashMap.get(p.key);
+        let connected = fromDash?.connected ?? false;
+        if (p.key === 'github') connected = connected || Boolean(repo);
+        if (p.key === 'cursor') connected = connected || credentialKeys.has('cursor');
+        if (['vercel', 'railway', 'neon', 'digitalocean', 'supabase', 'render'].includes(p.key)) {
+          connected = connected || credentialKeys.has(p.key);
+        }
+        return {
+          provider: p.key,
+          label: p.label,
+          connected,
+          reputationBoost: p.reputationBoost,
+          billTip: p.billTip,
+          accountName: fromDash?.accountName ?? null,
+          webhookUrl: fromDash?.webhookUrl ?? null,
+        };
+      });
+    },
+    [],
+  );
 
   const load = useCallback(async () => {
     setErr(null);
-    const [dashResult, memory, prov, x] = await Promise.all([
+    const [dashResult, memory, prov, x, overview, builder, promoStatus] = await Promise.all([
       fetchFounderOsDashboard(accessToken)
         .then((value) => ({ ok: true as const, value }))
         .catch((e: unknown) => ({ ok: false as const, error: e })),
       fetchCopilotMemory(accessToken).catch(() => null),
       fetchIntegrationProviders(),
       fetchXConnectionStatus(accessToken).catch(() => null),
+      fetchAccountOverview(accessToken).catch(() => null),
+      fetchBuilderSettings(accessToken).catch(() => null),
+      fetchFounderPromoStatus(accessToken).catch(() => null),
     ]);
 
     setProviders(prov);
     setXStatus(x);
+    setIsAdmin(overview?.isAdmin ?? false);
+    setPromo(promoStatus);
     const repo = memory?.repoFullName ?? null;
     setLinkedRepo(repo);
     if (repo) setRepoInput(repo);
 
+    const credentialKeys = new Set(
+      (builder?.providers ?? [])
+        .filter((p) => p.connected && p.credentialProvider)
+        .map((p) => p.credentialProvider!),
+    );
+
+    if (builder) {
+      setAiProviders(
+        AI_PROVIDERS.filter(
+          (p) =>
+            p.key !== 'RULE_BASED' &&
+            p.key !== 'OPENHANDS' &&
+            p.key !== 'CURSOR' &&
+            (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
+        ).map((cfg) => {
+          const api = builder.providers.find((p) => p.key === cfg.key);
+          return {
+            key: cfg.key,
+            label: cfg.label,
+            connected: api?.connected ?? false,
+            billTip: cfg.billTip,
+            defaultModel: cfg.defaultModel,
+          };
+        }),
+      );
+    }
+
+    const mergedApps = buildAppsFromProviders(
+      prov,
+      dashResult.ok ? dashResult.value.connectedApps : undefined,
+      repo,
+      credentialKeys,
+    );
+
     if (dashResult.ok) {
-      setData(dashResult.value);
+      setData({ ...dashResult.value, connectedApps: mergedApps });
+      setErr(null);
       return;
     }
 
-    const builder = await fetchBuilderSettings(accessToken).catch(() => null);
-    if (builder) {
-      const credentialKeys = new Set(
-        builder.providers.filter((p) => p.connected && p.credentialProvider).map((p) => p.credentialProvider!),
-      );
-      setData({
-        founderCredits: 0,
-        communityRewardPool: 0,
-        primaryProject: null,
-        connectedApps: prov.map((p) => ({
-          provider: p.key,
-          label: p.label,
-          connected:
-            p.key === 'github'
-              ? Boolean(repo)
-              : p.key === 'cursor'
-                ? credentialKeys.has('cursor')
-                : credentialKeys.has(p.key),
-          reputationBoost: p.reputationBoost,
-          billTip: p.billTip,
-          accountName: null,
-          webhookUrl: null,
-        })),
-        pendingSuggestions: [],
-        openBounties: [],
-      });
-    }
+    setData({
+      founderCredits: 0,
+      communityRewardPool: 0,
+      primaryProject: null,
+      connectedApps: mergedApps,
+      pendingSuggestions: [],
+      openBounties: [],
+    });
 
     const message =
       dashResult.error instanceof Error
         ? dashResult.error.message
-        : 'Failed to load connected accounts';
-    setErr(message);
-  }, [accessToken]);
+        : 'Dashboard partial load — account list shown from integration registry';
+    if (!message.includes('partial')) setErr(message);
+  }, [accessToken, buildAppsFromProviders]);
 
   useEffect(() => {
     load();
@@ -184,16 +245,52 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
 
   return (
     <section className="space-y-6">
+      {isAdmin && <AdminFounderPromoPanel accessToken={accessToken} />}
+
+      {promo?.enabled && promo.message && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            promo.eligible
+              ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
+              : promo.exhausted
+                ? 'border-amber-500/40 bg-amber-950/25 text-amber-100'
+                : 'border-violet-500/40 bg-violet-950/25 text-violet-100'
+          }`}
+        >
+          <p className="font-semibold text-white">
+            {promo.eligible
+              ? 'Founder AI promo active'
+              : !promo.founderRegistered
+                ? 'Free 1-month AI — register as founder'
+                : promo.exhausted
+                  ? 'Free demo ended'
+                  : 'Promo expired'}
+          </p>
+          <p className="mt-1 text-xs opacity-90">{promo.message}</p>
+          {promo.founderRegistered && (
+            <p className="mt-2 text-[11px] opacity-80">
+              {(promo.tokensUsed / 1_000_000).toFixed(2)}M / {(promo.tokenCap / 1_000_000).toFixed(0)}M tokens
+              {promo.daysRemaining != null ? ` · ${promo.daysRemaining} days left` : ''}
+            </p>
+          )}
+          {!promo.founderRegistered && (
+            <Link href="/founder-den?tab=build" className="mt-2 inline-block text-xs font-semibold underline">
+              Register as founder →
+            </Link>
+          )}
+        </div>
+      )}
+
       <div>
         <p className="text-sm text-zinc-400">
-          Connect OAuth, GitHub, deploy stack, and builder AI from one place. Each integration includes setup
-          instructions below.
+          All integrations in one place — deploy stack, OAuth, GitHub, and AI brain providers. Each card includes setup
+          instructions.
         </p>
         <Link
-          href="/settings/builder"
+          href="/settings/builder#connect-ai"
           className="mt-3 inline-flex rounded-lg border border-violet-500/40 px-4 py-2 text-sm text-violet-200 hover:bg-violet-500/10"
         >
-          Builder settings (AI · GitHub PAT · Cursor) →
+          Full AI setup (Step 3) →
         </Link>
       </div>
 
@@ -396,6 +493,39 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
           );
         })}
       </ul>
+
+      <div className="space-y-3">
+        <h3 className="text-sm font-semibold text-white">AI brain providers</h3>
+        <p className="text-xs text-zinc-500">
+          Copilot & Founder Brain — connect keys in{' '}
+          <Link href="/settings/builder#connect-ai" className="text-violet-300 underline">
+            Builder Step 3
+          </Link>
+          .
+        </p>
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {aiProviders.map((p) => (
+            <li
+              key={p.key}
+              className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5 text-xs"
+            >
+              <div>
+                <span className="font-medium text-zinc-200">{p.label}</span>
+                {p.defaultModel && (
+                  <span className="ml-1 text-zinc-600">· {p.defaultModel}</span>
+                )}
+              </div>
+              <span
+                className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                  p.connected ? 'bg-emerald-500/20 text-emerald-300' : 'bg-zinc-800 text-zinc-500'
+                }`}
+              >
+                {p.connected ? 'Connected' : 'Not connected'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
 
       {connectProvider && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">

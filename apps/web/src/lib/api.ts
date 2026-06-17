@@ -3246,6 +3246,48 @@ export function fetchAccountOverview(token: string) {
   return apiFetch<AccountOverview>('/account/overview', undefined, token);
 }
 
+export type FounderPromoPlatformSettings = {
+  enabled: boolean;
+  tokenCap: number;
+  windowDays: number;
+  message: string;
+  credentialsConfigured: boolean;
+};
+
+export type FounderPromoUserStatus = {
+  enabled: boolean;
+  eligible: boolean;
+  founderRegistered: boolean;
+  promoStartedAt: string | null;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+  tokenCap: number;
+  tokensUsed: number;
+  tokensRemaining: number;
+  exhausted: boolean;
+  message: string | null;
+  providers: string[];
+};
+
+export function fetchFounderPromoStatus(token: string) {
+  return apiFetch<FounderPromoUserStatus>('/account/founder-promo', undefined, token);
+}
+
+export function fetchAdminFounderPromoSettings(token: string) {
+  return apiFetch<FounderPromoPlatformSettings>('/admin-control/founder-promo', undefined, token);
+}
+
+export function updateAdminFounderPromoSettings(
+  token: string,
+  body: Partial<Pick<FounderPromoPlatformSettings, 'enabled' | 'tokenCap' | 'windowDays' | 'message'>>,
+) {
+  return apiFetch<FounderPromoPlatformSettings>(
+    '/admin-control/founder-promo',
+    { method: 'PATCH', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export function fetchAccountPointLedger(token: string, limit = 50) {
   return apiFetch<AccountPointLedgerEntry[]>(`/account/point-ledger?limit=${limit}`, undefined, token);
 }

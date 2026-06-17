@@ -4,12 +4,14 @@ import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AccountService } from './account.service';
 import { PlatformHandleService } from './platform-handle.service';
+import { FounderPromoService } from '../founder-os/founder-promo.service';
 
 @Controller('account')
 export class AccountController {
   constructor(
     private readonly account: AccountService,
     private readonly platformHandles: PlatformHandleService,
+    private readonly founderPromoService: FounderPromoService,
   ) {}
 
   @Get('overview')
@@ -55,6 +57,11 @@ export class AccountController {
   activity(@CurrentUser() user: AuthUser, @Query('limit') limit?: string) {
     const parsed = limit ? Math.min(100, Math.max(1, parseInt(limit, 10) || 40)) : 40;
     return this.account.getActivityHistory(user.id, parsed);
+  }
+
+  @Get('founder-promo')
+  founderPromo(@CurrentUser() user: AuthUser) {
+    return this.founderPromoService.getUserPromoStatus(user.id);
   }
 
   @Put('platform-handle')

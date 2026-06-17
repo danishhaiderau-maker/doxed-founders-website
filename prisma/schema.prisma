@@ -567,6 +567,8 @@ model AiTokenUsageLog {
   projectId        String?
   provider         String
   source           String
+  /** byok | platform_promo | rule_based */
+  billingSource    String?
   promptTokens     Int
   completionTokens Int
   createdAt        DateTime @default(now())
@@ -1284,6 +1286,13 @@ model PlatformSettings {
   showcaseBotPublicUrl        String?
   showcaseCredentialsUpdatedAt DateTime?
   showcaseRuntimePushedAt      DateTime?
+  /** Admin: offer platform-billed AI to new founders (Gemini, DeepSeek, Cursor, Ollama). */
+  founderPromoAiEnabled        Boolean  @default(false)
+  founderPromoTokenCap         Int      @default(10000000)
+  founderPromoWindowDays       Int      @default(30)
+  founderPromoMessage          String?  @db.Text
+  /** Encrypted JSON map: { gemini?, deepseek?, cursor?, openai?, anthropic? } */
+  founderPromoAiCredentialsEnc String?  @db.Text
   /** Admin-recommended agent settings shown to users on hire/observe flows */
   agentShowcaseDefaultSettings String? @db.Text
   updatedByUserId          String?

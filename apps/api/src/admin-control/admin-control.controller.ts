@@ -7,6 +7,7 @@ import { Public } from '../auth/public.decorator';
 import { AdminControlService } from './admin-control.service';
 import { ShowcaseRuntimeService } from './showcase-runtime.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
+import { FounderPromoService } from '../founder-os/founder-promo.service';
 
 @SkipThrottle()
 @Controller('admin-control')
@@ -15,6 +16,7 @@ export class AdminControlController {
     private readonly adminControl: AdminControlService,
     private readonly showcaseRuntime: ShowcaseRuntimeService,
     private readonly tradingAgents: TradingAgentsService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   @Public()
@@ -122,5 +124,26 @@ export class AdminControlController {
   @Post('showcase-runtime/push')
   pushShowcaseRuntime(@CurrentUser() user: AuthUser) {
     return this.showcaseRuntime.pushToRailwayRuntime(user.id);
+  }
+
+  @UseGuards(AdminGuard)
+  @Get('founder-promo')
+  getFounderPromoSettings() {
+    return this.founderPromo.getPlatformPromoSettings();
+  }
+
+  @UseGuards(AdminGuard)
+  @Patch('founder-promo')
+  updateFounderPromoSettings(
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      enabled?: boolean;
+      tokenCap?: number;
+      windowDays?: number;
+      message?: string;
+    },
+  ) {
+    return this.founderPromo.updatePlatformPromoSettings(user.id, body);
   }
 }
