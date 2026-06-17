@@ -53,6 +53,7 @@ import {
   type PhalaChatResult,
 } from './phala.client';
 import { callJatevoChat, verifyJatevoConnection } from './jatevo.client';
+import { callSurplusChat, verifySurplusConnection } from './surplus.client';
 import {
   estimateLlmTokensFromText,
   parseAnthropicUsage,
@@ -1293,6 +1294,8 @@ export class BuilderService {
         return this.callOpenRouter(apiKey, system, userPrompt, model);
       case AiProvider.JATEVO:
         return this.callJatevo(apiKey, system, userPrompt, model);
+      case AiProvider.SURPLUS:
+        return this.callSurplus(apiKey, system, userPrompt, model);
       default:
         return null;
     }
@@ -1463,6 +1466,7 @@ export class BuilderService {
 
   private readonly brainProviderPriority: AiProvider[] = [
     AiProvider.PHALA,
+    AiProvider.SURPLUS,
     AiProvider.JATEVO,
     AiProvider.OPENROUTER,
     AiProvider.DEEPSEEK,
@@ -1568,7 +1572,7 @@ export class BuilderService {
       where: {
         userId,
         provider: {
-          in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'jatevo', 'phala'],
+          in: ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'jatevo', 'surplus', 'phala'],
         },
       },
       select: { provider: true, token: true },
@@ -1640,6 +1644,11 @@ export class BuilderService {
       }
       case 'jatevo': {
         const verified = await verifyJatevoConnection(key);
+        if (!verified.ok) throw new BadRequestException(verified.reason);
+        return { accountName: verified.accountName };
+      }
+      case 'surplus': {
+        const verified = await verifySurplusConnection(key);
         if (!verified.ok) throw new BadRequestException(verified.reason);
         return { accountName: verified.accountName };
       }
@@ -1765,6 +1774,15 @@ export class BuilderService {
 
   private async callJatevo(key: string, system: string, user: string, model?: string) {
     return callJatevoChat({
+      apiKey: key,
+      system,
+      userPrompt: user,
+      model,
+    });
+  }
+
+  private async callSurplus(key: string, system: string, user: string, model?: string) {
+    return callSurplusChat({
       apiKey: key,
       system,
       userPrompt: user,
