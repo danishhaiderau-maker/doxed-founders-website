@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-os): Phase 5 Founder Cloud runtime, import wizard, publish pipeline
+feat(founder-promo): platform-billed AI promo for new founders
 
 ## Last Activity
 
