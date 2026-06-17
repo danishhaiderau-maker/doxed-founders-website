@@ -3,18 +3,22 @@
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { parseOnboardingPathParam, type OnboardingPathId } from '@dcf/utils';
 import { SiteNav, SiteBrand } from '@/components/site-nav';
 import { FounderWorkspace, WorkspaceTab } from '@/components/founder-workspace';
 import {
   clearFounderOnboardingDismiss,
   FounderOnboardingWizard,
 } from '@/components/founder-onboarding-wizard';
+import { FounderSetupRail } from '@/components/founder-setup-rail';
 import {
   createBuildPost,
   createSimulatedRaise,
   fetchFounderDashboard,
+  fetchFounderOnboardingStatus,
   fetchProjectRoom,
   FounderDashboard,
+  FounderOnboardingStatus,
   ProjectRoom,
   submitFounderApplication,
 } from '@/lib/api';
@@ -69,6 +73,8 @@ export default function FounderDenPageClient() {
   });
   const [wizardKey, setWizardKey] = useState(0);
   const [wizardDismissed, setWizardDismissed] = useState(false);
+  const [onboardingStatus, setOnboardingStatus] = useState<FounderOnboardingStatus | null>(null);
+  const initialPath = parseOnboardingPathParam(searchParams.get('onboard'));
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -92,6 +98,7 @@ export default function FounderDenPageClient() {
   }
 
   const hasFounder = dashboard?.hasFounderProfile ?? false;
+  const setupIncomplete = Boolean(onboardingStatus && !onboardingStatus.requiredComplete);
   const currentStage = room?.lifecycleStage ?? dashboard?.currentStage ?? 'IDEA';
 
   const load = useCallback(async () => {
@@ -99,6 +106,11 @@ export default function FounderDenPageClient() {
     try {
       const dash = await fetchFounderDashboard(session.accessToken);
       setDashboard(dash);
+      try {
+        setOnboardingStatus(await fetchFounderOnboardingStatus(session.accessToken));
+      } catch {
+        setOnboardingStatus(null);
+      }
       if (dash.primaryProjectSlug) {
         setRoom(await fetchProjectRoom(dash.primaryProjectSlug, session.accessToken));
       } else {
@@ -106,6 +118,7 @@ export default function FounderDenPageClient() {
       }
     } catch {
       setDashboard(null);
+      setOnboardingStatus(null);
     }
   }, [session?.accessToken]);
 
@@ -185,8 +198,13 @@ export default function FounderDenPageClient() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
             <p className="text-sm text-zinc-500">
-              Mission control · build in public · validate demand · launch with trust
+              Mission control · Founder Brain routes agents & providers · you choose the infrastructure
             </p>
+            {onboardingStatus?.pathLabel && hasFounder && (
+              <span className="mt-2 inline-flex rounded-full border border-violet-500/30 bg-violet-950/40 px-2.5 py-0.5 text-[10px] text-violet-200">
+                {onboardingStatus.pathLabel}
+              </span>
+            )}
           </div>
           <SiteNav />
         </div>
@@ -210,10 +228,21 @@ export default function FounderDenPageClient() {
           </p>
         )}
 
-        {session?.accessToken && !hasFounder && (
+        {session?.accessToken && hasFounder && setupIncomplete && onboardingStatus && wizardDismissed && (
+          <FounderSetupRail
+            status={onboardingStatus}
+            onResumeWizard={() => {
+              clearFounderOnboardingDismiss();
+              setWizardKey((k) => k + 1);
+            }}
+          />
+        )}
+
+        {session?.accessToken && (!hasFounder || setupIncomplete) && (
           <FounderOnboardingWizard
             key={wizardKey}
             accessToken={session.accessToken}
+            initialPath={initialPath as OnboardingPathId | null}
             onRefresh={load}
             onMessage={(msg) => {
               setMessage(msg);
@@ -222,7 +251,7 @@ export default function FounderDenPageClient() {
           />
         )}
 
-        {session?.accessToken && !hasFounder && wizardDismissed && (
+        {session?.accessToken && (!hasFounder || setupIncomplete) && wizardDismissed && (
           <button
             type="button"
             onClick={() => {

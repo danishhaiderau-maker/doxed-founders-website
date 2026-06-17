@@ -2650,7 +2650,18 @@ export function runCursorBuildRoom(
 }
 
 export interface FounderOnboardingStep {
-  id: 'founder' | 'github' | 'llm' | 'builder_worker' | 'ai_stack' | 'goal' | 'founder_node';
+  id:
+    | 'path'
+    | 'founder'
+    | 'starter_pack'
+    | 'github'
+    | 'platform'
+    | 'migrate'
+    | 'llm'
+    | 'builder_worker'
+    | 'ai_stack'
+    | 'goal'
+    | 'founder_node';
   label: string;
   complete: boolean;
   optional?: boolean;
@@ -2660,6 +2671,13 @@ export interface FounderOnboardingStep {
 
 export interface FounderOnboardingStatus {
   steps: FounderOnboardingStep[];
+  onboardingPath?: string | null;
+  effectivePath?: string;
+  pathLabel?: string;
+  computePlaneMode?: string;
+  starterPack?: string | null;
+  playbook?: { action: string; time?: string }[];
+  topology?: { memory: string; compute: string; publish: string };
   brainReady?: boolean;
   brainHint?: string | null;
   githubConnected?: boolean;
@@ -2673,6 +2691,49 @@ export interface FounderOnboardingStatus {
 
 export function fetchFounderOnboardingStatus(token: string) {
   return apiFetch<FounderOnboardingStatus>('/founder-os/onboarding', undefined, token);
+}
+
+export function updateFounderOnboardingPath(
+  data: {
+    onboardingPath?: string;
+    computePlaneMode?: string;
+    starterPack?: string | null;
+  },
+  token: string,
+) {
+  return apiFetch<{
+    onboardingPath: string | null;
+    computePlaneMode: string;
+    starterPack: string | null;
+    pathLabel: string;
+  }>(
+    '/founder-os/onboarding',
+    { method: 'PATCH', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export interface FounderPlatformStatus {
+  onboardingPath: string | null;
+  pathLabel: string;
+  computePlaneMode: string;
+  starterPack: string | null;
+  topology: {
+    memory: { mode: string; label: string; connected: boolean };
+    compute: { mode: string; label: string; connected: boolean };
+    publish: { label: string; connected: boolean };
+  };
+  connections: Array<{
+    id: string;
+    label: string;
+    connected: boolean;
+    optional?: boolean;
+  }>;
+  platformConnections: Record<string, unknown>;
+}
+
+export function fetchFounderPlatformStatus(token: string) {
+  return apiFetch<FounderPlatformStatus>('/founder-os/platform-status', undefined, token);
 }
 
 export function connectGitHubRepo(repoFullName: string, token: string) {
@@ -3785,6 +3846,9 @@ export interface BuilderSettings {
   autopilotEnabled?: boolean;
   autopilotRedeployHosts?: boolean;
   controlPlaneMode?: string;
+  onboardingPath?: string | null;
+  computePlaneMode?: string;
+  starterPack?: string | null;
   currentGoalFocus: string | null;
   memoryStorageMode?: string;
   secretsStorageMode?: string;
@@ -3867,6 +3931,9 @@ export function updateBuilderSettings(
     autopilotEnabled?: boolean;
     autopilotRedeployHosts?: boolean;
     controlPlaneMode?: string;
+    onboardingPath?: string;
+    computePlaneMode?: string;
+    starterPack?: string | null;
     currentGoalFocus?: string;
     memoryStorageMode?: string;
   },
