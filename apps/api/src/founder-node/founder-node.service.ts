@@ -7,7 +7,9 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
+import { parseFounderCloudState } from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
+import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -171,7 +173,46 @@ export class FounderNodeService {
         input.desktopBridge,
       );
     }
+    if (input.founderCloud) {
+      void this.persistFounderCloudFromHeartbeat(node.userId, input.label, input.founderCloud);
+    }
     return { success: true, status: 'online' as const };
+  }
+
+  private async persistFounderCloudFromHeartbeat(
+    userId: string,
+    nodeLabel: string,
+    founderCloud: NonNullable<FounderNodeHeartbeat['founderCloud']>,
+  ) {
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { founderCloudState: true },
+    });
+    const state = parseFounderCloudState(settings?.founderCloudState) ?? {
+      import: null,
+      localStack: null,
+    };
+    state.localStack = {
+      enabled: founderCloud.enabled,
+      running: founderCloud.stackRunning,
+      webUrl: founderCloud.webUrl,
+      apiUrl: founderCloud.apiUrl,
+      repoPath: founderCloud.repoPath,
+      nodeLabel,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.prisma.founderBuilderSettings.upsert({
+      where: { userId },
+      create: {
+        userId,
+        founderCloudState: state as unknown as Prisma.InputJsonValue,
+        computePlaneMode: founderCloud.enabled ? ComputePlaneMode.LOCAL : ComputePlaneMode.CLOUD,
+      },
+      update: {
+        founderCloudState: state as unknown as Prisma.InputJsonValue,
+        ...(founderCloud.enabled ? { computePlaneMode: ComputePlaneMode.LOCAL } : {}),
+      },
+    });
   }
 
   async syncFromNode(userId: string, nodeDbId: string, payload: DeviceMemoryPayload) {
