@@ -64,6 +64,8 @@ import {
 import { PlatformAdoptionService } from '../projects/platform-adoption.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
+import { AgentRuntimeService } from './agent-runtime.service';
+import { isAgentRunActive } from '@dcf/utils';
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
@@ -80,6 +82,7 @@ export class BuilderService {
     private readonly adoption: PlatformAdoptionService,
     private readonly memoryGraph: FounderMemoryGraphService,
     private readonly agentRuns: FounderAgentRunService,
+    private readonly agentRuntime: AgentRuntimeService,
   ) {}
 
   async getSecretsStatus(userId: string) {
@@ -728,7 +731,8 @@ export class BuilderService {
     if (worker === 'CURSOR') {
       try {
         const result = await this.dispatchCursorBuildTask(userId, input);
-        await this.agentRuns.start(userId, {
+        await this.agentRuntime.startRun(userId, {
+          adapterId: 'cursor',
           worker: 'CURSOR',
           status: 'CREATING',
           task: input.spec,
@@ -738,6 +742,8 @@ export class BuilderService {
         });
         return {
           worker,
+          adapterId: 'cursor' as const,
+          adapterLabel: 'Builder Agent',
           status: 'dispatched' as const,
           agentUrl: result.agentUrl,
           agentId: result.agentId,
@@ -757,7 +763,8 @@ export class BuilderService {
     if (worker === 'OPENHANDS') {
       try {
         const result = await this.dispatchOpenHandsBuildTask(userId, input);
-        await this.agentRuns.start(userId, {
+        await this.agentRuntime.startRun(userId, {
+          adapterId: 'openhands',
           worker: 'OPENHANDS',
           status: 'WORKING',
           task: input.spec,
@@ -766,6 +773,8 @@ export class BuilderService {
         });
         return {
           worker,
+          adapterId: 'openhands' as const,
+          adapterLabel: 'Builder Agent',
           status: 'dispatched' as const,
           agentUrl: result.conversationUrl,
           conversationId: result.conversationId,
@@ -795,6 +804,53 @@ export class BuilderService {
       status: 'queued' as const,
       message: 'Task queued. Connect a builder worker in Settings to auto-dispatch remotely.',
     };
+  }
+
+  /** Phase 3 — refresh persisted run steps from live worker snapshot. */
+  async refreshActiveAgentRun(userId: string) {
+    const run = await this.agentRuns.getActive(userId);
+    if (!run || !isAgentRunActive(run)) {
+      return { run, active: false };
+    }
+
+    if (run.worker === 'CURSOR' && run.agentId && run.runId) {
+      try {
+        const snap = await this.getCursorRunSnapshot(
+          userId,
+          run.agentId,
+          run.runId,
+          run.repository,
+        );
+        const branch = snap.git?.branches?.[0]?.branch ?? null;
+        const prUrl = snap.git?.branches?.[0]?.prUrl ?? null;
+        const updated = await this.agentRuntime.refreshFromWorkerSnapshot(userId, {
+          worker: 'CURSOR',
+          status: snap.status,
+          branch,
+          prUrl,
+          terminal: snap.terminal,
+        });
+        return { run: updated ?? run, active: !snap.terminal };
+      } catch {
+        return { run, active: true };
+      }
+    }
+
+    if (run.worker === 'OPENHANDS' && run.conversationId) {
+      try {
+        const snap = await this.getOpenHandsRunSnapshot(userId, run.conversationId);
+        const updated = await this.agentRuntime.refreshFromWorkerSnapshot(userId, {
+          worker: 'OPENHANDS',
+          status: snap.status,
+          terminal: snap.terminal,
+        });
+        return { run: updated ?? run, active: !snap.terminal };
+      } catch {
+        return { run, active: true };
+      }
+    }
+
+    return { run, active: true };
   }
 
   async getWorkerStatus(userId: string) {

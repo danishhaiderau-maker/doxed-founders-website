@@ -1,9 +1,14 @@
 /** P1.5 — persisted builder run surfaced in Mission Control (not external Cursor tab only). */
 
+import type { AgentRuntimeStep } from './agent-runtime';
+import type { BuildAdapterId } from './provider-adapters';
+
 export type FounderAgentRunWorker = 'CURSOR' | 'OPENHANDS';
 
 export type FounderAgentRunRecord = {
   worker: FounderAgentRunWorker;
+  adapterId?: BuildAdapterId;
+  adapterLabel?: string;
   status: string;
   task: string;
   repository?: string | null;
@@ -13,6 +18,7 @@ export type FounderAgentRunRecord = {
   prUrl?: string | null;
   branch?: string | null;
   terminal: boolean;
+  steps?: AgentRuntimeStep[];
   startedAt: string;
   updatedAt: string;
 };

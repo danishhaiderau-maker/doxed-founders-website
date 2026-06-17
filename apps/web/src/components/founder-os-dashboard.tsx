@@ -18,6 +18,7 @@ import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
 import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
+import { AgentRunStepsPanel } from '@/components/agent-run-steps-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlConnectionHub } from '@/components/mission-control-connection-hub';
 import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
@@ -505,6 +506,9 @@ export function FounderOsDashboardLayout({
                 </div>
 
                 <div className="flex flex-col gap-4">
+                  {activeAgentRun && isAgentRunActive(activeAgentRun) && (
+                    <AgentRunStepsPanel run={activeAgentRun} />
+                  )}
                   <FounderCommandCenterPanels
                     queue={founderQueue}
                     loading={commandCenterLoading}
@@ -594,36 +598,32 @@ export function FounderOsDashboardLayout({
               </h3>
               <div className="mt-3 space-y-3">
                 <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium text-white">Builder Agent</p>
-                    <span
-                      className={`text-[10px] font-semibold ${
-                        activeAgentRun
-                          ? 'text-amber-300'
-                          : workerStatus?.buildWorker !== 'NONE'
-                            ? 'text-emerald-400'
-                            : 'text-zinc-600'
-                      }`}
-                    >
-                      {activeAgentRun
-                        ? 'Running'
-                        : openBuilderTask && workerStatus?.buildWorker !== 'NONE'
-                          ? 'Working'
-                          : workerStatus?.buildWorker !== 'NONE'
-                            ? 'Ready'
-                            : 'Offline'}
-                    </span>
-                  </div>
-                  {activeAgentRun ? (
-                    <p className="mt-2 text-xs text-zinc-400">
-                      {activeAgentRun.task.slice(0, 56)} · {activeAgentRun.status}
-                    </p>
+                  {activeAgentRun && isAgentRunActive(activeAgentRun) ? (
+                    <AgentRunStepsPanel run={activeAgentRun} />
                   ) : (
-                    openBuilderTask && (
-                      <p className="mt-2 text-xs text-zinc-400">
-                        {openBuilderTask.title.slice(0, 56)}
-                      </p>
-                    )
+                    <>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-white">Builder Agent</p>
+                        <span
+                          className={`text-[10px] font-semibold ${
+                            openBuilderTask && workerStatus?.buildWorker !== 'NONE'
+                              ? 'text-amber-300'
+                              : workerStatus?.buildWorker !== 'NONE'
+                                ? 'text-emerald-400'
+                                : 'text-zinc-600'
+                          }`}
+                        >
+                          {openBuilderTask && workerStatus?.buildWorker !== 'NONE'
+                            ? 'Working'
+                            : workerStatus?.buildWorker !== 'NONE'
+                              ? 'Ready'
+                              : 'Offline'}
+                        </span>
+                      </div>
+                      {openBuilderTask && (
+                        <p className="mt-2 text-xs text-zinc-400">{openBuilderTask.title.slice(0, 56)}</p>
+                      )}
+                    </>
                   )}
                   {workerStatus?.cursorAgentUrl && (
                     <a

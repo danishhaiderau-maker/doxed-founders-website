@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { FounderAgentRunRecord, FounderAgentRunWorker } from '@dcf/utils';
+import {
+  buildCommandCenterRuntimeSteps,
+  type BuildAdapterId,
+  type FounderAgentRunRecord,
+  type FounderAgentRunWorker,
+  workerToBuildAdapter,
+  buildAdapterLabel,
+} from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
 const ACTIVE_RUN_KEY = '_activeAgentRun';
@@ -25,25 +32,41 @@ export class FounderAgentRunService {
     userId: string,
     input: {
       worker: FounderAgentRunWorker;
+      adapterId?: BuildAdapterId;
+      adapterLabel?: string;
       status: string;
       task: string;
       repository?: string | null;
       agentId?: string | null;
       runId?: string | null;
       conversationId?: string | null;
+      prUrl?: string | null;
+      branch?: string | null;
+      steps?: FounderAgentRunRecord['steps'];
     },
   ) {
     const now = new Date().toISOString();
+    const adapterId = input.adapterId ?? workerToBuildAdapter(input.worker);
     const record: FounderAgentRunRecord = {
       worker: input.worker,
+      adapterId,
+      adapterLabel: input.adapterLabel ?? buildAdapterLabel(adapterId),
       status: input.status,
       task: input.task.slice(0, 1200),
       repository: input.repository ?? null,
       agentId: input.agentId ?? null,
       runId: input.runId ?? null,
       conversationId: input.conversationId ?? null,
-      prUrl: null,
-      branch: null,
+      prUrl: input.prUrl ?? null,
+      branch: input.branch ?? null,
+      steps:
+        input.steps ??
+        buildCommandCenterRuntimeSteps({
+          worker: input.worker,
+          status: input.status,
+          prUrl: input.prUrl,
+          branch: input.branch,
+        }),
       terminal: false,
       startedAt: now,
       updatedAt: now,
@@ -57,7 +80,14 @@ export class FounderAgentRunService {
     patch: Partial<
       Pick<
         FounderAgentRunRecord,
-        'status' | 'prUrl' | 'branch' | 'terminal' | 'agentId' | 'runId' | 'conversationId'
+        | 'status'
+        | 'prUrl'
+        | 'branch'
+        | 'terminal'
+        | 'agentId'
+        | 'runId'
+        | 'conversationId'
+        | 'steps'
       >
     >,
   ) {
