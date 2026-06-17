@@ -1646,6 +1646,8 @@ model FounderBuilderSettings {
   starterPack            String?
   /** Phase 2+ connect hub: per-destination publish/sync/ai-context toggles. */
   platformConnections    Json?
+  /** Phase 4 — universal graph (initiative → commit → PR → deploy → update). */
+  founderGraph           Json?
   currentGoalFocus       String?
   /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
   memoryGraph            Json?

@@ -14,6 +14,7 @@ import { FounderMetricsService } from './founder-metrics.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
 import { FounderAgentRunModule } from '../founder-agent-run/founder-agent-run.module';
 import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
+import { FounderGraphModule } from '../founder-graph/founder-graph.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
     FounderMemoryGraphModule,
     FounderAgentRunModule,
     DesktopBridgeModule,
+    FounderGraphModule,
   ],
   controllers: [EventsController],
   providers: [

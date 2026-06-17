@@ -56,6 +56,11 @@ export class EventsController {
     return this.commandCenter.getActiveAgentRun(user.id);
   }
 
+  @Get('copilot/founder-graph')
+  founderGraph(@CurrentUser() user: AuthUser) {
+    return this.copilot.getFounderGraphForUser(user.id);
+  }
+
   @Get('copilot/project-timeline')
   projectTimeline(@CurrentUser() user: AuthUser) {
     return this.copilot.getProjectTimelineForUser(user.id, 30);

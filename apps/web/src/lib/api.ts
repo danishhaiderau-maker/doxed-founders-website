@@ -4615,6 +4615,18 @@ export function fetchActiveAgentRun(token: string) {
   );
 }
 
+export type FounderGraphResponse = {
+  graph: import('@dcf/utils').FounderGraph;
+  miniChain: import('@dcf/utils').FounderGraphNode[];
+  excerpt: string | null;
+  updatedAt: string;
+  nodeCount: number;
+};
+
+export function fetchFounderGraph(token: string) {
+  return apiFetch<FounderGraphResponse>('/copilot/founder-graph', undefined, token);
+}
+
 export type ProjectTimelineResponse = {
   days: number;
   entries: import('@dcf/utils').ProjectTimelineEntry[];
