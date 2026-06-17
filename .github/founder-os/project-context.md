@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(btc-bot): sync bybit-15m-research-bot upstream
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
