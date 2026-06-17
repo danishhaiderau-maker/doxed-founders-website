@@ -106,6 +106,8 @@ export class FounderOsIntegrationService {
         return this.verifyVercel(token, projectName);
       case 'railway':
         return this.verifyRailway(token, projectName);
+      case 'render':
+        return this.verifyRender(token, projectName);
       case 'neon':
         return this.verifyNeon(token, projectName);
       case 'digitalocean':
@@ -141,6 +143,35 @@ export class FounderOsIntegrationService {
     if (data.data?.me == null) throw new BadRequestException('Invalid Railway token');
     const accountName = data.data.me.name ?? data.data.me.email ?? 'Railway account';
     return { accountName, metadata: { projectName: projectName ?? null } };
+  }
+
+  private async verifyRender(token: string, projectName?: string): Promise<VerifyResult> {
+    const res = await fetch('https://api.render.com/v1/services?limit=1', {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+    if (!res.ok) throw new BadRequestException('Invalid Render API key');
+    const data = (await res.json()) as Array<{ service?: { name?: string; id?: string } }> | { name?: string }[];
+    const services = Array.isArray(data) ? data : [];
+    const first = services[0] as { service?: { name?: string }; name?: string } | undefined;
+    const serviceName = first?.service?.name ?? first?.name ?? projectName ?? 'Render account';
+    return { accountName: serviceName, metadata: { projectName: projectName ?? serviceName } };
+  }
+
+  /** Lightweight re-verify for connect hub health checks (no side effects). */
+  async verifyProviderHealth(
+    provider: string,
+    token: string,
+    projectName?: string,
+  ): Promise<{ ok: boolean; detail: string }> {
+    try {
+      const verified = await this.verifyToken(provider, token, projectName);
+      return { ok: true, detail: verified.accountName };
+    } catch (err) {
+      return {
+        ok: false,
+        detail: err instanceof Error ? err.message : 'Health check failed',
+      };
+    }
   }
 
   private async verifyNeon(token: string, projectName?: string): Promise<VerifyResult> {

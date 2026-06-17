@@ -17,6 +17,7 @@ import {
 import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
 import { GitHubPatConnectGuide } from '@/components/settings/github-pat-connect-guide';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
+import { InfrastructureConnectHub } from '@/components/infrastructure-connect-hub';
 import type { MemoryStorageModeKey } from '@dcf/utils';
 
 type BuilderSettingsPanelProps = {
@@ -223,15 +224,6 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
     return <p className="text-sm text-zinc-500">Loading builder settings…</p>;
   }
 
-  const llmProviders = settings.providers.filter(
-    (p) =>
-      p.key !== 'RULE_BASED' &&
-      p.key !== 'OPENHANDS' &&
-      p.key !== 'CURSOR' &&
-      p.key !== 'OLLAMA_LOCAL' &&
-      p.key !== 'PHALA' &&
-      p.key !== 'OPENROUTER',
-  );
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
 
@@ -258,14 +250,15 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
           phalaModel,
           setPhalaModel,
           connecting,
-          onConnectOpenRouter: () => handleConnectProvider('openrouter'),
-          onConnectJatevo: () => handleConnectProvider('jatevo'),
+          onConnectProvider: (cred) => handleConnectProvider(cred),
           onConnectOllama: handleConnectOllamaDirect,
           onConnectPhala: handleConnectPhala,
-          onDisconnectPhala: () => handleDisconnect('phala'),
+          onDisconnectProvider: (cred) => handleDisconnect(cred),
           onSaveSettings: saveSettings,
         }}
       />
+
+      <InfrastructureConnectHub accessToken={accessToken} onMessage={setMsg} />
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
         <h2 className="text-lg font-semibold text-white">Autopilot & production sync</h2>
@@ -286,8 +279,11 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
       <section id="remote-builder" className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 scroll-mt-24">
         <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Optional cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys below power specs and
-          Founder Brain when not using local Ollama or Phala.
+          Cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys for Copilot live in{' '}
+          <a href="#connect-ai" className="text-violet-300 underline">
+            Step 3 — AI on your stack
+          </a>{' '}
+          above (OpenAI, Anthropic, Surplus, etc.).
         </p>
 
         <div className="mt-4 space-y-3 rounded-xl border border-indigo-500/25 bg-indigo-950/10 p-4">
@@ -350,31 +346,6 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               Auto-create GitHub issues from Quick Build
             </label>
           </div>
-        </div>
-
-        <div className="mt-4">
-          <p className="text-xs font-medium text-zinc-400">Default chat AI (when multiple connected)</p>
-          <select
-            value={settings.defaultProvider}
-            onChange={(e) => saveSettings({ defaultProvider: e.target.value })}
-            className="mt-2 w-full max-w-md rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
-          >
-            {settings.providers
-              .filter(
-                (p) =>
-                  p.key !== 'RULE_BASED' &&
-                  p.key !== 'CURSOR' &&
-                  p.key !== 'OPENHANDS' &&
-                  (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
-              )
-              .map((p) => (
-                <option key={p.key} value={p.key} disabled={!p.connected}>
-                  {p.label}
-                  {p.connected ? '' : ' (connect in Step 3)'}
-                </option>
-              ))}
-            <option value="RULE_BASED">Project memory only</option>
-          </select>
         </div>
 
         <div className="mt-6 space-y-6">
@@ -476,58 +447,6 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               </button>
             )}
           </div>
-        </div>
-        </div>
-
-        <div className="rounded-xl border border-zinc-800 p-4">
-        <h3 className="font-semibold text-white">LLM providers (specs & Founder Brain)</h3>
-        <p className="mt-1 text-sm text-zinc-500">
-          Additional API keys — encrypted at rest. Set default provider in Founder Node Step 3 above.
-        </p>
-        <div className="mt-4 space-y-4">
-          {llmProviders.map((p) => (
-            <div key={p.key} className="rounded-xl border border-zinc-800 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <p className="font-medium text-white">{p.label}</p>
-                  <p className="text-xs text-zinc-500">{p.billTip}</p>
-                </div>
-                {p.connected && (
-                  <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-                    Connected
-                  </span>
-                )}
-              </div>
-              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                <input
-                  type="password"
-                  value={apiKeyInput[p.credentialProvider ?? ''] ?? ''}
-                  onChange={(e) =>
-                    setApiKeyInput({ ...apiKeyInput, [p.credentialProvider ?? '']: e.target.value })
-                  }
-                  placeholder="Paste API key"
-                  className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-                />
-                <button
-                  type="button"
-                  disabled={connecting === p.credentialProvider}
-                  onClick={() => p.credentialProvider && handleConnectProvider(p.credentialProvider)}
-                  className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  {p.connected ? 'Update key' : 'Connect & activate'}
-                </button>
-                {p.connected && p.credentialProvider && (
-                  <button
-                    type="button"
-                    onClick={() => handleDisconnect(p.credentialProvider!)}
-                    className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
-                  >
-                    Disconnect
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
         </div>
         </div>
 

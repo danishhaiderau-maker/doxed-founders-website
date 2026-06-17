@@ -44,6 +44,7 @@ import { EventsService } from '../events/events.service';
 import { FounderOsMemoryService } from '../github/founder-os-memory.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
+import { PlatformConnectionsService } from './platform-connections.service';
 
 @Injectable()
 export class FounderOsService {
@@ -57,6 +58,7 @@ export class FounderOsService {
     private readonly memory: FounderOsMemoryService,
     private readonly github: GitHubApiService,
     private readonly githubAutoSync: GithubAutoSyncService,
+    private readonly platformConnections: PlatformConnectionsService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -159,11 +161,29 @@ export class FounderOsService {
     return this.integrations.getProviderConfigs();
   }
 
-  connectIntegration(
+  async connectIntegration(
     userId: string,
     input: { provider: string; token?: string; repoFullName?: string; projectName?: string },
   ) {
-    return this.integrations.connectIntegration(userId, input);
+    const result = await this.integrations.connectIntegration(userId, input);
+    await this.platformConnections.ensureDefaultsOnConnect(userId, input.provider);
+    return result;
+  }
+
+  getPlatformConnectionsHub(userId: string) {
+    return this.platformConnections.getHub(userId);
+  }
+
+  updatePlatformConnectionToggles(
+    userId: string,
+    provider: string,
+    patch: { publish?: boolean; syncBack?: boolean; aiContext?: boolean },
+  ) {
+    return this.platformConnections.updateToggles(userId, provider, patch);
+  }
+
+  checkPlatformConnectionHealth(userId: string, provider: string) {
+    return this.platformConnections.runHealthCheck(userId, provider);
   }
 
   disconnectIntegration(userId: string, provider: string) {
@@ -240,6 +260,8 @@ export class FounderOsService {
     void this.memory.bootstrapRepoMemory(userId, normalized).catch(() => undefined);
     void this.memory.syncProjectMemoryToRepo(userId, normalized).catch(() => undefined);
     void this.githubAutoSync.syncForUser(userId, { force: true }).catch(() => undefined);
+
+    await this.platformConnections.ensureDefaultsOnConnect(userId, 'github');
 
     return { success: true, repoFullName: normalized };
   }

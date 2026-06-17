@@ -8,10 +8,23 @@ export type AiProviderKey =
   | 'DEEPSEEK'
   | 'OPENROUTER'
   | 'JATEVO'
+  | 'SURPLUS'
   | 'OLLAMA_LOCAL'
   | 'PHALA'
   | 'OPENHANDS'
   | 'CURSOR';
+
+export type AiProviderCategory = 'marketplace' | 'direct' | 'local' | 'private';
+
+export type AiProviderGuide = {
+  category: AiProviderCategory;
+  categoryLabel: string;
+  keyUrl: string;
+  keyUrlLabel: string;
+  keyPlaceholder: string;
+  modelPlaceholder: string;
+  steps: string[];
+};
 
 export type AiProviderConfig = {
   key: AiProviderKey;
@@ -99,6 +112,16 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     credentialProvider: 'jatevo',
   },
   {
+    key: 'SURPLUS',
+    label: 'Surplus Intelligence (marketplace)',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    defaultModel: 'claude-opus-4.8',
+    billTip:
+      'One inf_ key — routes Copilot to the cheapest healthy seller on the Surplus inference marketplace. Billed to your Surplus balance.',
+    credentialProvider: 'surplus',
+  },
+  {
     key: 'OLLAMA_LOCAL',
     label: 'Ollama (local via Founder Node)',
     connectMode: 'founder_node',
@@ -144,6 +167,121 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
 
 export function aiProviderConfig(key: string): AiProviderConfig | undefined {
   return AI_PROVIDERS.find((p) => p.key === key);
+}
+
+/** Step-by-step connect instructions shown in Settings → Builder Step 3. */
+export const AI_PROVIDER_GUIDES: Partial<Record<AiProviderKey, AiProviderGuide>> = {
+  SURPLUS: {
+    category: 'marketplace',
+    categoryLabel: 'Marketplace gateways',
+    keyUrl: 'https://www.surplusintelligence.ai/buy',
+    keyUrlLabel: 'surplusintelligence.ai/buy',
+    keyPlaceholder: 'inf_…',
+    modelPlaceholder: 'claude-opus-4.8, gpt-4o, …',
+    steps: [
+      'Sign in at surplusintelligence.ai/buy and fund your balance.',
+      'Create an API key (starts with inf_).',
+      'Paste below → Connect & activate → pick as Default brain.',
+    ],
+  },
+  OPENROUTER: {
+    category: 'marketplace',
+    categoryLabel: 'Marketplace gateways',
+    keyUrl: 'https://openrouter.ai/keys',
+    keyUrlLabel: 'openrouter.ai/keys',
+    keyPlaceholder: 'sk-or-…',
+    modelPlaceholder: 'openrouter/auto, anthropic/claude-3.5-haiku, …',
+    steps: [
+      'Create a key at openrouter.ai/keys.',
+      'Paste below → Connect & activate.',
+      'Optional: set Preferred model to a specific route.',
+    ],
+  },
+  JATEVO: {
+    category: 'marketplace',
+    categoryLabel: 'Marketplace gateways',
+    keyUrl: 'https://jatevo.ai',
+    keyUrlLabel: 'jatevo.ai',
+    keyPlaceholder: 'sk-clb-…',
+    modelPlaceholder: 'auto',
+    steps: [
+      'Get your sk-clb-… key from jatevo.ai.',
+      'Paste below → Connect & activate.',
+      'Quota scales with $JTVO holdings on your account.',
+    ],
+  },
+  OPENAI: {
+    category: 'direct',
+    categoryLabel: 'Direct vendor APIs',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    keyUrlLabel: 'platform.openai.com',
+    keyPlaceholder: 'sk-…',
+    modelPlaceholder: 'gpt-4o-mini, gpt-4o, …',
+    steps: [
+      'Create an API key at platform.openai.com.',
+      'Paste below → Connect & activate → select OpenAI as Default brain.',
+    ],
+  },
+  ANTHROPIC: {
+    category: 'direct',
+    categoryLabel: 'Direct vendor APIs',
+    keyUrl: 'https://console.anthropic.com/settings/keys',
+    keyUrlLabel: 'console.anthropic.com',
+    keyPlaceholder: 'sk-ant-…',
+    modelPlaceholder: 'claude-3-5-haiku-latest, claude-sonnet-4-…',
+    steps: [
+      'Create a key at console.anthropic.com.',
+      'Paste below → Connect & activate → select Anthropic as Default brain.',
+    ],
+  },
+  GEMINI: {
+    category: 'direct',
+    categoryLabel: 'Direct vendor APIs',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    keyUrlLabel: 'aistudio.google.com',
+    keyPlaceholder: 'AIza…',
+    modelPlaceholder: 'gemini-2.0-flash, gemini-1.5-pro, …',
+    steps: [
+      'Create an API key in Google AI Studio.',
+      'Paste below → Connect & activate → select Gemini as Default brain.',
+    ],
+  },
+  DEEPSEEK: {
+    category: 'direct',
+    categoryLabel: 'Direct vendor APIs',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    keyUrlLabel: 'platform.deepseek.com',
+    keyPlaceholder: 'sk-…',
+    modelPlaceholder: 'deepseek-chat, deepseek-reasoner',
+    steps: [
+      'Create a key at platform.deepseek.com.',
+      'Paste below → Connect & activate.',
+    ],
+  },
+};
+
+export function listBrainProvidersByCategory(): {
+  category: AiProviderCategory;
+  label: string;
+  keys: AiProviderKey[];
+}[] {
+  return [
+    {
+      category: 'marketplace',
+      label: 'Marketplace gateways',
+      keys: ['SURPLUS', 'OPENROUTER', 'JATEVO'],
+    },
+    {
+      category: 'direct',
+      label: 'Direct vendor APIs',
+      keys: ['OPENAI', 'ANTHROPIC', 'GEMINI', 'DEEPSEEK'],
+    },
+    {
+      category: 'local',
+      label: 'Local & private',
+      keys: ['OLLAMA_LOCAL', 'PHALA'],
+    },
+  ];
 }
 
 export const QUICK_BUILD_AI_SYSTEM = `You are a startup product assistant for Founder OS.

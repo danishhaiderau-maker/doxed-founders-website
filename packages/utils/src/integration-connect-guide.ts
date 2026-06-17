@@ -87,6 +87,24 @@ export const INTEGRATION_CONNECT_GUIDES: Record<string, IntegrationConnectGuide>
     ],
     note: 'Hobby (free) plan supports deploy hooks. Pro only needed for team features or higher limits — not for this integration.',
   },
+  render: {
+    summary: 'Render web + Postgres — recommended free starter pack.',
+    whatItDoes: 'Verifies Render API key and lists your first service for stack visibility.',
+    whatItDoesNot: 'Does not create services or billing — you deploy on render.com directly.',
+    steps: [
+      {
+        title: '1. Render API key',
+        body: 'dashboard.render.com → Account Settings → API Keys → Create.',
+        link: { label: 'Render API keys', href: 'https://dashboard.render.com/u/settings#api-keys' },
+      },
+      { title: '2. Connect', body: '+ Render in connect hub → paste rnd_… key → optional service name → Connect.' },
+      {
+        title: '3. Webhook',
+        body: 'Service → Settings → Deploy Hook → add the webhook URL from connect success.',
+      },
+    ],
+    note: 'Free Postgres expires in 30 days on hobby tier — upgrade before production.',
+  },
   railway: {
     summary: 'Railway deploy events → Founder OS suggested updates.',
     whatItDoes: 'Verifies Railway account token and registers a deploy webhook.',
