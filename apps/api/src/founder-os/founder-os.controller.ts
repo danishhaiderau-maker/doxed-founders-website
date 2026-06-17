@@ -66,6 +66,26 @@ export class FounderOsController {
     return this.founderOs.checkPlatformConnectionHealth(user.id, provider);
   }
 
+  @Get('founder-cloud/status')
+  founderCloudStatus(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getFounderCloudStatus(user.id);
+  }
+
+  @Get('founder-cloud/publish-plan')
+  publishPlan(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getPublishPlan(user.id);
+  }
+
+  @Get('import/status')
+  importStatus(@CurrentUser() user: AuthUser) {
+    return this.founderOs.getImportStatus(user.id);
+  }
+
+  @Post('import/start')
+  startImport(@CurrentUser() user: AuthUser) {
+    return this.founderOs.startImportWizard(user.id);
+  }
+
   @Post('github/connect')
   connectGitHub(@CurrentUser() user: AuthUser, @Body() body: { repoFullName: string }) {
     return this.founderOs.connectGitHubRepo(user.id, body.repoFullName);

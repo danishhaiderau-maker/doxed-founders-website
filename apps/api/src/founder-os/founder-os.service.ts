@@ -20,14 +20,18 @@ import {
   buildCommunityAnnouncement,
   buildDeploySuggestion,
   buildFeedPostBody,
+  buildHostPublishResults,
   buildSuggestionFromBuildPrompt,
   buildXUpdateTweet,
+  resolveUnifiedPublishPlan,
   defaultComputePlaneForPath,
   getPathDefinition,
   getRepoStarterTemplate,
   pathLabel,
   pathStepOptional,
   REPO_STARTER_TEMPLATES,
+  importJobComplete,
+  normalizePlatformConnections,
   type OnboardingPathId,
   type OnboardingStepId,
 } from '@dcf/utils';
@@ -45,6 +49,7 @@ import { FounderOsMemoryService } from '../github/founder-os-memory.service';
 import { GitHubApiService } from '../github/github-api.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
 import { PlatformConnectionsService } from './platform-connections.service';
+import { FounderCloudService } from './founder-cloud.service';
 
 @Injectable()
 export class FounderOsService {
@@ -59,6 +64,7 @@ export class FounderOsService {
     private readonly github: GitHubApiService,
     private readonly githubAutoSync: GithubAutoSyncService,
     private readonly platformConnections: PlatformConnectionsService,
+    private readonly founderCloud: FounderCloudService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -468,6 +474,8 @@ export class FounderOsService {
     const goalSet = Boolean(settings?.currentGoalFocus?.trim());
     const founderActive = Boolean(founder);
     const starterPackSet = Boolean(settings?.starterPack?.trim());
+    const cloudState = await this.founderCloud.getState(userId);
+    const importDone = importJobComplete(cloudState.import);
 
     const storedPath = settings?.onboardingPath as OnboardingPathId | null;
     const effectivePath: OnboardingPathId =
@@ -484,7 +492,7 @@ export class FounderOsService {
       ai_stack: llmConnected,
       goal: goalSet,
       founder_node: nodeOnline,
-      migrate: githubConnected && nodeOnline,
+      migrate: importDone || (githubConnected && nodeOnline),
     };
 
     const STEP_META: Record<
@@ -524,9 +532,13 @@ export class FounderOsService {
         detail: nodeOnline ? 'Node online' : null,
       },
       migrate: {
-        label: 'Connect sources to import',
-        href: '/settings/builder',
-        detail: githubConnected ? 'GitHub ready for import' : null,
+        label: 'Run import wizard',
+        href: '/founder-den?import=1',
+        detail: importDone
+          ? cloudState.import?.summary ?? 'Import complete'
+          : githubConnected
+            ? 'GitHub ready for import'
+            : null,
       },
     };
 
@@ -583,6 +595,22 @@ export class FounderOsService {
               ? 'Connect GitHub or your cloud host so Founder Brain sees project state — not generic templates.'
               : 'Connect your GitHub repo so Founder Brain sees commits, PRs, and can run builds.',
     };
+  }
+
+  getFounderCloudStatus(userId: string) {
+    return this.founderCloud.getCloudStatus(userId);
+  }
+
+  getPublishPlan(userId: string) {
+    return this.founderCloud.getPublishPlan(userId);
+  }
+
+  getImportStatus(userId: string) {
+    return this.founderCloud.getImportStatus(userId);
+  }
+
+  startImportWizard(userId: string) {
+    return this.founderCloud.startImport(userId);
   }
 
   async runCursorBuildRoom(userId: string, input: { title: string; prompt: string }) {
@@ -691,11 +719,15 @@ export class FounderOsService {
     });
     if (!suggestion) throw new NotFoundException('Suggestion not found');
 
-    const dest: PublishDestinations = {
-      buildFeed: destinations.buildFeed ?? true,
-      x: destinations.x ?? true,
-      community: destinations.community ?? true,
-    };
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { platformConnections: true },
+    });
+    const plan = resolveUnifiedPublishPlan(
+      normalizePlatformConnections(settings?.platformConnections),
+      destinations,
+    );
+    const dest: PublishDestinations = plan.social;
 
     const project = suggestion.projectId
       ? await this.prisma.project.findUnique({ where: { id: suggestion.projectId } })
@@ -791,7 +823,16 @@ export class FounderOsService {
       }
     }
 
-    const anyOk = Object.values(results).some((r) => r?.ok);
+    const hostResults = buildHostPublishResults(plan);
+    const publishLog = {
+      ...results,
+      hosts: hostResults,
+      planNotes: plan.notes,
+    } as Prisma.InputJsonValue;
+
+    const anyOk =
+      Object.values(results).some((r) => r?.ok) ||
+      hostResults.some((h) => h.ok && !h.skipped);
     if (!anyOk) {
       throw new BadRequestException(
         `Publish failed on all destinations: ${JSON.stringify(results)}`,
@@ -805,9 +846,25 @@ export class FounderOsService {
         buildPostId,
         communityThreadId,
         xTweetUrl,
-        publishLog: results as Prisma.InputJsonValue,
+        publishLog,
       },
     });
+
+    if (plan.hostRedeployProviders.length > 0) {
+      await this.events.emit({
+        founderId: founder.id,
+        projectId: suggestion.projectId ?? project?.id,
+        userId,
+        type: FounderEventType.DEPLOY_STARTED,
+        source: 'publish_pipeline',
+        title: `Host publish: ${plan.hostRedeployProviders.join(', ')}`,
+        payload: {
+          suggestionId,
+          providers: plan.hostRedeployProviders,
+          note: 'Push to GitHub or enable Autopilot redeploy to rebuild hosts',
+        },
+      });
+    }
 
     await this.events.emit({
       founderId: founder.id,
@@ -816,7 +873,7 @@ export class FounderOsService {
       type: FounderEventType.BUILD_PUBLISHED,
       source: 'founder-os',
       title: `Published: ${suggestion.headline.slice(0, 72)}`,
-      payload: { suggestionId, destinations: results },
+      payload: { suggestionId, destinations: results, hosts: hostResults, planNotes: plan.notes },
     });
 
     return {
@@ -825,6 +882,8 @@ export class FounderOsService {
       communityThreadId,
       xTweetUrl,
       destinations: results,
+      hosts: hostResults,
+      planNotes: plan.notes,
     };
   }
 

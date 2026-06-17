@@ -7,10 +7,13 @@ import {
   connectGitHubRepo,
   connectIntegration,
   fetchFounderPlatformConnectionsHub,
+  fetchFounderPublishPlan,
   fetchGitHubOAuthStart,
   updatePlatformConnectionToggles,
   type PlatformConnectionsHub,
+  type FounderPublishPlanResponse,
 } from '@/lib/api';
+import { FounderCloudPanel } from '@/components/founder-cloud-panel';
 
 type Props = {
   accessToken: string;
@@ -19,6 +22,7 @@ type Props = {
 
 export function InfrastructureConnectHub({ accessToken, onMessage }: Props) {
   const [hub, setHub] = useState<PlatformConnectionsHub | null>(null);
+  const [publishPlan, setPublishPlan] = useState<FounderPublishPlanResponse | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tokens, setTokens] = useState<Record<string, string>>({});
@@ -27,7 +31,12 @@ export function InfrastructureConnectHub({ accessToken, onMessage }: Props) {
 
   const load = useCallback(async () => {
     try {
-      setHub(await fetchFounderPlatformConnectionsHub(accessToken));
+      const [hubRes, planRes] = await Promise.all([
+        fetchFounderPlatformConnectionsHub(accessToken),
+        fetchFounderPublishPlan(accessToken).catch(() => null),
+      ]);
+      setHub(hubRes);
+      setPublishPlan(planRes);
       setErr(null);
     } catch (e) {
       setHub(null);
@@ -262,6 +271,30 @@ export function InfrastructureConnectHub({ accessToken, onMessage }: Props) {
             )}
           </div>
         ))}
+      </div>
+
+      {publishPlan ? (
+        <div className="mt-6 rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Publish pipeline</p>
+          <p className="mt-2 text-sm text-zinc-400">
+            Social: feed {publishPlan.social.buildFeed ? '✓' : '○'} · X {publishPlan.social.x ? '✓' : '○'} ·
+            community {publishPlan.social.community ? '✓' : '○'}
+          </p>
+          {publishPlan.hostRedeployProviders.length > 0 ? (
+            <p className="mt-1 text-xs text-violet-300">
+              Host redeploy toggles: {publishPlan.hostRedeployProviders.join(', ')}
+            </p>
+          ) : null}
+          {publishPlan.notes.map((note) => (
+            <p key={note} className="mt-1 text-[11px] text-zinc-600">
+              {note}
+            </p>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="mt-6">
+        <FounderCloudPanel accessToken={accessToken} showImport />
       </div>
     </section>
   );

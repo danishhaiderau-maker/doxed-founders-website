@@ -68,6 +68,12 @@ import {
   openWindowsFirewallSettings,
 } from './firewall-helper';
 import { createLoopHandles, stopBackgroundLoops, type BackgroundLoopHandles } from './background-loops';
+import {
+  getFounderCloudMode,
+  patchFounderCloudConfig,
+  resolveFounderCloudRepo,
+  runFounderLocalAsync,
+} from './founder-cloud';
 
 const DEFAULT_API = process.env.FOUNDER_OS_API_URL ?? 'https://doxxedcrypto.digital';
 const SETTINGS_BUILDER_URL = `${DEFAULT_API.replace(/\/$/, '')}/settings/builder`;
@@ -339,6 +345,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       ollamaEnabled: Boolean(ollama),
       ollamaBaseUrl: ollama?.baseUrl,
       ollamaModel: ollama?.model,
+      founderCloud: getFounderCloudMode(config),
       desktopBridge: {
         ...hb.desktopBridge,
         openFilePaths: metadataPayload.mergePatch?.fileManifest
@@ -454,6 +461,8 @@ function openPairWindow(): void {
 
 function buildTrayMenu(vaultRoot: string) {
   const config = readNodeConfig(vaultRoot);
+  const cloud = getFounderCloudMode(config);
+  const cloudRepo = resolveFounderCloudRepo(config);
   const pending = getPendingUpdate();
   const template: Electron.MenuItemConstructorOptions[] = [
     {
@@ -525,6 +534,58 @@ function buildTrayMenu(vaultRoot: string) {
       enabled: Boolean(config),
       click: () => {
         runSyncCycle(vaultRoot).catch(console.error);
+      },
+    },
+    { type: 'separator' },
+    {
+      label: cloud.enabled ? 'Founder Cloud mode: ON' : 'Enable Founder Cloud mode',
+      enabled: Boolean(config),
+      click: () => {
+        if (!config) return;
+        const next = patchFounderCloudConfig(config, {
+          enabled: !cloud.enabled,
+          repoPath: cloudRepo ?? undefined,
+        });
+        writeNodeConfig(vaultRoot, next);
+        refreshTrayMenu(vaultRoot);
+        notifyDesktop(
+          'Founder Cloud',
+          next.founderCloud?.enabled ? 'Local stack mode enabled' : 'Founder Cloud mode disabled',
+        );
+      },
+    },
+    {
+      label: cloud.stackRunning ? 'Stop local stack' : 'Start local stack',
+      enabled: Boolean(config) && cloud.enabled && Boolean(cloudRepo),
+      click: () => {
+        if (!config || !cloudRepo) {
+          notifyDesktop('Founder Cloud', 'Set FOUNDER_CLOUD_REPO to your Founder OS checkout');
+          return;
+        }
+        void (async () => {
+          const action = cloud.stackRunning ? 'stop' : 'start';
+          const result = await runFounderLocalAsync(cloudRepo, action);
+          const next = patchFounderCloudConfig(config, {
+            enabled: true,
+            repoPath: cloudRepo,
+            stackRunning: action === 'start' ? result.ok : false,
+            lastStartedAt: action === 'start' && result.ok ? new Date().toISOString() : config.founderCloud?.lastStartedAt,
+            lastError: result.ok ? undefined : result.detail,
+          });
+          writeNodeConfig(vaultRoot, next);
+          refreshTrayMenu(vaultRoot);
+          notifyDesktop('Founder Cloud', result.detail);
+          if (result.ok && action === 'start') {
+            void shell.openExternal(next.founderCloud?.webUrl ?? 'http://127.0.0.1:3000/founder-den');
+          }
+        })();
+      },
+    },
+    {
+      label: 'Open local Mission Control',
+      enabled: Boolean(cloud.stackRunning && cloud.webUrl),
+      click: () => {
+        void shell.openExternal(`${cloud.webUrl?.replace(/\/$/, '')}/founder-den`);
       },
     },
     { type: 'separator' },

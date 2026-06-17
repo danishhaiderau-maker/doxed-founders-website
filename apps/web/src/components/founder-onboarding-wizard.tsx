@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { LIFECYCLE_STAGES, type OnboardingPathId, type StarterPackId } from '@dcf/utils';
 import { FounderNodeDownloads } from '@/components/founder-node-downloads';
+import { FounderImportWizard } from '@/components/founder-import-wizard';
+import { FounderCloudPanel } from '@/components/founder-cloud-panel';
 import { FounderPathSelector } from '@/components/founder-path-selector';
 import { FounderStarterPackPicker } from '@/components/founder-starter-pack-picker';
 import {
@@ -459,24 +461,33 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, ini
           {(currentStepId === 'platform' || currentStepId === 'migrate') && (
             <>
               <h3 className="font-semibold text-white">
-                {currentStepId === 'migrate' ? 'Connect sources to import' : 'Connect cloud host'}
+                {currentStepId === 'migrate' ? 'Import to private stack' : 'Connect cloud host'}
               </h3>
               <p className="mt-1 text-sm text-zinc-500">
                 {currentStepId === 'migrate'
-                  ? 'Read-only GitHub + DB credentials first. Full import wizard ships in Phase 5.'
+                  ? 'Connect read-only GitHub + hosts, then run the import wizard.'
                   : 'Paste host URL, database string, or deploy token in Settings → Builder.'}
               </p>
-              <ul className="mt-4 list-inside list-disc space-y-1 text-sm text-zinc-400">
-                <li>Railway, Render, Vercel, Neon, or Supabase</li>
-                <li>Founder Node for local vault</li>
-                <li>Per-connector toggles: publish / sync / AI context (Phase 2)</li>
-              </ul>
-              <Link
-                href="/settings/builder"
-                className="mt-4 inline-flex rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
-              >
-                Open connect hub →
-              </Link>
+              {currentStepId === 'migrate' && accessToken ? (
+                <div className="mt-4 space-y-4">
+                  <FounderImportWizard accessToken={accessToken} onComplete={() => void load()} />
+                  <FounderCloudPanel accessToken={accessToken} />
+                </div>
+              ) : (
+                <>
+                  <ul className="mt-4 list-inside list-disc space-y-1 text-sm text-zinc-400">
+                    <li>Railway, Render, Vercel, Neon, or Supabase</li>
+                    <li>Founder Node for local vault</li>
+                    <li>Per-connector toggles: publish / sync / AI context</li>
+                  </ul>
+                  <Link
+                    href="/settings/builder"
+                    className="mt-4 inline-flex rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+                  >
+                    Open connect hub →
+                  </Link>
+                </>
+              )}
             </>
           )}
 

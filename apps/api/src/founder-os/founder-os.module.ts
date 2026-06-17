@@ -9,11 +9,18 @@ import { FounderOsService } from './founder-os.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
 
 import { PlatformConnectionsService } from './platform-connections.service';
+import { FounderCloudService } from './founder-cloud.service';
 
 @Module({
   imports: [NotificationsModule, XSocialModule, GitHubModule, forwardRef(() => EventsModule)],
   controllers: [FounderOsController],
-  providers: [FounderOsService, FounderOsIntegrationService, GithubAutoSyncService, PlatformConnectionsService],
-  exports: [FounderOsService, GithubAutoSyncService],
+  providers: [
+    FounderOsService,
+    FounderOsIntegrationService,
+    GithubAutoSyncService,
+    PlatformConnectionsService,
+    FounderCloudService,
+  ],
+  exports: [FounderOsService, GithubAutoSyncService, FounderCloudService],
 })
 export class FounderOsModule {}

@@ -1,7 +1,7 @@
 import type { DesktopBridgeInput, DeviceMemoryPayload, FounderOsTasksFile } from '@dcf/utils';
 
 export const FOUNDER_VAULT_SCHEMA_VERSION = 1 as const;
-export const FOUNDER_NODE_APP_VERSION = '0.5.5';
+export const FOUNDER_NODE_APP_VERSION = '0.5.6';
 
 export type FounderVaultMeta = {
   version: typeof FOUNDER_VAULT_SCHEMA_VERSION;
@@ -20,6 +20,18 @@ export type FounderNodeConfig = {
   label: string;
   pairedAt: string;
   ollama?: FounderNodeOllamaConfig;
+  /** Phase 5 — Founder Cloud local stack on this machine. */
+  founderCloud?: FounderCloudMode;
+};
+
+export type FounderCloudMode = {
+  enabled: boolean;
+  repoPath?: string;
+  stackRunning?: boolean;
+  webUrl?: string;
+  apiUrl?: string;
+  lastStartedAt?: string;
+  lastError?: string;
 };
 
 export type FounderNodeHeartbeat = {
@@ -37,6 +49,8 @@ export type FounderNodeHeartbeat = {
   ollamaModel?: string;
   /** Metadata-only IDE context (branch, file names, task label — no file contents). */
   desktopBridge?: DesktopBridgeInput;
+  /** Phase 5 — local Founder Cloud stack status from tray. */
+  founderCloud?: FounderCloudMode;
 };
 
 export type FounderNodeOllamaConfig = {

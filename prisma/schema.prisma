@@ -1648,6 +1648,8 @@ model FounderBuilderSettings {
   platformConnections    Json?
   /** Phase 4 — universal graph (initiative → commit → PR → deploy → update). */
   founderGraph           Json?
+  /** Phase 5 — import wizard + local stack state. */
+  founderCloudState      Json?
   currentGoalFocus       String?
   /** Sprint 1: canonical memory graph (goal, task, blocker, branch, PR) for all AI routes. */
   memoryGraph            Json?

@@ -2778,6 +2778,52 @@ export function checkPlatformConnectionHealth(token: string, provider: string) {
   );
 }
 
+export type FounderCloudStatusResponse = {
+  computePlaneMode: string;
+  onboardingPath: string | null;
+  localStack: {
+    enabled?: boolean;
+    running?: boolean;
+    webUrl?: string;
+    apiUrl?: string;
+    repoPath?: string;
+    nodeLabel?: string;
+    updatedAt?: string;
+  } | null;
+  import: import('@dcf/utils').FounderImportJob | null;
+  importComplete: boolean;
+  nodeOnline: boolean;
+  missionControlUrl: string | null;
+};
+
+export type FounderPublishPlanResponse = import('@dcf/utils').UnifiedPublishPlan & {
+  importComplete: boolean;
+};
+
+export function fetchFounderCloudStatus(token: string) {
+  return apiFetch<FounderCloudStatusResponse>('/founder-os/founder-cloud/status', undefined, token);
+}
+
+export function fetchFounderPublishPlan(token: string) {
+  return apiFetch<FounderPublishPlanResponse>('/founder-os/founder-cloud/publish-plan', undefined, token);
+}
+
+export function fetchImportStatus(token: string) {
+  return apiFetch<{
+    job: import('@dcf/utils').FounderImportJob | null;
+    complete: boolean;
+    summary: string | null;
+  }>('/founder-os/import/status', undefined, token);
+}
+
+export function startFounderImport(token: string) {
+  return apiFetch<import('@dcf/utils').FounderImportJob>(
+    '/founder-os/import/start',
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function connectGitHubRepo(repoFullName: string, token: string) {
   return apiFetch<{ success: boolean; repoFullName: string }>(
     '/founder-os/github/connect',
