@@ -79,26 +79,52 @@ MOMENTUM_FLAT_MAX = 0.01
 FLAT_MOMENTUM_EDGE_FLOOR = 4.8
 FLAT_MOMENTUM_FLOOR_LOW_EDGE = 2.0
 FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
-# v87 multi-lane research — early define (default args on helpers below are evaluated at import)
+# v87+ multi-lane research — early define (default args on helpers below are evaluated at import)
 # Pathway matrix (research_lane × entry_path):
-#   CONTINUOUS / AI_DIRECT — immediate AI limit (no 15m micro await)
-#   STABILITY / MICRO_SR — 15m pivot HL/LH + micro S/R await via latest_candles
-#   GOLDEN_STACK / MICRO_SR — 15m micro + golden-stack gates (spawned from CONTINUOUS/STABILITY)
-# Optional future lanes (not implemented): SHADOW_MIRROR, WIDE_THESIS
+#   CONTINUOUS / AI_DIRECT — frozen Scenario C benchmark
+#   spawn lanes from CONTINUOUS APPROVE — AI_DIRECT + AI_DIRECT_CHASE fill
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
-RESEARCH_LANE_STABILITY = "STABILITY"
-RESEARCH_LANE_GOLDEN_STACK = "GOLDEN_STACK"
+RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"
+RESEARCH_LANE_HIGH_EDGE_RUNNER = "HIGH_EDGE_RUNNER"
+RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
+RESEARCH_LANE_EDGE_ACCELERATION = "EDGE_ACCELERATION"
+RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
+RESEARCH_LANE_SHADOW_RUNNER = "SHADOW_RUNNER"
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
-    RESEARCH_LANE_STABILITY: "AI Stability Research",
-    RESEARCH_LANE_GOLDEN_STACK: "Golden Stack",
+    RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: "High Edge Runner",
+    RESEARCH_LANE_EXTREME_EDGE: "Extreme Edge",
+    RESEARCH_LANE_EDGE_ACCELERATION: "Edge Acceleration",
+    RESEARCH_LANE_EDGE_PLUS_STACK: "Edge Plus Stack",
+    RESEARCH_LANE_SHADOW_RUNNER: "Shadow Runner",
 }
+RESEARCH_SPAWN_LANES = (
+    RESEARCH_LANE_HIGH_EDGE_RUNNER,
+    RESEARCH_LANE_EXTREME_EDGE,
+    RESEARCH_LANE_EDGE_ACCELERATION,
+    RESEARCH_LANE_EDGE_PLUS_STACK,
+)
+AI_DIRECT_RESEARCH_LANES = frozenset({
+    RESEARCH_LANE_CONTINUOUS,
+    RESEARCH_LANE_PROFIT_GATES,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER,
+    RESEARCH_LANE_EXTREME_EDGE,
+    RESEARCH_LANE_EDGE_ACCELERATION,
+    RESEARCH_LANE_EDGE_PLUS_STACK,
+})
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
-    RESEARCH_LANE_STABILITY: threading.Lock(),
-    RESEARCH_LANE_GOLDEN_STACK: threading.Lock(),
+    RESEARCH_LANE_PROFIT_GATES: threading.Lock(),
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
+    RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
+    RESEARCH_LANE_EDGE_ACCELERATION: threading.Lock(),
+    RESEARCH_LANE_EDGE_PLUS_STACK: threading.Lock(),
+    RESEARCH_LANE_SHADOW_RUNNER: threading.Lock(),
 }
-PROFIT_GATES_ENFORCED_DEFAULT = True
+BENCHMARK_PROFILE_ID = "CONTINUOUS_SCENARIO_C_v1"
+PROFIT_GATES_LANE_DEFAULT_ENABLED = False
+PROFIT_GATES_ENFORCED_DEFAULT = PROFIT_GATES_LANE_DEFAULT_ENABLED  # legacy config key alias
 # Profit gates follow dashboard edge/AI thresholds (not hard-coded floors).
 PROFIT_MIN_ENTRY_EDGE = 3.0  # legacy fallback only when dashboard unset
 PROFIT_MIN_AI_PROB = 50
@@ -106,11 +132,8 @@ PROFIT_MIN_LONG_EDGE = 3.0
 RUNNER_BREATHE_MIN_PEAK_PCT = 5.0
 CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED = True
 CONTINUOUS_AI_DEFAULT_ENABLED = True
-AI_STABILITY_DEFAULT_ENABLED = True  # v90: stability lane optional; reduce impact via dashboard toggle
 RESEARCH_AI_TEMPERATURE = 0.0
-AI_STABILITY_TEMPERATURE = 0.0
-AI_STABILITY_LEGACY_TEMPERATURE = 0.4
-AI_STABILITY_CANDLE_ALIGN_SEC = 120
+LEGACY_AI_TEMPERATURE = 0.4
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 REPLAY_MODEL_VERSION = "replay_v1_scorecard"
 REPLAY_MODEL_APPROVE_THRESHOLD = 0.52
@@ -123,8 +146,6 @@ RESEARCH_SOFT_APPROVE_MIN_PROB = int(os.getenv("RESEARCH_SOFT_APPROVE_MIN_PROB",
 AI_RESEARCH_MODE_ENABLED = os.getenv("AI_RESEARCH_MODE", "1").lower() not in ("0", "false", "no")
 MTF_BLOCKING_RESEARCH = False  # MTF informational only in research — no hard reject from MTF
 AI_EXECUTE_TIERS = frozenset({"STRONG_APPROVE", "APPROVE", "SOFT_APPROVE"})
-GOLDEN_STACK_DEFAULT_ENABLED = True
-
 def get_weak_setup_min_edge() -> float:
     """Post-AI WEAK_SETUP floor; defaults to dashboard edge threshold (keeps UI and execution aligned)."""
     raw = (os.getenv("WEAK_SETUP_MIN_EDGE") or "").strip()
@@ -549,6 +570,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
         "original_limit_price": order.get("original_limit_price") or order.get("planned_limit_price"),
         "last_chase_ts": order.get("last_chase_ts") or signal.get("last_chase_ts"),
+        "exit_config": copy.deepcopy(signal.get("exit_config") or get_exit_config_for_lane(signal.get("research_lane"))),
     }
 
 def compute_live_factor_scores(mc: dict):
@@ -993,12 +1015,22 @@ def capture_entry_gate_snapshot(signal: dict, ai: dict, edge_score: float, featu
         "research_adx_min": RESEARCH_ADX_MIN if research_max else None,
     }
 
-def get_exit_config_snapshot() -> dict:
+def get_exit_config_snapshot(research_lane: str = None) -> dict:
     """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
+    lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
+    if lane == RESEARCH_LANE_HIGH_EDGE_RUNNER:
+        ladder = TRAIL_LADDER_RUNNER
+        profile_id = RUNNER_EXIT_PROFILE_ID
+        scenario_c = False
+    else:
+        ladder = TRAIL_LADDER_SCENARIO_C
+        profile_id = BENCHMARK_PROFILE_ID
+        scenario_c = SCENARIO_C_EXIT_PROFILE
     return {
-        "trail_ladder": TRAIL_LADDER,
-        "ladder_first_trigger_pct": TRAIL_LADDER[0][0],
-        "ladder_first_lock_pct": TRAIL_LADDER[0][1],
+        "trail_ladder": ladder,
+        "ladder_first_trigger_pct": ladder[0][0],
+        "ladder_first_lock_pct": ladder[0][1],
+        "exit_profile_id": profile_id,
         "peak_never_loser_min_peak": PEAK_NEVER_LOSER_MIN_PEAK,
         "peak_never_loser_floor": PEAK_NEVER_LOSER_FLOOR,
         "thesis_fast_exit_unreal_pct": THESIS_FAST_EXIT_UNREAL_PCT,
@@ -1010,7 +1042,7 @@ def get_exit_config_snapshot() -> dict:
         "early_fail_pct_threshold": EARLY_FAIL_PCT_THRESHOLD,
         "type_a_first_candle_enabled": TYPE_A_FIRST_CANDLE_ENABLED,
         "type_a_early_fail_enabled": TYPE_A_EARLY_FAIL_ENABLED,
-        "scenario_c_exit_profile": SCENARIO_C_EXIT_PROFILE,
+        "scenario_c_exit_profile": scenario_c,
         "type_a_stall_enabled": TYPE_A_STALL_ENABLED,
         "type_a_stall_min_age_sec": TYPE_A_STALL_MIN_AGE_SEC,
         "type_a_stall_min_candles": TYPE_A_STALL_MIN_CANDLES,
@@ -1021,11 +1053,16 @@ def get_exit_config_snapshot() -> dict:
     }
 
 
-def get_profit_lock_floor(peak_pct: float):
-    if peak_pct is None or peak_pct < TRAIL_LADDER[0][0]:
+def get_exit_config_for_lane(research_lane: str) -> dict:
+    return get_exit_config_snapshot(research_lane)
+
+
+def get_profit_lock_floor(peak_pct: float, trail_ladder=None):
+    ladder = trail_ladder or TRAIL_LADDER
+    if peak_pct is None or peak_pct < ladder[0][0]:
         return None
     floor = None
-    for trigger, lock in TRAIL_LADDER:
+    for trigger, lock in ladder:
         if peak_pct >= trigger:
             floor = lock
     if peak_pct >= PEAK_NEVER_LOSER_MIN_PEAK:
@@ -1114,8 +1151,13 @@ def compute_trend_health(direction_hint: str = None) -> dict:
         state["trend_health_last_diag"] = copy.deepcopy(result)
     return result
 
+def _position_trail_ladder(pos: dict):
+    exit_cfg = pos.get("exit_config") or {}
+    return exit_cfg.get("trail_ladder") or TRAIL_LADDER
+
+
 def _effective_profit_lock_floor(pos: dict, peak_pct: float):
-    floor = get_profit_lock_floor(peak_pct)
+    floor = get_profit_lock_floor(peak_pct, _position_trail_ladder(pos))
     if floor is None:
         return None
     tighten = 0.0
@@ -1389,17 +1431,22 @@ def count_directional_exposure(direction: str) -> int:
         )
     return open_n + pending_n
 
-def is_clustered_entry(direction: str, price: float) -> bool:
+def is_clustered_entry(direction: str, price: float, lane: str = None) -> bool:
     if price is None or price <= 0:
         return False
+    lane_only = lane if (_sole_ai_research_mode() and lane) else None
     with trade_lock:
         for p in open_positions:
+            if lane_only and p.get("research_lane") != lane_only:
+                continue
             if p.get("dir") == direction:
                 entry = p.get("entry", 0)
                 if entry > 0 and abs(price - entry) / entry < CLUSTER_MIN_DIST_PCT:
                     return True
         for o in pending_orders:
             if o.get("status") != "PENDING":
+                continue
+            if lane_only and o.get("research_lane") != lane_only:
                 continue
             side = (o.get("side") or o.get("signal_dir", "")).upper()
             if side != direction:
@@ -1540,13 +1587,9 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
         return None, f"CONVICTION_SPREAD_LOW_{spread}"
     mc = ctx.get("market_context") or {}
     adx = float((mc.get("trend_strength") or {}).get("adx") or 0)
-    if golden_stack_enabled():
-        if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
-            # v1.1.24: GS ADX dead-zone is log-only on CONTINUOUS research — do not block limit placement.
-            if research_sim or research_max:
-                pass
-            else:
-                return None, f"ADX_BAND_{adx:.1f}"
+    if GOLDEN_STACK_ADX_BLOCK_LOW <= adx < GOLDEN_STACK_ADX_BLOCK_HIGH:
+        if not (research_sim or research_max):
+            return None, f"ADX_BAND_{adx:.1f}"
     elif adx < ADX_BLOCK_NEW_ENTRY:
         if research_max or research_sim:
             pass
@@ -1555,9 +1598,7 @@ def resolve_entry_margin_usdt(direction: str, ai: dict, ctx: dict):
     sig_stub = {"micro_structure_eval": (ctx.get("market_context") or {}).get("market_structure")}
     health = state.get("trend_health") or {}
     ctx_penalty = spread_context_penalty_active(spread, direction, signal=sig_stub, health=health)
-    penalty_mult = 1.0 if golden_stack_enabled() else (
-        SPREAD_PENALTY_MARGIN_MULT if ctx_penalty else 1.0
-    )
+    penalty_mult = SPREAD_PENALTY_MARGIN_MULT if ctx_penalty else 1.0
     if FLAT_MARGIN_EVERY_TRADE:
         margin = round(float(FIXED_MARGIN_USDT) * penalty_mult, 4)
         if ctx_penalty:
@@ -1677,13 +1718,24 @@ def evaluate_evidence_entry_filter(
             return True, f"{direction}_MOMENTUM_CHOP_{mom:.2f}"
     return False, None
 
-def golden_stack_enabled() -> bool:
-    with state_lock:
-        return bool(state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED))
+def research_ai_temperature() -> float:
+    """Research lanes use temp=0 for reproducible cross-lane comparison."""
+    if is_research_data_collection():
+        return RESEARCH_AI_TEMPERATURE
+    return LEGACY_AI_TEMPERATURE
 
-def ai_stability_research_enabled() -> bool:
-    with state_lock:
-        return bool(state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED))
+def research_config_for_dashboard() -> dict:
+    return {
+        "temperature": RESEARCH_AI_TEMPERATURE,
+        "legacy_temperature": LEGACY_AI_TEMPERATURE,
+        "candle_interval_sec": CANDLE_INTERVAL_SEC,
+        "replay_model_version": REPLAY_MODEL_VERSION,
+        "replay_approve_threshold": REPLAY_MODEL_APPROVE_THRESHOLD,
+        "ai_input_log_file": AI_INPUT_LOG_FILE,
+        "continuous_ai_enabled": continuous_ai_research_enabled(),
+        "continuous_lane": RESEARCH_LANE_CONTINUOUS,
+        "lane_labels": RESEARCH_LANE_LABELS,
+    }
 
 def continuous_ai_research_enabled() -> bool:
     with state_lock:
@@ -1766,53 +1818,6 @@ def ensure_lane_signal_capacity(lane: str) -> bool:
     max_active = get_effective_max_active_signals()
     return not _is_at_signal_capacity(max_active, lane=lane)
 
-def research_ai_temperature() -> float:
-    """Research lanes use temp=0 for reproducible cross-lane comparison."""
-    if is_research_data_collection():
-        return RESEARCH_AI_TEMPERATURE
-    return AI_STABILITY_LEGACY_TEMPERATURE
-
-def ai_stability_config_for_dashboard() -> dict:
-    return {
-        "temperature": RESEARCH_AI_TEMPERATURE,
-        "legacy_temperature": AI_STABILITY_LEGACY_TEMPERATURE,
-        "candle_align_sec": AI_STABILITY_CANDLE_ALIGN_SEC,
-        "candle_interval_sec": CANDLE_INTERVAL_SEC,
-        "replay_model_version": REPLAY_MODEL_VERSION,
-        "replay_approve_threshold": REPLAY_MODEL_APPROVE_THRESHOLD,
-        "ai_input_log_file": AI_INPUT_LOG_FILE,
-        "continuous_ai_enabled": continuous_ai_research_enabled(),
-        "stability_lane": RESEARCH_LANE_STABILITY,
-        "continuous_lane": RESEARCH_LANE_CONTINUOUS,
-        "golden_stack_lane": RESEARCH_LANE_GOLDEN_STACK,
-        "lane_labels": RESEARCH_LANE_LABELS,
-    }
-
-def is_candle_aligned_ai_window(ts: float = None) -> bool:
-    """True in the first N seconds after each 15m bucket rollover (post-close window)."""
-    now = float(ts or time.time())
-    return (now % CANDLE_INTERVAL_SEC) < AI_STABILITY_CANDLE_ALIGN_SEC
-
-def ai_candle_bucket_available() -> bool:
-    bucket = _edge_candle_bucket()
-    with state_lock:
-        return bucket > int(state.get("last_ai_candle_bucket", -1))
-
-def mark_ai_candle_bucket_used():
-    with state_lock:
-        state["last_ai_candle_bucket"] = _edge_candle_bucket()
-
-def ai_stability_candle_gate_ok() -> tuple:
-    if not ai_stability_research_enabled():
-        return True, "BUNDLE_OFF"
-    if not is_candle_aligned_ai_window():
-        elapsed = time.time() % CANDLE_INTERVAL_SEC
-        wait = int(CANDLE_INTERVAL_SEC - elapsed)
-        return False, f"CANDLE_ALIGN_WAIT_{wait}s"
-    if not ai_candle_bucket_available():
-        return False, "CANDLE_BUCKET_USED"
-    return True, "CANDLE_ALIGNED"
-
 def _ai_context_fingerprint(ctx: dict) -> str:
     try:
         payload = json.dumps(ctx, sort_keys=True, default=str)
@@ -1894,8 +1899,6 @@ def log_ai_input_full(
             "candle_bucket": _edge_candle_bucket(),
             "candle_15m_elapsed_pct": _candle_15m_elapsed_pct(),
             "continuous_ai_enabled": continuous_ai_research_enabled(),
-            "ai_stability_enabled": ai_stability_research_enabled(),
-            "golden_stack_enabled": golden_stack_enabled(),
             "temperature": temperature,
             "trigger_reason": trigger_reason or state.get("debug_state", {}).get("edge_trigger_reason"),
             "context_fingerprint": _ai_context_fingerprint(ctx),
@@ -1990,7 +1993,7 @@ def capture_golden_stack_eval(signal: dict, ai: dict, edge_score: float, feature
     regime = capture_entry_regime_snapshot(signal, features)
     funding_bucket = regime.get("funding_bucket") or _funding_bucket(state.get("funding") or {})
     checks = {
-        "enabled": golden_stack_enabled(),
+        "enabled": True,
         "chop_max": gs_thr["chop_max"],
         "mom": mom,
         "chop_pass": mom <= gs_thr["chop_max"] + 1e-9,
@@ -2103,32 +2106,17 @@ def evaluate_golden_stack_filter(
     return False, None
 
 def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
-    """Return True if process_signal should return after a golden-stack gate hit."""
+    """Golden-stack eval is log-only — never blocks benchmark/spawn lanes (EDGE_PLUS_STACK gates at spawn)."""
     trade_id = signal.get("trade_id")
     tag = f"GOLDEN_STACK_{reason}"
     gs_eval = signal.get("golden_stack_eval") or {}
     log_golden_stack_rejection(signal, ai, gs_eval, edge_score, block_reason=reason)
-    if is_research_data_collection() and not (profit_gates_enforced() and golden_stack_enabled()):
-        _research_log_would_block(signal, ai, tag, edge_score)
-        if trade_id:
-            defer_shadow_research(trade_id, tag)
-        return False
-    if golden_stack_enabled():
-        logger.info(f"[GOLDEN_STACK] BLOCK {reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-        log_blocked_signal(signal, ai, tag)
-        log_pipeline_event("POST_AI", "BLOCKED", tag, trade_id, edge_score, force=True)
-        exit_pipeline(signal, ai, tag)
-        with state_lock:
-            state["debug_state"]["last_block_reason"] = tag
-            state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-            state["debug_state"]["skip_reason"] = tag
-        update_debug_state_always(tag, {"edge": edge_score, "golden_stack": True})
-        return True
-    if _sole_ai_research_mode():
+    if is_research_data_collection():
         _research_log_would_block(signal, ai, tag, edge_score)
         return False
     logger.info(f"[GOLDEN_STACK] BLOCK {reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
     log_blocked_signal(signal, ai, tag)
+    log_pipeline_event("POST_AI", "BLOCKED", tag, trade_id, edge_score, force=True)
     exit_pipeline(signal, ai, tag)
     with state_lock:
         state["debug_state"]["last_block_reason"] = tag
@@ -2276,8 +2264,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
 
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
+    ladder = _position_trail_ladder(pos)
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
-    if lock_floor is not None and peak >= TRAIL_LADDER[0][0] and unreal_pct <= lock_floor:
+    if lock_floor is not None and peak >= ladder[0][0] and unreal_pct <= lock_floor:
         entry = float(pos.get("entry") or 0)
         logger.info(
             f"[EXIT TRIGGER] PROFIT_LOCK_LADDER trade_id={pos.get('trade_id')} peak={peak:.1f}% "
@@ -2648,7 +2637,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.35-adx-research-execute-2026-06-16"
+ANALYZER_SYNC_ID = "v9.39-research-lanes-2026-06-17"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -3672,7 +3661,7 @@ def fills_first_continuous_enabled(signal: dict = None) -> bool:
     if not is_research_data_collection():
         return False
     lane = (signal or {}).get("research_lane", RESEARCH_LANE_CONTINUOUS)
-    return lane == RESEARCH_LANE_CONTINUOUS
+    return lane in AI_DIRECT_RESEARCH_LANES
 
 
 def resolve_ai_direct_limit(direction: str, price: float, trade_planner: dict) -> tuple:
@@ -4112,9 +4101,15 @@ CANDLE_INTERVAL_SEC = 15 * 60
 FIXED_TIME_EXIT_ENABLED = False
 EMERGENCY_MAX_HOLD_SEC = 24 * 3600
 # v1.1.21 Scenario C: first rung 12→8% (replay-optimal risk-adjusted profile)
-TRAIL_LADDER = [
+TRAIL_LADDER_SCENARIO_C = [
     (12, 8), (15, 10), (25, 18), (40, 28),
 ]
+# Runner variant — wider first rung for high-edge continuation trades
+TRAIL_LADDER_RUNNER = [
+    (18, 14), (25, 18), (40, 28), (55, 38),
+]
+TRAIL_LADDER = TRAIL_LADDER_SCENARIO_C
+RUNNER_EXIT_PROFILE_ID = "HIGH_EDGE_RUNNER_v1"
 SCENARIO_C_EXIT_PROFILE = True
 TYPE_A_FIRST_CANDLE_ENABLED = not SCENARIO_C_EXIT_PROFILE
 TYPE_A_EARLY_FAIL_ENABLED = not SCENARIO_C_EXIT_PROFILE
@@ -4170,14 +4165,22 @@ MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
 _LANE_DUPLICATE_TOL_USD = {
-    RESEARCH_LANE_STABILITY: 10.0,
     RESEARCH_LANE_CONTINUOUS: 15.0,
-    RESEARCH_LANE_GOLDEN_STACK: 20.0,
+    RESEARCH_LANE_PROFIT_GATES: 15.0,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
+    RESEARCH_LANE_EXTREME_EDGE: 15.0,
+    RESEARCH_LANE_EDGE_ACCELERATION: 15.0,
+    RESEARCH_LANE_EDGE_PLUS_STACK: 15.0,
+    RESEARCH_LANE_SHADOW_RUNNER: 15.0,
 }
 _LANE_LIMIT_OFFSET_USD = {
-    RESEARCH_LANE_STABILITY: 0.0,
     RESEARCH_LANE_CONTINUOUS: 5.0,
-    RESEARCH_LANE_GOLDEN_STACK: 10.0,
+    RESEARCH_LANE_PROFIT_GATES: 5.0,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: 5.0,
+    RESEARCH_LANE_EXTREME_EDGE: 5.0,
+    RESEARCH_LANE_EDGE_ACCELERATION: 5.0,
+    RESEARCH_LANE_EDGE_PLUS_STACK: 5.0,
+    RESEARCH_LANE_SHADOW_RUNNER: 5.0,
 }
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
@@ -4202,9 +4205,8 @@ MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden 
 RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
 RESEARCH_FREE_RUN_DISABLE_CHOP_GATE = True
 RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN = True
-RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; gates log-only unless golden_stack_enabled
-# v86 Golden Stack — dashboard toggle; edge/AI thresholds remain dashboard-controlled
-GOLDEN_STACK_DEFAULT_ENABLED = True
+RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; post-AI gates log-only except PROFIT_GATES spawn
+# Golden Stack eval thresholds (EDGE_PLUS_STACK spawn gate — not a separate lane)
 GOLDEN_STACK_CHOP_MAX = 0.8
 GOLDEN_STACK_ADX_MIN = 15.0
 GOLDEN_STACK_ADX_ALT_MAX = 20.0
@@ -4385,7 +4387,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.24-fills-first-v105"
+EXECUTION_FIX_VERSION = "v1.1.28-research-lanes-v109"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4456,12 +4458,11 @@ state = {
     "force_ai_every_signal": False,
     "debug_enabled": False,
     "fresh_collection_mode": False,
-    "golden_stack_enabled": GOLDEN_STACK_DEFAULT_ENABLED,
+    "profit_gates_lane_enabled": PROFIT_GATES_LANE_DEFAULT_ENABLED,
     "profit_gates_enforced": PROFIT_GATES_ENFORCED_DEFAULT,
     "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
     "golden_stack_last_eval": None,
     "golden_stack_last_block_reason": None,
-    "ai_stability_research_enabled": AI_STABILITY_DEFAULT_ENABLED,
     "continuous_ai_research_enabled": CONTINUOUS_AI_DEFAULT_ENABLED,
     "research_ai_cooldown_sec": None,
     "limit_chase_start_sec": None,
@@ -4472,8 +4473,6 @@ state = {
     "smart_submit_enabled": SMART_SUBMIT_ENABLED_DEFAULT,
     "smart_submit_reanchor_pct": SMART_SUBMIT_REANCHOR_PCT_DEFAULT,
     "duplicate_limit_block_enabled": DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT,
-    "last_ai_candle_bucket": -1,
-    "last_stability_ai_ts": 0.0,
     "last_replay_model_eval": None,
     "last_fresh_reset_ts": 0.0,
     "last_fresh_reset_summary": "",
@@ -4567,7 +4566,6 @@ state = {
     "system_ready_logged": False,
     "ai_skipped_signals": 0,
     "ai_call_count": 0,
-    "stability_ai_call_count": 0,
     "signals_last_hour": 0,
     "last_ai_confidence": 0.0,
     "ready_since": 0.0,
@@ -4725,7 +4723,7 @@ def enforce_edge_threshold_options():
     with state_lock:
         current = round(state["edge_threshold"], 1)
         research_collect = state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
-        if research_collect and RESEARCH_AI_SOLE_AUTHORITY and not profit_gates_enforced():
+        if research_collect and RESEARCH_AI_SOLE_AUTHORITY:
             fallback = 0.0
         else:
             fallback = RESEARCH_EDGE_THRESHOLD_DEFAULT if research_collect else 3.0
@@ -4837,6 +4835,8 @@ def should_trigger_edge_event(edge_score: float) -> tuple:
             with state_lock:
                 state["edge_trigger_armed"] = False
                 state["last_edge_trigger_candle_bucket"] = candle_bucket
+                state["last_edge_trigger_prev"] = prev
+                state["last_edge_trigger_score"] = edge_score
             if prev < eff_thr:
                 reason = "EDGE_CROSS"
             elif spike:
@@ -4855,30 +4855,58 @@ def should_trigger_edge_event(edge_score: float) -> tuple:
         return True, "EDGE_PASS"
     return True, "EDGE_PASS"
 
-def profit_gates_enforced() -> bool:
-    """When True, post-AI gates block execution (edge≥3, AI≥55, golden stack) instead of log-only."""
+def is_profit_gates_lane(research_lane) -> bool:
+    return str(research_lane or "") == RESEARCH_LANE_PROFIT_GATES
+
+
+def profit_gates_lane_enabled() -> bool:
+    """Spawn lane toggle — PROFIT_GATES lane with hard post-AI filters (not global pipeline mode)."""
     with state_lock:
+        if "profit_gates_lane_enabled" in state:
+            return bool(state.get("profit_gates_lane_enabled"))
         if "profit_gates_enforced" in state:
             return bool(state.get("profit_gates_enforced"))
-    return PROFIT_GATES_ENFORCED_DEFAULT
+    return PROFIT_GATES_LANE_DEFAULT_ENABLED
 
 
-def _post_ai_gate_blocks(sole: bool) -> bool:
-    return profit_gates_enforced() or not sole
+def profit_gates_enforced() -> bool:
+    """API compat — reflects PROFIT_GATES spawn lane toggle only (not global pipeline mode)."""
+    return profit_gates_lane_enabled()
 
 
-def evaluate_profitability_entry_gates(signal: dict, ai: dict, edge_score: float) -> tuple:
-    """Profit gates mirror dashboard edge/AI thresholds — no extra AI floor above toggle."""
-    if not profit_gates_enforced():
-        return False, None
+def _post_ai_gate_blocks(sole: bool, research_lane=None) -> bool:
+    if is_research_data_collection():
+        return is_profit_gates_lane(research_lane)
+    return not sole
+
+
+def _research_execute_log_only(research_lane=None) -> bool:
+    """Research sim: WOULD_FAIL/CLUSTER log-only on benchmark lanes; hard enforce on PROFIT_GATES."""
+    if not is_research_data_collection():
+        return False
+    if is_profit_gates_lane(research_lane):
+        return False
+    return not state.get("live_armed")
+
+
+def evaluate_profitability_entry_gates(
+    signal: dict, ai: dict, edge_score: float, research_lane=None
+) -> tuple:
+    """Profit gates mirror dashboard edge/AI thresholds — hard block only on PROFIT_GATES lane in research."""
     edge_score = round(float(edge_score or 0), 1)
     edge_min = round(float(get_edge_threshold()), 1)
     if edge_score < edge_min:
-        return True, f"PROFIT_GATE_EDGE_LT_{edge_min}"
+        reason = f"PROFIT_GATE_EDGE_LT_{edge_min}"
+        if is_research_data_collection():
+            return is_profit_gates_lane(research_lane), reason
+        return True, reason
     prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
     ai_min = round(float(get_ai_threshold()), 1)
     if prob < ai_min:
-        return True, f"PROFIT_GATE_AI_LT_{ai_min}"
+        reason = f"PROFIT_GATE_AI_LT_{ai_min}"
+        if is_research_data_collection():
+            return is_profit_gates_lane(research_lane), reason
+        return True, reason
     return False, None
 
 
@@ -4898,9 +4926,13 @@ def _exit_post_ai_profit_gate(signal, ai, reason: str, edge_score: float, sole: 
 
 
 def _sole_ai_research_mode() -> bool:
-    if profit_gates_enforced():
-        return False
+    """Independent research lanes — CONTINUOUS benchmark frozen; post-AI gates log-only except PROFIT_GATES spawn."""
     return RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection()
+
+
+def research_lanes_independent() -> bool:
+    """True when research lanes use per-lane capacity and no cross-lane blocks."""
+    return _sole_ai_research_mode()
 
 
 def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
@@ -7788,12 +7820,130 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     except Exception as e:
         logger.error(f"[AI TRANCHE] {e}")
 
-def spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Independent GOLDEN_STACK lane — real execution when gates pass (never blocks other lanes)."""
-    if not golden_stack_enabled() or not is_research_data_collection():
+_SPAWN_LANE_ID_PREFIX = {
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: "her",
+    RESEARCH_LANE_EXTREME_EDGE: "xedge",
+    RESEARCH_LANE_EDGE_ACCELERATION: "eacc",
+    RESEARCH_LANE_EDGE_PLUS_STACK: "eps",
+    RESEARCH_LANE_SHADOW_RUNNER: "shrun",
+    RESEARCH_LANE_PROFIT_GATES: "pg",
+}
+
+SHADOW_RUNNER_HORIZON_SECS = {
+    "15m": 900,
+    "30m": 1800,
+    "60m": 3600,
+    "90m": 5400,
+}
+
+
+def _golden_stack_pass_for_spawn(final_direction, ctx, ai, features, edge_score, signal_stub=None) -> tuple:
+    probe = signal_stub or {
+        "final_direction": final_direction,
+        "signal_price": nz(state.get("price")),
+        "trade_id": f"gs-probe-{uuid.uuid4().hex[:8]}",
+        "features": features or {},
+        "context": ctx,
+        "trade_planner": copy.deepcopy((ai or {}).get("trade_planner") or {}),
+    }
+    if not probe.get("entry_mode"):
+        compute_continuous_ai_direct_entry(probe)
+    blocked, reason = evaluate_golden_stack_filter(
+        final_direction, ctx, ai, features, edge_score, probe,
+    )
+    return not blocked, reason
+
+
+def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target_lane: str, trigger_reason: str):
+    if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
         return
-    if ai.get("decision") != "APPROVE":
+    if not is_research_data_collection():
         return
+    prefix = _SPAWN_LANE_ID_PREFIX.get(target_lane, "lane")
+    spawn_ctx = copy.deepcopy(ctx)
+    spawn_ctx["trade_id"] = f"{prefix}-{uuid.uuid4().hex[:12]}"
+    spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
+    logger.info(
+        f"[{target_lane} LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
+        f"reason={trigger_reason} [PIPELINE ENFORCEMENT]"
+    )
+    process_signal({
+        "event_trigger": True,
+        "research_lane": target_lane,
+        "edge_trigger_reason": trigger_reason,
+        "edge_score": round(float(edge_score), 1),
+        "price": nz(state.get("price")),
+        "timestamp": utc_iso(),
+        "features": features or {},
+        "skip_ai": True,
+        "pre_ai": copy.deepcopy(ai),
+        "pre_ctx": spawn_ctx,
+    })
+
+
+def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
+    """Shadow-only horizon study — no orders submitted."""
+    if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
+        return
+    if not is_research_data_collection():
+        return
+    edge = round(float(edge_score), 1)
+    if edge < 3.5:
+        return
+    direction = str(ai.get("direction") or "LONG").upper()
+    if state.get("invert_signal", False):
+        direction = "SHORT" if direction == "LONG" else "LONG" if direction == "SHORT" else direction
+    price = float(nz(state.get("price")) or 0)
+    if price <= 0:
+        return
+    study_id = f"shrun-{uuid.uuid4().hex[:12]}"
+    with state_lock:
+        edge_prev = round(float(state.get("last_edge_trigger_prev", state.get("edge_prev", 0)) or 0), 1)
+    row = {
+        "schema": "shadow_runner_v1",
+        "ts": utc_iso(),
+        "study_id": study_id,
+        "trade_id": study_id,
+        "source_lane": source_lane,
+        "research_lane": RESEARCH_LANE_SHADOW_RUNNER,
+        "direction": direction,
+        "price": price,
+        "edge_score": edge,
+        "edge_previous": edge_prev,
+        "volume_ratio": float((features or {}).get("volume_ratio") or 0),
+        "ai_win_prob": ai.get("win_prob"),
+        "horizon_secs": SHADOW_RUNNER_HORIZON_SECS,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }
+    _safe_append_jsonl("shadow_runner_study.jsonl", row, label="SHADOW_RUNNER")
+    start_replay_buffer(
+        study_id,
+        price,
+        lane=RESEARCH_LANE_SHADOW_RUNNER,
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(FIXED_MARGIN_USDT),
+        source_trade_id=ctx.get("trade_id"),
+        edge_score=edge,
+        horizon_secs=SHADOW_RUNNER_HORIZON_SECS,
+        exit_config=get_exit_config_snapshot(RESEARCH_LANE_CONTINUOUS),
+    )
+    logger.info(
+        f"[SHADOW_RUNNER] horizon study started study_id={study_id} edge={edge} "
+        f"horizons=+15/+30/+60/+90m [PIPELINE ENFORCEMENT]"
+    )
+
+
+def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, features, source_lane: str):
+    """Spawn experiment lanes from CONTINUOUS APPROVE (independent execution paths)."""
+    if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
+        return
+    if not is_research_data_collection():
+        return
+    edge = round(float(edge_score), 1)
+    vol_ratio = float((features or {}).get("volume_ratio") or compute_volume_ratio() or 0)
+    with state_lock:
+        edge_prev = round(float(state.get("last_edge_trigger_prev", state.get("edge_prev", 0)) or 0), 1)
     ai_direction = ai.get("direction")
     final_direction = ai_direction
     if state.get("invert_signal", False):
@@ -7801,123 +7951,66 @@ def spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, source_lan
             final_direction = "SHORT"
         elif ai_direction == "SHORT":
             final_direction = "LONG"
-    gs_probe = {
-        "final_direction": final_direction,
-        "signal_price": nz(state.get("price")),
-        "trade_id": f"gs-probe-{uuid.uuid4().hex[:8]}",
-        "features": features or {},
-        "context": ctx,
-    }
-    compute_micro_sr_entry(gs_probe)
-    gs_blocked, gs_reason = evaluate_golden_stack_filter(
-        final_direction,
-        ctx,
-        ai,
-        features,
-        edge_score,
-        gs_probe,
-    )
-    gs_eval = capture_golden_stack_eval(gs_probe, ai, edge_score, features)
-    gs_probe["golden_stack_eval"] = gs_eval
-    if gs_blocked:
-        gs_price = float(nz(state.get("price")) or 0)
-        if gs_price > 0:
-            start_replay_buffer(
-                gs_probe["trade_id"],
-                gs_price,
-                lane="golden_stack_reject",
-                direction=final_direction,
-                leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-                margin_usdt=float(FIXED_MARGIN_USDT),
-                block_reason=gs_reason,
-                failed_by=gs_eval.get("would_fail") or golden_stack_would_fail_list(gs_eval),
+
+    if edge >= 3.5 and vol_ratio >= 1.5:
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_HIGH_EDGE_RUNNER, "HIGH_EDGE_RUNNER_FROM_CONTINUOUS",
+        )
+    if edge >= 4.5:
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_EXTREME_EDGE, "EXTREME_EDGE_FROM_CONTINUOUS",
+        )
+    if edge >= 3.0 and edge > edge_prev:
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_EDGE_ACCELERATION, "EDGE_ACCELERATION_FROM_CONTINUOUS",
+        )
+    if edge >= 3.5:
+        gs_pass, gs_reason = _golden_stack_pass_for_spawn(
+            final_direction, ctx, ai, features, edge_score,
+        )
+        if gs_pass:
+            _spawn_research_lane(
+                ctx, ai, edge_score, features, source_lane,
+                RESEARCH_LANE_EDGE_PLUS_STACK, "EDGE_PLUS_STACK_FROM_CONTINUOUS",
             )
-        log_golden_stack_rejection(
-            gs_probe, ai, gs_eval, edge_score, block_reason=gs_reason, executed=False
-        )
-        logger.info(
-            f"[GOLDEN_STACK LANE] skip spawn — {gs_reason} failed_by={gs_eval.get('would_fail')} "
-            f"source={source_lane} [PIPELINE ENFORCEMENT]"
-        )
-        with state_lock:
-            state["golden_stack_last_block_reason"] = gs_reason
+        else:
+            logger.info(
+                f"[EDGE_PLUS_STACK] skip spawn — GS fail {gs_reason} edge={edge} [PIPELINE ENFORCEMENT]"
+            )
+    spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
+    spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane)
+
+
+def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
+    """Independent PROFIT_GATES lane — hard post-AI filters on spawn (never blocks other lanes)."""
+    if not profit_gates_lane_enabled() or not is_research_data_collection():
         return
-    gs_ctx = copy.deepcopy(ctx)
-    gs_ctx["trade_id"] = f"gs-{uuid.uuid4().hex[:12]}"
+    if source_lane == RESEARCH_LANE_PROFIT_GATES:
+        return
+    if ai.get("decision") != "APPROVE":
+        return
+    pg_ctx = copy.deepcopy(ctx)
+    pg_ctx["trade_id"] = f"pg-{uuid.uuid4().hex[:12]}"
     logger.info(
-        f"[GOLDEN_STACK LANE] spawn execution from {source_lane} trade_id={gs_ctx['trade_id']} "
+        f"[PROFIT_GATES LANE] spawn execution from {source_lane} trade_id={pg_ctx['trade_id']} "
         f"[PIPELINE ENFORCEMENT]"
     )
     process_signal({
         "event_trigger": True,
-        "research_lane": RESEARCH_LANE_GOLDEN_STACK,
-        "edge_trigger_reason": f"GOLDEN_STACK_FROM_{source_lane}",
+        "research_lane": RESEARCH_LANE_PROFIT_GATES,
+        "edge_trigger_reason": f"PROFIT_GATES_FROM_{source_lane}",
         "edge_score": round(float(edge_score), 1),
         "price": nz(state.get("price")),
         "timestamp": utc_iso(),
         "features": features or {},
         "skip_ai": True,
         "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": gs_ctx,
+        "pre_ctx": pg_ctx,
     })
 
-
-def maybe_run_stability_research_ai():
-    """Independent STABILITY lane: candle-aligned DeepSeek + real execution on APPROVE."""
-    if not ai_stability_research_enabled() or not is_research_data_collection():
-        return
-    ok, reason = ai_stability_candle_gate_ok()
-    if not ok:
-        return
-    with state_lock:
-        if not state.get("system_ready") or not state.get("price"):
-            return
-        snap = copy.deepcopy(state)
-    buffers = {
-        "ret_1m": ret_1m_buffer,
-        "ret_5m": ret_5m_buffer,
-        "velocity": velocity_buffer,
-        "volume": volume_buffer,
-        "delta": delta_buffer,
-        "delta_change": delta_change_buffer,
-        "imbalance": imbalance_buffer,
-        "candle_range": candle_range_buffer,
-        "body_ratio": body_ratio_buffer,
-        "wick_ratio": wick_ratio_buffer,
-    }
-    ctx = build_pure_ai_context(snap, buffers)
-    if not ctx:
-        return
-    edge_score = float(state.get("last_edge") or 0)
-    if round(edge_score, 1) <= 0.0:
-        return
-    ctx["trade_id"] = f"stab-{uuid.uuid4().hex[:12]}"
-    ctx["edge_score"] = edge_score
-    logger.info(
-        f"[AI STABILITY LANE] live call bucket={_edge_candle_bucket()} "
-        f"elapsed={_candle_15m_elapsed_pct():.2f} [PIPELINE ENFORCEMENT]"
-    )
-    ai = evaluate_signal_with_ai(
-        ctx,
-        research_lane=RESEARCH_LANE_STABILITY,
-        shadow_only=False,
-        trigger_reason="CANDLE_ALIGNED_STABILITY",
-    )
-    if not ai or ai.get("decision") != "APPROVE":
-        return
-    features = build_full_feature_snapshot() or {}
-    process_signal({
-        "event_trigger": True,
-        "research_lane": RESEARCH_LANE_STABILITY,
-        "edge_trigger_reason": "CANDLE_ALIGNED_STABILITY",
-        "edge_score": round(edge_score, 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features,
-        "skip_ai": True,
-        "pre_ai": ai,
-        "pre_ctx": ctx,
-    })
 
 def evaluate_signal_with_ai(
     raw_context: dict,
@@ -8056,13 +8149,7 @@ def evaluate_signal_with_ai(
             debug_snapshot(None, ai_result, "POST_AI_EVAL")
         if not ai_result.get("ai_error"):
             with state_lock:
-                if research_lane == RESEARCH_LANE_STABILITY:
-                    state["stability_ai_call_count"] = state.get("stability_ai_call_count", 0) + 1
-                    state["last_stability_ai_ts"] = time.time()
-                else:
-                    state["ai_call_count"] = state.get("ai_call_count", 0) + 1
-        if research_lane == RESEARCH_LANE_STABILITY:
-            mark_ai_candle_bucket_used()
+                state["ai_call_count"] = state.get("ai_call_count", 0) + 1
         if is_research_data_collection():
             log_ai_input_full(
                 ctx, ai_result, replay_eval, temperature, trigger_reason,
@@ -8110,10 +8197,7 @@ def evaluate_signal_with_ai(
                 state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
             _sync_ai_dashboard_debug(ai_result)
         with state_lock:
-            if research_lane == RESEARCH_LANE_STABILITY:
-                state["stability_ai_call_count"] = state.get("stability_ai_call_count", 0) + 1
-            else:
-                state["ai_call_count"] = state.get("ai_call_count", 0) + 1
+            state["ai_call_count"] = state.get("ai_call_count", 0) + 1
         logger.info(
             f"[AI RESULT] lane={research_lane} decision={ai_result['decision']} "
             f"prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]"
@@ -8785,6 +8869,8 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
     direction = str(direction or "").upper()
     if direction not in ("LONG", "SHORT") or limit_price <= 0:
         return {}
+    lane = str(lane or "").upper() or None
+    same_lane_only = research_lanes_independent() and bool(lane)
     now = time.time()
     with trade_lock:
         for o in pending_orders:
@@ -8796,8 +8882,10 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             odir = _normalize_order_side_to_dir(o.get("signal_dir") or o.get("side"))
             if odir != direction:
                 continue
+            o_lane = str(o.get("research_lane") or "").upper() or None
+            if same_lane_only and o_lane and o_lane != lane:
+                continue
             ref = o.get("planned_limit_price") or o.get("limit_price")
-            o_lane = o.get("research_lane")
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(o_lane))
             if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
@@ -8813,8 +8901,10 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 continue
             if p.get("dir") != direction:
                 continue
+            p_lane = str(p.get("research_lane") or "").upper() or None
+            if same_lane_only and p_lane and p_lane != lane:
+                continue
             ref = p.get("entry") or 0
-            p_lane = p.get("research_lane")
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(p_lane))
             if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
@@ -8844,8 +8934,10 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 continue
             if _signal_direction(sig) != direction:
                 continue
+            sig_lane = str(sig.get("research_lane") or "").upper() or None
+            if same_lane_only and sig_lane and sig_lane != lane:
+                continue
             ref = _signal_planned_limit(sig)
-            sig_lane = sig.get("research_lane")
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(sig_lane))
             if ref <= 0 or not _limit_prices_near(limit_price, ref, tolerance=tol):
                 continue
@@ -10191,11 +10283,15 @@ def process_signal(event: dict):
             signal["pullback_pct"] = state.get("pullback_threshold", 0.001)
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
-            if research_lane == RESEARCH_LANE_CONTINUOUS and continuous_ai_direct_entry_enabled():
+            if research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
             else:
                 signal["entry_path"] = "MICRO_SR"
                 compute_micro_sr_entry(signal)
+            lane_exit_cfg = get_exit_config_for_lane(research_lane)
+            if ctx.get("exit_config"):
+                lane_exit_cfg = {**lane_exit_cfg, **ctx.get("exit_config")}
+            signal["exit_config"] = lane_exit_cfg
             if fills_first_continuous_enabled(signal):
                 signal["await_micro_confirm"] = False
                 signal["await_5m_confirm"] = False
@@ -10218,18 +10314,22 @@ def process_signal(event: dict):
                 f"micro={signal.get('micro_structure_confirmed')} pivots={signal.get('pivot_count')} "
                 f"[PIPELINE ENFORCEMENT]"
             )
-            signal["golden_stack_enabled_at_entry"] = golden_stack_enabled()
             signal["golden_stack_eval"] = capture_golden_stack_eval(
                 signal, ai, edge_score, signal.get("features")
             )
             log_golden_stack_rejection(signal, ai, signal["golden_stack_eval"], edge_score)
-            signal["ai_stability_research_enabled_at_entry"] = ai_stability_research_enabled()
             with state_lock:
                 state["golden_stack_last_eval"] = copy.deepcopy(signal["golden_stack_eval"])
                 signal["replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             begin_approve_research(signal, ai, pipeline_eff_thr)
+            if research_lane == RESEARCH_LANE_CONTINUOUS and ai.get("decision") == "APPROVE":
+                spawn_research_lanes_from_continuous(
+                    ctx, ai, edge_score, event_obj, signal.get("features") or features, research_lane,
+                )
             capture_near_miss_on_approve(signal, ai, edge_score, signal.get("context", {}) or ctx)
-            pg_blocked, pg_reason = evaluate_profitability_entry_gates(signal, ai, edge_score)
+            pg_blocked, pg_reason = evaluate_profitability_entry_gates(signal, ai, edge_score, research_lane)
+            if pg_reason and not pg_blocked:
+                _research_log_would_block(signal, ai, pg_reason, edge_score)
             if pg_blocked:
                 if _exit_post_ai_profit_gate(signal, ai, pg_reason, edge_score, sole):
                     resolve_pending_approve_blocked(signal, ai, pg_reason)
@@ -10251,18 +10351,6 @@ def process_signal(event: dict):
             if gs_blocked:
                 with state_lock:
                     state["golden_stack_last_block_reason"] = gs_reason
-            if gs_blocked and research_lane == RESEARCH_LANE_GOLDEN_STACK:
-                if _golden_stack_gate_exit(signal, ai, gs_reason, edge_score):
-                    resolve_pending_approve_blocked(signal, ai, f"GOLDEN_STACK_{gs_reason}")
-                    patch_signal_snapshot_outcome(
-                        signal.get("trade_id"),
-                        executed=False,
-                        block_reason=f"GOLDEN_STACK_{gs_reason}",
-                    )
-                    _set_lane_pipeline_stage(research_lane, "IDLE")
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
-            elif gs_blocked and research_lane != RESEARCH_LANE_GOLDEN_STACK:
                 _research_log_would_block(signal, ai, f"GOLDEN_STACK_{gs_reason}", edge_score)
 
             if not signal.get("final_direction"):
@@ -10272,7 +10360,7 @@ def process_signal(event: dict):
             mc = signal.get("context", {}).get("market_context") or state.get("market_context", {})
             sr_blocked, sr_block_reason = evaluate_sr_direction_filter(final_direction, sr_state, mc, ai)
             if sr_blocked:
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, sr_block_reason, edge_score)
                 else:
                     logger.info(f"[SR FILTER] {sr_block_reason} mode={SR_FILTER_MODE} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10292,7 +10380,7 @@ def process_signal(event: dict):
                 final_direction, signal.get("context", {}) or ctx, ai
             )
             if loc_blocked:
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, loc_reason, edge_score)
                 else:
                     logger.info(f"[ENTRY FILTER] {loc_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10310,7 +10398,7 @@ def process_signal(event: dict):
                 final_direction, signal.get("context", {}) or ctx, ai, signal.get("features")
             )
             if qual_blocked:
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, qual_reason, edge_score)
                 else:
                     logger.info(f"[ENTRY QUALITY] {qual_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10332,7 +10420,7 @@ def process_signal(event: dict):
                 edge_score,
             )
             if ev_blocked:
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, ev_reason, edge_score)
                 else:
                     logger.info(f"[EVIDENCE GATE] {ev_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
@@ -10347,10 +10435,10 @@ def process_signal(event: dict):
                     return
 
             setup_type = signal.get("setup_type") or classify_setup(signal.get("features") or {})
-            if profit_gates_enforced() or not is_research_data_collection():
-                weak_min_edge = get_weak_setup_min_edge()
-                if setup_type == "WEAK_SETUP" and edge_score < weak_min_edge:
-                    weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
+            weak_min_edge = get_weak_setup_min_edge()
+            if setup_type == "WEAK_SETUP" and edge_score < weak_min_edge:
+                weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
+                if not is_research_data_collection() or is_profit_gates_lane(research_lane):
                     logger.info(f"[SETUP GATE] {weak_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
                     log_pipeline_event("POST_AI", "BLOCKED", weak_reason, trade_id, edge_score, {"setup_type": setup_type, "min_edge": weak_min_edge}, force=True)
                     log_blocked_signal(signal, ai, weak_reason)
@@ -10362,6 +10450,7 @@ def process_signal(event: dict):
                     update_debug_state_always(weak_reason, {"edge": edge_score})
                     state["last_pipeline_stage"] = "IDLE"
                     return
+                _research_log_would_block(signal, ai, weak_reason, edge_score)
 
             if not sole and not ensure_directional_capacity(final_direction):
                 block_reason = f"MAX_{final_direction}S"
@@ -10400,7 +10489,14 @@ def process_signal(event: dict):
                 final_direction, ai, signal.get("context", {}) or ctx
             )
             if margin_reason:
-                if not _post_ai_gate_blocks(sole):
+                margin_log_only = (
+                    not _post_ai_gate_blocks(sole, research_lane)
+                    or (
+                        _research_execute_log_only(research_lane)
+                        and str(margin_reason).startswith("WOULD_FAIL_")
+                    )
+                )
+                if margin_log_only:
                     if str(margin_reason).startswith("WOULD_FAIL_SPREAD"):
                         _research_log_would_block(signal, ai, "SPREAD_LOW", edge_score)
                     elif str(margin_reason).startswith("ADX"):
@@ -10425,7 +10521,7 @@ def process_signal(event: dict):
             signal["spread_penalty_mult"] = spread_penalty_margin_mult(spread)
             health = signal.get("trend_health_at_entry") or compute_trend_health(final_direction)
             if final_direction == "LONG" and health.get("trend_state") == "BULL_WEAKENING":
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
                     exit_pipeline(signal, ai, "TREND_WEAKENING")
@@ -10437,7 +10533,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
             if final_direction == "SHORT" and health.get("trend_state") == "BEAR_WEAKENING":
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
                     exit_pipeline(signal, ai, "TREND_WEAKENING")
@@ -10466,7 +10562,7 @@ def process_signal(event: dict):
             )
 
             if ai.get("win_prob", 0) < get_ai_threshold():
-                if not _post_ai_gate_blocks(sole):
+                if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
                 else:
                     exit_pipeline(signal, ai, "BELOW_THRESHOLD")
@@ -10478,8 +10574,8 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-            if is_clustered_entry(final_direction, price):
-                if not _post_ai_gate_blocks(sole):
+            if is_clustered_entry(final_direction, price, research_lane):
+                if not _post_ai_gate_blocks(sole, research_lane) or _research_execute_log_only(research_lane):
                     _research_log_would_block(signal, ai, "CLUSTER_ENTRY", edge_score)
                 else:
                     exit_pipeline(signal, ai, "CLUSTER_ENTRY")
@@ -10589,8 +10685,6 @@ def process_signal(event: dict):
             finalize_signal(signal, ai, final_status)
             with state_lock:
                 state.setdefault("last_signal_create_ts_by_lane", {})[research_lane] = time.time()
-            if research_lane in (RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_STABILITY):
-                spawn_golden_stack_lane(ctx, ai, edge_score, event_obj, features, research_lane)
             logger.info(
                 f"[PIPELINE] → ORDER STAGE COMPLETE lane={research_lane} model={signal.get('research_model')} "
                 f"[PIPELINE ENFORCEMENT]"
@@ -11105,7 +11199,6 @@ def state_monitor_loop():
                                 "timestamp": utc_iso(),
                                 "features": features,
                             })
-                maybe_run_stability_research_ai()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
     except Exception as e:
@@ -11852,7 +11945,7 @@ RESEARCH DATA COLLECTION MODE (active):
 - CONTINUOUS lane (AI_DIRECT): set entry_zone_low/high AND limit_price (exact limit the bot should place).
   LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
   If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
-- STABILITY / GOLDEN_STACK lanes still use micro-structure confirmation (unchanged)
+- Spawn lanes (HIGH_EDGE_RUNNER, EXTREME_EDGE, etc.) inherit CONTINUOUS AI_DIRECT entry unless noted
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -11926,6 +12019,7 @@ def research_wipe_file_paths():
         AI_INPUT_LOG_FILE,
         EDGE_CENSUS_FILE,
         "pathway_scorecard.json", FILL_QUALITY_FILE, "fill_quality_report.json",
+        "shadow_fill_outcome_report.json", "benchmark_vs_lanes_report.json", "pathway_lane_specs.json",
         SHADOW_VS_LIVE_ENTRY_FILE, SHADOW_VS_LIVE_ENTRY_REPORT,
         "execution_funnel.jsonl", "execution_funnel_summary.json",
         "approval_ev_report.json", "confidence_calibration_report.json",
@@ -12047,6 +12141,233 @@ _last_research_kpi_ts = 0.0
 _cached_research_kpis = {}
 RESEARCH_KPI_INTERVAL_SEC = 300
 _cached_pathway_scorecard = {}
+_cached_pathway_lane_specs = {}
+PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
+PATHWAY_LANE_ORDER = (
+    RESEARCH_LANE_CONTINUOUS,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER,
+    RESEARCH_LANE_EXTREME_EDGE,
+    RESEARCH_LANE_EDGE_ACCELERATION,
+    RESEARCH_LANE_EDGE_PLUS_STACK,
+    RESEARCH_LANE_SHADOW_RUNNER,
+    RESEARCH_LANE_PROFIT_GATES,
+)
+
+
+def _pathway_lanes_live() -> dict:
+    live = {lane: True for lane in PATHWAY_LANE_ORDER}
+    live[RESEARCH_LANE_CONTINUOUS] = continuous_ai_research_enabled()
+    live[RESEARCH_LANE_PROFIT_GATES] = profit_gates_lane_enabled()
+    return live
+
+
+def _scenario_c_exit_spec():
+    return {
+        "profile": "Scenario C",
+        "ladder": "12→8, 15→10, 25→18, 40→28",
+        "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
+        "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "OFF",
+    }
+
+
+def _runner_exit_spec():
+    return {
+        "profile": "Scenario C Runner Variant",
+        "ladder": "18→14, 25→18, 40→28, 55→38",
+        "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
+        "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "OFF",
+    }
+
+
+def build_static_pathway_lane_specs() -> dict:
+    """Static Pathway Lab tile definitions — analyzer merges session stats on top."""
+    ai_direct_entry = {
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": float(FIXED_MARGIN_USDT),
+    }
+    scenario_c = _scenario_c_exit_spec()
+    runner_exit = _runner_exit_spec()
+    promote_ev = "Per-trade EV > CONTINUOUS benchmark"
+    promote_pnl = "Session PnL > CONTINUOUS benchmark"
+    kill_ev = "EV <= CONTINUOUS benchmark over rolling window"
+    return {
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "analyzer_version": "v110-research-lanes",
+        "bot_version": EXECUTION_FIX_VERSION,
+        "benchmark_lane": RESEARCH_LANE_CONTINUOUS,
+        "benchmark_profile_id": BENCHMARK_PROFILE_ID,
+        "lanes": [
+            {
+                "lane": RESEARCH_LANE_CONTINUOUS,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_CONTINUOUS],
+                "subtitle": "FROZEN SCENARIO C BENCHMARK",
+                "role": "yardstick — all experiments compared to this",
+                "is_benchmark": True,
+                "badge": "★ BENCHMARK",
+                "toggle_key": "continuous_ai_research_enabled",
+                "hypothesis": "Periodic AI + AI_DIRECT is the minimum viable research baseline.",
+                "research_question": "What is baseline approve→fill→PnL under frozen Scenario C?",
+                "entry": {"trigger": "~180s AI when edge > 0", **ai_direct_entry},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": "N/A — benchmark",
+                "kill_criteria": "N/A — benchmark",
+                "expected_advantage": "Reference yardstick",
+                "expected_risk": "Baseline drawdown profile",
+                "benchmark_comparison": "Self",
+                "diff_vs_benchmark": [],
+            },
+            {
+                "lane": RESEARCH_LANE_HIGH_EDGE_RUNNER,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_HIGH_EDGE_RUNNER],
+                "subtitle": "EDGE≥3.5 • VOL≥1.5 • RUNNER EXIT PROFILE",
+                "role": "high-edge + volume continuation with wider runner exits",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "hypothesis": "Strong edge + elevated volume deserves wider profit ladder rungs.",
+                "research_question": "Does runner exit capture more tail on high-edge/high-volume approves?",
+                "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥3.5 & vol_ratio≥1.5", **ai_direct_entry},
+                "exit": runner_exit,
+                "exit_path": "Scenario C Runner Variant (18→14 first rung)",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Higher MFE capture on runners",
+                "expected_risk": "Wider ladder gives back more peak profit",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: edge≥3.5 & vol_ratio≥1.5", "Exit: runner ladder 18→14 vs 12→8"],
+            },
+            {
+                "lane": RESEARCH_LANE_EXTREME_EDGE,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EXTREME_EDGE],
+                "subtitle": "EDGE≥4.5 ONLY",
+                "role": "extreme edge subset — same exit as benchmark",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "hypothesis": "Tail-edge approves outperform average edge band.",
+                "research_question": "Is edge≥4.5 sufficient alone for superior EV?",
+                "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥4.5", **ai_direct_entry},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Higher-quality AI cohort",
+                "expected_risk": "Lower sample rate",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: edge≥4.5 only", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_EDGE_ACCELERATION,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_ACCELERATION],
+                "subtitle": "EDGE RISING • MOMENTUM BUILDING",
+                "role": "edge momentum — current edge rising vs prior snapshot",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "hypothesis": "Rising edge signals improving setup quality mid-candle.",
+                "research_question": "Does edge acceleration predict better forward returns?",
+                "entry": {"trigger": "spawn when edge≥3.0 AND edge > edge_prev (trigger snapshot)", **ai_direct_entry},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Timing edge inflection",
+                "expected_risk": "False spikes on noisy edge",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: edge≥3.0 & rising vs prior trigger edge", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_EDGE_PLUS_STACK,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_PLUS_STACK],
+                "subtitle": "EDGE≥3.5 • GS PASS REQUIRED",
+                "role": "edge + golden-stack quality pass (eval only, no GS lane)",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
+                "research_question": "Does GS-pass subset beat raw edge≥3.5?",
+                "entry": {"trigger": "spawn when edge≥3.5 AND golden_stack_eval pass", **ai_direct_entry},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Higher fill quality / lower chop",
+                "expected_risk": "Fewer spawns vs EXTREME_EDGE",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: edge≥3.5 + GS eval pass", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_SHADOW_RUNNER,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_SHADOW_RUNNER],
+                "subtitle": "POST-EXIT HORIZON STUDY",
+                "role": "shadow-only — no live orders",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "live_trading": False,
+                "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
+                "research_question": "What is +15/+30/+60/+90m outcome after APPROVE at edge≥3.5?",
+                "entry": {"trigger": "shadow log on CONTINUOUS APPROVE edge≥3.5", "entry_path": "SHADOW", "fill_path": "NONE", "ai_path": "same as CONTINUOUS", "execution": "no orders — replay horizons only"},
+                "exit": {"profile": "horizon study", "horizons_min": "15, 30, 60, 90"},
+                "exit_path": "Horizon counterfactual (+15/+30/+60/+90m)",
+                "promotion_criteria": "Inform runner exit design — not promoted to live",
+                "kill_criteria": "N/A — observational",
+                "expected_advantage": "Counterfactual insight",
+                "expected_risk": "None — shadow only",
+                "benchmark_comparison": "vs CONTINUOUS post-approve paths",
+                "diff_vs_benchmark": ["Live trading OFF", "Measures post-approve horizons"],
+            },
+            {
+                "lane": RESEARCH_LANE_PROFIT_GATES,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_PROFIT_GATES],
+                "subtitle": "HARD POST-AI FILTER STACK",
+                "role": "isolated post-AI filter experiment (spawn lane)",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "toggle_key": "profit_gates_lane_enabled",
+                "hypothesis": "Hard post-AI gates improve EV vs log-only benchmark.",
+                "research_question": "Does enforced gate stack beat CONTINUOUS on per-approve EV?",
+                "entry": {"trigger": "spawn on CONTINUOUS APPROVE (toggle)", **ai_direct_entry, "post_ai_gates": "hard enforcement"},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Fewer low-quality fills",
+                "expected_risk": "Lower fill rate",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Spawn on parent APPROVE", "Hard post-AI filter stack only"],
+            },
+        ],
+    }
+
+
+def write_static_pathway_lane_specs(cwd: str = None) -> dict:
+    payload = build_static_pathway_lane_specs()
+    path = os.path.join(cwd or os.getcwd(), PATHWAY_LANE_SPECS_FILE)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logger.debug(f"[PATHWAY_LANE_SPECS] write failed: {e}")
+    return payload
+
+
+def get_pathway_lane_specs_cached() -> dict:
+    """Load pathway_lane_specs.json written by analyzer (Pathway Lab tiles)."""
+    global _cached_pathway_lane_specs
+    path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
+    if not os.path.isfile(path):
+        return _cached_pathway_lane_specs or {}
+    try:
+        mtime = os.path.getmtime(path)
+        cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
+        if cached_at != mtime:
+            with open(path, encoding="utf-8") as f:
+                _cached_pathway_lane_specs = json.load(f)
+            _cached_pathway_lane_specs["_cached_mtime"] = mtime
+    except Exception as e:
+        logger.debug(f"[PATHWAY_LANE_SPECS] load failed: {e}")
+    return _cached_pathway_lane_specs or {}
 
 
 def get_pathway_scorecard_cached() -> dict:
@@ -12059,11 +12380,7 @@ def get_pathway_scorecard_cached() -> dict:
             _cached_pathway_scorecard = refresh_pathway_scorecard(
                 os.getcwd(),
                 bot_version=EXECUTION_FIX_VERSION,
-                lanes_live={
-                    "CONTINUOUS": continuous_ai_research_enabled(),
-                    "STABILITY": ai_stability_research_enabled(),
-                    "GOLDEN_STACK": golden_stack_enabled(),
-                },
+                lanes_live=_pathway_lanes_live(),
                 fresh_collection_mode=bool(state.get("fresh_collection_mode", False)),
             )
         else:
@@ -12084,11 +12401,7 @@ def refresh_pathway_scorecard_live() -> dict:
         _cached_pathway_scorecard = refresh_pathway_scorecard(
             os.getcwd(),
             bot_version=EXECUTION_FIX_VERSION,
-            lanes_live={
-                "CONTINUOUS": continuous_ai_research_enabled(),
-                "STABILITY": ai_stability_research_enabled(),
-                "GOLDEN_STACK": golden_stack_enabled(),
-            },
+            lanes_live=_pathway_lanes_live(),
             fresh_collection_mode=bool(state.get("fresh_collection_mode", False)),
         )
     except Exception as e:
@@ -12305,9 +12618,8 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleContinuousAi()" title="v87: periodic ~3min sole-AI lane (executes trades)">Continuous AI: <span id="continuousAiBtn">ON</span></button>
-    <button onclick="toggleAiStability()" title="v87: candle-aligned shadow AI lane (log-only)">AI Stability: <span id="aiStabilityBtn">ON</span></button>
-    <button onclick="toggleGoldenStack()" title="Enforce v86 quality gates after AI APPROVE">Golden Stack: <span id="goldenStackBtn">ON</span></button>
+    <button onclick="toggleProfitGates()" title="ON: spawn PROFIT_GATES lane with hard post-AI filters. OFF: spawn lanes log-only on benchmark.">Profit Gates Lane: <span id="profitGatesBtn">ON</span></button>
+    <button onclick="toggleContinuousAi()" title="Periodic ~3min CONTINUOUS benchmark lane">Continuous AI: <span id="continuousAiBtn">ON</span></button>
     <button onclick="toggleDuplicateLimitBlock()" title="When OFF, allow duplicate same-direction limits at same price">Dup Limit Block: <span id="duplicateLimitBlockBtn">ON</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
@@ -12317,12 +12629,18 @@ HTML = """<!DOCTYPE html>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Lane toggles + live pathway stats from <code>pathway_scorecard.json</code></p>
-  <div id="pathwayLaneChips" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;"></div>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Lane specs from <code>pathway_lane_specs.json</code> · stats from <code>pathway_scorecard.json</code></p>
+  <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div id="pathwayLaneChips" style="display:none;flex-wrap:wrap;gap:10px;margin-bottom:10px;"></div>
   <div id="pathwayAiDirectRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;border-top:1px solid #30363d;">
     <span style="color:#8b949e;font-size:0.88em;">Continuous entry path:</span>
     <button type="button" onclick="toggleContinuousAiDirect()" id="continuousAiDirectBtn" style="padding:5px 12px;font-weight:bold;">AI_DIRECT: <span id="continuousAiDirectLabel">ON</span></button>
     <span id="continuousAiDirectHint" style="color:#8b949e;font-size:0.82em;">Skip AWAITING_MICRO — place AI limit immediately</span>
+  </div>
+  <div id="pathwayProfitGatesRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;margin-top:8px;border-top:1px solid #30363d;">
+    <span style="color:#8b949e;font-size:0.88em;">Profit Gates lane:</span>
+    <button type="button" onclick="toggleProfitGatesLane()" id="profitGatesPathwayBtn" style="padding:5px 12px;font-weight:bold;">Profit Gates: <span id="profitGatesPathwayLabel">OFF</span></button>
+    <span id="profitGatesPathwayHint" style="color:#8b949e;font-size:0.82em;">Spawn experiment with hard post-AI filters on parent APPROVE</span>
   </div>
   <div id="pathwayDupLimitRow" style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding-top:8px;margin-top:8px;border-top:1px solid #30363d;">
     <span style="color:#8b949e;font-size:0.88em;">Duplicate limit block:</span>
@@ -12552,11 +12870,24 @@ DASHBOARD_JS = """(function () {
       const m = model || lane || '-';
       const colors = {
         'CONTINUOUS': '#58a6ff',
-        'STABILITY': '#bc8cff',
-        'GOLDEN_STACK': '#d4a72c'
+        'HIGH_EDGE_RUNNER': '#3fb950',
+        'EXTREME_EDGE': '#f97316',
+        'EDGE_ACCELERATION': '#a78bfa',
+        'EDGE_PLUS_STACK': '#d4a72c',
+        'SHADOW_RUNNER': '#6e7681',
+        'PROFIT_GATES': '#bc8cff'
+      };
+      const labels = {
+        'CONTINUOUS': 'Continuous',
+        'HIGH_EDGE_RUNNER': 'High Edge',
+        'EXTREME_EDGE': 'Extreme Edge',
+        'EDGE_ACCELERATION': 'Edge Accel',
+        'EDGE_PLUS_STACK': 'Edge+GS',
+        'SHADOW_RUNNER': 'Shadow',
+        'PROFIT_GATES': 'Profit Gates'
       };
       const c = colors[lane] || '#8b949e';
-      const short = lane === 'CONTINUOUS' ? 'Continuous' : lane === 'STABILITY' ? 'Stability' : lane === 'GOLDEN_STACK' ? 'Golden Stack' : m;
+      const short = labels[lane] || m;
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     async function post(url, obj={}) {
@@ -12657,16 +12988,18 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_invert_signal');
       refresh();
     }
+    async function toggleProfitGates() {
+      await post('/api/toggle_profit_gates');
+      refresh();
+    }
+    async function toggleProfitGatesLane() {
+      await toggleProfitGates();
+    }
+    async function toggleProfitGatesLane() {
+      await toggleProfitGates();
+    }
     async function toggleContinuousAi() {
       await post('/api/toggle_continuous_ai_research');
-      refresh();
-    }
-    async function toggleGoldenStack() {
-      await post('/api/toggle_golden_stack');
-      refresh();
-    }
-    async function toggleAiStability() {
-      await post('/api/toggle_ai_stability_research');
       refresh();
     }
     async function toggleContinuousAiDirect() {
@@ -12696,25 +13029,96 @@ DASHBOARD_JS = """(function () {
       const wr = wrs.length ? (wrs.reduce(function (s, p) { return s + p.wr_pct; }, 0) / wrs.length).toFixed(0) : '0';
       return 'n=' + n + ' · WR ' + wr + '% · $' + net.toFixed(2);
     }
+    function pathwayLaneToggleState(d, spec) {
+      if (!spec || spec.planned || spec.live_trading === false) return null;
+      const key = spec.toggle_key;
+      if (key === 'continuous_ai_research_enabled') return d.continuous_ai_research_enabled !== false;
+      if (key === 'profit_gates_lane_enabled') return d.profit_gates_lane_enabled !== false;
+      return null;
+    }
+    function pathwayLaneToggleFn(spec) {
+      if (!spec || spec.planned || spec.live_trading === false) return '';
+      if (spec.lane === 'CONTINUOUS') return 'toggleContinuousAi()';
+      if (spec.lane === 'PROFIT_GATES') return 'toggleProfitGatesLane()';
+      return '';
+    }
+    function pathwayLaneBorderColor(spec) {
+      if (spec.is_benchmark) return '#d4a72c';
+      if (spec.lane === 'PROFIT_GATES') return '#f85149';
+      if (spec.lane === 'SHADOW_RUNNER') return '#6e7681';
+      if (spec.lane === 'HIGH_EDGE_RUNNER') return '#3fb950';
+      if (spec.lane === 'EXTREME_EDGE') return '#f97316';
+      if (spec.lane === 'EDGE_ACCELERATION') return '#a78bfa';
+      if (spec.lane === 'EDGE_PLUS_STACK') return '#d4a72c';
+      if (spec.planned) return '#6e7681';
+      return '#58a6ff';
+    }
     function renderPathwayLab(d) {
-      const sc = d.pathway_scorecard || {};
-      const lanes = [
-        { key: 'CONTINUOUS', label: 'Continuous', on: d.continuous_ai_research_enabled !== false, toggle: toggleContinuousAi, color: '#58a6ff' },
-        { key: 'STABILITY', label: 'Stability', on: d.ai_stability_research_enabled !== false, toggle: toggleAiStability, color: '#bc8cff' },
-        { key: 'GOLDEN_STACK', label: 'Golden Stack', on: d.golden_stack_enabled !== false, toggle: toggleGoldenStack, color: '#d4a72c' },
-      ];
-      const chips = document.getElementById('pathwayLaneChips');
-      if (chips) {
-        chips.innerHTML = lanes.map(function (ln) {
-          const stats = pathwayLaneStats(sc, ln.key);
-          const bg = ln.on ? '#10b981' : '#ef4444';
-          return '<div style="padding:8px 12px;background:#0d1117;border:1px solid ' + ln.color + ';border-radius:8px;min-width:200px;">'
+      const specsPayload = d.pathway_lane_specs || {};
+      const specs = specsPayload.lanes || [];
+      const tiles = document.getElementById('pathwayLaneTiles');
+      if (tiles && specs.length) {
+        tiles.innerHTML = specs.map(function (spec) {
+          const border = pathwayLaneBorderColor(spec);
+          const on = pathwayLaneToggleState(d, spec);
+          const toggleFn = pathwayLaneToggleFn(spec);
+          const badge = spec.badge ? (' <span style="color:#d4a72c;font-size:0.78em;">' + spec.badge + '</span>') : '';
+          const entry = spec.entry || {};
+          const exit = spec.exit || {};
+          const stats = spec.session_stats || {};
+          const delta = spec.delta_vs_benchmark || {};
+          let toggleHtml = '';
+          if (spec.live_trading === false) {
+            toggleHtml = '<span style="color:#6e7681;font-size:0.82em;">SHADOW ONLY</span>';
+          } else if (spec.planned) {
+            toggleHtml = '<span style="color:#6e7681;font-size:0.82em;">PLANNED</span>';
+          } else if (toggleFn) {
+            const bg = on ? '#10b981' : '#ef4444';
+            toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">' + (on ? 'ON' : 'OFF') + '</button>';
+          }
+          let vsBench = '';
+          if (!spec.is_benchmark && delta.verdict) {
+            vsBench = '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #30363d;color:#8b949e;font-size:0.82em;">'
+              + '<strong style="color:#c9d1d9;">vs BENCHMARK:</strong><br>'
+              + 'Δ fill ' + (delta.delta_approve_to_fill_pct != null ? (delta.delta_approve_to_fill_pct >= 0 ? '+' : '') + delta.delta_approve_to_fill_pct + '%' : '—')
+              + ' · Δ PnL $' + (delta.delta_net_pnl_real != null ? (delta.delta_net_pnl_real >= 0 ? '+' : '') + Number(delta.delta_net_pnl_real).toFixed(2) : '0.00')
+              + '<br><span style="color:#58a6ff;">' + delta.verdict + '</span></div>';
+          }
+          const diffs = (spec.diff_vs_benchmark || []).map(function (line) {
+            return '• ' + line;
+          }).join('<br>');
+          const metaBlock = [
+            spec.subtitle ? ('<div style="color:#58a6ff;font-size:0.78em;margin-top:4px;">' + spec.subtitle + '</div>') : '',
+            spec.hypothesis ? ('<div style="margin-top:8px;font-size:0.8em;color:#c9d1d9;"><strong>Hypothesis:</strong> ' + spec.hypothesis + '</div>') : '',
+            spec.research_question ? ('<div style="font-size:0.8em;color:#8b949e;"><strong>Question:</strong> ' + spec.research_question + '</div>') : '',
+            spec.entry && spec.entry.fill_path ? ('<div style="margin-top:6px;font-size:0.8em;color:#8b949e;">Fill: ' + spec.entry.fill_path + ' · AI: ' + (spec.entry.ai_path || '—') + '</div>') : '',
+            spec.exit_path ? ('<div style="font-size:0.8em;color:#8b949e;">Exit path: ' + spec.exit_path + '</div>') : '',
+            spec.promotion_criteria ? ('<div style="margin-top:6px;font-size:0.8em;color:#3fb950;"><strong>Promote:</strong> ' + spec.promotion_criteria + '</div>') : '',
+            spec.kill_criteria ? ('<div style="font-size:0.8em;color:#f85149;"><strong>Kill:</strong> ' + spec.kill_criteria + '</div>') : '',
+            spec.expected_advantage ? ('<div style="font-size:0.8em;color:#8b949e;"><strong>Edge:</strong> ' + spec.expected_advantage + '</div>') : '',
+            spec.expected_risk ? ('<div style="font-size:0.8em;color:#8b949e;"><strong>Risk:</strong> ' + spec.expected_risk + '</div>') : '',
+            spec.benchmark_comparison ? ('<div style="font-size:0.8em;color:#8b949e;"><strong>Benchmark:</strong> ' + spec.benchmark_comparison + '</div>') : '',
+          ].join('');
+          return '<div style="padding:12px 14px;background:#0d1117;border:2px solid ' + border + ';border-radius:10px;">'
             + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
-            + '<strong style="color:' + ln.color + ';">' + ln.label + '</strong>'
-            + '<button type="button" onclick="' + (ln.key === 'CONTINUOUS' ? 'toggleContinuousAi()' : ln.key === 'STABILITY' ? 'toggleAiStability()' : 'toggleGoldenStack()') + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">'
-            + (ln.on ? 'ON' : 'OFF') + '</button></div>'
-            + '<div style="color:#8b949e;font-size:0.82em;margin-top:6px;">' + stats + '</div></div>';
+            + '<strong style="color:' + border + ';">' + (spec.label || spec.lane) + badge + '</strong>'
+            + toggleHtml + '</div>'
+            + '<div style="color:#8b949e;font-size:0.8em;margin-top:6px;">' + (spec.role || '') + '</div>'
+            + metaBlock
+            + '<div style="margin-top:10px;font-size:0.82em;color:#c9d1d9;"><strong>ENTRY:</strong> '
+            + (entry.trigger || '—') + ' · ' + (entry.entry_path || '—') + '<br>'
+            + (entry.execution || '') + '</div>'
+            + '<div style="margin-top:6px;font-size:0.82em;color:#c9d1d9;"><strong>EXIT:</strong> '
+            + (exit.profile || 'Scenario C') + ' — ladder ' + (exit.ladder || exit.horizons_min || '—')
+            + (exit.thesis_stop_margin_pct != null ? (' · thesis ' + exit.thesis_stop_margin_pct + '%') : '')
+            + (exit.mfe_protect_margin_pct != null ? (' · MFE ' + exit.mfe_protect_margin_pct + '%') : '') + '</div>'
+            + (diffs ? ('<div style="margin-top:8px;font-size:0.8em;color:#8b949e;">' + diffs + '</div>') : '')
+            + '<div style="margin-top:8px;font-size:0.85em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
+            + vsBench
+            + '</div>';
         }).join('');
+      } else if (tiles) {
+        tiles.innerHTML = '<p style="color:#8b949e;font-size:0.85em;">Pathway specs loading — restart bot or run analyzer</p>';
       }
       const aiDirectOn = d.continuous_ai_direct_entry_enabled !== false;
       const aiDirectLabel = document.getElementById('continuousAiDirectLabel');
@@ -12726,6 +13130,22 @@ DASHBOARD_JS = """(function () {
       const dupPathBtn = document.getElementById('duplicateLimitPathwayBtn');
       if (dupPathLabel) dupPathLabel.innerText = dupOn ? 'ON' : 'OFF';
       if (dupPathBtn) dupPathBtn.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
+      const pgOn = d.profit_gates_lane_enabled !== false;
+      const pgBtn = document.getElementById('profitGatesBtn');
+      if (pgBtn) {
+        pgBtn.innerText = pgOn ? 'ON' : 'OFF';
+        pgBtn.parentElement.style.backgroundColor = pgOn ? '#10b981' : '#ef4444';
+      }
+      const pgPathLabel = document.getElementById('profitGatesPathwayLabel');
+      const pgPathBtn = document.getElementById('profitGatesPathwayBtn');
+      if (pgPathLabel) pgPathLabel.innerText = pgOn ? 'ON' : 'OFF';
+      if (pgPathBtn) pgPathBtn.style.backgroundColor = pgOn ? '#10b981' : '#ef4444';
+      const pgHint = document.getElementById('profitGatesPathwayHint');
+      if (pgHint) {
+        pgHint.innerText = pgOn
+          ? 'ON — spawn PROFIT_GATES lane with hard post-AI filters (edge/AI/spread/cluster) on parent APPROVE'
+          : 'OFF — no PROFIT_GATES spawn; CONTINUOUS benchmark stays log-only on post-AI gates';
+      }
     }
     function renderPathwayScorecard(d) {
       const sc = d.pathway_scorecard || {};
@@ -12805,6 +13225,7 @@ DASHBOARD_JS = """(function () {
       }
     }
     window.showPathwayTab = showPathwayTab;
+    window.toggleProfitGates = toggleProfitGates;
     window.toggleContinuousAiDirect = toggleContinuousAiDirect;
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
@@ -12900,10 +13321,8 @@ DASHBOARD_JS = """(function () {
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous AI OFF';
           else syncTxt += ' | Continuous AI ON';
-          if (d.ai_stability_research_enabled === false) syncTxt += ' | AI Stability OFF';
-          else syncTxt += ' | AI Stability ON';
-          if (d.golden_stack_enabled === false) syncTxt += ' | Golden Stack OFF';
-          else syncTxt += ' | Golden Stack ON';
+          if (d.profit_gates_lane_enabled === false) syncTxt += ' | Profit Gates OFF';
+          else syncTxt += ' | Profit Gates ON';
           if (d.duplicate_limit_block_enabled === false) syncTxt += ' | Dup limit ALLOWED';
           else syncTxt += ' | Dup limit BLOCK';
           if (d.min_signal_age_enabled !== false) syncTxt += ' | min_age=' + (d.min_signal_age_sec || 600) + 's';
@@ -12991,7 +13410,15 @@ DASHBOARD_JS = """(function () {
         }
         safeText('aiDecision', aiStatusTxt);
         safeText('aiStatusNote', dai.note || '');
-        const laneLabels = {'CONTINUOUS': 'Continuous AI Research', 'STABILITY': 'AI Stability Research', 'GOLDEN_STACK': 'Golden Stack'};
+        const laneLabels = (d.research_config && d.research_config.lane_labels) || {
+          'CONTINUOUS': 'Continuous AI Research',
+          'HIGH_EDGE_RUNNER': 'High Edge Runner',
+          'EXTREME_EDGE': 'Extreme Edge',
+          'EDGE_ACCELERATION': 'Edge Acceleration',
+          'EDGE_PLUS_STACK': 'Edge Plus Stack',
+          'SHADOW_RUNNER': 'Shadow Runner',
+          'PROFIT_GATES': 'Profit Gates'
+        };
         safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
         const aiProbEl = document.getElementById('aiProb');
         if (aiProbEl) {
@@ -13036,6 +13463,10 @@ DASHBOARD_JS = """(function () {
           const prob = d.last_ai?.win_prob;
           const thr = d.ai_threshold;
           const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
+          const pgOn = d.profit_gates_lane_enabled !== false;
+          const modeLine = '<span style="color:#10b981">Independent lanes</span> — CONTINUOUS benchmark ~'
+            + (d.ai_cooldown_sec || 180) + 's AI · PROFIT_GATES spawn '
+            + (pgOn ? '<span style="color:#58a6ff">ON</span>' : '<span style="color:#8b949e">OFF</span>');
           if (dec === 'APPROVE') {
             if (lao.status === 'EXECUTED') {
               gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
@@ -13048,9 +13479,9 @@ DASHBOARD_JS = """(function () {
                 : `<span class="red">Last APPROVE: AI ${prob}% &lt; min ${thr}% → blocked (BELOW_THRESHOLD)</span>`;
             }
           } else if (!aiCalled) {
-            gate.innerHTML = `<span style="color:#8b949e">DeepSeek not called this cycle — ${dai.note || skipBlk.skip || 'waiting for edge ≥ threshold'}</span>`;
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">DeepSeek not called this cycle — ' + (dai.note || skipBlk.skip || 'waiting for edge ≥ threshold') + '</span>';
           } else {
-            gate.innerHTML = `<span style="color:#8b949e">Min win % to execute: ${thr != null ? thr : '-'} | Last AI: ${dec || '-'} ${prob != null ? prob + '%' : ''}</span>`;
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">Min win % to execute: ' + (thr != null ? thr : '-') + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
           }
         }
         safeText('aiReason', d.last_ai?.reason || d.ai_reason || '-');
@@ -13086,18 +13517,18 @@ DASHBOARD_JS = """(function () {
         const contAiMode = document.getElementById('continuousAiModeNote');
         if (contAiMode) {
           contAiMode.innerHTML = contAiOn
-            ? '<span style="color:#10b981">COLLECTING + EXECUTING</span> — temp=0, ~3 min sole-AI when edge &gt; 0; trades may execute on APPROVE.'
-            : '<span style="color:#fbbf24">OFF</span> — no periodic sole-AI calls; AI Stability shadow and Golden Stack unaffected.';
+            ? '<span style="color:#10b981">INDEPENDENT LANE</span> — ~3 min AI when edge &gt; 0; AI_DIRECT + fills-first; CONTINUOUS benchmark frozen.'
+            : '<span style="color:#fbbf24">OFF</span> — no periodic sole-AI calls; spawn lanes inactive until parent APPROVE.';
         }
         const contAiList = document.getElementById('continuousAiFeatureList');
-        const ascLane = d.ai_stability_config || {};
-        if (contAiList && ascLane.temperature != null) {
+        const rcfg = d.research_config || {};
+        if (contAiList && rcfg.temperature != null) {
           const items = [
-            'DeepSeek temperature = ' + ascLane.temperature + ' (all research lanes)',
+            'DeepSeek temperature = ' + rcfg.temperature + ' (all research lanes)',
             'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
             'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
             'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
-            'Executes approved trades (subject to Golden Stack when ON)',
+            'Spawns HER / XEDGE / EACC / EPS / SHRUN on APPROVE',
           ];
           contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
@@ -13109,44 +13540,11 @@ DASHBOARD_JS = """(function () {
           if (cd != null && cd > 0) txt += ' · next slot in ' + cd + 's';
           contAiLive.innerText = txt;
         }
-        const gsOn = d.golden_stack_enabled !== false;
-        const gsBtn = document.getElementById('goldenStackBtn');
-        if (gsBtn) {
-          gsBtn.innerText = gsOn ? 'ON' : 'OFF';
-          gsBtn.parentElement.style.backgroundColor = gsOn ? '#10b981' : '#ef4444';
-        }
-        const gsCtrlLabel = document.getElementById('goldenStackControlLabel');
-        const gsCtrlBtn = document.getElementById('goldenStackControlBtn');
-        if (gsCtrlLabel) gsCtrlLabel.innerText = gsOn ? 'ON' : 'OFF';
-        if (gsCtrlBtn) gsCtrlBtn.style.backgroundColor = gsOn ? '#10b981' : '#ef4444';
         const dupOn = d.duplicate_limit_block_enabled !== false;
         const dupBtn = document.getElementById('duplicateLimitBlockBtn');
         if (dupBtn) {
           dupBtn.innerText = dupOn ? 'ON' : 'OFF';
           dupBtn.parentElement.style.backgroundColor = dupOn ? '#10b981' : '#ef4444';
-        }
-        const gsMode = document.getElementById('goldenStackModeNote');
-        if (gsMode) {
-          gsMode.innerHTML = gsOn
-            ? '<span style="color:#10b981">ENFORCING</span> — failing any gate below blocks trade execution (logged as <code>GOLDEN_STACK_*</code>).'
-            : '<span style="color:#fbbf24">LOG-ONLY</span> — gates evaluated and logged as <code>WOULD_BLOCK_GOLDEN_STACK_*</code>; sole-AI research may still execute approved trades.';
-        }
-        const gsList = document.getElementById('goldenStackGateList');
-        const gsc = d.golden_stack_config || {};
-        if (gsList && gsc.chop_max != null) {
-          const items = [
-            'Momentum chop ≤ ' + gsc.chop_max + ' (conflicted tape penalty)',
-            'ADX not in ' + gsc.adx_block_low + '–' + gsc.adx_block_high + ' band (weak trend chop zone)',
-            'SHORT requires MTF BEAR_ALIGNED',
-            'SHORT structure score ≤ ' + gsc.short_struct_max,
-            'Directional spread ' + gsc.spread_min + '–' + gsc.spread_max + ' (bull/bear conviction gap)',
-            'Entry mode = ' + (gsc.entry_mode_required || 'EMA_HYBRID_LIMIT'),
-            'EMA hybrid distance ≤ ' + gsc.ema_dist_max_pct + '% (ideal ≤ ' + gsc.ema_dist_ideal_pct + '%)',
-            gsc.block_high_pos_funding ? 'Block HIGH_POS funding (longs pay heavily)' : 'Funding gate off',
-            'Full $20 margin when ON (no spread sizing penalty)',
-            'Profit ladder first rung: ' + (gsc.ladder_first_rung || '8%→5%'),
-          ];
-          gsList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
         const rkpi = document.getElementById('researchKpiLive');
         const kpis = d.research_kpis || {};
@@ -13183,61 +13581,14 @@ DASHBOARD_JS = """(function () {
           if (ev && ev.golden_stack_pass != null) {
             const pass = ev.golden_stack_pass;
             const br = d.golden_stack_last_block_reason;
-            let txt = 'Last AI APPROVE golden-stack check: ' + (pass ? '<span style="color:#10b981">PASS</span>' : '<span style="color:#ef4444">FAIL</span>');
+            let txt = 'Last GS eval (EDGE_PLUS_STACK gate): ' + (pass ? '<span style="color:#10b981">PASS</span>' : '<span style="color:#ef4444">FAIL</span>');
             if (br) txt += ' (' + br + ')';
             if (ev.mom != null) txt += ' · chop ' + ev.mom + '/' + ev.chop_max;
             if (ev.spread != null) txt += ' · spread ' + ev.spread;
-            if (ev.entry_mode) txt += ' · entry ' + ev.entry_mode;
             gsLive.innerHTML = txt;
           } else {
-            gsLive.innerText = 'No AI APPROVE yet this session — live gate check appears after first APPROVE.';
+            gsLive.innerText = 'No GS eval yet — logged on each APPROVE for EDGE_PLUS_STACK spawn gate.';
           }
-        }
-        const aiStabOn = d.ai_stability_research_enabled !== false;
-        const aiStabBtn = document.getElementById('aiStabilityBtn');
-        if (aiStabBtn) {
-          aiStabBtn.innerText = aiStabOn ? 'ON' : 'OFF';
-          aiStabBtn.parentElement.style.backgroundColor = aiStabOn ? '#10b981' : '#ef4444';
-        }
-        const aiStabCtrlLabel = document.getElementById('aiStabilityControlLabel');
-        const aiStabCtrlBtn = document.getElementById('aiStabilityControlBtn');
-        if (aiStabCtrlLabel) aiStabCtrlLabel.innerText = aiStabOn ? 'ON' : 'OFF';
-        if (aiStabCtrlBtn) aiStabCtrlBtn.style.backgroundColor = aiStabOn ? '#10b981' : '#ef4444';
-        const aiStabMode = document.getElementById('aiStabilityModeNote');
-        if (aiStabMode) {
-          aiStabMode.innerHTML = aiStabOn
-            ? '<span style="color:#10b981">LIVE EXECUTING</span> — temp=0, candle-aligned AI in first 2 min of each 15m candle; real ActiveSignal + orders tagged AI Stability Research.'
-            : '<span style="color:#fbbf24">OFF</span> — no stability-lane calls; Continuous AI and Golden Stack unaffected.';
-        }
-        const aiStabList = document.getElementById('aiStabilityFeatureList');
-        const asc = d.ai_stability_config || {};
-        if (aiStabList && asc.temperature != null) {
-          const items = [
-            'DeepSeek temperature = ' + asc.temperature + ' (independent shadow call)',
-            'Candle-aligned trigger — first ' + (asc.candle_align_sec || 120) + 's of each 15m bucket only',
-            'Once per 15m candle bucket max (reduces timing lottery)',
-            'Lane tag: STABILITY · independent ActiveSignal + pending orders',
-            'Full sanitized AI context → ai_input_log.jsonl',
-            'Deterministic replay scorecard (' + (asc.replay_model_version || 'replay_v1') + ', threshold ' + (asc.replay_approve_threshold || 0.52) + ')',
-            'Runs alongside Continuous AI (~3 min) — separate cooldown/bucket',
-          ];
-          aiStabList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
-        }
-        const aiStabLive = document.getElementById('aiStabilityLiveStatus');
-        if (aiStabLive) {
-          const stabN = d.stability_ai_call_count != null ? d.stability_ai_call_count : 0;
-          const elapsed = d.candle_15m_elapsed_pct != null ? (d.candle_15m_elapsed_pct * 100).toFixed(0) + '% into 15m candle' : '';
-          const aligned = d.candle_aligned_window ? ' · in align window' : ' · outside align window';
-          const rm = d.last_replay_model_eval;
-          let stabTxt = 'Stability shadow calls this session: ' + stabN;
-          if (elapsed) stabTxt += ' · ' + elapsed + aligned;
-          if (rm && rm.replay_score != null) {
-            stabTxt += ' · last replay ' + rm.replay_score + ' (approve≥' + (rm.approve_threshold || 0.52) + ')';
-            if (rm.ai_agrees != null) stabTxt += rm.ai_agrees ? ' · agrees with AI' : ' · disagrees with AI';
-          } else if (aiStabOn) {
-            stabTxt += ' · waiting for candle-aligned window';
-          }
-          aiStabLive.innerText = stabTxt;
         }
         const debugBtn = document.getElementById('debugToggle');
         if (debugBtn) {
@@ -13557,8 +13908,7 @@ DASHBOARD_JS = """(function () {
     window.toggleDebug = toggleDebug;
     window.toggleFreshCollection = toggleFreshCollection;
     window.toggleContinuousAi = toggleContinuousAi;
-    window.toggleGoldenStack = toggleGoldenStack;
-    window.toggleAiStability = toggleAiStability;
+    window.toggleProfitGates = toggleProfitGates;
     window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
@@ -13621,6 +13971,12 @@ def api_state():
         snapshot["weak_setup_min_edge"] = get_weak_setup_min_edge()
         snapshot["ai_cooldown_sec"] = get_effective_ai_cooldown_sec()
         snapshot["ai_cooldown_remaining_sec"] = ai_cooldown_remaining_sec()
+        snapshot["profit_gates_lane_enabled"] = profit_gates_lane_enabled()
+        snapshot["profit_gates_enforced"] = profit_gates_enforced()
+        snapshot["research_lanes_independent"] = research_lanes_independent()
+        snapshot["research_execution_mode"] = (
+            "INDEPENDENT_LANES" if is_research_data_collection() else "LIVE"
+        )
         snapshot["dashboard_port"] = DASHBOARD_PORT
         snapshot["dashboard_url"] = dashboard_public_url()
         snapshot["sim_realism"] = {
@@ -13822,16 +14178,14 @@ def api_state():
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached()
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached()
+        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached()
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()
         snapshot["min_signal_age_enabled"] = min_signal_age_enabled()
         snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
         snapshot["smart_submit_enabled"] = smart_submit_enabled()
-        snapshot["ai_stability_config"] = ai_stability_config_for_dashboard()
-        snapshot["candle_15m_elapsed_pct"] = _candle_15m_elapsed_pct()
-        snapshot["candle_aligned_window"] = is_candle_aligned_ai_window()
-        snapshot["ai_candle_bucket_available"] = ai_candle_bucket_available()
+        snapshot["research_config"] = research_config_for_dashboard()
         with state_lock:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
@@ -13903,18 +14257,29 @@ def toggle_invert_signal():
         save_persistent_config()
     return jsonify({"invert_signal": state["invert_signal"]})
 
-@app.route('/api/toggle_golden_stack', methods=['POST'])
-def toggle_golden_stack():
+@app.route('/api/toggle_profit_gates', methods=['POST'])
+def toggle_profit_gates():
     with state_lock:
-        state["golden_stack_enabled"] = not bool(
-            state.get("golden_stack_enabled", GOLDEN_STACK_DEFAULT_ENABLED)
+        enabled = not bool(
+            state.get(
+                "profit_gates_lane_enabled",
+                state.get("profit_gates_enforced", PROFIT_GATES_LANE_DEFAULT_ENABLED),
+            )
         )
+        state["profit_gates_lane_enabled"] = enabled
+        state["profit_gates_enforced"] = enabled
         save_persistent_config()
+        mode = "PROFIT_GATES_SPAWN" if enabled else "INDEPENDENT_LANES"
         logger.info(
-            f"[GOLDEN_STACK] toggled {'ON' if state['golden_stack_enabled'] else 'OFF'} "
-            f"[PIPELINE ENFORCEMENT]"
+            f"[PROFIT_GATES] spawn lane toggled {'ON' if enabled else 'OFF'} "
+            f"mode={mode} [PIPELINE ENFORCEMENT]"
         )
-    return jsonify({"golden_stack_enabled": state["golden_stack_enabled"]})
+    return jsonify({
+        "profit_gates_lane_enabled": state["profit_gates_lane_enabled"],
+        "profit_gates_enforced": state["profit_gates_enforced"],
+        "research_lanes_independent": research_lanes_independent(),
+        "research_execution_mode": mode,
+    })
 
 @app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
 def toggle_duplicate_limit_block():
@@ -13928,19 +14293,6 @@ def toggle_duplicate_limit_block():
             f"(OFF=allow duplicates) [PIPELINE ENFORCEMENT]"
         )
     return jsonify({"duplicate_limit_block_enabled": state["duplicate_limit_block_enabled"]})
-
-@app.route('/api/toggle_ai_stability_research', methods=['POST'])
-def toggle_ai_stability_research():
-    with state_lock:
-        state["ai_stability_research_enabled"] = not bool(
-            state.get("ai_stability_research_enabled", AI_STABILITY_DEFAULT_ENABLED)
-        )
-        save_persistent_config()
-        logger.info(
-            f"[AI_STABILITY] toggled {'ON' if state['ai_stability_research_enabled'] else 'OFF'} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-    return jsonify({"ai_stability_research_enabled": state["ai_stability_research_enabled"]})
 
 @app.route('/api/toggle_continuous_ai_research', methods=['POST'])
 def toggle_continuous_ai_research():
@@ -14482,7 +14834,6 @@ def reset_runtime_state():
             "debug_state": _fresh_debug_state(),
             "last_pipeline_stage": "IDLE",
             "ai_call_count": 0,
-    "stability_ai_call_count": 0,
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
 
@@ -14723,11 +15074,11 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "leverage": lev,
                 "sl_pct": sl_price_pct(lev),
                 "margin_usdt": margin_usdt,
-                "trail_ladder": TRAIL_LADDER,
+                "trail_ladder": (signal.get("exit_config") or get_exit_config_for_lane(signal.get("research_lane"))).get("trail_ladder", TRAIL_LADDER),
                 "free_run_mtf": RESEARCH_FREE_RUN_DISABLE_MTF_GATE,
                 "free_run_chop": RESEARCH_FREE_RUN_DISABLE_CHOP_GATE,
                 "free_run_momentum_align": RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN,
-                **get_exit_config_snapshot(),
+                **get_exit_config_for_lane(signal.get("research_lane")),
             },
             "policy_effective": {
                 "early_fail": bool(state.get("early_fail_enabled", True)),
@@ -14777,11 +15128,7 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "setup_type": signal.get("setup_type") or classify_setup(feat),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "golden_stack_enabled": signal.get("golden_stack_enabled_at_entry", golden_stack_enabled()),
             "golden_stack_eval": signal.get("golden_stack_eval"),
-            "ai_stability_research_enabled": signal.get(
-                "ai_stability_research_enabled_at_entry", ai_stability_research_enabled()
-            ),
             "replay_model_eval": signal.get("replay_model_eval"),
             "features": copy.deepcopy(feat),
             "context": copy.deepcopy(signal.get("context") or {}),
@@ -14789,6 +15136,8 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "funding": copy.deepcopy(state.get("funding") or {}),
             "outcome_labels": {},
         }
+        if str(signal.get("research_lane") or "") == RESEARCH_LANE_CONTINUOUS:
+            snapshot["benchmark_profile_id"] = BENCHMARK_PROFILE_ID
         if feat:
             snapshot["entry_features"] = {
                 "mom_metric": round(_compute_momentum_metric(feat), 4),
@@ -15874,9 +16223,10 @@ def _persistent_config_keys():
         "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
-        "edge_range_preset", "fresh_collection_mode", "golden_stack_enabled",
+        "edge_range_preset", "fresh_collection_mode",
+        "profit_gates_lane_enabled",
+        "profit_gates_enforced",
         "continuous_ai_direct_entry_enabled",
-        "ai_stability_research_enabled",
         "continuous_ai_research_enabled",
         "research_ai_cooldown_sec",
         "limit_chase_start_sec",
@@ -15953,6 +16303,11 @@ def load_persistent_config():
                 for key in allowed_keys:
                     if key in config:
                         state[key] = config[key]
+                if "profit_gates_lane_enabled" not in config and "profit_gates_enforced" in config:
+                    state["profit_gates_lane_enabled"] = bool(config["profit_gates_enforced"])
+                elif "profit_gates_lane_enabled" not in state:
+                    state["profit_gates_lane_enabled"] = PROFIT_GATES_LANE_DEFAULT_ENABLED
+                state["profit_gates_enforced"] = bool(state.get("profit_gates_lane_enabled", PROFIT_GATES_LANE_DEFAULT_ENABLED))
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
         with state_lock:
@@ -16480,54 +16835,37 @@ def main():
         f"| dup_limit_block={'ON' if duplicate_limit_block_enabled() else 'OFF'} "
         f"[PIPELINE ENFORCEMENT]"
     )
-    if golden_stack_enabled():
-        logger.warning(
-            f"[V86 GOLDEN_STACK] ENFORCED — chop<={GOLDEN_STACK_CHOP_MAX} | SHORT BEAR_ALIGNED | "
-            f"struct<={GOLDEN_STACK_SHORT_STRUCT_MAX} | spread {GOLDEN_STACK_SPREAD_MIN}-{GOLDEN_STACK_SPREAD_MAX} | "
-            f"EMA_HYBRID dist<={GOLDEN_STACK_EMA_DIST_MAX_PCT}% | block ADX {GOLDEN_STACK_ADX_BLOCK_LOW}-"
-            f"{GOLDEN_STACK_ADX_BLOCK_HIGH} | ladder {TRAIL_LADDER[0][0]}→{TRAIL_LADDER[0][1]}% "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-    elif RESEARCH_AI_SOLE_AUTHORITY:
-        logger.warning(
-            f"[V81 SOLE-AI] Full research funnel — edge min 0.0+ | periodic AI every "
-            f"{get_research_ai_cooldown_sec()}s | golden stack OFF — post-AI gates log WOULD_BLOCK_* "
-            f"[PIPELINE ENFORCEMENT]"
-        )
     logger.warning(
         f"[V121 SCENARIO-C] exit profile ON — thesis_stop={THESIS_FAST_EXIT_UNREAL_PCT}% "
         f"ladder {TRAIL_LADDER[0][0]}→{TRAIL_LADDER[0][1]}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
         f"| type_a={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} trend_scratch={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} "
         f"[PIPELINE ENFORCEMENT]"
     )
-    if profit_gates_enforced():
+    if profit_gates_lane_enabled():
         logger.warning(
-            f"[V121 SCENARIO-C] neutral AI — profit gates edge≥{get_edge_threshold()} "
-            f"AI≥{get_ai_threshold()}% (dashboard) | golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
-            f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} | honest context labels "
+            f"[PROFIT_GATES LANE] ON — spawn experiment with hard post-AI filters "
+            f"(edge≥{get_edge_threshold()} AI≥{get_ai_threshold()}%) on parent APPROVE "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
+        logger.warning(
+            f"[BENCHMARK] {BENCHMARK_PROFILE_ID} — CONTINUOUS frozen yardstick | "
+            f"~{get_research_ai_cooldown_sec()}s AI | AI_DIRECT | Scenario C exits | post-AI gates log-only "
+            f"| spawn lanes: {', '.join(RESEARCH_SPAWN_LANES + (RESEARCH_LANE_SHADOW_RUNNER,))} "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
-        f"[V87 MULTI-LANE] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
-        f"| stability_shadow={'ON' if ai_stability_research_enabled() else 'OFF'} "
-        f"| golden_stack={'ON' if golden_stack_enabled() else 'OFF'} "
-        f"| research_temp={RESEARCH_AI_TEMPERATURE} "
+        f"[V109 RESEARCH-LANES] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
+        f"| runner_exit={RUNNER_EXIT_PROFILE_ID} | research_temp={RESEARCH_AI_TEMPERATURE} "
         f"[PIPELINE ENFORCEMENT]"
     )
     if continuous_ai_research_enabled():
         logger.warning(
-            f"[V87 CONTINUOUS_AI] ON — ~{get_research_ai_cooldown_sec()}s sole-AI when edge>0 "
+            f"[CONTINUOUS_AI] ON — ~{get_research_ai_cooldown_sec()}s sole-AI when edge>0 "
             f"| temp={RESEARCH_AI_TEMPERATURE} | executes trades | lane={RESEARCH_LANE_CONTINUOUS} "
             f"[PIPELINE ENFORCEMENT]"
         )
-    if ai_stability_research_enabled():
-        logger.warning(
-            f"[V87 AI_STABILITY] ON — shadow lane | candle-aligned first "
-            f"{AI_STABILITY_CANDLE_ALIGN_SEC}s/15m | once/bucket | log {AI_INPUT_LOG_FILE} | "
-            f"replay={REPLAY_MODEL_VERSION} threshold={REPLAY_MODEL_APPROVE_THRESHOLD} "
-            f"| lane={RESEARCH_LANE_STABILITY} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
+    write_static_pathway_lane_specs()
     if RESEARCH_FREE_RUN_DISABLE_MTF_GATE or RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
         logger.warning(
             f"[FREE_RUN] Post-AI gates OFF — mtf={RESEARCH_FREE_RUN_DISABLE_MTF_GATE} "
