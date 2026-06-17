@@ -10,6 +10,7 @@ import { GithubAutoSyncService } from './github-auto-sync.service';
 
 import { PlatformConnectionsService } from './platform-connections.service';
 import { FounderCloudService } from './founder-cloud.service';
+import { FounderPromoService } from './founder-promo.service';
 
 @Module({
   imports: [NotificationsModule, XSocialModule, GitHubModule, forwardRef(() => EventsModule)],
@@ -20,7 +21,8 @@ import { FounderCloudService } from './founder-cloud.service';
     GithubAutoSyncService,
     PlatformConnectionsService,
     FounderCloudService,
+    FounderPromoService,
   ],
-  exports: [FounderOsService, GithubAutoSyncService, FounderCloudService],
+  exports: [FounderOsService, GithubAutoSyncService, FounderCloudService, FounderPromoService],
 })
 export class FounderOsModule {}

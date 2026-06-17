@@ -212,7 +212,7 @@ export class FounderOsService {
       const meta = (map.get(p.key)?.metadata ?? credMap.get(p.key)?.metadata) as Record<string, unknown> | undefined;
       if (p.key === 'github') connected = connected || Boolean(gh || founder?.githubUrl || founder?.githubRepoFullName);
       if (p.key === 'x') connected = connected || Boolean(user?.twitterHandle || user?.oauthAccounts.length);
-      if (['vercel', 'railway', 'neon', 'digitalocean', 'supabase'].includes(p.key)) {
+      if (['vercel', 'railway', 'neon', 'digitalocean', 'supabase', 'render'].includes(p.key)) {
         connected = connected || Boolean(credMap.get(p.key)?.verifiedAt);
       }
       if (p.key === 'cursor') connected = connected || Boolean(credMap.get('cursor')?.verifiedAt);

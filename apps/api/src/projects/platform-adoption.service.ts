@@ -47,6 +47,7 @@ export class PlatformAdoptionService {
     promptTokens: number;
     completionTokens: number;
     projectId?: string | null;
+    billingSource?: string | null;
   }) {
     if (input.promptTokens <= 0 && input.completionTokens <= 0) return;
     await this.prisma.aiTokenUsageLog.create({
@@ -55,6 +56,7 @@ export class PlatformAdoptionService {
         projectId: input.projectId ?? null,
         provider: input.provider,
         source: input.source,
+        billingSource: input.billingSource ?? 'byok',
         promptTokens: input.promptTokens,
         completionTokens: input.completionTokens,
       },
