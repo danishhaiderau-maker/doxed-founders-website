@@ -45,6 +45,7 @@ export type FounderBrainContextInput = {
   decisionLogExcerpt?: string | null;
   marketIntelligenceExcerpt?: string | null;
   outcomeIntelligenceExcerpt?: string | null;
+  founderGraphExcerpt?: string | null;
 };
 
 export function deriveMissionIntelligence(input: FounderBrainContextInput): MissionIntelligence {
@@ -231,6 +232,7 @@ export function formatFounderBrainContextForPrompt(
   }
   if (input.desktopBridgeBlock) sections.push('', input.desktopBridgeBlock);
   if (input.decisionLogExcerpt) sections.push('', input.decisionLogExcerpt);
+  if (input.founderGraphExcerpt) sections.push('', input.founderGraphExcerpt);
   if (input.marketIntelligenceExcerpt) sections.push('', input.marketIntelligenceExcerpt);
   if (input.outcomeIntelligenceExcerpt) sections.push('', input.outcomeIntelligenceExcerpt);
 

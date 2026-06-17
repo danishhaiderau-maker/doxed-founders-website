@@ -102,6 +102,7 @@ import { FounderMetricsService } from './founder-metrics.service';
 import { FounderMemoryGraphService } from '../founder-memory/founder-memory-graph.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
+import { FounderGraphService } from '../founder-graph/founder-graph.service';
 import type { FounderMemoryGraphPatch } from '@dcf/utils';
 
 @Injectable()
@@ -124,7 +125,20 @@ export class FounderCopilotService {
     private readonly commandCenter: FounderCommandCenterService,
     private readonly agentRuns: FounderAgentRunService,
     private readonly desktopBridge: DesktopBridgeService,
+    private readonly founderGraph: FounderGraphService,
   ) {}
+
+  async getFounderGraphForUser(userId: string) {
+    const stored = await this.founderGraph.getStored(userId);
+    const graph = stored ?? (await this.founderGraph.rebuildForUser(userId));
+    return {
+      graph,
+      miniChain: this.founderGraph.miniChain(graph),
+      excerpt: this.founderGraph.formatForBrain(graph),
+      updatedAt: graph.updatedAt,
+      nodeCount: graph.nodes.length,
+    };
+  }
 
   async getMemoryGraph(userId: string) {
     return this.memoryGraph.resolveForUser(userId);
@@ -1549,6 +1563,10 @@ export class FounderCopilotService {
     if (isFounderRepoStatusPrompt(text)) {
       await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
     }
+    const graph = await this.founderGraph.rebuildForUser(userId, {
+      currentInitiative: intelligence.currentInitiative,
+    });
+    brainInput.founderGraphExcerpt = this.founderGraph.formatForBrain(graph);
     const contextBlock = formatFounderBrainContextForPrompt(brainInput, intelligence);
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 

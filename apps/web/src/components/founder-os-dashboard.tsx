@@ -19,6 +19,7 @@ import { FounderCommandCenterPanels } from '@/components/founder-command-center-
 import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
 import { AgentRunStepsPanel } from '@/components/agent-run-steps-panel';
+import { FounderGraphMiniPanel } from '@/components/founder-graph-mini-panel';
 import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlConnectionHub } from '@/components/mission-control-connection-hub';
 import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
@@ -37,7 +38,9 @@ import {
   fetchFounderQueue,
   executeFounderQueueAction,
   fetchActiveAgentRun,
+  fetchFounderGraph,
   fetchPlatformSyncStatus,
+  type FounderGraphResponse,
   type MissionIntelligence,
   type FounderQueueItem,
   type FounderAgentRunRecord,
@@ -127,11 +130,12 @@ export function FounderOsDashboardLayout({
   const [founderQueue, setFounderQueue] = useState<FounderQueueItem[]>([]);
   const [commandCenterLoading, setCommandCenterLoading] = useState(true);
   const [activeAgentRun, setActiveAgentRun] = useState<FounderAgentRunRecord | null>(null);
+  const [founderGraph, setFounderGraph] = useState<FounderGraphResponse | null>(null);
   const [liveNudges, setLiveNudges] = useState<ChiefOfStaffNudge[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, builder, account, platform, intel, queueRes, agentRunRes] =
+      const [br, mem, worker, builder, account, platform, intel, queueRes, agentRunRes, graphRes] =
         await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
@@ -142,6 +146,7 @@ export function FounderOsDashboardLayout({
         fetchMissionIntelligence(accessToken).catch(() => null),
         fetchFounderQueue(accessToken).catch(() => null),
         fetchActiveAgentRun(accessToken).catch(() => null),
+        fetchFounderGraph(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
@@ -154,6 +159,7 @@ export function FounderOsDashboardLayout({
       setMissionIntel(intel);
       setFounderQueue(queueRes?.items ?? []);
       setActiveAgentRun(agentRunRes?.active ? agentRunRes.run : null);
+      setFounderGraph(graphRes);
       setCommandCenterLoading(false);
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
@@ -704,6 +710,15 @@ export function FounderOsDashboardLayout({
                   </span>
                 </div>
               ))}
+            </section>
+
+            <section className="mt-4">
+              <FounderGraphMiniPanel
+                miniChain={founderGraph?.miniChain ?? []}
+                nodeCount={founderGraph?.nodeCount ?? 0}
+                updatedAt={founderGraph?.updatedAt}
+                loading={commandCenterLoading && !founderGraph}
+              />
             </section>
 
             {room && (
