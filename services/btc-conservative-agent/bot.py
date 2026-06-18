@@ -2510,6 +2510,8 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
 def _apply_position_exits(pos: dict, price: float, now: float = None):
     if now is None:
         now = time.time()
+    if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+        return False
     unreal_pct = unrealized_margin_pct(pos, price)
     append_replay_tick(pos.get("trade_id"), price, unreal_pct)
     pos["max_pnl_pct"] = max(pos.get("max_pnl_pct", 0.0), unreal_pct)
@@ -4694,7 +4696,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.42-urgent-chase-alpha"
+EXECUTION_FIX_VERSION = "v1.1.43-close-deadlock-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -12577,6 +12579,7 @@ def position_manager():
         set_execution_paused("THREAD_CRASH")
 
 def close_position(pos: dict, exit_reason: str):
+    """Close sim position — never hold state_lock while acquiring trade_lock (WS tick deadlock)."""
     if not validate_state():
         return
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -12790,68 +12793,69 @@ def close_position(pos: dict, exit_reason: str):
             "cfg_trail_ladder_json": json.dumps(TRAIL_LADDER),
             "exit_config_json": json.dumps(get_exit_config_snapshot()),
         }
-        lane_unregister_open_position(pos)
-        begin_post_exit_replay(trade_id, pos, price)
-        log_trade_outcome_jsonl(trade_row, pos)
-        update_lane_pnl_ledger(
-            pos.get("research_lane") or (master or {}).get("research_lane"),
-            "CLOSE",
-            net_pnl,
-            pos.get("dir"),
+    pos["status"] = "CLOSED"
+    lane_unregister_open_position(pos)
+    begin_post_exit_replay(trade_id, pos, price)
+    log_trade_outcome_jsonl(trade_row, pos)
+    update_lane_pnl_ledger(
+        pos.get("research_lane") or (master or {}).get("research_lane"),
+        "CLOSE",
+        net_pnl,
+        pos.get("dir"),
+    )
+    log_lane_opportunity_event(
+        pos.get("research_lane") or (master or {}).get("research_lane"),
+        "CLOSED",
+        trade_id,
+        pos.get("dir"),
+        (master or {}).get("ai_win_prob"),
+        (master or {}).get("edge_score_at_entry"),
+        exit_reason,
+        net_pnl,
+    )
+    log_trade_lifecycle(trade_row, pos, master)
+    log_ai_confidence_calibration(trade_row, net_pnl)
+    log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
+    trades.append(trade_row)
+    try:
+        log_trade(trade_row)
+        logger.info(
+            f"[CSV] Trade logged reason={exit_reason} trade_id={trade_id} net_pnl={fmt(net_pnl)} "
+            f"gross={fmt(gross_pnl)} trading_fees={fmt(trading_fees)} funding={fmt(funding_total)} "
+            f"profile={EXCHANGE_FEE_PROFILE} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]"
         )
-        log_lane_opportunity_event(
-            pos.get("research_lane") or (master or {}).get("research_lane"),
-            "CLOSED",
-            trade_id,
-            pos.get("dir"),
-            (master or {}).get("ai_win_prob"),
-            (master or {}).get("edge_score_at_entry"),
-            exit_reason,
-            net_pnl,
-        )
-        log_trade_lifecycle(trade_row, pos, master)
-        log_ai_confidence_calibration(trade_row, net_pnl)
-        log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
-        trades.append(trade_row)
-        validate_state()
-        try:
-            log_trade(trade_row)
-            logger.info(
-                f"[CSV] Trade logged reason={exit_reason} trade_id={trade_id} net_pnl={fmt(net_pnl)} "
-                f"gross={fmt(gross_pnl)} trading_fees={fmt(trading_fees)} funding={fmt(funding_total)} "
-                f"profile={EXCHANGE_FEE_PROFILE} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]"
-            )
-            persist_signal_close(trade_id, "CLOSED")
+        persist_signal_close(trade_id, "CLOSED")
+        with state_lock:
             state["account_balance"] += net_pnl
             recent_trades.append({"pnl": net_pnl,"win": net_pnl > 0,"regime": trade_row.get("regime", "UNKNOWN"),"setup": trade_row.get("strategy", "SR")})
-        except Exception as e:
-            logger.error(f"[CSV ERROR] {e}")
-        apply_trade_pnl(trade_row)
-        _record_research_trade_close(net_pnl, exit_reason)
+    except Exception as e:
+        logger.error(f"[CSV ERROR] {e}")
+    apply_trade_pnl(trade_row)
+    _record_research_trade_close(net_pnl, exit_reason)
 
-        with state_lock:
-            a = state.setdefault("analytics", {})
-            bands = a.setdefault("ai_bands", {})
-            if band_key not in bands:
-                bands[band_key] = {"trades": 0, "wins": 0, "pnl": 0.0}
-            bands[band_key]["trades"] += 1
-            bands[band_key]["pnl"] += net_pnl
-            if net_pnl > 0:
-                bands[band_key]["wins"] += 1
-            state["analytics"] = a
+    with state_lock:
+        a = state.setdefault("analytics", {})
+        bands = a.setdefault("ai_bands", {})
+        if band_key not in bands:
+            bands[band_key] = {"trades": 0, "wins": 0, "pnl": 0.0}
+        bands[band_key]["trades"] += 1
+        bands[band_key]["pnl"] += net_pnl
+        if net_pnl > 0:
+            bands[band_key]["wins"] += 1
+        state["analytics"] = a
 
-        master = trades_map.get(trade_id, {}).get("signal_ref")
-        if master:
-            master.update({"status": "CLOSED","exit_reason": exit_reason,"outcome": "WIN" if net_pnl > 0 else "LOSS","closed_ts": time.time()})
-            master["expires_ts"] = time.time() - 1
+    master = trades_map.get(trade_id, {}).get("signal_ref")
+    if master:
+        master.update({"status": "CLOSED","exit_reason": exit_reason,"outcome": "WIN" if net_pnl > 0 else "LOSS","closed_ts": time.time()})
+        master["expires_ts"] = time.time() - 1
 
-        persist_signal_close(trade_id, "CLOSED")
+    persist_signal_close(trade_id, "CLOSED")
 
-        save_positions()
-        save_persistent_config()
-        if not validate_state():
-            logger.error("State corrupted after closing position")
-            set_execution_paused("ENGINE_FAILURE")
+    save_positions()
+    save_persistent_config()
+    if not validate_state():
+        logger.error("State corrupted after closing position")
+        set_execution_paused("ENGINE_FAILURE")
     logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
     candidate_signal["active"] = False
     clear_pending_trade()
@@ -13042,6 +13046,53 @@ logger.addHandler(file_handler)
 FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC = 3600
 _last_fresh_maintain_ts = 0.0
 
+# Analyzer outputs — must be wiped with CSVs on fresh collection or dashboard shows stale PnL.
+ANALYZER_TEXT_OUTPUTS = (
+    "executive_summary.txt",
+    "research_highlights.txt",
+    "research_findings.txt",
+    "research_coverage.txt",
+    "research_deep_dive_index.txt",
+    "analysis_dashboard.html",
+    "analyzer_run.log",
+    "research_compact_summary.json",
+    "report_manifest.json",
+    "real_edge_summary.json",
+    "pathway_scorecard.json",
+    "ai_confidence_expectancy.json",
+    "lane_opportunity_capture.json",
+    "approve_outcome_confidence_direction.json",
+    "scenario_c_capture_ratio.json",
+    "execution_funnel_summary.json",
+)
+
+def _analyzer_output_wipe_globs() -> list:
+    """All analyzer JSON/text artifacts in cwd and reports/ (not session archives)."""
+    patterns = (
+        "*_report.json",
+        "research_compact_summary.json",
+        "report_manifest.json",
+        "real_edge_summary.json",
+        "pathway_scorecard.json",
+        "pathway_lane_specs.json",
+        "ai_confidence_expectancy.json",
+        "lane_opportunity_capture.json",
+        "approve_outcome_confidence_direction.json",
+        "scenario_c_capture_ratio.json",
+        "execution_funnel_summary.json",
+    )
+    found = list(ANALYZER_TEXT_OUTPUTS)
+    for pat in patterns:
+        found.extend(glob.glob(pat))
+    reports_dir = "reports"
+    if os.path.isdir(reports_dir):
+        for name in os.listdir(reports_dir):
+            path = os.path.join(reports_dir, name)
+            if os.path.isfile(path) and name.endswith((".json", ".html", ".txt")):
+                found.append(path)
+    return sorted(set(p for p in found if p and "research_session" not in p))
+
+
 def research_wipe_file_paths():
     """Research artifacts that can grow without bound between analyzer runs."""
     paths = [
@@ -13085,7 +13136,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
 
 
 def all_research_wipe_paths() -> list:
-    return sorted(set(research_wipe_file_paths()) | set(_research_wipe_rotated_jsonl_paths()))
+    return sorted(set(research_wipe_file_paths()) | set(_research_wipe_rotated_jsonl_paths()) | set(_analyzer_output_wipe_globs()))
 
 def _delete_paths(paths) -> tuple:
     deleted = []
@@ -13153,11 +13204,12 @@ def perform_fresh_collection_reset() -> dict:
     reset_session_risk_state()
     bot_start_time = time.time()
     _last_fresh_maintain_ts = time.time()
+    with state_lock:
+        state["fresh_collection_mode"] = True
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     with state_lock:
-        state["fresh_collection_mode"] = True
         state["last_fresh_reset_ts"] = time.time()
         state["last_fresh_reset_summary"] = summary
         state["execution_paused"] = False
