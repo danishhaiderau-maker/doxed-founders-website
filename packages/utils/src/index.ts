@@ -80,6 +80,7 @@ export * from './founder-memory-graph';
 export * from './mission-state';
 export * from './founder-brain-router';
 export * from './commit-intelligence';
+export * from './founder-brain-coach';
 export * from './founder-brain-context';
 export * from './agent-runtime';
 export * from './founder-queue';

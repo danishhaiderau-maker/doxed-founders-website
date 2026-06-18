@@ -43,9 +43,11 @@ import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { cn } from '@dcf/utils';
 import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
+import { FounderBrainCoachPanel } from '@/components/founder-brain-coach-panel';
 import {
   AI_STACK_HREF,
   buildCopilotUsageLines,
+  connectionSnapshotFromSync,
   CopilotAction,
   CopilotSendMode,
   copilotActionSendMode,
@@ -60,6 +62,7 @@ import {
   resolveCopilotSendMode,
   resolveHeroBrainSendMode,
   resolveCopilotStack,
+  resolveSmartQuickPrompts,
   shortProviderName,
 } from '@/lib/copilot-ai-stack';
 
@@ -136,6 +139,9 @@ type FounderCopilotChatProps = {
   contentDraftReady?: boolean;
   /** Live Chief of Staff nudges (polled from API). */
   liveNudges?: ChiefOfStaffNudge[];
+  /** Infra connection chips from platform sync (for smart onboarding). */
+  syncPlatforms?: { key: string; connected: boolean }[];
+  founderNodeConnected?: boolean;
 };
 
 const ASK_CHIPS = [
@@ -163,6 +169,8 @@ export function FounderCopilotChat({
   activeAgentRunActive = false,
   contentDraftReady = false,
   liveNudges = [],
+  syncPlatforms = [],
+  founderNodeConnected = false,
 }: FounderCopilotChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -229,6 +237,22 @@ export function FounderCopilotChat({
         contentDraftReady,
       }),
     [stack, providers, activeAgentRunActive, contentDraftReady],
+  );
+
+  const connectionSnapshot = useMemo(
+    () =>
+      connectionSnapshotFromSync(syncPlatforms, {
+        llmConnected: stack.canAsk,
+        cursorConnected: stack.canBuild,
+        founderNodeConnected,
+        repoFullName: memory?.repoFullName,
+      }),
+    [syncPlatforms, stack.canAsk, stack.canBuild, founderNodeConnected, memory?.repoFullName],
+  );
+
+  const smartPrompts = useMemo(
+    () => resolveSmartQuickPrompts(connectionSnapshot),
+    [connectionSnapshot],
   );
 
   const patchMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
@@ -488,7 +512,7 @@ export function FounderCopilotChat({
         effectiveMode === 'build' ? 'build' : 'ask',
       );
 
-      const setupGap = copilotSetupGapMessage(effectiveMode, stack);
+      const setupGap = copilotSetupGapMessage(effectiveMode, stack, connectionSnapshot);
       if (setupGap) {
         const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', content: q };
         setMessages((prev) => [
@@ -891,11 +915,30 @@ export function FounderCopilotChat({
         )}
       >
         {messages.length === 0 && !busy && (
-          <div className="mx-auto max-w-lg space-y-2 text-center text-sm text-zinc-500">
+          <div className="mx-auto w-full max-w-2xl space-y-3 text-sm text-zinc-500">
+            {isHero && (
+              <FounderBrainCoachPanel
+                prompts={smartPrompts}
+                onSelect={(p, kind) => {
+                  const mode =
+                    kind === 'build' && stack.canBuild
+                      ? 'build'
+                      : 'ask';
+                  if (kind === 'build') {
+                    const buildAction = copilotActions.find((a) => a.kind === 'build');
+                    if (buildAction) setSelectedActionId(buildAction.id);
+                  }
+                  void submit(p, mode);
+                }}
+              />
+            )}
             {isHero && !stack.canAsk && (
               <p className="rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-left text-xs text-amber-100/90">
-                Connect <strong>GitHub</strong> and a <strong>chat LLM</strong> in Settings → Builder so
-                Founder Brain gives tailored answers — not generic rule-based replies.
+                Connect a <strong>chat LLM</strong> in{' '}
+                <a href={AI_STACK_HREF} className="text-amber-200 underline">
+                  Settings → Builder
+                </a>{' '}
+                for expert answers — until then I use mission memory only.
               </p>
             )}
             {isHero && usageLines.length > 0 && (
@@ -925,9 +968,9 @@ export function FounderCopilotChat({
                 ) : null}
               </p>
             )}
-            <p>
+            <p className="text-center text-xs">
               {isHero
-                ? 'Type below — Founder Brain routes to research or build automatically.'
+                ? 'Or type below — I route to research, build, or Sovereign vault drafting automatically.'
                 : 'Type below, then pick your model or code agent and send.'}
             </p>
           </div>
@@ -965,6 +1008,24 @@ export function FounderCopilotChat({
                 ? `Running ${thinkingLabel ?? stack.buildLabel} on your repo…`
                 : `${thinkingLabel ?? stack.askLabel} · streaming answer…`}
             </div>
+          </div>
+        )}
+        {!busy && isHero && smartPrompts.length > 0 && messages.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 border-t border-zinc-800/60 pt-3">
+            {smartPrompts.slice(0, 4).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => {
+                  const mode =
+                    chip.kind === 'build' && stack.canBuild ? 'build' : 'ask';
+                  void submit(chip.prompt, mode);
+                }}
+                className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2.5 py-1 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-white"
+              >
+                {chip.label}
+              </button>
+            ))}
           </div>
         )}
         {!busy && !isHero && (

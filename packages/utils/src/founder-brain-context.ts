@@ -7,6 +7,7 @@ import {
   type CommitSignal,
   type InitiativeTheme,
 } from './commit-intelligence';
+import { formatRecapCoachAnswer, isRecapOrHistoryPrompt } from './founder-brain-coach';
 
 export type MissionIntelligence = {
   currentInitiative: string;
@@ -73,6 +74,10 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
   let blocker = graph?.blocked_by?.trim() ?? null;
   if (!blocker && openPrs.length > 0) {
     blocker = `${openPrs.length} open PR(s) need review — ${openPrs[0]!.title.slice(0, 80)}`;
+  }
+  if (!blocker && !input.repoFullName) {
+    blocker =
+      'No GitHub repository linked — choose Sovereign (Founder Vault on your machine) or connect a repo for Cursor builds';
   }
   if (!blocker && input.commits.length === 0 && input.repoFullName) {
     blocker = 'No recent commits synced — run GitHub sync in AI Stack';
@@ -244,6 +249,7 @@ export function formatFounderBrainContextForPrompt(
     '- Ignore chore(founder-os): sync * commits when describing current work — call out sync noise as hygiene if >40% of commits.',
     '- Never reply with only task.json titles or generic "define milestone" when GitHub commit data exists.',
     '- Name real initiatives (Feed, Discover, Founder OS, Vault, Builder, Predictions) when commits support them.',
+    '- If repository is not linked: ask which pathway (Sovereign local vault, Hybrid GitHub-only, Production full cloud) before recommending specific code.',
   );
 
   return sections.filter(Boolean).join('\n');
@@ -255,6 +261,23 @@ export function formatRuleBasedBrainAnswer(
   prompt: string,
 ): string {
   const q = prompt.toLowerCase();
+
+  if (isRecapOrHistoryPrompt(prompt)) {
+    return formatRecapCoachAnswer({
+      projectName: input.projectName,
+      currentInitiative: intelligence.currentInitiative,
+      recommendedNextStep: intelligence.recommendedNextStep,
+      blocker: intelligence.blocker,
+      confidence: intelligence.confidence,
+      repoFullName: input.repoFullName,
+      conn: {
+        githubConnected: Boolean(input.repoFullName),
+        cursorConnected: false,
+        llmConnected: true,
+      },
+    });
+  }
+
   const workingOn =
     /what.*(working|building|focus)|what am i|what should i ship|status|left off/i.test(q);
 

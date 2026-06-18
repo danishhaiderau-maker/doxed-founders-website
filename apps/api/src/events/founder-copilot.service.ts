@@ -71,6 +71,8 @@ import {
   deriveMissionIntelligence,
   formatFounderBrainContextForPrompt,
   formatRuleBasedBrainAnswer,
+  FOUNDER_BRAIN_EXPERT_PM_RULES,
+  isRecapOrHistoryPrompt,
   buildProjectTimeline,
   formatProjectTimelineExcerpt,
   buildDeployIntelligenceCard,
@@ -1567,13 +1569,19 @@ export class FounderCopilotService {
       currentInitiative: intelligence.currentInitiative,
     });
     brainInput.founderGraphExcerpt = this.founderGraph.formatForBrain(graph);
-    const contextBlock = formatFounderBrainContextForPrompt(brainInput, intelligence);
+    const contextBlock =
+      formatFounderBrainContextForPrompt(brainInput, intelligence) +
+      (!refreshedMemory.repoFullName
+        ? '\n\n## Onboarding coach (required)\nRepository is NOT linked. Follow expert PM rules: offer Sovereign (Founder Vault local), Hybrid (GitHub+Cursor), or Production (full cloud). Ask ONE clarifying question. Do NOT invent specific code (e.g. Solidity functions) until the user picks a pathway and describes the product.\n'
+        : '');
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 
-    const systemPrompt = `${memoryPrefix}You are Founder Brain — the command center for crypto founders. Use the assembled context below (commits, PRs, deployments, initiatives, mission graph). Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
+    const systemPrompt = `${memoryPrefix}${FOUNDER_BRAIN_EXPERT_PM_RULES}\n\nYou are Founder Brain — the command center for crypto founders. Use the assembled context below (commits, PRs, deployments, initiatives, mission graph). Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
 
     const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
-    const preferGrounded = shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length);
+    const preferGrounded =
+      shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
+      isRecapOrHistoryPrompt(text);
 
     const aiResult = preferGrounded
       ? ({ ok: false as const, llmErrors: ['github_grounded_status'] })

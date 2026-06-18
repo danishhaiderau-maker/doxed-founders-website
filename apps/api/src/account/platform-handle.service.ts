@@ -33,7 +33,9 @@ export class PlatformHandleService {
     }
 
     if (user.role === UserRole.ADMIN) {
-      if (user.platformHandle !== ADMIN_PLATFORM_HANDLE) {
+      const broken =
+        user.platformHandle?.includes('undefined') || user.platformHandle?.includes('Cheetah');
+      if (user.platformHandle !== ADMIN_PLATFORM_HANDLE || broken) {
         await this.prisma.user.update({
           where: { id: userId },
           data: { platformHandle: ADMIN_PLATFORM_HANDLE },
