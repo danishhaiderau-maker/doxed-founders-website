@@ -8,13 +8,15 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   resolveSubscriberExecutionPollMs,
   DEFAULT_SUBSCRIBER_LEVERAGE,
-  SUBSCRIBER_MAX_CONCURRENT_COPY_LEGS,
+  SUBSCRIBER_MAX_OPEN_COPY_LEGS,
+  SUBSCRIBER_MAX_PENDING_COPY_LEGS,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   computeLimitFromMark,
   computeStopPrice,
   computeProfitLockStopPrice,
   computeQty,
   computeLimitChaseTarget,
+  computeUnrealizedMarginPct,
   isNearChaseFillZone,
   sanitizeLimitPrice,
   getProfitLockFloor,
@@ -251,10 +253,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
     }
 
-    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
-    const botActiveLegs = this.countBotActiveLegs(botState);
+    const openCount = openParticipantAfter.filter((p) => p.status === SignalCycleStatus.OPEN).length;
+    const pendingCount = openParticipantAfter.filter(
+      (p) => p.status === SignalCycleStatus.PENDING_ENTRY,
+    ).length;
 
-    // Pass 2 — place limit entries for each INTENT cycle (isolated legs, same as showcase bot).
+    // Pass 2 — one Bitfinex leg at a time (exchange nets BTC-PERP; bot sim runs many parallel legs).
     let entriesThisTick = 0;
     for (const cycle of cycles) {
       if (cycle.status !== SignalCycleStatus.INTENT) continue;
@@ -269,8 +273,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       const eligibility = await this.evaluateEntryEligibility(
         creds,
-        openParticipantAfter.length + entriesThisTick,
-        botActiveLegs,
+        {
+          open: openCount,
+          pending: pendingCount + entriesThisTick,
+        },
         managedOrderIds,
         marginCap,
       );
@@ -309,10 +315,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         data: { lastError: null },
       });
     } else if (!managedOpenTrade) {
+      const openCount = openParticipantAfter.filter((p) => p.status === SignalCycleStatus.OPEN).length;
+      const pendingCount = openParticipantAfter.filter(
+        (p) => p.status === SignalCycleStatus.PENDING_ENTRY,
+      ).length;
       const eligibility = await this.evaluateEntryEligibility(
         creds,
-        openParticipantAfter.length,
-        botActiveLegs,
+        { open: openCount, pending: pendingCount },
         managedOrderIds,
         marginCap,
       );
@@ -330,20 +339,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
-  /** Count showcase bot pending orders + open positions (target copy leg count). */
-  private countBotActiveLegs(bot: { orders?: unknown[]; positions?: unknown[] } | null): number {
-    if (!bot) return 1;
-    const orders = (bot.orders ?? []).filter((o) => {
-      const row = o as { status?: string };
-      return row.status === 'PENDING' || row.status === 'ORDERED';
-    });
-    const positions = (bot.positions ?? []).filter((p) => {
-      const row = p as { status?: string };
-      return row.status === 'OPEN' || !row.status;
-    });
-    return Math.max(1, orders.length + positions.length);
-  }
-
+  /** Resolve showcase bot pending limit for chase sync. */
   private resolveBotLimitPrice(
     bot: { orders?: Array<{ trade_id?: string; limit_price?: number; status?: string }> } | null,
     tradeId: string,
@@ -357,13 +353,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Allow multiple isolated limit legs when margin and slots remain (matches showcase bot).
-   * Does not block on our own managed pending orders — only foreign/unmanaged orders.
+   * Bitfinex BTC-PERP nets to one position — copy tracks at most 1 open + 1 pending leg.
+   * Showcase bot simulates many parallel legs; live copy mirrors one leg at a time reliably.
    */
   private async evaluateEntryEligibility(
     creds: ExchangeCredentials,
-    managedLegCount: number,
-    botActiveLegs: number,
+    managed: { open: number; pending: number },
     managedOrderIds: Set<number>,
     marginCap: number,
   ): Promise<EntryEligibility> {
@@ -393,20 +388,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
 
-    const maxByMargin = Math.max(0, Math.floor((available * 0.95) / marginCap));
-    const maxLegs = Math.min(
-      SUBSCRIBER_MAX_CONCURRENT_COPY_LEGS,
-      Math.max(botActiveLegs, maxByMargin),
-    );
-    const slotsRemaining = Math.max(0, Math.min(maxByMargin, maxLegs - managedLegCount));
-
-    if (slotsRemaining <= 0) {
+    if (managed.open >= SUBSCRIBER_MAX_OPEN_COPY_LEGS) {
       return {
         canEnter: false,
-        reason:
-          managedLegCount > 0
-            ? `Managing ${managedLegCount} copy leg(s) — no free slots (bot has ${botActiveLegs} active, margin allows ${maxByMargin}).`
-            : 'No copy slots available.',
+        reason: 'Copy position open on Bitfinex — new entries wait until profit-lock, stop, or showcase exit completes.',
+        availableUsd: available,
+        slotsRemaining: 0,
+      };
+    }
+
+    if (managed.pending >= SUBSCRIBER_MAX_PENDING_COPY_LEGS) {
+      return {
+        canEnter: false,
+        reason: 'Copy limit order already resting — waiting for fill or chase before another entry.',
         availableUsd: available,
         slotsRemaining: 0,
       };
@@ -421,6 +415,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         slotsRemaining: 0,
       };
     }
+
+    const slotsRemaining =
+      SUBSCRIBER_MAX_OPEN_COPY_LEGS +
+      SUBSCRIBER_MAX_PENDING_COPY_LEGS -
+      managed.open -
+      managed.pending;
 
     return { canEnter: true, reason: null, availableUsd: available, slotsRemaining };
   }
@@ -629,8 +629,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const fillPrice = position.basePrice > 0 ? position.basePrice : meta.limitPrice ?? (await this.bitfinex.getMarkPrice());
-    const qty = Math.abs(position.amount);
+    const fillPrice =
+      meta.limitPrice && meta.limitPrice > 0
+        ? meta.limitPrice
+        : position.basePrice > 0
+          ? position.basePrice
+          : await this.bitfinex.getMarkPrice();
+    const qty = meta.qty ?? MIN_QTY_BTC;
     const filledEvents = await this.prisma.signalCycleEvent.count({
       where: { participantId: participant.id, eventType: 'FILLED' },
     });
@@ -732,7 +737,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!meta.direction) return;
     const position = await this.bitfinex.getOpenPositionDetail(creds);
     if (!position) return;
-    const qty = Math.abs(position.amount);
+    const qty = meta.qty ?? MIN_QTY_BTC;
     const entry = fillPrice ?? position.basePrice;
     if (!entry || entry <= 0) return;
 
@@ -864,8 +869,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
-   * Live profit-lock ladder + trailing stop while showcase position is still open.
-   * Mirrors showcase bot TRAIL_LADDER (12% peak → lock 8%, etc.).
+   * Live profit-lock ladder + trailing stop — uses per-leg margin % (same formula as showcase bot).
    */
   private async monitorOpenPosition(
     agentId: string,
@@ -885,26 +889,43 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
     if (!hasExpected) return;
 
-    const unrealMarginPct = position.pnlPct;
-    const runtime = this.positionRuntime.get(participant.id) ?? {
-      peakMarginPct: meta.peakMarginPct ?? 0,
-      lastChaseAtMs: 0,
-      filledRecorded: true,
-    };
-    runtime.peakMarginPct = Math.max(runtime.peakMarginPct, unrealMarginPct);
-    this.positionRuntime.set(participant.id, runtime);
-
-    const lockFloor = getProfitLockFloor(runtime.peakMarginPct);
     const fillPrice =
       participant.fillPrice != null
         ? Number(participant.fillPrice)
-        : position.basePrice > 0
-          ? position.basePrice
-          : meta.limitPrice ?? 0;
+        : meta.limitPrice && meta.limitPrice > 0
+          ? meta.limitPrice
+          : position.basePrice > 0
+            ? position.basePrice
+            : 0;
+    if (!fillPrice || fillPrice <= 0) return;
+
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const mark = await this.bitfinex.getMarkPrice();
+    const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
+
+    const runtime = this.positionRuntime.get(participant.id) ?? {
+      peakMarginPct: meta.peakMarginPct ?? 0,
+      lastChaseAtMs: meta.lastChaseAtMs ?? 0,
+      filledRecorded: true,
+    };
+    const priorPeak = Math.max(runtime.peakMarginPct, meta.peakMarginPct ?? 0);
+    runtime.peakMarginPct = Math.max(priorPeak, unrealMarginPct);
+    this.positionRuntime.set(participant.id, runtime);
+
+    if (runtime.peakMarginPct > priorPeak + 0.25) {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+        venue: 'bitfinex',
+        event: 'PEAK_MARGIN_UPDATE',
+        peak_margin_pct: Math.round(runtime.peakMarginPct * 100) / 100,
+        unreal_margin_pct: Math.round(unrealMarginPct * 100) / 100,
+        mark,
+        source: 'hire',
+      });
+    }
+
+    const lockFloor = getProfitLockFloor(runtime.peakMarginPct);
 
     if (lockFloor != null && unrealMarginPct <= lockFloor) {
-      const mark = await this.bitfinex.getMarkPrice();
       try {
         if (meta.stopOrderId) {
           try {
@@ -926,11 +947,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       const direction = meta.direction;
       const pnlUsd =
-        fillPrice && mark
-          ? direction === 'LONG'
-            ? (mark - fillPrice) * meta.qty
-            : (fillPrice - mark) * meta.qty
-          : position.pnlUsd;
+        direction === 'LONG'
+          ? (mark - fillPrice) * meta.qty
+          : (fillPrice - mark) * meta.qty;
       const pnlMarginPct = runtime.peakMarginPct > 0 ? lockFloor : unrealMarginPct;
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
@@ -939,13 +958,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         exit_reason: 'PROFIT_LOCK',
         peak_margin_pct: runtime.peakMarginPct,
         lock_floor_margin_pct: lockFloor,
+        unreal_margin_pct: unrealMarginPct,
         pnl_usd: Math.round(pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         source: 'hire',
       });
       this.positionRuntime.delete(participant.id);
       this.logger.log(
-        `Hire profit-lock ${userId} cycle=${cycle.id} peak=${runtime.peakMarginPct.toFixed(2)}% lock=${lockFloor}% exit=${mark.toFixed(2)}`,
+        `Hire profit-lock ${userId} cycle=${cycle.id} peak=${runtime.peakMarginPct.toFixed(2)}% unreal=${unrealMarginPct.toFixed(2)}% lock=${lockFloor}% exit=${mark.toFixed(2)}`,
       );
       return;
     }
