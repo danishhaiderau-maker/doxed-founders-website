@@ -149,19 +149,87 @@ export function computeQty(marginUsd: number, leverage: number, price: number, m
   return Math.max(minQty, Math.floor(raw * 1e5) / 1e5);
 }
 
-/** Limit chase step — move resting entry toward mark by fraction of remaining gap. */
+/** Mirrors showcase bot LIMIT_CHASE_MIN_BUFFER_USD / MICRO_SR_ENTRY_BUFFER_USD. */
+export const SUBSCRIBER_CHASE_MIN_BUFFER_USD = 15;
+export const SUBSCRIBER_CHASE_NEAR_FILL_USD = 10;
+export const SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT = 0.9;
+export const SUBSCRIBER_CHASE_STEP_PCT = 0.25;
+/** Matches bot LIMIT_CHASE_INTERVAL_SEC_DEFAULT (60s). */
+export const SUBSCRIBER_CHASE_INTERVAL_MS = 60_000;
+/** Max concurrent copy legs per hire (matches bot MAX_CONCURRENT_POSITIONS_DEFAULT). */
+export const SUBSCRIBER_MAX_CONCURRENT_COPY_LEGS = 20;
+
+/** Signed distance from limit to market (always >= 0 when limit is on correct side). */
+export function limitChaseMarketGap(
+  direction: 'LONG' | 'SHORT',
+  limitPrice: number,
+  marketPrice: number,
+): number {
+  if (direction === 'LONG') return Math.max(0, marketPrice - limitPrice);
+  return Math.max(0, limitPrice - marketPrice);
+}
+
+/**
+ * Nudge resting entry toward market — mirrors bot _compute_limit_chase_target.
+ * SHORT: limit above mark, chase moves limit down. LONG: limit below mark, chase moves up.
+ */
+export function computeLimitChaseTarget(
+  direction: 'LONG' | 'SHORT',
+  currentLimit: number,
+  marketPrice: number,
+  originalLimit: number,
+  stepPct = SUBSCRIBER_CHASE_STEP_PCT,
+): { newLimit: number; reason: string } {
+  const curGap = limitChaseMarketGap(direction, currentLimit, marketPrice);
+  if (curGap <= 0) return { newLimit: currentLimit, reason: 'NO_GAP' };
+
+  const origGap = limitChaseMarketGap(direction, originalLimit, marketPrice);
+  if (origGap <= 0) return { newLimit: currentLimit, reason: 'NO_ORIG_GAP' };
+
+  const closedPct = 1 - curGap / origGap;
+  if (closedPct >= SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT) {
+    return { newLimit: currentLimit, reason: 'MAX_CHASE_REACHED' };
+  }
+
+  const step = stepPct * curGap;
+  const buffer = SUBSCRIBER_CHASE_MIN_BUFFER_USD;
+  let newLimit: number;
+  if (direction === 'LONG') {
+    newLimit = Math.min(currentLimit + step, marketPrice - buffer);
+    newLimit = Math.max(newLimit, currentLimit);
+  } else {
+    newLimit = Math.max(currentLimit - step, marketPrice + buffer);
+    newLimit = Math.min(newLimit, currentLimit);
+  }
+
+  if (Math.abs(newLimit - currentLimit) < 0.01) {
+    return { newLimit: currentLimit, reason: 'NO_MOVE' };
+  }
+  return { newLimit: Math.round(newLimit * 100) / 100, reason: 'LIMIT_CHASE' };
+}
+
+export function isNearChaseFillZone(
+  direction: 'LONG' | 'SHORT',
+  limitPrice: number,
+  marketPrice: number,
+): boolean {
+  return limitChaseMarketGap(direction, limitPrice, marketPrice) <= SUBSCRIBER_CHASE_NEAR_FILL_USD;
+}
+
+/** @deprecated Use computeLimitChaseTarget — kept for callers migrating gradually. */
 export function computeChaseLimitPrice(
   mark: number,
   currentLimit: number,
   direction: 'LONG' | 'SHORT',
-  stepPct = 0.25,
+  stepPct = SUBSCRIBER_CHASE_STEP_PCT,
+  originalLimit?: number,
 ): number {
-  if (direction === 'LONG') {
-    const gap = currentLimit - mark;
-    if (gap <= 0) return currentLimit;
-    return Math.round((currentLimit - gap * stepPct) * 100) / 100;
-  }
-  const gap = mark - currentLimit;
-  if (gap <= 0) return currentLimit;
-  return Math.round((currentLimit + gap * stepPct) * 100) / 100;
+  const { newLimit } = computeLimitChaseTarget(
+    direction,
+    currentLimit,
+    mark,
+    originalLimit ?? currentLimit,
+    stepPct,
+  );
+  return newLimit;
 }

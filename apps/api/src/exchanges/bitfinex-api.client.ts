@@ -3,6 +3,8 @@ import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
 
 export const BITFINEX_BTC_PERP_SYMBOL = 'tBTCF0:USTF0';
+/** Bitfinex defaults to 10x when lev is omitted — showcase bot uses 100x. */
+export const BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE = 100;
 const MIN_POSITION_BTC = 0.000004;
 const STABLE_CURRENCIES = new Set(['USD', 'USDT', 'UST', 'USTF0']);
 
@@ -314,9 +316,16 @@ export class BitfinexTradingClient {
 
   async submitLimitOrder(
     creds: ExchangeCredentials,
-    input: { symbol?: string; direction: 'LONG' | 'SHORT'; qty: number; price: number },
+    input: {
+      symbol?: string;
+      direction: 'LONG' | 'SHORT';
+      qty: number;
+      price: number;
+      leverage?: number;
+    },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
     const amount =
       input.direction === 'LONG'
         ? Math.abs(input.qty)
@@ -326,6 +335,7 @@ export class BitfinexTradingClient {
       symbol,
       amount: amount.toFixed(5),
       price: input.price.toFixed(2),
+      lev,
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
@@ -340,9 +350,11 @@ export class BitfinexTradingClient {
       positionDirection: 'LONG' | 'SHORT';
       qty: number;
       stopPrice: number;
+      leverage?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
     const amount =
       input.positionDirection === 'LONG'
         ? -Math.abs(input.qty)
@@ -352,6 +364,7 @@ export class BitfinexTradingClient {
       symbol,
       amount: amount.toFixed(5),
       price: input.stopPrice.toFixed(2),
+      lev,
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
@@ -361,9 +374,15 @@ export class BitfinexTradingClient {
 
   async submitMarketClose(
     creds: ExchangeCredentials,
-    input: { symbol?: string; positionDirection: 'LONG' | 'SHORT'; qty: number },
+    input: {
+      symbol?: string;
+      positionDirection: 'LONG' | 'SHORT';
+      qty: number;
+      leverage?: number;
+    },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
     const amount =
       input.positionDirection === 'LONG'
         ? -Math.abs(input.qty)
@@ -372,6 +391,7 @@ export class BitfinexTradingClient {
       type: 'MARKET',
       symbol,
       amount: amount.toFixed(5),
+      lev,
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
