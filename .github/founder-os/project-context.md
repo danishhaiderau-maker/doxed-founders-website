@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(live-copy): populate Bitfinex positions, pending orders, and virtual lots in liveBook
+chore(scripts): add resume-live-copy automation helper
 
 ## Last Activity
 
