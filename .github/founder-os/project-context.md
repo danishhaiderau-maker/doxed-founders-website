@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(live-copy): always manage user open cycles; heal stuck participants
+fix(live-copy): chase SHORT limits correctly, 100x lev, multi-leg entries
 
 ## Last Activity
 
