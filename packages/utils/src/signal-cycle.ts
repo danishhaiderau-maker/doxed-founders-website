@@ -1,6 +1,9 @@
 /** Platform-enforced max collateral (margin) per hire/signal trade — admin can raise via PlatformSettings. */
 export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 
+/** Matches showcase bot DEFAULT_RESEARCH_LEVERAGE (100x on Bitfinex derivatives). */
+export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
+
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS. */
 export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 1_000;
 

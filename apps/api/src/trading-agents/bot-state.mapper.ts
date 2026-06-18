@@ -494,6 +494,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
       daily: Number(dailyPnlPct.toFixed(2)),
       total: Number(totalPnlPct.toFixed(2)),
     },
+    leverage: bot.leverage ?? 100,
     liveBook: mapLiveBook(bot),
   };
 }
@@ -589,6 +590,7 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
     liveSinceDays,
     currentPosition: openCount === 0 ? 'NONE' : (bot.positions?.[0]?.dir ?? 'OPEN'),
     currentAction,
+    leverage: bot.leverage ?? 100,
     status: bot.strategy_mode === 'RESEARCH' ? 'TESTING' : bot.execution_paused ? 'PAUSED' : 'TESTING',
   };
 }

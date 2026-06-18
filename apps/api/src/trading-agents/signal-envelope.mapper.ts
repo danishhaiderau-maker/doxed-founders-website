@@ -1,13 +1,13 @@
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  DEFAULT_SUBSCRIBER_LEVERAGE,
   SUBSCRIBER_TRAIL_LADDER,
   normalizePullbackToOffsetPct,
 } from '@dcf/utils';
 import type { BotApiState } from './bot-state.mapper';
 
 const DEFAULT_STOP_LOSS_MARGIN_PCT = -18;
-const DEFAULT_LEVERAGE_HINT = 20;
 const LIMIT_TTL_SEC = 1800;
 
 export type BotApproveSnapshot = {
@@ -92,8 +92,7 @@ export function buildIntentEnvelope(
         at_margin_pct,
         close_position_pct: lock_margin_pct,
       })),
-      leverage_hint:
-        (bot as BotApiState & { leverage?: number }).leverage ?? DEFAULT_LEVERAGE_HINT,
+      leverage_hint: bot.leverage ?? DEFAULT_SUBSCRIBER_LEVERAGE,
       max_margin_usd: options?.maxMarginUsd ?? DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     },
     context: {

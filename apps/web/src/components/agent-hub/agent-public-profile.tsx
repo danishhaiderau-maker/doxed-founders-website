@@ -538,6 +538,7 @@ export function AgentPublicProfile({
           {tab === 'Overview' && (
             <div className="space-y-6">
               <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                <MetricPill label="Leverage" value={`${agent.leverage ?? dashboard.leverage ?? 100}x`} accent="text-violet-300" />
                 <MetricPill label="30D return" value={formatPercent(agent.netReturnPct)} accent="text-emerald-400" />
                 <MetricPill label="Win rate" value={`${agent.winRatePct.toFixed(0)}%`} />
                 <MetricPill label="Max drawdown" value="6.2%" />

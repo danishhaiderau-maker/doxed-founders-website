@@ -112,6 +112,8 @@ export type TradingAgentDashboardState = {
   wsHealth: string;
   dataQuality: string;
   pnl: { daily: number; total: number };
+  /** Showcase / copy leverage (Bitfinex derivatives, typically 100x). */
+  leverage: number;
   liveBook: {
     activeSignals: AgentLiveSignalRow[];
     positions: AgentLivePositionRow[];

@@ -7,6 +7,7 @@ import {
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   resolveSubscriberExecutionPollMs,
+  DEFAULT_SUBSCRIBER_LEVERAGE,
   computeLimitFromMark,
   computeStopPrice,
   computeProfitLockStopPrice,
@@ -401,7 +402,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return false;
       }
 
-      const leverage = intent.risk.leverage_hint ?? 20;
+      const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
       const orderId = await this.bitfinex.submitLimitOrder(creds, {
@@ -531,7 +532,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const runtime = this.positionRuntime.get(participant.id);
     if (runtime?.filledRecorded) return;
 
-    const leverage = intent.risk.leverage_hint ?? 20;
+    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
@@ -613,7 +614,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const entry = fillPrice ?? position.basePrice;
     if (!entry || entry <= 0) return;
 
-    const leverage = intent.risk.leverage_hint ?? 20;
+    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
     const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
 
@@ -667,7 +668,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     try {
       await this.bitfinex.cancelOrder(creds, orderId);
-      const leverage = intent.risk.leverage_hint ?? 20;
+      const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const qty = meta.qty ?? computeQty(20, leverage, safe, MIN_QTY_BTC);
       const newOrderId = await this.bitfinex.submitLimitOrder(creds, {
         direction: meta.direction,
@@ -754,7 +755,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         : position.basePrice > 0
           ? position.basePrice
           : meta.limitPrice ?? 0;
-    const leverage = intent.risk.leverage_hint ?? 20;
+    const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
 
     if (lockFloor != null && unrealMarginPct <= lockFloor) {
       const mark = await this.bitfinex.getMarkPrice();
@@ -906,7 +907,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         : 0;
     const pnlMarginPct =
       fillPrice && fillPrice > 0
-        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * 20
+        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
         : 0;
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
@@ -940,6 +941,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       status: SignalCycleStatus;
       showcasePnlUsd: { toNumber?: () => number } | null;
       closedAt: Date | null;
+      intentEnvelope?: unknown;
     },
     participant: { id: string; fillPrice: { toNumber?: () => number } | null },
     meta: ExecutionPayload,
@@ -981,9 +983,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? Number(cycle.showcasePnlUsd)
           : 0;
 
+    const leverage = (cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const pnlMarginPct =
       fillPrice && fillPrice > 0
-        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * (meta.direction ? 20 : 1)
+        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage
         : 0;
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {

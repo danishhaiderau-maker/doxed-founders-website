@@ -245,6 +245,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     wsHealth: '',
     dataQuality: '',
     pnl: { daily: 0, total: 0 },
+    leverage: agent?.leverage ?? 100,
     liveBook: {
       activeSignals: [],
       positions: [],
