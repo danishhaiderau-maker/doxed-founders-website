@@ -4,6 +4,7 @@ import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AccountService } from './account.service';
 import { PlatformHandleService } from './platform-handle.service';
+import { ReferralService } from './referral.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 
 @Controller('account')
@@ -11,6 +12,7 @@ export class AccountController {
   constructor(
     private readonly account: AccountService,
     private readonly platformHandles: PlatformHandleService,
+    private readonly referrals: ReferralService,
     private readonly founderPromoService: FounderPromoService,
   ) {}
 
@@ -70,5 +72,18 @@ export class AccountController {
     @Body() body: { platformHandle: string },
   ) {
     return this.platformHandles.updateHandle(user.id, body.platformHandle);
+  }
+
+  @Get('referral')
+  referral(@CurrentUser() user: AuthUser) {
+    return this.referrals.getSummary(user.id);
+  }
+
+  @Post('referral/claim')
+  claimReferral(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { referralCode: string },
+  ) {
+    return this.referrals.claimReferralCode(user.id, body.referralCode);
   }
 }

@@ -382,6 +382,10 @@ model User {
   avatarUrl     String?
   twitterHandle   String?
   platformHandle  String?   @unique
+  referralCode      String?   @unique
+  referredByUserId  String?
+  xVerified         Boolean   @default(false)
+  xVerifiedAt       DateTime?
   role            UserRole  @default(USER)
   emailVerified DateTime?
   banned        Boolean   @default(false)
@@ -460,10 +464,14 @@ model User {
   aiTokenUsageLogs     AiTokenUsageLog[]
   messagesSent         PlatformMessage[] @relation("MessageFrom")
   messagesReceived     PlatformMessage[] @relation("MessageTo")
+  referredBy           User?  @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
+  referrals            User[] @relation("UserReferrals")
 
   @@index([email])
   @@index([role])
   @@index([platformHandle])
+  @@index([referralCode])
+  @@index([referredByUserId])
 }
 
 model OAuthAccount {

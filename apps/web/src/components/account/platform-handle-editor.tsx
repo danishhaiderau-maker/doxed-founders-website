@@ -26,7 +26,18 @@ export function PlatformHandleEditor({
   if (!canEdit) {
     return (
       <p className="text-sm text-amber-200/90">
-        Platform handles for admin accounts are managed by the platform.
+        {initialHandle.includes('Founder')
+          ? 'Platform founder account — shown as Founder · Platform for transparency.'
+          : 'Platform handles for admin accounts are managed by the platform.'}
+      </p>
+    );
+  }
+
+  if (hasTwitterConnected && initialHandle.startsWith('@')) {
+    return (
+      <p className="text-sm text-emerald-200/90">
+        Your public name is your X handle <strong className="text-white">{initialHandle}</strong>. Legacy
+        animal · country IDs apply only to email-only accounts.
       </p>
     );
   }

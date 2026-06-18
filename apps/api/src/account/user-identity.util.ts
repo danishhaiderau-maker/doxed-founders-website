@@ -12,6 +12,8 @@ export type UserIdentityRow = {
   email?: string | null;
   platformHandle?: string | null;
   twitterHandle?: string | null;
+  xVerified?: boolean;
+  role?: string;
   oauthAccounts?: { provider: string }[];
 };
 
@@ -27,6 +29,8 @@ export function buildUserIdentity(user: UserIdentityRow) {
     platformHandle: user.platformHandle,
     twitterHandle: user.twitterHandle,
     hasTwitterConnected: hasTwitter,
+    xVerified: user.xVerified,
+    isAdmin: user.role === 'ADMIN',
   });
   return { identity, hasTwitter };
 }

@@ -25,6 +25,8 @@ export type AccountOverview = {
   twitterUrl: string | null;
   canEditPlatformHandle: boolean;
   hasTwitterConnected: boolean;
+  xVerified: boolean;
+  identityBadge: string | null;
   email: string;
   avatarUrl: string | null;
   joinedAt: string;
@@ -67,6 +69,7 @@ export class AccountService {
         createdAt: true,
         twitterHandle: true,
         platformHandle: true,
+        xVerified: true,
         oauthAccounts: { select: { provider: true } },
         webAuthnCredentials: { select: { id: true } },
         totp: { select: { enabled: true } },
@@ -161,6 +164,8 @@ export class AccountService {
       email: user.email,
       platformHandle,
       twitterHandle: user.twitterHandle,
+      xVerified: user.xVerified,
+      role: user.role,
       oauthAccounts: user.oauthAccounts,
     });
 
@@ -171,8 +176,10 @@ export class AccountService {
       messagingAddress: identity.messagingAddress,
       twitterHandle: identity.twitterHandle,
       twitterUrl: identity.twitterUrl,
-      canEditPlatformHandle: user.role !== 'ADMIN',
+      canEditPlatformHandle: user.role !== 'ADMIN' && !hasTwitter,
       hasTwitterConnected: hasTwitter,
+      xVerified: identity.xVerified,
+      identityBadge: identity.identityBadge,
       email: user.email,
       avatarUrl: user.avatarUrl,
       joinedAt: user.createdAt.toISOString(),

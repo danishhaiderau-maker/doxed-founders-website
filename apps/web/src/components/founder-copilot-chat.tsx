@@ -41,6 +41,7 @@ import {
 import { formatThinkingInChat, revealTextInChat } from '@/lib/copilot-inline-stream';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
+import { cn } from '@dcf/utils';
 import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import {
   AI_STACK_HREF,
@@ -117,6 +118,7 @@ type FounderCopilotChatProps = {
   accessToken: string;
   onResult?: (answer: string) => void;
   variant?: 'default' | 'hero' | 'embedded';
+  className?: string;
   memory?: ProjectMemory | null;
   missionInitiative?: string | null;
   missionNextStep?: string | null;
@@ -148,6 +150,7 @@ export function FounderCopilotChat({
   accessToken,
   onResult,
   variant = 'default',
+  className,
   memory: memoryProp,
   missionInitiative,
   missionNextStep,
@@ -830,13 +833,15 @@ export function FounderCopilotChat({
 
   return (
     <section
-      className={`flex flex-col overflow-hidden rounded-2xl border shadow-xl ${
+      className={cn(
+        'flex flex-col overflow-hidden rounded-2xl border shadow-xl',
         isHero
-          ? 'border-violet-500/30 bg-gradient-to-b from-violet-950/25 to-[#0d0d0f]'
+          ? 'min-h-0 flex-1 border-violet-500/30 bg-gradient-to-b from-violet-950/25 to-[#0d0d0f]'
           : isEmbedded
             ? 'border-zinc-800/80 bg-[#0d0d0f]'
-            : 'border-zinc-800 bg-[#0d0d0f]'
-      }`}
+            : 'border-zinc-800 bg-[#0d0d0f]',
+        className,
+      )}
     >
       <header className="border-b border-zinc-800 px-4 py-3 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -880,9 +885,10 @@ export function FounderCopilotChat({
 
       <div
         ref={scrollRef}
-        className={`flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 ${
-          isHero ? 'min-h-[min(62vh,640px)] max-h-[min(72vh,720px)]' : 'min-h-[320px] max-h-[min(58vh,520px)]'
-        }`}
+        className={cn(
+          'flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4',
+          isHero ? 'min-h-0 flex-1' : 'min-h-[320px] max-h-[min(58vh,520px)]',
+        )}
       >
         {messages.length === 0 && !busy && (
           <div className="mx-auto max-w-lg space-y-2 text-center text-sm text-zinc-500">

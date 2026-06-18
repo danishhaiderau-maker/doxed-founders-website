@@ -20,6 +20,12 @@ export class RegisterDto {
   @MinLength(2)
   @MaxLength(80)
   name?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(6)
+  @MaxLength(16)
+  referralCode?: string;
 }
 
 export class LoginDto {

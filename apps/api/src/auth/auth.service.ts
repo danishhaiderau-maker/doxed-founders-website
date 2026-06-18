@@ -6,11 +6,9 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { UserRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import {
-  generatePlatformHandle,
-  isReservedPlatformHandle,
-  normalizeTwitterHandle,
-} from '@dcf/utils';
+import { normalizeTwitterHandle } from '@dcf/utils';
+import { PlatformHandleService } from '../account/platform-handle.service';
+import { ReferralService } from '../account/referral.service';
 import { bootstrapUserEconomy } from '../account/user-economy.bootstrap';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -27,6 +25,8 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly points: PointsService,
+    private readonly platformHandles: PlatformHandleService,
+    private readonly referrals: ReferralService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -47,7 +47,8 @@ export class AuthService {
     });
 
     await bootstrapUserEconomy(this.prisma, this.points, user.id);
-    await this.assignPlatformHandleIfNeeded(user.id);
+    await this.referrals.attachReferralCode(user.id, dto.referralCode);
+    await this.platformHandles.ensureHandle(user.id);
 
     return await this.buildAuthResponse(user);
   }
@@ -112,6 +113,8 @@ export class AuthService {
   async oauthLogin(dto: OAuthLoginDto): Promise<AuthResponse> {
     const email = this.resolveOAuthEmail(dto);
     const twitterHandle = normalizeTwitterHandle(dto.twitterHandle) ?? undefined;
+    const isTwitter = dto.provider === 'twitter';
+    const xVerified = Boolean(dto.xVerified && isTwitter);
     const tokenData =
       dto.oauthAccessToken && dto.oauthAccessTokenSecret
         ? {
@@ -149,15 +152,42 @@ export class AuthService {
       if (tokenData) {
         await upsertOAuthTokens(linked.id);
       }
+
+      const updates: {
+        twitterHandle?: string;
+        xVerified?: boolean;
+        xVerifiedAt?: Date;
+      } = {};
       if (twitterHandle && linked.user.twitterHandle !== twitterHandle) {
+        updates.twitterHandle = twitterHandle;
+      }
+      if (xVerified && !linked.user.xVerified) {
+        updates.xVerified = true;
+        updates.xVerifiedAt = new Date();
+      }
+
+      if (Object.keys(updates).length > 0) {
         const user = await this.prisma.user.update({
           where: { id: linked.user.id },
-          data: { twitterHandle },
+          data: updates,
         });
-        await this.assignPlatformHandleIfNeeded(user.id);
+        await this.platformHandles.ensureHandle(user.id);
+        if (isTwitter) {
+          await this.referrals.tryCompleteReferralRewards(user.id, {
+            xVerified: user.xVerified,
+            isNewSignup: false,
+          });
+        }
         return await this.buildAuthResponse(user);
       }
-      await this.assignPlatformHandleIfNeeded(linked.user.id);
+
+      await this.platformHandles.ensureHandle(linked.user.id);
+      if (isTwitter) {
+        await this.referrals.tryCompleteReferralRewards(linked.user.id, {
+          xVerified: linked.user.xVerified,
+          isNewSignup: false,
+        });
+      }
       return await this.buildAuthResponse(linked.user);
     }
 
@@ -185,10 +215,16 @@ export class AuthService {
         avatarUrl?: string;
         emailVerified?: Date;
         twitterHandle?: string;
+        xVerified?: boolean;
+        xVerifiedAt?: Date;
       } = {};
       if (dto.name && !existingUser.name) updates.name = dto.name.trim();
       if (dto.avatarUrl && !existingUser.avatarUrl) updates.avatarUrl = dto.avatarUrl;
       if (twitterHandle) updates.twitterHandle = twitterHandle;
+      if (xVerified) {
+        updates.xVerified = true;
+        updates.xVerifiedAt = new Date();
+      }
       updates.emailVerified = new Date();
 
       const user = await this.prisma.user.update({
@@ -196,7 +232,14 @@ export class AuthService {
         data: updates,
       });
 
-      await this.assignPlatformHandleIfNeeded(user.id);
+      await this.referrals.attachReferralCode(user.id, dto.referralCode);
+      await this.platformHandles.ensureHandle(user.id);
+      if (isTwitter) {
+        await this.referrals.tryCompleteReferralRewards(user.id, {
+          xVerified: user.xVerified,
+          isNewSignup: false,
+        });
+      }
       return await this.buildAuthResponse(user);
     }
 
@@ -206,6 +249,8 @@ export class AuthService {
         name: dto.name?.trim() || null,
         avatarUrl: dto.avatarUrl || null,
         twitterHandle: twitterHandle ?? null,
+        xVerified: xVerified,
+        xVerifiedAt: xVerified ? new Date() : null,
         emailVerified: new Date(),
         role: UserRole.USER,
         oauthAccounts: {
@@ -220,31 +265,16 @@ export class AuthService {
     });
 
     await bootstrapUserEconomy(this.prisma, this.points, user.id);
-    await this.assignPlatformHandleIfNeeded(user.id);
+    await this.referrals.attachReferralCode(user.id, dto.referralCode);
+    await this.platformHandles.ensureHandle(user.id);
+    if (isTwitter) {
+      await this.referrals.tryCompleteReferralRewards(user.id, {
+        xVerified: user.xVerified,
+        isNewSignup: true,
+      });
+    }
 
     return await this.buildAuthResponse(user);
-  }
-
-  private async assignPlatformHandleIfNeeded(userId: string) {
-    const existing = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { platformHandle: true },
-    });
-    if (existing?.platformHandle) return;
-
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const candidate = generatePlatformHandle(userId, attempt);
-      if (isReservedPlatformHandle(candidate)) continue;
-      const taken = await this.prisma.user.findUnique({
-        where: { platformHandle: candidate },
-      });
-      if (taken) continue;
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { platformHandle: candidate },
-      });
-      return;
-    }
   }
 
   private resolveOAuthEmail(dto: OAuthLoginDto): string {

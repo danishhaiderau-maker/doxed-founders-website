@@ -1,4 +1,4 @@
-import { IsEmail, IsIn, IsOptional, IsString, MinLength, ValidateIf } from 'class-validator';
+import { IsBoolean, IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength, ValidateIf } from 'class-validator';
 
 export class OAuthLoginDto {
   @ValidateIf((o: OAuthLoginDto) => o.provider === 'google')
@@ -34,4 +34,14 @@ export class OAuthLoginDto {
   @IsOptional()
   @IsString()
   oauthAccessTokenSecret?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  xVerified?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(6)
+  @MaxLength(16)
+  referralCode?: string;
 }

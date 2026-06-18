@@ -1,6 +1,7 @@
 'use client';
 
 import { signIn } from 'next-auth/react';
+import { readReferralCode, persistReferralCode } from '@/lib/referral-storage';
 
 interface OAuthButtonsProps {
   callbackUrl?: string;
@@ -8,6 +9,7 @@ interface OAuthButtonsProps {
   nextAuthUrl?: string;
   /** Prefer X login for paper trading / public track record */
   preferTwitter?: boolean;
+  referralCode?: string | null;
 }
 
 export function OAuthButtons({
@@ -15,10 +17,17 @@ export function OAuthButtons({
   enabled = { google: false, twitter: false },
   nextAuthUrl = 'http://localhost:3000',
   preferTwitter = false,
+  referralCode = null,
 }: OAuthButtonsProps) {
   const googleRedirect = `${nextAuthUrl.replace(/\/$/, '')}/api/auth/callback/google`;
   const hasTwitter = Boolean(enabled.twitter);
   const hasGoogle = Boolean(enabled.google);
+
+  function startOAuth(provider: 'twitter' | 'google') {
+    const code = persistReferralCode(referralCode) ?? readReferralCode();
+    if (code) persistReferralCode(code);
+    void signIn(provider, { callbackUrl });
+  }
 
   if (!hasTwitter && !hasGoogle) {
     return (
@@ -56,7 +65,7 @@ export function OAuthButtons({
       {hasTwitter && (
         <button
           type="button"
-          onClick={() => signIn('twitter', { callbackUrl })}
+          onClick={() => startOAuth('twitter')}
           className={`flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-semibold ${
             preferTwitter
               ? 'bg-white text-black hover:bg-zinc-100'
@@ -70,7 +79,7 @@ export function OAuthButtons({
       {hasGoogle && (
         <button
           type="button"
-          onClick={() => signIn('google', { callbackUrl })}
+          onClick={() => startOAuth('google')}
           className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-white py-3 text-sm font-medium text-zinc-900 hover:bg-zinc-100"
         >
           <GoogleIcon />
