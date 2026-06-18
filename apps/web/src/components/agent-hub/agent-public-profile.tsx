@@ -4,9 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import {
   AGENT_BETA_RISK_COPY,
-  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   formatPercent,
-  formatRelativeTime,
   formatUsd,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
@@ -225,7 +223,6 @@ export function AgentPublicProfile({
   const isLiveSession = hired && instanceMode === 'live';
   const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
-  const allocationUsd = agent.startingBalance || 500;
   const heroBadge = isLiveSession
     ? instanceStatus === 'PAUSED'
       ? { label: 'Relay off', className: 'bg-red-500/20 text-red-200 ring-1 ring-red-500/40' }
