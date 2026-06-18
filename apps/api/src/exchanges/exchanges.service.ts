@@ -146,15 +146,19 @@ export class ExchangesService {
   async getUserBitfinexExchangeSnapshot(userId: string) {
     const creds = await this.getUserCredentials(userId, 'bitfinex');
     if (!creds) return null;
+    let orders: Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>> = [];
+    let position: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>> = null;
     try {
-      const [orders, position] = await Promise.all([
-        this.bitfinex.listActiveOrders(creds),
-        this.bitfinex.getOpenPositionDetail(creds),
-      ]);
-      return { orders, position };
+      orders = await this.bitfinex.listActiveOrders(creds);
     } catch {
-      return null;
+      orders = [];
     }
+    try {
+      position = await this.bitfinex.getOpenPositionDetail(creds);
+    } catch {
+      position = null;
+    }
+    return { orders, position };
   }
 
   async ensureUserBitfinexDerivativesMargin(userId: string, minUsd: number) {

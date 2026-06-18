@@ -223,6 +223,23 @@ function serializeAgent(
   };
 }
 
+function latestParticipantExecutionMeta(
+  events: Array<{ eventType: string; payload: unknown }>,
+): { limitPrice: number | null; qty: number | null } {
+  for (const e of events) {
+    const p = (e.payload ?? {}) as Record<string, unknown>;
+    const limit = Number(p.limitPrice ?? p.limit_price ?? 0);
+    const qty = Number(p.qty ?? 0);
+    if (limit > 0 || qty > 0) {
+      return {
+        limitPrice: limit > 0 ? limit : null,
+        qty: qty > 0 ? qty : null,
+      };
+    }
+  }
+  return { limitPrice: null, qty: null };
+}
+
 @Injectable()
 export class TradingAgentsService implements OnModuleInit {
   private readonly logger = new Logger(TradingAgentsService.name);
@@ -747,6 +764,12 @@ export class TradingAgentsService implements OnModuleInit {
       instance.exchangeProvider === 'bitfinex'
         ? await this.exchanges.getUserBitfinexExchangeSnapshot(userId)
         : null;
+    const metrics =
+      instance.exchangeProvider === 'bitfinex'
+        ? await this.exchanges.getUserBitfinexLiveMetrics(userId, {
+            sessionStartedAt,
+          })
+        : null;
 
     const rows = await this.prisma.signalCycleParticipant.findMany({
       where: {
@@ -764,31 +787,43 @@ export class TradingAgentsService implements OnModuleInit {
             createdAt: true,
           },
         },
+        events: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: { eventType: true, payload: true },
+        },
       },
       orderBy: { updatedAt: 'desc' },
       take: 40,
     });
 
-    const participants: SubscriberCycleRow[] = rows.map((r) => ({
-      status: r.status,
-      fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
-      exitPrice: r.exitPrice != null ? Number(r.exitPrice) : null,
-      pnlUsd: r.pnlUsd != null ? Number(r.pnlUsd) : null,
-      pnlMarginPct: r.pnlMarginPct != null ? Number(r.pnlMarginPct) : null,
-      updatedAt: r.updatedAt,
-      createdAt: r.createdAt,
-      cycle: {
-        tradeId: r.cycle.tradeId,
-        status: r.cycle.status,
-        intentEnvelope: r.cycle.intentEnvelope,
-        showcaseExitReason: r.cycle.showcaseExitReason,
-        createdAt: r.cycle.createdAt,
-      },
-    }));
+    const participants: SubscriberCycleRow[] = rows.map((r) => {
+      const meta = latestParticipantExecutionMeta(r.events);
+      return {
+        status: r.status,
+        fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
+        exitPrice: r.exitPrice != null ? Number(r.exitPrice) : null,
+        pnlUsd: r.pnlUsd != null ? Number(r.pnlUsd) : null,
+        pnlMarginPct: r.pnlMarginPct != null ? Number(r.pnlMarginPct) : null,
+        limitPrice: meta.limitPrice,
+        qty: meta.qty,
+        updatedAt: r.updatedAt,
+        createdAt: r.createdAt,
+        cycle: {
+          tradeId: r.cycle.tradeId,
+          status: r.cycle.status,
+          intentEnvelope: r.cycle.intentEnvelope,
+          showcaseExitReason: r.cycle.showcaseExitReason,
+          createdAt: r.cycle.createdAt,
+        },
+      };
+    });
+
+    const exchangePosition = snapshot?.position ?? metrics?.openPosition ?? null;
 
     return mapSubscriberExchangeLiveBook({
       orders: snapshot?.orders ?? [],
-      position: snapshot?.position ?? null,
+      position: exchangePosition,
       markPrice,
       participants,
     });
