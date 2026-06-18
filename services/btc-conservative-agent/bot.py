@@ -644,6 +644,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_path": signal.get("entry_path"),
         "fill_model": order.get("fill_model") or _resolve_fill_model(signal, order),
         "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
+        "urgent_chase_tier": order.get("urgent_chase_tier") or signal.get("urgent_chase_tier"),
         "original_limit_price": order.get("original_limit_price") or order.get("planned_limit_price"),
         "last_chase_ts": order.get("last_chase_ts") or signal.get("last_chase_ts"),
         "exit_config": copy.deepcopy(signal.get("exit_config") or get_exit_config_for_lane(signal.get("research_lane"))),
@@ -1844,9 +1845,7 @@ def is_research_lane_enabled(lane: str) -> bool:
         return continuous_ai_research_enabled()
     if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
         return True
-    with state_lock:
-        enabled = state.get("research_lane_enabled") or {}
-        return bool(enabled.get(lane, _RESEARCH_LANE_TOGGLE_DEFAULTS.get(lane, True)))
+    return bool(research_lane_enabled_map().get(lane, True))
 
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
@@ -2929,7 +2928,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.62-pathway-rationalization-2026-06-18"
+ANALYZER_SYNC_ID = "v9.64-pathway-lab-persist-2026-06-18"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4696,7 +4695,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.43-close-deadlock-fix"
+EXECUTION_FIX_VERSION = "v1.1.44-pathway-lab-persist-fix"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -12722,6 +12721,8 @@ def close_position(pos: dict, exit_reason: str):
             "signal_age_bucket": pos.get("signal_age_bucket"),
             "entry_path": master.get("entry_path") or pos.get("entry_path"),
             "fill_model": pos.get("fill_model") or master.get("fill_model"),
+            "limit_chase_count": int(pos.get("limit_chase_count") or master.get("limit_chase_count") or 0),
+            "urgent_chase_tier": pos.get("urgent_chase_tier") or master.get("urgent_chase_tier"),
             "slippage": round(float(slippage), 6),
             "book_slippage_usd_entry": round(book_slip, 4),
             "book_slippage_usd_exit": round(exit_book_slip, 4),
@@ -14096,6 +14097,16 @@ DASHBOARD_JS = """(function () {
       const el = document.getElementById(id);
       if (el) el.innerHTML = html ?? "";
     }
+    const DASH_PREFS_KEY = 'bitfinex_research_dashboard_prefs_v1';
+    function loadDashPrefs() {
+      try { return JSON.parse(localStorage.getItem(DASH_PREFS_KEY) || '{}'); } catch (e) { return {}; }
+    }
+    function saveDashPrefs(partial) {
+      const p = Object.assign(loadDashPrefs(), partial || {});
+      try { localStorage.setItem(DASH_PREFS_KEY, JSON.stringify(p)); } catch (e) {}
+      return p;
+    }
+    let laneToggleInFlight = false;
     function laneBadge(lane, model) {
       const m = model || lane || '-';
       const colors = {
@@ -14233,9 +14244,24 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_continuous_ai_research');
       refresh();
     }
-    async function toggleResearchLane(lane) {
-      await post('/api/toggle_research_lane', {lane: lane});
+    async function setContinuousAi(enabled) {
+      await post('/api/toggle_continuous_ai_research', {enabled: !!enabled});
       refresh();
+    }
+    async function setResearchLane(lane, enabled) {
+      if (laneToggleInFlight) return;
+      laneToggleInFlight = true;
+      try {
+        const body = {lane: lane};
+        if (enabled !== null && enabled !== undefined) body.enabled = !!enabled;
+        const res = await post('/api/toggle_research_lane', body);
+        if (res && res.ok) await refresh();
+      } finally {
+        laneToggleInFlight = false;
+      }
+    }
+    async function toggleResearchLane(lane) {
+      await setResearchLane(lane, null);
     }
     async function toggleContinuousAiDirect() {
       await post('/api/toggle_continuous_ai_direct');
@@ -14253,6 +14279,7 @@ DASHBOARD_JS = """(function () {
         if (panel) panel.style.display = t === name ? 'block' : 'none';
         if (btn) btn.style.fontWeight = t === name ? 'bold' : 'normal';
       });
+      saveDashPrefs({pathwayTab: name});
     }
     function pathwayLaneStats(scorecard, lane) {
       const paths = (scorecard && scorecard.pathways) || [];
@@ -14266,6 +14293,7 @@ DASHBOARD_JS = """(function () {
     }
     function pathwayLaneToggleState(d, spec) {
       if (!spec || spec.planned) return null;
+      if (spec.status === 'RETIRED') return false;
       const key = spec.toggle_key;
       if (key === 'continuous_ai_research_enabled') return d.continuous_ai_research_enabled !== false;
       if (key === 'research_lane_enabled') {
@@ -14274,10 +14302,12 @@ DASHBOARD_JS = """(function () {
       }
       return null;
     }
-    function pathwayLaneToggleFn(spec) {
-      if (!spec || spec.planned) return '';
-      if (spec.lane === 'CONTINUOUS') return 'toggleContinuousAi()';
-      if (spec.toggle_key === 'research_lane_enabled') return "toggleResearchLane('" + spec.lane + "')";
+    function pathwayLaneToggleFn(spec, on) {
+      if (!spec || spec.planned || spec.status === 'RETIRED') return '';
+      if (spec.lane === 'CONTINUOUS') return "setContinuousAi(" + (!on) + ")";
+      if (spec.toggle_key === 'research_lane_enabled') {
+        return "setResearchLane('" + spec.lane + "', " + (!on) + ")";
+      }
       return '';
     }
     function pathwayLaneBorderColor(spec) {
@@ -14329,7 +14359,7 @@ DASHBOARD_JS = """(function () {
         tiles.innerHTML = specs.map(function (spec) {
           const border = pathwayLaneBorderColor(spec);
           const on = pathwayLaneToggleState(d, spec);
-          const toggleFn = pathwayLaneToggleFn(spec);
+          const toggleFn = pathwayLaneToggleFn(spec, on);
           const badge = spec.badge ? (' <span style="color:#d4a72c;font-size:0.78em;">' + spec.badge + '</span>') : '';
           const entry = spec.entry || {};
           const exit = spec.exit || {};
@@ -14338,9 +14368,13 @@ DASHBOARD_JS = """(function () {
           let toggleHtml = '';
           if (spec.planned) {
             toggleHtml = '<span style="color:#6e7681;font-size:0.82em;">PLANNED</span>';
+          } else if (spec.status === 'RETIRED') {
+            toggleHtml = '<span style="color:#484f58;font-size:0.82em;font-weight:600;">RETIRED — spawn disabled</span>';
           } else if (toggleFn) {
             const bg = on ? '#10b981' : '#ef4444';
-            toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">' + (on ? 'ON' : 'OFF') + '</button>';
+            const action = on ? 'Disable' : 'Enable';
+            toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:3px 10px;font-weight:bold;background:' + bg + ';">' + action + '</button>';
+            toggleHtml += ' <span style="color:' + (on ? '#3fb950' : '#f85149') + ';font-size:0.82em;font-weight:600;">' + (on ? 'ON' : 'OFF') + '</span>';
             if (spec.live_trading === false) {
               toggleHtml += ' <span style="color:#6e7681;font-size:0.78em;">SHADOW ONLY</span>';
             }
@@ -14469,6 +14503,8 @@ DASHBOARD_JS = """(function () {
       }
     }
     window.showPathwayTab = showPathwayTab;
+    window.setResearchLane = setResearchLane;
+    window.setContinuousAi = setContinuousAi;
     window.toggleProfitGates = toggleProfitGates;
     window.toggleContinuousAiDirect = toggleContinuousAiDirect;
     async function toggleDebug() {
@@ -15172,12 +15208,20 @@ DASHBOARD_JS = """(function () {
           refreshTimer = setInterval(refresh, AUTO_REFRESH_MS);
         }
       }
+      const dashPrefs = loadDashPrefs();
       const autoToggle = document.getElementById('autoRefreshToggle');
       if (autoToggle) {
-        autoToggle.checked = false;
-        autoToggle.addEventListener('change', scheduleAutoRefresh);
+        autoToggle.checked = dashPrefs.autoRefresh === true;
+        autoToggle.addEventListener('change', function () {
+          saveDashPrefs({ autoRefresh: autoToggle.checked });
+          scheduleAutoRefresh();
+        });
       }
       scheduleAutoRefresh();
+      const savedPathTab = dashPrefs.pathwayTab;
+      if (savedPathTab && typeof showPathwayTab === 'function') {
+        showPathwayTab(savedPathTab);
+      }
       refresh();
     });
     window.refresh = refresh;
@@ -15633,13 +15677,17 @@ def toggle_duplicate_limit_block():
 
 @app.route('/api/toggle_continuous_ai_research', methods=['POST'])
 def toggle_continuous_ai_research():
+    data = request.get_json(silent=True) or {}
     with state_lock:
-        state["continuous_ai_research_enabled"] = not bool(
-            state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
-        )
+        if "enabled" in data and data["enabled"] is not None:
+            state["continuous_ai_research_enabled"] = bool(data["enabled"])
+        else:
+            state["continuous_ai_research_enabled"] = not bool(
+                state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
+            )
         save_persistent_config()
         logger.info(
-            f"[CONTINUOUS_AI] toggled {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
+            f"[CONTINUOUS_AI] set {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
             f"[PIPELINE ENFORCEMENT]"
         )
     return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
@@ -15650,13 +15698,18 @@ def toggle_research_lane():
     lane = str(data.get("lane") or "").upper()
     if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
         return jsonify({"error": f"Unknown lane: {lane}"}), 400
+    if is_research_lane_retired(lane):
+        return jsonify({"error": f"Lane {lane} is RETIRED — cannot enable spawn"}), 400
     with state_lock:
         enabled = dict(research_lane_enabled_map())
-        enabled[lane] = not bool(enabled.get(lane, True))
+        if "enabled" in data and data["enabled"] is not None:
+            enabled[lane] = bool(data["enabled"])
+        else:
+            enabled[lane] = not bool(enabled.get(lane, True))
         state["research_lane_enabled"] = enabled
     save_persistent_config()
     logger.info(
-        f"[RESEARCH_LANE] {lane} toggled {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
+        f"[RESEARCH_LANE] {lane} set {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
     )
     return jsonify({"lane": lane, "enabled": enabled[lane], "research_lane_enabled": enabled})
 
@@ -17744,6 +17797,9 @@ def load_persistent_config():
                     for lane, val in config["research_lane_enabled"].items():
                         if lane in merged_lanes:
                             merged_lanes[lane] = bool(val)
+                for lane, pathway_status in PATHWAY_LANE_STATUS.items():
+                    if pathway_status == "RETIRED" and lane in merged_lanes:
+                        merged_lanes[lane] = False
                 state["research_lane_enabled"] = merged_lanes
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
