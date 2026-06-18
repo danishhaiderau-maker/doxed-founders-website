@@ -13,6 +13,7 @@ export type BotApiState = {
   regime?: string;
   strategy_mode?: string;
   execution_paused?: boolean;
+  max_active_signals?: number;
   execution_reason?: string;
   execution_status?: string;
   data_source?: string;

@@ -1,11 +1,19 @@
 /**
- * Resume paused Bitfinex live-copy hire instance (admin automation).
+ * Resume paused Bitfinex live-copy hire instance.
+ * Requires explicit --confirm (never run from automation/sync).
  */
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PrismaClient } from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
+
+if (!process.argv.includes('--confirm')) {
+  console.error(
+    'Refusing to resume live copy without --confirm. User must press Start on Agent Hub.',
+  );
+  process.exit(1);
+}
 
 const neonPath = path.join(getVaultDir(), '.env.neon');
 if (fs.existsSync(neonPath)) {
@@ -24,7 +32,7 @@ if (fs.existsSync(neonPath)) {
 }
 
 const prisma = new PrismaClient();
-const handle = process.argv[2] ?? 'Cheetah';
+const handle = process.argv.find((a) => !a.startsWith('-') && a !== process.argv[1]) ?? 'Cheetah';
 
 async function main() {
   const agent = await prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } });
@@ -46,11 +54,11 @@ async function main() {
 
   if (!match) {
     console.log(`No PAUSED bitfinex instance matching "${handle}".`);
-    const active = await prisma.tradingAgentInstance.findMany({
+    const all = await prisma.tradingAgentInstance.findMany({
       where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
       include: { user: { select: { platformHandle: true, name: true } } },
     });
-    for (const i of active) {
+    for (const i of all) {
       console.log(`  ${i.user?.platformHandle ?? i.user?.name} → ${i.status}`);
     }
     return;
