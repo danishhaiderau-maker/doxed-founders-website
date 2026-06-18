@@ -162,6 +162,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.cancelAbsurdPendingOrders(creds, instance.userId);
     }
 
+    const MIN_INTENT_TTL_MS = 90_000;
+
     const cycles = await this.prisma.signalCycle.findMany({
       where: {
         agentId,
@@ -227,7 +229,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       if (participant.status === SignalCycleStatus.OPEN) {
         managedOpenTrade = true;
-        const reconciled = await this.reconcileManualClose(
+        const attributed = await this.reconcileAttributedLotClose(
           agentId,
           instance.userId,
           cycle,
@@ -235,6 +237,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           meta,
           creds,
         );
+        const reconciled =
+          attributed ||
+          (await this.reconcileManualClose(
+            agentId,
+            instance.userId,
+            cycle,
+            participant,
+            meta,
+            creds,
+          ));
         if (!reconciled) {
           await this.monitorOpenPosition(
             agentId,
@@ -269,11 +281,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
+    await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
+
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
+    const intentCycles = cycles
+      .filter((c) => c.status === SignalCycleStatus.INTENT)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     let entriesThisTick = 0;
-    for (const cycle of cycles) {
-      if (cycle.status !== SignalCycleStatus.INTENT) continue;
+    for (const cycle of intentCycles) {
       if (cycle.expiresAt && cycle.expiresAt < new Date()) continue;
+      if (
+        cycle.expiresAt &&
+        cycle.expiresAt.getTime() - Date.now() < MIN_INTENT_TTL_MS
+      ) {
+        continue;
+      }
 
       const existing = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
@@ -300,13 +322,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (entriesThisTick === 0) {
           await this.prisma.tradingAgentInstance.update({
             where: { id: instance.id },
-            data: {
-              lastError: managedOpenTrade
-                ? eligibility.reason?.includes('Managing') || eligibility.reason?.includes('slots')
-                  ? eligibility.reason
-                  : 'Managing open copy trades — new signals paused until margin or slots free.'
-                : eligibility.reason,
-            },
+            data: { lastError: eligibility.reason },
           });
         }
         break;
@@ -1256,7 +1272,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         /* stop may have filled */
       }
     }
-    await this.bitfinex.cancelOrphanStopOrders(creds, meta.bitfinexOrderId);
 
     const fillPrice =
       participant.fillPrice != null
@@ -1369,12 +1384,109 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
       venue: 'bitfinex',
       exit_price: exitPrice,
+      exit_reason: 'SHOWCASE_MIRROR',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       source: 'hire',
     });
 
     this.logger.log(`Hire exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`);
+  }
+
+  private async cleanupOrphanCopyOrders(
+    userId: string,
+    creds: ExchangeCredentials,
+    managedOrderIds: Set<number>,
+  ) {
+    const orders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    for (const order of orders) {
+      if (managedOrderIds.has(order.id)) continue;
+      try {
+        await this.bitfinex.cancelOrder(creds, order.id);
+        this.logger.warn(
+          `Cancelled orphan copy order ${order.id} (${order.orderType}) for ${userId}`,
+        );
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+
+  /**
+   * Exchange stop filled for this lot qty — position shrank but other lots remain open.
+   */
+  private async reconcileAttributedLotClose(
+    agentId: string,
+    userId: string,
+    cycle: { id: string },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+  ): Promise<boolean> {
+    if (!meta.qty || !meta.direction) return false;
+    if (await this.hasParticipantExited(participant.id)) return false;
+
+    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    if (!position) return false;
+
+    const expectedLong = meta.direction === 'LONG';
+    const hasExpected =
+      (expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0);
+    if (!hasExpected) return false;
+
+    const openParticipants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId },
+      },
+    });
+    let ledgerQty = 0;
+    for (const p of openParticipants) {
+      const m = await this.loadExecutionMeta(p.id);
+      ledgerQty += m.qty ?? 0;
+    }
+
+    const exchangeQty = Math.abs(position.amount);
+    const deficit = ledgerQty - exchangeQty;
+    if (deficit < meta.qty * 0.85 || deficit > meta.qty * 1.15) return false;
+
+    if (!meta.stopOrderId) return false;
+    const stop = await this.bitfinex.findOrder(creds, meta.stopOrderId).catch(() => null);
+    if (stop) return false;
+
+    const fillPrice =
+      participant.fillPrice != null
+        ? Number(participant.fillPrice)
+        : meta.limitPrice ?? position.basePrice;
+    const exitPrice = await this.bitfinex.getMarkPrice().catch(() => fillPrice);
+    const direction = meta.direction;
+    const closeQty = Math.min(meta.qty, deficit);
+    const pnlUsd =
+      fillPrice && exitPrice
+        ? direction === 'LONG'
+          ? (exitPrice - fillPrice) * closeQty
+          : (fillPrice - exitPrice) * closeQty
+        : 0;
+    const pnlMarginPct =
+      fillPrice && fillPrice > 0
+        ? (pnlUsd / (fillPrice * closeQty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
+        : 0;
+
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+      venue: 'bitfinex',
+      exit_price: exitPrice,
+      exit_reason: 'EXCHANGE_STOP',
+      pnl_usd: Math.round(pnlUsd * 100) / 100,
+      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+      qty_closed: closeQty,
+      source: 'hire',
+    });
+
+    this.logger.log(
+      `Hire exchange stop lot ${userId} cycle=${cycle.id} qty=${closeQty} pnl=$${pnlUsd.toFixed(2)}`,
+    );
+    return true;
   }
 
   private hydrateRuntime(participantId: string, meta: ExecutionPayload): PositionRuntime {

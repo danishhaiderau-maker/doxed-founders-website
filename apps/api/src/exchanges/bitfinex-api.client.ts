@@ -167,6 +167,7 @@ export type BitfinexActiveOrder = {
   amountOrig: number;
   price: number;
   status: string;
+  orderType: string;
 };
 
 /** Bitfinex order array indices (REST). */
@@ -177,6 +178,7 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
     symbol: String(row[3]),
     amount: Number(row[6]),
     amountOrig: Number(row[7]),
+    orderType: String(row[8] ?? ''),
     price: Number(row[16] ?? row[14] ?? 0),
     status: String(row[13] ?? 'UNKNOWN'),
   };
@@ -543,6 +545,7 @@ export class BitfinexTradingClient {
     let cancelled = 0;
     for (const order of orders) {
       if (keepOrderId != null && order.id === keepOrderId) continue;
+      if (!order.orderType.toUpperCase().includes('STOP')) continue;
       try {
         await this.cancelOrder(creds, order.id);
         cancelled += 1;
