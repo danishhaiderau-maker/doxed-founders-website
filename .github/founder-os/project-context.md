@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(sync): use Neon DATABASE_URL when pushing showcase bot credentials
+chore(btc-bot): sync research bot v8caa816dc5ed
 
 ## Last Activity
 
