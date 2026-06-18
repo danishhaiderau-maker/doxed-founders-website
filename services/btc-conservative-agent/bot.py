@@ -1401,11 +1401,15 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
     if fast_cut:
         if THESIS_MFE_PROTECT_PCT > 0 and peak >= THESIS_MFE_PROTECT_PCT:
-            logger.info(
-                f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-                f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
-                f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
-            )
+            now_ts = time.time()
+            last_log = float(pos.get("_mfe_protect_log_ts") or 0)
+            if now_ts - last_log >= 30.0:
+                pos["_mfe_protect_log_ts"] = now_ts
+                logger.info(
+                    f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+                    f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
+                    f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
+                )
             return False
         logger.info(
             f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
