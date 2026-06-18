@@ -722,18 +722,13 @@ export class SignalCyclesService implements OnModuleInit {
       }
     }
 
-    if (event === 'FILLED' || event === 'STOP_LOSS_ARMED') {
-      const stopPlaced = body.stop_loss_placed === true;
-      if (!stopPlaced) {
-        throw new BadRequestException('stop_loss_placed=true required for FILLED');
-      }
+    if (event === 'FILLED') {
       await this.prisma.signalCycleParticipant.update({
         where: { id: participant.id },
         data: {
           status: SignalCycleStatus.OPEN,
-          stopLossConfirmedAt: new Date(),
-          fillPrice:
-            typeof body.fill_price === 'number' ? body.fill_price : null,
+          stopLossConfirmedAt: body.stop_loss_placed === true ? new Date() : participant.stopLossConfirmedAt,
+          fillPrice: typeof body.fill_price === 'number' ? body.fill_price : null,
           venue: typeof body.venue === 'string' ? body.venue : participant.venue,
         },
       });
@@ -741,6 +736,22 @@ export class SignalCyclesService implements OnModuleInit {
         where: { id: cycleId },
         data: { status: SignalCycleStatus.OPEN },
       });
+    }
+
+    if (event === 'STOP_LOSS_ARMED') {
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: participant.id },
+        data: {
+          status: SignalCycleStatus.OPEN,
+          stopLossConfirmedAt: new Date(),
+        },
+      });
+      if (cycle.status !== SignalCycleStatus.OPEN) {
+        await this.prisma.signalCycle.update({
+          where: { id: cycleId },
+          data: { status: SignalCycleStatus.OPEN },
+        });
+      }
     }
 
     if (event === 'EXIT' || event === 'EXPIRED') {

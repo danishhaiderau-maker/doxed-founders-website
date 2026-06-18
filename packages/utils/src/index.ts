@@ -111,6 +111,7 @@ export * from './project-name';
 export * from './repo-starter-templates';
 export * from './trading-agents';
 export * from './signal-cycle';
+export * from './subscriber-exit';
 export * from './conservative-btc-agent-card';
 export * from './agent-directory-submissions';
 export * from './trading-agent-adapters';

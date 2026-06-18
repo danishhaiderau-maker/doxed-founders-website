@@ -1,11 +1,14 @@
 import type { SignalIntentEnvelope } from '@dcf/utils';
-import { DEFAULT_SUBSCRIBER_MAX_MARGIN_USD } from '@dcf/utils';
+import {
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  SUBSCRIBER_TRAIL_LADDER,
+  normalizePullbackToOffsetPct,
+} from '@dcf/utils';
 import type { BotApiState } from './bot-state.mapper';
 
 const DEFAULT_STOP_LOSS_MARGIN_PCT = -18;
 const DEFAULT_LEVERAGE_HINT = 20;
 const LIMIT_TTL_SEC = 1800;
-const DEFAULT_PULLBACK_PCT = 0.2;
 
 export type BotApproveSnapshot = {
   trade_id?: string;
@@ -36,14 +39,11 @@ function resolveDirection(bot: BotApiState): 'LONG' | 'SHORT' | null {
 function resolveOffsetPct(bot: BotApiState, direction: 'LONG' | 'SHORT'): number {
   const signals = bot.signal_info?.signals ?? [];
   const active = signals.find((s) => s.status === 'ORDERED' || s.status === 'ACTIVE' || s.status === 'PENDING');
-  const pull =
-    active?.pullback_pct ??
-    active?.pull_req ??
-    (bot as BotApiState & { pullback_threshold?: number }).pullback_threshold;
-  let pct = typeof pull === 'number' && pull > 0 ? pull : DEFAULT_PULLBACK_PCT / 100;
-  if (pct > 1) pct = pct / 100;
-  const signed = direction === 'LONG' ? -Math.abs(pct * 100) : Math.abs(pct * 100);
-  return Math.round(signed * 10000) / 10000;
+  return normalizePullbackToOffsetPct(direction, {
+    botPullbackThreshold: bot.pullback_threshold,
+    signalPullback: active?.pullback_pct,
+    signalPullReq: active?.pull_req,
+  });
 }
 
 function resolveEntryModeSource(bot: BotApiState): string {
@@ -88,10 +88,10 @@ export function buildIntentEnvelope(
     },
     risk: {
       stop_loss_margin_pct: DEFAULT_STOP_LOSS_MARGIN_PCT,
-      take_profit_ladder: [
-        { at_margin_pct: 8, close_position_pct: 5 },
-        { at_margin_pct: 15, close_position_pct: 10 },
-      ],
+      take_profit_ladder: SUBSCRIBER_TRAIL_LADDER.map(([at_margin_pct, lock_margin_pct]) => ({
+        at_margin_pct,
+        close_position_pct: lock_margin_pct,
+      })),
       leverage_hint:
         (bot as BotApiState & { leverage?: number }).leverage ?? DEFAULT_LEVERAGE_HINT,
       max_margin_usd: options?.maxMarginUsd ?? DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
