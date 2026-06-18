@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-feat: referral system, X identity, and dominant Mission Control guide
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
