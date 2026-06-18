@@ -220,6 +220,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
     const allCycles = [...cycleById.values()];
 
+    await this.reconcileUnattributedExchangeFills(
+      agentId,
+      instance.userId,
+      creds,
+      activeOrderIdSet,
+    );
+
     let managedOpenTrade = false;
 
     // Pass 1 — manage existing copy trades (fills, stops, exits) before any new entries.
@@ -843,6 +850,107 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Prior deploys recorded FILLED events but participant stayed PENDING_ENTRY when stop failed. */
+  private async reconcileUnattributedExchangeFills(
+    agentId: string,
+    userId: string,
+    creds: ExchangeCredentials,
+    activeOrderIdSet: Set<number>,
+  ) {
+    const position = await this.bitfinex.getOpenPositionDetail(creds).catch(() => null);
+    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
+
+    const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
+    const exchangeQty = Math.abs(position.amount);
+
+    const managed = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        cycle: { agentId },
+      },
+      include: { cycle: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    let attributedQty = 0;
+    for (const row of managed) {
+      if (row.status !== SignalCycleStatus.OPEN) continue;
+      const meta = await this.loadExecutionMeta(row.id);
+      if (meta.direction && meta.direction !== direction) continue;
+      attributedQty += meta.qty ?? 0;
+    }
+
+    let gap = exchangeQty - attributedQty;
+    if (gap < MIN_QTY_BTC) return;
+
+    this.logger.warn(
+      `Exchange fill gap ${userId}: Bitfinex ${exchangeQty.toFixed(5)} ${direction} vs ledger OPEN ${attributedQty.toFixed(5)} — attributing ${gap.toFixed(5)} BTC`,
+    );
+
+    for (const row of managed) {
+      if (gap < MIN_QTY_BTC) break;
+      if (row.status !== SignalCycleStatus.PENDING_ENTRY) continue;
+
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.direction || meta.direction !== direction) continue;
+
+      const orderId = meta.bitfinexOrderId;
+      if (orderId && activeOrderIdSet.has(orderId)) continue;
+
+      const filledCount = await this.prisma.signalCycleEvent.count({
+        where: { participantId: row.id, eventType: 'FILLED' },
+      });
+      if (filledCount > 0) {
+        const fillPrice =
+          meta.limitPrice && meta.limitPrice > 0
+            ? meta.limitPrice
+            : position.basePrice > 0
+              ? position.basePrice
+              : await this.bitfinex.getMarkPrice();
+        await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
+        gap -= meta.qty ?? MIN_QTY_BTC;
+        continue;
+      }
+
+      const intent = row.cycle.intentEnvelope as SignalIntentEnvelope;
+      const fillPrice =
+        meta.limitPrice && meta.limitPrice > 0
+          ? meta.limitPrice
+          : position.basePrice > 0
+            ? position.basePrice
+            : await this.bitfinex.getMarkPrice();
+      const qty = meta.qty ?? MIN_QTY_BTC;
+      const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+      const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
+      const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+
+      const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+        positionDirection: meta.direction,
+        qty,
+        stopPrice,
+        leverage,
+      }).catch(() => null);
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'FILLED', {
+        venue: 'bitfinex',
+        fill_price: fillPrice,
+        qty,
+        stop_loss_placed: stopOrderId != null,
+        stop_loss_margin_pct: stopLossMarginPct,
+        stopOrderId: stopOrderId ?? undefined,
+        source: 'hire',
+        event: 'EXCHANGE_FILL_RECONCILE',
+      });
+
+      await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
+      gap -= qty;
+
+      this.logger.log(
+        `Reconciled fill ${userId} cycle=${row.cycleId} ${meta.direction} @ ${fillPrice.toFixed(2)} qty=${qty}`,
+      );
+    }
+  }
+
   private async reconcileFilledParticipants(userId: string, agentId: string) {
     const stuck = await this.prisma.signalCycleParticipant.findMany({
       where: {
