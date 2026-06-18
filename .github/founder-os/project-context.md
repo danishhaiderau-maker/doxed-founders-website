@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-chore(btc-bot): sync latest bybit-15m-research-bot upstream
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
