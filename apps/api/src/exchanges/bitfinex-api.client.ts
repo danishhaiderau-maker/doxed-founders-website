@@ -87,17 +87,37 @@ function signBitfinex(secret: string, payload: string): string {
   return createHmac('sha384', secret).update(payload).digest('hex');
 }
 
-function nextNonce(): string {
-  return (Date.now() * 1000).toString();
+type NonceLane = {
+  lastNonce: bigint;
+  tail: Promise<unknown>;
+};
+
+/** Per API key: monotonic nonce + serialized auth calls (parallel ticks caused nonce: small). */
+const nonceLanes = new Map<string, NonceLane>();
+
+function nonceLaneFor(apiKey: string): NonceLane {
+  let lane = nonceLanes.get(apiKey);
+  if (!lane) {
+    lane = { lastNonce: 0n, tail: Promise.resolve() };
+    nonceLanes.set(apiKey, lane);
+  }
+  return lane;
 }
 
-export async function bitfinexAuthPost<T = unknown>(
+function allocMonotonicNonce(lane: NonceLane): string {
+  const now = BigInt(Date.now()) * 1000n;
+  const next = lane.lastNonce >= now ? lane.lastNonce + 1n : now;
+  lane.lastNonce = next;
+  return next.toString();
+}
+
+async function bitfinexAuthPostOnce<T>(
   creds: ExchangeCredentials,
   apiPath: string,
-  body: Record<string, unknown> = {},
-  timeoutMs = 12_000,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+  nonce: string,
 ): Promise<T> {
-  const nonce = nextNonce();
   const bodyStr = JSON.stringify(body);
   const payload = `/api/${apiPath}${nonce}${bodyStr}`;
   const signature = signBitfinex(creds.apiSecret, payload);
@@ -136,6 +156,38 @@ export async function bitfinexAuthPost<T = unknown>(
   }
 
   return parsed as T;
+}
+
+export async function bitfinexAuthPost<T = unknown>(
+  creds: ExchangeCredentials,
+  apiPath: string,
+  body: Record<string, unknown> = {},
+  timeoutMs = 12_000,
+): Promise<T> {
+  const lane = nonceLaneFor(creds.apiKey);
+  const run = async (): Promise<T> => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const nonce = allocMonotonicNonce(lane);
+      try {
+        return await bitfinexAuthPostOnce<T>(creds, apiPath, body, timeoutMs, nonce);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < 3 && /nonce:\s*small/i.test(msg)) {
+          await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`Bitfinex ${apiPath}: nonce retry exhausted`);
+  };
+
+  const result = lane.tail.then(run, run);
+  lane.tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 export async function bitfinexPublicGet<T = unknown>(apiPath: string): Promise<T> {
