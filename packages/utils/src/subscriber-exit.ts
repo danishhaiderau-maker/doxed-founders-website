@@ -156,8 +156,23 @@ export const SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT = 0.9;
 export const SUBSCRIBER_CHASE_STEP_PCT = 0.25;
 /** Matches bot LIMIT_CHASE_INTERVAL_SEC_DEFAULT (60s). */
 export const SUBSCRIBER_CHASE_INTERVAL_MS = 60_000;
-/** Max concurrent copy legs per hire (matches bot MAX_CONCURRENT_POSITIONS_DEFAULT). */
-export const SUBSCRIBER_MAX_CONCURRENT_COPY_LEGS = 20;
+export function computeUnrealizedMarginPct(
+  fillPrice: number,
+  markPrice: number,
+  direction: 'LONG' | 'SHORT',
+  leverage: number,
+): number {
+  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !Number.isFinite(markPrice) || markPrice <= 0) {
+    return 0;
+  }
+  const dirFactor = direction === 'LONG' ? 1 : -1;
+  const priceMove = ((markPrice - fillPrice) / fillPrice) * dirFactor;
+  return priceMove * Math.max(leverage, 1) * 100;
+}
+
+/** Bitfinex BTC-PERP nets to one position — copy relay tracks one open + one pending leg max. */
+export const SUBSCRIBER_MAX_OPEN_COPY_LEGS = 1;
+export const SUBSCRIBER_MAX_PENDING_COPY_LEGS = 1;
 
 /** Signed distance from limit to market (always >= 0 when limit is on correct side). */
 export function limitChaseMarketGap(
