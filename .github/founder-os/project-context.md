@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-chore(btc-bot): sync research bot v8caa816dc5ed
+fix(live-copy): populate Bitfinex positions, pending orders, and virtual lots in liveBook
 
 ## Last Activity
 
