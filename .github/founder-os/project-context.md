@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(founder-os): clean Mission Control, vault-first coach, Cursor-only focus
+Enforce $20 margin cap, 1s copy relay, and graceful Bitfinex hire execution.
 
 ## Last Activity
 
