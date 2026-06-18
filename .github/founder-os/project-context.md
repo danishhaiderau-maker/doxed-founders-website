@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-feat(founder-brain): expert onboarding coach and smart quick prompts
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
