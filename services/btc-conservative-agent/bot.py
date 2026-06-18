@@ -137,17 +137,24 @@ RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
     RESEARCH_LANE_CHASE_3PLUS_ALPHA,
 )
+# Only these lanes may submit limit orders (Pathway Lab policy).
+PATHWAY_LIMIT_ORDER_LANES = frozenset({
+    RESEARCH_LANE_CONTINUOUS,
+    RESEARCH_LANE_AI_60_65_ALPHA,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA,
+})
+PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
-    RESEARCH_LANE_HIGH_EDGE_RUNNER: True,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: False,
     RESEARCH_LANE_EXTREME_EDGE: False,
     RESEARCH_LANE_EDGE_ACCELERATION: False,
     RESEARCH_LANE_EDGE_PLUS_STACK: False,
-    RESEARCH_LANE_SHADOW_RUNNER: True,
-    RESEARCH_LANE_EDGE_ALPHA_4: True,
-    RESEARCH_LANE_TYPE_B_HUNTER: True,
-    RESEARCH_LANE_SHORT_BEAR_ALPHA: True,
+    RESEARCH_LANE_SHADOW_RUNNER: False,
+    RESEARCH_LANE_EDGE_ALPHA_4: False,
+    RESEARCH_LANE_TYPE_B_HUNTER: False,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: False,
     RESEARCH_LANE_AI_60_65_ALPHA: True,
-    RESEARCH_LANE_URGENT_CHASE_ALPHA: True,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: False,
     RESEARCH_LANE_CHASE_3PLUS_ALPHA: True,
 }
 AI_DIRECT_RESEARCH_LANES = frozenset({
@@ -1840,14 +1847,38 @@ def continuous_ai_research_enabled() -> bool:
     with state_lock:
         return bool(state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED))
 
-def research_lane_enabled_map() -> dict:
-    with state_lock:
-        stored = state.get("research_lane_enabled") or {}
-        merged = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
+def _normalize_research_lane_map(stored: dict = None) -> dict:
+    merged = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
+    if isinstance(stored, dict):
         for lane, val in stored.items():
             if lane in merged:
                 merged[lane] = bool(val)
+    for lane, pathway_status in PATHWAY_LANE_STATUS.items():
+        if pathway_status == "RETIRED" and lane in merged:
+            merged[lane] = False
+    return merged
+
+
+def _apply_pathway_lane_env_overrides(merged: dict) -> dict:
+    raw = (os.getenv("PATHWAY_LANES_ENABLED_JSON") or "").strip()
+    if not raw:
         return merged
+    try:
+        overrides = json.loads(raw)
+        if isinstance(overrides, dict):
+            for lane, val in overrides.items():
+                key = str(lane).upper()
+                if key in merged:
+                    merged[key] = bool(val)
+    except Exception as e:
+        logger.warning(f"[CONFIG] PATHWAY_LANES_ENABLED_JSON invalid: {e} [PIPELINE ENFORCEMENT]")
+    return merged
+
+
+def research_lane_enabled_map() -> dict:
+    with state_lock:
+        return _normalize_research_lane_map(state.get("research_lane_enabled") or {})
+
 
 def is_research_lane_enabled(lane: str) -> bool:
     lane = str(lane or "").upper()
@@ -1856,13 +1887,16 @@ def is_research_lane_enabled(lane: str) -> bool:
     if lane == RESEARCH_LANE_CONTINUOUS:
         return continuous_ai_research_enabled()
     if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
-        return True
-    return bool(research_lane_enabled_map().get(lane, True))
+        return False
+    return bool(research_lane_enabled_map().get(lane, False))
 
 
 def lane_orders_allowed(lane: str = None) -> bool:
-    """Pathway Lab toggle — OFF means no new/chased limit orders for this lane."""
-    return is_research_lane_enabled(lane or RESEARCH_LANE_CONTINUOUS)
+    """Pathway Lab toggle — OFF or non-allowlisted lane means no new/chased limit orders."""
+    lane = str(lane or RESEARCH_LANE_CONTINUOUS).upper()
+    if lane not in PATHWAY_LIMIT_ORDER_LANES:
+        return False
+    return is_research_lane_enabled(lane)
 
 
 def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
@@ -14668,7 +14702,9 @@ DASHBOARD_JS = """(function () {
       if (key === 'continuous_ai_research_enabled') return d.continuous_ai_research_enabled !== false;
       if (key === 'research_lane_enabled') {
         const m = d.research_lane_enabled || {};
-        return m[spec.lane] !== false;
+        const allowed = (d.pathway_limit_order_lanes || ['CONTINUOUS', 'AI_60_65_ALPHA', 'CHASE_3PLUS_ALPHA']);
+        if (allowed.indexOf(spec.lane) < 0) return false;
+        return !!m[spec.lane];
       }
       return null;
     }
@@ -14676,6 +14712,8 @@ DASHBOARD_JS = """(function () {
       if (!spec || spec.planned || spec.status === 'RETIRED') return '';
       if (spec.lane === 'CONTINUOUS') return "setContinuousAi(" + (!on) + ")";
       if (spec.toggle_key === 'research_lane_enabled') {
+        const allowed = ['CONTINUOUS', 'AI_60_65_ALPHA', 'CHASE_3PLUS_ALPHA'];
+        if (allowed.indexOf(spec.lane) < 0) return '';
         return "setResearchLane('" + spec.lane + "', " + (!on) + ")";
       }
       return '';
@@ -14749,6 +14787,8 @@ DASHBOARD_JS = """(function () {
             if (spec.live_trading === false) {
               toggleHtml += ' <span style="color:#6e7681;font-size:0.78em;">SHADOW ONLY</span>';
             }
+          } else if (spec.toggle_key === 'research_lane_enabled') {
+            toggleHtml = '<span style="color:#484f58;font-size:0.82em;font-weight:600;">ORDERS LOCKED — analytics only</span>';
           }
           let vsBench = '';
           if (!spec.is_benchmark && delta.verdict) {
@@ -15929,6 +15969,9 @@ def api_state():
         snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
         snapshot["smart_submit_enabled"] = smart_submit_enabled()
         snapshot["research_config"] = research_config_for_dashboard()
+        snapshot["research_lane_enabled"] = research_lane_enabled_map()
+        snapshot["pathway_limit_order_lanes"] = sorted(PATHWAY_LIMIT_ORDER_LANES)
+        snapshot["pathway_lane_policy_version"] = PATHWAY_SPAWN_LANE_POLICY_VERSION
         with state_lock:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
@@ -16088,7 +16131,14 @@ def toggle_research_lane():
         if "enabled" in data and data["enabled"] is not None:
             enabled[lane] = bool(data["enabled"])
         else:
-            enabled[lane] = not bool(enabled.get(lane, True))
+            enabled[lane] = not bool(enabled.get(lane, False))
+        if enabled[lane] and lane not in PATHWAY_LIMIT_ORDER_LANES:
+            return jsonify({
+                "error": (
+                    f"Lane {lane} cannot place limit orders — policy allows only "
+                    "CONTINUOUS, AI_60_65_ALPHA, CHASE_3PLUS_ALPHA"
+                ),
+            }), 400
         state["research_lane_enabled"] = enabled
     save_persistent_config()
     suspend_result = None
@@ -16101,7 +16151,48 @@ def toggle_research_lane():
         "lane": lane,
         "enabled": enabled[lane],
         "research_lane_enabled": enabled,
+        "pathway_limit_order_lanes": sorted(PATHWAY_LIMIT_ORDER_LANES),
         "suspend": suspend_result,
+    })
+
+
+@app.route('/api/set_research_lanes', methods=['POST'])
+def set_research_lanes():
+    """Bulk-set spawn lane toggles (persists to config.json)."""
+    data = request.get_json(silent=True) or {}
+    lanes_in = data.get("lanes") or data.get("research_lane_enabled") or {}
+    if not isinstance(lanes_in, dict):
+        return jsonify({"error": "lanes must be an object"}), 400
+    with state_lock:
+        enabled = dict(research_lane_enabled_map())
+        for lane, val in lanes_in.items():
+            key = str(lane).upper()
+            if key not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
+                continue
+            if is_research_lane_retired(key):
+                enabled[key] = False
+                continue
+            want_on = bool(val)
+            if want_on and key not in PATHWAY_LIMIT_ORDER_LANES:
+                return jsonify({
+                    "error": (
+                        f"Lane {key} cannot place limit orders — policy allows only "
+                        "CONTINUOUS, AI_60_65_ALPHA, CHASE_3PLUS_ALPHA"
+                    ),
+                }), 400
+            enabled[key] = want_on
+        state["research_lane_enabled"] = enabled
+    save_persistent_config()
+    suspended = []
+    for lane, on in enabled.items():
+        if not on:
+            suspended.append(suspend_lane_trading(lane, reason="LANE_TOGGLE_OFF"))
+    logger.info(f"[RESEARCH_LANE] bulk set {enabled} [PIPELINE ENFORCEMENT]")
+    return jsonify({
+        "research_lane_enabled": enabled,
+        "pathway_limit_order_lanes": sorted(PATHWAY_LIMIT_ORDER_LANES),
+        "continuous_ai_research_enabled": continuous_ai_research_enabled(),
+        "suspend": suspended,
     })
 
 @app.route('/api/toggle_continuous_ai_direct', methods=['POST'])
@@ -18183,15 +18274,17 @@ def load_persistent_config():
                 elif "profit_gates_lane_enabled" not in state:
                     state["profit_gates_lane_enabled"] = PROFIT_GATES_LANE_DEFAULT_ENABLED
                 state["profit_gates_enforced"] = bool(state.get("profit_gates_lane_enabled", PROFIT_GATES_LANE_DEFAULT_ENABLED))
-                merged_lanes = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
-                if isinstance(config.get("research_lane_enabled"), dict):
-                    for lane, val in config["research_lane_enabled"].items():
-                        if lane in merged_lanes:
-                            merged_lanes[lane] = bool(val)
-                for lane, pathway_status in PATHWAY_LANE_STATUS.items():
-                    if pathway_status == "RETIRED" and lane in merged_lanes:
-                        merged_lanes[lane] = False
+                merged_lanes = _normalize_research_lane_map(config.get("research_lane_enabled"))
+                policy_ver = int(config.get("pathway_lane_policy_version") or 0)
+                if policy_ver < PATHWAY_SPAWN_LANE_POLICY_VERSION:
+                    merged_lanes = _normalize_research_lane_map(None)
+                    logger.info(
+                        f"[CONFIG] Pathway spawn lane policy v{PATHWAY_SPAWN_LANE_POLICY_VERSION} "
+                        f"applied (was v{policy_ver}) [PIPELINE ENFORCEMENT]"
+                    )
+                merged_lanes = _apply_pathway_lane_env_overrides(merged_lanes)
                 state["research_lane_enabled"] = merged_lanes
+                state["pathway_lane_policy_version"] = PATHWAY_SPAWN_LANE_POLICY_VERSION
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
         with state_lock:
@@ -18208,9 +18301,20 @@ def load_persistent_config():
             elif not state.get("_threshold_locked"):
                 state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
         logger.info("Loaded persistent config from config.json - ai_threshold restored")
+    else:
+        with state_lock:
+            merged_lanes = _apply_pathway_lane_env_overrides(_normalize_research_lane_map(None))
+            state["research_lane_enabled"] = merged_lanes
+            state["pathway_lane_policy_version"] = PATHWAY_SPAWN_LANE_POLICY_VERSION
+        logger.info(
+            f"[CONFIG] No config.json — pathway spawn defaults v{PATHWAY_SPAWN_LANE_POLICY_VERSION} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
 
 def save_persistent_config():
-    config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
+    with state_lock:
+        state["pathway_lane_policy_version"] = PATHWAY_SPAWN_LANE_POLICY_VERSION
+    config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done", "pathway_lane_policy_version"]}
     if _atomic_file_replace(
         CONFIG_FILE,
         lambda f: json.dump(config, f),
@@ -18572,6 +18676,11 @@ def main():
         )
     _wipe_research_on_startup_if_needed()
     load_persistent_config()
+    with state_lock:
+        state["research_lane_enabled"] = _apply_pathway_lane_env_overrides(
+            _normalize_research_lane_map(state.get("research_lane_enabled"))
+        )
+        state["pathway_lane_policy_version"] = PATHWAY_SPAWN_LANE_POLICY_VERSION
     reset_transient_runtime_state()
     update_logger_level()
     validate_startup()
