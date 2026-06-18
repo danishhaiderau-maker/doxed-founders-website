@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-feat(founder-os): promo-aware Mission Control with action prompts and usage counter
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
