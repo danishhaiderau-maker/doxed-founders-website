@@ -2,8 +2,6 @@
 
 import { formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 
-const MAX_ROWS = 5;
-
 function MiniTable({
   title,
   subtitle,
@@ -57,7 +55,7 @@ function MiniTable({
       </div>
       {rows.length > 0 && (
         <p className="border-t border-zinc-800/60 px-3 py-1.5 text-[10px] text-zinc-600">
-          Showing latest {Math.min(rows.length, cap)} entries
+          Showing latest {rows.length} entries
         </p>
       )}
     </section>
