@@ -16,4 +16,4 @@ chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
-Just now
+15m ago
