@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-chore(scripts): add resume-live-copy automation helper
+fix(live-copy): freeze Bitfinex policy and exit-only PAUSED monitoring
 
 ## Last Activity
 
