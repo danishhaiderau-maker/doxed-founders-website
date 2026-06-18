@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(web): remove unused imports in agent public profile
+fix(sync): use Neon DATABASE_URL when pushing showcase bot credentials
 
 ## Last Activity
 
