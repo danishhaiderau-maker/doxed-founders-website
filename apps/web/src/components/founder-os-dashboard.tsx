@@ -11,7 +11,6 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
-import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
 import { FounderPersonalGuide } from '@/components/founder-personal-guide';
 import { AgentRunStepsPanel } from '@/components/agent-run-steps-panel';
 import { FounderGraphMiniPanel } from '@/components/founder-graph-mini-panel';
@@ -33,7 +32,6 @@ import {
   fetchFounderGraph,
   fetchPlatformSyncStatus,
   fetchFounderPromoStatus,
-  runCopilotAutopilot,
   type FounderPromoUserStatus,
   type FounderGraphResponse,
   type MissionIntelligence,
@@ -45,10 +43,7 @@ import {
   ProjectRoom,
 } from '@/lib/api';
 import {
-  CONNECT_ACCOUNTS_HREF,
-  buildCopilotUsageLines,
   connectionSnapshotFromSync,
-  listCopilotActions,
   resolveSmartQuickPrompts,
   type ProviderRow,
 } from '@/lib/copilot-ai-stack';
@@ -58,7 +53,6 @@ type NavItem = { id: WorkspaceTab; label: string; icon: string };
 const SIDEBAR_NAV: NavItem[] = [
   { id: 'activity', label: 'Mission Control', icon: '◆' },
   { id: 'social', label: 'Social Hub', icon: '📡' },
-  { id: 'agents', label: 'Agents', icon: '🤖' },
   { id: 'analytics', label: 'Settings', icon: '⚙' },
 ];
 
@@ -115,7 +109,6 @@ export function FounderOsDashboardLayout({
   const [founderGraph, setFounderGraph] = useState<FounderGraphResponse | null>(null);
   const [liveNudges, setLiveNudges] = useState<ChiefOfStaffNudge[]>([]);
   const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
-  const [autopilotBusy, setAutopilotBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -181,14 +174,6 @@ export function FounderOsDashboardLayout({
     missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
   const displayNextStep =
     rawNextStep && !isStaleBoilerplateMissionTask(rawNextStep) ? rawNextStep : null;
-  const copilotUsageLines = useMemo(() => {
-    const actions = listCopilotActions(aiProviders, defaultAiProvider, {
-      cursor: workerStatus?.connections?.cursor,
-      openHands: workerStatus?.connections?.openHands,
-    });
-    return buildCopilotUsageLines(actions, defaultAiProvider);
-  }, [aiProviders, defaultAiProvider, workerStatus]);
-
   const aiStackHealth = useMemo(
     () =>
       resolveAiStackHealth({
@@ -249,26 +234,6 @@ export function FounderOsDashboardLayout({
     [founderQueue],
   );
 
-  async function handleTakeFullControl() {
-    setAutopilotBusy(true);
-    try {
-      const result = await runCopilotAutopilot(
-        'Take full control — sync GitHub, vault, and push all updates to my local Sovereign stack.',
-        accessToken,
-      );
-      setQuickPrompt(null);
-      setResumeBriefing(result.answer ?? 'Autopilot sync complete.');
-      setChatKey((k) => k + 1);
-      onMessage?.(result.answer ?? 'Autopilot sync complete');
-      void load();
-      onRefresh();
-    } catch (e) {
-      onMessage?.(e instanceof Error ? e.message : 'Autopilot sync failed');
-    } finally {
-      setAutopilotBusy(false);
-    }
-  }
-
   return (
     <div className="flex min-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
       <div className="flex flex-1 flex-col lg:flex-row">
@@ -320,13 +285,13 @@ export function FounderOsDashboardLayout({
                 </div>
               </div>
               <p className="mt-3 text-[10px] text-zinc-600">
-                {missionIntel ? 'Current initiative (GitHub)' : 'Current goal'}
+                {missionIntel && memory?.repoFullName ? 'Current initiative (GitHub)' : 'Current goal'}
               </p>
               <p className="mt-0.5 text-xs leading-snug text-zinc-300 line-clamp-4">{displayInitiative}</p>
               {displayNextStep && (
                 <>
                   <p className="mt-2 text-[10px] text-zinc-600">Start here</p>
-                  <p className="mt-0.5 text-[11px] leading-snug text-emerald-300/90 line-clamp-3">
+                  <p className="mt-0.5 text-[11px] leading-snug text-zinc-400 line-clamp-3">
                     {displayNextStep}
                   </p>
                 </>
@@ -361,59 +326,20 @@ export function FounderOsDashboardLayout({
         >
           {showMissionControl ? (
             <div className="flex min-h-0 flex-1 flex-col gap-3">
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 pb-2">
-                <div className="min-w-0">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">
-                    Founder Brain · Mission Control
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    Your command window — agents, GitHub, vault, and infra route from here
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    disabled={autopilotBusy}
-                    onClick={() => void handleTakeFullControl()}
-                    className="rounded-lg bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
-                  >
-                    {autopilotBusy ? 'Syncing…' : 'Take full control'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={autopilotBusy}
-                    onClick={() => {
-                      setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
-                      setChatKey((k) => k + 1);
-                    }}
-                    className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-950/50"
-                  >
-                    Build with Cursor
-                  </button>
-                  <Link
-                    href={CONNECT_ACCOUNTS_HREF}
-                    className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-400 hover:text-zinc-200"
-                  >
-                    Deploy to cloud
-                  </Link>
-                </div>
-              </div>
-
-              <FounderPersonalGuide
-                accessToken={accessToken}
-                compact
-                onPrompt={(p) => {
-                  setQuickPrompt(p);
-                  setChatKey((k) => k + 1);
-                }}
-              />
-
               <details className="group shrink-0 rounded-lg border border-zinc-800/80 bg-zinc-900/30">
-                <summary className="cursor-pointer list-none px-3 py-2 text-[11px] font-medium text-zinc-400 marker:content-none [&::-webkit-details-marker]:hidden">
-                  <span className="text-zinc-300">Stack & connections</span>
-                  <span className="ml-2 text-zinc-600">— tap to expand infra, promo, AI team</span>
+                <summary className="cursor-pointer list-none px-3 py-2 text-[11px] font-medium text-zinc-500 marker:content-none [&::-webkit-details-marker]:hidden">
+                  <span className="text-zinc-400">Setup guide & connections</span>
+                  <span className="ml-2 text-zinc-600">— optional · expand when connecting GitHub or Cursor</span>
                 </summary>
                 <div className="space-y-2 border-t border-zinc-800/60 px-3 pb-3 pt-2">
+                  <FounderPersonalGuide
+                    accessToken={accessToken}
+                    compact
+                    onPrompt={(p) => {
+                      setQuickPrompt(p);
+                      setChatKey((k) => k + 1);
+                    }}
+                  />
                   <MissionControlConnectionHub
                     accessToken={accessToken}
                     providers={aiProviders}
@@ -427,18 +353,10 @@ export function FounderOsDashboardLayout({
                     contentDraftReady={contentDraftReady}
                     promo={promoStatus}
                     compact
+                    hideWorkforceAgents
                     onRefresh={() => {
                       void load();
                       onRefresh();
-                    }}
-                  />
-                  <FounderMissionControlQuickstart
-                    compact
-                    usageLines={copilotUsageLines}
-                    onTakeFullControl={() => void handleTakeFullControl()}
-                    onBuildWithCursor={() => {
-                      setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
-                      setChatKey((k) => k + 1);
                     }}
                   />
                 </div>

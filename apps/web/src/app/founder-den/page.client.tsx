@@ -23,7 +23,7 @@ import {
   submitFounderApplication,
 } from '@/lib/api';
 
-const PRIMARY_TABS: WorkspaceTab[] = ['activity', 'social', 'agents', 'analytics'];
+const PRIMARY_TABS: WorkspaceTab[] = ['activity', 'social', 'analytics'];
 
 const TAB_ALIASES: Record<string, WorkspaceTab> = {
   build: 'activity',
@@ -33,6 +33,7 @@ const TAB_ALIASES: Record<string, WorkspaceTab> = {
   funding: 'analytics',
   notifications: 'activity',
   copilot: 'activity',
+  agents: 'activity',
 };
 
 function parseTab(value: string | null): WorkspaceTab {
@@ -198,7 +199,7 @@ export default function FounderDenPageClient() {
             <SiteBrand className="text-sm" />
             <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
             <p className="text-sm text-zinc-500">
-              Mission control · Founder Brain routes agents & providers · you choose the infrastructure
+              Founder Brain + Cursor — vault-first or GitHub when you are ready
             </p>
             {onboardingStatus?.pathLabel && hasFounder && (
               <span className="mt-2 inline-flex rounded-full border border-violet-500/30 bg-violet-950/40 px-2.5 py-0.5 text-[10px] text-violet-200">

@@ -83,7 +83,10 @@ export function isFounderRepoStatusPrompt(prompt: string): boolean {
     /what (changed|shipped).{0,30}(today|this week|last 24|yesterday|recently)/.test(t) ||
     /what should (i|we) (work on|ship|build) next/.test(t) ||
     /(tell|show) me what.{0,50}(working|shipping|shipped|status)/.test(t) ||
-    /can you (tell|check|see|look).{0,60}(working|repo|repository|github|status|commits?)/.test(t) ||
+    /can you (tell|check|see|look).{0,60}(working|repo|repository|github|status|commits?|built|done|coded)/.test(t) ||
+    /what have (you|i|we) (done|built|coded|shipped|saved)/.test(t) ||
+    /(real )?capacity to build|have you coded|saved anything/.test(t) ||
+    /use my (space|vault|storage|machine)|instead of github|option a\b|local (vault|infrastructure|memory)/.test(t) ||
     /check (my |our )?(git\s*hub|repo|repository)/.test(t) ||
     /(see|look at|check|review).{0,48}(repo|repository|github|commits?)/.test(t) ||
     /currently working on/.test(t) ||
@@ -92,14 +95,13 @@ export function isFounderRepoStatusPrompt(prompt: string): boolean {
   );
 }
 
-/** Prefer deterministic commit/PR intelligence over raw LLM paraphrase of tasks.json. */
+/** Prefer deterministic answers over LLM paraphrase of stale tasks.json boilerplate. */
 export function shouldPreferGithubGroundedBrainAnswer(
   prompt: string,
-  commitsWithSignal: number,
+  _commitsWithSignal: number,
 ): boolean {
-  if (!isFounderRepoStatusPrompt(prompt)) return false;
-  // Status questions must not fall through to LLM paraphrase of stale tasks.json.
-  return commitsWithSignal >= 1;
+  // Status / vault / capacity questions always use rule-based coach — never invent Solidity tasks.
+  return isFounderRepoStatusPrompt(prompt);
 }
 
 const TASK_PROVIDER_PREFERENCE: Record<Exclude<FounderBrainTask, 'general'>, AiProviderKey[]> = {

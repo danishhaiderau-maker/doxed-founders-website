@@ -19,7 +19,67 @@ export type SmartQuickPrompt = {
 };
 
 const CONNECT_GITHUB_HREF = '/account?tab=connected&connect=github';
+const CONNECT_PORTAL_HREF = '/account?tab=connected';
 const AI_STACK_HREF = '/settings/builder';
+const CURSOR_DOCS_HREF = 'https://cursor.com/dashboard';
+const GITHUB_SIGNUP_HREF = 'https://github.com/signup';
+
+/** Honest vault-first status when user chose Sovereign / no GitHub. */
+export function formatVaultCapacityAnswer(input: {
+  projectName: string;
+  vaultNote?: string | null;
+  openTaskCount: number;
+  paperTrades?: number;
+  founderNodeOnline?: boolean;
+  conn: BrainConnectionSnapshot;
+}): string {
+  const lines = [
+    `# ${input.projectName} — what exists today`,
+    '',
+    '**Short answer:** You are in **Sovereign / research mode**. Your project memory lives in **Founder Vault** on your machine — that is your storage instead of GitHub until you choose otherwise.',
+    '',
+    '## What is saved (Founder Vault)',
+    input.vaultNote?.trim()
+      ? input.vaultNote.trim()
+      : [
+          '- Goals, roadmap, decisions, and task titles sync via Founder Node',
+          '- Private notes and full task bodies stay on your device (encrypted relay only)',
+          '- **GitHub is not required** on Option A — vault replaces it for planning & drafts',
+        ].join('\n'),
+    '',
+    '## What has been built in code',
+    '- **No production repo commits** — expected without GitHub linked',
+    `- **Planning artifacts:** ${input.openTaskCount} task(s) in your queue (template items may be stale — tell me your real goal)`,
+    input.paperTrades
+      ? `- **Paper trades:** ${input.paperTrades} recorded for market testing`
+      : '',
+    '',
+    '## Can I actually build?',
+    '**Yes — two ways:**',
+    '',
+    '1. **Vault drafting (free, no GitHub)** — I write specs, contracts, and file trees; you save locally in Founder Vault. Reply: **"Draft my next milestone in the vault"**',
+    '2. **Cursor in a repo (when ready)** — connect GitHub + Cursor for real PRs. Only needed when you want version control, not for research.',
+    '',
+    input.conn.githubConnected
+      ? `GitHub is linked (\`${input.conn.repoFullName}\`) — say **Build with Cursor** to implement.`
+      : [
+          '## GitHub is optional right now',
+          '',
+          'You picked **save money / local infrastructure**. Vault is working as your "GitHub substitute" for memory.',
+          '',
+          '**When you want GitHub later:**',
+          `1. [Create a free GitHub account](${GITHUB_SIGNUP_HREF})`,
+          `2. [Connect owner/repo in Connected Accounts](${CONNECT_GITHUB_HREF}) — step-by-step guide in the portal`,
+          `3. [Add Cursor API key](${AI_STACK_HREF}#remote-builder) — get key at [cursor.com/dashboard](${CURSOR_DOCS_HREF})`,
+          '',
+          `Open connect portal: [${CONNECT_PORTAL_HREF}](${CONNECT_PORTAL_HREF})`,
+        ].join('\n'),
+    '',
+    '**One question:** What is $REM in one sentence (token-gated site, app, something else)? I will draft the right next file in your vault — not a generic smart-contract template.',
+  ];
+
+  return lines.filter(Boolean).join('\n');
+}
 
 /** Expert PM-style gap message — never a dead-end "connect GitHub" only. */
 export function buildBrainCoachGapMessage(
@@ -197,15 +257,17 @@ export function formatRecapCoachAnswer(input: {
     lines.push(
       '---',
       '',
-      '**Before we ship code**, I need your pathway:',
+      '**You chose local / Sovereign storage** — Founder Vault on your machine is your source of truth, not GitHub.',
       '',
-      '1. **Sovereign** — draft in Founder Vault on your laptop (no cloud bills)',
-      '2. **Hybrid** — connect GitHub + Cursor; cloud later',
-      '3. **Production** — GitHub + Neon + Railway + Vercel',
+      '**Pick how to continue:**',
       '',
-      '**Reply with 1, 2, or 3** — or tell me your goal in one sentence (research vs go-live).',
+      '1. **Keep vault-only** — I draft code & specs locally (free)',
+      `2. **Add GitHub** — [Connect repo](${CONNECT_GITHUB_HREF}) when you want Cursor PRs`,
+      '3. **Go production** — Neon + Railway + Vercel when you are past research',
       '',
-      '_I will not recommend random smart-contract tasks until you pick a path and I understand $REM._',
+      '**Reply with 1, 2, or 3** — or describe $REM in one sentence so I stop using generic templates.',
+      '',
+      '_I will not recommend random smart-contract tasks until I understand your product._',
     );
   } else {
     lines.push(

@@ -11,10 +11,15 @@ type Props = {
 const BAR_HEIGHTS = [0.35, 0.55, 0.85, 0.65, 0.45];
 
 export function VoiceWaveform({ phase, level = 0 }: Props) {
-  const active = phase === 'listening' || phase === 'starting';
+  const active = phase === 'listening' || phase === 'starting' || phase === 'waiting_network';
   if (!active) return null;
 
-  const boost = phase === 'starting' ? 0.25 : Math.min(1, level * 1.4 + 0.15);
+  const boost =
+    phase === 'waiting_network'
+      ? 0.3
+      : phase === 'starting'
+        ? 0.25
+        : Math.min(1, level * 1.4 + 0.15);
 
   return (
     <div
@@ -29,7 +34,11 @@ export function VoiceWaveform({ phase, level = 0 }: Props) {
           <span
             key={i}
             className={`w-1 rounded-full transition-[height] duration-75 ${
-              phase === 'listening' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
+              phase === 'listening'
+                ? 'bg-red-400'
+                : phase === 'waiting_network'
+                  ? 'bg-sky-400 animate-pulse'
+                  : 'bg-amber-400 animate-pulse'
             }`}
             style={{
               height: `${Math.max(18, Math.min(100, h))}%`,

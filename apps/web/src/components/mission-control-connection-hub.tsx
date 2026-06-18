@@ -28,6 +28,8 @@ type Props = {
   contentDraftReady?: boolean;
   promo?: FounderPromoUserStatus | null;
   compact?: boolean;
+  /** Hide Research/Builder/Content workforce strip — Cursor-first Mission Control */
+  hideWorkforceAgents?: boolean;
   onRefresh?: () => void;
 };
 
@@ -41,6 +43,7 @@ export function MissionControlConnectionHub({
   contentDraftReady = false,
   promo,
   compact = false,
+  hideWorkforceAgents = false,
   onRefresh,
 }: Props) {
   const [status, setStatus] = useState<PlatformSyncStatus | null>(null);
@@ -96,7 +99,7 @@ export function MissionControlConnectionHub({
 
   return (
     <>
-      {promo?.enabled && promo.eligible && (
+      {promo?.enabled && promo.eligible && !compact && (
         <div className="rounded-xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/40 to-violet-950/20 px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -130,18 +133,18 @@ export function MissionControlConnectionHub({
       )}
 
       <div
-        className={`space-y-3 rounded-xl border border-emerald-500/20 bg-gradient-to-br from-zinc-900/80 to-emerald-950/10 shadow-lg shadow-black/20 ${
+        className={`space-y-3 rounded-xl border border-zinc-800/80 bg-zinc-900/40 ${
           compact ? 'px-3 py-2.5' : 'px-4 py-4'
         }`}
       >
         {!compact && (
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/90">
-                Your stack · connections
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                Connections
               </p>
               <p className="mt-0.5 text-xs text-zinc-500">
-                Green = ready. Tap anything gray to connect — infra, LLMs, and code agents.
+                Tap gray chips to connect — optional on Sovereign / vault-only path.
               </p>
             </div>
             <Link
@@ -163,7 +166,7 @@ export function MissionControlConnectionHub({
                 <span
                   key={p.key}
                   title={p.detail ?? p.label}
-                  className="rounded-full bg-emerald-950/50 px-2.5 py-0.5 text-[10px] font-medium text-emerald-300"
+                  className="rounded-full bg-zinc-800/80 px-2.5 py-0.5 text-[10px] font-medium text-zinc-300"
                 >
                   {p.label} ✓
                 </span>
@@ -206,9 +209,9 @@ export function MissionControlConnectionHub({
           )}
         </div>
 
-        <FounderAiTeamStrip agents={aiTeam} compact linkable />
+        {!hideWorkforceAgents && <FounderAiTeamStrip agents={aiTeam} compact linkable />}
 
-        {copilotActions.length > 0 && (
+        {!hideWorkforceAgents && copilotActions.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/80 pt-3">
             <span className="mr-1 text-[10px] font-semibold text-zinc-500">Send as</span>
             {copilotActions.map((action) => (
