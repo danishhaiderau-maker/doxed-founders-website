@@ -97,6 +97,7 @@ export class AdminControlService {
         botRuntimeNote: credentials.botRuntimeNote,
         aiRuntimeNote: credentials.aiRuntimeNote,
         agentShowcaseDefaultSettings: settings?.agentShowcaseDefaultSettings?.trim() ?? null,
+        subscriberMaxMarginUsd: settings?.subscriberMaxMarginUsd ?? 20,
       },
       adapters: {
         exchangeStatus: bridge.connected
@@ -232,7 +233,12 @@ export class AdminControlService {
 
   async updateShowcaseConfig(
     userId: string,
-    input: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
+    input: {
+      exchangeProvider?: string;
+      aiProvider?: string;
+      agentShowcaseDefaultSettings?: string;
+      subscriberMaxMarginUsd?: number;
+    },
   ) {
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
@@ -241,6 +247,10 @@ export class AdminControlService {
         showcaseExchangeProvider: input.exchangeProvider ?? 'bybit',
         showcaseAiProvider: input.aiProvider ?? 'deepseek',
         agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings ?? null,
+        subscriberMaxMarginUsd:
+          input.subscriberMaxMarginUsd != null && input.subscriberMaxMarginUsd > 0
+            ? Math.round(input.subscriberMaxMarginUsd)
+            : 20,
         updatedByUserId: userId,
       },
       update: {
@@ -248,6 +258,9 @@ export class AdminControlService {
         ...(input.aiProvider ? { showcaseAiProvider: input.aiProvider } : {}),
         ...(input.agentShowcaseDefaultSettings !== undefined
           ? { agentShowcaseDefaultSettings: input.agentShowcaseDefaultSettings || null }
+          : {}),
+        ...(input.subscriberMaxMarginUsd != null && input.subscriberMaxMarginUsd > 0
+          ? { subscriberMaxMarginUsd: Math.round(input.subscriberMaxMarginUsd) }
           : {}),
         updatedByUserId: userId,
       },

@@ -29,6 +29,7 @@ export function ExchangeRelayControl({
   onStop,
   onStart,
   showSelector = true,
+  hideConnect = false,
   providers,
   onExchangeChange,
 }: {
@@ -42,6 +43,7 @@ export function ExchangeRelayControl({
   onStop?: () => void;
   onStart?: () => void;
   showSelector?: boolean;
+  hideConnect?: boolean;
   providers?: { id: string; label: string; available: boolean }[];
   onExchangeChange?: (id: string) => void;
 }) {
@@ -127,7 +129,7 @@ export function ExchangeRelayControl({
               {busy ? '…' : 'Stop'}
             </button>
           )
-        ) : relayState === 'idle' ? (
+        ) : relayState === 'idle' && !hideConnect ? (
           <Link
             href={hireHref}
             className="shrink-0 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500"

@@ -15,6 +15,7 @@ import {
 import {
   computeSignalSuccessFeeUsd,
   SIGNAL_LEGAL_DISCLAIMER,
+  resolveSignalCyclePollMs,
   type SignalCycleEventType,
 } from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
@@ -37,8 +38,10 @@ import {
   buildIntentEnvelope,
   extractBotApproveSnapshot,
 } from './signal-envelope.mapper';
+import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 const DDOLLAR_PER_USD = 100;
+const SIGNAL_POLL_MS = resolveSignalCyclePollMs();
 
 export type SignalApiKeyContext = {
   userId: string;
@@ -59,8 +62,10 @@ export class SignalCyclesService implements OnModuleInit {
 
   onModuleInit() {
     void this.bootstrapLastTradeId();
-    setInterval(() => void this.pollBotForIntents(), 25_000);
-    setInterval(() => void this.syncShowcaseCycleClosures(), 30_000);
+    this.logger.log(`Signal cycle bridge polling every ${SIGNAL_POLL_MS / 1000}s`);
+    setInterval(() => void this.pollBotForIntents(), SIGNAL_POLL_MS);
+    setInterval(() => void this.syncShowcaseCycleClosures(), SIGNAL_POLL_MS);
+    setTimeout(() => void this.pollBotForIntents(), 1_000);
   }
 
   private async bootstrapLastTradeId() {
@@ -171,7 +176,8 @@ export class SignalCyclesService implements OnModuleInit {
     }
 
     const cycleId = `cyc_${randomBytes(8).toString('hex')}`;
-    const envelope = buildIntentEnvelope(cycleId, lao.trade_id, bot);
+    const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
+    const envelope = buildIntentEnvelope(cycleId, lao.trade_id, bot, { maxMarginUsd });
     if (!envelope) return;
 
     const ttlSec = envelope.entry.ttl_sec;
@@ -310,6 +316,7 @@ export class SignalCyclesService implements OnModuleInit {
   async getSubscriberMandate() {
     const treasury = await resolveSolanaTreasuryAddress(this.prisma);
     const evmTreasury = await resolveEvmTreasuryAddress(this.prisma);
+    const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
     const x402Enabled = Boolean(evmTreasury || process.env.X402_EVM_PAY_TO?.trim());
     const facilitator = resolveX402FacilitatorUrl();
     const bazaarEnabled = isX402BazaarEnabled();
@@ -317,6 +324,8 @@ export class SignalCyclesService implements OnModuleInit {
       stop_loss_at_fill: true,
       use_subscriber_mark_at_receipt: true,
       no_research_venue_absolute_prices: true,
+      max_margin_usd_per_trade: maxMarginUsd,
+      platform_enforced_margin: true,
       x402: x402Enabled
         ? {
             support: true,

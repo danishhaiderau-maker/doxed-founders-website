@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
   BITFINEX_RECOMMEND_BANNER,
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   EXCHANGE_API_GUIDES,
   EXCHANGE_PROVIDER_LABELS,
   EXCHANGE_PROVIDERS,
@@ -98,8 +99,8 @@ export function ExchangeHirePanel({
     { n: 1, label: 'Choose exchange', detail: `${selectedLabel}${exchange === 'bitfinex' ? ' (Recommended)' : ''}` },
     { n: 2, label: 'Connect exchange API', detail: 'Read + trade only — no withdraw' },
     { n: 3, label: 'Admin DeepSeek copy', detail: 'No AI key needed' },
-    { n: 4, label: 'Risk acknowledgement', detail: 'Max $500 allocation' },
-    { n: 5, label: 'Activate agent', detail: `${costWeek.toLocaleString()} DDollar / week · auto Bitfinex execution` },
+    { n: 4, label: 'Risk acknowledgement', detail: `Max $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin per trade (platform-enforced)` },
+    { n: 5, label: 'Activate agent', detail: `${costWeek.toLocaleString()} DDollar / week · Bitfinex auto-copy` },
   ];
 
   return (
@@ -108,7 +109,8 @@ export function ExchangeHirePanel({
         <p className="text-xs font-bold uppercase text-emerald-400">Showcase tested on Bitfinex</p>
         <p className="mt-2 text-xs text-emerald-100/75">{BITFINEX_RECOMMEND_BANNER}</p>
         <p className="mt-2 text-[11px] text-zinc-400">
-          For live hire you can connect any supported exchange below — Bitfinex is recommended, not required.
+          Live hire uses Bitfinex (zero fees). Platform enforces ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} max margin per
+          trade — exchange balance cannot override this cap.
         </p>
       </div>
 

@@ -1,4 +1,5 @@
 import type { SignalIntentEnvelope } from '@dcf/utils';
+import { DEFAULT_SUBSCRIBER_MAX_MARGIN_USD } from '@dcf/utils';
 import type { BotApiState } from './bot-state.mapper';
 
 const DEFAULT_STOP_LOSS_MARGIN_PCT = -18;
@@ -56,6 +57,7 @@ export function buildIntentEnvelope(
   cycleId: string,
   tradeId: string,
   bot: BotApiState,
+  options?: { maxMarginUsd?: number },
 ): SignalIntentEnvelope | null {
   const direction = resolveDirection(bot);
   if (!direction) return null;
@@ -92,6 +94,7 @@ export function buildIntentEnvelope(
       ],
       leverage_hint:
         (bot as BotApiState & { leverage?: number }).leverage ?? DEFAULT_LEVERAGE_HINT,
+      max_margin_usd: options?.maxMarginUsd ?? DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     },
     context: {
       regime: bot.regime ?? 'UNKNOWN',

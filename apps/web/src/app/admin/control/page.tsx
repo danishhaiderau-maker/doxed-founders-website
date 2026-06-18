@@ -57,6 +57,7 @@ export default function AdminControlPage() {
   const [botPublicUrl, setBotPublicUrl] = useState('');
   const [showcaseTestnet, setShowcaseTestnet] = useState(false);
   const [defaultSettings, setDefaultSettings] = useState('');
+  const [subscriberMaxMarginUsd, setSubscriberMaxMarginUsd] = useState(20);
   const [researchRaw, setResearchRaw] = useState<Record<string, unknown> | null>(null);
   const [researchVersion, setResearchVersion] = useState<string | null>(null);
   const [researchUpdated, setResearchUpdated] = useState<string>('');
@@ -224,9 +225,15 @@ export default function AdminControlPage() {
     setBusy('default-settings');
     setError(null);
     try {
-      const ov = await updateShowcaseConfig({ agentShowcaseDefaultSettings: defaultSettings }, token);
+      const ov = await updateShowcaseConfig(
+        {
+          agentShowcaseDefaultSettings: defaultSettings,
+          subscriberMaxMarginUsd: Number(subscriberMaxMarginUsd),
+        },
+        token,
+      );
       setOverview(ov);
-      setMsg('Public default settings message saved — shown on agent hire sidebar.');
+      setMsg('Hire rules saved — max margin per trade and public message updated.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
@@ -249,7 +256,9 @@ export default function AdminControlPage() {
   useEffect(() => {
     const msg = overview?.showcase?.agentShowcaseDefaultSettings;
     if (msg != null) setDefaultSettings(msg);
-  }, [overview?.showcase?.agentShowcaseDefaultSettings]);
+    const margin = overview?.showcase?.subscriberMaxMarginUsd;
+    if (margin != null && margin > 0) setSubscriberMaxMarginUsd(margin);
+  }, [overview?.showcase?.agentShowcaseDefaultSettings, overview?.showcase?.subscriberMaxMarginUsd]);
 
   useEffect(() => {
     if (section !== 'research' || !researchAutoRefresh || !token) return;
@@ -549,23 +558,39 @@ export default function AdminControlPage() {
                   )}
 
                   <form onSubmit={handleSaveDefaultSettings} className="mt-6 rounded-lg border border-amber-500/25 bg-amber-950/10 p-4">
-                    <p className="text-sm font-semibold text-amber-200">Public default settings message</p>
+                    <p className="text-sm font-semibold text-amber-200">Hire rules & public message</p>
                     <p className="mt-1 text-xs text-zinc-500">
-                      Shown on the agent hire sidebar. Users may override with experimental settings at their own risk.
+                      Max margin per trade is enforced server-side on every Bitfinex copy order. Users cannot override
+                      via API keys or balance.
+                    </p>
+                    <label className="mt-3 block text-sm">
+                      <span className="text-zinc-400">Max margin per trade (USD)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={500}
+                        step={1}
+                        value={subscriberMaxMarginUsd}
+                        onChange={(e) => setSubscriberMaxMarginUsd(Number(e.target.value))}
+                        className="mt-1 w-full max-w-[12rem] rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                      />
+                    </label>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Default $20 — matches showcase bot. Change here when you want to raise the platform cap.
                     </p>
                     <textarea
                       value={defaultSettings}
                       onChange={(e) => setDefaultSettings(e.target.value)}
                       rows={4}
                       className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"
-                      placeholder="Conservative edge threshold, RESEARCH mode, max $500 allocation…"
+                      placeholder="Live Bitfinex copy — $20 max margin per trade enforced by platform…"
                     />
                     <button
                       type="submit"
                       disabled={busy === 'default-settings'}
                       className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium hover:bg-amber-500 disabled:opacity-50"
                     >
-                      {busy === 'default-settings' ? 'Saving…' : 'Save default settings message'}
+                      {busy === 'default-settings' ? 'Saving…' : 'Save hire rules'}
                     </button>
                   </form>
 

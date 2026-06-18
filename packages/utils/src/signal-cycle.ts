@@ -1,3 +1,36 @@
+/** Platform-enforced max collateral (margin) per hire/signal trade — admin can raise via PlatformSettings. */
+export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
+
+/** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS. */
+export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 1_000;
+
+/** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS. */
+export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 1_000;
+
+export function resolveSubscriberMaxMarginUsd(input?: {
+  envValue?: string | number | null;
+  platformValue?: number | null;
+}): number {
+  const fromPlatform = input?.platformValue;
+  if (fromPlatform != null && Number.isFinite(fromPlatform) && fromPlatform > 0) {
+    return fromPlatform;
+  }
+  const raw = Number(
+    input?.envValue ?? process.env.SUBSCRIBER_MAX_MARGIN_USD ?? DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+  );
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_SUBSCRIBER_MAX_MARGIN_USD;
+}
+
+export function resolveSubscriberExecutionPollMs(envValue?: string | number | null): number {
+  const raw = Number(envValue ?? process.env.SUBSCRIBER_EXECUTION_POLL_MS ?? DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS);
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS;
+}
+
+export function resolveSignalCyclePollMs(envValue?: string | number | null): number {
+  const raw = Number(envValue ?? process.env.SIGNAL_CYCLE_POLL_MS ?? DEFAULT_SIGNAL_CYCLE_POLL_MS);
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : DEFAULT_SIGNAL_CYCLE_POLL_MS;
+}
+
 /** Exchange-neutral signal envelope (ENSE) — portable across venues. */
 export type SignalEntryMode = 'PULLBACK_PCT' | 'EMA_OFFSET_PCT';
 
@@ -21,6 +54,8 @@ export type SignalIntentEnvelope = {
     stop_loss_margin_pct: number;
     take_profit_ladder: Array<{ at_margin_pct: number; close_position_pct: number }>;
     leverage_hint: number;
+    /** Platform-enforced max collateral USD per trade (hire relay cannot exceed this). */
+    max_margin_usd: number;
   };
   context: {
     regime: string;
