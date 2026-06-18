@@ -34,9 +34,9 @@ export function AgentShowcaseEquity({
     mode === 'live'
       ? [
           {
-            label: `${exchangeLabel ?? 'Exchange'} balance`,
+            label: `${exchangeLabel ?? 'Bitfinex'} Derivatives balance`,
             value: formatUsd(cash, 2),
-            hint: 'Available margin from your connected account',
+            hint: 'USDT in Derivatives wallet — required for BTC perp copy',
           },
           {
             label: 'Current equity',

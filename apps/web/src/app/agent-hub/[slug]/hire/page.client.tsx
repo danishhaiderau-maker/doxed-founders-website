@@ -7,6 +7,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
 import { ExchangeRelayControl, exchangeLabelFor } from '@/components/agent-hub/exchange-relay-control';
+import { BitfinexDerivativesFundingGuide } from '@/components/agent-hub/bitfinex-derivatives-funding-guide';
 import {
   AGENT_BETA_RISK_COPY,
   BITFINEX_RECOMMEND_BANNER,
@@ -218,6 +219,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
             <p className="text-xs text-zinc-500">
               Live tier places real orders on your account when admin AI trades. Never enable withdraw permissions.
             </p>
+
+            {exchange === 'bitfinex' && <BitfinexDerivativesFundingGuide />}
 
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
               <ExchangeRelayControl

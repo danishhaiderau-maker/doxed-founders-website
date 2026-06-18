@@ -113,7 +113,27 @@ export class ExchangesService {
     const creds = await this.getUserCredentials(userId, provider);
     if (!creds) return null;
     try {
-      return await this.bitfinex.getAvailableUsd(creds);
+      return await this.bitfinex.getDerivativesAvailableUsd(creds);
+    } catch {
+      return null;
+    }
+  }
+
+  async getUserBitfinexWalletSnapshot(userId: string) {
+    const creds = await this.getUserCredentials(userId, 'bitfinex');
+    if (!creds) return null;
+    try {
+      return await this.bitfinex.getWalletSnapshot(creds);
+    } catch {
+      return null;
+    }
+  }
+
+  async ensureUserBitfinexDerivativesMargin(userId: string, minUsd: number) {
+    const creds = await this.getUserCredentials(userId, 'bitfinex');
+    if (!creds) return null;
+    try {
+      return await this.bitfinex.ensureDerivativesMargin(creds, minUsd);
     } catch {
       return null;
     }

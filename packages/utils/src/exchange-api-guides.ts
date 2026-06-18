@@ -17,6 +17,22 @@ export type ExchangeApiGuide = {
 export const BITFINEX_RECOMMEND_BANNER =
   'Recommended: Bitfinex currently offers zero trading fees for eligible users — ideal for small per-trade sizing without fees eating into returns.';
 
+/** Where live BTC perp copy trading pulls margin on Bitfinex (tBTCF0:USTF0). */
+export const BITFINEX_DERIVATIVES_FUNDING_COPY = {
+  title: 'Where to keep USDT for live copy',
+  walletLabel: 'Derivatives wallet (USDT)',
+  summary:
+    'Conservative BTC copies Bitfinex BTC perpetuals (tBTCF0:USTF0). Margin must sit in your Derivatives wallet — not Exchange, Funding, or Capital Raise.',
+  depositSteps: [
+    'Deposit USDT to Bitfinex (Funding or Exchange wallet is fine for arrival).',
+    'Move USDT to Derivatives: Wallet → Transfer → From Exchange or Funding → To Derivatives → USDT.',
+    'Keep at least ~$25 USDT in Derivatives for the next copy trade (platform uses up to $20 margin per trade).',
+    'With API keys connected, the platform can auto-move USDT from Exchange/Funding into Derivatives before each signal when wallet transfer is enabled on the key.',
+  ],
+  apiNote:
+    'Enable wallet transfer on your API key (Read + Write on Wallets, no Withdraw). Relay starts placing limits as soon as Derivatives has free USDT and the showcase bot fires a signal.',
+};
+
 /** Referral signup — shown inline on Bitfinex hire tiles only (not as a standalone promo block). */
 export const BITFINEX_SIGNUP_REFERRAL_URL = 'https://www.bitfinex.com/sign-up?refcode=vOZIj2vW4';
 
@@ -39,15 +55,22 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
     docsUrl: 'https://support.bitfinex.com/hc/en-us/articles/115003363429-How-to-create-and-revoke-a-Bitfinex-API-Key',
     maxCapitalWarningUsd: 20,
     credentialHint: 'API Key + API Secret (no passphrase).',
-    requiredPermissions: ['Read balance', 'Read orders', 'Create orders', 'Cancel orders'],
+    requiredPermissions: [
+      'Read balance',
+      'Read orders',
+      'Create orders',
+      'Cancel orders',
+      'Transfer between wallets (Exchange/Funding → Derivatives)',
+    ],
     forbiddenPermissions: ['Withdraw funds'],
     steps: [
       'Log in to Bitfinex and open Account → API Keys.',
       'Click Create New Key and label it (e.g. Doxxed Crypto Conservative BTC).',
-      'Enable Read and Write permissions for Orders and Wallets — do NOT enable Withdraw.',
+      'Enable Read and Write for Orders and Wallets (includes internal transfers) — do NOT enable Withdraw.',
+      'Fund Derivatives: Wallet → Transfer → move USDT from Exchange or Funding into Derivatives (required for BTC perp copy).',
       'Optionally restrict by IP for extra security.',
       'Copy the API Key and API Secret immediately (secret shown once).',
-      'Paste both into the Hire Agent wizard — platform mirrors admin AI signals on your account.',
+      'Paste both into Hire Agent — platform mirrors admin signals; auto-moves USDT to Derivatives when needed.',
     ],
   },
   bybit: {

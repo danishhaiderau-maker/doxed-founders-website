@@ -84,9 +84,13 @@ export class TradingAgentInstancesService {
     }
 
     let exchangeBalanceUsd = 0;
+    let walletNote: string | undefined;
     if (input.exchangeProvider === 'bitfinex') {
-      const available = await this.exchanges.getUserAvailableUsd(userId, input.exchangeProvider);
-      if (available != null) exchangeBalanceUsd = available;
+      const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
+      const funding = await this.exchanges.ensureUserBitfinexDerivativesMargin(userId, marginCap);
+      const snapshot = await this.exchanges.getUserBitfinexWalletSnapshot(userId);
+      exchangeBalanceUsd = funding?.derivativesUsd ?? snapshot?.derivativesUsd ?? 0;
+      walletNote = funding?.message;
     }
 
     const hireExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
@@ -148,6 +152,7 @@ export class TradingAgentInstancesService {
       paperDdRefunded: paperDdSpent > 0 ? paperDdSpent : 0,
       rentalExpiresAt: hireExpiresAt.toISOString(),
       exchangeBalanceUsd,
+      walletNote,
     };
   }
 
@@ -181,6 +186,10 @@ export class TradingAgentInstancesService {
     const exchangeStatus = isCopy
       ? { connected: false, provider: 'copy', accountLabel: 'DDollar copy track' }
       : await this.exchanges.getUserExchangeStatus(userId, instance.exchangeProvider);
+    const bitfinexWallets =
+      !isCopy && instance.exchangeProvider === 'bitfinex'
+        ? await this.exchanges.getUserBitfinexWalletSnapshot(userId)
+        : null;
 
     return {
       kind: isCopy ? ('copy' as const) : ('live' as const),
@@ -213,7 +222,17 @@ export class TradingAgentInstancesService {
         startingBalanceUsd: scope.startingBalanceUsd,
         sessionStartedAt: scope.sessionStartedAt.toISOString(),
       },
-      exchange: exchangeStatus,
+      exchange: {
+        ...exchangeStatus,
+        derivativesUsd: bitfinexWallets?.derivativesUsd ?? null,
+        exchangeUsd: bitfinexWallets?.exchangeUsd ?? null,
+        fundingUsd: bitfinexWallets?.fundingUsd ?? null,
+        fundingWalletLabel: 'Derivatives (USDT)',
+        fundingHint:
+          bitfinexWallets && bitfinexWallets.derivativesUsd < marginCap
+            ? `Move USDT to Bitfinex Derivatives wallet (need ~$${marginCap} per copy trade). Exchange/Funding balances can be auto-moved when your API key allows wallet transfers.`
+            : 'USDT in Derivatives wallet — ready for live copy signals.',
+      },
       runtime: {
         connected: instance.status === TradingAgentInstanceStatus.ACTIVE,
         message: isCopy

@@ -13,6 +13,7 @@ import {
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
 import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
 import { AgentRentalCountdown } from '@/components/agent-hub/agent-rental-countdown';
+import { BitfinexDerivativesFundingGuide } from '@/components/agent-hub/bitfinex-derivatives-funding-guide';
 import { ExchangeProviderOption, fetchExchangeProviders } from '@/lib/api';
 import { formatUsd } from '@dcf/utils';
 
@@ -130,10 +131,15 @@ export function ExchangeHirePanel({
               </div>
             )}
             <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
-              Your {selectedLabel} balance:{' '}
+              Derivatives balance (tradeable):{' '}
               <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
-              {' '}available · platform caps each trade at ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin.
+              {' '}· platform caps each trade at ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin.
             </p>
+            {exchange === 'bitfinex' && (
+              <div className="mt-3">
+                <BitfinexDerivativesFundingGuide compact />
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -165,6 +171,12 @@ export function ExchangeHirePanel({
             />
           </div>
         </div>
+
+        {relayState === 'idle' && exchange === 'bitfinex' && (
+          <div className="mt-4">
+            <BitfinexDerivativesFundingGuide />
+          </div>
+        )}
 
         {relayState === 'idle' && (
           <>
