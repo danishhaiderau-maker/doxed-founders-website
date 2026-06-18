@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(api): resolve Nest circular module deps blocking Railway deploy
+fix(agent-hub): live hire balance, rental UI, paper refund, admin signal API
 
 ## Last Activity
 
