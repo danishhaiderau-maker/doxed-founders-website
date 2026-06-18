@@ -27,6 +27,7 @@ type Props = {
   builderWorking?: boolean;
   contentDraftReady?: boolean;
   promo?: FounderPromoUserStatus | null;
+  compact?: boolean;
   onRefresh?: () => void;
 };
 
@@ -39,6 +40,7 @@ export function MissionControlConnectionHub({
   builderWorking = false,
   contentDraftReady = false,
   promo,
+  compact = false,
   onRefresh,
 }: Props) {
   const [status, setStatus] = useState<PlatformSyncStatus | null>(null);
@@ -127,23 +129,29 @@ export function MissionControlConnectionHub({
         </div>
       )}
 
-      <div className="space-y-3 rounded-xl border border-emerald-500/20 bg-gradient-to-br from-zinc-900/80 to-emerald-950/10 px-4 py-4 shadow-lg shadow-black/20">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/90">
-              Your stack · connections
-            </p>
-            <p className="mt-0.5 text-xs text-zinc-500">
-              Green = ready. Tap anything gray to connect — infra, LLMs, and code agents.
-            </p>
+      <div
+        className={`space-y-3 rounded-xl border border-emerald-500/20 bg-gradient-to-br from-zinc-900/80 to-emerald-950/10 shadow-lg shadow-black/20 ${
+          compact ? 'px-3 py-2.5' : 'px-4 py-4'
+        }`}
+      >
+        {!compact && (
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/90">
+                Your stack · connections
+              </p>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                Green = ready. Tap anything gray to connect — infra, LLMs, and code agents.
+              </p>
+            </div>
+            <Link
+              href={CONNECT_ACCOUNTS_HREF}
+              className="text-xs font-medium text-cyan-400 hover:text-cyan-300"
+            >
+              Connect portal →
+            </Link>
           </div>
-          <Link
-            href={CONNECT_ACCOUNTS_HREF}
-            className="text-xs font-medium text-cyan-400 hover:text-cyan-300"
-          >
-            Connect portal →
-          </Link>
-        </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] font-semibold text-zinc-500">Infra</span>
@@ -222,15 +230,17 @@ export function MissionControlConnectionHub({
           </div>
         )}
 
-        <p className="text-[10px] text-zinc-600">
-          <Link href={AI_STACK_HREF} className="text-cyan-500/80 hover:text-cyan-300">
-            AI stack &amp; Founder Node
-          </Link>
-          {' · '}
-          <Link href={CONNECT_ACCOUNTS_HREF} className="text-cyan-500/80 hover:text-cyan-300">
-            Neon · Vercel · Railway tokens
-          </Link>
-        </p>
+        {!compact && (
+          <p className="text-[10px] text-zinc-600">
+            <Link href={AI_STACK_HREF} className="text-cyan-500/80 hover:text-cyan-300">
+              AI stack &amp; Founder Node
+            </Link>
+            {' · '}
+            <Link href={CONNECT_ACCOUNTS_HREF} className="text-cyan-500/80 hover:text-cyan-300">
+              Neon · Vercel · Railway tokens
+            </Link>
+          </p>
+        )}
       </div>
 
       {guide && guideKey && (

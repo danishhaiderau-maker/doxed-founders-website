@@ -47,6 +47,12 @@ export const POINTS = {
   HELPFUL_MARK: 75,
   /** Early scout — backed a project before 50 followers. */
   EARLY_SCOUT: 200,
+  /** Referrer reward when a referred user completes signup via X. */
+  REFERRAL: 5_000,
+  /** Referrer reward when referred user has a blue-verified X account. */
+  REFERRAL_BLUE: 15_000,
+  /** One-time bonus for a new user with blue-verified X at signup. */
+  X_BLUE_VERIFIED: 15_000,
 } as const;
 
 export type PointAction = {
@@ -100,6 +106,27 @@ export const POINT_ACTIONS: PointAction[] = [
     label: 'Create account',
     description: 'One-time welcome bonus when you sign up.',
     amount: POINTS.REGISTER,
+    repeatable: false,
+  },
+  {
+    key: 'REFERRAL',
+    label: 'Referral reward',
+    description: 'Earn DDollar when someone you invited signs up with X.',
+    amount: POINTS.REFERRAL,
+    repeatable: true,
+  },
+  {
+    key: 'REFERRAL_BLUE',
+    label: 'Verified X referral',
+    description: 'Premium referral tier when your invitee has a blue-verified X account.',
+    amount: POINTS.REFERRAL_BLUE,
+    repeatable: true,
+  },
+  {
+    key: 'X_BLUE_VERIFIED',
+    label: 'X verified welcome bonus',
+    description: 'One-time bonus for signing up with a blue-verified X account.',
+    amount: POINTS.X_BLUE_VERIFIED,
     repeatable: false,
   },
   {
@@ -248,6 +275,9 @@ export function pointActionLabel(actionKey: string): string {
   if (base === 'AGENT_HIRE') return 'Agent hire fee (1 week)';
   if (base === 'PLATFORM_FEE') return 'Platform fee collected';
   if (base === 'WELCOME_UPGRADE') return 'Welcome bonus upgrade';
+  if (base === 'REFERRAL') return 'Referral reward';
+  if (base === 'REFERRAL_BLUE') return 'Verified X referral reward';
+  if (base === 'X_BLUE_VERIFIED') return 'X verified welcome bonus';
   return base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 

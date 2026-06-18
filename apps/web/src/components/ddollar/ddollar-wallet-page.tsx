@@ -3,7 +3,16 @@
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { DDOLLAR_CURRENCY_NAME, formatDdollar, POINTS, pointActionLabel } from '@dcf/utils';
+import {
+  DDOLLAR_CURRENCY_NAME,
+  formatDdollar,
+  POINTS,
+  POINT_ACTIONS,
+  pointActionLabel,
+  REFERRAL_REWARD_BLUE_VERIFIED,
+  REFERRAL_REWARD_STANDARD,
+} from '@dcf/utils';
+import { ReferralPanel } from '@/components/account/referral-panel';
 import {
   AccountOverview,
   AccountPointLedgerEntry,
@@ -12,14 +21,18 @@ import {
 } from '@/lib/api';
 
 const WAYS_TO_EARN = [
-  { label: 'Create account', amount: POINTS.REGISTER, href: '/register' },
+  { label: 'Create account (welcome)', amount: POINTS.REGISTER, href: '/register' },
+  { label: 'Refer a friend (X signup)', amount: REFERRAL_REWARD_STANDARD, href: '/ddollar#referral' },
+  { label: 'Refer verified X account', amount: REFERRAL_REWARD_BLUE_VERIFIED, href: '/ddollar#referral' },
+  { label: 'X verified welcome bonus', amount: POINTS.X_BLUE_VERIFIED, href: '/register' },
   { label: 'Vote on listing', amount: POINTS.LISTING_VOTE, href: '/trust-center?tab=scout-voting' },
   { label: 'Helpful review', amount: POINTS.VALIDATION_HELPFUL, href: '/trust-center?tab=reviews' },
   { label: 'Correct validation', amount: POINTS.VALIDATION_CORRECT, href: '/trust-center?tab=scout-voting' },
   { label: 'Confirmed scam report', amount: POINTS.SCAM_CONFIRMED, href: '/trust-center?tab=investigations' },
   { label: 'Daily login', amount: POINTS.DAILY_LOGIN, href: '/feed' },
+  { label: 'Paper trade', amount: POINTS.PAPER_TRADE, href: '/paper-trading' },
   { label: 'Build update', amount: POINTS.FOUNDER_BUILD_POST, href: '/founder-den' },
-  { label: 'Project listed', amount: POINTS.LISTING_SCOUT_APPROVED, href: '/list-your-project' },
+  { label: 'Project listed (scout)', amount: POINTS.LISTING_SCOUT_APPROVED, href: '/list-your-project' },
 ] as const;
 
 const WAYS_TO_SPEND = [
@@ -109,10 +122,16 @@ export function DdollarWalletPage() {
         </div>
       </section>
 
+      <div id="referral">
+        <ReferralPanel accessToken={token} />
+      </div>
+
       <div className="grid gap-8 lg:grid-cols-2">
         <section className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">
           <h2 className="text-lg font-semibold text-white">Ways to earn</h2>
-          <p className="mt-1 text-sm text-zinc-500">Participate in trust, builds, and community validation.</p>
+          <p className="mt-1 text-sm text-zinc-500">
+            Highlights — every credit is idempotent where noted and logged in your ledger below.
+          </p>
           <ul className="mt-4 divide-y divide-zinc-800">
             {WAYS_TO_EARN.map((item) => (
               <li key={item.label}>
@@ -146,6 +165,21 @@ export function DdollarWalletPage() {
           </ul>
         </section>
       </div>
+
+      <section className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">
+        <h2 className="text-lg font-semibold text-white">Complete earn rate table</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          All configured DDollar awards on the platform ({POINT_ACTIONS.filter((a) => a.amount > 0).length} actions).
+        </p>
+        <ul className="mt-4 max-h-72 divide-y divide-zinc-800 overflow-y-auto">
+          {POINT_ACTIONS.filter((a) => a.amount > 0).map((action) => (
+            <li key={action.key} className="flex items-center justify-between py-2 text-sm">
+              <span className="text-zinc-300">{action.label}</span>
+              <span className="font-semibold text-emerald-400">+{action.amount.toLocaleString()}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
 
       {recentLedger.length > 0 && (
         <section className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">

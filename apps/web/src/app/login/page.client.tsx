@@ -3,9 +3,10 @@
 import Link from 'next/link';
 import { signIn } from 'next-auth/react';
 import { startAuthentication } from '@simplewebauthn/browser';
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
+import { persistReferralCode, readReferralCode } from '@/lib/referral-storage';
 import {
   loginAccount,
   passkeyLoginOptions,
@@ -30,6 +31,13 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
   const [methods, setMethods] = useState<string[]>([]);
   const [totpCode, setTotpCode] = useState('');
   const [recoveryCode, setRecoveryCode] = useState('');
+  const [referralCode, setReferralCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fromUrl = searchParams.get('ref');
+    const code = persistReferralCode(fromUrl) ?? readReferralCode();
+    setReferralCode(code);
+  }, [searchParams]);
 
   async function finishLogin(accessToken: string) {
     const result = await signIn('credentials', {
@@ -148,6 +156,7 @@ export default function LoginPageClient({ oauthEnabled, nextAuthUrl }: LoginPage
                 enabled={oauthEnabled}
                 nextAuthUrl={nextAuthUrl}
                 preferTwitter
+                referralCode={referralCode}
               />
             </div>
 

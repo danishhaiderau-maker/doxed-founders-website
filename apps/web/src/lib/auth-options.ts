@@ -2,6 +2,7 @@ import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import GoogleProvider from 'next-auth/providers/google';
 import TwitterProvider from 'next-auth/providers/twitter';
+import { cookies } from 'next/headers';
 import { apiUrl } from './api-base';
 
 async function syncOAuthWithApi(input: {
@@ -13,8 +14,10 @@ async function syncOAuthWithApi(input: {
   twitterHandle?: string | null;
   oauthAccessToken?: string | null;
   oauthAccessTokenSecret?: string | null;
+  xVerified?: boolean;
+  referralCode?: string | null;
 }) {
-  const payload: Record<string, string | null | undefined> = {
+  const payload: Record<string, string | boolean | null | undefined> = {
     email: input.email,
     name: input.name ?? undefined,
     avatarUrl: input.avatarUrl ?? undefined,
@@ -25,6 +28,8 @@ async function syncOAuthWithApi(input: {
   if (handle) payload.twitterHandle = handle;
   if (input.oauthAccessToken) payload.oauthAccessToken = input.oauthAccessToken;
   if (input.oauthAccessTokenSecret) payload.oauthAccessTokenSecret = input.oauthAccessTokenSecret;
+  if (input.xVerified) payload.xVerified = true;
+  if (input.referralCode) payload.referralCode = input.referralCode;
 
   const res = await fetch(apiUrl('/auth/oauth', true), {
     method: 'POST',
@@ -46,17 +51,22 @@ async function syncOAuthWithApi(input: {
   }>;
 }
 
-async function fetchTwitterHandle(accessToken: string): Promise<string | null> {
+async function fetchTwitterProfile(
+  accessToken: string,
+): Promise<{ username: string | null; verified: boolean }> {
   try {
     const res = await fetch(
-      'https://api.twitter.com/2/users/me?user.fields=username,profile_image_url',
+      'https://api.twitter.com/2/users/me?user.fields=username,profile_image_url,verified,verified_type',
       { headers: { Authorization: `Bearer ${accessToken}` } },
     );
-    if (!res.ok) return null;
-    const data = (await res.json()) as { data?: { username?: string } };
-    return data.data?.username?.replace(/^@/, '') ?? null;
+    if (!res.ok) return { username: null, verified: false };
+    const data = (await res.json()) as { data?: { username?: string; verified?: boolean } };
+    return {
+      username: data.data?.username?.replace(/^@/, '') ?? null,
+      verified: Boolean(data.data?.verified),
+    };
   } catch {
-    return null;
+    return { username: null, verified: false };
   }
 }
 
@@ -151,6 +161,7 @@ if (useTwitterOAuth1) {
           screen_name?: string;
           email?: string;
           profile_image_url_https?: string;
+          verified?: boolean;
         };
         const handle = p.screen_name?.replace(/^@/, '');
         return {
@@ -159,6 +170,7 @@ if (useTwitterOAuth1) {
           email: p.email,
           image:
             p.profile_image_url_https?.replace(/_normal\.(jpg|png|gif)$/, '.$1'),
+          verified: Boolean(p.verified),
         };
       },
     }),
@@ -176,7 +188,7 @@ if (useTwitterOAuth1) {
       },
       userinfo: {
         params: {
-          'user.fields': 'profile_image_url,username',
+          'user.fields': 'profile_image_url,username,verified,verified_type',
         },
       },
     }),
@@ -194,6 +206,9 @@ export const authOptions: NextAuthOptions = {
   providers,
   callbacks: {
     async signIn({ user, account }) {
+      const cookieStore = await cookies();
+      const referralCode = cookieStore.get('dcf_ref')?.value?.trim().toUpperCase() || undefined;
+
       if (account?.provider === 'google') {
         if (!user.email || !account.providerAccountId) {
           return false;
@@ -222,10 +237,13 @@ export const authOptions: NextAuthOptions = {
         }
 
         let handle: string | null = null;
+        let xVerified = Boolean((user as { verified?: boolean }).verified);
         if (user.name?.startsWith('@')) {
           handle = user.name.slice(1);
         } else if (account.access_token) {
-          handle = await fetchTwitterHandle(account.access_token);
+          const profile = await fetchTwitterProfile(account.access_token);
+          handle = profile.username;
+          xVerified = xVerified || profile.verified;
         }
 
         const email =
@@ -245,6 +263,8 @@ export const authOptions: NextAuthOptions = {
             (account as { oauth_token_secret?: string }).oauth_token_secret ??
             (account as { refresh_token?: string }).refresh_token ??
             null,
+          xVerified,
+          referralCode,
         });
 
         if (!data) {

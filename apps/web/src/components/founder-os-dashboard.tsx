@@ -3,12 +3,7 @@
 import Link from 'next/link';
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  formatRelativeTime,
-  getStageColorLabel,
-  getStageColorTheme,
-  LIFECYCLE_STAGES,
   resolveAiStackHealth,
-  STAGE_COLOR_CLASSES,
   isAgentRunActive,
   isStaleBoilerplateMissionTask,
   type ChiefOfStaffNudge,
@@ -16,13 +11,11 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
-import { FounderProjectTimelinePanel } from '@/components/founder-project-timeline-panel';
 import { FounderMissionControlQuickstart } from '@/components/founder-mission-control-quickstart';
+import { FounderPersonalGuide } from '@/components/founder-personal-guide';
 import { AgentRunStepsPanel } from '@/components/agent-run-steps-panel';
 import { FounderGraphMiniPanel } from '@/components/founder-graph-mini-panel';
-import { FounderOsReadinessPanel } from '@/components/founder-os-readiness-panel';
 import { MissionControlConnectionHub } from '@/components/mission-control-connection-hub';
-import { MissionControlTrustStrip } from '@/components/mission-control-trust-strip';
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
@@ -52,7 +45,6 @@ import {
   ProjectRoom,
 } from '@/lib/api';
 import {
-  AI_STACK_HREF,
   CONNECT_ACCOUNTS_HREF,
   buildCopilotUsageLines,
   listCopilotActions,
@@ -92,10 +84,6 @@ export type FounderOsDashboardProps = {
   onInitialCopilotPromptConsumed?: () => void;
   activeAgentTemplate?: string | null;
 };
-
-function stageLabel(key: string) {
-  return LIFECYCLE_STAGES.find((s) => s.key === key)?.label ?? key.replace(/_/g, ' ');
-}
 
 export function FounderOsDashboardLayout({
   accessToken,
@@ -191,9 +179,6 @@ export function FounderOsDashboardLayout({
     setQuickPrompt(initialCopilotPrompt);
   }, [initialCopilotPrompt]);
 
-  const stage = room?.lifecycleStage ?? dashboard?.currentStage ?? 'IDEA';
-  const theme = getStageColorTheme(stage, room?.isLiveToken);
-  const colors = STAGE_COLOR_CLASSES[theme];
   const readiness = memory?.launchReadiness ?? room?.launchReadiness ?? dashboard?.launchReadiness ?? 0;
   const openTasks = buildRoom?.grouped.tasks.filter((t) => t.status !== 'DONE').length ?? 0;
   const currentGoal = memory?.currentGoal ?? 'Set your current goal in Settings';
@@ -203,7 +188,6 @@ export function FounderOsDashboardLayout({
     missionIntel?.recommendedNextStep?.trim() || memory?.suggestedNextStep || null;
   const displayNextStep =
     rawNextStep && !isStaleBoilerplateMissionTask(rawNextStep) ? rawNextStep : null;
-  const openBuilderTask = buildRoom?.grouped.tasks.find((t) => t.status !== 'DONE');
   const copilotUsageLines = useMemo(() => {
     const actions = listCopilotActions(aiProviders, defaultAiProvider, {
       cursor: workerStatus?.connections?.cursor,
@@ -283,7 +267,7 @@ export function FounderOsDashboardLayout({
   }
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
+    <div className="flex min-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#07070a]">
       <div className="flex flex-1 flex-col lg:flex-row">
         <aside className="flex w-full shrink-0 flex-col border-b border-zinc-800/80 bg-[#0a0a0e] lg:w-56 lg:border-b-0 lg:border-r xl:w-60">
           <div className="border-b border-zinc-800/60 px-4 py-4">
@@ -365,33 +349,32 @@ export function FounderOsDashboardLayout({
           </div>
         </aside>
 
-        <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <main
+          className={`min-w-0 flex-1 ${
+            showMissionControl
+              ? 'flex flex-col overflow-hidden p-3 sm:p-4 lg:p-5'
+              : 'overflow-y-auto p-4 sm:p-6 lg:p-8'
+          }`}
+        >
           {showMissionControl ? (
-            <div className="mx-auto flex max-w-[90rem] flex-col gap-6">
-              <header className="flex flex-wrap items-start justify-between gap-4">
-                <div>
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 pb-2">
+                <div className="min-w-0">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">
-                    Founder Command Center
+                    Founder Brain · Mission Control
                   </p>
-                  <h1 className="mt-1 text-xl font-bold text-white sm:text-2xl">
-                    Think · plan · build · ship — in one tab
-                  </h1>
-                  <p className="mt-1 max-w-xl text-xs text-zinc-500">
-                    <strong className="font-medium text-violet-300">Take full control</strong> syncs GitHub + vault.
-                    Pick an AI below — promo models are tagged · code tasks route to Cursor automatically.
+                  <p className="text-xs text-zinc-500">
+                    Your command window — agents, GitHub, vault, and infra route from here
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-1.5">
                   <button
                     type="button"
                     disabled={autopilotBusy}
                     onClick={() => void handleTakeFullControl()}
-                    className="rounded-xl bg-violet-600 px-5 py-2.5 text-left text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
+                    className="rounded-lg bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
                   >
-                    <span className="block">{autopilotBusy ? 'Syncing…' : 'Take full control'}</span>
-                    <span className="block text-[10px] font-normal text-violet-200/80">
-                      GitHub + vault + local Sovereign stack
-                    </span>
+                    {autopilotBusy ? 'Syncing…' : 'Take full control'}
                   </button>
                   <button
                     type="button"
@@ -400,56 +383,71 @@ export function FounderOsDashboardLayout({
                       setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
                       setChatKey((k) => k + 1);
                     }}
-                    className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-left text-sm font-medium text-emerald-200 hover:bg-emerald-950/50 disabled:opacity-50"
+                    className="rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-950/50"
                   >
-                    <span className="block">Build with Cursor</span>
-                    <span className="block text-[10px] font-normal text-zinc-500">
-                      Direct code agent · edits your repo
-                    </span>
+                    Build with Cursor
                   </button>
                   <Link
                     href={CONNECT_ACCOUNTS_HREF}
-                    className="rounded-xl border border-zinc-700 px-4 py-2.5 text-left text-sm text-zinc-400 hover:border-violet-500/40 hover:text-zinc-200"
+                    className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-400 hover:text-zinc-200"
                   >
-                    <span className="block">Deploy to cloud</span>
-                    <span className="block text-[10px] text-zinc-600">Vercel · Railway · Neon</span>
+                    Deploy to cloud
                   </Link>
                 </div>
-              </header>
+              </div>
 
-              <MissionControlConnectionHub
+              <FounderPersonalGuide
                 accessToken={accessToken}
-                providers={aiProviders}
-                defaultProvider={defaultAiProvider}
-                buildWorker={workerStatus?.buildWorker}
-                workerConnections={{
-                  cursor: workerStatus?.connections?.cursor,
-                  openHands: workerStatus?.connections?.openHands,
-                }}
-                builderWorking={isAgentRunActive(activeAgentRun)}
-                contentDraftReady={contentDraftReady}
-                promo={promoStatus}
-                onRefresh={() => {
-                  void load();
-                  onRefresh();
-                }}
-              />
-
-              <FounderMissionControlQuickstart
-                usageLines={copilotUsageLines}
-                onTakeFullControl={() => void handleTakeFullControl()}
-                onBuildWithCursor={() => {
-                  setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
+                compact
+                onPrompt={(p) => {
+                  setQuickPrompt(p);
                   setChatKey((k) => k + 1);
                 }}
               />
 
-              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,32%)]">
-                <div className="flex min-w-0 flex-col gap-4">
+              <details className="group shrink-0 rounded-lg border border-zinc-800/80 bg-zinc-900/30">
+                <summary className="cursor-pointer list-none px-3 py-2 text-[11px] font-medium text-zinc-400 marker:content-none [&::-webkit-details-marker]:hidden">
+                  <span className="text-zinc-300">Stack & connections</span>
+                  <span className="ml-2 text-zinc-600">— tap to expand infra, promo, AI team</span>
+                </summary>
+                <div className="space-y-2 border-t border-zinc-800/60 px-3 pb-3 pt-2">
+                  <MissionControlConnectionHub
+                    accessToken={accessToken}
+                    providers={aiProviders}
+                    defaultProvider={defaultAiProvider}
+                    buildWorker={workerStatus?.buildWorker}
+                    workerConnections={{
+                      cursor: workerStatus?.connections?.cursor,
+                      openHands: workerStatus?.connections?.openHands,
+                    }}
+                    builderWorking={isAgentRunActive(activeAgentRun)}
+                    contentDraftReady={contentDraftReady}
+                    promo={promoStatus}
+                    compact
+                    onRefresh={() => {
+                      void load();
+                      onRefresh();
+                    }}
+                  />
+                  <FounderMissionControlQuickstart
+                    compact
+                    usageLines={copilotUsageLines}
+                    onTakeFullControl={() => void handleTakeFullControl()}
+                    onBuildWithCursor={() => {
+                      setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
+                      setChatKey((k) => k + 1);
+                    }}
+                  />
+                </div>
+              </details>
+
+              <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row">
+                <div className="flex min-h-0 min-w-0 flex-[1_1_78%] flex-col gap-2">
                   <FounderCopilotChat
                     key={chatKey}
                     accessToken={accessToken}
                     variant="hero"
+                    className="min-h-0 flex-1"
                     memory={memory}
                     missionInitiative={displayInitiative}
                     missionNextStep={displayNextStep}
@@ -474,13 +472,13 @@ export function FounderOsDashboardLayout({
                       onRefresh();
                     }}
                   />
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex shrink-0 flex-wrap gap-1.5">
                     {COPILOT_CHIPS.map((chip) => (
                       <button
                         key={chip}
                         type="button"
                         onClick={() => setQuickPrompt(chip)}
-                        className="rounded-full border border-zinc-700/80 bg-zinc-900/50 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-violet-500/50 hover:text-white"
+                        className="rounded-full border border-zinc-700/80 bg-zinc-900/50 px-2.5 py-1 text-[10px] text-zinc-300 transition hover:border-violet-500/50 hover:text-white"
                       >
                         {chip}
                       </button>
@@ -488,7 +486,7 @@ export function FounderOsDashboardLayout({
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-4">
+                <aside className="flex min-h-0 w-full shrink-0 flex-col gap-2 overflow-y-auto lg:max-w-[17rem] lg:flex-[0_0_22%]">
                   {activeAgentRun && isAgentRunActive(activeAgentRun) && (
                     <AgentRunStepsPanel run={activeAgentRun} />
                   )}
@@ -507,61 +505,43 @@ export function FounderOsDashboardLayout({
                       return { message: result.message };
                     }}
                   />
-
-                  <FounderProjectTimelinePanel accessToken={accessToken} />
-
                   {missionIntel && (
-                    <div className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-4 text-sm text-zinc-200">
+                    <div className="rounded-xl border border-violet-500/25 bg-violet-950/15 p-3 text-xs text-zinc-200">
                       <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-300">
-                        Mission intelligence
+                        Mission intel
                       </p>
-                      <p className="mt-2 font-medium text-white">{missionIntel.currentInitiative}</p>
-                      <p className="mt-2 text-xs text-zinc-400">{missionIntel.impact}</p>
-                      {missionIntel.blocker && (
-                        <p className="mt-2 text-xs text-amber-200/90">Blocker: {missionIntel.blocker}</p>
-                      )}
-                      <p className="mt-2 text-xs text-emerald-200/90">
+                      <p className="mt-1 font-medium text-white line-clamp-2">{missionIntel.currentInitiative}</p>
+                      <p className="mt-1 text-[10px] text-emerald-200/90 line-clamp-2">
                         Next: {missionIntel.recommendedNextStep}
-                      </p>
-                      <p className="mt-2 text-[10px] text-zinc-600">
-                        Confidence: {missionIntel.confidence} · {missionIntel.progressPercent}% progress
                       </p>
                     </div>
                   )}
-
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-1.5">
                     {[
-                      { label: 'Open tasks', value: String(openTasks) },
-                      { label: 'Agents', value: workerStatus?.buildWorker !== 'NONE' ? '1' : '0' },
-                      { label: 'Commits (7d)', value: String(buildRoom?.stats.commits ?? 0) },
-                      { label: 'Readiness', value: `${readiness}%` },
+                      { label: 'Tasks', value: String(openTasks) },
+                      { label: 'Commits', value: String(buildRoom?.stats.commits ?? 0) },
+                      { label: 'Ready', value: `${readiness}%` },
+                      {
+                        label: 'Agents',
+                        value: workerStatus?.buildWorker !== 'NONE' ? '1' : '0',
+                      },
                     ].map((stat) => (
                       <div
                         key={stat.label}
-                        className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3 py-2.5"
+                        className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2 py-1.5"
                       >
-                        <p className="text-[10px] uppercase tracking-wider text-zinc-600">{stat.label}</p>
-                        <p className="mt-0.5 truncate text-sm font-semibold text-white">{stat.value}</p>
+                        <p className="text-[9px] uppercase tracking-wider text-zinc-600">{stat.label}</p>
+                        <p className="text-xs font-semibold text-white">{stat.value}</p>
                       </div>
                     ))}
                   </div>
-
-                  <FounderOsReadinessPanel
-                    accessToken={accessToken}
-                    onRefresh={() => {
-                      void load();
-                      onRefresh();
-                    }}
+                  <FounderGraphMiniPanel
+                    miniChain={founderGraph?.miniChain ?? []}
+                    nodeCount={founderGraph?.nodeCount ?? 0}
+                    updatedAt={founderGraph?.updatedAt ?? undefined}
+                    loading={commandCenterLoading}
                   />
-
-                  <MissionControlTrustStrip
-                    accessToken={accessToken}
-                    onRefresh={() => {
-                      void load();
-                      onRefresh();
-                    }}
-                  />
-                </div>
+                </aside>
               </div>
             </div>
           ) : (
@@ -572,159 +552,6 @@ export function FounderOsDashboardLayout({
             )
           )}
         </main>
-
-        {showMissionControl && (
-          <aside className="hidden w-72 shrink-0 border-l border-zinc-800/80 bg-[#0a0a0e] p-4 xl:block">
-            <section className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                Active agents
-              </h3>
-              <div className="mt-3 space-y-3">
-                <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 p-3">
-                  {activeAgentRun && isAgentRunActive(activeAgentRun) ? (
-                    <AgentRunStepsPanel run={activeAgentRun} />
-                  ) : (
-                    <>
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-white">Builder Agent</p>
-                        <span
-                          className={`text-[10px] font-semibold ${
-                            openBuilderTask && workerStatus?.buildWorker !== 'NONE'
-                              ? 'text-amber-300'
-                              : workerStatus?.buildWorker !== 'NONE'
-                                ? 'text-emerald-400'
-                                : 'text-zinc-600'
-                          }`}
-                        >
-                          {openBuilderTask && workerStatus?.buildWorker !== 'NONE'
-                            ? 'Working'
-                            : workerStatus?.buildWorker !== 'NONE'
-                              ? 'Ready'
-                              : 'Offline'}
-                        </span>
-                      </div>
-                      {openBuilderTask && (
-                        <p className="mt-2 text-xs text-zinc-400">{openBuilderTask.title.slice(0, 56)}</p>
-                      )}
-                    </>
-                  )}
-                  {workerStatus?.cursorAgentUrl && (
-                    <a
-                      href={workerStatus.cursorAgentUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-block text-[10px] text-violet-400 hover:underline"
-                    >
-                      View run →
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    disabled={workerStatus?.buildWorker === 'NONE'}
-                    onClick={() => {
-                      setQuickPrompt(
-                        openBuilderTask?.title?.trim() ||
-                          'Implement the next task from the founder queue in the repo.',
-                      );
-                      setChatKey((k) => k + 1);
-                    }}
-                    className="mt-3 w-full rounded-lg bg-violet-600/80 py-2 text-[11px] font-semibold text-white hover:bg-violet-600 disabled:opacity-40"
-                  >
-                    Build in chat →
-                  </button>
-                  {workerStatus?.buildWorker === 'NONE' && (
-                    <Link
-                      href={AI_STACK_HREF}
-                      className="mt-2 block text-center text-[10px] text-zinc-500 hover:text-violet-300"
-                    >
-                      Connect builder →
-                    </Link>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onTabChange('agents')}
-                  className="w-full rounded-lg border border-zinc-800 py-2 text-[11px] text-zinc-400 hover:text-white"
-                >
-                  Open Agent Workforce
-                </button>
-              </div>
-            </section>
-
-            <section className="mt-4 space-y-2">
-              {[
-                {
-                  label: 'GitHub sync',
-                  ok: buildRoom?.githubConnected ?? false,
-                  detail: buildRoom?.repoFullName ?? 'Not linked',
-                },
-                {
-                  label: 'AI stack',
-                  ok: aiStackHealth === 'healthy',
-                  detail:
-                    aiStackHealth === 'healthy'
-                      ? 'Healthy'
-                      : aiStackHealth === 'needs_attention'
-                        ? 'Needs attention'
-                        : 'Connect in Settings',
-                },
-                {
-                  label: 'Founder Node',
-                  ok: workerStatus?.connections.founderNode ?? false,
-                  detail: workerStatus?.connections.founderNode ? 'Connected' : 'Optional',
-                },
-              ].map((card) => (
-                <div
-                  key={card.label}
-                  className="flex items-center justify-between rounded-lg border border-zinc-800/80 bg-zinc-900/30 px-3 py-2.5"
-                >
-                  <div>
-                    <p className="text-xs text-zinc-300">{card.label}</p>
-                    <p className="text-[10px] text-zinc-600 truncate max-w-[140px]">{card.detail}</p>
-                  </div>
-                  <span className={card.ok ? 'text-emerald-400' : 'text-zinc-600'}>
-                    {card.ok ? '●' : '○'}
-                  </span>
-                </div>
-              ))}
-            </section>
-
-            <section className="mt-4">
-              <FounderGraphMiniPanel
-                miniChain={founderGraph?.miniChain ?? []}
-                nodeCount={founderGraph?.nodeCount ?? 0}
-                updatedAt={founderGraph?.updatedAt}
-                loading={commandCenterLoading && !founderGraph}
-              />
-            </section>
-
-            {room && (
-              <section className={`mt-4 rounded-xl border p-3 ${colors.badge}`}>
-                <p className="text-[10px] text-zinc-600">Stage</p>
-                <span className={`text-xs font-semibold ${colors.text}`}>
-                  {getStageColorLabel(theme)} · {stageLabel(stage)}
-                </span>
-                {memory?.lastCommit && (
-                  <p className="mt-2 text-[10px] text-zinc-500">
-                    Last commit · {memory.lastCommit.split('\n')[0].slice(0, 48)}
-                  </p>
-                )}
-                {memory?.lastActivityLabel && (
-                  <p className="mt-1 text-[10px] text-zinc-600">
-                    Synced {formatRelativeTime(memory.lastActivityAt ?? undefined)}
-                  </p>
-                )}
-              </section>
-            )}
-
-            <Link
-              href="/founder-den?tab=analytics"
-              className="mt-4 block text-center text-[10px] text-zinc-600 hover:text-violet-400"
-            >
-              Technical settings →
-            </Link>
-          </aside>
-        )}
       </div>
 
       <AutopilotPromoToast

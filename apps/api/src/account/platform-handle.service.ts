@@ -2,9 +2,13 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   generatePlatformHandle,
   isReservedPlatformHandle,
+  normalizeTwitterHandle,
+  userHasTwitterConnected,
   validatePlatformHandleInput,
 } from '@dcf/utils';
+import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ADMIN_PLATFORM_HANDLE } from './referral.service';
 
 @Injectable()
 export class PlatformHandleService {
@@ -13,9 +17,32 @@ export class PlatformHandleService {
   async ensureHandle(userId: string): Promise<string> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { platformHandle: true },
+      select: {
+        platformHandle: true,
+        role: true,
+        twitterHandle: true,
+        oauthAccounts: { select: { provider: true } },
+      },
     });
-    if (user?.platformHandle) return user.platformHandle;
+    if (!user) throw new BadRequestException('User not found');
+
+    const hasTwitter = userHasTwitterConnected(user);
+    const twitter = normalizeTwitterHandle(user.twitterHandle);
+    if (hasTwitter && twitter) {
+      return `@${twitter}`;
+    }
+
+    if (user.role === UserRole.ADMIN) {
+      if (user.platformHandle !== ADMIN_PLATFORM_HANDLE) {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { platformHandle: ADMIN_PLATFORM_HANDLE },
+        });
+      }
+      return ADMIN_PLATFORM_HANDLE;
+    }
+
+    if (user.platformHandle) return user.platformHandle;
 
     for (let attempt = 0; attempt < 40; attempt++) {
       const candidate = generatePlatformHandle(userId, attempt);

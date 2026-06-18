@@ -2,9 +2,11 @@
 
 import Link from 'next/link';
 import { signIn } from 'next-auth/react';
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
 import { registerAccount } from '@/lib/api';
+import { persistReferralCode, readReferralCode } from '@/lib/referral-storage';
 
 interface RegisterPageClientProps {
   oauthEnabled: { google: boolean; twitter?: boolean };
@@ -12,11 +14,19 @@ interface RegisterPageClientProps {
 }
 
 export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: RegisterPageClientProps) {
+  const searchParams = useSearchParams();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [referralCode, setReferralCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fromUrl = searchParams.get('ref');
+    const code = persistReferralCode(fromUrl) ?? readReferralCode();
+    setReferralCode(code);
+  }, [searchParams]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -24,7 +34,12 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
     setLoading(true);
 
     try {
-      await registerAccount({ email, password, name: name || undefined });
+      await registerAccount({
+        email,
+        password,
+        name: name || undefined,
+        referralCode: referralCode ?? undefined,
+      });
       const result = await signIn('credentials', {
         email,
         password,
@@ -51,9 +66,14 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Create account</h1>
         <p className="mt-3 rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-100">
-          You get a unique platform ID (animal · country). To <strong className="text-white">list projects</strong>, use{' '}
-          <strong className="text-white">Sign in with X</strong> — admins contact listers via Messages.
+          <strong className="text-white">Sign in with X</strong> to unlock your public @handle, referrals, and 1-click
+          Proof of Conviction. Email signups get a legacy platform ID (animal · country) until X is connected.
         </p>
+        {referralCode && (
+          <p className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+            Referral code <strong className="text-white">{referralCode}</strong> saved — rewards unlock when you sign in with X.
+          </p>
+        )}
         <p className="mt-2 text-sm text-[var(--color-muted)]">
           Most traders start with <strong className="text-white">Sign up with X</strong> — your paper
           portfolio links to your handle, and you can share Proof of Conviction instantly (auto-written
@@ -66,6 +86,7 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
             enabled={oauthEnabled}
             nextAuthUrl={nextAuthUrl}
             preferTwitter
+            referralCode={referralCode}
           />
         </div>
 

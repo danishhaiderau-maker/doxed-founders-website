@@ -18,6 +18,8 @@ import { PlatformHandleEditor } from '@/components/account/platform-handle-edito
 import { UserIdField } from '@/components/account/user-id-field';
 import { PublicMessagingAddress } from '@/components/account/public-messaging-address';
 import { TwitterIdentityLink } from '@/components/account/twitter-identity-link';
+import { IdentityBadge } from '@/components/account/identity-badge';
+import { ReferralPanel } from '@/components/account/referral-panel';
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
@@ -191,6 +193,11 @@ export function AccountHub({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-xl font-bold text-white">{overview.username}</h2>
+                  <IdentityBadge
+                    badge={overview.identityBadge}
+                    xVerified={overview.xVerified}
+                    hasTwitterConnected={overview.hasTwitterConnected}
+                  />
                   <GamifiedRoleBadge role={overview.gamifiedRole} size="md" />
                   {overview.builderStatus.badge && (
                     <BuilderStatusBadge badge={overview.builderStatus.badge} />
@@ -204,7 +211,16 @@ export function AccountHub({
                   />
                 </div>
                 <p className="mt-1 text-xs text-zinc-400">
-                  Platform handle: <span className="text-cyan-300/90">{overview.platformHandle}</span>
+                  {overview.hasTwitterConnected ? (
+                    <>
+                      Public identity: <span className="text-emerald-300/90">{overview.username}</span>
+                      {overview.xVerified ? ' · blue-verified on X' : ''}
+                    </>
+                  ) : (
+                    <>
+                      Legacy platform ID: <span className="text-cyan-300/90">{overview.platformHandle}</span>
+                    </>
+                  )}
                 </p>
                 <p className="mt-2 text-sm text-zinc-400">
                   Joined {formatDate(overview.joinedAt)}
@@ -287,6 +303,8 @@ export function AccountHub({
               />
               <StatCard label="Following" value={String(overview.followingCount)} />
             </div>
+
+            {token && <ReferralPanel accessToken={token} />}
           </section>
         )}
 

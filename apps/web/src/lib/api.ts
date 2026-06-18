@@ -724,6 +724,7 @@ export function registerAccount(input: {
   email: string;
   password: string;
   name?: string;
+  referralCode?: string;
 }) {
   return apiFetch<{ accessToken: string; user: { id: string; email: string; role: string } }>(
     '/auth/register',
@@ -3195,6 +3196,8 @@ export interface AccountOverview {
   twitterUrl: string | null;
   canEditPlatformHandle: boolean;
   hasTwitterConnected: boolean;
+  xVerified: boolean;
+  identityBadge: string | null;
   email: string;
   avatarUrl: string | null;
   joinedAt: string;
@@ -3244,6 +3247,30 @@ export interface AccountFollowingEntry {
 
 export function fetchAccountOverview(token: string) {
   return apiFetch<AccountOverview>('/account/overview', undefined, token);
+}
+
+export interface AccountReferralSummary {
+  code: string;
+  sharePath: string;
+  referredCount: number;
+  pendingCount: number;
+  earnedDdollar: number;
+  rules: { title: string; detail: string; amount?: number }[];
+  rewardStandard: number;
+  rewardBlueVerified: number;
+  refereeBlueBonus: number;
+}
+
+export function fetchAccountReferral(token: string) {
+  return apiFetch<AccountReferralSummary>('/account/referral', undefined, token);
+}
+
+export function claimReferralCode(referralCode: string, token: string) {
+  return apiFetch<AccountReferralSummary>(
+    '/account/referral/claim',
+    { method: 'POST', body: JSON.stringify({ referralCode }) },
+    token,
+  );
 }
 
 export type FounderPromoPlatformSettings = {

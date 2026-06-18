@@ -7,18 +7,22 @@ export type PublicIdentityInput = {
   platformHandle?: string | null;
   twitterHandle?: string | null;
   hasTwitterConnected?: boolean;
+  xVerified?: boolean;
+  isAdmin?: boolean;
 };
 
 export type PublicIdentity = {
   userId: string;
   primaryLabel: string;
   secondaryLabel: string | null;
+  identityBadge: string | null;
   messagingAddress: string;
   shortTag: string;
   twitterHandle: string | null;
   twitterUrl: string | null;
   platformHandle: string | null;
   hasTwitterConnected: boolean;
+  xVerified: boolean;
 };
 
 /** Stable 4-char disambiguator from account id (shown as #A7F2). */
@@ -37,41 +41,52 @@ export function twitterProfileUrl(handle?: string | null): string | null {
 export function resolvePublicIdentity(input: PublicIdentityInput): PublicIdentity {
   const twitter = normalizeTwitterHandle(input.twitterHandle);
   const hasTwitter = Boolean(input.hasTwitterConnected ?? twitter);
+  const xVerified = Boolean(input.xVerified && hasTwitter);
   const platformHandle = input.platformHandle?.trim() || null;
   const tag = messagingShortTag(input.userId);
   const twitterUrl = twitter ? twitterProfileUrl(twitter) : null;
 
   let primaryLabel: string;
   let secondaryLabel: string | null = null;
+  let identityBadge: string | null = null;
   let messagingAddress: string;
 
   if (twitter && hasTwitter) {
     primaryLabel = `@${twitter}`;
     messagingAddress = `@${twitter}#${tag}`;
-    if (platformHandle && platformHandle !== primaryLabel) {
+    identityBadge = xVerified ? 'X verified account' : 'X account holder';
+    if (platformHandle && !platformHandle.startsWith('@') && platformHandle !== primaryLabel) {
       secondaryLabel = platformHandle;
     }
+  } else if (input.isAdmin && platformHandle) {
+    primaryLabel = platformHandle;
+    messagingAddress = `${platformHandle}#${tag}`;
+    identityBadge = 'Platform founder';
   } else if (platformHandle) {
     primaryLabel = platformHandle;
     messagingAddress = `${platformHandle}#${tag}`;
+    identityBadge = 'Email account';
   } else if (hasTradingDisplayName(input.name, input.email)) {
     primaryLabel = input.name!.trim();
     messagingAddress = `${primaryLabel}#${tag}`;
   } else {
     primaryLabel = maskEmail(input.email);
     messagingAddress = `${primaryLabel}#${tag}`;
+    identityBadge = 'Email account';
   }
 
   return {
     userId: input.userId,
     primaryLabel,
     secondaryLabel,
+    identityBadge,
     messagingAddress,
     shortTag: tag,
     twitterHandle: twitter,
     twitterUrl,
     platformHandle,
     hasTwitterConnected: hasTwitter,
+    xVerified,
   };
 }
 
