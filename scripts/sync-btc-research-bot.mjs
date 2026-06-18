@@ -52,6 +52,14 @@ function stripEmbeddedSecrets(source) {
     /^BITFINEX_API_SECRET\s*=\s*(?!.*getenv)["'][^"']*["']/m,
     'BITFINEX_API_SECRET = os.getenv("BITFINEX_API_SECRET", "").strip()',
   );
+  out = out.replace(
+    /^BYBIT_API_KEY\s*=\s*(?!.*getenv)["'][^"']*["']/m,
+    'BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "").strip()',
+  );
+  out = out.replace(
+    /^BYBIT_SECRET\s*=\s*(?!.*getenv)["'][^"']*["']/m,
+    'BYBIT_SECRET = os.getenv("BYBIT_SECRET", "").strip()',
+  );
   return out;
 }
 
@@ -111,6 +119,14 @@ async function main() {
 
   writeFileSync(TARGET, patchForProduction(raw), 'utf8');
   applyProductionPatches();
+
+  const verify = execSync('node scripts/verify-bitfinex-production-lock.mjs', {
+    cwd: ROOT,
+    stdio: 'pipe',
+    encoding: 'utf8',
+  });
+  console.log(verify.trim());
+
   const finalSrc = readFileSync(TARGET, 'utf8');
   const newHash = sha256(finalSrc);
 
