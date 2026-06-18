@@ -142,6 +142,21 @@ export class ExchangesService {
     }
   }
 
+  /** Open orders + position on Bitfinex derivatives for subscriber live dashboard. */
+  async getUserBitfinexExchangeSnapshot(userId: string) {
+    const creds = await this.getUserCredentials(userId, 'bitfinex');
+    if (!creds) return null;
+    try {
+      const [orders, position] = await Promise.all([
+        this.bitfinex.listActiveOrders(creds),
+        this.bitfinex.getOpenPositionDetail(creds),
+      ]);
+      return { orders, position };
+    } catch {
+      return null;
+    }
+  }
+
   async ensureUserBitfinexDerivativesMargin(userId: string, minUsd: number) {
     const creds = await this.getUserCredentials(userId, 'bitfinex');
     if (!creds) return null;

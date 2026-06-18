@@ -156,6 +156,54 @@ export const SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT = 0.9;
 export const SUBSCRIBER_CHASE_STEP_PCT = 0.25;
 /** Matches bot LIMIT_CHASE_INTERVAL_SEC_DEFAULT (60s). */
 export const SUBSCRIBER_CHASE_INTERVAL_MS = 60_000;
+/** Scenario C thesis fast-cut (margin %) — bot THESIS_FAST_EXIT_UNREAL_PCT. */
+export const SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT = -12;
+/** Skip thesis fast-cut when peak ever reached this margin % — bot THESIS_MFE_PROTECT_PCT. */
+export const SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT = 2;
+/** Default hard stop margin % — bot stop_loss path. */
+export const SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT = -18;
+
+/**
+ * Virtual lots on merged Bitfinex BTC-PERP (same direction only).
+ * Bot sim runs up to 20 concurrent legs; copy ledger tracks each fill separately.
+ */
+export const SUBSCRIBER_MAX_OPEN_COPY_LEGS = 20;
+export const SUBSCRIBER_MAX_PENDING_COPY_LEGS = 20;
+
+export type VirtualLotExitReason = 'PROFIT_LOCK' | 'THESIS_FAST_CUT' | 'HARD_STOP' | null;
+
+/** Scenario C exit evaluation per virtual lot (margin %, same formula as showcase bot). */
+export function evaluateScenarioCLotExit(opts: {
+  unrealMarginPct: number;
+  peakMarginPct: number;
+  stopLossMarginPct?: number;
+}): { reason: VirtualLotExitReason; lockFloor?: number } {
+  const stopLossMarginPct = opts.stopLossMarginPct ?? SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
+  const { unrealMarginPct, peakMarginPct } = opts;
+
+  const lockFloor = getProfitLockFloor(peakMarginPct);
+  if (
+    lockFloor != null &&
+    peakMarginPct >= SUBSCRIBER_TRAIL_LADDER[0][0] &&
+    unrealMarginPct <= lockFloor
+  ) {
+    return { reason: 'PROFIT_LOCK', lockFloor };
+  }
+
+  if (
+    unrealMarginPct <= SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT &&
+    peakMarginPct < SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT
+  ) {
+    return { reason: 'THESIS_FAST_CUT' };
+  }
+
+  if (unrealMarginPct <= stopLossMarginPct) {
+    return { reason: 'HARD_STOP' };
+  }
+
+  return { reason: null };
+}
+
 export function computeUnrealizedMarginPct(
   fillPrice: number,
   markPrice: number,
@@ -169,10 +217,6 @@ export function computeUnrealizedMarginPct(
   const priceMove = ((markPrice - fillPrice) / fillPrice) * dirFactor;
   return priceMove * Math.max(leverage, 1) * 100;
 }
-
-/** Bitfinex BTC-PERP nets to one position — copy relay tracks one open + one pending leg max. */
-export const SUBSCRIBER_MAX_OPEN_COPY_LEGS = 1;
-export const SUBSCRIBER_MAX_PENDING_COPY_LEGS = 1;
 
 /** Signed distance from limit to market (always >= 0 when limit is on correct side). */
 export function limitChaseMarketGap(

@@ -83,10 +83,16 @@ export function TransparencyPanel({ dashboard }: { dashboard: TradingAgentDashbo
   );
 }
 
-export function AgentActivityFeed({ items }: { items: TradingAgentActivityEntry[] }) {
+export function AgentActivityFeed({
+  items,
+  title = 'Agent Activity Feed',
+}: {
+  items: TradingAgentActivityEntry[];
+  title?: string;
+}) {
   return (
     <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">Agent Activity Feed</h2>
+      <h2 className="text-sm font-semibold uppercase tracking-widest text-zinc-500">{title}</h2>
       {items.length === 0 ? (
         <p className="mt-4 text-sm text-zinc-500">No activity yet.</p>
       ) : (

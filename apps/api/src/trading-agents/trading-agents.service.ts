@@ -35,6 +35,10 @@ import {
   type UserInstanceScope,
   type UserInstanceStats,
 } from './instance-view.mapper';
+import {
+  mapSubscriberExchangeLiveBook,
+  type SubscriberCycleRow,
+} from './subscriber-exchange-live.mapper';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -723,6 +727,68 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
+  private async buildSubscriberExchangeLiveBook(
+    userId: string,
+    agentId: string,
+    sessionStartedAt: Date,
+    markPrice?: number,
+  ): Promise<TradingAgentDashboardState['liveBook'] | null> {
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId, userId } },
+    });
+    if (!instance) return null;
+
+    const snapshot =
+      instance.exchangeProvider === 'bitfinex'
+        ? await this.exchanges.getUserBitfinexExchangeSnapshot(userId)
+        : null;
+
+    const rows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        createdAt: { gte: sessionStartedAt },
+        cycle: { agentId },
+      },
+      include: {
+        cycle: {
+          select: {
+            tradeId: true,
+            status: true,
+            intentEnvelope: true,
+            showcaseExitReason: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 40,
+    });
+
+    const participants: SubscriberCycleRow[] = rows.map((r) => ({
+      status: r.status,
+      fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
+      exitPrice: r.exitPrice != null ? Number(r.exitPrice) : null,
+      pnlUsd: r.pnlUsd != null ? Number(r.pnlUsd) : null,
+      pnlMarginPct: r.pnlMarginPct != null ? Number(r.pnlMarginPct) : null,
+      updatedAt: r.updatedAt,
+      createdAt: r.createdAt,
+      cycle: {
+        tradeId: r.cycle.tradeId,
+        status: r.cycle.status,
+        intentEnvelope: r.cycle.intentEnvelope,
+        showcaseExitReason: r.cycle.showcaseExitReason,
+        createdAt: r.cycle.createdAt,
+      },
+    }));
+
+    return mapSubscriberExchangeLiveBook({
+      orders: snapshot?.orders ?? [],
+      position: snapshot?.position ?? null,
+      markPrice,
+      participants,
+    });
+  }
+
   private async fetchShowcaseExecutedActivity(slug: string) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) return [];
@@ -748,11 +814,17 @@ export class TradingAgentsService implements OnModuleInit {
     let viewScope: 'showcase' | 'user' = 'showcase';
     let agent = rest.agent;
     const showcaseAgent = { ...rest.agent };
+    const showcaseLiveBook = rest.dashboard.liveBook;
+    let exchangeLiveBook: TradingAgentDashboardState['liveBook'] | null = null;
+    let overlayMeta: Awaited<ReturnType<typeof this.resolveUserInstanceOverlay>> | null = null;
+    let agentRowId: string | null = null;
 
     if (userId) {
       const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+      agentRowId = agentRow?.id ?? null;
       if (agentRow) {
         const overlay = await this.resolveUserInstanceOverlay(agentRow.id, userId);
+        overlayMeta = overlay;
         if (overlay?.liveStats) {
           viewScope = 'user';
           userInstance = {
@@ -806,6 +878,20 @@ export class TradingAgentsService implements OnModuleInit {
       });
     }
 
+    const showcaseActivity = await this.listActivity(slug, 20, true, undefined);
+    let userActivity = showcaseActivity;
+    if (userId && viewScope === 'user') {
+      userActivity = await this.listActivity(slug, 20, true, userId);
+      if (agentRowId && overlayMeta?.userSessionStartedAt) {
+        exchangeLiveBook = await this.buildSubscriberExchangeLiveBook(
+          userId,
+          agentRowId,
+          new Date(overlayMeta.userSessionStartedAt),
+          rest.dashboard.currentPrice,
+        );
+      }
+    }
+
     return {
       ...rest,
       agent,
@@ -814,6 +900,10 @@ export class TradingAgentsService implements OnModuleInit {
       userInstance,
       showcaseFlash,
       showcaseAgent: viewScope === 'user' ? showcaseAgent : undefined,
+      showcaseLiveBook,
+      exchangeLiveBook,
+      showcaseActivity,
+      userActivity,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'
           ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'

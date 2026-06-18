@@ -11,14 +11,11 @@ import {
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
-import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
-import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-exchange-equity';
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
-import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
-import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
+import { AgentDualDeskPanels } from '@/components/agent-hub/agent-dual-desk-panels';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import type {
@@ -174,6 +171,10 @@ export function AgentPublicProfile({
   viewScope = 'showcase',
   showcaseNote,
   showcaseAgent,
+  showcaseLiveBook,
+  exchangeLiveBook,
+  showcaseActivity: showcaseActivityProp,
+  userActivity: userActivityProp,
   onFollow,
   followBusy,
   onCopyAllocate,
@@ -205,6 +206,10 @@ export function AgentPublicProfile({
   viewScope?: 'showcase' | 'user';
   showcaseNote?: string | null;
   showcaseAgent?: TradingAgentSummary;
+  showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
+  exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  showcaseActivity?: TradingAgentActivityEntry[];
+  userActivity?: TradingAgentActivityEntry[];
   onFollow?: () => void;
   followBusy?: boolean;
   onCopyAllocate?: () => void;
@@ -260,64 +265,28 @@ export function AgentPublicProfile({
         ? 'text-amber-400'
         : 'text-zinc-400';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
+  const deskShowcaseAgent = showcaseAgent ?? agent;
+  const showcaseLive = showcaseLiveBook ?? dashboard.liveBook;
+  const showcaseAct = showcaseActivityProp ?? activity;
+  const userAct = userActivityProp ?? activity;
+  const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
       {isLiveSession && (
-        <div className="mb-4 rounded-2xl border border-emerald-500/45 bg-gradient-to-r from-emerald-950/50 via-zinc-950/30 to-zinc-950/50 px-5 py-4 shadow-lg shadow-emerald-950/20">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-base font-bold text-emerald-100">
-                Live copy active on {exchangeLabel ?? 'your exchange'}
-              </p>
-              <p className="mt-1 text-sm text-zinc-300">
-                Admin showcase signals relay to your {exchangeLabel ?? 'exchange'} account (max $
-                {DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin per trade).
-                Use <strong className="text-white">Stop</strong> in the sidebar to sever the relay instantly.
-              </p>
-            </div>
-            <span
-              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wide ${
-                instanceStatus === 'PAUSED'
-                  ? 'bg-red-500/20 text-red-200'
-                  : 'bg-emerald-500/20 text-emerald-200'
-              }`}
-            >
-              {instanceStatus === 'PAUSED' ? 'Relay off' : 'Relay on'}
-            </span>
-          </div>
+        <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-950/15 px-4 py-3 text-sm text-emerald-100/90">
+          <strong>Two desks below:</strong> left = your real {exchangeLabel ?? 'Bitfinex'} orders &amp; P&amp;L ·
+          right = admin showcase bot signals (what gets relayed).
         </div>
       )}
 
       {isCopySession && (
-        <div className="mb-4 rounded-2xl border border-emerald-500/45 bg-gradient-to-r from-emerald-950/50 via-violet-950/30 to-zinc-950/50 px-5 py-4 shadow-lg shadow-emerald-950/20">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-base font-bold text-emerald-100">
-                You are paper-tracking this BTC agent with {formatUsd(allocationUsd, 0)} DDollar
-              </p>
-              <p className="mt-1 text-sm text-zinc-300">
-                Your stats mirror admin signals from when you started
-                {agent.userSessionStartedAt
-                  ? ` (${formatRelativeTime(agent.userSessionStartedAt)})`
-                  : ''}
-                . Equity and trades below are isolated to your session — not the public showcase.
-              </p>
-            </div>
-            <span
-              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wide ${
-                instanceStatus === 'PAUSED'
-                  ? 'bg-amber-500/20 text-amber-200'
-                  : 'bg-emerald-500/20 text-emerald-200'
-              }`}
-            >
-              {instanceStatus === 'PAUSED' ? 'Copy paused' : 'Copy active'}
-            </span>
-          </div>
+        <div className="mb-4 rounded-xl border border-violet-500/30 bg-violet-950/15 px-4 py-3 text-sm text-violet-100/90">
+          <strong>Two desks below:</strong> left = your paper-track session · right = admin showcase research bot.
         </div>
       )}
 
-      {showcaseNote && !isCopySession && (
+      {showcaseNote && !isCopySession && !isLiveSession && (
         <p className="mb-4 rounded-xl border border-violet-500/25 bg-violet-950/20 px-4 py-3 text-sm text-violet-100/90">
           {showcaseNote}
         </p>
@@ -328,41 +297,7 @@ export function AgentPublicProfile({
         </p>
       )}
 
-      {isLiveSession && (
-        <div className="mb-4">
-          <AgentLiveExchangeEquity
-            agent={agent}
-            exchangeLabel={exchangeLabel ?? 'Bitfinex'}
-            compact
-          />
-        </div>
-      )}
-
-      {!isCopySession && !isLiveSession && (
-        <div className="mb-4">
-          <AgentShowcaseEquity agent={showcaseAgent ?? agent} title="Admin showcase paper desk" />
-        </div>
-      )}
-
-      {isCopySession && (
-        <div className="mb-4">
-          <AgentShowcaseEquity agent={showcaseAgent ?? agent} title="Admin showcase (public research run)" />
-        </div>
-      )}
-
-      {isCopySession && (
-        <div className="mb-4">
-          <AgentShowcaseEquity agent={agent} title="Your paper-track session" compact />
-        </div>
-      )}
-
-      {isLiveSession && showcaseAgent && (
-        <div className="mb-4">
-          <AgentShowcaseEquity agent={showcaseAgent} title="Admin showcase (public research run)" compact />
-        </div>
-      )}
-
-      <AgentMarketplaceStats agents={allAgents ?? [showcaseAgent ?? agent]} builderCount={14} />
+      <AgentMarketplaceStats agents={allAgents ?? [deskShowcaseAgent]} builderCount={14} />
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_300px]">
         <div className="min-w-0 space-y-6">
@@ -537,32 +472,22 @@ export function AgentPublicProfile({
 
           {tab === 'Overview' && (
             <div className="space-y-6">
-              <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-                <MetricPill label="Leverage" value={`${agent.leverage ?? dashboard.leverage ?? 100}x`} accent="text-violet-300" />
-                <MetricPill label="30D return" value={formatPercent(agent.netReturnPct)} accent="text-emerald-400" />
-                <MetricPill label="Win rate" value={`${agent.winRatePct.toFixed(0)}%`} />
-                <MetricPill label="Max drawdown" value="6.2%" />
-                <MetricPill label="Total trades" value={String(agent.tradeCount)} />
-                <MetricPill label="Sharpe" value="1.42" />
-                <MetricPill label="Profit factor" value="2.31" />
-              </div>
-
-              <section>
-                <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-500">
-                  Live transparency
-                </h2>
-                <p className="mt-1 text-xs text-zinc-600">
-                  Signals, limit orders, positions, and trades from the admin showcase bot — max 5 entries each.
-                </p>
-                <div className="mt-4">
-                  <AgentTransparencyTables liveBook={dashboard.liveBook} />
-                </div>
-              </section>
-
-              <AgentTradeJourney activity={activity} layout="horizontal" showBalance={isUserSession} />
+              <AgentDualDeskPanels
+                mode={dualDeskMode}
+                exchangeLabel={exchangeLabel}
+                userAgent={agent}
+                showcaseAgent={deskShowcaseAgent}
+                exchangeLiveBook={exchangeLiveBook}
+                showcaseLiveBook={showcaseLive}
+                userActivity={userAct}
+                showcaseActivity={showcaseAct}
+              />
               <PublicReasoningPanel dashboard={dashboard} />
               <div className="grid gap-6 lg:grid-cols-2">
-                <AgentActivityFeed items={activity.slice(0, 8)} />
+                <AgentActivityFeed
+                  items={(isUserSession ? userAct : showcaseAct).slice(0, 8)}
+                  title={isUserSession ? 'Your session feed' : 'Showcase feed'}
+                />
                 <AgentPerformanceChart agentReturnPct={agent.netReturnPct} label={agent.name} />
               </div>
             </div>
@@ -571,13 +496,38 @@ export function AgentPublicProfile({
             <AgentPerformanceChart agentReturnPct={agent.netReturnPct} label={agent.name} />
           )}
           {tab === 'Trade Journey' && (
-            <AgentTradeJourney activity={activity} showBalance={isUserSession} />
+            <AgentDualDeskPanels
+              mode={dualDeskMode}
+              exchangeLabel={exchangeLabel}
+              userAgent={agent}
+              showcaseAgent={deskShowcaseAgent}
+              exchangeLiveBook={exchangeLiveBook}
+              showcaseLiveBook={showcaseLive}
+              userActivity={userAct}
+              showcaseActivity={showcaseAct}
+            />
           )}
           {tab === 'Reasoning' && <PublicReasoningPanel dashboard={dashboard} />}
           {tab === 'Activity' && (
             <div className="space-y-6">
-              <AgentActivityFeed items={activity} />
-              <AgentTransparencyTables liveBook={dashboard.liveBook} />
+              {isUserSession ? (
+                <>
+                  <AgentActivityFeed items={userAct} title="Your session activity" />
+                  <AgentActivityFeed items={showcaseAct} title="Admin showcase activity" />
+                </>
+              ) : (
+                <AgentActivityFeed items={showcaseAct} />
+              )}
+              <AgentDualDeskPanels
+                mode={dualDeskMode}
+                exchangeLabel={exchangeLabel}
+                userAgent={agent}
+                showcaseAgent={deskShowcaseAgent}
+                exchangeLiveBook={exchangeLiveBook}
+                showcaseLiveBook={showcaseLive}
+                userActivity={userAct}
+                showcaseActivity={showcaseAct}
+              />
             </div>
           )}
           {tab === 'Followers' && (
