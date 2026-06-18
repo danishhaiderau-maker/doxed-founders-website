@@ -164,10 +164,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       take: 5,
     });
 
+    const exitPendingCycles = await this.prisma.signalCycle.findMany({
+      where: {
+        agentId,
+        status: { in: [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED] },
+        participants: {
+          some: { userId: instance.userId, status: SignalCycleStatus.OPEN },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
+    const cycleIds = new Set(cycles.map((c) => c.id));
+    const allCycles = [...cycles, ...exitPendingCycles.filter((c) => !cycleIds.has(c.id))];
+
     let managedOpenTrade = false;
 
     // Pass 1 — manage existing copy trades (fills, stops, exits) before any new entries.
-    for (const cycle of cycles) {
+    for (const cycle of allCycles) {
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
       });
@@ -183,11 +198,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       if (participant.status === SignalCycleStatus.OPEN) {
         managedOpenTrade = true;
-        await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
+        const reconciled = await this.reconcileManualClose(
+          agentId,
+          instance.userId,
+          cycle,
+          participant,
+          meta,
+          creds,
+        );
+        if (!reconciled) {
+          await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
+        }
       }
     }
 
-    const eligibility = await this.evaluateEntryEligibility(creds, openParticipant, marginCap);
+    const openParticipantAfter = await this.prisma.signalCycleParticipant.findFirst({
+      where: {
+        userId: instance.userId,
+        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        cycle: { agentId },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const eligibility = await this.evaluateEntryEligibility(creds, openParticipantAfter, marginCap);
 
     // Pass 2 — new limit entries only when free margin exists and no trade is in flight.
     if (!eligibility.canEnter) {
@@ -458,6 +492,82 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
   }
 
+  /**
+   * User closed on Bitfinex (or stop filled) while our cycle still shows OPEN — reconcile without crashing.
+   */
+  private async reconcileManualClose(
+    agentId: string,
+    userId: string,
+    cycle: {
+      id: string;
+      status: SignalCycleStatus;
+      showcasePnlUsd: { toNumber?: () => number } | null;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null; status: SignalCycleStatus },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+  ): Promise<boolean> {
+    if (participant.status !== SignalCycleStatus.OPEN || !meta.qty || !meta.direction) {
+      return false;
+    }
+
+    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const expectedLong = meta.direction === 'LONG';
+    const hasExpected =
+      position &&
+      ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
+
+    if (hasExpected) return false;
+
+    if (meta.stopOrderId) {
+      try {
+        await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
+      } catch {
+        /* stop may have filled */
+      }
+    }
+    await this.bitfinex.cancelOrphanStopOrders(creds, meta.bitfinexOrderId);
+
+    const fillPrice =
+      participant.fillPrice != null
+        ? Number(participant.fillPrice)
+        : meta.limitPrice ?? (await this.bitfinex.getMarkPrice());
+    const exitPrice = await this.bitfinex.getMarkPrice().catch(() => fillPrice ?? 0);
+    const direction = meta.direction;
+    const pnlUsd =
+      fillPrice && exitPrice
+        ? direction === 'LONG'
+          ? (exitPrice - fillPrice) * meta.qty
+          : (fillPrice - exitPrice) * meta.qty
+        : 0;
+    const pnlMarginPct =
+      fillPrice && fillPrice > 0
+        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * 20
+        : 0;
+
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+      venue: 'bitfinex',
+      exit_price: exitPrice,
+      exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
+      pnl_usd: Math.round(pnlUsd * 100) / 100,
+      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+      source: 'hire',
+    });
+
+    await this.prisma.tradingAgentInstance.updateMany({
+      where: { agentId, userId },
+      data: {
+        lastError:
+          'Position closed on your exchange (manual or stop) — copy session synced. Ready for next showcase signal.',
+      },
+    });
+
+    this.logger.log(
+      `Hire reconcile manual close ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`,
+    );
+    return true;
+  }
+
   private async monitorExit(
     agentId: string,
     userId: string,
@@ -472,6 +582,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
   ) {
     if (cycle.status !== SignalCycleStatus.CLOSED && cycle.status !== SignalCycleStatus.EXPIRED) {
+      return;
+    }
+
+    const position = await this.bitfinex.getOpenPosition(creds);
+    if (!position) {
+      this.logger.log(`Exit skip ${userId} cycle=${cycle.id}: already flat on exchange`);
       return;
     }
 

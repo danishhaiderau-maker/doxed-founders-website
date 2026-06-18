@@ -15,9 +15,34 @@ export type BitfinexWalletRow = {
 
 export type BitfinexWalletSnapshot = {
   derivativesUsd: number;
+  derivativesTotalUsd: number;
   exchangeUsd: number;
   fundingUsd: number;
   totalStableUsd: number;
+};
+
+export type BitfinexPositionDetail = {
+  symbol: string;
+  amount: number;
+  basePrice: number;
+  pnlUsd: number;
+  pnlPct: number;
+  direction: 'LONG' | 'SHORT';
+};
+
+export type BitfinexLiveAccountMetrics = {
+  derivativesAvailableUsd: number;
+  derivativesTotalUsd: number;
+  exchangeUsd: number;
+  fundingUsd: number;
+  unrealizedPnlUsd: number;
+  equityUsd: number;
+  realizedPnlUsd: number;
+  tradingFeesUsd: number;
+  fundingFeesUsd: number;
+  sessionPnlUsd: number;
+  openPosition: BitfinexPositionDetail | null;
+  fundsInWrongWallet: boolean;
 };
 
 export type EnsureDerivativesResult = {
@@ -43,6 +68,15 @@ function stableAvailable(rows: BitfinexWalletRow[], walletType: string): number 
   for (const row of rows) {
     if (row.walletType !== walletType) continue;
     if (row.available > best) best = row.available;
+  }
+  return best;
+}
+
+function stableTotalBalance(rows: BitfinexWalletRow[], walletType: string): number {
+  let best = 0;
+  for (const row of rows) {
+    if (row.walletType !== walletType) continue;
+    if (row.balance > best) best = row.balance;
   }
   return best;
 }
@@ -165,13 +199,15 @@ export class BitfinexTradingClient {
   async getWalletSnapshot(creds: ExchangeCredentials): Promise<BitfinexWalletSnapshot> {
     const rows = await this.listWallets(creds);
     const derivativesUsd = stableAvailable(rows, 'margin');
+    const derivativesTotalUsd = stableTotalBalance(rows, 'margin');
     const exchangeUsd = stableAvailable(rows, 'exchange');
     const fundingUsd = stableAvailable(rows, 'funding');
     return {
       derivativesUsd,
+      derivativesTotalUsd,
       exchangeUsd,
       fundingUsd,
-      totalStableUsd: derivativesUsd + exchangeUsd + fundingUsd,
+      totalStableUsd: derivativesTotalUsd + exchangeUsd + fundingUsd,
     };
   }
 
@@ -372,15 +408,127 @@ export class BitfinexTradingClient {
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
   ): Promise<{ amount: number; basePrice: number } | null> {
+    const detail = await this.getOpenPositionDetail(creds, symbol);
+    if (!detail) return null;
+    return { amount: detail.amount, basePrice: detail.basePrice };
+  }
+
+  async getOpenPositionDetail(
+    creds: ExchangeCredentials,
+    symbol = BITFINEX_BTC_PERP_SYMBOL,
+  ): Promise<BitfinexPositionDetail | null> {
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/positions');
     if (!Array.isArray(rows)) return null;
     for (const row of rows) {
-      if (!Array.isArray(row) || row.length < 4) continue;
+      if (!Array.isArray(row) || row.length < 8) continue;
       if (String(row[0]) !== symbol) continue;
       const amount = Number(row[2] ?? 0);
       if (Math.abs(amount) < MIN_POSITION_BTC) continue;
-      return { amount, basePrice: Number(row[3] ?? 0) };
+      const pnlUsd = Number(row[6] ?? 0);
+      const pnlPct = Number(row[7] ?? 0);
+      return {
+        symbol,
+        amount,
+        basePrice: Number(row[3] ?? 0),
+        pnlUsd,
+        pnlPct,
+        direction: amount > 0 ? 'LONG' : 'SHORT',
+      };
     }
     return null;
+  }
+
+  /** Sum trading + funding fees from margin wallet ledgers since session start. */
+  async getLedgerFeesSince(
+    creds: ExchangeCredentials,
+    sinceMs: number,
+  ): Promise<{ tradingFeesUsd: number; fundingFeesUsd: number }> {
+    let tradingFeesUsd = 0;
+    let fundingFeesUsd = 0;
+    try {
+      const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/ledgers/hist', {
+        wallet: 'margin',
+        start: sinceMs,
+        end: Date.now(),
+        limit: 250,
+      });
+      if (!Array.isArray(rows)) return { tradingFeesUsd, fundingFeesUsd };
+      for (const row of rows) {
+        if (!Array.isArray(row) || row.length < 8) continue;
+        const amount = Number(row[4] ?? 0);
+        const description = String(row[7] ?? '').toLowerCase();
+        if (amount >= 0) continue;
+        const fee = Math.abs(amount);
+        if (description.includes('funding') || description.includes('margin funding')) {
+          fundingFeesUsd += fee;
+        } else if (
+          description.includes('fee') ||
+          description.includes('trading') ||
+          description.includes('commission')
+        ) {
+          tradingFeesUsd += fee;
+        }
+      }
+    } catch {
+      /* ledger optional */
+    }
+    return {
+      tradingFeesUsd: Number(tradingFeesUsd.toFixed(4)),
+      fundingFeesUsd: Number(fundingFeesUsd.toFixed(4)),
+    };
+  }
+
+  async getLiveAccountMetrics(
+    creds: ExchangeCredentials,
+    opts?: { sessionStartedAt?: Date; realizedPnlUsd?: number },
+  ): Promise<BitfinexLiveAccountMetrics> {
+    const rows = await this.listWallets(creds);
+    const derivativesAvailableUsd = stableAvailable(rows, 'margin');
+    const derivativesTotalUsd = stableTotalBalance(rows, 'margin');
+    const exchangeUsd = stableAvailable(rows, 'exchange');
+    const fundingUsd = stableAvailable(rows, 'funding');
+    const position = await this.getOpenPositionDetail(creds);
+    const unrealizedPnlUsd = position?.pnlUsd ?? 0;
+    const equityUsd = Number((derivativesTotalUsd + unrealizedPnlUsd).toFixed(2));
+    const sinceMs = opts?.sessionStartedAt?.getTime() ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const fees = await this.getLedgerFeesSince(creds, sinceMs);
+    const realizedPnlUsd = opts?.realizedPnlUsd ?? 0;
+    const sessionPnlUsd = Number(
+      (realizedPnlUsd + unrealizedPnlUsd - fees.tradingFeesUsd - fees.fundingFeesUsd).toFixed(2),
+    );
+    const fundsInWrongWallet =
+      !position &&
+      derivativesAvailableUsd < 5 &&
+      exchangeUsd + fundingUsd > 10;
+
+    return {
+      derivativesAvailableUsd,
+      derivativesTotalUsd,
+      exchangeUsd,
+      fundingUsd,
+      unrealizedPnlUsd,
+      equityUsd,
+      realizedPnlUsd,
+      tradingFeesUsd: fees.tradingFeesUsd,
+      fundingFeesUsd: fees.fundingFeesUsd,
+      sessionPnlUsd,
+      openPosition: position,
+      fundsInWrongWallet,
+    };
+  }
+
+  async cancelOrphanStopOrders(creds: ExchangeCredentials, keepOrderId?: number): Promise<number> {
+    const orders = await this.listActiveOrders(creds);
+    let cancelled = 0;
+    for (const order of orders) {
+      if (keepOrderId != null && order.id === keepOrderId) continue;
+      try {
+        await this.cancelOrder(creds, order.id);
+        cancelled += 1;
+      } catch {
+        /* already gone */
+      }
+    }
+    return cancelled;
   }
 }

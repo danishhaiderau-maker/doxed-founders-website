@@ -129,6 +129,19 @@ export class ExchangesService {
     }
   }
 
+  async getUserBitfinexLiveMetrics(
+    userId: string,
+    opts?: { sessionStartedAt?: Date; realizedPnlUsd?: number },
+  ) {
+    const creds = await this.getUserCredentials(userId, 'bitfinex');
+    if (!creds) return null;
+    try {
+      return await this.bitfinex.getLiveAccountMetrics(creds, opts);
+    } catch {
+      return null;
+    }
+  }
+
   async ensureUserBitfinexDerivativesMargin(userId: string, minUsd: number) {
     const creds = await this.getUserCredentials(userId, 'bitfinex');
     if (!creds) return null;

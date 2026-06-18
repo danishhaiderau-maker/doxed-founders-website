@@ -16,13 +16,25 @@ export function BitfinexDerivativesFundingGuide({
   const copy = BITFINEX_DERIVATIVES_FUNDING_COPY;
   const ready =
     derivativesUsd != null && derivativesUsd >= DEFAULT_SUBSCRIBER_MAX_MARGIN_USD * 0.9;
+  const wrongWallet =
+    (exchangeUsd ?? 0) + (fundingUsd ?? 0) > 10 &&
+    (derivativesUsd ?? 0) < 5;
 
   return (
     <section
       className={`rounded-xl border ${
-        ready ? 'border-emerald-500/35 bg-emerald-950/15' : 'border-amber-500/35 bg-amber-950/15'
+        wrongWallet
+          ? 'border-amber-500/45 bg-amber-950/20'
+          : ready
+            ? 'border-emerald-500/35 bg-emerald-950/15'
+            : 'border-amber-500/35 bg-amber-950/15'
       } ${compact ? 'p-3' : 'p-4'}`}
     >
+      {wrongWallet && (
+        <p className="mb-2 text-xs font-semibold text-amber-200">
+          USDT is in the wrong wallet — move it to <strong>Derivatives</strong> before copy trades can fire.
+        </p>
+      )}
       <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">{copy.title}</p>
       <p className={`mt-1 font-semibold text-white ${compact ? 'text-xs' : 'text-sm'}`}>
         {copy.walletLabel}
