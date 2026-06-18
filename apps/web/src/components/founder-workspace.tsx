@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { formatDdollar, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
-import { FounderAgentsWorkforce } from '@/components/founder-agents-workforce';
 import { FounderSocialHub } from '@/components/founder-social-hub';
 import { FounderMissionControl } from '@/components/founder-mission-control';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
@@ -33,7 +32,6 @@ export type WorkspaceTab =
 const TABS: { id: WorkspaceTab; label: string }[] = [
   { id: 'activity', label: 'Mission Control' },
   { id: 'social', label: 'Social Hub' },
-  { id: 'agents', label: 'Agents' },
   { id: 'analytics', label: 'Settings' },
 ];
 
@@ -152,12 +150,22 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
       )}
 
       {tab === 'agents' && session && (
-        <FounderAgentsWorkforce
-          accessToken={session.accessToken}
-          room={room}
-          buildRoom={buildRoom}
-          onTabChange={() => onTabChange('activity')}
-        />
+        <section className="mx-auto max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 text-center text-sm text-zinc-400">
+          <p>Agent workforce is paused — focus is <strong className="text-zinc-200">Founder Brain</strong> + <strong className="text-zinc-200">Cursor</strong>.</p>
+          <p className="mt-2">
+            Live trading agent:{' '}
+            <Link href="/agent-hub" className="text-violet-400 underline">
+              BTC Conservative Bot
+            </Link>
+          </p>
+          <button
+            type="button"
+            onClick={() => onTabChange('activity')}
+            className="mt-4 text-xs text-violet-400 underline"
+          >
+            ← Back to Mission Control
+          </button>
+        </section>
       )}
 
       {tab === 'agents' && !session && (

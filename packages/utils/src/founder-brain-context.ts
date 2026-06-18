@@ -7,7 +7,8 @@ import {
   type CommitSignal,
   type InitiativeTheme,
 } from './commit-intelligence';
-import { formatRecapCoachAnswer, isRecapOrHistoryPrompt } from './founder-brain-coach';
+import { formatRecapCoachAnswer, formatVaultCapacityAnswer, isRecapOrHistoryPrompt } from './founder-brain-coach';
+import { isFounderRepoStatusPrompt } from './founder-brain-router';
 
 export type MissionIntelligence = {
   currentInitiative: string;
@@ -61,11 +62,14 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
     : null;
 
   const githubSignalsStrong = signalCommits.length >= 3 && Boolean(topTheme);
+  const freshOpenTasks = input.openTasks.filter((t) => !isStaleBoilerplateMissionTask(t));
   const currentInitiative =
     (githubSignalsStrong && initiativeFromCommits) ||
     graph?.current_sprint?.trim() ||
     initiativeFromCommits ||
     input.roadmapInProgress ||
+    (!input.repoFullName && freshOpenTasks[0]) ||
+    (!input.repoFullName ? `${input.projectName} — research & planning (Sovereign vault)` : null) ||
     input.currentGoal;
 
   const openPrs = input.pullRequests.filter((p) => p.state === 'open');
@@ -100,7 +104,7 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
       ? 'Batch Founder OS sync (context + roadmap + tasks) into one commit; skip when unchanged'
       : null;
 
-  const freshOpenTask = input.openTasks.find((t) => !isStaleBoilerplateMissionTask(t));
+  const freshOpenTask = freshOpenTasks[0];
   const graphNext = graph?.next_action?.trim();
   const suggested = input.suggestedNextStep?.trim();
 
@@ -117,13 +121,17 @@ export function deriveMissionIntelligence(input: FounderBrainContextInput): Miss
       : null) ||
     (shippedRecently[0]
       ? `Publish or ship next: ${shippedRecently[0]!.slice(0, 80)}`
-      : 'Ship the top open task and sync GitHub');
+      : !input.repoFullName
+        ? 'Describe your product goal — I will draft the next milestone in Founder Vault (no GitHub needed)'
+        : 'Ship the top open task and sync GitHub');
 
   const resolvedNextStep =
     recommendedNextStep ??
     (shippedRecently[0]
       ? `Continue ${topTheme?.label ?? 'the product'} — latest ship: ${shippedRecently[0]!.slice(0, 80)}`
-      : 'Sync GitHub and ship the next feature commit');
+      : !input.repoFullName
+        ? 'Tell me what $REM is — then I draft in your vault'
+        : 'Sync GitHub and ship the next feature commit');
 
   const signalCount =
     signalCommits.length +
@@ -274,6 +282,24 @@ export function formatRuleBasedBrainAnswer(
         githubConnected: Boolean(input.repoFullName),
         cursorConnected: false,
         llmConnected: true,
+      },
+    });
+  }
+
+  const capacityOrStatus =
+    isFounderRepoStatusPrompt(prompt) ||
+    /real capacity|saved anything|instead of github|option a|use my (space|vault)/i.test(prompt);
+
+  if (!input.repoFullName && capacityOrStatus) {
+    return formatVaultCapacityAnswer({
+      projectName: input.projectName,
+      vaultNote: input.vaultNote,
+      openTaskCount: input.openTasks.filter((t) => !isStaleBoilerplateMissionTask(t)).length,
+      conn: {
+        githubConnected: false,
+        cursorConnected: false,
+        llmConnected: true,
+        repoFullName: null,
       },
     });
   }

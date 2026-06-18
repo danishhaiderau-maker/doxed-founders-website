@@ -46,7 +46,6 @@ import { FounderAiTeamStrip } from '@/components/founder-ai-team-strip';
 import { FounderBrainCoachPanel } from '@/components/founder-brain-coach-panel';
 import {
   AI_STACK_HREF,
-  buildCopilotUsageLines,
   connectionSnapshotFromSync,
   CopilotAction,
   CopilotSendMode,
@@ -220,11 +219,6 @@ export function FounderCopilotChat({
 
   const sendMode: CopilotSendMode = copilotActionSendMode(selectedAction);
 
-  const usageLines = useMemo(
-    () => buildCopilotUsageLines(copilotActions, defaultProvider),
-    [copilotActions, defaultProvider],
-  );
-
   const askProviderLabel = useMemo(() => {
     const row = providers.find((p) => p.key === activeChatProvider);
     return row ? shortProviderName(row) : stack.askLabel;
@@ -281,6 +275,7 @@ export function FounderCopilotChat({
   const {
     listening,
     starting,
+    waitingNetwork,
     phase,
     supported,
     audioLevel,
@@ -873,18 +868,12 @@ export function FounderCopilotChat({
             <p className="text-sm font-semibold text-zinc-100">
               {isHero ? 'Founder Brain' : 'Founder AI Team'}
             </p>
-            <p className="truncate text-xs text-zinc-500">
-              {isHero ? (
-                <span className="text-violet-300">
-                  One chat — research, build, and ship route automatically
-                </span>
-              ) : (
-                <>
-                  {memory?.project?.name ?? 'Project'} ·{' '}
-                  {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Settings'}
-                </>
-              )}
-            </p>
+            {!isHero && (
+              <p className="truncate text-xs text-zinc-500">
+                {memory?.project?.name ?? 'Project'} ·{' '}
+                {memory?.currentGoal?.slice(0, 48) ?? 'Set a goal in Settings'}
+              </p>
+            )}
           </div>
           {messages.length > 0 && (
             <button
@@ -941,36 +930,26 @@ export function FounderCopilotChat({
                 for expert answers — until then I use mission memory only.
               </p>
             )}
-            {isHero && usageLines.length > 0 && (
-              <ul className="rounded-lg border border-cyan-500/20 bg-cyan-950/10 px-3 py-2 text-left text-xs text-zinc-400 space-y-1.5">
-                {usageLines.map((line) => (
-                  <li key={line.title}>
-                    <strong className="text-cyan-300">{line.title}</strong>
-                    {line.detail ? ` — ${line.detail}` : ''}
-                  </li>
-                ))}
-              </ul>
-            )}
             {isHero && missionInitiative && (
               <p className="rounded-lg border border-zinc-800/80 bg-zinc-950/50 px-3 py-2 text-left text-xs text-zinc-300">
                 <span className="text-[10px] uppercase tracking-wider text-zinc-500">
-                  From GitHub
+                  {memory?.repoFullName ? 'From GitHub' : 'Mission memory'}
                 </span>
                 <br />
                 {missionInitiative}
                 {missionNextStep && !isStaleBoilerplateMissionTask(missionNextStep) ? (
                   <>
                     <br />
-                    <span className="mt-1 inline-block text-emerald-300/90">
+                    <span className="mt-1 inline-block text-zinc-400">
                       Next: {missionNextStep}
                     </span>
                   </>
                 ) : null}
               </p>
             )}
-            <p className="text-center text-xs">
+            <p className="text-center text-xs text-zinc-600">
               {isHero
-                ? 'Or type below — I route to research, build, or Sovereign vault drafting automatically.'
+                ? 'Ask anything — vault drafting, Cursor builds, or onboarding links with step-by-step guides.'
                 : 'Type below, then pick your model or code agent and send.'}
             </p>
           </div>
@@ -1177,24 +1156,33 @@ export function FounderCopilotChat({
               className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium ${
                 listening
                   ? 'bg-red-600 text-white ring-2 ring-red-500/50'
-                  : starting
-                    ? 'bg-amber-600/90 text-white ring-2 ring-amber-500/40'
-                    : 'text-zinc-500 hover:bg-zinc-900 hover:text-white'
+                  : waitingNetwork
+                    ? 'bg-sky-700/90 text-white ring-2 ring-sky-500/40'
+                    : starting
+                      ? 'bg-amber-600/90 text-white ring-2 ring-amber-500/40'
+                      : 'text-zinc-500 hover:bg-zinc-900 hover:text-white'
               }`}
               title={
                 listening
                   ? 'Stop recording'
-                  : starting
-                    ? 'Starting microphone… allow if prompted'
-                    : 'Voice input (speech to text)'
+                  : waitingNetwork
+                    ? 'Waiting for internet — transcript kept, retrying…'
+                    : starting
+                      ? 'Starting microphone… allow if prompted'
+                      : 'Voice input (speech to text)'
               }
             >
-              {listening ? '⏹ Stop' : starting ? 'Starting…' : '🎤'}
+              {listening ? '⏹ Stop' : waitingNetwork ? '⏳ Waiting…' : starting ? 'Starting…' : '🎤'}
               <VoiceWaveform phase={phase} level={audioLevel} />
             </button>
             {starting && (
               <span className="text-[10px] text-amber-200 animate-pulse">
                 Allow microphone when your browser asks…
+              </span>
+            )}
+            {waitingNetwork && (
+              <span className="text-[10px] font-medium text-sky-200">
+                Offline — keeping your words; will transcribe when connection returns
               </span>
             )}
             {listening && (

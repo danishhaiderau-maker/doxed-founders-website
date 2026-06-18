@@ -11,7 +11,8 @@ export function isStaleBoilerplateMissionTask(title: string | null | undefined):
     /^define your next milestone/.test(t) ||
     /deploy verification.*(dns|ssl|page load)/.test(t) ||
     /^list acceptance criteria/.test(t) ||
-    /^map user stories/.test(t)
+    /^map user stories/.test(t) ||
+    /checkbalance|smart contract function|token.gating|souvenir gallery|metamask wallet/.test(t)
   );
 }
 

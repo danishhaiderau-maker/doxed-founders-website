@@ -27,10 +27,12 @@ type SpeechRecognitionEventLike = {
   };
 };
 
-export type VoiceInputPhase = 'idle' | 'starting' | 'listening';
+export type VoiceInputPhase = 'idle' | 'starting' | 'listening' | 'waiting_network';
 
-const MAX_RECOGNITION_RESTARTS = 8;
+const MAX_RECOGNITION_RESTARTS = 24;
 const RESTART_DELAY_MS = 350;
+const NETWORK_RETRY_BASE_MS = 1200;
+const MAX_NETWORK_RETRIES = 12;
 
 function getSpeechRecognition(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
@@ -51,7 +53,7 @@ function voiceErrorMessage(code: string): string {
     case 'audio-capture':
       return 'No microphone found — plug in a mic or check Windows sound settings.';
     case 'network':
-      return 'Voice transcription needs internet — Chrome sends audio to Google servers. Check Wi‑Fi/VPN, or type your message instead.';
+      return 'Waiting for internet — your words are kept; transcription resumes when connection returns.';
     case 'aborted':
       return '';
     default:
@@ -73,6 +75,9 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const wantListeningRef = useRef(false);
   const transcriptBaseRef = useRef('');
   const restartCountRef = useRef(0);
+  const networkRetryRef = useRef(0);
+  const waitingNetworkRef = useRef(false);
+  const networkRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseRafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
 
@@ -82,6 +87,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
 
   const listening = phase === 'listening';
   const starting = phase === 'starting';
+  const waitingNetwork = phase === 'waiting_network';
 
   const stopPulse = useCallback(() => {
     if (pulseRafRef.current != null) {
@@ -106,30 +112,67 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     pulseRafRef.current = requestAnimationFrame(tick);
   }, [stopPulse]);
 
+  const clearNetworkRetryTimer = useCallback(() => {
+    if (networkRetryTimerRef.current != null) {
+      clearTimeout(networkRetryTimerRef.current);
+      networkRetryTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     setSupported(Boolean(getSpeechRecognition()));
     return () => {
       wantListeningRef.current = false;
+      clearNetworkRetryTimer();
       recRef.current?.abort();
       stopPulse();
     };
-  }, [stopPulse]);
+  }, [clearNetworkRetryTimer, stopPulse]);
 
   const markListening = useCallback(() => {
     setPhase('listening');
     setVoiceError(null);
+    networkRetryRef.current = 0;
     startPulse();
   }, [startPulse]);
 
   const stopRecognition = useCallback(() => {
     wantListeningRef.current = false;
     restartCountRef.current = 0;
+    networkRetryRef.current = 0;
+    clearNetworkRetryTimer();
     recRef.current?.stop();
     recRef.current?.abort();
     recRef.current = null;
     setPhase('idle');
     stopPulse();
-  }, [stopPulse]);
+  }, [clearNetworkRetryTimer, stopPulse]);
+
+  const scheduleNetworkRetry = useCallback(
+    (startRecognitionFn: () => void) => {
+      if (!wantListeningRef.current) return;
+      if (networkRetryRef.current >= MAX_NETWORK_RETRIES) {
+        setVoiceError(
+          'Still offline — your typed text is safe. Tap Stop, then retry the mic when Wi‑Fi is back.',
+        );
+        wantListeningRef.current = false;
+        setPhase('idle');
+        stopPulse();
+        return;
+      }
+      networkRetryRef.current += 1;
+      waitingNetworkRef.current = true;
+      setPhase('waiting_network');
+      setVoiceError(voiceErrorMessage('network'));
+      startPulse();
+      const delay = NETWORK_RETRY_BASE_MS * Math.min(networkRetryRef.current, 6);
+      clearNetworkRetryTimer();
+      networkRetryTimerRef.current = setTimeout(() => {
+        if (wantListeningRef.current) startRecognitionFn();
+      }, delay);
+    },
+    [clearNetworkRetryTimer, startPulse, stopPulse],
+  );
 
   const startRecognition = useCallback(() => {
     const Ctor = getSpeechRecognition();
@@ -142,7 +185,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     }
 
     if (restartCountRef.current >= MAX_RECOGNITION_RESTARTS) {
-      setVoiceError('Voice session ended — tap the mic again to continue.');
+      setVoiceError('Voice session paused — tap the mic again to continue.');
       wantListeningRef.current = false;
       setPhase('idle');
       stopPulse();
@@ -157,6 +200,8 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
 
     rec.onstart = () => {
       restartCountRef.current = 0;
+      networkRetryRef.current = 0;
+      waitingNetworkRef.current = false;
       markListening();
     };
     rec.onspeechstart = () => markListening();
@@ -179,13 +224,16 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     };
 
     rec.onerror = (ev) => {
+      if (ev.error === 'network' && wantListeningRef.current) {
+        scheduleNetworkRetry(startRecognition);
+        return;
+      }
       const msg = voiceErrorMessage(ev.error);
       if (msg) setVoiceError(msg);
       if (
         ev.error === 'not-allowed' ||
         ev.error === 'service-not-allowed' ||
-        ev.error === 'audio-capture' ||
-        ev.error === 'network'
+        ev.error === 'audio-capture'
       ) {
         stopRecognition();
       }
@@ -197,6 +245,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
         stopPulse();
         return;
       }
+      if (waitingNetworkRef.current) return;
       restartCountRef.current += 1;
       if (restartCountRef.current >= MAX_RECOGNITION_RESTARTS) {
         stopRecognition();
@@ -217,7 +266,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       setPhase('idle');
       stopPulse();
     }
-  }, [markListening, stopPulse, stopRecognition]);
+  }, [markListening, scheduleNetworkRetry, stopPulse, stopRecognition]);
 
   const start = useCallback(
     (existingText = '') => {
@@ -225,6 +274,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       transcriptBaseRef.current = existingText.trim();
       wantListeningRef.current = true;
       restartCountRef.current = 0;
+      networkRetryRef.current = 0;
       setPhase('starting');
       startRecognition();
     },
@@ -248,6 +298,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   return {
     listening,
     starting,
+    waitingNetwork,
     phase,
     supported,
     audioLevel,
