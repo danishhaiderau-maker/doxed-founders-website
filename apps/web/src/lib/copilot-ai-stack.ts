@@ -40,6 +40,7 @@ export type ProviderRow = {
   label: string;
   connected: boolean;
   connectMode?: string;
+  billingSource?: 'byok' | 'platform_promo';
 };
 
 export function shortProviderName(provider: { key: string; label: string }): string {
@@ -66,7 +67,10 @@ export function listChatProviders(providers: ProviderRow[], defaultProvider: str
     (p) =>
       p.connected &&
       p.key !== 'RULE_BASED' &&
-      (p.connectMode === 'api_key' || p.connectMode === 'founder_node'),
+      (p.connectMode === 'api_key' ||
+        p.connectMode === 'founder_node' ||
+        p.connectMode === 'remote_agent' ||
+        p.billingSource === 'platform_promo'),
   );
   const defaultChat =
     connected.find((p) => p.key === defaultProvider) ??
@@ -175,17 +179,26 @@ export function listCopilotActions(
   connections?: { cursor?: boolean; openHands?: boolean },
 ): CopilotAction[] {
   const { connected } = listChatProviders(providers, defaultProvider);
-  const asks: CopilotAction[] = connected.map((p) => ({
-    id: `ask:${p.key}`,
-    kind: 'ask',
-    providerKey: p.key,
-    label: `Ask ${shortProviderName(p)}`,
-  }));
+  const asks: CopilotAction[] = connected
+    .filter((p) => p.connectMode !== 'remote_agent')
+    .map((p) => ({
+      id: `ask:${p.key}`,
+      kind: 'ask',
+      providerKey: p.key,
+      label:
+        p.billingSource === 'platform_promo'
+          ? `Ask ${shortProviderName(p)} (Promo)`
+          : `Ask ${shortProviderName(p)}`,
+    }));
   const builds: CopilotAction[] = listBuildWorkers(connections ?? {}).map((w) => ({
     id: `build:${w.key}`,
     kind: 'build',
     workerKey: w.key,
-    label: `Build with ${w.label}`,
+    label:
+      w.key === 'CURSOR' &&
+      providers.find((p) => p.key === 'CURSOR')?.billingSource === 'platform_promo'
+        ? `Build with ${w.label} (Promo)`
+        : `Build with ${w.label}`,
   }));
   if (asks.length === 0) {
     asks.push({
@@ -223,12 +236,16 @@ export function buildCopilotUsageLines(
 ): CopilotUsageLine[] {
   const lines: CopilotUsageLine[] = [
     {
-      title: 'Resume',
-      detail: 'Sync GitHub + vault briefing. No code changes.',
+      title: 'Take full control',
+      detail: 'Sync GitHub + vault and push all updates to your local Sovereign stack.',
     },
     {
-      title: "What's the status?",
-      detail: 'GitHub-grounded answer — pick any Ask model below.',
+      title: 'Build with Cursor',
+      detail: 'Direct code agent — implements in your GitHub repo from chat.',
+    },
+    {
+      title: 'Deploy to cloud',
+      detail: 'When past idea phase — copy vault config to Vercel, Railway, and Neon.',
     },
   ];
 
@@ -360,8 +377,15 @@ export type AiTeamAgentCard = {
 
 function connectedLlmProviders(providers: ProviderRow[]): ProviderRow[] {
   return providers.filter(
-    (p) => p.connected && CHAT_LLM_KEYS.includes(p.key as (typeof CHAT_LLM_KEYS)[number]),
+    (p) =>
+      p.connected &&
+      CHAT_LLM_KEYS.includes(p.key as (typeof CHAT_LLM_KEYS)[number]),
   );
+}
+
+function providerLabelWithPromo(p: ProviderRow): string {
+  const name = shortProviderName(p);
+  return p.billingSource === 'platform_promo' ? `${name} (Promo)` : name;
 }
 
 export function resolveAiTeamCards(
@@ -373,12 +397,17 @@ export function resolveAiTeamCards(
   },
 ): AiTeamAgentCard[] {
   const llms = connectedLlmProviders(providers);
-  const llmLabels = llms.map((p) => shortProviderName(p));
+  const llmLabels = llms.map((p) => providerLabelWithPromo(p));
   const researchConnected = llms.length > 0;
   const contentConnected = llms.length > 0;
 
-  const builderLabel =
-    stack.buildWorkers[0]?.label ?? (stack.canBuild ? 'Cursor' : undefined);
+  const builderLabel = stack.buildWorkers[0]
+    ? providers.find((p) => p.key === 'CURSOR')?.billingSource === 'platform_promo'
+      ? `${stack.buildWorkers[0].label} (Promo)`
+      : stack.buildWorkers[0].label
+    : stack.canBuild
+      ? 'Cursor'
+      : undefined;
 
   return [
     {

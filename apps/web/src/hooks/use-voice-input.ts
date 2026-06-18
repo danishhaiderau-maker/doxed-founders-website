@@ -51,7 +51,7 @@ function voiceErrorMessage(code: string): string {
     case 'audio-capture':
       return 'No microphone found — plug in a mic or check Windows sound settings.';
     case 'network':
-      return 'Voice needs internet (Chrome sends audio for transcription). Check connection and retry.';
+      return 'Voice transcription needs internet — Chrome sends audio to Google servers. Check Wi‑Fi/VPN, or type your message instead.';
     case 'aborted':
       return '';
     default:

@@ -3,16 +3,16 @@
 import type { CopilotUsageLine } from '@/lib/copilot-ai-stack';
 
 type Props = {
-  onTryStatus: () => void;
-  onTryResume: () => void;
+  onTakeFullControl: () => void;
+  onBuildWithCursor: () => void;
   usageLines?: CopilotUsageLine[];
   compact?: boolean;
 };
 
 /** Onboarding strip for new builders at /founder-den Mission Control. */
 export function FounderMissionControlQuickstart({
-  onTryStatus,
-  onTryResume,
+  onTakeFullControl,
+  onBuildWithCursor,
   usageLines,
   compact,
 }: Props) {
@@ -23,22 +23,25 @@ export function FounderMissionControlQuickstart({
       }`}
     >
       <p className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300/90">
-        How to use Mission Control
+        Founder OS commands
       </p>
       {!compact && (
         <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
-          Pick an action below the chat — <strong className="font-medium text-zinc-300">Ask DeepSeek</strong>,{' '}
-          <strong className="font-medium text-zinc-300">Ask Ollama</strong>, or{' '}
-          <strong className="font-medium text-zinc-300">Build with Cursor</strong>. Your connection hub above
-          shows what is green vs needs setup.
+          Promo-tagged models are platform-billed for your first month. Pick an action below the chat —{' '}
+          <strong className="font-medium text-zinc-300">Ask DeepSeek</strong>,{' '}
+          <strong className="font-medium text-zinc-300">Ask Gemini</strong>, or{' '}
+          <strong className="font-medium text-zinc-300">Build with Cursor</strong>.
         </p>
       )}
       <ol className={`mt-2 space-y-1 text-xs text-zinc-400 ${compact ? '' : 'list-decimal pl-4'}`}>
         {(usageLines ?? [
-          { title: 'Resume', detail: 'Sync GitHub + vault briefing (no code changes).' },
           {
-            title: "What's the status?",
-            detail: 'GitHub-grounded — use an Ask model in chat.',
+            title: 'Take full control',
+            detail: 'Sync GitHub + vault and push updates to your Sovereign stack.',
+          },
+          {
+            title: 'Build with Cursor',
+            detail: 'Direct code agent — implements in your GitHub repo.',
           },
         ]).map((line) => (
           <li key={line.title}>
@@ -46,30 +49,21 @@ export function FounderMissionControlQuickstart({
             {line.detail ? ` — ${line.detail}` : ''}
           </li>
         ))}
-        <li>
-          <button
-            type="button"
-            onClick={onTryStatus}
-            className="font-medium text-cyan-300 underline decoration-cyan-500/50 hover:text-cyan-200"
-          >
-            Try: What&apos;s the status?
-          </button>
-        </li>
       </ol>
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={onTryStatus}
-          className="rounded-lg bg-cyan-600/80 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-cyan-500"
+          onClick={onTakeFullControl}
+          className="rounded-lg bg-violet-600/90 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500"
         >
-          Ask: What&apos;s the status?
+          Take full control
         </button>
         <button
           type="button"
-          onClick={onTryResume}
-          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-[11px] text-zinc-300 hover:border-violet-500/50"
+          onClick={onBuildWithCursor}
+          className="rounded-lg bg-emerald-600/80 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500"
         >
-          ▶ Resume first
+          Build with Cursor
         </button>
       </div>
     </div>
