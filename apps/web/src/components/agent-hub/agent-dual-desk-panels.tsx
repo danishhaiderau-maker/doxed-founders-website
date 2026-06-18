@@ -5,6 +5,7 @@ import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-excha
 import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
+import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
 type DeskPanelProps = {
@@ -40,7 +41,8 @@ function DeskPanel({
   );
 }
 
-export function AgentDualDeskPanels({
+export function AgentDeskView({
+  activeDesk,
   mode,
   exchangeLabel,
   userAgent,
@@ -50,6 +52,7 @@ export function AgentDualDeskPanels({
   userActivity,
   showcaseActivity,
 }: {
+  activeDesk: AgentDeskId;
   mode: 'live' | 'copy' | 'showcase';
   exchangeLabel?: string | null;
   userAgent: TradingAgentSummary;
@@ -59,77 +62,82 @@ export function AgentDualDeskPanels({
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
 }) {
-  if (mode === 'showcase') {
+  if (activeDesk === 'showcase' || mode === 'showcase') {
     return (
       <DeskPanel
         badge="Admin showcase"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
-        title="Conservative BTC Agent · research desk"
-        subtitle="Public paper run on Railway — signals, limits, positions, and trades from the showcase bot."
+        title="Conservative BTC Agent · showcase bot"
+        subtitle="Public research run on Railway — signals, limit orders, open positions, expired orders, and closed trades."
       >
         <AgentShowcaseEquity agent={showcaseAgent} title="Showcase equity" />
         <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={10} />
-        <AgentTradeJourney activity={showcaseActivity} layout="horizontal" />
+        <AgentTradeJourney
+          activity={showcaseActivity}
+          liveBook={showcaseLiveBook}
+          layout="horizontal"
+          windowMinutes={30}
+        />
       </DeskPanel>
     );
   }
 
-  const primary =
-    mode === 'live'
-      ? {
-          badge: `${exchangeLabel ?? 'Bitfinex'} · live copy`,
-          badgeClassName: 'text-emerald-300',
-          borderClassName: 'border-emerald-500/45',
-          title: `Your ${exchangeLabel ?? 'Bitfinex'} account`,
-          subtitle:
-            'Real money on your exchange — open position, pending limits, expired relay orders, closed copy trades, and session P&L.',
-        }
-      : {
-          badge: 'Paper track',
-          badgeClassName: 'text-violet-300',
-          borderClassName: 'border-violet-500/40',
-          title: 'Your paper-track session',
-          subtitle:
-            'DDollar simulation from when you started — isolated from the admin showcase and from other users.',
-        };
-
-  const secondary = {
-    badge: 'Admin showcase bot',
-    badgeClassName: 'text-amber-200/90',
-    borderClassName: 'border-amber-500/30',
-    title: 'Conservative BTC Agent · signal source',
-    subtitle:
-      'What the research bot is doing on Railway — this is what your live copy relays when a signal is approved.',
-  };
+  const exchange = exchangeLabel ?? 'Bitfinex';
+  const isLive = mode === 'live';
 
   return (
-    <div className="grid gap-6 xl:grid-cols-2">
-      <DeskPanel {...primary}>
-        {mode === 'live' ? (
-          <AgentLiveExchangeEquity agent={userAgent} exchangeLabel={exchangeLabel ?? 'Bitfinex'} />
-        ) : (
-          <AgentShowcaseEquity agent={userAgent} title="Your session equity" compact />
-        )}
-        {exchangeLiveBook ? (
-          <AgentTransparencyTables liveBook={exchangeLiveBook} maxRows={10} />
-        ) : mode === 'live' ? (
-          <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
-            Connect Bitfinex and start the relay to load live orders and positions from your exchange.
-          </p>
-        ) : (
-          <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
-            Start a paper-track session to see your signals, pending limits, and closed trades here.
-          </p>
-        )}
-        <AgentTradeJourney activity={userActivity} layout="horizontal" showBalance />
-      </DeskPanel>
-
-      <DeskPanel {...secondary}>
-        <AgentShowcaseEquity agent={showcaseAgent} title="Showcase desk" compact />
-        <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={10} />
-        <AgentTradeJourney activity={showcaseActivity} layout="horizontal" />
-      </DeskPanel>
-    </div>
+    <DeskPanel
+      badge={`${exchange} · live copy`}
+      badgeClassName="text-emerald-300"
+      borderClassName="border-emerald-500/45"
+      title={isLive ? `Your ${exchange} account` : 'Your paper-track session'}
+      subtitle={
+        isLive
+          ? 'Real money on your exchange — every open order, position, expired limit, and closed copy trade.'
+          : 'Your isolated DDollar session — signals and trades from when you started paper tracking.'
+      }
+    >
+      {isLive ? (
+        <AgentLiveExchangeEquity agent={userAgent} exchangeLabel={exchange} />
+      ) : (
+        <AgentShowcaseEquity agent={userAgent} title="Your session equity" compact />
+      )}
+      {exchangeLiveBook ? (
+        <AgentTransparencyTables liveBook={exchangeLiveBook} maxRows={10} />
+      ) : isLive ? (
+        <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
+          Connect {exchange} and start the relay to load live orders and positions from your exchange.
+        </p>
+      ) : (
+        <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
+          Start a paper-track session to see your signals, pending limits, and closed trades here.
+        </p>
+      )}
+      <AgentTradeJourney
+        activity={userActivity}
+        liveBook={exchangeLiveBook}
+        layout="horizontal"
+        showBalance
+        windowMinutes={30}
+      />
+    </DeskPanel>
   );
+}
+
+/** @deprecated Use AgentDeskView with activeDesk instead */
+export function AgentDualDeskPanels(props: {
+  mode: 'live' | 'copy' | 'showcase';
+  exchangeLabel?: string | null;
+  userAgent: TradingAgentSummary;
+  showcaseAgent: TradingAgentSummary;
+  exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
+  userActivity: TradingAgentActivityEntry[];
+  showcaseActivity: TradingAgentActivityEntry[];
+  activeDesk?: AgentDeskId;
+}) {
+  const desk: AgentDeskId =
+    props.activeDesk ?? (props.mode === 'showcase' ? 'showcase' : 'live');
+  return <AgentDeskView activeDesk={desk} {...props} />;
 }

@@ -23,6 +23,7 @@ import {
   sanitizeActivityForPublic,
   filterActivityToExecutedTrades,
   mapBotStateToExecutedTradesActivity,
+  mapBotStateToActivity,
   type BotActivityEntry,
 } from './bot-state.mapper';
 import {
@@ -39,6 +40,10 @@ import {
   mapSubscriberExchangeLiveBook,
   type SubscriberCycleRow,
 } from './subscriber-exchange-live.mapper';
+import {
+  mapLiveBookToActivity,
+  mergeActivityFeeds,
+} from './livebook-activity.mapper';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -878,10 +883,20 @@ export class TradingAgentsService implements OnModuleInit {
       });
     }
 
-    const showcaseActivity = await this.listActivity(slug, 20, true, undefined);
+    const showcaseActivityFromBook = mapLiveBookToActivity(showcaseLiveBook, 'showcase');
+    const listActivityRows = await this.listActivity(slug, 50, true, undefined);
+    let showcaseActivity = mergeActivityFeeds(listActivityRows, showcaseActivityFromBook);
+
+    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+      const botForActivity = await this.botBridge.fetchState();
+      if (botForActivity) {
+        const richFeed = mapBotStateToActivity(botForActivity, agent.name);
+        showcaseActivity = mergeActivityFeeds(richFeed, showcaseActivity);
+      }
+    }
+
     let userActivity = showcaseActivity;
     if (userId && viewScope === 'user') {
-      userActivity = await this.listActivity(slug, 20, true, userId);
       if (agentRowId && overlayMeta?.userSessionStartedAt) {
         exchangeLiveBook = await this.buildSubscriberExchangeLiveBook(
           userId,
@@ -890,6 +905,12 @@ export class TradingAgentsService implements OnModuleInit {
           rest.dashboard.currentPrice,
         );
       }
+      const userBookActivity = mapLiveBookToActivity(
+        exchangeLiveBook,
+        `user-${userId}`,
+      );
+      const scopedList = await this.listActivity(slug, 50, true, userId);
+      userActivity = mergeActivityFeeds(userBookActivity, scopedList);
     }
 
     return {

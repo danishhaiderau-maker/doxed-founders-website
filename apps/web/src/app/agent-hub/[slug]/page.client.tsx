@@ -96,7 +96,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     try {
       const results = await Promise.allSettled([
         withTimeout(fetchTradingAgentDashboard(slug, token), 10000, 'Dashboard'),
-        fetchTradingAgentActivity(slug, 20, token),
+        fetchTradingAgentActivity(slug, 50, token),
         fetchPublicAgentStatus(),
       ]);
 
