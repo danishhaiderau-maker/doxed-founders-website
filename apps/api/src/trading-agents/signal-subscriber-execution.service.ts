@@ -166,6 +166,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       take: 5,
     });
 
+    const userManagedCycles = await this.prisma.signalCycle.findMany({
+      where: {
+        agentId,
+        participants: {
+          some: {
+            userId: instance.userId,
+            status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
     const exitPendingCycles = await this.prisma.signalCycle.findMany({
       where: {
         agentId,
@@ -178,8 +191,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       take: 5,
     });
 
-    const cycleIds = new Set(cycles.map((c) => c.id));
-    const allCycles = [...cycles, ...exitPendingCycles.filter((c) => !cycleIds.has(c.id))];
+    const cycleById = new Map<string, (typeof cycles)[number]>();
+    for (const c of [...userManagedCycles, ...cycles, ...exitPendingCycles]) {
+      cycleById.set(c.id, c);
+    }
+    const allCycles = [...cycleById.values()];
 
     let managedOpenTrade = false;
 
