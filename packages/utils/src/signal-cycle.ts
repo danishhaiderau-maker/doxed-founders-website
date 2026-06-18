@@ -5,10 +5,13 @@ export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
 
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS. */
-export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 1_000;
+export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 500;
 
 /** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS. */
-export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 1_000;
+export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 500;
+
+/** Minimum allowed poll interval (ms) — 0.5s for tight bot copy parity. */
+export const MIN_SUBSCRIBER_POLL_MS = 500;
 
 export function resolveSubscriberMaxMarginUsd(input?: {
   envValue?: string | number | null;
@@ -26,12 +29,12 @@ export function resolveSubscriberMaxMarginUsd(input?: {
 
 export function resolveSubscriberExecutionPollMs(envValue?: string | number | null): number {
   const raw = Number(envValue ?? process.env.SUBSCRIBER_EXECUTION_POLL_MS ?? DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS);
-  return Number.isFinite(raw) && raw >= 1_000 ? raw : DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS;
+  return Number.isFinite(raw) && raw >= MIN_SUBSCRIBER_POLL_MS ? raw : DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS;
 }
 
 export function resolveSignalCyclePollMs(envValue?: string | number | null): number {
   const raw = Number(envValue ?? process.env.SIGNAL_CYCLE_POLL_MS ?? DEFAULT_SIGNAL_CYCLE_POLL_MS);
-  return Number.isFinite(raw) && raw >= 1_000 ? raw : DEFAULT_SIGNAL_CYCLE_POLL_MS;
+  return Number.isFinite(raw) && raw >= MIN_SUBSCRIBER_POLL_MS ? raw : DEFAULT_SIGNAL_CYCLE_POLL_MS;
 }
 
 /** Exchange-neutral signal envelope (ENSE) — portable across venues. */

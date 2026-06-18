@@ -11,6 +11,7 @@ import {
   SUBSCRIBER_MAX_OPEN_COPY_LEGS,
   SUBSCRIBER_MAX_PENDING_COPY_LEGS,
   SUBSCRIBER_CHASE_INTERVAL_MS,
+  SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
   computeLimitFromMark,
   computeStopPrice,
   computeProfitLockStopPrice,
@@ -35,6 +36,7 @@ const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
 const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
+const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 500;
 
 type ExecutionPayload = {
   bitfinexOrderId?: number;
@@ -82,6 +84,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
   private readonly bitfinex = new BitfinexTradingClient();
   private readonly positionRuntime = new Map<string, PositionRuntime>();
+  private readonly exitingLots = new Set<string>();
   private running = false;
 
   constructor(
@@ -98,11 +101,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
-        `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS / 1000}s (max $${cap} margin/trade)`,
+        `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS}ms (max $${cap} margin/trade)`,
       );
     });
     setInterval(() => void this.tick(), POLL_MS);
-    setTimeout(() => void this.tick(), 1_000);
+    setTimeout(() => void this.tick(), POLL_MS);
   }
 
   private async tick() {
@@ -558,7 +561,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     try {
       const mark = await this.bitfinex.getMarkPrice();
       const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
-      const limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
+      let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
       if (limitPrice == null) {
         this.logger.error(
           `Hire reject ${instance.userId} cycle=${cycleId}: absurd limit ${rawLimit.toFixed(2)} vs mark ${mark.toFixed(2)} offset=${intent.entry.offset_pct}%`,
@@ -570,6 +573,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           },
         });
         return false;
+      }
+
+      if (tradeId && this.botBridge.isEnabled()) {
+        const botState = await this.botBridge.fetchState().catch(() => null);
+        const botLimit = this.resolveBotLimitPrice(botState, tradeId);
+        if (botLimit != null && botLimit > 0) {
+          const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
+          if (anchored != null) limitPrice = anchored;
+        }
       }
 
       const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
@@ -821,10 +833,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     fillPrice?: number,
   ) {
     if (!meta.direction) return;
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
-    if (!position) return;
     const qty = meta.qty ?? MIN_QTY_BTC;
-    const entry = fillPrice ?? position.basePrice;
+    const entry = fillPrice ?? meta.limitPrice;
     if (!entry || entry <= 0) return;
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
@@ -870,62 +880,95 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const lastChaseAtMs = meta.lastChaseAtMs ?? 0;
     const now = Date.now();
-    if (!immediate && now - lastChaseAtMs < CHASE_INTERVAL_MS) return;
-
     const mark = await this.bitfinex.getMarkPrice();
-    if (isNearChaseFillZone(meta.direction, meta.limitPrice, mark)) return;
-
-    const originalLimit = meta.originalLimitPrice ?? meta.limitPrice;
-    let targetLimit = meta.limitPrice;
+    const nearFill = isNearChaseFillZone(meta.direction, meta.limitPrice, mark);
+    const chaseInterval = nearFill ? CHASE_NEAR_FILL_INTERVAL_MS : CHASE_INTERVAL_MS;
+    if (!immediate && now - lastChaseAtMs < chaseInterval) return;
 
     const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
     const botLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
     if (botLimit != null && botLimit > 0) {
       const safeBot = sanitizeLimitPrice(mark, botLimit, meta.direction);
-      if (safeBot != null) targetLimit = safeBot;
+      if (safeBot != null && Math.abs(safeBot - meta.limitPrice) >= 0.01) {
+        await this.replaceRestingLimit(agentId, userId, cycleId, participantId, meta, creds, intent, {
+          newLimit: safeBot,
+          mark,
+          now,
+          chaseLabel: `bot=${botLimit.toFixed(2)}`,
+          event: 'BOT_ANCHOR_CHASE',
+        });
+        return;
+      }
+      if (nearFill) return;
     }
 
+    if (nearFill) return;
+
+    const originalLimit = meta.originalLimitPrice ?? meta.limitPrice;
     const { newLimit, reason } = computeLimitChaseTarget(
       meta.direction,
-      targetLimit,
+      meta.limitPrice,
       mark,
       originalLimit,
     );
     if (reason !== 'LIMIT_CHASE' || Math.abs(newLimit - meta.limitPrice) < 0.01) return;
 
+    await this.replaceRestingLimit(agentId, userId, cycleId, participantId, meta, creds, intent, {
+      newLimit,
+      mark,
+      now,
+      chaseLabel: '',
+      event: 'LIMIT_CHASE',
+    });
+  }
+
+  private async replaceRestingLimit(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope,
+    opts: {
+      newLimit: number;
+      mark: number;
+      now: number;
+      chaseLabel: string;
+      event: 'LIMIT_CHASE' | 'BOT_ANCHOR_CHASE';
+    },
+  ) {
+    if (!meta.direction || !meta.bitfinexOrderId || !meta.limitPrice) return;
+
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
-    const qty = meta.qty ?? computeQty(20, leverage, newLimit, MIN_QTY_BTC);
+    const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
 
     try {
       await this.bitfinex.cancelOrder(creds, meta.bitfinexOrderId);
       const newOrderId = await this.bitfinex.submitLimitOrder(creds, {
         direction: meta.direction,
         qty,
-        price: newLimit,
+        price: opts.newLimit,
         leverage,
       });
       const chaseCount = (meta.limitChaseCount ?? 0) + 1;
       this.logger.log(
-        `Hire chase ${userId} cycle=${cycleId} limit ${meta.limitPrice.toFixed(2)} → ${newLimit.toFixed(2)} (mark ${mark.toFixed(2)}${botLimit != null ? ` bot=${botLimit.toFixed(2)}` : ''})`,
+        `Hire chase ${userId} cycle=${cycleId} ${opts.event} ${meta.limitPrice.toFixed(2)} → ${opts.newLimit.toFixed(2)} (mark ${opts.mark.toFixed(2)}${opts.chaseLabel ? ` ${opts.chaseLabel}` : ''})`,
       );
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
         venue: 'bitfinex',
-        event: 'LIMIT_CHASE',
+        event: opts.event,
         prior_limit: meta.limitPrice,
-        new_limit: newLimit,
-        limitPrice: newLimit,
+        new_limit: opts.newLimit,
+        limitPrice: opts.newLimit,
         bitfinexOrderId: newOrderId,
-        local_mark: mark,
-        lastChaseAtMs: now,
+        local_mark: opts.mark,
+        lastChaseAtMs: opts.now,
         limitChaseCount: chaseCount,
         source: 'hire',
       });
-      const runtime = this.positionRuntime.get(participantId) ?? {
-        peakMarginPct: 0,
-        lastChaseAtMs: 0,
-        filledRecorded: false,
-      };
-      runtime.lastChaseAtMs = now;
+      const runtime = this.hydrateRuntime(participantId, meta);
+      runtime.lastChaseAtMs = opts.now;
       this.positionRuntime.set(participantId, runtime);
     } catch (err) {
       this.logger.warn(
@@ -966,6 +1009,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
   ) {
     if (!meta.qty || !meta.direction) return;
+    if (await this.hasParticipantExited(participant.id)) return;
 
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
     const position = await this.bitfinex.getOpenPositionDetail(creds);
@@ -988,13 +1032,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const mark = await this.bitfinex.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
 
-    const runtime = this.positionRuntime.get(participant.id) ?? {
-      peakMarginPct: meta.peakMarginPct ?? 0,
-      lastChaseAtMs: meta.lastChaseAtMs ?? 0,
-      filledRecorded: true,
-    };
+    const runtime = this.hydrateRuntime(participant.id, meta);
     const priorPeak = Math.max(runtime.peakMarginPct, meta.peakMarginPct ?? 0);
     runtime.peakMarginPct = Math.max(priorPeak, unrealMarginPct);
+    if (meta.profitLockFloor != null) {
+      runtime.lastProfitLockFloor = Math.max(runtime.lastProfitLockFloor ?? 0, meta.profitLockFloor);
+    }
     this.positionRuntime.set(participant.id, runtime);
 
     if (runtime.peakMarginPct > priorPeak + 0.25) {
@@ -1106,7 +1149,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     },
   ) {
     if (!meta.qty || !meta.direction || !opts.reason) return;
+    if (this.exitingLots.has(participantId)) return;
+    if (await this.hasParticipantExited(participantId)) return;
 
+    this.exitingLots.add(participantId);
+    try {
     const closeQty = Math.min(meta.qty, Math.abs((await this.bitfinex.getOpenPositionDetail(creds))?.amount ?? meta.qty));
 
     try {
@@ -1162,6 +1209,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     this.logger.log(
       `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)}`,
     );
+    } finally {
+      this.exitingLots.delete(participantId);
+    }
   }
 
   /**
@@ -1189,7 +1239,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       position &&
       ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
 
-    if (hasExpected) return false;
+    if (hasExpected) {
+      const exchangeQty = Math.abs(position!.amount);
+      if (meta.qty && exchangeQty + MIN_QTY_BTC < meta.qty) {
+        this.logger.warn(
+          `Lot qty drift ${userId} cycle=${cycle.id}: ledger lot ${meta.qty.toFixed(5)} > exchange ${exchangeQty.toFixed(5)} — partial external close?`,
+        );
+      }
+      return false;
+    }
 
     if (meta.stopOrderId) {
       try {
@@ -1258,6 +1316,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    if (await this.hasParticipantExited(participant.id)) {
+      return;
+    }
+
     const position = await this.bitfinex.getOpenPosition(creds);
     if (!position) {
       this.logger.log(`Exit skip ${userId} cycle=${cycle.id}: already flat on exchange`);
@@ -1315,17 +1377,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     this.logger.log(`Hire exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`);
   }
 
+  private hydrateRuntime(participantId: string, meta: ExecutionPayload): PositionRuntime {
+    const cached = this.positionRuntime.get(participantId);
+    if (cached) return cached;
+    return {
+      peakMarginPct: meta.peakMarginPct ?? 0,
+      lastChaseAtMs: meta.lastChaseAtMs ?? 0,
+      lastProfitLockFloor: meta.profitLockFloor,
+      filledRecorded: true,
+    };
+  }
+
+  private async hasParticipantExited(participantId: string): Promise<boolean> {
+    const exits = await this.prisma.signalCycleEvent.count({
+      where: { participantId, eventType: 'EXIT' },
+    });
+    return exits > 0;
+  }
+
   private async loadExecutionMeta(participantId: string): Promise<ExecutionPayload> {
     const events = await this.prisma.signalCycleEvent.findMany({
       where: { participantId },
       orderBy: { createdAt: 'asc' },
     });
     const meta: ExecutionPayload = {};
+    let peakFromEvents = 0;
+    let lockFloorFromEvents = 0;
     for (const e of events) {
       if (e.payload && typeof e.payload === 'object') {
-        Object.assign(meta, e.payload as ExecutionPayload);
+        const p = e.payload as ExecutionPayload & {
+          peak_margin_pct?: number;
+          lock_floor_margin_pct?: number;
+        };
+        Object.assign(meta, p);
+        const peak = Number(p.peak_margin_pct ?? p.peakMarginPct);
+        if (Number.isFinite(peak)) peakFromEvents = Math.max(peakFromEvents, peak);
+        const floor = Number(p.lock_floor_margin_pct ?? p.profitLockFloor);
+        if (Number.isFinite(floor)) lockFloorFromEvents = Math.max(lockFloorFromEvents, floor);
       }
     }
+    meta.peakMarginPct = Math.max(meta.peakMarginPct ?? 0, peakFromEvents);
+    if (lockFloorFromEvents > 0) meta.profitLockFloor = lockFloorFromEvents;
     return meta;
   }
 }

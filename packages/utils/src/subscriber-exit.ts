@@ -156,6 +156,8 @@ export const SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT = 0.9;
 export const SUBSCRIBER_CHASE_STEP_PCT = 0.25;
 /** Matches bot LIMIT_CHASE_INTERVAL_SEC_DEFAULT (60s). */
 export const SUBSCRIBER_CHASE_INTERVAL_MS = 60_000;
+/** Near-fill zone: chase every tick (500ms poll) to mirror bot limit moves. */
+export const SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS = 500;
 /** Scenario C thesis fast-cut (margin %) — bot THESIS_FAST_EXIT_UNREAL_PCT. */
 export const SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT = -12;
 /** Skip thesis fast-cut when peak ever reached this margin % — bot THESIS_MFE_PROTECT_PCT. */
