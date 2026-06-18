@@ -5,7 +5,16 @@ import {
   type TradingAgentInstance,
 } from '@prisma/client';
 import type { SignalIntentEnvelope } from '@dcf/utils';
-import { resolveSubscriberExecutionPollMs } from '@dcf/utils';
+import {
+  resolveSubscriberExecutionPollMs,
+  computeLimitFromMark,
+  computeStopPrice,
+  computeProfitLockStopPrice,
+  computeQty,
+  computeChaseLimitPrice,
+  sanitizeLimitPrice,
+  getProfitLockFloor,
+} from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
@@ -17,6 +26,8 @@ import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
+const CHASE_INTERVAL_MS = 60_000;
+const CHASE_STEP_PCT = 0.25;
 
 type ExecutionPayload = {
   bitfinexOrderId?: number;
@@ -26,31 +37,20 @@ type ExecutionPayload = {
   qty?: number;
   direction?: 'LONG' | 'SHORT';
   source?: 'hire';
+  peakMarginPct?: number;
+  profitLockFloor?: number;
+  stopLossPlaced?: boolean;
+};
+
+type PositionRuntime = {
+  peakMarginPct: number;
+  lastChaseAtMs: number;
+  lastProfitLockFloor?: number;
+  filledRecorded: boolean;
 };
 
 function executionEnabled(): boolean {
   return process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
-}
-
-function computeLimitFromMark(mark: number, offsetPct: number): number {
-  return mark * (1 + offsetPct / 100);
-}
-
-function computeStopPrice(
-  fill: number,
-  direction: 'LONG' | 'SHORT',
-  stopLossMarginPct: number,
-  leverage: number,
-): number {
-  const distance = Math.abs(stopLossMarginPct) / (100 * Math.max(leverage, 1));
-  if (direction === 'LONG') return fill * (1 - distance);
-  return fill * (1 + distance);
-}
-
-function computeQty(marginUsd: number, leverage: number, price: number): number {
-  const notional = marginUsd * leverage;
-  const raw = notional / price;
-  return Math.max(MIN_QTY_BTC, Math.floor(raw * 1e5) / 1e5);
 }
 
 type EntryEligibility = {
@@ -63,6 +63,7 @@ type EntryEligibility = {
 export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
   private readonly bitfinex = new BitfinexTradingClient();
+  private readonly positionRuntime = new Map<string, PositionRuntime>();
   private running = false;
 
   constructor(
@@ -137,6 +138,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (funding.message && funding.transferredUsd > 0) {
         this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
       }
+      await this.cancelAbsurdPendingOrders(creds, instance.userId);
     }
 
     const openParticipant = await this.prisma.signalCycleParticipant.findFirst({
@@ -207,6 +209,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           creds,
         );
         if (!reconciled) {
+          await this.monitorOpenPosition(
+            agentId,
+            instance.userId,
+            cycle,
+            participant,
+            meta,
+            creds,
+          );
           await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
         }
       }
@@ -360,9 +370,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     try {
       const mark = await this.bitfinex.getMarkPrice();
-      const limitPrice = computeLimitFromMark(mark, intent.entry.offset_pct);
+      const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
+      const limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
+      if (limitPrice == null) {
+        this.logger.error(
+          `Hire reject ${instance.userId} cycle=${cycleId}: absurd limit ${rawLimit.toFixed(2)} vs mark ${mark.toFixed(2)} offset=${intent.entry.offset_pct}%`,
+        );
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            lastError: `Entry limit ${rawLimit.toFixed(0)} rejected — price sanity check failed (mark ~$${mark.toFixed(0)}). Signal will retry on next cycle.`,
+          },
+        });
+        return false;
+      }
+
       const leverage = intent.risk.leverage_hint ?? 20;
-      const qty = computeQty(marginUsd, leverage, limitPrice);
+      const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
       const orderId = await this.bitfinex.submitLimitOrder(creds, {
         direction: intent.direction,
@@ -424,6 +448,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const orderId = meta.bitfinexOrderId;
     if (!orderId || !meta.qty || !meta.direction) return;
 
+    await this.cancelAbsurdPendingOrders(creds, userId);
+
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
       try {
         await this.bitfinex.cancelOrder(creds, orderId);
@@ -439,7 +465,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const active = await this.bitfinex.findOrder(creds, orderId);
-    if (active) return;
+    if (active) {
+      await this.chasePendingLimit(agentId, userId, cycle.id, participantId, orderId, meta, creds, intent);
+      return;
+    }
 
     const position = await this.bitfinex.getOpenPosition(creds);
     const expectedLong = meta.direction === 'LONG';
@@ -457,14 +486,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    const runtime = this.positionRuntime.get(participantId);
+    if (runtime?.filledRecorded) return;
+
     const fillPrice = position.basePrice > 0 ? position.basePrice : meta.limitPrice ?? (await this.bitfinex.getMarkPrice());
     const leverage = intent.risk.leverage_hint ?? 20;
-    const stopPrice = computeStopPrice(
-      fillPrice,
-      meta.direction,
-      intent.risk.stop_loss_margin_pct ?? -18,
-      leverage,
-    );
+    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
     const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
       positionDirection: meta.direction,
@@ -482,14 +510,245 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       fill_price: fillPrice,
       qty: meta.qty,
       stop_loss_placed: stopOrderId != null,
-      stop_loss_margin_pct: intent.risk.stop_loss_margin_pct ?? -18,
+      stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
       source: 'hire',
     });
 
+    if (stopOrderId != null) {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
+        venue: 'bitfinex',
+        stop_price: stopPrice,
+        stopOrderId,
+        source: 'hire',
+      });
+    }
+
+    this.positionRuntime.set(participantId, {
+      peakMarginPct: 0,
+      lastChaseAtMs: 0,
+      filledRecorded: true,
+    });
+
     this.logger.log(
-      `Hire fill ${userId} cycle=${cycle.id} @ ${fillPrice.toFixed(2)} stop=${stopPrice.toFixed(2)}`,
+      `Hire fill ${userId} cycle=${cycle.id} @ ${fillPrice.toFixed(2)} stop=${stopPrice.toFixed(2)} armed=${stopOrderId != null}`,
     );
+  }
+
+  private async chasePendingLimit(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    orderId: number,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope,
+  ) {
+    if (!meta.direction || !meta.limitPrice) return;
+
+    const runtime = this.positionRuntime.get(participantId) ?? {
+      peakMarginPct: 0,
+      lastChaseAtMs: 0,
+      filledRecorded: false,
+    };
+    const now = Date.now();
+    if (now - runtime.lastChaseAtMs < CHASE_INTERVAL_MS) return;
+
+    const mark = await this.bitfinex.getMarkPrice();
+    const chased = computeChaseLimitPrice(mark, meta.limitPrice, meta.direction, CHASE_STEP_PCT);
+    const safe = sanitizeLimitPrice(mark, chased, meta.direction);
+    if (safe == null || Math.abs(safe - meta.limitPrice) < 0.5) return;
+
+    try {
+      await this.bitfinex.cancelOrder(creds, orderId);
+      const leverage = intent.risk.leverage_hint ?? 20;
+      const qty = meta.qty ?? computeQty(20, leverage, safe, MIN_QTY_BTC);
+      const newOrderId = await this.bitfinex.submitLimitOrder(creds, {
+        direction: meta.direction,
+        qty,
+        price: safe,
+      });
+      runtime.lastChaseAtMs = now;
+      this.positionRuntime.set(participantId, runtime);
+      this.logger.log(
+        `Hire chase ${userId} cycle=${cycleId} limit ${meta.limitPrice.toFixed(2)} → ${safe.toFixed(2)} (mark ${mark.toFixed(2)})`,
+      );
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+        venue: 'bitfinex',
+        event: 'LIMIT_CHASE',
+        prior_limit: meta.limitPrice,
+        new_limit: safe,
+        limitPrice: safe,
+        bitfinexOrderId: newOrderId,
+        local_mark: mark,
+        source: 'hire',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Limit chase ${userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /** Cancel resting limits whose price is far from market (e.g. $904 on $64k BTC). */
+  private async cancelAbsurdPendingOrders(creds: ExchangeCredentials, userId: string) {
+    const mark = await this.bitfinex.getMarkPrice().catch(() => null);
+    if (!mark) return;
+    const orders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    for (const order of orders) {
+      const deviationPct = Math.abs((order.price - mark) / mark) * 100;
+      if (deviationPct > 8) {
+        try {
+          await this.bitfinex.cancelOrder(creds, order.id);
+          this.logger.warn(
+            `Cancelled absurd order ${order.id} for ${userId}: price ${order.price} vs mark ${mark.toFixed(2)}`,
+          );
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  }
+
+  /**
+   * Live profit-lock ladder + trailing stop while showcase position is still open.
+   * Mirrors showcase bot TRAIL_LADDER (12% peak → lock 8%, etc.).
+   */
+  private async monitorOpenPosition(
+    agentId: string,
+    userId: string,
+    cycle: { id: string; intentEnvelope: unknown },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+  ) {
+    if (!meta.qty || !meta.direction) return;
+
+    const intent = cycle.intentEnvelope as SignalIntentEnvelope;
+    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const expectedLong = meta.direction === 'LONG';
+    const hasExpected =
+      position &&
+      ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
+    if (!hasExpected) return;
+
+    const unrealMarginPct = position.pnlPct;
+    const runtime = this.positionRuntime.get(participant.id) ?? {
+      peakMarginPct: meta.peakMarginPct ?? 0,
+      lastChaseAtMs: 0,
+      filledRecorded: true,
+    };
+    runtime.peakMarginPct = Math.max(runtime.peakMarginPct, unrealMarginPct);
+    this.positionRuntime.set(participant.id, runtime);
+
+    const lockFloor = getProfitLockFloor(runtime.peakMarginPct);
+    const fillPrice =
+      participant.fillPrice != null
+        ? Number(participant.fillPrice)
+        : position.basePrice > 0
+          ? position.basePrice
+          : meta.limitPrice ?? 0;
+    const leverage = intent.risk.leverage_hint ?? 20;
+
+    if (lockFloor != null && unrealMarginPct <= lockFloor) {
+      const mark = await this.bitfinex.getMarkPrice();
+      try {
+        if (meta.stopOrderId) {
+          try {
+            await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
+          } catch {
+            /* may have fired */
+          }
+        }
+        await this.bitfinex.submitMarketClose(creds, {
+          positionDirection: meta.direction,
+          qty: meta.qty,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Profit-lock close ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+
+      const direction = meta.direction;
+      const pnlUsd =
+        fillPrice && mark
+          ? direction === 'LONG'
+            ? (mark - fillPrice) * meta.qty
+            : (fillPrice - mark) * meta.qty
+          : position.pnlUsd;
+      const pnlMarginPct = runtime.peakMarginPct > 0 ? lockFloor : unrealMarginPct;
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        venue: 'bitfinex',
+        exit_price: mark,
+        exit_reason: 'PROFIT_LOCK',
+        peak_margin_pct: runtime.peakMarginPct,
+        lock_floor_margin_pct: lockFloor,
+        pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+        source: 'hire',
+      });
+      this.positionRuntime.delete(participant.id);
+      this.logger.log(
+        `Hire profit-lock ${userId} cycle=${cycle.id} peak=${runtime.peakMarginPct.toFixed(2)}% lock=${lockFloor}% exit=${mark.toFixed(2)}`,
+      );
+      return;
+    }
+
+    if (!meta.stopOrderId && fillPrice > 0) {
+      const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+      const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+      const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+        positionDirection: meta.direction,
+        qty: meta.qty,
+        stopPrice,
+      }).catch(() => null);
+      if (stopOrderId != null) {
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
+          venue: 'bitfinex',
+          stop_price: stopPrice,
+          stopOrderId,
+          source: 'hire',
+        });
+        this.logger.log(`Hire stop retry ${userId} cycle=${cycle.id} @ ${stopPrice.toFixed(2)}`);
+      }
+    }
+
+    if (lockFloor != null && fillPrice > 0 && meta.stopOrderId) {
+      const trailStop = computeProfitLockStopPrice(fillPrice, meta.direction, lockFloor, leverage);
+      const priorFloor = runtime.lastProfitLockFloor ?? 0;
+      if (lockFloor > priorFloor + 0.5) {
+        try {
+          await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
+          const newStopId = await this.bitfinex.submitStopOrder(creds, {
+            positionDirection: meta.direction,
+            qty: meta.qty,
+            stopPrice: trailStop,
+          });
+          runtime.lastProfitLockFloor = lockFloor;
+          this.positionRuntime.set(participant.id, runtime);
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            event: 'PROFIT_LOCK_TRAIL',
+            lock_floor_margin_pct: lockFloor,
+            profitLockFloor: lockFloor,
+            peak_margin_pct: runtime.peakMarginPct,
+            stop_price: trailStop,
+            stopOrderId: newStopId,
+            source: 'hire',
+          });
+          this.logger.log(
+            `Hire trail stop ${userId} cycle=${cycle.id} floor=${lockFloor}% stop=${trailStop.toFixed(2)}`,
+          );
+        } catch (err) {
+          this.logger.warn(
+            `Trail stop update ${userId}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+    }
   }
 
   /**
