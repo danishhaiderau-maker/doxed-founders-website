@@ -3515,6 +3515,13 @@ export interface TradingAgentSummary {
   exchangeBalanceUsd?: number | null;
   hireFeeDdollar?: number | null;
   paperDdRefunded?: number | null;
+  exchangeUsd?: number | null;
+  fundingUsd?: number | null;
+  tradingFeesUsd?: number | null;
+  fundingFeesUsd?: number | null;
+  fundsInWrongWallet?: boolean;
+  openPositionSide?: string | null;
+  walletStatusHint?: string | null;
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;

@@ -12,8 +12,8 @@ import {
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
 import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
+import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-exchange-equity';
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
-import { BitfinexDerivativesFundingGuide } from '@/components/agent-hub/bitfinex-derivatives-funding-guide';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
@@ -330,21 +330,11 @@ export function AgentPublicProfile({
 
       {isLiveSession && (
         <div className="mb-4">
-          <AgentShowcaseEquity
+          <AgentLiveExchangeEquity
             agent={agent}
-            title={`Your ${exchangeLabel ?? 'Bitfinex'} Derivatives wallet`}
-            mode="live"
             exchangeLabel={exchangeLabel ?? 'Bitfinex'}
             compact
           />
-          {exchangeProvider === 'bitfinex' && (
-            <div className="mt-3">
-              <BitfinexDerivativesFundingGuide
-                derivativesUsd={agent.exchangeBalanceUsd ?? agent.balanceUsd}
-                compact
-              />
-            </div>
-          )}
         </div>
       )}
 

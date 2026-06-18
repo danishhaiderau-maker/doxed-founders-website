@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/com
 import {
   NotificationType,
   Prisma,
+  SignalCycleStatus,
   TradingAgentActivityType,
   TradingAgentKind,
   TradingAgentStatus,
@@ -135,6 +136,13 @@ function serializeAgent(
     exchangeBalanceUsd?: number | null;
     hireFeeDdollar?: number | null;
     paperDdRefunded?: number | null;
+    exchangeUsd?: number | null;
+    fundingUsd?: number | null;
+    tradingFeesUsd?: number | null;
+    fundingFeesUsd?: number | null;
+    fundsInWrongWallet?: boolean;
+    openPositionSide?: string | null;
+    walletStatusHint?: string | null;
     liveStats?: {
       balanceUsd?: number;
       equityUsd?: number;
@@ -190,6 +198,13 @@ function serializeAgent(
     exchangeBalanceUsd: extra?.exchangeBalanceUsd ?? null,
     hireFeeDdollar: extra?.hireFeeDdollar ?? null,
     paperDdRefunded: extra?.paperDdRefunded ?? null,
+    exchangeUsd: extra?.exchangeUsd ?? null,
+    fundingUsd: extra?.fundingUsd ?? null,
+    tradingFeesUsd: extra?.tradingFeesUsd ?? null,
+    fundingFeesUsd: extra?.fundingFeesUsd ?? null,
+    fundsInWrongWallet: extra?.fundsInWrongWallet ?? false,
+    openPositionSide: extra?.openPositionSide ?? null,
+    walletStatusHint: extra?.walletStatusHint ?? null,
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
@@ -618,38 +633,66 @@ export class TradingAgentsService implements OnModuleInit {
       typeof dash.hireFeeDdollarPaid === 'number' ? (dash.hireFeeDdollarPaid as number) : null;
 
     if (scope.instanceMode === 'live' && instance.exchangeProvider !== 'paper') {
-      const sessionStartUsd =
-        typeof dash.liveSessionStartingBalanceUsd === 'number'
-          ? (dash.liveSessionStartingBalanceUsd as number)
-          : scope.startingBalanceUsd;
-      const available = await this.exchanges.getUserAvailableUsd(
-        userId,
-        instance.exchangeProvider,
+      const sessionStart = scope.sessionStartedAt;
+      const closedParticipants = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          status: SignalCycleStatus.CLOSED,
+          updatedAt: { gte: sessionStart },
+          cycle: { agentId },
+        },
+        select: { pnlUsd: true },
+      });
+      const realizedPnlUsd = closedParticipants.reduce(
+        (sum, row) => sum + Number(row.pnlUsd ?? 0),
+        0,
       );
-      const exchangeBalanceUsd = available ?? sessionStartUsd;
 
-      const rawActivity = await this.fetchShowcaseExecutedActivity(agent.slug);
-      const liveScope = { ...scope, startingBalanceUsd: sessionStartUsd };
-      const scoped = scopeActivityToUserSession(rawActivity, liveScope);
-      const stats = statsFromScopedActivity(scoped, liveScope);
-      const sessionPnlUsd = stats.sessionPnlUsd ?? stats.equityUsd - sessionStartUsd;
+      const metrics =
+        instance.exchangeProvider === 'bitfinex'
+          ? await this.exchanges.getUserBitfinexLiveMetrics(userId, {
+              sessionStartedAt: sessionStart,
+              realizedPnlUsd,
+            })
+          : null;
+
+      const exchangeBalanceUsd = metrics?.derivativesAvailableUsd ?? 0;
+      const walletHint = metrics?.fundsInWrongWallet
+        ? `USDT detected in Exchange/Funding — move to Derivatives to trade (Exchange $${metrics.exchangeUsd.toFixed(0)} · Funding $${metrics.fundingUsd.toFixed(0)}).`
+        : metrics?.openPosition
+          ? `${metrics.openPosition.direction} open · unrealized ${metrics.unrealizedPnlUsd >= 0 ? '+' : ''}$${metrics.unrealizedPnlUsd.toFixed(2)}`
+          : exchangeBalanceUsd < 5
+            ? 'Transfer USDT to Bitfinex Derivatives wallet to arm the next copy trade.'
+            : 'Derivatives funded — relay will copy next showcase signal.';
 
       return {
         instanceStatus: instance.status,
         instanceMode: 'live' as const,
         viewScope: 'user' as const,
-        userSessionStartedAt: scope.sessionStartedAt.toISOString(),
+        userSessionStartedAt: sessionStart.toISOString(),
         rentalExpiresAt,
         exchangeBalanceUsd,
+        exchangeUsd: metrics?.exchangeUsd ?? null,
+        fundingUsd: metrics?.fundingUsd ?? null,
+        tradingFeesUsd: metrics?.tradingFeesUsd ?? null,
+        fundingFeesUsd: metrics?.fundingFeesUsd ?? null,
+        fundsInWrongWallet: metrics?.fundsInWrongWallet ?? false,
+        openPositionSide: metrics?.openPosition?.direction ?? null,
+        walletStatusHint: walletHint,
         hireFeeDdollar,
         paperDdRefunded,
         liveStats: {
-          balanceUsd: exchangeBalanceUsd,
-          equityUsd: exchangeBalanceUsd,
-          netReturnPct: stats.netReturnPct,
-          tradeCount: stats.tradeCount,
-          winRatePct: stats.winRatePct,
-          sessionPnlUsd,
+          balanceUsd: metrics?.derivativesTotalUsd ?? exchangeBalanceUsd,
+          equityUsd: metrics?.equityUsd ?? exchangeBalanceUsd,
+          netReturnPct:
+            metrics && metrics.derivativesTotalUsd > 0
+              ? Number(((metrics.sessionPnlUsd / metrics.derivativesTotalUsd) * 100).toFixed(2))
+              : 0,
+          tradeCount: closedParticipants.length + (metrics?.openPosition ? 1 : 0),
+          winRatePct: 0,
+          sessionPnlUsd: metrics?.sessionPnlUsd ?? realizedPnlUsd,
+          unrealizedPnlUsd: metrics?.unrealizedPnlUsd ?? 0,
+          dailyPnlUsd: metrics?.sessionPnlUsd ?? 0,
         },
       };
     }
@@ -726,15 +769,24 @@ export class TradingAgentsService implements OnModuleInit {
             tradeCount: overlay.liveStats.tradeCount,
             winRatePct: overlay.liveStats.winRatePct,
             sessionPnlUsd: overlay.liveStats.sessionPnlUsd ?? 0,
+            unrealizedPnlUsd: overlay.liveStats.unrealizedPnlUsd ?? 0,
+            dailyPnlUsd: overlay.liveStats.dailyPnlUsd ?? overlay.liveStats.sessionPnlUsd ?? 0,
             startingBalance:
               overlay.instanceMode === 'live'
-                ? (overlay.exchangeBalanceUsd ?? overlay.liveStats.balanceUsd)
+                ? (overlay.liveStats.balanceUsd ?? overlay.exchangeBalanceUsd ?? 0)
                 : overlay.liveStats.balanceUsd,
             viewScope: 'user',
             userSessionStartedAt: overlay.userSessionStartedAt,
             instanceMode: overlay.instanceMode,
             rentalExpiresAt: overlay.rentalExpiresAt ?? null,
             exchangeBalanceUsd: overlay.exchangeBalanceUsd ?? null,
+            exchangeUsd: overlay.exchangeUsd ?? null,
+            fundingUsd: overlay.fundingUsd ?? null,
+            tradingFeesUsd: overlay.tradingFeesUsd ?? null,
+            fundingFeesUsd: overlay.fundingFeesUsd ?? null,
+            fundsInWrongWallet: overlay.fundsInWrongWallet ?? false,
+            openPositionSide: overlay.openPositionSide ?? null,
+            walletStatusHint: overlay.walletStatusHint ?? null,
             hireFeeDdollar: overlay.hireFeeDdollar ?? null,
             paperDdRefunded: overlay.paperDdRefunded ?? null,
           };
