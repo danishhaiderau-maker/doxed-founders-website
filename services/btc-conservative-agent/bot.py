@@ -86,12 +86,31 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
 RESEARCH_LANE_HIGH_EDGE_RUNNER = "HIGH_EDGE_RUNNER"
 RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
-RESEARCH_LANE_EDGE_ACCELERATION = "EDGE_ACCELERATION"
+RESEARCH_LANE_EDGE_ACCELERATION = "EDGE_ACCELERATION"  # legacy — disabled, no Pathway tile
 RESEARCH_LANE_EDGE_PLUS_STACK = "EDGE_PLUS_STACK"
 RESEARCH_LANE_SHADOW_RUNNER = "SHADOW_RUNNER"
 RESEARCH_LANE_EDGE_ALPHA_4 = "EDGE_ALPHA_4"
 RESEARCH_LANE_TYPE_B_HUNTER = "TYPE_B_HUNTER"
+RESEARCH_LANE_SHORT_BEAR_ALPHA = "SHORT_BEAR_ALPHA"
+RESEARCH_LANE_AI_60_65_ALPHA = "AI_60_65_ALPHA"
+RESEARCH_LANE_URGENT_CHASE_ALPHA = "URGENT_CHASE_ALPHA"
 RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
+PATHWAY_LANE_STATUS = {
+    RESEARCH_LANE_CONTINUOUS: "ACTIVE_BENCHMARK",
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: "ACTIVE",
+    RESEARCH_LANE_EXTREME_EDGE: "RETIRED",
+    RESEARCH_LANE_EDGE_PLUS_STACK: "RETIRED",
+    RESEARCH_LANE_SHADOW_RUNNER: "PROBATION",
+    RESEARCH_LANE_EDGE_ALPHA_4: "ACTIVE",
+    RESEARCH_LANE_TYPE_B_HUNTER: "ACTIVE",
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: "ACTIVE",
+    RESEARCH_LANE_AI_60_65_ALPHA: "ACTIVE",
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: "ACTIVE",
+}
+RETIRED_PATHWAY_LANES = frozenset({
+    RESEARCH_LANE_EXTREME_EDGE,
+    RESEARCH_LANE_EDGE_PLUS_STACK,
+})
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: "High Edge Runner",
@@ -101,33 +120,39 @@ RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_SHADOW_RUNNER: "Shadow Runner",
     RESEARCH_LANE_EDGE_ALPHA_4: "Edge Alpha 4",
     RESEARCH_LANE_TYPE_B_HUNTER: "Type B Hunter",
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: "Short Bear Alpha",
+    RESEARCH_LANE_AI_60_65_ALPHA: "AI 60-65 Alpha",
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: "Urgent Chase Alpha",
     RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
 }
 RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_ACCELERATION,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_EDGE_ALPHA_4,
     RESEARCH_LANE_TYPE_B_HUNTER,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA,
+    RESEARCH_LANE_AI_60_65_ALPHA,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA,
 )
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_HIGH_EDGE_RUNNER: True,
-    RESEARCH_LANE_EXTREME_EDGE: True,
-    RESEARCH_LANE_EDGE_ACCELERATION: True,
-    RESEARCH_LANE_EDGE_PLUS_STACK: True,
+    RESEARCH_LANE_EXTREME_EDGE: False,
+    RESEARCH_LANE_EDGE_ACCELERATION: False,
+    RESEARCH_LANE_EDGE_PLUS_STACK: False,
     RESEARCH_LANE_SHADOW_RUNNER: True,
     RESEARCH_LANE_EDGE_ALPHA_4: True,
     RESEARCH_LANE_TYPE_B_HUNTER: True,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: True,
+    RESEARCH_LANE_AI_60_65_ALPHA: True,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: True,
 }
 AI_DIRECT_RESEARCH_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_ACCELERATION,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_EDGE_ALPHA_4,
     RESEARCH_LANE_TYPE_B_HUNTER,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA,
+    RESEARCH_LANE_AI_60_65_ALPHA,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA,
 })
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
@@ -138,16 +163,21 @@ _lane_locks = {
     RESEARCH_LANE_SHADOW_RUNNER: threading.Lock(),
     RESEARCH_LANE_EDGE_ALPHA_4: threading.Lock(),
     RESEARCH_LANE_TYPE_B_HUNTER: threading.Lock(),
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: threading.Lock(),
+    RESEARCH_LANE_AI_60_65_ALPHA: threading.Lock(),
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: threading.Lock(),
 }
 PATHWAY_LAB_LANES = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_ACCELERATION,
     RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_SHADOW_RUNNER,
     RESEARCH_LANE_EDGE_ALPHA_4,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA,
+    RESEARCH_LANE_AI_60_65_ALPHA,
     RESEARCH_LANE_TYPE_B_HUNTER,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA,
 )
 lane_open_positions: Dict[str, List] = {ln: [] for ln in PATHWAY_LAB_LANES}
 lane_pending_orders: Dict[str, List] = {ln: [] for ln in PATHWAY_LAB_LANES}
@@ -156,7 +186,7 @@ AI_FUNNEL_REPORT_FILE = "ai_funnel_report.json"
 # Binance USDT-M VIP0 reference (for dashboard fee-stress box — bot sim uses BITFINEX_ZERO)
 BINANCE_USDT_M_TAKER_FEE = 0.0005   # 0.05% per side
 BINANCE_USDT_M_MAKER_FEE = 0.0002   # 0.02% per side
-BENCHMARK_PROFILE_ID = "CONTINUOUS_SCENARIO_C_v1"
+BENCHMARK_PROFILE_ID = "CONTINUOUS_SCENARIO_C_v2"
 PROFIT_GATES_LANE_DEFAULT_ENABLED = False
 PROFIT_GATES_ENFORCED_DEFAULT = PROFIT_GATES_LANE_DEFAULT_ENABLED  # legacy config key alias
 # Profit gates follow dashboard edge/AI thresholds (not hard-coded floors).
@@ -1808,6 +1838,8 @@ def research_lane_enabled_map() -> dict:
 
 def is_research_lane_enabled(lane: str) -> bool:
     lane = str(lane or "").upper()
+    if is_research_lane_retired(lane):
+        return False
     if lane == RESEARCH_LANE_CONTINUOUS:
         return continuous_ai_research_enabled()
     if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
@@ -1818,6 +1850,12 @@ def is_research_lane_enabled(lane: str) -> bool:
 
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
+
+def get_pathway_lane_status(lane: str) -> str:
+    return PATHWAY_LANE_STATUS.get(str(lane or "").upper(), "ACTIVE")
+
+def is_research_lane_retired(lane: str) -> bool:
+    return get_pathway_lane_status(lane) == "RETIRED"
 
 def get_lane_lock(lane: str):
     return _lane_locks.get(lane, process_lock)
@@ -2889,7 +2927,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.49-chase-attribution-2026-06-18"
+ANALYZER_SYNC_ID = "v9.62-pathway-rationalization-2026-06-18"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4357,9 +4395,10 @@ FILL_BUFFER = 0.0005
 SLIPPAGE_BPS = 0.0002
 EARLY_FAIL_PCT_THRESHOLD = -32.0
 CANDLE_INTERVAL_SEC = 15 * 60
-# --- v6 exit / risk (evidence-driven: MFE positive, TIME_EXIT losses) ---
-FIXED_TIME_EXIT_ENABLED = False
-EMERGENCY_MAX_HOLD_SEC = 24 * 3600
+# --- v6 exit / risk — v1.1.40: global 2h TIME_EXIT backstop (all lanes, Scenario C ladder unchanged) ---
+FIXED_TIME_EXIT_ENABLED = True
+MAX_POSITION_AGE_SEC = 2 * 3600
+EMERGENCY_MAX_HOLD_SEC = MAX_POSITION_AGE_SEC
 # v1.1.21 Scenario C: first rung 12→8% (replay-optimal risk-adjusted profile)
 TRAIL_LADDER_SCENARIO_C = [
     (12, 8), (15, 10), (25, 18), (40, 28),
@@ -4428,21 +4467,21 @@ _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
     RESEARCH_LANE_EXTREME_EDGE: 15.0,
-    RESEARCH_LANE_EDGE_ACCELERATION: 15.0,
-    RESEARCH_LANE_EDGE_PLUS_STACK: 15.0,
-    RESEARCH_LANE_SHADOW_RUNNER: 15.0,
     RESEARCH_LANE_EDGE_ALPHA_4: 15.0,
     RESEARCH_LANE_TYPE_B_HUNTER: 15.0,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: 15.0,
+    RESEARCH_LANE_AI_60_65_ALPHA: 15.0,
 }
 _LANE_LIMIT_OFFSET_USD = {
     RESEARCH_LANE_CONTINUOUS: 5.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 5.0,
     RESEARCH_LANE_EXTREME_EDGE: 5.0,
-    RESEARCH_LANE_EDGE_ACCELERATION: 5.0,
     RESEARCH_LANE_EDGE_PLUS_STACK: 5.0,
     RESEARCH_LANE_SHADOW_RUNNER: 5.0,
     RESEARCH_LANE_EDGE_ALPHA_4: 5.0,
     RESEARCH_LANE_TYPE_B_HUNTER: 5.0,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: 5.0,
+    RESEARCH_LANE_AI_60_65_ALPHA: 5.0,
 }
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
@@ -4508,7 +4547,6 @@ CONVICTION_SPREAD_FULL = 5
 CONVICTION_SPREAD_HALF = 3
 CONVICTION_SPREAD_QUARTER = 1
 LOSS_PAUSE_SEC = 2 * 3600
-MAX_POSITION_AGE_SEC = EMERGENCY_MAX_HOLD_SEC
 TP_TARGET_PCT = TP_EMERGENCY_MARGIN_PCT
 TP_ARM_UNREAL_PCT = 999.0
 PROTECTION_ARM_UNREAL_PCT = 999.0
@@ -4616,6 +4654,8 @@ AI_CONFIDENCE_CALIBRATION_FILE = "ai_confidence_calibration.jsonl"
 TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
 RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
+POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
+POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 ANALYTICS_INTERVAL_SEC = 600
@@ -4654,7 +4694,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.38-chase-attribution-immediate-first"
+EXECUTION_FIX_VERSION = "v1.1.42-urgent-chase-alpha"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4925,6 +4965,8 @@ def _edge_range_label() -> str:
 def edge_range_allows(edge_score: float) -> tuple:
     """Return (allowed, block_reason). Uses effective min + optional dashboard max."""
     edge_score = round(float(edge_score), 1)
+    if EDGE_RESEARCH_TELEMETRY_ONLY:
+        return True, "EDGE_OBSERVER_ONLY"
     if _sole_ai_research_mode():
         if edge_score <= 0.0:
             return False, "EDGE_BELOW_THRESHOLD"
@@ -5206,6 +5248,8 @@ def research_lanes_independent() -> bool:
 
 def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
     """Cheap structural gate — blocks AI without an API call."""
+    if EDGE_RESEARCH_TELEMETRY_ONLY:
+        return False, None
     if _sole_ai_research_mode():
         return False, None
     edge_score = round(float(edge_score), 1)
@@ -5291,6 +5335,26 @@ def get_limit_chase_step_pct() -> float:
     return max(0.05, min(1.0, _limit_chase_config_value(
         "limit_chase_step_pct", "LIMIT_CHASE_STEP_PCT", LIMIT_CHASE_STEP_PCT_DEFAULT, float
     )))
+
+
+URGENT_CHASE_VELOCITY_MED = float(os.getenv("URGENT_CHASE_VEL_MED", "0.00003"))
+URGENT_CHASE_VELOCITY_HIGH = float(os.getenv("URGENT_CHASE_VEL_HIGH", "0.00006"))
+URGENT_CHASE_VELOCITY_EXTREME = float(os.getenv("URGENT_CHASE_VEL_EXTREME", "0.00012"))
+
+
+def _urgent_chase_step_for_order(order: dict, signal: dict = None):
+    """Velocity-aware chase step for URGENT_CHASE_ALPHA; None → benchmark 25% step."""
+    lane = order.get("research_lane") or (signal or {}).get("research_lane")
+    if lane != RESEARCH_LANE_URGENT_CHASE_ALPHA:
+        return None, None, False
+    vel = abs(float(order.get("entry_velocity") or (signal or {}).get("entry_velocity") or 0))
+    if vel >= URGENT_CHASE_VELOCITY_EXTREME:
+        return 1.0, "extreme", True
+    if vel >= URGENT_CHASE_VELOCITY_HIGH:
+        return 0.75, "high", False
+    if vel >= URGENT_CHASE_VELOCITY_MED:
+        return 0.50, "medium", False
+    return 0.25, "normal", False
 
 
 def min_signal_age_enabled() -> bool:
@@ -8462,6 +8526,9 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_SHADOW_RUNNER: "shrun",
     RESEARCH_LANE_EDGE_ALPHA_4: "ea4",
     RESEARCH_LANE_TYPE_B_HUNTER: "tbh",
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: "sba",
+    RESEARCH_LANE_AI_60_65_ALPHA: "a65",
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: "ucha",
     RESEARCH_LANE_PROFIT_GATES: "pg",
 }
 
@@ -8471,6 +8538,24 @@ SHADOW_RUNNER_HORIZON_SECS = {
     "60m": 3600,
     "90m": 5400,
 }
+
+
+def _spawn_ai_prob_ge(ai, lo: int) -> bool:
+    try:
+        return int(ai.get("win_prob") or 0) >= int(lo)
+    except (TypeError, ValueError):
+        return False
+
+
+def _spawn_structure_score(ctx, features=None) -> float:
+    mc = ctx or {}
+    ms = mc.get("market_structure") or {}
+    if ms.get("structure_score") is None and isinstance(features, dict):
+        ms = features.get("market_structure") or ms
+    try:
+        return float(ms.get("structure_score") or mc.get("structure_score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _spawn_near_support(ctx, features) -> bool:
@@ -8645,8 +8730,6 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
         return
     edge = round(float(edge_score), 1)
     vol_ratio = float((features or {}).get("volume_ratio") or compute_volume_ratio() or 0)
-    with state_lock:
-        edge_prev = round(float(state.get("last_edge_trigger_prev", state.get("edge_prev", 0)) or 0), 1)
     ai_direction = ai.get("direction")
     final_direction = ai_direction
     if state.get("invert_signal", False):
@@ -8655,6 +8738,11 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
         elif ai_direction == "SHORT":
             final_direction = "LONG"
     near_support = _spawn_near_support(ctx, features)
+    spread = int(compute_directional_spread(final_direction, ai))
+    struct_score = _spawn_structure_score(ctx, features)
+    bull = int(ai.get("bull_score") or 0)
+    bear = int(ai.get("bear_score") or 0)
+    ai_prob = int(ai.get("win_prob") or 0)
 
     if edge >= 3.5 and vol_ratio >= 1.5:
         _spawn_research_lane(
@@ -8665,11 +8753,6 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
         _spawn_research_lane(
             ctx, ai, edge_score, features, source_lane,
             RESEARCH_LANE_EXTREME_EDGE, "EXTREME_EDGE_FROM_CONTINUOUS",
-        )
-    if edge >= 3.0 and edge > edge_prev:
-        _spawn_research_lane(
-            ctx, ai, edge_score, features, source_lane,
-            RESEARCH_LANE_EDGE_ACCELERATION, "EDGE_ACCELERATION_FROM_CONTINUOUS",
         )
     if edge >= 3.5:
         gs_pass, gs_reason = _golden_stack_pass_for_spawn(
@@ -8694,6 +8777,26 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
             ctx, ai, edge_score, features, source_lane,
             RESEARCH_LANE_TYPE_B_HUNTER, "TYPE_B_HUNTER_FROM_CONTINUOUS",
         )
+    if (
+        final_direction == "SHORT"
+        and struct_score <= -3
+        and bear > bull
+        and spread >= 3
+        and ai_prob >= 55
+    ):
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_SHORT_BEAR_ALPHA, "SHORT_BEAR_ALPHA_FROM_CONTINUOUS",
+        )
+    if 60 <= ai_prob < 65 and spread >= 3 and edge >= 3.0:
+        _spawn_research_lane(
+            ctx, ai, edge_score, features, source_lane,
+            RESEARCH_LANE_AI_60_65_ALPHA, "AI_60_65_ALPHA_FROM_CONTINUOUS",
+        )
+    _spawn_research_lane(
+        ctx, ai, edge_score, features, source_lane,
+        RESEARCH_LANE_URGENT_CHASE_ALPHA, "URGENT_CHASE_FROM_CONTINUOUS",
+    )
     spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
 
 
@@ -9759,6 +9862,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "limit_chase_count": 0,
         "last_chase_ts": None,
     }
+    features = signal.get("features") or {}
+    order["entry_velocity"] = float(features.get("velocity") or 0)
+    if lane == RESEARCH_LANE_URGENT_CHASE_ALPHA:
+        order["urgent_chase_lane"] = True
+        signal["entry_velocity"] = order["entry_velocity"]
     if smart_meta.get("immediate_chase"):
         order["immediate_chase"] = True
         order["chase_start_sec"] = 0
@@ -10188,7 +10296,8 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
 
 
 def _compute_limit_chase_target(
-    direction: str, current_limit: float, market_price: float, original_limit: float
+    direction: str, current_limit: float, market_price: float, original_limit: float,
+    step_pct: float = None,
 ) -> tuple:
     """Return (new_limit, reason) — nudge limit toward market without crossing."""
     direction = str(direction or "").upper()
@@ -10201,7 +10310,8 @@ def _compute_limit_chase_target(
     closed_pct = 1.0 - (cur_gap / orig_gap)
     if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
         return current_limit, "MAX_CHASE_REACHED"
-    step = get_limit_chase_step_pct() * cur_gap
+    pct = step_pct if step_pct is not None else get_limit_chase_step_pct()
+    step = pct * cur_gap
     buffer = LIMIT_CHASE_MIN_BUFFER_USD
     if direction == "LONG":
         new_limit = min(current_limit + step, market_price - buffer)
@@ -10214,11 +10324,61 @@ def _compute_limit_chase_target(
     return round(new_limit, 2), "LIMIT_CHASE"
 
 
+def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now: float, tier: str = "extreme") -> bool:
+    """URGENT_CHASE_ALPHA extreme tier — immediate marketable limit (no 10m wait)."""
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    if direction not in ("LONG", "SHORT"):
+        return False
+    if not _chase_structure_valid(direction):
+        return False
+    old_limit = float(order.get("limit_price") or 0)
+    if old_limit <= 0 or price <= 0:
+        return False
+    refresh_bbo_state()
+    with state_lock:
+        ask = float(state.get("ask") or price)
+        bid = float(state.get("bid") or price)
+    new_limit = round(ask, 2) if direction == "LONG" else round(bid, 2)
+    if abs(new_limit - old_limit) < 0.01:
+        return False
+    age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
+    gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
+    chase_count = int(order.get("limit_chase_count") or 0) + 1
+    order["limit_price"] = new_limit
+    order["limit_chase_count"] = chase_count
+    order["last_chase_ts"] = now
+    order["urgent_chase_tier"] = tier
+    order["urgent_marketable_chase"] = True
+    order["fill_model"] = _resolve_fill_model(signal, order)
+    if signal:
+        signal["limit_price"] = new_limit
+        signal["limit_chase_count"] = chase_count
+        signal["last_chase_ts"] = now
+        signal["urgent_chase_tier"] = tier
+        signal["fill_model"] = order["fill_model"]
+    logger.info(
+        f"[SIM] URGENT_MARKETABLE_CHASE trade_id={order.get('trade_id')} dir={direction} tier={tier} "
+        f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
+        f"gap_pct={gap_pct} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+    )
+    try:
+        from execution_funnel import funnel_on_limit_chase
+        funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
+    except Exception as _fe:
+        logger.debug(f"[FUNNEL] urgent marketable chase log failed: {_fe}")
+    return True
+
+
 def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
-    new_limit, reason = _compute_limit_chase_target(direction, old_limit, float(price), original)
+    step_pct, tier, use_marketable = _urgent_chase_step_for_order(order, signal)
+    if use_marketable:
+        return _apply_urgent_marketable_chase(order, signal, price, now, tier=tier or "extreme")
+    new_limit, reason = _compute_limit_chase_target(
+        direction, old_limit, float(price), original, step_pct=step_pct,
+    )
     if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
         return False
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
@@ -10228,15 +10388,20 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     order["limit_chase_count"] = chase_count
     order["last_chase_ts"] = now
     order["fill_model"] = _resolve_fill_model(signal, order)
+    if tier:
+        order["urgent_chase_tier"] = tier
     if signal:
         signal["limit_price"] = new_limit
         signal["limit_chase_count"] = chase_count
         signal["last_chase_ts"] = now
         signal["fill_model"] = order["fill_model"]
+        if tier:
+            signal["urgent_chase_tier"] = tier
+    tier_note = f" tier={tier}" if tier else ""
     logger.info(
         f"[SIM] LIMIT_CHASE trade_id={order.get('trade_id')} dir={direction} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
-        f"gap_pct={gap_pct} chase_count={chase_count} reason={reason} [PIPELINE ENFORCEMENT]"
+        f"gap_pct={gap_pct} chase_count={chase_count} reason={reason}{tier_note} [PIPELINE ENFORCEMENT]"
     )
     try:
         from execution_funnel import funnel_on_limit_chase
@@ -11938,6 +12103,9 @@ def state_monitor_loop():
                         expired_ids.append(tid)
                     elif is_deferred_shadow and age_from_start > SHADOW_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
+                    elif buf.get("post_exit"):
+                        if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
+                            expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                 if len(replay_buffers) > MAX_REPLAY_BUFFERS:
@@ -11970,6 +12138,7 @@ def state_monitor_loop():
                     replay_buffers.pop(oldest_id, None)
             if oldest_id:
                 dump_replay(oldest_id)
+            service_post_exit_replays()
             pipeline_state_sync()
             process_pending_orders()
             process_positions()
@@ -12622,7 +12791,7 @@ def close_position(pos: dict, exit_reason: str):
             "exit_config_json": json.dumps(get_exit_config_snapshot()),
         }
         lane_unregister_open_position(pos)
-        close_replay_buffer(trade_id)
+        begin_post_exit_replay(trade_id, pos, price)
         log_trade_outcome_jsonl(trade_row, pos)
         update_lane_pnl_ledger(
             pos.get("research_lane") or (master or {}).get("research_lane"),
@@ -13015,10 +13184,11 @@ PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_ACCELERATION,
     RESEARCH_LANE_EDGE_PLUS_STACK,
     RESEARCH_LANE_SHADOW_RUNNER,
     RESEARCH_LANE_EDGE_ALPHA_4,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA,
+    RESEARCH_LANE_AI_60_65_ALPHA,
     RESEARCH_LANE_TYPE_B_HUNTER,
 )
 
@@ -13039,7 +13209,7 @@ def _scenario_c_exit_spec():
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
-        "fixed_time_exit": "OFF",
+        "fixed_time_exit": "2h global (7200s)",
     }
 
 
@@ -13051,7 +13221,7 @@ def _runner_exit_spec():
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
-        "fixed_time_exit": "OFF",
+        "fixed_time_exit": "2h global (7200s)",
     }
 
 
@@ -13119,19 +13289,20 @@ def build_static_pathway_lane_specs() -> dict:
             {
                 "lane": RESEARCH_LANE_EXTREME_EDGE,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EXTREME_EDGE],
-                "subtitle": "EDGE≥4.5 ONLY",
-                "role": "extreme edge subset — same exit as benchmark",
+                "subtitle": "EDGE≥4.5 ONLY · RETIRED",
+                "role": "retired — edge has no predictive value; historical analytics only",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "RETIRED",
                 "toggle_key": "research_lane_enabled",
                 "hypothesis": "Tail-edge approves outperform average edge band.",
                 "research_question": "Is edge≥4.5 sufficient alone for superior EV?",
                 "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥4.5", **ai_direct_entry},
                 "exit": scenario_c,
                 "exit_path": "Scenario C frozen",
-                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
-                "kill_criteria": kill_ev,
-                "expected_advantage": "Higher-quality AI cohort",
-                "expected_risk": "Lower sample rate",
+                "promotion_criteria": "N/A — retired",
+                "kill_criteria": "RETIRED — edge hypothesis failed validation",
+                "expected_advantage": "N/A",
+                "expected_risk": "N/A",
                 "benchmark_comparison": "vs CONTINUOUS Scenario C",
                 "diff_vs_benchmark": ["Activation: edge≥4.5 only", "Exit: frozen Scenario C"],
             },
@@ -13157,28 +13328,30 @@ def build_static_pathway_lane_specs() -> dict:
             {
                 "lane": RESEARCH_LANE_EDGE_PLUS_STACK,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_EDGE_PLUS_STACK],
-                "subtitle": "EDGE≥3.5 · GS PASS REQUIRED",
-                "role": "edge + golden-stack quality pass (eval only, no GS lane)",
+                "subtitle": "EDGE≥3.5 · GS PASS · RETIRED",
+                "role": "retired — edge + extra filters; historical analytics only",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "RETIRED",
                 "toggle_key": "research_lane_enabled",
                 "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
                 "research_question": "Does GS-pass subset beat raw edge≥3.5?",
                 "entry": {"trigger": "spawn when edge≥3.5 AND golden_stack_eval pass", **ai_direct_entry},
                 "exit": scenario_c,
                 "exit_path": "Scenario C frozen",
-                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
-                "kill_criteria": kill_ev,
-                "expected_advantage": "Higher fill quality / lower chop",
-                "expected_risk": "Fewer spawns vs EXTREME_EDGE",
+                "promotion_criteria": "N/A — retired",
+                "kill_criteria": "RETIRED — edge stack adds complexity without alpha",
+                "expected_advantage": "N/A",
+                "expected_risk": "N/A",
                 "benchmark_comparison": "vs CONTINUOUS Scenario C",
                 "diff_vs_benchmark": ["Activation: edge≥3.5 + GS eval pass", "Exit: frozen Scenario C"],
             },
             {
                 "lane": RESEARCH_LANE_SHADOW_RUNNER,
                 "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_SHADOW_RUNNER],
-                "subtitle": "POST-EXIT HORIZON STUDY",
-                "role": "shadow-only — no live orders",
+                "subtitle": "POST-EXIT HORIZON STUDY · PROBATION",
+                "role": "shadow-only — retire if no unique EV contribution",
                 "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "PROBATION",
                 "live_trading": False,
                 "toggle_key": "research_lane_enabled",
                 "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
@@ -13240,6 +13413,77 @@ def build_static_pathway_lane_specs() -> dict:
                 "diff_vs_benchmark": [
                     "Activation: edge>=3.5, vol>1.2, NEAR_SUPPORT, AI 50-55",
                     "Exit: frozen Scenario C",
+                ],
+            },
+            {
+                "lane": RESEARCH_LANE_SHORT_BEAR_ALPHA,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_SHORT_BEAR_ALPHA],
+                "subtitle": "SHORT · struct≤-3 · bear>bull · spread≥3 · AI≥55",
+                "role": "bearish regime attribution — not directional AI bias",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "ACTIVE",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "Short + bear structure + wide spread for regime attribution.",
+                "research_question": "Does bear-alpha fingerprint add unique EV vs CONTINUOUS?",
+                "entry": {
+                    "trigger": "spawn SHORT when structure≤-3, bear>bull, spread≥3, AI≥55%",
+                    **ai_direct_entry,
+                },
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Regime attribution in bear sessions",
+                "expected_risk": "Regime-dependent — long rallies reduce short edge",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: SHORT bear-alpha fingerprint", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_AI_60_65_ALPHA,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_AI_60_65_ALPHA],
+                "subtitle": "AI 60-65 · spread≥3 · edge≥3",
+                "role": "strongest AI confidence band under test",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "ACTIVE",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "AI 60-65 band outperforms other confidence bands.",
+                "research_question": "Does mid-high confidence alone beat benchmark?",
+                "entry": {"trigger": "spawn when 60≤AI<65, spread≥3, edge≥3", **ai_direct_entry},
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": kill_ev,
+                "expected_advantage": "Data-driven confidence band",
+                "expected_risk": "Narrow AI band — sparse spawns",
+                "benchmark_comparison": "vs CONTINUOUS Scenario C",
+                "diff_vs_benchmark": ["Activation: AI 60-65 + spread≥3 + edge≥3", "Exit: frozen Scenario C"],
+            },
+            {
+                "lane": RESEARCH_LANE_URGENT_CHASE_ALPHA,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_URGENT_CHASE_ALPHA],
+                "subtitle": "VELOCITY-AWARE CHASE · SAME ENTRY/EXIT AS BENCHMARK",
+                "role": "execution experiment — velocity-aware chase vs benchmark 25% step",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "ACTIVE",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "Velocity-aware chase captures more profitable fills than fixed 25% step.",
+                "research_question": "Does market-velocity chase beat CONTINUOUS on EV or net PnL?",
+                "entry": {
+                    "trigger": "spawn on every CONTINUOUS APPROVE — same AI, same limit plan",
+                    "fill_path": "URGENT_VELOCITY_CHASE",
+                    **{k: v for k, v in ai_direct_entry.items() if k != "fill_path"},
+                    "execution": "normal 25% · medium 50% · high 75% · extreme marketable",
+                },
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
+                "expected_advantage": "Better fills in fast markets without changing AI or exits",
+                "expected_risk": "Over-chasing in chop",
+                "benchmark_comparison": "vs CONTINUOUS chase (25% fixed step)",
+                "diff_vs_benchmark": [
+                    "Chase only: normal 25% / medium 50% / high 75% / extreme marketable",
+                    "Entry, AI, Scenario C exits, TTL: frozen same as CONTINUOUS",
                 ],
             },
         ],
@@ -13554,7 +13798,7 @@ HTML = """<!DOCTYPE html>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">8-lane Pathway Lab — CONTINUOUS benchmark + 7 spawn/shadow lanes · stats from session trades</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Pathway Lab — CONTINUOUS benchmark + spawn/shadow lanes · stats from session trades</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:12px;"></div>
 </div>
 
@@ -13576,6 +13820,10 @@ HTML = """<!DOCTYPE html>
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
 <label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
+<p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
+  <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
+</p>
+<div id="edgeControlsLegacy" style="display:none;">
 <label>Edge range preset:</label>
 <select id="edgeRangePreset">
   <option value="min_only" selected>Any ≥ min (no upper cap) — v80 collection</option>
@@ -13615,8 +13863,9 @@ HTML = """<!DOCTYPE html>
   <option value="6.0">6.0</option>
 </select>
 </div>
-<p style="color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
-<p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
+</div>
+<p style="display:none;color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
+<p id="executionGateHint" style="display:none;margin:8px 0;color:#8b949e;">—</p>
 </div>
 
 <div id="dataBanner">
@@ -13646,7 +13895,7 @@ HTML = """<!DOCTYPE html>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
 <p><strong>AI Threshold:</strong> <span id="aiThresholdDisplay">-</span>%</p>
-<p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">-</span></p>
+<p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">DEPRECATED — analytics only</span></p>
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
 
@@ -13980,12 +14229,15 @@ DASHBOARD_JS = """(function () {
       return '';
     }
     function pathwayLaneBorderColor(spec) {
+      if (spec.status === 'RETIRED') return '#484f58';
       if (spec.is_benchmark) return '#d4a72c';
+      if (spec.lane === 'URGENT_CHASE_ALPHA') return '#22d3ee';
       if (spec.lane === 'SHADOW_RUNNER') return '#6e7681';
+      if (spec.status === 'PROBATION') return '#f97316';
       if (spec.lane === 'HIGH_EDGE_RUNNER') return '#3fb950';
-      if (spec.lane === 'EXTREME_EDGE') return '#f97316';
+      if (spec.lane === 'EXTREME_EDGE') return '#484f58';
       if (spec.lane === 'EDGE_ACCELERATION') return '#a78bfa';
-      if (spec.lane === 'EDGE_PLUS_STACK') return '#d4a72c';
+      if (spec.lane === 'EDGE_PLUS_STACK') return '#484f58';
       if (spec.lane === 'EDGE_ALPHA_4') return '#2ea043';
       if (spec.lane === 'TYPE_B_HUNTER') return '#bc8cff';
       if (spec.planned) return '#6e7681';
@@ -14053,6 +14305,7 @@ DASHBOARD_JS = """(function () {
             return '• ' + line;
           }).join('<br>');
           const metaBlock = [
+            spec.status ? ('<div style="color:' + (spec.status === 'RETIRED' ? '#484f58' : spec.status === 'PROBATION' ? '#f97316' : '#58a6ff') + ';font-size:0.78em;font-weight:600;">STATUS: ' + spec.status + '</div>') : '',
             spec.subtitle ? ('<div style="color:#58a6ff;font-size:0.78em;margin-top:4px;">' + spec.subtitle + '</div>') : '',
             spec.hypothesis ? ('<div style="margin-top:8px;font-size:0.8em;color:#c9d1d9;"><strong>Hypothesis:</strong> ' + spec.hypothesis + '</div>') : '',
             spec.research_question ? ('<div style="font-size:0.8em;color:#8b949e;"><strong>Question:</strong> ' + spec.research_question + '</div>') : '',
@@ -15069,6 +15322,7 @@ def api_state():
         snapshot["profit_gates_lane_enabled"] = profit_gates_lane_enabled()
         snapshot["profit_gates_enforced"] = profit_gates_enforced()
         snapshot["research_lane_enabled"] = research_lane_enabled_map()
+        snapshot["pathway_lane_status"] = dict(PATHWAY_LANE_STATUS)
         snapshot["research_lanes_independent"] = research_lanes_independent()
         snapshot["pipeline_funnel_counters"] = copy.deepcopy(state.get("pipeline_funnel_counters") or {})
         snapshot["research_isolation_mode"] = research_isolation_enabled()
@@ -16742,9 +16996,15 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
         buf["seq"] = _buf_int(buf.get("seq"), 0) + 1
         t_rel = round(now - _buf_float(buf.get("start_ts"), now), 3)
         block_ts = _buf_float(buf.get("block_ts"), 0)
-        phase = "post_block" if block_ts > 0 and now >= block_ts else "pre_block"
+        if buf.get("post_exit"):
+            phase = "post_exit"
+        elif block_ts > 0 and now >= block_ts:
+            phase = "post_block"
+        else:
+            phase = "pre_block"
         ticks = buf.setdefault("ticks", [])
-        if len(ticks) >= REPLAY_TICK_MAX:
+        tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
+        if len(ticks) >= tick_max:
             ticks.pop(0)
         ticks.append({
             "seq": buf["seq"],
@@ -16833,6 +17093,71 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
         logger.error(f"[TRADE_OUTCOME] log failed: {e}")
 
 
+def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
+    """Keep replay alive for POST_EXIT_REPLAY_SEC after close — horizon recovery data."""
+    if not trade_id or exit_price is None or float(exit_price) <= 0:
+        close_replay_buffer(trade_id)
+        return
+    now = time.time()
+    with replay_lock:
+        buf = replay_buffers.get(trade_id)
+        if not buf:
+            return
+        entry = float(pos.get("entry") or buf.get("virtual_entry") or exit_price)
+        exit_t_rel = round(now - _buf_float(buf.get("start_ts"), now), 3)
+        buf["post_exit"] = True
+        buf["post_exit_started_ts"] = now
+        buf["post_exit_deadline_ts"] = now + POST_EXIT_REPLAY_SEC
+        buf["exit_t_rel"] = exit_t_rel
+        buf["entry_price"] = entry
+        buf["virtual_entry"] = buf.get("virtual_entry") or entry
+        buf["direction"] = pos.get("dir") or buf.get("direction") or "LONG"
+        buf["leverage"] = _buf_int(pos.get("leverage") or buf.get("leverage"), _replay_leverage_default())
+        buf["exit_reason"] = pos.get("exit_reason")
+        unreal = _shadow_unreal_pct(buf, float(exit_price))
+        buf["seq"] = _buf_int(buf.get("seq"), 0) + 1
+        ticks = buf.setdefault("ticks", [])
+        tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
+        if len(ticks) >= tick_max:
+            ticks.pop(0)
+        ticks.append({
+            "seq": buf["seq"],
+            "t": exit_t_rel,
+            "price": float(exit_price),
+            "unreal_pct": round(float(unreal), 4),
+            "phase": "post_exit",
+        })
+        buf["last_update"] = now
+        buf["last_tick_ts"] = now
+    logger.info(
+        f"[POST_EXIT_REPLAY] trade_id={trade_id} exit_t={exit_t_rel}s "
+        f"collecting {POST_EXIT_REPLAY_SEC}s for horizon recovery [PIPELINE ENFORCEMENT]"
+    )
+
+
+def service_post_exit_replays():
+    """Append mark-price ticks to post-exit replay buffers (no open position required)."""
+    with state_lock:
+        price = float(state.get("price") or 0)
+    if price <= 0:
+        return
+    with replay_lock:
+        tids = [
+            tid for tid, buf in replay_buffers.items()
+            if buf.get("post_exit") and not buf.get("closed")
+        ]
+    for tid in tids:
+        with replay_lock:
+            buf = replay_buffers.get(tid)
+            if not buf or not buf.get("post_exit") or buf.get("closed"):
+                continue
+            entry = _buf_float(buf.get("entry_price") or buf.get("virtual_entry"), 0)
+            if entry <= 0:
+                continue
+            unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, price)
+        append_replay_tick(tid, price, unreal)
+
+
 def close_replay_buffer(trade_id):
     with replay_lock:
         buf = replay_buffers.get(trade_id)
@@ -16849,8 +17174,9 @@ def dump_replay(trade_id: str):
             return
         try:
             post_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_block"]
+            post_exit_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_exit"]
             replay = {
-                "schema": "signal_replay_v3",
+                "schema": "signal_replay_v4",
                 "trade_id": trade_id,
                 "start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),
                 "start_price": buf["start_price"],
@@ -16860,8 +17186,13 @@ def dump_replay(trade_id: str):
                 "block_ts": buf.get("block_ts"),
                 "block_t_rel": buf.get("block_t_rel"),
                 "post_block_tick_count": len(post_ticks),
+                "post_exit_tick_count": len(post_exit_ticks),
+                "post_exit_sec": POST_EXIT_REPLAY_SEC if buf.get("post_exit") or post_exit_ticks else 0,
+                "exit_t_rel": buf.get("exit_t_rel"),
+                "exit_reason": buf.get("exit_reason"),
                 "virtual_entry": buf.get("virtual_entry"),
                 "virtual_fill_t": buf.get("virtual_fill_t"),
+                "entry_price": buf.get("entry_price"),
                 "pullback_pct": buf.get("pullback_pct"),
                 "leverage": buf.get("leverage"),
                 "margin_usdt": buf.get("margin_usdt"),
@@ -17894,6 +18225,11 @@ def main():
         f"[V121 SCENARIO-C] exit profile ON - thesis_stop={THESIS_FAST_EXIT_UNREAL_PCT}% "
         f"ladder {TRAIL_LADDER[0][0]}->{TRAIL_LADDER[0][1]}% mfe_protect={THESIS_MFE_PROTECT_PCT}% "
         f"| type_a={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} trend_scratch={'OFF' if SCENARIO_C_EXIT_PROFILE else 'ON'} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    logger.warning(
+        f"[V140 TIME-EXIT] global blunt cap ON — TIME_EXIT after {MAX_POSITION_AGE_SEC // 3600}h "
+        f"({MAX_POSITION_AGE_SEC}s) all lanes; ladder/thesis unchanged; profile={BENCHMARK_PROFILE_ID} "
         f"[PIPELINE ENFORCEMENT]"
     )
     if profit_gates_lane_enabled():
