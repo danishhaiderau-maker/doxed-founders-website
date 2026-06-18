@@ -39,7 +39,21 @@ async function main() {
     include: { user: { select: { platformHandle: true, name: true } } },
   });
 
-  console.log('\n=== Hire instances ===');
+  const allInstances = await prisma.tradingAgentInstance.findMany({
+    where: { agentId: agent.id },
+    include: { user: { select: { platformHandle: true, name: true } } },
+    orderBy: { hiredAt: 'desc' },
+    take: 5,
+  });
+
+  console.log('\n=== All recent instances ===');
+  for (const inst of allInstances) {
+    const who = inst.user?.platformHandle ?? inst.user?.name ?? inst.userId;
+    console.log(`  ${who} | status=${inst.status} | ${inst.exchangeProvider} | expires=${inst.expiresAt?.toISOString() ?? 'null'}`);
+    if (inst.lastError) console.log(`    lastError=${inst.lastError.slice(0, 120)}`);
+  }
+
+  console.log('\n=== Hire instances (ACTIVE live) ===');
   for (const inst of instances) {
     const who = inst.user?.platformHandle ?? inst.user?.name ?? inst.userId;
     console.log(`  ${who} | ${inst.exchangeProvider} | lastError=${inst.lastError ?? '(none)'}`);
