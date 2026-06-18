@@ -8,9 +8,10 @@ import { createDecipheriv, scryptSync } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { exchangeCredentialsToEnvVars } from '@dcf/utils';
 import { loadVaultEnv } from './load-vault-env.mjs';
+import { getVaultDir } from './secrets-vault-path.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const vault = join(root, '..', 'doxedcryptofounder-secrets', 'vault');
+const vault = getVaultDir();
 const GQL = 'https://backboard.railway.com/graphql/v2';
 const BOT_SERVICE = 'btc-conservative-agent';
 
@@ -58,6 +59,23 @@ const vercel = readDotEnv(join(vault, '.env.vercel.check'));
 const token = xSecrets.RAILWAY_TOKEN?.trim();
 const jwtSecret = vercel.JWT_SECRET;
 loadVaultEnv(root);
+
+// Prefer Neon production DB over local .env (same as push-neon-schema.mjs).
+const neonPath = join(vault, '.env.neon');
+if (existsSync(neonPath)) {
+  for (const line of readFileSync(neonPath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx < 1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let val = trimmed.slice(idx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (key === 'DATABASE_URL') process.env.DATABASE_URL = val;
+  }
+}
 
 if (!token || !process.env.DATABASE_URL || !jwtSecret) {
   console.error('Missing RAILWAY_TOKEN, DATABASE_URL, or JWT_SECRET in vault');
