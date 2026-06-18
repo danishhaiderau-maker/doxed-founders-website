@@ -1,9 +1,10 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { formatPercent, formatUsd } from '@dcf/utils';
+import { formatPercent, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { ShareOnXButton } from '@/components/share-on-x-button';
+import { filterActivitySince, liveBookToActivity, mergeDeskActivity } from '@/lib/livebook-activity';
 
 type JourneyNode = {
   id: string;
@@ -12,26 +13,31 @@ type JourneyNode = {
   type: 'buy' | 'add' | 'reduce' | 'exit' | 'wait' | 'skip';
 };
 
-function isExecutedTrade(item: TradingAgentActivityEntry): boolean {
+function isJourneyEvent(item: TradingAgentActivityEntry): boolean {
   const t = item.type.toUpperCase();
   const title = item.title.toUpperCase();
-  if (t === 'NO_TRADE' || t === 'AI_REJECTED' || t === 'AI_APPROVED') return false;
+  if (t === 'NO_TRADE' || t === 'AI_REJECTED') return false;
   if (title.includes('NO TRADE') || title.includes('AI REJECTED')) return false;
   return (
     t.includes('POSITION') ||
     t.includes('TRADE') ||
     t.includes('OPEN') ||
     t.includes('CLOSE') ||
+    t.includes('SIGNAL') ||
+    t.includes('ORDER') ||
+    t.includes('EXIT') ||
     item.profitPct != null ||
     item.entryPrice != null
   );
 }
 
 function activityToNodes(items: TradingAgentActivityEntry[]): JourneyNode[] {
-  return items.filter(isExecutedTrade).slice(0, 8).map((item) => {
+  return items.filter(isJourneyEvent).slice(0, 12).map((item) => {
     const t = item.type.toLowerCase();
     let type: JourneyNode['type'] = 'exit';
-    if (t.includes('open') || t.includes('buy') || t.includes('long') || t.includes('short')) {
+    if (t.includes('expired') || t.includes('skip')) type = 'skip';
+    else if (t.includes('pending') || t.includes('wait')) type = 'wait';
+    else if (t.includes('open') || t.includes('buy') || t.includes('long') || t.includes('short') || t.includes('signal')) {
       type = 'buy';
     } else if (t.includes('add')) type = 'add';
     else if (t.includes('reduce') || t.includes('partial')) type = 'reduce';
@@ -69,27 +75,55 @@ function PnlBar({ pct }: { pct: number }) {
 
 export function AgentTradeJourney({
   activity,
+  liveBook,
   layout = 'vertical',
   showBalance = true,
+  windowMinutes = 30,
 }: {
   activity: TradingAgentActivityEntry[];
+  liveBook?: TradingAgentDashboardState['liveBook'] | null;
   layout?: 'vertical' | 'horizontal';
   showBalance?: boolean;
+  windowMinutes?: number;
 }) {
-  const executed = useMemo(() => activity.filter(isExecutedTrade), [activity]);
-  const nodes = activityToNodes(executed);
-  const [selected, setSelected] = useState<TradingAgentActivityEntry | null>(
-    executed[0] ?? null,
+  const [showAllSession, setShowAllSession] = useState(false);
+
+  const mergedActivity = useMemo(
+    () => mergeDeskActivity(activity, liveBookToActivity(liveBook, 'journey')),
+    [activity, liveBook],
   );
+
+  const windowed = useMemo(
+    () =>
+      showAllSession
+        ? mergedActivity
+        : filterActivitySince(mergedActivity, windowMinutes),
+    [mergedActivity, showAllSession, windowMinutes],
+  );
+
+  const executed = useMemo(() => windowed.filter(isJourneyEvent), [windowed]);
+  const nodes = activityToNodes(executed);
+  const [selected, setSelected] = useState<TradingAgentActivityEntry | null>(null);
+
+  const activeSelected = selected ?? executed[0] ?? null;
 
   if (nodes.length === 0) {
     return (
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-6">
-        <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">
-          Trade journey · last 30 days
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">
+            Trade journey · last {windowMinutes} min
+          </h2>
+          <button
+            type="button"
+            onClick={() => setShowAllSession((v) => !v)}
+            className="text-xs text-violet-400 hover:text-violet-300"
+          >
+            {showAllSession ? 'Show last 30 min' : 'Show full session'}
+          </button>
+        </div>
         <p className="mt-4 text-sm text-zinc-500">
-          No completed trades yet — only executed trades appear here (no AI rejections or skips).
+          No trades in this window yet — limit fills, closes, and relay events appear here as they happen.
         </p>
       </section>
     );
@@ -99,10 +133,21 @@ export function AgentTradeJourney({
 
   return (
     <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-6">
-      <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">
-        Trade journey · last 30 days
-      </h2>
-      <p className="mt-1 text-xs text-zinc-500">Executed trades only · P/L and balance after each close.</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-emerald-400/90">
+          Trade journey · {showAllSession ? 'full session' : `last ${windowMinutes} min`}
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowAllSession((v) => !v)}
+          className="text-xs text-violet-400 hover:text-violet-300"
+        >
+          {showAllSession ? 'Show last 30 min' : 'Show full session'}
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-zinc-500">
+        Executed trades, fills, and relay events · {executed.length} in view
+      </p>
 
       <div
         className={`mt-6 flex gap-3 ${
@@ -114,7 +159,7 @@ export function AgentTradeJourney({
         {nodes.map((node) => {
           const item = executed.find((a) => a.id === node.id);
           if (!item) return null;
-          const active = selected?.id === node.id;
+          const active = activeSelected?.id === node.id;
           const dateStr = new Date(item.createdAt).toLocaleDateString(undefined, {
             month: 'short',
             day: 'numeric',
@@ -171,38 +216,38 @@ export function AgentTradeJourney({
         })}
       </div>
 
-      {selected && !isHorizontal && (
+      {activeSelected && !isHorizontal && (
         <div className="mt-8 rounded-xl border border-zinc-700/80 bg-black/30 p-5">
-          <p className="text-[10px] text-zinc-500">{new Date(selected.createdAt).toLocaleString()}</p>
-          <p className="mt-1 text-lg font-semibold text-white">{selected.title}</p>
-          {selected.entryPrice != null && (
+          <p className="text-[10px] text-zinc-500">{new Date(activeSelected.createdAt).toLocaleString()}</p>
+          <p className="mt-1 text-lg font-semibold text-white">{activeSelected.title}</p>
+          {activeSelected.entryPrice != null && (
             <p className="mt-2 font-mono text-sm text-zinc-300">
-              Entry ${selected.entryPrice.toLocaleString()}
-              {selected.exitPrice != null ? ` → Exit $${selected.exitPrice.toLocaleString()}` : ''}
+              Entry ${activeSelected.entryPrice.toLocaleString()}
+              {activeSelected.exitPrice != null ? ` → Exit $${activeSelected.exitPrice.toLocaleString()}` : ''}
             </p>
           )}
-          {selected.profitPct != null && (
+          {activeSelected.profitPct != null && (
             <>
               <p
-                className={`mt-2 text-lg font-bold ${selected.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                className={`mt-2 text-lg font-bold ${activeSelected.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
               >
-                P/L: {formatPercent(selected.profitPct)}
-                {selected.netPnlUsd != null ? ` (${formatUsd(selected.netPnlUsd, 2)})` : ''}
+                P/L: {formatPercent(activeSelected.profitPct)}
+                {activeSelected.netPnlUsd != null ? ` (${formatUsd(activeSelected.netPnlUsd, 2)})` : ''}
               </p>
-              <PnlBar pct={selected.profitPct} />
+              <PnlBar pct={activeSelected.profitPct} />
             </>
           )}
-          {showBalance && selected.balanceUsd != null && (
+          {showBalance && activeSelected.balanceUsd != null && (
             <p className="mt-3 text-sm text-zinc-400">
-              Balance after trade: <span className="font-semibold text-white">{formatUsd(selected.balanceUsd, 0)}</span>
+              Balance after trade: <span className="font-semibold text-white">{formatUsd(activeSelected.balanceUsd, 0)}</span>
             </p>
           )}
-          {selected.reason && (
-            <p className="mt-3 text-sm text-zinc-400">{selected.reason}</p>
+          {activeSelected.reason && (
+            <p className="mt-3 text-sm text-zinc-400">{activeSelected.reason}</p>
           )}
-          {selected.shareText && (
+          {activeSelected.shareText && (
             <div className="mt-4">
-              <ShareOnXButton text={selected.shareText} label="Share to X" />
+              <ShareOnXButton text={activeSelected.shareText} label="Share to X" />
             </div>
           )}
         </div>
