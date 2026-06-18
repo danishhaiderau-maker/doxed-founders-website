@@ -9,7 +9,7 @@ import { PlatformAdoptionService } from './platform-adoption.service';
 import { ProjectsService } from './projects.service';
 
 @Module({
-  imports: [AuthModule, DexscreenerModule, forwardRef(() => FeedModule)],
+  imports: [forwardRef(() => AuthModule), DexscreenerModule, forwardRef(() => FeedModule)],
   controllers: [ProjectsController, FoundersController, ProjectsClaimController],
   providers: [ProjectsService, MetricsSyncService, PlatformAdoptionService],
   exports: [ProjectsService, MetricsSyncService, PlatformAdoptionService],

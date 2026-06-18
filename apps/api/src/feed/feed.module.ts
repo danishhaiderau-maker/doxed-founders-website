@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { BuilderModule } from '../builder/builder.module';
 import { FeedController } from './feed.controller';
@@ -10,7 +10,7 @@ import { FeedTerminalService } from './feed-terminal.service';
 import { FeedHubService } from './feed-hub.service';
 
 @Module({
-  imports: [NotificationsModule, BuilderModule],
+  imports: [NotificationsModule, forwardRef(() => BuilderModule)],
   controllers: [FeedController],
   providers: [
     FeedService,

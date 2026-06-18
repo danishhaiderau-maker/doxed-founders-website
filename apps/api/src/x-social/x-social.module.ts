@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialSignalsService } from './social-signals.service';
@@ -9,7 +9,7 @@ import { XPostingResolverService } from './x-posting-resolver.service';
 import { XSocialController } from './x-social.controller';
 
 @Module({
-  imports: [NotificationsModule, AuthModule],
+  imports: [NotificationsModule, forwardRef(() => AuthModule)],
   controllers: [XSocialController],
   providers: [
     XPostingService,

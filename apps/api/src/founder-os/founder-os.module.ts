@@ -13,7 +13,7 @@ import { FounderCloudService } from './founder-cloud.service';
 import { FounderPromoService } from './founder-promo.service';
 
 @Module({
-  imports: [NotificationsModule, XSocialModule, GitHubModule, forwardRef(() => EventsModule)],
+  imports: [NotificationsModule, forwardRef(() => XSocialModule), GitHubModule, forwardRef(() => EventsModule)],
   controllers: [FounderOsController],
   providers: [
     FounderOsService,
