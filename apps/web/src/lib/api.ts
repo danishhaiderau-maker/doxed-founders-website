@@ -3525,6 +3525,7 @@ export interface TradingAgentSummary {
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;
+  leverage?: number;
 }
 
 export interface TradingAgentDashboard {

@@ -114,6 +114,7 @@ export function ResearchBotDetailDashboard({
           }
         />
         <Row label="Equity" value={formatUsd(Number(raw.equity ?? raw.account_balance ?? 0), 2)} />
+        <Row label="Leverage" value={`${Number(raw.leverage ?? 100)}x`} />
         <Row label="Regime" value={str(raw.regime)} />
       </Section>
 

@@ -95,6 +95,7 @@ function buildDefaultDashboard(support: number, resistance: number, price: numbe
     wsHealth: 'HEALTHY',
     dataQuality: 'GOOD',
     pnl: { daily: -2.1, total: -4.9 },
+    leverage: 100,
     liveBook: {
       activeSignals: [],
       positions: [],
@@ -155,6 +156,7 @@ function serializeAgent(
       liveSinceDays?: number;
       currentPosition?: string;
       currentAction?: string;
+      leverage?: number;
     };
     botConnected?: boolean;
   },
@@ -208,6 +210,7 @@ function serializeAgent(
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
+    leverage: live?.leverage ?? 100,
   };
 }
 

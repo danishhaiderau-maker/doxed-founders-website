@@ -83,6 +83,10 @@ export function AgentProfileHero({
               <dd className="font-semibold text-amber-200">{agent.currentPosition ?? 'FLAT'}</dd>
             </div>
             <div>
+              <dt className="text-zinc-500">Leverage</dt>
+              <dd className="font-bold text-white">{agent.leverage ?? 100}x</dd>
+            </div>
+            <div>
               <dt className="text-zinc-500">Win rate</dt>
               <dd className="font-bold text-white">{agent.winRatePct.toFixed(0)}%</dd>
             </div>
