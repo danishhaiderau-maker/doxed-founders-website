@@ -26,7 +26,6 @@ import { MissionControlTrustStrip } from '@/components/mission-control-trust-str
 import type { WorkspaceTab } from '@/components/founder-workspace';
 import {
   BuildRoomData,
-  copilotResume,
   fetchAccountOverview,
   fetchBuildRoom,
   fetchBuilderSettings,
@@ -40,6 +39,9 @@ import {
   fetchActiveAgentRun,
   fetchFounderGraph,
   fetchPlatformSyncStatus,
+  fetchFounderPromoStatus,
+  runCopilotAutopilot,
+  type FounderPromoUserStatus,
   type FounderGraphResponse,
   type MissionIntelligence,
   type FounderQueueItem,
@@ -49,9 +51,9 @@ import {
   ProjectMemory,
   ProjectRoom,
 } from '@/lib/api';
-import { pollMissionBuildUntilDone } from '@/lib/mission-build-runner';
 import {
   AI_STACK_HREF,
+  CONNECT_ACCOUNTS_HREF,
   buildCopilotUsageLines,
   listCopilotActions,
   type ProviderRow,
@@ -67,11 +69,11 @@ const SIDEBAR_NAV: NavItem[] = [
 ];
 
 const COPILOT_CHIPS = [
-  "What's the status?",
+  'Take full control and push all updates',
+  'Build with Cursor — implement my top priority task',
   'What am I working on?',
   'What should I ship today?',
-  'What broke yesterday?',
-  'Continue last task',
+  'Deploy my stack to Vercel and Railway',
   'Run platform autopilot sync',
 ];
 
@@ -120,7 +122,6 @@ export function FounderOsDashboardLayout({
   const [username, setUsername] = useState<string>('@founder');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [roleLabel, setRoleLabel] = useState<string>('Founder');
-  const [resumeBusy, setResumeBusy] = useState(false);
   const [aiProviders, setAiProviders] = useState<ProviderRow[]>([]);
   const [defaultAiProvider, setDefaultAiProvider] = useState('RULE_BASED');
   const [syncStatus, setSyncStatus] = useState<Awaited<
@@ -132,10 +133,12 @@ export function FounderOsDashboardLayout({
   const [activeAgentRun, setActiveAgentRun] = useState<FounderAgentRunRecord | null>(null);
   const [founderGraph, setFounderGraph] = useState<FounderGraphResponse | null>(null);
   const [liveNudges, setLiveNudges] = useState<ChiefOfStaffNudge[]>([]);
+  const [promoStatus, setPromoStatus] = useState<FounderPromoUserStatus | null>(null);
+  const [autopilotBusy, setAutopilotBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [br, mem, worker, builder, account, platform, intel, queueRes, agentRunRes, graphRes] =
+      const [br, mem, worker, builder, account, platform, intel, queueRes, agentRunRes, graphRes, promo] =
         await Promise.all([
         fetchBuildRoom(accessToken),
         fetchCopilotMemory(accessToken),
@@ -147,6 +150,7 @@ export function FounderOsDashboardLayout({
         fetchFounderQueue(accessToken).catch(() => null),
         fetchActiveAgentRun(accessToken).catch(() => null),
         fetchFounderGraph(accessToken).catch(() => null),
+        fetchFounderPromoStatus(accessToken).catch(() => null),
       ]);
       setBuildRoom(br);
       setMemory(mem);
@@ -160,6 +164,7 @@ export function FounderOsDashboardLayout({
       setFounderQueue(queueRes?.items ?? []);
       setActiveAgentRun(agentRunRes?.active ? agentRunRes.run : null);
       setFounderGraph(graphRes);
+      setPromoStatus(promo);
       setCommandCenterLoading(false);
       if (account) {
         setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
@@ -257,51 +262,23 @@ export function FounderOsDashboardLayout({
     [founderQueue],
   );
 
-  async function handleResumeWork() {
-    setResumeBusy(true);
+  async function handleTakeFullControl() {
+    setAutopilotBusy(true);
     try {
-      const result = await copilotResume(accessToken);
-      setResumeBriefing(result.message);
+      const result = await runCopilotAutopilot(
+        'Take full control — sync GitHub, vault, and push all updates to my local Sovereign stack.',
+        accessToken,
+      );
       setQuickPrompt(null);
+      setResumeBriefing(result.answer ?? 'Autopilot sync complete.');
       setChatKey((k) => k + 1);
-      onMessage?.(result.dispatchHint ?? result.message);
-
-      const mb = result.missionBuild;
-      if (mb?.status === 'dispatched' && mb.agentId && mb.runId) {
-        await pollMissionBuildUntilDone(
-          accessToken,
-          {
-            graph: result.memory.memoryGraph!,
-            taskLabel: mb.taskLabel,
-            status: mb.status,
-            worker: 'CURSOR',
-            message: result.message,
-            agentId: mb.agentId,
-            runId: mb.runId,
-          },
-          (line) => onMessage?.(line),
-        );
-      } else if (mb?.status === 'dispatched' && mb.conversationId) {
-        await pollMissionBuildUntilDone(
-          accessToken,
-          {
-            graph: result.memory.memoryGraph!,
-            taskLabel: mb.taskLabel,
-            status: mb.status,
-            worker: 'OPENHANDS',
-            message: result.message,
-            conversationId: mb.conversationId,
-          },
-          (line) => onMessage?.(line),
-        );
-      }
-
+      onMessage?.(result.answer ?? 'Autopilot sync complete');
       void load();
       onRefresh();
-    } catch (err) {
-      onMessage?.(err instanceof Error ? err.message : 'Resume failed');
+    } catch (e) {
+      onMessage?.(e instanceof Error ? e.message : 'Autopilot sync failed');
     } finally {
-      setResumeBusy(false);
+      setAutopilotBusy(false);
     }
   }
 
@@ -400,43 +377,42 @@ export function FounderOsDashboardLayout({
                     Think · plan · build · ship — in one tab
                   </h1>
                   <p className="mt-1 max-w-xl text-xs text-zinc-500">
-                    <strong className="font-medium text-zinc-400">Resume</strong> syncs GitHub + vault.
-                    Type in <strong className="font-medium text-zinc-400">Founder Brain</strong> — status questions,
-                    research, and code tasks route automatically. Connect models in Settings if needed.
+                    <strong className="font-medium text-violet-300">Take full control</strong> syncs GitHub + vault.
+                    Pick an AI below — promo models are tagged · code tasks route to Cursor automatically.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    disabled={resumeBusy}
-                    onClick={() => void handleResumeWork()}
+                    disabled={autopilotBusy}
+                    onClick={() => void handleTakeFullControl()}
                     className="rounded-xl bg-violet-600 px-5 py-2.5 text-left text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
                   >
-                    <span className="block">{resumeBusy ? 'Syncing…' : '▶ Resume'}</span>
+                    <span className="block">{autopilotBusy ? 'Syncing…' : 'Take full control'}</span>
                     <span className="block text-[10px] font-normal text-violet-200/80">
-                      GitHub + vault · no auto-build
+                      GitHub + vault + local Sovereign stack
                     </span>
                   </button>
                   <button
                     type="button"
-                    disabled={resumeBusy}
+                    disabled={autopilotBusy}
                     onClick={() => {
-                      setQuickPrompt("What's the status?");
+                      setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
                       setChatKey((k) => k + 1);
                     }}
-                    className="rounded-xl border border-cyan-500/40 px-4 py-2.5 text-left text-sm font-medium text-cyan-200 hover:bg-cyan-950/30 disabled:opacity-50"
+                    className="rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-left text-sm font-medium text-emerald-200 hover:bg-emerald-950/50 disabled:opacity-50"
                   >
-                    <span className="block">What&apos;s the status?</span>
+                    <span className="block">Build with Cursor</span>
                     <span className="block text-[10px] font-normal text-zinc-500">
-                      GitHub-grounded · no mode picker
+                      Direct code agent · edits your repo
                     </span>
                   </button>
                   <Link
-                    href={AI_STACK_HREF}
+                    href={CONNECT_ACCOUNTS_HREF}
                     className="rounded-xl border border-zinc-700 px-4 py-2.5 text-left text-sm text-zinc-400 hover:border-violet-500/40 hover:text-zinc-200"
                   >
-                    <span className="block">AI stack</span>
-                    <span className="block text-[10px] text-zinc-600">Connect Ollama, DeepSeek, Cursor…</span>
+                    <span className="block">Deploy to cloud</span>
+                    <span className="block text-[10px] text-zinc-600">Vercel · Railway · Neon</span>
                   </Link>
                 </div>
               </header>
@@ -452,6 +428,7 @@ export function FounderOsDashboardLayout({
                 }}
                 builderWorking={isAgentRunActive(activeAgentRun)}
                 contentDraftReady={contentDraftReady}
+                promo={promoStatus}
                 onRefresh={() => {
                   void load();
                   onRefresh();
@@ -460,11 +437,11 @@ export function FounderOsDashboardLayout({
 
               <FounderMissionControlQuickstart
                 usageLines={copilotUsageLines}
-                onTryStatus={() => {
-                  setQuickPrompt("What's the status?");
+                onTakeFullControl={() => void handleTakeFullControl()}
+                onBuildWithCursor={() => {
+                  setQuickPrompt('Build with Cursor — implement my top priority task from the mission queue');
                   setChatKey((k) => k + 1);
                 }}
-                onTryResume={() => void handleResumeWork()}
               />
 
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,32%)]">

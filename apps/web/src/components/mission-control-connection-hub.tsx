@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getIntegrationConnectGuide } from '@dcf/utils';
 import { IntegrationConnectGuidePanel } from '@/components/integration-connect-guide-panel';
-import { fetchPlatformSyncStatus, type PlatformSyncStatus } from '@/lib/api';
+import { fetchPlatformSyncStatus, type FounderPromoUserStatus, type PlatformSyncStatus } from '@/lib/api';
 import {
   AI_STACK_HREF,
   CONNECT_ACCOUNTS_HREF,
@@ -26,6 +26,7 @@ type Props = {
   workerConnections?: { cursor?: boolean; openHands?: boolean };
   builderWorking?: boolean;
   contentDraftReady?: boolean;
+  promo?: FounderPromoUserStatus | null;
   onRefresh?: () => void;
 };
 
@@ -37,6 +38,7 @@ export function MissionControlConnectionHub({
   workerConnections,
   builderWorking = false,
   contentDraftReady = false,
+  promo,
   onRefresh,
 }: Props) {
   const [status, setStatus] = useState<PlatformSyncStatus | null>(null);
@@ -73,6 +75,11 @@ export function MissionControlConnectionHub({
     [providers, defaultProvider, workerConnections],
   );
 
+  const promoProviders = useMemo(
+    () => providers.filter((p) => p.connected && p.billingSource === 'platform_promo'),
+    [providers],
+  );
+
   const infra =
     status?.platforms.filter((p) => INFRA_KEYS.includes(p.key as (typeof INFRA_KEYS)[number])) ?? [];
   const connectedInfra = infra.filter((p) => p.connected).length;
@@ -87,6 +94,39 @@ export function MissionControlConnectionHub({
 
   return (
     <>
+      {promo?.enabled && promo.eligible && (
+        <div className="rounded-xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/40 to-violet-950/20 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-semibold text-emerald-200">Platform AI promo active</p>
+              <p className="mt-0.5 text-[11px] text-zinc-400">
+                Gemini, DeepSeek, Cursor & more billed by Doxxed Crypto — connect your own keys anytime in Settings.
+              </p>
+            </div>
+            <div className="text-right text-[11px] font-medium text-emerald-300">
+              <p>
+                {(promo.tokensRemaining / 1_000_000).toFixed(2)}M tokens left
+              </p>
+              <p className="text-emerald-400/80">
+                {promo.daysRemaining ?? 0} days remaining
+              </p>
+            </div>
+          </div>
+          {promoProviders.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {promoProviders.map((p) => (
+                <span
+                  key={p.key}
+                  className="rounded-full border border-emerald-500/30 bg-emerald-950/50 px-2 py-0.5 text-[10px] font-medium text-emerald-200"
+                >
+                  {p.label.split(/[(\[]/)[0].trim()} · Promo
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="space-y-3 rounded-xl border border-emerald-500/20 bg-gradient-to-br from-zinc-900/80 to-emerald-950/10 px-4 py-4 shadow-lg shadow-black/20">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>

@@ -107,6 +107,7 @@ export class BuilderService {
     await this.reconcileDefaultBrain(userId);
     const settings = await this.ensureSettings(userId);
     const connected = await this.listConnectedProviders(userId);
+    const promoKeys = await this.promoCredentialProviders(userId);
 
     const openHandsMeta = await this.getOpenHandsMeta(userId);
     const cursorMeta = await this.getCursorMeta(userId);
@@ -152,17 +153,26 @@ export class BuilderService {
       founderNodeAi: ollamaStatus,
       founderNodeV2,
       phalaPrivateAi: phalaStatus,
-      providers: AI_PROVIDERS.map((p) => ({
-        ...p,
-        connected:
+      providers: AI_PROVIDERS.map((p) => {
+        const cred = p.credentialProvider;
+        const byok = cred ? connected.has(cred) : false;
+        const promo = cred ? promoKeys.has(cred) : false;
+        const isConnected =
           p.connectMode === 'none'
             ? p.key === 'RULE_BASED'
             : p.key === 'PHALA'
               ? phalaStatus.ready
               : p.connectMode === 'founder_node'
                 ? ollamaStatus.ollamaReady
-                : connected.has(p.credentialProvider!),
-      })),
+                : p.key === 'CURSOR'
+                  ? byok || promo
+                  : byok || promo;
+        return {
+          ...p,
+          connected: isConnected,
+          billingSource: promo && !byok ? ('platform_promo' as const) : ('byok' as const),
+        };
+      }),
       githubTokenConnected: Boolean(githubConn?.accessTokenEncrypted),
       repoFullName:
         repoFullName && !String(repoFullName).endsWith('/pending-setup') ? repoFullName : null,
@@ -668,10 +678,11 @@ export class BuilderService {
 
   async getBuildWorkerConnections(userId: string) {
     const connected = await this.listConnectedProviders(userId);
+    const promoKeys = await this.promoCredentialProviders(userId);
     const settings = await this.ensureSettings(userId);
     const ollamaReady = await this.founderNodeInference.isOllamaReady(userId);
     return {
-      cursor: connected.has('cursor'),
+      cursor: connected.has('cursor') || promoKeys.has('cursor'),
       openHands: connected.has('openhands'),
       founderNode: ollamaReady,
       defaultProvider: settings.defaultProvider,
@@ -1509,6 +1520,7 @@ export class BuilderService {
 
   private async listConnectedBrainProviders(userId: string): Promise<AiProvider[]> {
     const connected = await this.listConnectedProviders(userId);
+    const promoKeys = await this.promoCredentialProviders(userId);
     const ollamaReady = await this.founderNodeInference.isOllamaReady(userId);
     const phalaStatus = await this.getPhalaPrivateAiStatus(userId);
     const ready: AiProvider[] = [];
@@ -1520,11 +1532,26 @@ export class BuilderService {
         if (phalaStatus.ready) ready.push(key);
       } else if (key === AiProvider.OLLAMA_LOCAL) {
         if (ollamaReady) ready.push(key);
-      } else if (cfg.credentialProvider && connected.has(cfg.credentialProvider)) {
+      } else if (key === AiProvider.CURSOR) {
+        if (connected.has('cursor') || promoKeys.has('cursor')) ready.push(key);
+      } else if (
+        cfg.credentialProvider &&
+        (connected.has(cfg.credentialProvider) || promoKeys.has(cfg.credentialProvider))
+      ) {
         ready.push(key);
       }
     }
     return ready;
+  }
+
+  private async promoCredentialProviders(userId: string): Promise<Set<string>> {
+    const status = await this.founderPromo.getUserPromoStatus(userId);
+    if (!status.eligible) return new Set();
+    const out = new Set<string>();
+    for (const p of ['gemini', 'deepseek', 'cursor', 'openai', 'anthropic'] as const) {
+      if (await this.founderPromo.hasPromoProvider(userId, p)) out.add(p);
+    }
+    return out;
   }
 
   /** Pick a connected brain when saved default is rule-based or disconnected. */
