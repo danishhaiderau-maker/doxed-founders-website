@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(live-copy): freeze Bitfinex policy and exit-only PAUSED monitoring
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
