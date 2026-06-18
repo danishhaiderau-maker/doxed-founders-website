@@ -94,6 +94,7 @@ RESEARCH_LANE_TYPE_B_HUNTER = "TYPE_B_HUNTER"
 RESEARCH_LANE_SHORT_BEAR_ALPHA = "SHORT_BEAR_ALPHA"
 RESEARCH_LANE_AI_60_65_ALPHA = "AI_60_65_ALPHA"
 RESEARCH_LANE_URGENT_CHASE_ALPHA = "URGENT_CHASE_ALPHA"
+RESEARCH_LANE_CHASE_3PLUS_ALPHA = "CHASE_3PLUS_ALPHA"
 RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
 PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_CONTINUOUS: "ACTIVE_BENCHMARK",
@@ -106,6 +107,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_SHORT_BEAR_ALPHA: "ACTIVE",
     RESEARCH_LANE_AI_60_65_ALPHA: "ACTIVE",
     RESEARCH_LANE_URGENT_CHASE_ALPHA: "ACTIVE",
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "ACTIVE",
 }
 RETIRED_PATHWAY_LANES = frozenset({
     RESEARCH_LANE_EXTREME_EDGE,
@@ -123,6 +125,7 @@ RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_SHORT_BEAR_ALPHA: "Short Bear Alpha",
     RESEARCH_LANE_AI_60_65_ALPHA: "AI 60-65 Alpha",
     RESEARCH_LANE_URGENT_CHASE_ALPHA: "Urgent Chase Alpha",
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "Chase 3+ Alpha",
     RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
 }
 RESEARCH_SPAWN_LANES = (
@@ -132,6 +135,7 @@ RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_SHORT_BEAR_ALPHA,
     RESEARCH_LANE_AI_60_65_ALPHA,
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA,
 )
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_HIGH_EDGE_RUNNER: True,
@@ -144,6 +148,7 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_SHORT_BEAR_ALPHA: True,
     RESEARCH_LANE_AI_60_65_ALPHA: True,
     RESEARCH_LANE_URGENT_CHASE_ALPHA: True,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: True,
 }
 AI_DIRECT_RESEARCH_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
@@ -153,6 +158,7 @@ AI_DIRECT_RESEARCH_LANES = frozenset({
     RESEARCH_LANE_SHORT_BEAR_ALPHA,
     RESEARCH_LANE_AI_60_65_ALPHA,
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA,
 })
 _lane_locks = {
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
@@ -166,6 +172,7 @@ _lane_locks = {
     RESEARCH_LANE_SHORT_BEAR_ALPHA: threading.Lock(),
     RESEARCH_LANE_AI_60_65_ALPHA: threading.Lock(),
     RESEARCH_LANE_URGENT_CHASE_ALPHA: threading.Lock(),
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: threading.Lock(),
 }
 PATHWAY_LAB_LANES = (
     RESEARCH_LANE_CONTINUOUS,
@@ -178,6 +185,7 @@ PATHWAY_LAB_LANES = (
     RESEARCH_LANE_AI_60_65_ALPHA,
     RESEARCH_LANE_TYPE_B_HUNTER,
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA,
 )
 lane_open_positions: Dict[str, List] = {ln: [] for ln in PATHWAY_LAB_LANES}
 lane_pending_orders: Dict[str, List] = {ln: [] for ln in PATHWAY_LAB_LANES}
@@ -645,6 +653,10 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "fill_model": order.get("fill_model") or _resolve_fill_model(signal, order),
         "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
         "urgent_chase_tier": order.get("urgent_chase_tier") or signal.get("urgent_chase_tier"),
+        "chase_3plus_activation_reason": signal.get("chase_3plus_activation_reason"),
+        "chase_3plus_virtual_chase_at_activation": signal.get("chase_3plus_virtual_chase_at_activation"),
+        "chase_3plus_signal_age_at_activation": signal.get("chase_3plus_signal_age_at_activation"),
+        "chase_3plus_signal_distance_pct_at_activation": signal.get("chase_3plus_signal_distance_pct_at_activation"),
         "original_limit_price": order.get("original_limit_price") or order.get("planned_limit_price"),
         "last_chase_ts": order.get("last_chase_ts") or signal.get("last_chase_ts"),
         "exit_config": copy.deepcopy(signal.get("exit_config") or get_exit_config_for_lane(signal.get("research_lane"))),
@@ -1886,6 +1898,7 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
                 SIGNAL_STATUS_AWAITING_MICRO,
                 SIGNAL_STATUS_AWAITING_5M,
                 SIGNAL_STATUS_AWAITING_MIN_AGE,
+                SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
                 "ORDERED",
                 "ACTIVE",
                 "PENDING",
@@ -1965,7 +1978,7 @@ def get_active_signal_count(lane: str = None):
             if not isinstance(sig, dict) or is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
                 continue
             sig_lane = sig.get("research_lane")
             if lane and sig_lane != lane:
@@ -1978,7 +1991,7 @@ def get_active_signal_count(lane: str = None):
         exposure += [{"trade_id": s.get("trade_id"), "kind": "awaiting", "status": s.get("status"), "lane": s.get("research_lane")} for s in awaiting]
         stale_map = len([
             s for s in trades_map.values()
-            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE)
+            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS)
             and (s.get("signal_ref") or {}).get("trade_id") not in {e.get("trade_id") for e in exposure}
         ])
     _agent_dbg("H1", "get_active_signal_count", "counted", {"active": active, "lane": lane, "pending_pending_status": pending_count, "pending_list_len": list_len, "open_positions": open_count, "stale_map_orphans": stale_map, "exposure": exposure})
@@ -2998,7 +3011,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.65-lane-execution-gate-2026-06-18"
+ANALYZER_SYNC_ID = "v9.66-chase-3plus-alpha-2026-06-18"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4765,7 +4778,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.45-lane-execution-gate"
+EXECUTION_FIX_VERSION = "v1.1.46-chase-3plus-alpha"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -4785,6 +4798,11 @@ ORDER_PLACEMENT_GRACE_SEC = 30
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
 SIGNAL_STATUS_AWAITING_5M = "AWAITING_5M"
 SIGNAL_STATUS_AWAITING_MIN_AGE = "AWAITING_MIN_AGE"
+SIGNAL_STATUS_AWAITING_CHASE_3PLUS = "AWAITING_CHASE_3PLUS"
+# CHASE_3PLUS_ALPHA — observe virtual chase persistence before first limit submit.
+CHASE_3PLUS_VIRTUAL_MIN = int(os.getenv("CHASE_3PLUS_VIRTUAL_MIN", "3"))
+CHASE_3PLUS_MAX_WAIT_SEC = int(os.getenv("CHASE_3PLUS_MAX_WAIT_SEC", "180"))
+CHASE_3PLUS_DISTANCE_PCT = float(os.getenv("CHASE_3PLUS_DISTANCE_PCT", "0.0015"))
 # Only statuses with a committed limit on the path to a real book order count as duplicate exposure.
 # AWAITING_MIN_AGE is intentionally excluded — no order on book yet; dual-lane signals share ai_direct_limit
 # and would deadlock each other at promotion if counted here.
@@ -5573,6 +5591,176 @@ def _defer_signal_min_age(signal: dict) -> bool:
     pipeline_state_sync()
     return True
 
+
+def is_chase_3plus_alpha_lane(signal: dict) -> bool:
+    return str((signal or {}).get("research_lane") or "").upper() == RESEARCH_LANE_CHASE_3PLUS_ALPHA
+
+
+def _chase_3plus_signal_distance_pct(signal: dict, market_price: float) -> float:
+    ref = float(signal.get("chase_3plus_signal_price") or signal.get("signal_price") or 0)
+    if ref <= 0 or market_price <= 0:
+        return 0.0
+    return abs(market_price - ref) / ref
+
+
+def _init_chase_3plus_virtual_state(signal: dict, market_price: float) -> None:
+    """Seed virtual chase from benchmark-equivalent planned limit (CONTINUOUS chase step)."""
+    if not signal.get("entry_path"):
+        compute_continuous_ai_direct_entry(signal)
+    planned, entry_mode, smart_meta, _planned_raw = _resolve_submit_limit_price(signal)
+    if smart_submit_enabled() and market_price > 0:
+        planned, entry_mode, smart_meta = _apply_smart_submit_limit(
+            signal, planned, entry_mode, market_price,
+        )
+    original = float((smart_meta or {}).get("original_planned") or planned)
+    ref_price = float(signal.get("signal_price") or market_price or 0)
+    signal["chase_3plus_signal_price"] = ref_price
+    signal["chase_3plus_planned_limit"] = float(planned)
+    signal["chase_3plus_virtual_limit"] = float(planned)
+    signal["chase_3plus_original_limit"] = original
+    signal["chase_3plus_virtual_chase_count"] = 0
+    signal["chase_3plus_virtual_started_ts"] = time.time()
+    signal["chase_3plus_last_virtual_chase_ts"] = None
+    signal["planned_limit_price"] = float(planned)
+    signal["limit_price"] = float(planned)
+    signal["entry_mode"] = entry_mode
+
+
+def _virtual_chase_eligible(signal: dict, market_price: float, now: float) -> bool:
+    direction = _signal_direction(signal)
+    virtual_limit = float(signal.get("chase_3plus_virtual_limit") or 0)
+    original = float(signal.get("chase_3plus_original_limit") or virtual_limit)
+    started = float(signal.get("chase_3plus_virtual_started_ts") or now)
+    age_sec = now - started
+    if age_sec < LIMIT_CHASE_HOLD_SEC:
+        return False
+    if age_sec >= MARKETABLE_CHASE_SEC:
+        return False
+    last_chase = signal.get("chase_3plus_last_virtual_chase_ts")
+    if last_chase and (now - float(last_chase)) < get_limit_chase_interval_sec():
+        return False
+    if virtual_limit <= 0 or market_price <= 0:
+        return False
+    if _limit_chase_near_fill_zone(direction, virtual_limit, market_price):
+        return False
+    orig_gap = _limit_chase_market_gap(direction, original, market_price)
+    if orig_gap <= LIMIT_CHASE_NEAR_FILL_USD:
+        return False
+    cur_gap = _limit_chase_market_gap(direction, virtual_limit, market_price)
+    if cur_gap <= 0:
+        return False
+    if orig_gap > 0:
+        closed_pct = 1.0 - (cur_gap / orig_gap)
+        if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
+            return False
+    return True
+
+
+def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: float) -> int:
+    if not _virtual_chase_eligible(signal, market_price, now):
+        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    direction = _signal_direction(signal)
+    virtual_limit = float(signal.get("chase_3plus_virtual_limit") or 0)
+    original = float(signal.get("chase_3plus_original_limit") or virtual_limit)
+    new_limit, reason = _compute_limit_chase_target(
+        direction, virtual_limit, market_price, original, step_pct=get_limit_chase_step_pct(),
+    )
+    if reason != "LIMIT_CHASE" or abs(new_limit - virtual_limit) < 0.01:
+        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    signal["chase_3plus_virtual_limit"] = new_limit
+    signal["limit_price"] = new_limit
+    count = int(signal.get("chase_3plus_virtual_chase_count") or 0) + 1
+    signal["chase_3plus_virtual_chase_count"] = count
+    signal["chase_3plus_last_virtual_chase_ts"] = now
+    return count
+
+
+def _chase_3plus_activation_reason(signal: dict, market_price: float) -> str:
+    vcount = int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    if vcount >= CHASE_3PLUS_VIRTUAL_MIN:
+        return f"VIRTUAL_CHASE_{vcount}"
+    age = _signal_age_sec(signal)
+    if age >= CHASE_3PLUS_MAX_WAIT_SEC:
+        return f"SIGNAL_AGE_{int(age)}s"
+    dist_pct = _chase_3plus_signal_distance_pct(signal, market_price)
+    if dist_pct >= CHASE_3PLUS_DISTANCE_PCT:
+        return f"SIGNAL_DISTANCE_{dist_pct * 100:.3f}pct"
+    return ""
+
+
+def _defer_signal_chase_3plus(signal: dict) -> bool:
+    price = float(state.get("price") or signal.get("signal_price") or 0)
+    _init_chase_3plus_virtual_state(signal, price)
+    signal["status"] = SIGNAL_STATUS_AWAITING_CHASE_3PLUS
+    signal["awaiting_chase_3plus_since"] = time.time()
+    signal["order_placed"] = False
+    logger.info(
+        f"[CHASE_3PLUS] observe trade_id={signal.get('trade_id')} "
+        f"signal_price={fmt(signal.get('chase_3plus_signal_price'))} "
+        f"virtual_limit={fmt(signal.get('chase_3plus_virtual_limit'))} "
+        f"need_virtual>={CHASE_3PLUS_VIRTUAL_MIN} or age>={CHASE_3PLUS_MAX_WAIT_SEC}s "
+        f"or dist>={CHASE_3PLUS_DISTANCE_PCT * 100:.2f}% [PIPELINE ENFORCEMENT]"
+    )
+    pipeline_state_sync()
+    return True
+
+
+def process_awaiting_chase_3plus_entries():
+    """Promote CHASE_3PLUS_ALPHA signals once virtual persistence threshold is met."""
+    price = state.get("price")
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    market = float(price)
+    with trade_lock:
+        awaiting = [
+            (entry.get("signal_ref") or {})
+            for entry in trades_map.values()
+            if isinstance(entry.get("signal_ref"), dict)
+            and entry["signal_ref"].get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS
+            and not is_terminal_signal(entry["signal_ref"])
+        ]
+    for signal in awaiting:
+        tid = signal.get("trade_id")
+        if not tid:
+            continue
+        if not lane_orders_allowed(signal.get("research_lane")):
+            continue
+        expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+        if expires_ts and now > expires_ts:
+            with trade_lock:
+                master = trades_map.get(tid, {}).get("signal_ref", signal)
+                master["status"] = "EXPIRED"
+                master["outcome"] = "SIGNAL_TTL_EXPIRED"
+                master["exit_reason"] = "SIGNAL_TTL_EXPIRED"
+            _record_expired_order(signal, "SIGNAL_TTL_EXPIRED")
+            _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
+            logger.info(
+                f"[CHASE_3PLUS] expired without activation trade_id={tid} "
+                f"virtual_chase={signal.get('chase_3plus_virtual_chase_count')} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            continue
+        _tick_chase_3plus_virtual_chase(signal, market, now)
+        reason = _chase_3plus_activation_reason(signal, market)
+        if not reason:
+            continue
+        if not ensure_signal_capacity():
+            continue
+        vcount = int(signal.get("chase_3plus_virtual_chase_count") or 0)
+        dist_pct = round(_chase_3plus_signal_distance_pct(signal, market) * 100, 4)
+        age_sec = round(_signal_age_sec(signal), 1)
+        signal["chase_3plus_activation_reason"] = reason
+        signal["chase_3plus_virtual_chase_at_activation"] = vcount
+        signal["chase_3plus_signal_distance_pct_at_activation"] = dist_pct
+        signal["chase_3plus_signal_age_at_activation"] = age_sec
+        logger.info(
+            f"[CHASE_3PLUS] activate trade_id={tid} reason={reason} "
+            f"virtual_chase={vcount} age_sec={age_sec} dist_pct={dist_pct} "
+            f"submitting limit [PIPELINE ENFORCEMENT]"
+        )
+        _promote_signal_to_limit_order(signal)
+
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
     if _sole_ai_research_mode() and is_research_data_collection():
@@ -6262,7 +6450,7 @@ def reconcile_stale_signals():
             if sig.get("outcome") != "OPEN":
                 sig["outcome"] = "OPEN"
                 fixed += 1
-            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
+            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
                 sig["status"] = "FILLED"
                 fixed += 1
         for s in trades_map.values():
@@ -6304,7 +6492,7 @@ def reconcile_stale_signals():
                     if _remove_pending_for_trade(tid, sig["outcome"]):
                         orphans_removed += 1
                 continue
-            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE) and ttl_expired:
+            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
@@ -6333,6 +6521,7 @@ def sync_signal_info_registry():
     awaiting_micro_ids = set()
     awaiting_5m_ids = set()
     awaiting_min_age_ids = set()
+    awaiting_chase_3plus_ids = set()
     with trade_lock:
         for entry in trades_map.values():
             sig = entry.get("signal_ref")
@@ -6345,7 +6534,9 @@ def sync_signal_info_registry():
                 awaiting_5m_ids.add(tid)
             if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(sig):
                 awaiting_min_age_ids.add(tid)
-    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids
+            if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS and not is_terminal_signal(sig):
+                awaiting_chase_3plus_ids.add(tid)
+    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | awaiting_chase_3plus_ids
     live_signals = []
     with trade_lock:
         for entry in trades_map.values():
@@ -8602,6 +8793,7 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_SHORT_BEAR_ALPHA: "sba",
     RESEARCH_LANE_AI_60_65_ALPHA: "a65",
     RESEARCH_LANE_URGENT_CHASE_ALPHA: "ucha",
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "c3a",
     RESEARCH_LANE_PROFIT_GATES: "pg",
 }
 
@@ -8878,6 +9070,10 @@ def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, feature
     _spawn_research_lane(
         ctx, ai, edge_score, features, source_lane,
         RESEARCH_LANE_URGENT_CHASE_ALPHA, "URGENT_CHASE_FROM_CONTINUOUS",
+    )
+    _spawn_research_lane(
+        ctx, ai, edge_score, features, source_lane,
+        RESEARCH_LANE_CHASE_3PLUS_ALPHA, "CHASE_3PLUS_FROM_CONTINUOUS",
     )
     spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
 
@@ -9486,6 +9682,7 @@ def validate_pipeline_completion(signal: dict):
     VALID_FINAL_STATES = [
         "ACTIVE", "ORDERED", "REJECTED", "BLOCKED", "EXPIRED", "COMPLETE",
         SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
+        SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
     ]
     if signal.get("status") not in VALID_FINAL_STATES:
         logger.warning(f"[PIPELINE WARNING] Non-terminal state: {signal.get('status')} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
@@ -10283,6 +10480,11 @@ def execute_simulated_order(signal):
     price = state.get("price")
     if not price or price <= 0:
         return False
+    if is_chase_3plus_alpha_lane(signal):
+        if signal.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS:
+            return True
+        if not signal.get("chase_3plus_activation_reason"):
+            return _defer_signal_chase_3plus(signal)
     if _should_defer_min_signal_age(signal):
         return _defer_signal_min_age(signal)
     return _promote_signal_to_limit_order(signal)
@@ -10610,7 +10812,7 @@ def _update_awaiting_signal_price_extremes(price: float):
             if not isinstance(sig, dict) or is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE):
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
                 continue
             if not (sig.get("limit_price") or sig.get("planned_limit_price")):
                 continue
@@ -10669,6 +10871,7 @@ def process_pending_orders():
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
     process_awaiting_min_age_entries()
+    process_awaiting_chase_3plus_entries()
     _update_awaiting_signal_price_extremes(price)
     _update_pending_order_price_extremes(price)
     process_limit_chase(price)
@@ -11773,6 +11976,8 @@ def process_signal(event: dict):
                 final_status = SIGNAL_STATUS_AWAITING_MICRO
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE:
                 final_status = SIGNAL_STATUS_AWAITING_MIN_AGE
+            elif signal.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS:
+                final_status = SIGNAL_STATUS_AWAITING_CHASE_3PLUS
             else:
                 final_status = "ORDERED"
             finalize_signal(signal, ai, final_status)
@@ -13673,6 +13878,37 @@ def build_static_pathway_lane_specs() -> dict:
                     "Entry, AI, Scenario C exits, TTL: frozen same as CONTINUOUS",
                 ],
             },
+            {
+                "lane": RESEARCH_LANE_CHASE_3PLUS_ALPHA,
+                "label": RESEARCH_LANE_LABELS[RESEARCH_LANE_CHASE_3PLUS_ALPHA],
+                "subtitle": "DELAYED ENTRY · VIRTUAL CHASE ≥3 OR 180s",
+                "role": "late-entry experiment — observe persistence before first limit",
+                "parent_lane": RESEARCH_LANE_CONTINUOUS,
+                "status": "ACTIVE",
+                "toggle_key": "research_lane_enabled",
+                "hypothesis": "Trades that would reach chase #3+ are stronger; delayed entry avoids weak early fills.",
+                "research_question": "Does waiting for virtual chase persistence beat immediate CONTINUOUS entry?",
+                "entry": {
+                    "trigger": "spawn on every CONTINUOUS APPROVE — observe, do not submit immediately",
+                    "entry_path": "AI_DIRECT",
+                    "fill_path": "AI_DIRECT_CHASE",
+                    "ai_path": "same as CONTINUOUS benchmark",
+                    "execution": "activate when virtual_chase≥3 OR age≥180s OR signal distance threshold; then normal chase",
+                    "post_ai_gates": "log-only telemetry",
+                    "margin_usd": float(FIXED_MARGIN_USDT),
+                },
+                "exit": scenario_c,
+                "exit_path": "Scenario C frozen",
+                "promotion_criteria": f"{promote_ev}; {promote_pnl}",
+                "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
+                "expected_advantage": "Skip 0–2 chase noise cohort; enter demonstrated trends",
+                "expected_risk": "Miss early fills; correlation≠causation on chase buckets",
+                "benchmark_comparison": "vs CONTINUOUS immediate entry",
+                "diff_vs_benchmark": [
+                    "Entry delay: virtual chase observation before first limit",
+                    "After activation: same AI limit, 25% chase, Scenario C, TTL",
+                ],
+            },
         ],
     }
 
@@ -14448,6 +14684,7 @@ DASHBOARD_JS = """(function () {
       if (spec.status === 'RETIRED') return '#484f58';
       if (spec.is_benchmark) return '#d4a72c';
       if (spec.lane === 'URGENT_CHASE_ALPHA') return '#22d3ee';
+      if (spec.lane === 'CHASE_3PLUS_ALPHA') return '#c084fc';
       if (spec.lane === 'SHADOW_RUNNER') return '#6e7681';
       if (spec.status === 'PROBATION') return '#f97316';
       if (spec.lane === 'HIGH_EDGE_RUNNER') return '#3fb950';
@@ -15078,7 +15315,7 @@ DASHBOARD_JS = """(function () {
           capWarn.style.display = msgs.length ? 'block' : 'none';
           capWarn.innerText = msgs.join(' ');
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
+        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS")).map(s => `
           <tr>
             <td>${s.created_ts || '-'}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -15091,7 +15328,7 @@ DASHBOARD_JS = """(function () {
             <td>${s.pull_req != null ? s.pull_req.toFixed(2) : '-' }%</td>
             <td>${s.signal_price !== undefined ? s.signal_price.toFixed(2) : '-'}</td>
             <td>${s.max_pull != null ? s.max_pull.toFixed(2) : '-' }%</td>
-            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_MIN_AGE' ? 'AWAITING MIN AGE (' + (s.age_min != null ? s.age_min.toFixed(1) : '?') + 'm)' : (s.outcome || '-')}</td>
+            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_MIN_AGE' ? 'AWAITING MIN AGE (' + (s.age_min != null ? s.age_min.toFixed(1) : '?') + 'm)' : s.status === 'AWAITING_CHASE_3PLUS' ? 'CHASE 3+ OBSERVE (v=' + (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0) + ')' : (s.outcome || '-')}</td>
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
@@ -15417,6 +15654,7 @@ def _collect_dashboard_active_signals(
     awaiting_micro_ids = set()
     awaiting_5m_ids = set()
     awaiting_min_age_ids = set()
+    awaiting_chase_3plus_ids = set()
     ordered_placed_ids = set()
     for entry in trades_map_src.values():
         s = entry.get("signal_ref")
@@ -15429,6 +15667,8 @@ def _collect_dashboard_active_signals(
             awaiting_5m_ids.add(tid)
         if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(s):
             awaiting_min_age_ids.add(tid)
+        if tid and s.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS and not is_terminal_signal(s):
+            awaiting_chase_3plus_ids.add(tid)
         if (
             tid
             and s.get("status") == "ORDERED"
@@ -15436,7 +15676,7 @@ def _collect_dashboard_active_signals(
             and not is_terminal_signal(s)
         ):
             ordered_placed_ids.add(tid)
-    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | ordered_placed_ids
+    live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | awaiting_chase_3plus_ids | ordered_placed_ids
     active_list = []
     now = time.time()
     for entry in trades_map_src.values():
@@ -15493,6 +15733,9 @@ def _collect_dashboard_active_signals(
             "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
             "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
             "awaiting_min_age": s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE,
+            "awaiting_chase_3plus": s.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+            "chase_3plus_virtual_chase_count": s.get("chase_3plus_virtual_chase_count"),
+            "chase_3plus_activation_reason": s.get("chase_3plus_activation_reason"),
             "entry_path": s.get("entry_path"),
         })
     exposure_count = max(len(active_list), len(live_ids))
