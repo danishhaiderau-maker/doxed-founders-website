@@ -4,6 +4,48 @@ import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
 
 export const BITFINEX_BTC_PERP_SYMBOL = 'tBTCF0:USTF0';
 const MIN_POSITION_BTC = 0.000004;
+const STABLE_CURRENCIES = new Set(['USD', 'USDT', 'UST', 'USTF0']);
+
+export type BitfinexWalletRow = {
+  walletType: string;
+  currency: string;
+  balance: number;
+  available: number;
+};
+
+export type BitfinexWalletSnapshot = {
+  derivativesUsd: number;
+  exchangeUsd: number;
+  fundingUsd: number;
+  totalStableUsd: number;
+};
+
+export type EnsureDerivativesResult = {
+  derivativesUsd: number;
+  transferredUsd: number;
+  message?: string;
+};
+
+function parseWalletRow(row: unknown): BitfinexWalletRow | null {
+  if (!Array.isArray(row) || row.length < 5) return null;
+  const currency = String(row[1] ?? '').toUpperCase();
+  if (!STABLE_CURRENCIES.has(currency)) return null;
+  return {
+    walletType: String(row[0] ?? '').toLowerCase(),
+    currency,
+    balance: Number(row[2] ?? 0),
+    available: Number(row[4] ?? 0),
+  };
+}
+
+function stableAvailable(rows: BitfinexWalletRow[], walletType: string): number {
+  let best = 0;
+  for (const row of rows) {
+    if (row.walletType !== walletType) continue;
+    if (row.available > best) best = row.available;
+  }
+  return best;
+}
 
 function signBitfinex(secret: string, payload: string): string {
   return createHmac('sha384', secret).update(payload).digest('hex');
@@ -114,6 +156,113 @@ export class BitfinexTradingClient {
     }
   }
 
+  async listWallets(creds: ExchangeCredentials): Promise<BitfinexWalletRow[]> {
+    const wallets = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/wallets');
+    if (!Array.isArray(wallets)) return [];
+    return wallets.map(parseWalletRow).filter((row): row is BitfinexWalletRow => row != null);
+  }
+
+  async getWalletSnapshot(creds: ExchangeCredentials): Promise<BitfinexWalletSnapshot> {
+    const rows = await this.listWallets(creds);
+    const derivativesUsd = stableAvailable(rows, 'margin');
+    const exchangeUsd = stableAvailable(rows, 'exchange');
+    const fundingUsd = stableAvailable(rows, 'funding');
+    return {
+      derivativesUsd,
+      exchangeUsd,
+      fundingUsd,
+      totalStableUsd: derivativesUsd + exchangeUsd + fundingUsd,
+    };
+  }
+
+  /**
+   * BTC perp collateral — Bitfinex maps the UI "Derivatives" wallet to API wallet type `margin` (USTF0).
+   */
+  async getDerivativesAvailableUsd(creds: ExchangeCredentials): Promise<number> {
+    const rows = await this.listWallets(creds);
+    return stableAvailable(rows, 'margin');
+  }
+
+  /** @deprecated Prefer getDerivativesAvailableUsd — perp copy uses Derivatives (margin) only. */
+  async getAvailableUsd(creds: ExchangeCredentials): Promise<number> {
+    return this.getDerivativesAvailableUsd(creds);
+  }
+
+  private pickTransferSource(
+    rows: BitfinexWalletRow[],
+    walletType: 'exchange' | 'funding',
+    minAmount: number,
+  ): BitfinexWalletRow | null {
+    const candidates = rows
+      .filter((row) => row.walletType === walletType && row.available >= minAmount)
+      .sort((a, b) => b.available - a.available);
+    return candidates[0] ?? null;
+  }
+
+  private async transferStableToDerivatives(
+    creds: ExchangeCredentials,
+    from: 'exchange' | 'funding',
+    amount: number,
+    rows: BitfinexWalletRow[],
+  ): Promise<number> {
+    const source = this.pickTransferSource(rows, from, 0.01);
+    if (!source || source.available < 0.01) return 0;
+
+    const transferAmount = Math.min(amount, source.available);
+    const currency = source.currency === 'USD' ? 'USD' : 'UST';
+    const currencyTo = currency === 'USD' ? 'USD' : 'USTF0';
+
+    await bitfinexAuthPost(creds, 'v2/auth/w/transfer', {
+      from,
+      to: 'margin',
+      currency,
+      currency_to: currencyTo,
+      amount: transferAmount.toFixed(4),
+    });
+    return transferAmount;
+  }
+
+  /** Top up Derivatives (margin/USTF0) from Exchange or Funding before copy entries. */
+  async ensureDerivativesMargin(
+    creds: ExchangeCredentials,
+    minUsd: number,
+  ): Promise<EnsureDerivativesResult> {
+    const target = Math.max(minUsd, 1);
+    let rows = await this.listWallets(creds);
+    let derivativesUsd = stableAvailable(rows, 'margin');
+
+    if (derivativesUsd >= target * 0.9) {
+      return { derivativesUsd, transferredUsd: 0 };
+    }
+
+    let needed = Math.max(0, target - derivativesUsd);
+    let transferredUsd = 0;
+
+    for (const from of ['exchange', 'funding'] as const) {
+      if (needed < 0.01) break;
+      try {
+        const moved = await this.transferStableToDerivatives(creds, from, needed, rows);
+        if (moved > 0) {
+          transferredUsd += moved;
+          needed -= moved;
+          rows = await this.listWallets(creds);
+          derivativesUsd = stableAvailable(rows, 'margin');
+        }
+      } catch {
+        /* try next source */
+      }
+    }
+
+    const message =
+      transferredUsd > 0
+        ? `Moved $${transferredUsd.toFixed(2)} USDT to Derivatives for copy trading.`
+        : derivativesUsd < target * 0.9
+          ? `Need ~$${target.toFixed(0)} USDT in Derivatives wallet — transfer from Exchange or Funding in Bitfinex.`
+          : undefined;
+
+    return { derivativesUsd, transferredUsd, message };
+  }
+
   async getMarkPrice(symbol = BITFINEX_BTC_PERP_SYMBOL): Promise<number> {
     const ticker = await bitfinexPublicGet<number[]>(`v2/ticker/${symbol}`);
     const last = ticker[7];
@@ -124,19 +273,6 @@ export class BitfinexTradingClient {
       return (bid + ask) / 2;
     }
     throw new Error('Bitfinex ticker returned no price');
-  }
-
-  async getAvailableUsd(creds: ExchangeCredentials): Promise<number> {
-    const wallets = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/wallets');
-    let best = 0;
-    for (const w of wallets) {
-      if (!Array.isArray(w) || w.length < 5) continue;
-      const currency = String(w[1] ?? '').toUpperCase();
-      if (currency !== 'USD' && currency !== 'USDT' && currency !== 'UST') continue;
-      const available = Number(w[4] ?? 0);
-      if (available > best) best = available;
-    }
-    return best;
   }
 
   async submitLimitOrder(

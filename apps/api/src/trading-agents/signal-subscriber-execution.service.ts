@@ -132,6 +132,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
 
+    if (instance.exchangeProvider === 'bitfinex') {
+      const funding = await this.bitfinex.ensureDerivativesMargin(creds, marginCap);
+      if (funding.message && funding.transferredUsd > 0) {
+        this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
+      }
+    }
+
     const openParticipant = await this.prisma.signalCycleParticipant.findFirst({
       where: {
         userId: instance.userId,
@@ -234,14 +241,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     let available = 0;
     try {
-      available = await this.bitfinex.getAvailableUsd(creds);
+      available = await this.bitfinex.getDerivativesAvailableUsd(creds);
     } catch (err) {
       this.logger.warn(
-        `Could not read Bitfinex balance: ${err instanceof Error ? err.message : err}`,
+        `Could not read Bitfinex Derivatives balance: ${err instanceof Error ? err.message : err}`,
       );
       return {
         canEnter: false,
-        reason: 'Could not read Bitfinex free margin — skipping new entries this tick.',
+        reason: 'Could not read Bitfinex Derivatives balance — skipping new entries this tick.',
         availableUsd: null,
       };
     }
@@ -268,7 +275,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (available < minRequired) {
       return {
         canEnter: false,
-        reason: `Insufficient free margin ($${available.toFixed(2)} available, need ~$${marginCap} per trade). Skipping new entries — deposit more or wait for open trade to close.`,
+        reason: `Insufficient Derivatives margin ($${available.toFixed(2)} available, need ~$${marginCap} in Derivatives wallet). Move USDT to Derivatives in Bitfinex or keep funds in Exchange/Funding for auto-transfer.`,
         availableUsd: available,
       };
     }
@@ -295,10 +302,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     let available = 0;
     try {
-      available = await this.bitfinex.getAvailableUsd(creds);
+      available = await this.bitfinex.getDerivativesAvailableUsd(creds);
     } catch (err) {
       this.logger.warn(
-        `Hire skip ${instance.userId} cycle=${cycleId}: balance check failed — ${err instanceof Error ? err.message : err}`,
+        `Hire skip ${instance.userId} cycle=${cycleId}: Derivatives balance check failed — ${err instanceof Error ? err.message : err}`,
       );
       return false;
     }
@@ -311,7 +318,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
         data: {
-          lastError: `Insufficient free margin ($${available.toFixed(2)} available, need ~$${effectiveCap} per trade). Skipping this signal — no order placed.`,
+          lastError: `Insufficient Derivatives margin ($${available.toFixed(2)} available, need ~$${effectiveCap}). Move USDT to Derivatives in Bitfinex.`,
         },
       });
       return false;
