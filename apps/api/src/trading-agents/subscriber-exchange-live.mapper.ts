@@ -22,6 +22,8 @@ export type SubscriberCycleRow = {
   exitPrice: number | null;
   pnlUsd: number | null;
   pnlMarginPct: number | null;
+  limitPrice?: number | null;
+  qty?: number | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -32,6 +34,12 @@ export type SubscriberCycleRow = {
     createdAt: Date;
   };
 };
+
+const ACTIVE_CYCLE_STATUSES = new Set<SignalCycleStatus>([
+  'INTENT',
+  'PENDING_ENTRY',
+  'OPEN',
+]);
 
 function fmtTime(d: Date): string {
   return d.toISOString().slice(0, 19).replace('T', ' ');
@@ -70,7 +78,7 @@ export function mapSubscriberExchangeLiveBook(input: {
     });
   }
 
-  const pendingOrders = input.orders
+  const exchangePending = input.orders
     .filter((o) => Math.abs(o.amount) > 0 && o.price > 0)
     .slice(0, 10)
     .map((o) => ({
@@ -82,6 +90,11 @@ export function mapSubscriberExchangeLiveBook(input: {
       signalPrice: o.price,
     }));
 
+  const pendingOrders = [...exchangePending];
+  const seenPending = new Set(
+    exchangePending.map((o) => `${o.side}:${o.limitPrice}:${o.qty}`),
+  );
+
   const expiredOrders: TradingAgentDashboardState['liveBook']['expiredOrders'] = [];
   const activeSignals: TradingAgentDashboardState['liveBook']['activeSignals'] = [];
   const trades: TradingAgentDashboardState['liveBook']['trades'] = [];
@@ -89,9 +102,13 @@ export function mapSubscriberExchangeLiveBook(input: {
   for (const row of input.participants) {
     const intent = parseIntent(row.cycle.intentEnvelope);
     const direction = String(intent.direction ?? '—').toUpperCase();
-    const limitPrice = Number(intent.limit_price ?? intent.signal_price ?? row.fillPrice ?? 0);
+    const limitPrice = Number(
+      row.limitPrice ?? intent.limit_price ?? intent.signal_price ?? row.fillPrice ?? 0,
+    );
+    const qty = Number(row.qty ?? 0);
+    const cycleLive = ACTIVE_CYCLE_STATUSES.has(row.cycle.status);
 
-    if (row.status === 'EXPIRED' || (row.status === 'PENDING_ENTRY' && row.cycle.status === 'EXPIRED')) {
+    if (row.status === 'EXPIRED' || (row.status === 'PENDING_ENTRY' && !cycleLive)) {
       const ageMin = Math.max(
         0,
         Math.round((Date.now() - row.createdAt.getTime()) / 60_000),
@@ -108,7 +125,52 @@ export function mapSubscriberExchangeLiveBook(input: {
       continue;
     }
 
-    if (row.status === 'OPEN' || row.status === 'PENDING_ENTRY') {
+    if (row.status === 'OPEN') {
+      const entry = Number(row.fillPrice ?? limitPrice);
+      positions.push({
+        leg: row.cycle.tradeId.slice(0, 10),
+        side: direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG',
+        qty: qty > 0 ? qty : 0,
+        entry,
+        current: mark > 0 ? mark : entry,
+        stopLoss: 0,
+        takeProfit: 0,
+        pnlUsd: row.pnlUsd ?? 0,
+      });
+      activeSignals.push({
+        time: fmtTime(row.createdAt),
+        direction,
+        confidence: Math.round(Number(intent.confidence ?? 0)),
+        regime: String(intent.regime ?? '—'),
+        strategy: String(intent.strategy ?? 'COPY'),
+        trigger: String(intent.trigger ?? 'RELAY'),
+        pullRequiredPct: 0,
+        signalPrice: limitPrice,
+        maxPullPct: 0,
+        outcome: row.status,
+        fillPrice: row.fillPrice,
+        exitReason: null,
+      });
+      continue;
+    }
+
+    if (row.status === 'PENDING_ENTRY' && cycleLive) {
+      const ageMin = Math.max(
+        0,
+        Math.round((Date.now() - row.createdAt.getTime()) / 60_000),
+      );
+      const pendingKey = `${direction}:${limitPrice}:${qty}`;
+      if (limitPrice > 0 && !seenPending.has(pendingKey)) {
+        pendingOrders.push({
+          ageMin,
+          side: direction === 'LONG' || direction === 'SHORT' ? direction : 'SHORT',
+          status: 'PENDING',
+          qty: qty > 0 ? qty : 0,
+          limitPrice,
+          signalPrice: limitPrice,
+        });
+        seenPending.add(pendingKey);
+      }
       activeSignals.push({
         time: fmtTime(row.createdAt),
         direction,
