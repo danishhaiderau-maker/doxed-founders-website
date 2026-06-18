@@ -154,13 +154,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
 
+    let activeOrderIdSet = new Set<number>();
     if (instance.exchangeProvider === 'bitfinex') {
-      const funding = await this.bitfinex.ensureDerivativesMargin(creds, marginCap);
-      if (funding.message && funding.transferredUsd > 0) {
-        this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
+      try {
+        const funding = await this.bitfinex.ensureDerivativesMargin(creds, marginCap);
+        if (funding.message && funding.transferredUsd > 0) {
+          this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
+        }
+        await this.cancelAbsurdPendingOrders(creds, instance.userId);
+        const activeOrders = await this.bitfinex.listActiveOrders(creds);
+        activeOrderIdSet = new Set(activeOrders.map((o) => o.id));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Bitfinex prep ${instance.userId}: ${msg}`);
       }
-      await this.cancelAbsurdPendingOrders(creds, instance.userId);
     }
+
+    await this.reconcileFilledParticipants(instance.userId, agentId);
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -223,7 +233,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       if (participant.status === SignalCycleStatus.PENDING_ENTRY) {
         managedOpenTrade = true;
-        await this.monitorEntry(agentId, instance.userId, cycle, participant, meta, creds);
+        await this.monitorEntry(
+          agentId,
+          instance.userId,
+          cycle,
+          participant,
+          meta,
+          creds,
+          activeOrderIdSet,
+        );
         continue;
       }
 
@@ -687,6 +705,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     participant: { id: string; status: SignalCycleStatus },
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
+    activeOrderIdSet: Set<number>,
   ) {
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
     const orderId = meta.bitfinexOrderId;
@@ -713,7 +732,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const active = await this.bitfinex.findOrder(creds, orderId);
+    const active =
+      activeOrderIdSet.size > 0
+        ? activeOrderIdSet.has(orderId)
+        : !!(await this.bitfinex.findOrder(creds, orderId).catch(() => null));
     if (active) {
       await this.applyLimitChase(
         agentId,
@@ -729,7 +751,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const position = await this.bitfinex.getOpenPositionDetail(creds).catch(() => null);
     const expectedLong = meta.direction === 'LONG';
     const hasPosition =
       position &&
@@ -798,6 +820,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       source: 'hire',
     });
 
+    await this.healStuckPendingFill(participant.id, cycle.id, fillPrice);
+
     if (stopOrderId != null) {
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
         venue: 'bitfinex',
@@ -819,6 +843,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Prior deploys recorded FILLED events but participant stayed PENDING_ENTRY when stop failed. */
+  private async reconcileFilledParticipants(userId: string, agentId: string) {
+    const stuck = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+        events: { some: { eventType: 'FILLED' } },
+      },
+      include: {
+        events: {
+          where: { eventType: 'FILLED' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    for (const row of stuck) {
+      const payload = row.events[0]?.payload as { fill_price?: number } | null;
+      const fill =
+        payload?.fill_price != null && Number.isFinite(payload.fill_price)
+          ? payload.fill_price
+          : 0;
+      await this.healStuckPendingFill(row.id, row.cycleId, fill);
+    }
+  }
+
   private async healStuckPendingFill(
     participantId: string,
     cycleId: string,
