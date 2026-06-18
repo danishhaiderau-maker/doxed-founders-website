@@ -8,8 +8,7 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   resolveSubscriberExecutionPollMs,
   DEFAULT_SUBSCRIBER_LEVERAGE,
-  SUBSCRIBER_MAX_OPEN_COPY_LEGS,
-  SUBSCRIBER_MAX_PENDING_COPY_LEGS,
+  BITFINEX_COPY_POLICY_VERSION,
   resolveMaxConcurrentCopySignals,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
@@ -101,9 +100,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
-    this.logger.log(
-        `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS}ms (max $${cap} margin/trade)`,
-    );
+      this.logger.log(
+        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, every ${POLL_MS}ms (max $${cap}/trade)`,
+      );
     });
     setInterval(() => void this.tick(), POLL_MS);
     setTimeout(() => void this.tick(), POLL_MS);
@@ -119,7 +118,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const instances = await this.prisma.tradingAgentInstance.findMany({
         where: {
           agentId: agent.id,
-          status: TradingAgentInstanceStatus.ACTIVE,
+          status: {
+            in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED],
+          },
           exchangeProvider: { not: 'paper' },
           OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
         },
@@ -144,6 +145,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async processInstance(agentId: string, instance: TradingAgentInstance) {
+    const exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED;
     const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
     if (!creds) {
       await this.prisma.tradingAgentInstance.update({
@@ -240,6 +242,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const meta = await this.loadExecutionMeta(participant.id);
 
       if (participant.status === SignalCycleStatus.PENDING_ENTRY) {
+        if (exitOnly) continue;
         managedOpenTrade = true;
         await this.monitorEntry(
           agentId,
@@ -308,6 +311,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
     await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
+
+    if (exitOnly) {
+      if (managedOpenTrade) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            lastError:
+              'Relay stopped — no new entries; Scenario C risk monitor still active on OPEN lots.',
+          },
+        });
+      }
+      return;
+    }
 
     const maxConcurrent = await this.resolveMaxConcurrentSignals();
     const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
