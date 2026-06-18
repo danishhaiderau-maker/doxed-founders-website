@@ -301,14 +301,15 @@ export class BitfinexTradingClient {
 
   async getMarkPrice(symbol = BITFINEX_BTC_PERP_SYMBOL): Promise<number> {
     const ticker = await bitfinexPublicGet<number[]>(`v2/ticker/${symbol}`);
-    const last = ticker[7];
-    const bid = ticker[1];
-    const ask = ticker[3];
-    if (typeof last === 'number' && last > 0) return last;
-    if (typeof bid === 'number' && typeof ask === 'number' && bid > 0 && ask > 0) {
+    // Trading pair ticker: [0]=BID [2]=ASK [6]=LAST_PRICE [7]=VOLUME (not price!)
+    const last = ticker[6];
+    const bid = ticker[0];
+    const ask = ticker[2];
+    if (typeof last === 'number' && last > 10_000) return last;
+    if (typeof bid === 'number' && typeof ask === 'number' && bid > 10_000 && ask > 0) {
       return (bid + ask) / 2;
     }
-    throw new Error('Bitfinex ticker returned no price');
+    throw new Error(`Bitfinex ticker returned invalid mark for ${symbol}`);
   }
 
   async submitLimitOrder(
