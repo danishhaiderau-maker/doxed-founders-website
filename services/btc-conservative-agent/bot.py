@@ -1847,6 +1847,68 @@ def is_research_lane_enabled(lane: str) -> bool:
         return True
     return bool(research_lane_enabled_map().get(lane, True))
 
+
+def lane_orders_allowed(lane: str = None) -> bool:
+    """Pathway Lab toggle — OFF means no new/chased limit orders for this lane."""
+    return is_research_lane_enabled(lane or RESEARCH_LANE_CONTINUOUS)
+
+
+def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
+    """Cancel pending limits and block awaiting promotions for a disabled lane."""
+    lane = str(lane or RESEARCH_LANE_CONTINUOUS).upper()
+    cancelled_pending = []
+    expired_awaiting = []
+    now = time.time()
+    with trade_lock:
+        for o in list(pending_orders):
+            if o.get("status") != "PENDING":
+                continue
+            if _normalize_lane_key(o) != lane:
+                continue
+            tid = o.get("trade_id")
+            lane_unregister_pending_order(o)
+            cancelled_pending.append(tid)
+            sig = (trades_map.get(tid) or {}).get("signal_ref") or {}
+            if isinstance(sig, dict):
+                sig["status"] = "BLOCKED"
+                sig["outcome"] = reason
+                sig["exit_reason"] = reason
+        for entry in trades_map.values():
+            sig = entry.get("signal_ref") or {}
+            if not isinstance(sig, dict) or _normalize_lane_key(sig) != lane:
+                continue
+            if is_terminal_signal(sig):
+                continue
+            st = sig.get("status")
+            if st in ("FILLED", "OPEN", "CLOSED", "COMPLETE"):
+                continue
+            if st in (
+                SIGNAL_STATUS_AWAITING_MICRO,
+                SIGNAL_STATUS_AWAITING_5M,
+                SIGNAL_STATUS_AWAITING_MIN_AGE,
+                "ORDERED",
+                "ACTIVE",
+                "PENDING",
+            ):
+                sig["status"] = "BLOCKED"
+                sig["outcome"] = reason
+                sig["exit_reason"] = reason
+                sig["expires_ts"] = now - 1
+                expired_awaiting.append(sig.get("trade_id"))
+    if cancelled_pending or expired_awaiting:
+        logger.info(
+            f"[LANE SUSPEND] lane={lane} reason={reason} "
+            f"cancelled_pending={len(cancelled_pending)} expired_awaiting={len(expired_awaiting)} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        pipeline_state_sync()
+    return {
+        "lane": lane,
+        "reason": reason,
+        "cancelled_pending": cancelled_pending,
+        "expired_awaiting": expired_awaiting,
+    }
+
 def research_lane_label(lane: str) -> str:
     return RESEARCH_LANE_LABELS.get(lane, lane or "Unknown")
 
@@ -2743,6 +2805,14 @@ def purge_dead_pending_orders():
     return removed
 
 def execution_allowed(lane: str = None) -> bool:
+    if lane and not lane_orders_allowed(lane):
+        with state_lock:
+            state["execution_reason"] = "LANE_DISABLED"
+        logger.warning(
+            f"[EXECUTION BLOCK] lane={lane} toggle OFF — no limit orders "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False
     if not risk_trading_allowed():
         with state_lock:
             state["execution_reason"] = state.get("execution_reason") or "RISK_PAUSE"
@@ -2928,7 +2998,7 @@ BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
-ANALYZER_SYNC_ID = "v9.64-pathway-lab-persist-2026-06-18"
+ANALYZER_SYNC_ID = "v9.65-lane-execution-gate-2026-06-18"
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = 8
 FUNDING_REFRESH_SEC = 60
@@ -4695,7 +4765,7 @@ PRE_AI_BLOCK_LOW_ADX_BELOW = 3.5
 PRE_AI_MIN_ADX = 12.0
 DOUBLE_CONFIRM_AI = False
 MIN_DATA_QUALITY_FOR_EDGE = 0.7
-EXECUTION_FIX_VERSION = "v1.1.44-pathway-lab-persist-fix"
+EXECUTION_FIX_VERSION = "v1.1.45-lane-execution-gate"
 
 
 def csv_research_meta(signal: dict = None) -> dict:
@@ -7730,6 +7800,8 @@ def log_lane_opportunity_event(
                 bucket["approve_not_traded"] = int(bucket.get("approve_not_traded", 0)) + 1
             elif event in ("EXECUTION_BLOCK", "WOULD_BLOCK"):
                 bucket["blocks"] = int(bucket.get("blocks", 0)) + 1
+            elif event in ("LANE_DISABLED", "SPAWN_SKIPPED"):
+                bucket["spawn_skipped"] = int(bucket.get("spawn_skipped", 0)) + 1
         rotate_log(LANE_OPPORTUNITY_CAPTURE_FILE)
         _safe_append_jsonl(LANE_OPPORTUNITY_CAPTURE_FILE, row, label="LANE_OPPORTUNITY")
     except Exception as e:
@@ -8637,6 +8709,15 @@ def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target
         return
     if not is_research_lane_enabled(target_lane):
         logger.info(f"[{target_lane} LANE] spawn skipped - lane OFF [PIPELINE ENFORCEMENT]")
+        log_lane_opportunity_event(
+            target_lane,
+            "SPAWN_SKIPPED",
+            (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"),
+            (ai or {}).get("win_prob"),
+            edge_score,
+            block_reason="LANE_TOGGLE_OFF",
+        )
         return
     prefix = _SPAWN_LANE_ID_PREFIX.get(target_lane, "lane")
     spawn_ctx = copy.deepcopy(ctx)
@@ -9828,9 +9909,15 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
 def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str, smart_meta: dict = None) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
     smart_meta = smart_meta or {}
+    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    if not lane_orders_allowed(lane):
+        logger.info(
+            f"[SIM] BLOCK limit lane={lane} toggle OFF trade_id={signal.get('trade_id')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return False
-    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
     direction = signal.get("final_direction") or _signal_direction(signal)
     limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
     price = state.get("price")
@@ -9996,6 +10083,8 @@ def process_awaiting_micro_entries():
         tid = signal.get("trade_id")
         if not tid:
             continue
+        if not lane_orders_allowed(signal.get("research_lane")):
+            continue
         expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
         if expires_ts and now > expires_ts:
             with trade_lock:
@@ -10042,6 +10131,8 @@ def process_awaiting_5m_entries():
     for signal in awaiting:
         tid = signal.get("trade_id")
         if not tid:
+            continue
+        if not lane_orders_allowed(signal.get("research_lane")):
             continue
         expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
         if expires_ts and now > expires_ts:
@@ -10142,6 +10233,8 @@ def process_awaiting_min_age_entries():
         tid = signal.get("trade_id")
         if not tid:
             continue
+        if not lane_orders_allowed(signal.get("research_lane")):
+            continue
         expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
         if expires_ts and now > expires_ts:
             with trade_lock:
@@ -10166,6 +10259,20 @@ def process_awaiting_min_age_entries():
 
 def execute_simulated_order(signal):
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    if not lane_orders_allowed(lane):
+        logger.info(
+            f"[SIM] BLOCK lane={lane} toggle OFF trade_id={signal.get('trade_id')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        log_lane_opportunity_event(
+            lane, "LANE_DISABLED", signal.get("trade_id"),
+            signal.get("final_direction"), signal.get("ai_win_prob"),
+            signal.get("edge_score_at_entry"), block_reason="PATHWAY_LAB_TOGGLE_OFF",
+        )
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = "LANE_DISABLED"
+        signal["exit_reason"] = "LANE_DISABLED"
+        return False
     _refresh_order_and_signal_ttl()
     logger.info(
         f"[SIM] Simulated order created trade_id={signal.get('trade_id')} "
@@ -10240,6 +10347,9 @@ def _limit_chase_near_fill_zone(direction: str, limit_price: float, market_price
 
 def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
     if not limit_chase_enabled():
+        return False
+    lane = order.get("research_lane")
+    if lane and not lane_orders_allowed(lane):
         return False
     if order.get("status") != "PENDING":
         return False
@@ -10473,6 +10583,8 @@ def process_limit_chase(price: float):
     with trade_lock:
         pending = [o for o in pending_orders if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
+        if not lane_orders_allowed(order.get("research_lane")):
+            continue
         if not _limit_chase_eligible_order(order, price, now):
             continue
         tid = order.get("trade_id")
@@ -10564,6 +10676,8 @@ def process_pending_orders():
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
+                continue
+            if not lane_orders_allowed(order.get("research_lane")):
                 continue
             if not _pending_limit_touched(order, price):
                 continue
@@ -10799,6 +10913,20 @@ def process_signal(event: dict):
                 f"[PIPELINE] -> ENTER lane={research_lane} model={research_lane_label(research_lane)} "
                 f"skip_ai={skip_ai} - full pipeline enforced [PIPELINE ENFORCEMENT]"
             )
+            if not lane_orders_allowed(research_lane):
+                logger.info(
+                    f"[PIPELINE] lane={research_lane} toggle OFF — no orders (telemetry only) "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+                log_lane_opportunity_event(
+                    research_lane,
+                    "LANE_DISABLED",
+                    event.get("trade_id") or (pre_ctx or {}).get("trade_id"),
+                    block_reason="PATHWAY_LAB_TOGGLE_OFF",
+                )
+                _set_lane_pipeline_stage(research_lane, "IDLE")
+                state["last_pipeline_stage"] = "IDLE"
+                return
             update_debug_state_always("PIPELINE_ENTER")
             if not is_buffer_ready():
                 logger.warning("[BUFFER] Not enough data for stable features - skipping [PIPELINE ENFORCEMENT]")
@@ -12192,6 +12320,12 @@ def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     return signal
 
 def execute_order(signal, ai=None):
+    if not lane_orders_allowed(signal.get("research_lane")):
+        logger.warning(
+            f"[EXECUTION BLOCK] lane={signal.get('research_lane')} toggle OFF "
+            f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     if not state.get("live_armed", False) and state.get("strategy_mode") != "RESEARCH":
         logger.warning("[LIVE ARM BLOCK] execute_order skipped - live_armed=False")
         full_pipeline_trace("[EXECUTION]", "LIVE_ARM_BLOCKED", signal.get("trade_id"))
@@ -15690,7 +15824,13 @@ def toggle_continuous_ai_research():
             f"[CONTINUOUS_AI] set {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
             f"[PIPELINE ENFORCEMENT]"
         )
-    return jsonify({"continuous_ai_research_enabled": state["continuous_ai_research_enabled"]})
+    suspend_result = None
+    if not state["continuous_ai_research_enabled"]:
+        suspend_result = suspend_lane_trading(RESEARCH_LANE_CONTINUOUS, reason="CONTINUOUS_AI_OFF")
+    return jsonify({
+        "continuous_ai_research_enabled": state["continuous_ai_research_enabled"],
+        "suspend": suspend_result,
+    })
 
 @app.route('/api/toggle_research_lane', methods=['POST'])
 def toggle_research_lane():
@@ -15708,10 +15848,18 @@ def toggle_research_lane():
             enabled[lane] = not bool(enabled.get(lane, True))
         state["research_lane_enabled"] = enabled
     save_persistent_config()
+    suspend_result = None
+    if not enabled[lane]:
+        suspend_result = suspend_lane_trading(lane, reason="LANE_TOGGLE_OFF")
     logger.info(
         f"[RESEARCH_LANE] {lane} set {'ON' if enabled[lane] else 'OFF'} [PIPELINE ENFORCEMENT]"
     )
-    return jsonify({"lane": lane, "enabled": enabled[lane], "research_lane_enabled": enabled})
+    return jsonify({
+        "lane": lane,
+        "enabled": enabled[lane],
+        "research_lane_enabled": enabled,
+        "suspend": suspend_result,
+    })
 
 @app.route('/api/toggle_continuous_ai_direct', methods=['POST'])
 def toggle_continuous_ai_direct():
