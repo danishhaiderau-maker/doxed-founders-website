@@ -10,6 +10,7 @@ import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   SUBSCRIBER_MAX_OPEN_COPY_LEGS,
   SUBSCRIBER_MAX_PENDING_COPY_LEGS,
+  resolveMaxConcurrentCopySignals,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
   computeLimitFromMark,
@@ -100,9 +101,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
-      this.logger.log(
+    this.logger.log(
         `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS}ms (max $${cap} margin/trade)`,
-      );
+    );
     });
     setInterval(() => void this.tick(), POLL_MS);
     setTimeout(() => void this.tick(), POLL_MS);
@@ -281,7 +282,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             meta,
             creds,
           );
-          await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
+        await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
         }
       }
     }
@@ -307,6 +308,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
     await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
+
+    const maxConcurrent = await this.resolveMaxConcurrentSignals();
+    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    if (botState?.execution_paused) {
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError:
+            'Showcase bot paused on dashboard — no new copy entries until admin resumes trading.',
+        },
+      });
+      return;
+    }
 
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
     const intentCycles = cycles
@@ -341,6 +355,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         },
         managedOrderIds,
         marginCap,
+        maxConcurrent,
         intent.direction,
       );
       if (!eligibility.canEnter) {
@@ -378,6 +393,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         { open: lotSummary.open, pending: lotSummary.pending, direction: lotSummary.direction },
         managedOrderIds,
         marginCap,
+        maxConcurrent,
       );
       if (!eligibility.canEnter) {
         await this.prisma.tradingAgentInstance.update({
@@ -385,10 +401,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           data: { lastError: eligibility.reason },
         });
       } else {
-        await this.prisma.tradingAgentInstance.update({
-          where: { id: instance.id },
-          data: { lastError: null },
-        });
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: { lastError: null },
+    });
       }
     }
   }
@@ -451,6 +467,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
+  private async resolveMaxConcurrentSignals(): Promise<number> {
+    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    return resolveMaxConcurrentCopySignals({
+      botMaxActiveSignals: bot?.max_active_signals,
+      envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
+    });
+  }
+
   /**
    * Virtual lot ledger — same-direction legs on merged Bitfinex position.
    * Each lot exits via partial market close of its exact qty (Scenario C rules).
@@ -464,6 +488,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     },
     managedOrderIds: Set<number>,
     marginCap: number,
+    maxConcurrent: number,
     newDirection?: 'LONG' | 'SHORT',
   ): Promise<EntryEligibility> {
     let available = 0;
@@ -506,34 +531,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const maxByMargin = Math.max(0, Math.floor((available * 0.95) / marginCap));
-    const maxLegs = Math.min(
-      SUBSCRIBER_MAX_OPEN_COPY_LEGS + SUBSCRIBER_MAX_PENDING_COPY_LEGS,
-      maxByMargin,
-    );
+    const maxLegs = Math.min(maxConcurrent, maxByMargin);
     const totalLegs = managed.open + managed.pending;
 
     if (totalLegs >= maxLegs) {
       return {
         canEnter: false,
-        reason: `Virtual lot cap reached (${totalLegs} legs, margin allows ${maxByMargin} more at $${marginCap}/leg).`,
+        reason: `Max ${maxConcurrent} concurrent signals (showcase dashboard) — ${totalLegs} active (${managed.open} open, ${managed.pending} pending).`,
         availableUsd: available,
         slotsRemaining: 0,
       };
     }
 
-    if (managed.open >= SUBSCRIBER_MAX_OPEN_COPY_LEGS) {
+    if (managed.open >= maxConcurrent) {
       return {
         canEnter: false,
-        reason: `Max ${SUBSCRIBER_MAX_OPEN_COPY_LEGS} open copy lots — waiting for Scenario C exits.`,
+        reason: `Max ${maxConcurrent} open copy lots (showcase dashboard) — waiting for Scenario C exits.`,
         availableUsd: available,
         slotsRemaining: 0,
       };
     }
 
-    if (managed.pending >= SUBSCRIBER_MAX_PENDING_COPY_LEGS) {
+    if (managed.pending >= maxConcurrent) {
       return {
         canEnter: false,
-        reason: `Max ${SUBSCRIBER_MAX_PENDING_COPY_LEGS} pending limits — waiting for fills/chase.`,
+        reason: `Max ${maxConcurrent} pending limits (showcase dashboard) — waiting for fills/chase.`,
         availableUsd: available,
         slotsRemaining: 0,
       };
@@ -600,7 +622,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     try {
-      const mark = await this.bitfinex.getMarkPrice();
+    const mark = await this.bitfinex.getMarkPrice();
       const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
       let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
       if (limitPrice == null) {
@@ -628,36 +650,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
-      const orderId = await this.bitfinex.submitLimitOrder(creds, {
-        direction: intent.direction,
-        qty,
-        price: limitPrice,
+    const orderId = await this.bitfinex.submitLimitOrder(creds, {
+      direction: intent.direction,
+      qty,
+      price: limitPrice,
         leverage,
-      });
+    });
 
-      const payload: ExecutionPayload = {
-        bitfinexOrderId: orderId,
-        limitPrice,
+    const payload: ExecutionPayload = {
+      bitfinexOrderId: orderId,
+      limitPrice,
         originalLimitPrice: limitPrice,
-        localMark: mark,
-        qty,
-        direction: intent.direction,
-        source: 'hire',
+      localMark: mark,
+      qty,
+      direction: intent.direction,
+      source: 'hire',
         lastChaseAtMs: 0,
         limitChaseCount: 0,
-      };
+    };
 
-      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
-        venue: 'bitfinex',
-        local_mark_at_signal: mark,
-        limit_price: limitPrice,
+    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
+      venue: 'bitfinex',
+      local_mark_at_signal: mark,
+      limit_price: limitPrice,
         original_limit_price: limitPrice,
-        qty,
+      qty,
         margin_usd: marginUsd,
         margin_cap_usd: effectiveCap,
         leverage,
-        ...payload,
-      });
+      ...payload,
+    });
 
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId, userId: instance.userId } },
@@ -676,7 +698,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
       }
 
-      this.logger.log(
+    this.logger.log(
         `Hire entry ${instance.userId} cycle=${cycleId} ${intent.direction} limit=${limitPrice.toFixed(2)} qty=${qty} margin=$${marginUsd.toFixed(2)} lev=${leverage}x`,
       );
       return true;
@@ -793,7 +815,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         { ...meta, qty },
         creds,
         intent,
-        fillPrice,
+      fillPrice,
       );
       return;
     }
@@ -1251,7 +1273,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
       const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
         positionDirection: meta.direction,
-        qty: meta.qty,
+      qty: meta.qty,
         stopPrice,
         leverage,
       }).catch(() => null);
@@ -1259,10 +1281,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
           venue: 'bitfinex',
           stop_price: stopPrice,
-          stopOrderId,
+      stopOrderId,
           qty: meta.qty,
-          source: 'hire',
-        });
+      source: 'hire',
+    });
         this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${meta.qty}`);
       }
     }
@@ -1293,7 +1315,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             qty: meta.qty,
             source: 'hire',
           });
-          this.logger.log(
+    this.logger.log(
             `Hire trail stop lot ${userId} cycle=${cycle.id} floor=${lockFloorTrail}% stop=${trailStop.toFixed(2)} qty=${meta.qty}`,
           );
         } catch (err) {
@@ -1513,11 +1535,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? Math.min(meta.qty, Math.abs(position.amount))
         : meta.qty;
       if (closeQty >= MIN_QTY_BTC) {
-        await this.bitfinex.submitMarketClose(creds, {
-          positionDirection: meta.direction,
+      await this.bitfinex.submitMarketClose(creds, {
+        positionDirection: meta.direction,
           qty: closeQty,
           leverage,
-        });
+      });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

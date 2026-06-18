@@ -337,6 +337,7 @@ export class TradingAgentInstancesService {
 
     if (paused && instance.exchangeProvider !== 'paper') {
       relayAction = await this.severShowcaseRelay(userId, instance.exchangeProvider);
+      await this.expirePendingCopyParticipants(userId, agent.id);
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -409,6 +410,43 @@ export class TradingAgentInstancesService {
       );
     }
     return { cancelledOrders: cancelled };
+  }
+
+  /** Stop relay: clear pending ledger rows so resume does not resurrect stale limits. */
+  private async expirePendingCopyParticipants(userId: string, agentId: string) {
+    const pending = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId },
+      },
+      select: { id: true, cycleId: true },
+    });
+    if (!pending.length) return;
+
+    const now = new Date();
+    for (const row of pending) {
+      await this.prisma.signalCycleParticipant.update({
+        where: { id: row.id },
+        data: { status: SignalCycleStatus.EXPIRED, updatedAt: now },
+      });
+      await this.prisma.signalCycleEvent.create({
+        data: {
+          cycleId: row.cycleId,
+          participantId: row.id,
+          eventType: 'EXPIRED',
+          payload: {
+            venue: 'bitfinex',
+            exit_reason: 'USER_RELAY_STOP',
+            pnl_usd: 0,
+            source: 'hire',
+          },
+        },
+      });
+    }
+    this.logger.log(
+      `Relay stop ${userId}: expired ${pending.length} pending copy participant(s)`,
+    );
   }
 
   private formatInstance(

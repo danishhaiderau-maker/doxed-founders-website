@@ -167,10 +167,39 @@ export const SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT = -18;
 
 /**
  * Virtual lots on merged Bitfinex BTC-PERP (same direction only).
- * Bot sim runs up to 20 concurrent legs; copy ledger tracks each fill separately.
+ * Live copy cap follows showcase dashboard max_active_signals (default 3).
  */
-export const SUBSCRIBER_MAX_OPEN_COPY_LEGS = 20;
-export const SUBSCRIBER_MAX_PENDING_COPY_LEGS = 20;
+export const SUBSCRIBER_MAX_CONCURRENT_SIGNALS_DEFAULT = 3;
+export const SUBSCRIBER_MAX_CONCURRENT_SIGNALS_CAP = 20;
+/** @deprecated Use resolveMaxConcurrentCopySignals — kept for legacy imports */
+export const SUBSCRIBER_MAX_OPEN_COPY_LEGS = SUBSCRIBER_MAX_CONCURRENT_SIGNALS_CAP;
+/** @deprecated Use resolveMaxConcurrentCopySignals — kept for legacy imports */
+export const SUBSCRIBER_MAX_PENDING_COPY_LEGS = SUBSCRIBER_MAX_CONCURRENT_SIGNALS_CAP;
+
+/** Mirrors bot get_effective_max_active_signals() — dashboard value is authoritative. */
+export function resolveMaxConcurrentCopySignals(opts?: {
+  botMaxActiveSignals?: number | string | null;
+  envOverride?: string | null;
+}): number {
+  const envRaw = opts?.envOverride?.trim();
+  if (envRaw) {
+    const env = Number.parseInt(envRaw, 10);
+    if (Number.isFinite(env) && env >= 1) {
+      return Math.min(SUBSCRIBER_MAX_CONCURRENT_SIGNALS_CAP, Math.floor(env));
+    }
+  }
+  const botRaw = opts?.botMaxActiveSignals;
+  const bot =
+    typeof botRaw === 'number'
+      ? botRaw
+      : typeof botRaw === 'string'
+        ? Number.parseInt(botRaw, 10)
+        : NaN;
+  if (Number.isFinite(bot) && bot >= 1) {
+    return Math.min(SUBSCRIBER_MAX_CONCURRENT_SIGNALS_CAP, Math.floor(bot));
+  }
+  return SUBSCRIBER_MAX_CONCURRENT_SIGNALS_DEFAULT;
+}
 
 export type VirtualLotExitReason = 'PROFIT_LOCK' | 'THESIS_FAST_CUT' | 'HARD_STOP' | null;
 
