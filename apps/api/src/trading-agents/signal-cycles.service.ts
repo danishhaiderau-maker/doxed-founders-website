@@ -10,6 +10,7 @@ import {
 import {
   SignalCycleSettlementStatus,
   SignalCycleStatus,
+  UserRole,
   type Prisma,
 } from '@prisma/client';
 import {
@@ -86,7 +87,14 @@ export class SignalCyclesService implements OnModuleInit {
     return agent;
   }
 
-  async createApiKey(userId: string, slug: string, label?: string) {
+  private requireAdmin(role: string) {
+    if (role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Signal API keys are admin-only');
+    }
+  }
+
+  async createApiKey(userId: string, slug: string, label: string | undefined, role: string) {
+    this.requireAdmin(role);
     const agent = await this.resolveAgent(slug);
     const raw = `dcf_sig_${randomBytes(24).toString('hex')}`;
     const keyHash = createHash('sha256').update(raw).digest('hex');
@@ -110,7 +118,8 @@ export class SignalCyclesService implements OnModuleInit {
     };
   }
 
-  async listApiKeys(userId: string, slug: string) {
+  async listApiKeys(userId: string, slug: string, role: string) {
+    this.requireAdmin(role);
     const agent = await this.resolveAgent(slug);
     const rows = await this.prisma.signalApiKey.findMany({
       where: { userId, agentId: agent.id, revokedAt: null },
@@ -125,7 +134,8 @@ export class SignalCyclesService implements OnModuleInit {
     }));
   }
 
-  async revokeApiKey(userId: string, slug: string, keyId: string) {
+  async revokeApiKey(userId: string, slug: string, keyId: string, role: string) {
+    this.requireAdmin(role);
     const agent = await this.resolveAgent(slug);
     const row = await this.prisma.signalApiKey.findFirst({
       where: { id: keyId, userId, agentId: agent.id, revokedAt: null },

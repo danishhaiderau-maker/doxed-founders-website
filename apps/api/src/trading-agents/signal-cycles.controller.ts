@@ -127,13 +127,13 @@ export class SignalCyclesController {
     @CurrentUser() user: AuthUser,
     @Body() body: { label?: string },
   ) {
-    return this.cycles.createApiKey(user.id, slug, body.label);
+    return this.cycles.createApiKey(user.id, slug, body.label, user.role);
   }
 
   @UseGuards(JwtAuthGuard)
   @Get('api-keys')
   listKeys(@Param('slug') slug: string, @CurrentUser() user: AuthUser) {
-    return this.cycles.listApiKeys(user.id, slug);
+    return this.cycles.listApiKeys(user.id, slug, user.role);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -143,7 +143,7 @@ export class SignalCyclesController {
     @Param('keyId') keyId: string,
     @CurrentUser() user: AuthUser,
   ) {
-    return this.cycles.revokeApiKey(user.id, slug, keyId);
+    return this.cycles.revokeApiKey(user.id, slug, keyId, user.role);
   }
 }
 
