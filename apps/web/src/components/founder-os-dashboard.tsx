@@ -47,7 +47,9 @@ import {
 import {
   CONNECT_ACCOUNTS_HREF,
   buildCopilotUsageLines,
+  connectionSnapshotFromSync,
   listCopilotActions,
+  resolveSmartQuickPrompts,
   type ProviderRow,
 } from '@/lib/copilot-ai-stack';
 
@@ -58,15 +60,6 @@ const SIDEBAR_NAV: NavItem[] = [
   { id: 'social', label: 'Social Hub', icon: '📡' },
   { id: 'agents', label: 'Agents', icon: '🤖' },
   { id: 'analytics', label: 'Settings', icon: '⚙' },
-];
-
-const COPILOT_CHIPS = [
-  'Take full control and push all updates',
-  'Build with Cursor — implement my top priority task',
-  'What am I working on?',
-  'What should I ship today?',
-  'Deploy my stack to Vercel and Railway',
-  'Run platform autopilot sync',
 ];
 
 const EXECUTIVE_BRIEF_DATE_KEY = 'dcf-executive-brief-date-v1';
@@ -155,7 +148,7 @@ export function FounderOsDashboardLayout({
       setPromoStatus(promo);
       setCommandCenterLoading(false);
       if (account) {
-        setUsername(account.username.startsWith('@') ? account.username : `@${account.username}`);
+        setUsername(account.username);
         setAvatarUrl(account.avatarUrl);
         setRoleLabel(account.gamifiedRole?.label ?? 'Founder');
       }
@@ -205,6 +198,16 @@ export function FounderOsDashboardLayout({
       }),
     [workerStatus, buildRoom],
   );
+
+  const smartChips = useMemo(() => {
+    const conn = connectionSnapshotFromSync(syncStatus?.platforms ?? [], {
+      llmConnected: workerStatus?.llmConnected ?? false,
+      cursorConnected: workerStatus?.connections?.cursor ?? false,
+      founderNodeConnected: workerStatus?.connections?.founderNode ?? false,
+      repoFullName: memory?.repoFullName ?? buildRoom?.repoFullName,
+    });
+    return resolveSmartQuickPrompts(conn);
+  }, [syncStatus, workerStatus, memory, buildRoom]);
 
   const showMissionControl = activeTab === 'activity' && !tabContent;
 
@@ -461,6 +464,8 @@ export function FounderOsDashboardLayout({
                     activeAgentRunActive={isAgentRunActive(activeAgentRun)}
                     contentDraftReady={contentDraftReady}
                     liveNudges={liveNudges}
+                    syncPlatforms={syncStatus?.platforms ?? []}
+                    founderNodeConnected={workerStatus?.connections?.founderNode ?? false}
                     agentTemplate={null}
                     onInitialPromptConsumed={() => {
                       setQuickPrompt(null);
@@ -473,14 +478,14 @@ export function FounderOsDashboardLayout({
                     }}
                   />
                   <div className="flex shrink-0 flex-wrap gap-1.5">
-                    {COPILOT_CHIPS.map((chip) => (
+                    {smartChips.map((chip) => (
                       <button
-                        key={chip}
+                        key={chip.id}
                         type="button"
-                        onClick={() => setQuickPrompt(chip)}
+                        onClick={() => setQuickPrompt(chip.prompt)}
                         className="rounded-full border border-zinc-700/80 bg-zinc-900/50 px-2.5 py-1 text-[10px] text-zinc-300 transition hover:border-violet-500/50 hover:text-white"
                       >
-                        {chip}
+                        {chip.label}
                       </button>
                     ))}
                   </div>

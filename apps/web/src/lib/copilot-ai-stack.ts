@@ -2,6 +2,9 @@ import {
   classifyFounderBrainTask,
   isFounderRepoStatusPrompt,
   shouldDispatchBuilderForCodeAsk,
+  buildBrainCoachGapMessage,
+  resolveSmartQuickPrompts,
+  type BrainConnectionSnapshot,
 } from '@dcf/utils';
 
 export const AI_STACK_HREF = '/settings/builder';
@@ -345,22 +348,39 @@ export function primaryButtonLabelForAction(action: CopilotAction | null): strin
 export function copilotSetupGapMessage(
   mode: CopilotSendMode,
   stack: CopilotStackSummary,
+  conn?: BrainConnectionSnapshot,
 ): string | null {
-  if (mode === 'build') {
-    if (stack.canBuild) return null;
-    return [
-      '**Build** needs a code agent connected.',
-      '',
-      '1. Open **Settings → Founder Node** (AI stack)',
-      '2. Connect **Cursor** (API key) — or OpenHands',
-      '3. Link **GitHub** to your repo',
-      '4. Come back and tap **Build** again',
-      '',
-      '_Until then, use **Ask** for planning — or connect DeepSeek/OpenRouter for smarter answers._',
-    ].join('\n');
-  }
-  return null;
+  const snapshot: BrainConnectionSnapshot = conn ?? {
+    githubConnected: stack.canBuild || Boolean(stack.buildWorkers.length),
+    cursorConnected: stack.canBuild,
+    llmConnected: stack.canAsk,
+  };
+  return buildBrainCoachGapMessage(mode, snapshot);
 }
+
+export function connectionSnapshotFromSync(
+  platforms: { key: string; connected: boolean }[],
+  opts: {
+    llmConnected: boolean;
+    cursorConnected: boolean;
+    founderNodeConnected?: boolean;
+    repoFullName?: string | null;
+  },
+): BrainConnectionSnapshot {
+  const byKey = Object.fromEntries(platforms.map((p) => [p.key, p.connected]));
+  return {
+    githubConnected: Boolean(opts.repoFullName) || Boolean(byKey.github),
+    cursorConnected: opts.cursorConnected,
+    llmConnected: opts.llmConnected,
+    founderNodeConnected: opts.founderNodeConnected,
+    neonConnected: Boolean(byKey.neon),
+    vercelConnected: Boolean(byKey.vercel),
+    railwayConnected: Boolean(byKey.railway),
+    repoFullName: opts.repoFullName,
+  };
+}
+
+export { resolveSmartQuickPrompts };
 
 export type AiTeamAgentStatus = 'ready' | 'working' | 'offline' | 'needs_setup';
 
