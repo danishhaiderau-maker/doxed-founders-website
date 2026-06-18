@@ -1304,6 +1304,8 @@ model PlatformSettings {
   founderPromoAiCredentialsEnc String?  @db.Text
   /** Admin-recommended agent settings shown to users on hire/observe flows */
   agentShowcaseDefaultSettings String? @db.Text
+  /** Max USD margin per hire/signal trade (platform-enforced; default $20). */
+  subscriberMaxMarginUsd       Int      @default(20)
   updatedByUserId          String?
   updatedAt                DateTime @updatedAt
 }

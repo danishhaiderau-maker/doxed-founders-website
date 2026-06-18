@@ -10,6 +10,7 @@ import { ExchangeRelayControl, exchangeLabelFor } from '@/components/agent-hub/e
 import {
   AGENT_BETA_RISK_COPY,
   BITFINEX_RECOMMEND_BANNER,
+  BITFINEX_SIGNUP_REFERRAL_URL,
   EXCHANGE_API_GUIDES,
   EXCHANGE_CREDENTIAL_CONFIG,
   exchangeRequiresPassphrase,
@@ -151,8 +152,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
         <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Go live · real money</p>
         <h1 className="mt-1 text-2xl font-bold">{agentName || 'Agent'}</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Connect your exchange only. Admin DeepSeek AI powers every trade — you mirror the same signals as the
-          showcase bot. No AI API key required.
+          Connect Bitfinex only. Admin DeepSeek AI powers every trade — platform enforces $20 max margin per trade on
+          your account. No AI API key required.
         </p>
 
         <div className="mt-4 rounded-xl border border-violet-500/25 bg-violet-950/15 px-4 py-3 text-sm text-violet-100/90">
@@ -226,6 +227,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                 exchangeLabel={selectedProvider?.label ?? exchangeLabelFor(exchange)}
                 relayState="idle"
                 showSelector
+                hideConnect
                 providers={sortedProviders}
                 onExchangeChange={(id) => {
                   setExchange(id);
@@ -255,11 +257,27 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                         : 'cursor-not-allowed border-zinc-800 opacity-50'
                     }`}
                   >
-                    <span className="font-medium">{p.label}</span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="font-medium">{p.label}</span>
+                      {recommended && (
+                        <span className="rounded bg-emerald-600/30 px-1.5 py-0.5 text-[10px] font-bold text-emerald-200">
+                          Recommended
+                        </span>
+                      )}
+                    </div>
                     {recommended && (
-                      <span className="ml-2 rounded bg-emerald-600/30 px-1.5 py-0.5 text-[10px] font-bold text-emerald-200">
-                        Recommended
-                      </span>
+                      <p className="mt-1.5 text-[11px] text-zinc-500">
+                        No Bitfinex account?{' '}
+                        <a
+                          href={BITFINEX_SIGNUP_REFERRAL_URL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="font-medium text-emerald-300 underline hover:text-emerald-200"
+                        >
+                          Sign up for Bitfinex
+                        </a>
+                      </p>
                     )}
                     {!p.available && (
                       <span className="mt-1 block text-xs text-zinc-500">Coming soon</span>

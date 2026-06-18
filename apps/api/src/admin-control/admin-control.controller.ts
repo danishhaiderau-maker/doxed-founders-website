@@ -77,7 +77,7 @@ export class AdminControlController {
   @Patch('showcase-config')
   updateShowcase(
     @CurrentUser() user: AuthUser,
-    @Body() body: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
+    @Body() body: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string; subscriberMaxMarginUsd?: number },
   ) {
     return this.adminControl.updateShowcaseConfig(user.id, body);
   }

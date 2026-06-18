@@ -15,17 +15,20 @@ export type ExchangeApiGuide = {
 };
 
 export const BITFINEX_RECOMMEND_BANNER =
-  'Recommended: Bitfinex currently offers zero trading fees for eligible users — ideal for beta testing while fees would otherwise eat into small accounts.';
+  'Recommended: Bitfinex currently offers zero trading fees for eligible users — ideal for small per-trade sizing without fees eating into returns.';
+
+/** Referral signup — shown inline on Bitfinex hire tiles only (not as a standalone promo block). */
+export const BITFINEX_SIGNUP_REFERRAL_URL = 'https://www.bitfinex.com/sign-up?refcode=vOZIj2vW4';
 
 export const AGENT_BETA_RISK_COPY = {
-  title: 'Experimental agent — beta phase',
+  title: 'Live copy trading — real money',
   bullets: [
-    'This strategy remains in active testing. Do not allocate more than $500.',
+    'Platform enforces $20 max margin per trade on your exchange — you cannot size larger via API keys.',
     'Past performance does not guarantee future results.',
     'The agent may lose capital. Use only funds you can afford to lose.',
     'High risk. Not financial advice.',
   ],
-  checkboxLabel: 'I understand the risks and will not allocate more than $500.',
+  checkboxLabel: 'I understand the risks — platform places up to $20 margin per trade on my exchange.',
 };
 
 export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
@@ -34,7 +37,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
     recommended: true,
     recommendReason: BITFINEX_RECOMMEND_BANNER,
     docsUrl: 'https://support.bitfinex.com/hc/en-us/articles/115003363429-How-to-create-and-revoke-a-Bitfinex-API-Key',
-    maxCapitalWarningUsd: 500,
+    maxCapitalWarningUsd: 20,
     credentialHint: 'API Key + API Secret (no passphrase).',
     requiredPermissions: ['Read balance', 'Read orders', 'Create orders', 'Cancel orders'],
     forbiddenPermissions: ['Withdraw funds'],
@@ -50,7 +53,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   bybit: {
     provider: 'bybit',
     docsUrl: 'https://www.bybit.com/en/help-center/article/How-to-create-your-API-key',
-    maxCapitalWarningUsd: 500,
+    maxCapitalWarningUsd: 20,
     credentialHint: 'API Key + API Secret. Use Unified Trading account keys for BTC perps.',
     requiredPermissions: ['Read', 'Trade (derivatives)'],
     forbiddenPermissions: ['Withdraw', 'Transfer'],
@@ -66,7 +69,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   binance: {
     provider: 'binance',
     docsUrl: 'https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072',
-    maxCapitalWarningUsd: 500,
+    maxCapitalWarningUsd: 20,
     credentialHint: 'API Key + Secret. Futures keys if copying BTC perpetuals.',
     requiredPermissions: ['Enable Reading', 'Enable Futures (or Spot & Margin if spot only)'],
     forbiddenPermissions: ['Enable Withdrawals'],
@@ -82,7 +85,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   okx: {
     provider: 'okx',
     docsUrl: 'https://www.okx.com/help-center/how-to-create-an-api-key',
-    maxCapitalWarningUsd: 500,
+    maxCapitalWarningUsd: 20,
     credentialHint: 'API Key + Secret + Passphrase (OKX requires all three).',
     requiredPermissions: ['Read', 'Trade'],
     forbiddenPermissions: ['Withdraw'],
@@ -98,7 +101,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   hyperliquid: {
     provider: 'hyperliquid',
     docsUrl: 'https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets',
-    maxCapitalWarningUsd: 500,
+    maxCapitalWarningUsd: 20,
     credentialHint: 'Agent wallet address + agent wallet private key (not your main wallet).',
     requiredPermissions: ['Agent wallet trading'],
     forbiddenPermissions: ['Main wallet private key export'],

@@ -5,16 +5,17 @@ import {
   type TradingAgentInstance,
 } from '@prisma/client';
 import type { SignalIntentEnvelope } from '@dcf/utils';
+import { resolveSubscriberExecutionPollMs } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import { SignalCyclesService } from './signal-cycles.service';
 import { BotBridgeService } from './bot-bridge.service';
+import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 const AGENT_SLUG = 'conservative-btc';
-const POLL_MS = 30_000;
-const DEFAULT_MAX_MARGIN_USD = 500;
+const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
 
 type ExecutionPayload = {
@@ -29,11 +30,6 @@ type ExecutionPayload = {
 
 function executionEnabled(): boolean {
   return process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
-}
-
-function maxMarginUsd(): number {
-  const raw = Number(process.env.SUBSCRIBER_MAX_MARGIN_USD ?? DEFAULT_MAX_MARGIN_USD);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_MARGIN_USD;
 }
 
 function computeLimitFromMark(mark: number, offsetPct: number): number {
@@ -57,6 +53,12 @@ function computeQty(marginUsd: number, leverage: number, price: number): number 
   return Math.max(MIN_QTY_BTC, Math.floor(raw * 1e5) / 1e5);
 }
 
+type EntryEligibility = {
+  canEnter: boolean;
+  reason: string | null;
+  availableUsd: number | null;
+};
+
 @Injectable()
 export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
@@ -75,11 +77,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
       return;
     }
-    this.logger.log(
-      `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS / 1000}s (max margin $${maxMarginUsd()})`,
-    );
+    void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
+      this.logger.log(
+        `Hire subscriber runner active — Bitfinex live copy every ${POLL_MS / 1000}s (max $${cap} margin/trade)`,
+      );
+    });
     setInterval(() => void this.tick(), POLL_MS);
-    setTimeout(() => void this.tick(), 8_000);
+    setTimeout(() => void this.tick(), 1_000);
   }
 
   private async tick() {
@@ -126,6 +130,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
+
     const openParticipant = await this.prisma.signalCycleParticipant.findFirst({
       where: {
         userId: instance.userId,
@@ -151,33 +157,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       take: 5,
     });
 
+    let managedOpenTrade = false;
+
+    // Pass 1 — manage existing copy trades (fills, stops, exits) before any new entries.
     for (const cycle of cycles) {
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
       });
-
-      if (!participant && cycle.status === SignalCycleStatus.INTENT) {
-        if (openParticipant) continue;
-        if (cycle.expiresAt && cycle.expiresAt < new Date()) continue;
-        if (!this.botBridge.isEnabled()) continue;
-        const reachable = await this.botBridge.isReachable(true);
-        if (!reachable) continue;
-        await this.placeEntry(agentId, instance, cycle.id, cycle.intentEnvelope, creds);
-        continue;
-      }
-
       if (!participant) continue;
 
       const meta = await this.loadExecutionMeta(participant.id);
 
       if (participant.status === SignalCycleStatus.PENDING_ENTRY) {
+        managedOpenTrade = true;
         await this.monitorEntry(agentId, instance.userId, cycle, participant.id, meta, creds);
         continue;
       }
 
       if (participant.status === SignalCycleStatus.OPEN) {
+        managedOpenTrade = true;
         await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
       }
+    }
+
+    const eligibility = await this.evaluateEntryEligibility(creds, openParticipant, marginCap);
+
+    // Pass 2 — new limit entries only when free margin exists and no trade is in flight.
+    if (!eligibility.canEnter) {
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError: managedOpenTrade
+            ? eligibility.reason?.includes('Managing')
+              ? eligibility.reason
+              : 'Managing open copy trade — new signals paused until it closes.'
+            : eligibility.reason,
+        },
+      });
+      return;
+    }
+
+    for (const cycle of cycles) {
+      if (cycle.status !== SignalCycleStatus.INTENT) continue;
+      if (cycle.expiresAt && cycle.expiresAt < new Date()) continue;
+
+      const participant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
+      });
+      if (participant) continue;
+      if (!this.botBridge.isEnabled()) continue;
+      if (!(await this.botBridge.isReachable(true))) continue;
+
+      const placed = await this.placeEntry(agentId, instance, cycle.id, cycle.intentEnvelope, creds, marginCap);
+      if (placed) break;
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -186,52 +218,157 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
   }
 
+  /** Skip new limit orders when margin is tied up or balance is below platform cap ($20 default). */
+  private async evaluateEntryEligibility(
+    creds: ExchangeCredentials,
+    openParticipant: { status: SignalCycleStatus } | null,
+    marginCap: number,
+  ): Promise<EntryEligibility> {
+    if (openParticipant) {
+      return {
+        canEnter: false,
+        reason: 'Managing open copy trade — new signals paused until it closes.',
+        availableUsd: null,
+      };
+    }
+
+    let available = 0;
+    try {
+      available = await this.bitfinex.getAvailableUsd(creds);
+    } catch (err) {
+      this.logger.warn(
+        `Could not read Bitfinex balance: ${err instanceof Error ? err.message : err}`,
+      );
+      return {
+        canEnter: false,
+        reason: 'Could not read Bitfinex free margin — skipping new entries this tick.',
+        availableUsd: null,
+      };
+    }
+
+    const position = await this.bitfinex.getOpenPosition(creds).catch(() => null);
+    if (position) {
+      return {
+        canEnter: false,
+        reason: 'Bitfinex position open — capital reserved; skipping new entries until close completes.',
+        availableUsd: available,
+      };
+    }
+
+    const pendingOrders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    if (pendingOrders.length > 0) {
+      return {
+        canEnter: false,
+        reason: 'Pending Bitfinex order active — waiting before placing another limit entry.',
+        availableUsd: available,
+      };
+    }
+
+    const minRequired = marginCap * 0.9;
+    if (available < minRequired) {
+      return {
+        canEnter: false,
+        reason: `Insufficient free margin ($${available.toFixed(2)} available, need ~$${marginCap} per trade). Skipping new entries — deposit more or wait for open trade to close.`,
+        availableUsd: available,
+      };
+    }
+
+    return { canEnter: true, reason: null, availableUsd: available };
+  }
+
   private async placeEntry(
     agentId: string,
     instance: TradingAgentInstance,
     cycleId: string,
     envelopeJson: unknown,
     creds: ExchangeCredentials,
-  ) {
+    marginCap: number,
+  ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
-    if (!intent?.direction || intent.action !== 'ENTER') return;
+    if (!intent?.direction || intent.action !== 'ENTER') return false;
 
-    const mark = await this.bitfinex.getMarkPrice();
-    const limitPrice = computeLimitFromMark(mark, intent.entry.offset_pct);
-    const leverage = intent.risk.leverage_hint ?? 20;
-    const available = await this.bitfinex.getAvailableUsd(creds);
-    const marginUsd = Math.min(maxMarginUsd(), available * 0.95);
-    if (marginUsd < 10) {
-      throw new Error(`Insufficient Bitfinex balance (need ~$10+, have $${available.toFixed(2)})`);
+    const intentCap = intent.risk?.max_margin_usd;
+    const effectiveCap =
+      intentCap != null && Number.isFinite(intentCap) && intentCap > 0
+        ? Math.min(marginCap, intentCap)
+        : marginCap;
+
+    let available = 0;
+    try {
+      available = await this.bitfinex.getAvailableUsd(creds);
+    } catch (err) {
+      this.logger.warn(
+        `Hire skip ${instance.userId} cycle=${cycleId}: balance check failed — ${err instanceof Error ? err.message : err}`,
+      );
+      return false;
     }
-    const qty = computeQty(marginUsd, leverage, limitPrice);
 
-    const orderId = await this.bitfinex.submitLimitOrder(creds, {
-      direction: intent.direction,
-      qty,
-      price: limitPrice,
-    });
+    const marginUsd = Math.min(effectiveCap, available * 0.95);
+    if (marginUsd < effectiveCap * 0.9) {
+      this.logger.log(
+        `Hire skip ${instance.userId} cycle=${cycleId}: free margin $${available.toFixed(2)} < $${effectiveCap} required`,
+      );
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError: `Insufficient free margin ($${available.toFixed(2)} available, need ~$${effectiveCap} per trade). Skipping this signal — no order placed.`,
+        },
+      });
+      return false;
+    }
 
-    const payload: ExecutionPayload = {
-      bitfinexOrderId: orderId,
-      limitPrice,
-      localMark: mark,
-      qty,
-      direction: intent.direction,
-      source: 'hire',
-    };
+    try {
+      const mark = await this.bitfinex.getMarkPrice();
+      const limitPrice = computeLimitFromMark(mark, intent.entry.offset_pct);
+      const leverage = intent.risk.leverage_hint ?? 20;
+      const qty = computeQty(marginUsd, leverage, limitPrice);
 
-    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
-      venue: 'bitfinex',
-      local_mark_at_signal: mark,
-      limit_price: limitPrice,
-      qty,
-      ...payload,
-    });
+      const orderId = await this.bitfinex.submitLimitOrder(creds, {
+        direction: intent.direction,
+        qty,
+        price: limitPrice,
+      });
 
-    this.logger.log(
-      `Hire entry ${instance.userId} cycle=${cycleId} ${intent.direction} limit=${limitPrice.toFixed(2)} qty=${qty}`,
-    );
+      const payload: ExecutionPayload = {
+        bitfinexOrderId: orderId,
+        limitPrice,
+        localMark: mark,
+        qty,
+        direction: intent.direction,
+        source: 'hire',
+      };
+
+      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
+        venue: 'bitfinex',
+        local_mark_at_signal: mark,
+        limit_price: limitPrice,
+        qty,
+        margin_usd: marginUsd,
+        margin_cap_usd: effectiveCap,
+        ...payload,
+      });
+
+      this.logger.log(
+        `Hire entry ${instance.userId} cycle=${cycleId} ${intent.direction} limit=${limitPrice.toFixed(2)} qty=${qty} margin=$${marginUsd.toFixed(2)}`,
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const lowMargin =
+        /insufficient|balance|margin|not enough|funds/i.test(msg) ||
+        msg.includes('balance');
+      if (lowMargin) {
+        this.logger.log(`Hire skip ${instance.userId} cycle=${cycleId}: exchange rejected entry — ${msg}`);
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            lastError: `Bitfinex declined new entry (margin in use or balance too low). Open trades still managed automatically.`,
+          },
+        });
+        return false;
+      }
+      throw err;
+    }
   }
 
   private async monitorEntry(
@@ -292,15 +429,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       positionDirection: meta.direction,
       qty: meta.qty,
       stopPrice,
+    }).catch((err) => {
+      this.logger.warn(
+        `Stop placement ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
     });
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
       qty: meta.qty,
-      stop_loss_placed: true,
+      stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: intent.risk.stop_loss_margin_pct ?? -18,
-      stopOrderId,
+      stopOrderId: stopOrderId ?? undefined,
       source: 'hire',
     });
 
@@ -337,7 +479,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         qty: meta.qty,
       });
     } catch (err) {
-      this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${msg}`);
+      // Still record EXIT so billing/state advances; position may close on exchange stop.
     }
 
     const direction = meta.direction;

@@ -3718,6 +3718,7 @@ export interface AdminControlOverview {
     botRuntimeNote?: string | null;
     aiRuntimeNote?: string | null;
     agentShowcaseDefaultSettings?: string | null;
+    subscriberMaxMarginUsd?: number;
   };
   adapters?: {
     exchangeStatus: string;
@@ -3848,7 +3849,12 @@ export function resumeMyAgentInstance(slug: string, token: string) {
 }
 
 export function updateShowcaseConfig(
-  body: { exchangeProvider?: string; aiProvider?: string; agentShowcaseDefaultSettings?: string },
+  body: {
+    exchangeProvider?: string;
+    aiProvider?: string;
+    agentShowcaseDefaultSettings?: string;
+    subscriberMaxMarginUsd?: number;
+  },
   token: string,
 ) {
   return apiFetch<AdminControlOverview>(

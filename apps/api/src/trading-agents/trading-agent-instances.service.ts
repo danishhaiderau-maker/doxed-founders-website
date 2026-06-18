@@ -16,6 +16,7 @@ import {
   buildFreshInstanceDashboardState,
   readInstanceScope,
 } from './instance-view.mapper';
+import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 @Injectable()
 export class TradingAgentInstancesService {
@@ -117,7 +118,7 @@ export class TradingAgentInstancesService {
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
-      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex live; max $500 margin).`,
+      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${await loadSubscriberMaxMarginUsd(this.prisma)} margin/trade).`,
       link: `/agent-hub/${agent.slug}`,
     });
 
@@ -152,6 +153,7 @@ export class TradingAgentInstancesService {
 
     const executionLive = process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
     const relayPaused = instance.status === TradingAgentInstanceStatus.PAUSED;
+    const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
     const scope = readInstanceScope(instance);
     const exchangeStatus = isCopy
@@ -196,7 +198,7 @@ export class TradingAgentInstancesService {
           : relayPaused
             ? 'Relay stopped — showcase signals will not execute on your exchange until you press Start.'
             : executionLive
-              ? 'Live copy execution active — platform places Bitfinex limit orders from admin signals on your account (max $500 margin).'
+              ? `Live copy execution active — platform places Bitfinex limit orders from admin signals (max $${marginCap} margin/trade).`
               : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
         openPositions: openHirePositions,
         pnlPct: 0,
