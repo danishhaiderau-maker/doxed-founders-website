@@ -57,7 +57,7 @@ function MiniTable({
       </div>
       {rows.length > 0 && (
         <p className="border-t border-zinc-800/60 px-3 py-1.5 text-[10px] text-zinc-600">
-          Showing latest {Math.min(rows.length, MAX_ROWS)} entries
+          Showing latest {Math.min(rows.length, cap)} entries
         </p>
       )}
     </section>
@@ -79,12 +79,15 @@ const EMPTY_BOOK: TradingAgentDashboardState['liveBook'] = {
 
 export function AgentTransparencyTables({
   liveBook,
+  maxRows = 5,
 }: {
   liveBook?: TradingAgentDashboardState['liveBook'];
+  maxRows?: number;
 }) {
   const book = liveBook ?? EMPTY_BOOK;
+  const cap = Math.max(1, Math.min(maxRows, 20));
 
-  const signalRows = book.activeSignals.slice(0, MAX_ROWS).map((s) => [
+  const signalRows = book.activeSignals.slice(0, cap).map((s) => [
     s.time,
     s.direction,
     `${s.confidence}%`,
@@ -99,7 +102,7 @@ export function AgentTransparencyTables({
     s.exitReason ?? '—',
   ]);
 
-  const positionRows = book.positions.slice(0, MAX_ROWS).map((p) => [
+  const positionRows = book.positions.slice(0, cap).map((p) => [
     p.leg,
     p.side,
     p.qty.toFixed(4),
@@ -110,7 +113,7 @@ export function AgentTransparencyTables({
     formatUsd(p.pnlUsd),
   ]);
 
-  const pendingRows = book.pendingOrders.slice(0, MAX_ROWS).map((o) => [
+  const pendingRows = book.pendingOrders.slice(0, cap).map((o) => [
     String(o.ageMin),
     o.side,
     o.status,
@@ -119,7 +122,7 @@ export function AgentTransparencyTables({
     fmtPrice(o.signalPrice),
   ]);
 
-  const expiredRows = book.expiredOrders.slice(0, MAX_ROWS).map((o) => [
+  const expiredRows = book.expiredOrders.slice(0, cap).map((o) => [
     o.time,
     o.direction,
     fmtPrice(o.limitPrice),
@@ -129,7 +132,7 @@ export function AgentTransparencyTables({
     o.mode,
   ]);
 
-  const tradeRows = book.trades.slice(0, MAX_ROWS).map((t) => [
+  const tradeRows = book.trades.slice(0, cap).map((t) => [
     t.time,
     t.tradeId.slice(0, 8),
     t.direction,

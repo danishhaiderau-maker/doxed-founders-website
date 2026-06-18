@@ -26,6 +26,7 @@ import {
   unfollowTradingAgent,
   type PublicAgentStatus,
   type TradingAgentSummary,
+  type TradingAgentActivityEntry,
 } from '@/lib/api';
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -58,7 +59,13 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [dashboard, setDashboard] = useState<TradingAgentDashboardState | null>(null);
   const [botConnected, setBotConnected] = useState(false);
   const [executionPaused, setExecutionPaused] = useState(false);
-  const [activity, setActivity] = useState<Awaited<ReturnType<typeof fetchTradingAgentActivity>>>([]);
+  const [activity, setActivity] = useState<TradingAgentActivityEntry[]>([]);
+  const [showcaseLiveBook, setShowcaseLiveBook] =
+    useState<TradingAgentDashboardState['liveBook'] | undefined>();
+  const [exchangeLiveBook, setExchangeLiveBook] =
+    useState<TradingAgentDashboardState['liveBook'] | null | undefined>();
+  const [showcaseActivity, setShowcaseActivity] = useState<TradingAgentActivityEntry[]>([]);
+  const [userActivity, setUserActivity] = useState<TradingAgentActivityEntry[]>([]);
   const [following, setFollowing] = useState(false);
   const [hired, setHired] = useState(false);
   const [publicStatus, setPublicStatus] = useState<{ status: PublicAgentStatus; label: string }>({
@@ -106,13 +113,23 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setShowcaseNote(dashR.value.showcaseNote ?? null);
         setShowcaseFlash((prev) => dashR.value.showcaseFlash ?? prev);
         setShowcaseAgent(dashR.value.showcaseAgent ?? dashR.value.agent);
+        setShowcaseLiveBook(dashR.value.showcaseLiveBook ?? dashR.value.dashboard.liveBook);
+        setExchangeLiveBook(dashR.value.exchangeLiveBook ?? null);
+        setShowcaseActivity(dashR.value.showcaseActivity ?? []);
+        setUserActivity(dashR.value.userActivity ?? dashR.value.showcaseActivity ?? []);
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
       } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
       }
 
-      if (actR.status === 'fulfilled') setActivity(actR.value);
+      if (actR.status === 'fulfilled') {
+        setActivity(actR.value);
+        if (dashR.status !== 'fulfilled') {
+          setShowcaseActivity(actR.value);
+          setUserActivity(actR.value);
+        }
+      }
       if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load live data');
@@ -306,6 +323,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           viewScope={viewScope}
           showcaseNote={showcaseNote}
           showcaseAgent={showcaseAgent ?? agent}
+          showcaseLiveBook={showcaseLiveBook}
+          exchangeLiveBook={exchangeLiveBook}
+          showcaseActivity={showcaseActivity.length > 0 ? showcaseActivity : activity}
+          userActivity={userActivity.length > 0 ? userActivity : activity}
           onFollow={toggleFollow}
           followBusy={followBusy}
           onCopyAllocate={handleCopyTrack}

@@ -3551,6 +3551,10 @@ export interface TradingAgentDashboard {
   showcaseNote?: string;
   showcaseFlash?: AgentShowcaseFlash | null;
   showcaseAgent?: TradingAgentSummary;
+  showcaseLiveBook?: import('@dcf/utils').TradingAgentDashboardState['liveBook'];
+  exchangeLiveBook?: import('@dcf/utils').TradingAgentDashboardState['liveBook'] | null;
+  showcaseActivity?: TradingAgentActivityEntry[];
+  userActivity?: TradingAgentActivityEntry[];
 }
 
 export interface TradingAgentActivityEntry {
