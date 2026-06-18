@@ -14,9 +14,9 @@ import { AgentRuntimeService } from './agent-runtime.service';
   imports: [
     GitHubModule,
     forwardRef(() => FounderNodeModule),
-    FounderOsModule,
+    forwardRef(() => FounderOsModule),
     AttestationModule,
-    ProjectsModule,
+    forwardRef(() => ProjectsModule),
     FounderMemoryGraphModule,
     FounderAgentRunModule,
   ],
