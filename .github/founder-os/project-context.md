@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(live-copy): chase SHORT limits correctly, 100x lev, multi-leg entries
+fix(web): remove unused imports in agent public profile
 
 ## Last Activity
 
