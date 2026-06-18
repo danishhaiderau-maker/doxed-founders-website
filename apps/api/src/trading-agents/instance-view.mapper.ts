@@ -18,6 +18,7 @@ export type UserInstanceStats = {
   sessionStartedAt: string;
   startingBalanceUsd: number;
   instanceMode: 'copy' | 'live';
+  sessionPnlUsd?: number;
 };
 
 export function readInstanceScope(instance: {
@@ -95,11 +96,16 @@ export function statsFromScopedActivity(
   const winRate = executed.length > 0 ? (wins / executed.length) * 100 : 0;
   const lastBalance = executed.length > 0 ? executed[0].balanceUsd : scope.startingBalanceUsd;
   const equity = lastBalance ?? scope.startingBalanceUsd;
+  const sessionPnlUsd = equity - scope.startingBalanceUsd;
   const netReturnPct =
-    ((equity - scope.startingBalanceUsd) / scope.startingBalanceUsd) * 100;
+    scope.startingBalanceUsd > 0
+      ? (sessionPnlUsd / scope.startingBalanceUsd) * 100
+      : sessionPnlUsd !== 0
+        ? sessionPnlUsd
+        : 0;
 
   return {
-    balanceUsd: scope.startingBalanceUsd,
+    balanceUsd: Number(equity.toFixed(2)),
     equityUsd: Number(equity.toFixed(2)),
     netReturnPct: Number(netReturnPct.toFixed(2)),
     tradeCount: executed.length,
@@ -107,21 +113,23 @@ export function statsFromScopedActivity(
     sessionStartedAt: scope.sessionStartedAt.toISOString(),
     startingBalanceUsd: scope.startingBalanceUsd,
     instanceMode: scope.instanceMode,
+    sessionPnlUsd: Number(sessionPnlUsd.toFixed(2)),
   };
 }
 
 export function buildFreshInstanceDashboardState(
   mode: 'copy' | 'live',
-  paperAllocationUsd = USER_INSTANCE_STARTING_BALANCE,
+  allocationUsd = USER_INSTANCE_STARTING_BALANCE,
   extra?: Record<string, unknown>,
 ) {
   const now = new Date().toISOString();
   return {
     instanceMode: mode,
     copySource: 'admin-showcase',
-    startingBalanceUsd: paperAllocationUsd,
+    startingBalanceUsd: allocationUsd,
+    liveSessionStartingBalanceUsd: mode === 'live' ? allocationUsd : undefined,
     sessionStartedAt: now,
-    paperAllocationUsd: mode === 'copy' ? paperAllocationUsd : undefined,
+    paperAllocationUsd: mode === 'copy' ? allocationUsd : undefined,
     ...extra,
   };
 }

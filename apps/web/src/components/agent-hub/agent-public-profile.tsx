@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import {
   AGENT_BETA_RISK_COPY,
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   formatPercent,
   formatRelativeTime,
   formatUsd,
@@ -11,6 +12,7 @@ import {
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
 import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
+import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
@@ -77,6 +79,7 @@ function HireSidebar({
   onResumeInstance,
   instanceBusy,
   copyBusy,
+  rentalExpiresAt,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -92,11 +95,17 @@ function HireSidebar({
   onResumeInstance?: () => void;
   instanceBusy?: boolean;
   copyBusy?: boolean;
+  rentalExpiresAt?: string | null;
 }) {
   const [riskOk, setRiskOk] = useState(false);
+  const isLiveHired = hired && instanceMode === 'live';
 
   return (
     <aside className="space-y-4 xl:sticky xl:top-28">
+      {isLiveHired && rentalExpiresAt && (
+        <AgentRentalCountdown expiresAt={rentalExpiresAt} />
+      )}
+
       <ExchangeHirePanel
         slug={slug}
         signedIn={signedIn}
@@ -107,34 +116,37 @@ function HireSidebar({
         exchangeProvider={exchangeProvider}
         exchangeLabel={exchangeLabel}
         exchangeConnected={exchangeConnected}
+        exchangeBalanceUsd={agent.exchangeBalanceUsd ?? agent.balanceUsd}
+        rentalExpiresAt={rentalExpiresAt}
         onStopRelay={onPauseInstance}
         onStartRelay={onResumeInstance}
         relayBusy={instanceBusy}
       />
 
-      <div className="rounded-2xl border border-red-500/40 bg-red-950/25 p-5">
-        <p className="text-sm font-bold uppercase text-red-200">{AGENT_BETA_RISK_COPY.title}</p>
-        <ul className="mt-2 space-y-1 text-xs text-red-100/80">
-          {AGENT_BETA_RISK_COPY.bullets.slice(0, 4).map((b) => (
-            <li key={b}>• {b}</li>
-          ))}
-        </ul>
-        <label className="mt-3 flex items-start gap-2 text-xs text-red-100/90">
-          <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} className="mt-0.5" />
-          {AGENT_BETA_RISK_COPY.checkboxLabel}
-        </label>
-        {signedIn && onCopyAllocate && (
-          <button
-            type="button"
-            disabled={!riskOk || copyBusy || (hired && instanceMode === 'copy')}
-            onClick={onCopyAllocate}
-            className="mt-3 w-full rounded-lg border border-emerald-500/50 bg-emerald-950/40 py-2 text-sm font-semibold text-emerald-200 disabled:opacity-40"
-          >
-            {copyBusy ? 'Allocating…' : 'Paper track $500 (DDollar)'}
-          </button>
-        )}
-      </div>
-
+      {!isLiveHired && (
+        <div className="rounded-2xl border border-red-500/40 bg-red-950/25 p-5">
+          <p className="text-sm font-bold uppercase text-red-200">{AGENT_BETA_RISK_COPY.title}</p>
+          <ul className="mt-2 space-y-1 text-xs text-red-100/80">
+            {AGENT_BETA_RISK_COPY.bullets.slice(0, 4).map((b) => (
+              <li key={b}>• {b}</li>
+            ))}
+          </ul>
+          <label className="mt-3 flex items-start gap-2 text-xs text-red-100/90">
+            <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} className="mt-0.5" />
+            {AGENT_BETA_RISK_COPY.checkboxLabel}
+          </label>
+          {signedIn && onCopyAllocate && (
+            <button
+              type="button"
+              disabled={!riskOk || copyBusy || (hired && instanceMode === 'copy')}
+              onClick={onCopyAllocate}
+              className="mt-3 w-full rounded-lg border border-emerald-500/50 bg-emerald-950/40 py-2 text-sm font-semibold text-emerald-200 disabled:opacity-40"
+            >
+              {copyBusy ? 'Allocating…' : 'Paper track $500 (DDollar)'}
+            </button>
+          )}
+        </div>
+      )}
     </aside>
   );
 }
@@ -169,6 +181,7 @@ export function AgentPublicProfile({
   onAdminRefresh,
   instanceBusy,
   copyBusy,
+  rentalExpiresAt,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -199,11 +212,12 @@ export function AgentPublicProfile({
   onAdminRefresh?: () => void;
   instanceBusy?: boolean;
   copyBusy?: boolean;
+  rentalExpiresAt?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const isCopySession = hired && instanceMode === 'copy';
   const isLiveSession = hired && instanceMode === 'live';
-  const isUserSession = viewScope === 'user' || isCopySession;
+  const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
   const allocationUsd = agent.startingBalance || 500;
   const heroBadge = isLiveSession
@@ -256,7 +270,8 @@ export function AgentPublicProfile({
                 Live copy active on {exchangeLabel ?? 'your exchange'}
               </p>
               <p className="mt-1 text-sm text-zinc-300">
-                Admin showcase signals relay to your {exchangeLabel ?? 'exchange'} account (max $500 margin).
+                Admin showcase signals relay to your {exchangeLabel ?? 'exchange'} account (max $
+                {DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin per trade).
                 Use <strong className="text-white">Stop</strong> in the sidebar to sever the relay instantly.
               </p>
             </div>
@@ -312,13 +327,19 @@ export function AgentPublicProfile({
         </p>
       )}
 
-      {isCopySession && showcaseAgent && (
+      {isLiveSession && (
         <div className="mb-4">
-          <AgentShowcaseEquity agent={showcaseAgent} title="Admin showcase (public research run)" />
+          <AgentShowcaseEquity
+            agent={agent}
+            title={`Your ${exchangeLabel ?? 'exchange'} live copy`}
+            mode="live"
+            exchangeLabel={exchangeLabel}
+            compact
+          />
         </div>
       )}
 
-      {!isCopySession && (
+      {!isCopySession && !isLiveSession && (
         <div className="mb-4">
           <AgentShowcaseEquity agent={showcaseAgent ?? agent} title="Admin showcase paper desk" />
         </div>
@@ -326,7 +347,19 @@ export function AgentPublicProfile({
 
       {isCopySession && (
         <div className="mb-4">
+          <AgentShowcaseEquity agent={showcaseAgent ?? agent} title="Admin showcase (public research run)" />
+        </div>
+      )}
+
+      {isCopySession && (
+        <div className="mb-4">
           <AgentShowcaseEquity agent={agent} title="Your paper-track session" compact />
+        </div>
+      )}
+
+      {isLiveSession && showcaseAgent && (
+        <div className="mb-4">
+          <AgentShowcaseEquity agent={showcaseAgent} title="Admin showcase (public research run)" compact />
         </div>
       )}
 
@@ -427,21 +460,30 @@ export function AgentPublicProfile({
               <span className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200">
                 <span aria-hidden>👁</span> Observe live
               </span>
-              <button
-                type="button"
-                disabled={copyBusy || !signedIn || (hired && instanceMode === 'copy')}
-                onClick={onCopyAllocate}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-              >
-                <span aria-hidden>🌐</span>
-                {copyBusy ? 'Starting…' : 'Paper trade'}
-              </button>
-              <Link
-                href={signedIn ? `/agent-hub/${slug}/hire` : `/login?callbackUrl=/agent-hub/${slug}/hire`}
-                className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
-              >
-                <span aria-hidden>➕</span> Hire agent
-              </Link>
+              {!isLiveSession && (
+                <>
+                  <button
+                    type="button"
+                    disabled={copyBusy || !signedIn || isCopySession}
+                    onClick={onCopyAllocate}
+                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    <span aria-hidden>🌐</span>
+                    {copyBusy ? 'Starting…' : isCopySession ? 'Paper tracking ✓' : 'Paper trade'}
+                  </button>
+                  {!hired && (
+                    <Link
+                      href={signedIn ? `/agent-hub/${slug}/hire` : `/login?callbackUrl=/agent-hub/${slug}/hire`}
+                      className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
+                    >
+                      <span aria-hidden>➕</span> Hire agent
+                    </Link>
+                  )}
+                </>
+              )}
+              {isLiveSession && rentalExpiresAt && (
+                <LiveCopyRentalBadge expiresAt={rentalExpiresAt} />
+              )}
               {onFollow && (
                 <button
                   type="button"
@@ -585,6 +627,7 @@ export function AgentPublicProfile({
           onResumeInstance={onResumeInstance}
           instanceBusy={instanceBusy}
           copyBusy={copyBusy}
+          rentalExpiresAt={rentalExpiresAt}
         />
       </div>
     </div>

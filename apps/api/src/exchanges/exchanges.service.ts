@@ -8,10 +8,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CredentialCryptoService } from './credential-crypto.service';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { ExchangeAdapterRegistry } from './exchange-adapter.registry';
+import { BitfinexTradingClient } from './bitfinex-api.client';
 
 @Injectable()
 export class ExchangesService {
   private readonly registry = new ExchangeAdapterRegistry();
+  private readonly bitfinex = new BitfinexTradingClient();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -104,6 +106,17 @@ export class ExchangesService {
       where: { userId, provider: providerKey },
     });
     return { disconnected: true };
+  }
+
+  async getUserAvailableUsd(userId: string, provider: string): Promise<number | null> {
+    if (provider !== 'bitfinex') return null;
+    const creds = await this.getUserCredentials(userId, provider);
+    if (!creds) return null;
+    try {
+      return await this.bitfinex.getAvailableUsd(creds);
+    } catch {
+      return null;
+    }
   }
 
   async getUserCredentials(

@@ -131,6 +131,10 @@ function serializeAgent(
     exchangeConnected?: boolean;
     viewScope?: 'showcase' | 'user';
     userSessionStartedAt?: string | null;
+    rentalExpiresAt?: string | null;
+    exchangeBalanceUsd?: number | null;
+    hireFeeDdollar?: number | null;
+    paperDdRefunded?: number | null;
     liveStats?: {
       balanceUsd?: number;
       equityUsd?: number;
@@ -182,6 +186,10 @@ function serializeAgent(
     exchangeConnected: extra?.exchangeConnected ?? false,
     viewScope: extra?.viewScope ?? 'showcase',
     userSessionStartedAt: extra?.userSessionStartedAt ?? null,
+    rentalExpiresAt: extra?.rentalExpiresAt ?? null,
+    exchangeBalanceUsd: extra?.exchangeBalanceUsd ?? null,
+    hireFeeDdollar: extra?.hireFeeDdollar ?? null,
+    paperDdRefunded: extra?.paperDdRefunded ?? null,
     botConnected: extra?.botConnected ?? false,
     currentPosition: live?.currentPosition,
     currentAction: live?.currentAction,
@@ -561,12 +569,10 @@ export class TradingAgentsService implements OnModuleInit {
     return this.enrichWithBotLive(agent, {
       following,
       hired,
-      instanceStatus,
-      instanceMode,
       exchangeProvider,
       exchangeLabel,
       exchangeConnected,
-      ...(userOverlay ?? {}),
+      ...(userOverlay ?? { instanceStatus, instanceMode }),
     });
   }
 
@@ -580,7 +586,74 @@ export class TradingAgentsService implements OnModuleInit {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { id: agentId } });
     if (!agent) return null;
 
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    let paperDdRefunded: number | null = null;
+
+    if (
+      instance.exchangeProvider !== 'paper' &&
+      typeof dash.paperDdSpent === 'number' &&
+      dash.paperDdSpent > 0 &&
+      !dash.paperDdRefunded
+    ) {
+      const refund = dash.paperDdSpent as number;
+      await this.points.award(userId, refund, `AGENT_PAPER_REFUND:${agent.slug}`);
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: {
+            ...dash,
+            paperDdRefunded: true,
+            paperDdRefundedAmount: refund,
+          },
+        },
+      });
+      paperDdRefunded = refund;
+    } else if (typeof dash.paperDdRefundedAmount === 'number') {
+      paperDdRefunded = dash.paperDdRefundedAmount;
+    }
+
     const scope = readInstanceScope(instance);
+    const rentalExpiresAt = instance.expiresAt?.toISOString() ?? null;
+    const hireFeeDdollar =
+      typeof dash.hireFeeDdollarPaid === 'number' ? (dash.hireFeeDdollarPaid as number) : null;
+
+    if (scope.instanceMode === 'live' && instance.exchangeProvider !== 'paper') {
+      const sessionStartUsd =
+        typeof dash.liveSessionStartingBalanceUsd === 'number'
+          ? (dash.liveSessionStartingBalanceUsd as number)
+          : scope.startingBalanceUsd;
+      const available = await this.exchanges.getUserAvailableUsd(
+        userId,
+        instance.exchangeProvider,
+      );
+      const exchangeBalanceUsd = available ?? sessionStartUsd;
+
+      const rawActivity = await this.fetchShowcaseExecutedActivity(agent.slug);
+      const liveScope = { ...scope, startingBalanceUsd: sessionStartUsd };
+      const scoped = scopeActivityToUserSession(rawActivity, liveScope);
+      const stats = statsFromScopedActivity(scoped, liveScope);
+      const sessionPnlUsd = stats.sessionPnlUsd ?? stats.equityUsd - sessionStartUsd;
+
+      return {
+        instanceStatus: instance.status,
+        instanceMode: 'live' as const,
+        viewScope: 'user' as const,
+        userSessionStartedAt: scope.sessionStartedAt.toISOString(),
+        rentalExpiresAt,
+        exchangeBalanceUsd,
+        hireFeeDdollar,
+        paperDdRefunded,
+        liveStats: {
+          balanceUsd: exchangeBalanceUsd,
+          equityUsd: exchangeBalanceUsd,
+          netReturnPct: stats.netReturnPct,
+          tradeCount: stats.tradeCount,
+          winRatePct: stats.winRatePct,
+          sessionPnlUsd,
+        },
+      };
+    }
+
     const rawActivity = await this.fetchShowcaseExecutedActivity(agent.slug);
     const scoped = scopeActivityToUserSession(rawActivity, scope);
     const stats = statsFromScopedActivity(scoped, scope);
@@ -589,12 +662,17 @@ export class TradingAgentsService implements OnModuleInit {
       instanceMode: scope.instanceMode,
       viewScope: 'user' as const,
       userSessionStartedAt: scope.sessionStartedAt.toISOString(),
+      rentalExpiresAt,
+      exchangeBalanceUsd: null,
+      hireFeeDdollar,
+      paperDdRefunded,
       liveStats: {
         balanceUsd: stats.balanceUsd,
         equityUsd: stats.equityUsd,
         netReturnPct: stats.netReturnPct,
         tradeCount: stats.tradeCount,
         winRatePct: stats.winRatePct,
+        sessionPnlUsd: stats.sessionPnlUsd,
       },
     };
   }
@@ -634,7 +712,10 @@ export class TradingAgentsService implements OnModuleInit {
           userInstance = {
             ...overlay.liveStats,
             sessionStartedAt: overlay.userSessionStartedAt ?? new Date().toISOString(),
-            startingBalanceUsd: overlay.liveStats.balanceUsd,
+            startingBalanceUsd:
+              overlay.instanceMode === 'live'
+                ? (overlay.exchangeBalanceUsd ?? overlay.liveStats.balanceUsd)
+                : overlay.liveStats.balanceUsd,
             instanceMode: overlay.instanceMode ?? 'copy',
           };
           agent = {
@@ -644,9 +725,18 @@ export class TradingAgentsService implements OnModuleInit {
             netReturnPct: overlay.liveStats.netReturnPct,
             tradeCount: overlay.liveStats.tradeCount,
             winRatePct: overlay.liveStats.winRatePct,
+            sessionPnlUsd: overlay.liveStats.sessionPnlUsd ?? 0,
+            startingBalance:
+              overlay.instanceMode === 'live'
+                ? (overlay.exchangeBalanceUsd ?? overlay.liveStats.balanceUsd)
+                : overlay.liveStats.balanceUsd,
             viewScope: 'user',
             userSessionStartedAt: overlay.userSessionStartedAt,
             instanceMode: overlay.instanceMode,
+            rentalExpiresAt: overlay.rentalExpiresAt ?? null,
+            exchangeBalanceUsd: overlay.exchangeBalanceUsd ?? null,
+            hireFeeDdollar: overlay.hireFeeDdollar ?? null,
+            paperDdRefunded: overlay.paperDdRefunded ?? null,
           };
         }
       }
@@ -670,9 +760,11 @@ export class TradingAgentsService implements OnModuleInit {
       showcaseFlash,
       showcaseAgent: viewScope === 'user' ? showcaseAgent : undefined,
       showcaseNote:
-        viewScope === 'user'
-          ? 'Your isolated copy session — stats and trades only from when you started testing.'
-          : 'Admin showcase for observation only. Paper-track or hire for your own $500 balance.',
+        viewScope === 'user' && userInstance?.instanceMode === 'live'
+          ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'
+          : viewScope === 'user'
+            ? 'Your isolated copy session — stats and trades only from when you started testing.'
+            : 'Admin showcase for observation only. Paper-track or hire for your own session.',
     };
   }
 

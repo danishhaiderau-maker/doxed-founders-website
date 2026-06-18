@@ -12,7 +12,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import {
-  USER_INSTANCE_STARTING_BALANCE,
   buildFreshInstanceDashboardState,
   readInstanceScope,
 } from './instance-view.mapper';
@@ -69,13 +68,34 @@ export class TradingAgentInstancesService {
       !existing ||
       existing.exchangeProvider === 'paper' ||
       (existing.expiresAt != null && existing.expiresAt < new Date());
+
+    const existingDash = (existing?.dashboardState ?? {}) as Record<string, unknown>;
+    const paperDdSpent =
+      existing?.exchangeProvider === 'paper' && typeof existingDash.paperDdSpent === 'number'
+        ? existingDash.paperDdSpent
+        : 0;
+    if (paperDdSpent > 0 && !existingDash.paperDdRefunded) {
+      await this.points.award(userId, paperDdSpent, `AGENT_PAPER_REFUND:${agent.slug}`);
+    }
+
     if (cost > 0 && needsHireFee) {
       await this.points.spend(userId, cost, `AGENT_HIRE:${agent.slug}`);
       await this.points.creditAdminFee(cost, agent.slug);
     }
 
+    let exchangeBalanceUsd = 0;
+    if (input.exchangeProvider === 'bitfinex') {
+      const available = await this.exchanges.getUserAvailableUsd(userId, input.exchangeProvider);
+      if (available != null) exchangeBalanceUsd = available;
+    }
+
     const hireExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    const sessionState = buildFreshInstanceDashboardState('live', USER_INSTANCE_STARTING_BALANCE);
+    const sessionState = buildFreshInstanceDashboardState('live', exchangeBalanceUsd, {
+      liveSessionStartingBalanceUsd: exchangeBalanceUsd,
+      paperDdRefunded: paperDdSpent > 0,
+      paperDdRefundedAmount: paperDdSpent > 0 ? paperDdSpent : undefined,
+      hireFeeDdollarPaid: needsHireFee ? cost : 0,
+    });
 
     const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     /** Live tier mirrors admin DeepSeek decisions — users only connect exchange keys. */
@@ -125,7 +145,9 @@ export class TradingAgentInstancesService {
     return {
       ...this.formatInstance(instance, agent),
       hireFeeDdollar: needsHireFee ? cost : 0,
+      paperDdRefunded: paperDdSpent > 0 ? paperDdSpent : 0,
       rentalExpiresAt: hireExpiresAt.toISOString(),
+      exchangeBalanceUsd,
     };
   }
 
@@ -184,6 +206,7 @@ export class TradingAgentInstancesService {
           : 'Platform AI',
         hiredAt: instance.hiredAt.toISOString(),
         activatedAt: instance.activatedAt?.toISOString() ?? null,
+        expiresAt: instance.expiresAt?.toISOString() ?? null,
         lastError: instance.lastError,
         instanceMode: (dashState.instanceMode as string) ?? (isCopy ? 'copy' : 'live'),
         paperAllocationUsd: dashState.paperAllocationUsd as number | undefined,
@@ -378,6 +401,7 @@ export class TradingAgentInstancesService {
       aiProvider: string | null;
       hiredAt: Date;
       activatedAt: Date | null;
+      expiresAt?: Date | null;
     },
     agent: { slug: string; name: string },
   ) {
@@ -394,6 +418,7 @@ export class TradingAgentInstancesService {
       aiProvider: instance.aiProvider,
       hiredAt: instance.hiredAt.toISOString(),
       activatedAt: instance.activatedAt?.toISOString() ?? null,
+      rentalExpiresAt: instance.expiresAt?.toISOString() ?? null,
       dashboardUrl: `/agent-hub/${agent.slug}`,
     };
   }

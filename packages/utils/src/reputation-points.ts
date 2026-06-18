@@ -273,6 +273,8 @@ export function pointActionLabel(actionKey: string): string {
   if (base === 'SCOUT_STAKE') return 'Scout market stake';
   if (base === 'AGENT_RENTAL') return 'Trading agent rental';
   if (base === 'AGENT_HIRE') return 'Agent hire fee (1 week)';
+  if (base === 'AGENT_PAPER_TRACK') return 'Agent paper track allocation';
+  if (base === 'AGENT_PAPER_REFUND') return 'Paper track DDollar refunded (live hire)';
   if (base === 'PLATFORM_FEE') return 'Platform fee collected';
   if (base === 'WELCOME_UPGRADE') return 'Welcome bonus upgrade';
   if (base === 'REFERRAL') return 'Referral reward';

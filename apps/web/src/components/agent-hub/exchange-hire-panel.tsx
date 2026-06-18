@@ -12,7 +12,9 @@ import {
 } from '@dcf/utils';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
 import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
+import { AgentRentalCountdown } from '@/components/agent-hub/agent-rental-countdown';
 import { ExchangeProviderOption, fetchExchangeProviders } from '@/lib/api';
+import { formatUsd } from '@dcf/utils';
 
 function sortProviders(list: ExchangeProviderOption[]): ExchangeProviderOption[] {
   return [...list].sort((a, b) => {
@@ -39,6 +41,8 @@ export function ExchangeHirePanel({
   exchangeProvider,
   exchangeLabel,
   exchangeConnected,
+  exchangeBalanceUsd,
+  rentalExpiresAt,
   onStopRelay,
   onStartRelay,
   relayBusy,
@@ -52,6 +56,8 @@ export function ExchangeHirePanel({
   exchangeProvider?: string | null;
   exchangeLabel?: string | null;
   exchangeConnected?: boolean;
+  exchangeBalanceUsd?: number | null;
+  rentalExpiresAt?: string | null;
   onStopRelay?: () => void;
   onStartRelay?: () => void;
   relayBusy?: boolean;
@@ -115,12 +121,30 @@ export function ExchangeHirePanel({
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-        <p className="font-semibold text-white">Hire this agent</p>
-        <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
-          Hiring fee:{' '}
-          <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week of live copy
-          trading
-        </p>
+        {relayState === 'active' || relayState === 'paused' ? (
+          <>
+            <p className="font-semibold text-white">Live copy on {selectedLabel}</p>
+            {rentalExpiresAt && (
+              <div className="mt-3">
+                <AgentRentalCountdown expiresAt={rentalExpiresAt} compact />
+              </div>
+            )}
+            <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+              Your {selectedLabel} balance:{' '}
+              <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
+              {' '}available · platform caps each trade at ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="font-semibold text-white">Hire this agent</p>
+            <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
+              Hiring fee:{' '}
+              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week of live copy
+              trading
+            </p>
+          </>
+        )}
 
         <div className="mt-4 rounded-xl border border-zinc-800 bg-black/25 p-4">
           <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Exchange & relay control</p>

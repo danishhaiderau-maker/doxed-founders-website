@@ -3511,6 +3511,10 @@ export interface TradingAgentSummary {
   exchangeConnected?: boolean;
   viewScope?: 'showcase' | 'user';
   userSessionStartedAt?: string | null;
+  rentalExpiresAt?: string | null;
+  exchangeBalanceUsd?: number | null;
+  hireFeeDdollar?: number | null;
+  paperDdRefunded?: number | null;
   botConnected?: boolean;
   currentPosition?: string;
   currentAction?: string;

@@ -14,10 +14,14 @@ export function AgentShowcaseEquity({
   agent,
   title = 'Showcase paper desk',
   compact = false,
+  mode = 'showcase',
+  exchangeLabel,
 }: {
   agent: TradingAgentSummary;
   title?: string;
   compact?: boolean;
+  mode?: 'showcase' | 'copy' | 'live';
+  exchangeLabel?: string | null;
 }) {
   const runway = agent.startingBalance || 500;
   const equity = agent.equityUsd ?? runway;
@@ -26,33 +30,59 @@ export function AgentShowcaseEquity({
   const sessionPnl = agent.sessionPnlUsd ?? equity - runway;
   const unrealized = agent.unrealizedPnlUsd ?? Math.max(0, equity - cash);
 
-  const cells = [
-    {
-      label: 'Paper runway',
-      value: formatUsd(runway, 0),
-      hint: 'Starting allocation this session',
-    },
-    {
-      label: 'Current equity',
-      value: formatUsd(equity, 0),
-      hint:
-        unrealized > 0.01
-          ? `${formatUsd(cash, 0)} cash + ${formatUsd(unrealized, 0)} open`
-          : 'Cash + mark-to-market',
-    },
-    {
-      label: "Today's P&L",
-      value: `${dailyPnl >= 0 ? '+' : ''}${formatUsd(dailyPnl, 2)}`,
-      accent: pnlColor(dailyPnl),
-      hint: 'UTC session day',
-    },
-    {
-      label: 'Session P&L',
-      value: `${sessionPnl >= 0 ? '+' : ''}${formatUsd(sessionPnl, 2)}`,
-      accent: pnlColor(sessionPnl),
-      hint: formatPercent(agent.netReturnPct),
-    },
-  ];
+  const cells =
+    mode === 'live'
+      ? [
+          {
+            label: `${exchangeLabel ?? 'Exchange'} balance`,
+            value: formatUsd(cash, 2),
+            hint: 'Available margin from your connected account',
+          },
+          {
+            label: 'Current equity',
+            value: formatUsd(equity, 2),
+            hint: 'Live account — not paper DDollar',
+          },
+          {
+            label: "Today's P&L",
+            value: `${dailyPnl >= 0 ? '+' : ''}${formatUsd(dailyPnl, 2)}`,
+            accent: pnlColor(dailyPnl),
+            hint: 'UTC session day',
+          },
+          {
+            label: 'Session P&L',
+            value: `${sessionPnl >= 0 ? '+' : ''}${formatUsd(sessionPnl, 2)}`,
+            accent: pnlColor(sessionPnl),
+            hint: formatPercent(agent.netReturnPct),
+          },
+        ]
+      : [
+          {
+            label: 'Paper runway',
+            value: formatUsd(runway, 0),
+            hint: 'Starting allocation this session',
+          },
+          {
+            label: 'Current equity',
+            value: formatUsd(equity, 0),
+            hint:
+              unrealized > 0.01
+                ? `${formatUsd(cash, 0)} cash + ${formatUsd(unrealized, 0)} open`
+                : 'Cash + mark-to-market',
+          },
+          {
+            label: "Today's P&L",
+            value: `${dailyPnl >= 0 ? '+' : ''}${formatUsd(dailyPnl, 2)}`,
+            accent: pnlColor(dailyPnl),
+            hint: 'UTC session day',
+          },
+          {
+            label: 'Session P&L',
+            value: `${sessionPnl >= 0 ? '+' : ''}${formatUsd(sessionPnl, 2)}`,
+            accent: pnlColor(sessionPnl),
+            hint: formatPercent(agent.netReturnPct),
+          },
+        ];
 
   return (
     <section

@@ -52,6 +52,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [exchangeProvider, setExchangeProvider] = useState<string | null>(null);
   const [exchangeLabel, setExchangeLabel] = useState<string | null>(null);
   const [exchangeConnected, setExchangeConnected] = useState(false);
+  const [rentalExpiresAt, setRentalExpiresAt] = useState<string | null>(null);
   const [agent, setAgent] = useState<TradingAgentSummary | null>(null);
   const [allAgents, setAllAgents] = useState<TradingAgentSummary[]>([]);
   const [dashboard, setDashboard] = useState<TradingAgentDashboardState | null>(null);
@@ -79,6 +80,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setExchangeProvider(meta.exchangeProvider ?? null);
     setExchangeLabel(meta.exchangeLabel ?? null);
     setExchangeConnected(Boolean(meta.exchangeConnected));
+    setRentalExpiresAt(meta.rentalExpiresAt ?? null);
   }, []);
 
   const loadLive = useCallback(async () => {
@@ -104,6 +106,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setShowcaseNote(dashR.value.showcaseNote ?? null);
         setShowcaseFlash((prev) => dashR.value.showcaseFlash ?? prev);
         setShowcaseAgent(dashR.value.showcaseAgent ?? dashR.value.agent);
+        setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
       } else {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
@@ -310,9 +313,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           onAdminRefresh={load}
           instanceBusy={instanceBusy}
           copyBusy={paperBusy}
+          rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
         />
       )}
-      {agent && slug === 'conservative-btc' && (
+      {agent && slug === 'conservative-btc' && isAdmin && (
         <SignalApiPanel slug={slug} token={session?.accessToken} signedIn={signedIn} />
       )}
     </AgentHubShell>
