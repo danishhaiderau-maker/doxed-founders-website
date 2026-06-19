@@ -463,21 +463,6 @@ def _should_wipe_research_on_startup() -> bool:
         return False
     return _wipe_csv_on_startup()
 
-def _maybe_reset_on_version_change() -> bool:
-    """Archive+wipe when bot version changes so stale CSV/session PnL cannot carry over."""
-    if _preserve_research_data():
-        return False
-    meta = _load_research_session_meta()
-    prev = str(meta.get("bot_version") or "").strip()
-    if not prev or prev == EXECUTION_FIX_VERSION:
-        return False
-    logger.warning(
-        f"[STARTUP] Bot version changed {prev} -> {EXECUTION_FIX_VERSION} — fresh collection reset "
-        f"[PIPELINE ENFORCEMENT]"
-    )
-    perform_fresh_collection_reset()
-    return True
-
 class ArchiveIntegrityError(Exception):
     """Archive copy failed hash verification — wipe must not proceed."""
 
@@ -12618,9 +12603,7 @@ def state_monitor_loop():
             global _last_feature_drift_ts
             if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
                 _last_feature_drift_ts = time.time()
-                if _showcase_execution_only():
-                    pass
-                else:
+                if not _showcase_execution_only():
                     try:
                         from feature_drift_monitor import build_report as _build_feature_drift_report
                         drift_report = _build_feature_drift_report()
@@ -12639,7 +12622,9 @@ def state_monitor_loop():
                     except Exception as e:
                         logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
             global _last_research_kpi_ts, _cached_research_kpis
-            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+            if _showcase_execution_only():
+                pass
+            elif is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
                 try:
                     from research_kpi_engine import refresh_all_research_kpis
                     _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
@@ -16037,7 +16022,6 @@ def api_state():
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
-        snapshot["last_fresh_reset_ts"] = float(state.get("last_fresh_reset_ts") or 0.0)
         snapshot["showcase_execution_only"] = _showcase_execution_only()
         snapshot["runtime_mode"] = "EXECUTION_MIRROR" if _showcase_execution_only() else "RESEARCH"
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
@@ -18722,7 +18706,6 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
-    version_reset = _maybe_reset_on_version_change()
     load_persistent_config()
     reset_transient_runtime_state()
     update_logger_level()
@@ -18731,28 +18714,20 @@ def main():
     startup_log_research_sync()
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
-    if version_reset:
-        bot_start_time = time.time()
-        with state_lock:
-            state["bot_start_time"] = bot_start_time
+    session_meta = _load_research_session_meta()
+    persisted_start = session_meta.get("bot_start_time")
+    if persisted_start:
+        bot_start_time = float(persisted_start)
         logger.info(
-            f"[STARTUP] Version-reset session start={bot_start_time} [PIPELINE ENFORCEMENT]"
+            f"[STARTUP] Restored showcase session from research_session.json start={bot_start_time} "
+            f"[PIPELINE ENFORCEMENT]"
         )
     else:
-        session_meta = _load_research_session_meta()
-        persisted_start = session_meta.get("bot_start_time")
-        if persisted_start:
-            bot_start_time = float(persisted_start)
-            logger.info(
-                f"[STARTUP] Restored showcase session from research_session.json start={bot_start_time} "
-                f"[PIPELINE ENFORCEMENT]"
-            )
-        else:
-            bot_start_time = time.time()
-            logger.info(f"[STARTUP] New showcase session start={bot_start_time} [PIPELINE ENFORCEMENT]")
-        with state_lock:
-            state["ai_history"] = []
-            state["bot_start_time"] = bot_start_time
+        bot_start_time = time.time()
+        logger.info(f"[STARTUP] New showcase session start={bot_start_time} [PIPELINE ENFORCEMENT]")
+    with state_lock:
+        state["ai_history"] = []
+        state["bot_start_time"] = bot_start_time
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
