@@ -14,7 +14,10 @@ import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import {
   buildFreshInstanceDashboardState,
   readInstanceScope,
+  USER_INSTANCE_STARTING_BALANCE,
 } from './instance-view.mapper';
+import { emptyCopyRelaySimState } from '@dcf/utils';
+import { CopyRelaySimService } from './copy-relay-sim.service';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 @Injectable()
@@ -27,6 +30,7 @@ export class TradingAgentInstancesService {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
+    private readonly relaySim: CopyRelaySimService,
   ) {}
 
   async hireAgent(
@@ -374,6 +378,76 @@ export class TradingAgentInstancesService {
           : 'Relay severed — no new showcase trades until you Start.'
         : 'Relay resumed — copying admin showcase signals on your exchange again.',
     };
+  }
+
+  /**
+   * Wipe user copy/relay/paper session counters when showcase bot fresh-collection or version changes.
+   * Resets display P&L to $500 baseline; live exchange positions are not force-closed.
+   */
+  async resetAllUserCopySessions(input: {
+    agentId: string;
+    reason: string;
+    botStartTime?: number;
+  }) {
+    const sessionIso =
+      input.botStartTime != null && input.botStartTime > 0
+        ? new Date(input.botStartTime * 1000).toISOString()
+        : new Date().toISOString();
+
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: { agentId: input.agentId },
+    });
+
+    for (const instance of instances) {
+      const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+      const isPaper = instance.exchangeProvider === 'paper';
+      const isLive = !isPaper && instance.exchangeProvider !== 'paper';
+      const mode: 'copy' | 'live' = isPaper ? 'copy' : isLive ? 'live' : 'copy';
+      const startingUsd = USER_INSTANCE_STARTING_BALANCE;
+
+      const fresh = buildFreshInstanceDashboardState(mode, startingUsd, {
+        showcaseSessionResetAt: sessionIso,
+        showcaseSessionResetReason: input.reason,
+        paperDdSpent: typeof dash.paperDdSpent === 'number' ? dash.paperDdSpent : undefined,
+        paperDdRefunded: dash.paperDdRefunded,
+        paperDdRefundedAmount: dash.paperDdRefundedAmount,
+        hireFeeDdollarPaid: dash.hireFeeDdollarPaid,
+      });
+
+      if (mode === 'live') {
+        fresh.liveSessionStartingBalanceUsd = startingUsd;
+      }
+
+      const simWasActive = Boolean(
+        dash.copyRelaySim && typeof dash.copyRelaySim === 'object' && (dash.copyRelaySim as { active?: boolean }).active,
+      );
+
+      await this.expirePendingCopyParticipants(instance.userId, input.agentId);
+      this.relaySim.dropSimClient(instance.userId);
+
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: {
+            ...fresh,
+            copyRelaySim: emptyCopyRelaySimState(startingUsd),
+            copyRelayReconcile: null,
+            copyRelayCapacity: null,
+            relaySimChannel: false,
+            copyRelayLimitChain: null,
+            tradeLifecycleIntegrity: null,
+          },
+          lastError: simWasActive
+            ? 'Showcase session reset — relay sim cleared. Start relay sim again for a fresh $500 paper book.'
+            : null,
+        },
+      });
+    }
+
+    this.logger.log(
+      `Reset ${instances.length} user copy session(s) for agent ${input.agentId} (${input.reason})`,
+    );
+    return { resetCount: instances.length };
   }
 
   /** Kill switch: cancel pending exchange orders so showcase relay cannot fill new trades. */

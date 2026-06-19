@@ -7,6 +7,7 @@ export type BotApiState = {
   equity?: number;
   fresh_collection_mode?: boolean;
   bot_start_time?: number;
+  last_fresh_reset_ts?: number;
   trade_count_session?: number;
   bot_version?: string;
   daily_pnl_usd?: number;
@@ -345,14 +346,15 @@ export function normalizeBotSessionTrades(bot: BotApiState): BotTradeRow[] {
 
 function researchSessionBalance(bot: BotApiState, startingBalance = STARTING_BALANCE): number {
   if (bot.strategy_mode === 'RESEARCH') {
-    const daily = bot.daily_pnl_usd;
-    if (typeof daily === 'number' && Number.isFinite(daily)) {
-      return startingBalance + daily;
+    const trades = normalizeBotSessionTrades(bot);
+    if (trades.length > 0) {
+      const net = trades.reduce(
+        (sum, t) => sum + Number(t.net_pnl_usd ?? (t.pnl != null ? (Number(t.pnl) / 100) * startingBalance : 0)),
+        0,
+      );
+      return startingBalance + net;
     }
-    const last = bot.research_counters?.last_trade_pnl_usd;
-    if (typeof last === 'number' && Number.isFinite(last)) {
-      return startingBalance + last;
-    }
+    return startingBalance;
   }
   if (bot.live_armed === false && bot.strategy_mode !== 'RESEARCH') {
     return startingBalance;

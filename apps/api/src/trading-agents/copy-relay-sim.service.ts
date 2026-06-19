@@ -55,8 +55,8 @@ export class CopyRelaySimService {
     const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
     const botStats = bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
     if (botStats) {
-      sim.showcasePnlUsd = Number(botStats.total_pnl_usd ?? botStats.session_pnl_usd ?? 0);
-      sim.showcaseTradeCount = Number(botStats.trade_count ?? botStats.total_trades ?? 0);
+      sim.showcasePnlUsd = 0;
+      sim.showcaseTradeCount = 0;
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -215,6 +215,12 @@ export class CopyRelaySimService {
     const mark = await this.bitfinex.getMarkPrice().catch(() => 0);
     const ledger = client?.getLedger() ?? sim.ledger;
     const sessionPnlUsd = client ? client.sessionPnlUsd(mark) : sim.sessionPnlUsd;
+    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
+    const botStats =
+      bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
+    const showcasePnlUsd = botStats
+      ? Number(botStats.session_pnl_usd ?? botStats.total_pnl_usd ?? 0)
+      : sim.showcasePnlUsd;
 
     await this.prisma.tradingAgentInstance.update({
       where: { id: instanceId },
@@ -226,6 +232,7 @@ export class CopyRelaySimService {
             ledger,
             reconcile,
             sessionPnlUsd,
+            showcasePnlUsd,
           },
           copyRelayReconcile: reconcile,
         },
