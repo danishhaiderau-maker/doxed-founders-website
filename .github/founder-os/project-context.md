@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Sync showcase bot from upstream bybit-15m-research-bot and recover Railway deploy.
 
 ## Last Activity
 
