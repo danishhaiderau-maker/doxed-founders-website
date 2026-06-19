@@ -1,0 +1,49 @@
+---
+description: Architecture B — lightweight Railway showcase runtime (execution mirror, not minimal dashboard)
+globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs,scripts/sync-btc-research-bot.mjs
+alwaysApply: false
+---
+
+# Architecture B — Showcase execution runtime
+
+## Goal
+
+**Full execution transparency. Minimal research storage. Minimal disk writes. Minimal Railway resource usage.**
+
+This is NOT "remove dashboard features." It IS "remove research infrastructure."
+
+## Three roles
+
+| Runtime | Purpose |
+|---------|---------|
+| Research bot (`bybit-15m-research-bot`) | Collect everything, log everything, export everything |
+| Showcase bot (Railway `btc_conservative_agent.py`) | Trade, mirror signals, display operator state — **no research warehouse** |
+| NestJS API | Bitfinex copy execution, relay wake, subscriber lots |
+
+## KEEP (execution visibility)
+
+Account, positions, orders, signal pipeline, AI snapshot + last 5 decisions, system status (engine version, runtime mode, signal hash, parity/sync).
+
+Dashboard lives in `showcase_ui.py`. `/api/state` must remain rich for NestJS relay + operator desk.
+
+## REMOVE on Railway (research-only)
+
+Disable writes and CPU for: replay buffers, counterfactual studies, signal_snapshot/replay JSONL, CSV exports, ai_input_log, near_miss, shadow_reject, feature drift, research KPI refresh, analytics exports.
+
+Gate with `_showcase_execution_only()` — set by `btc_conservative_agent.py` via `SHOWCASE_EXECUTION_ONLY=1`.
+
+## ALLOW (small operational state)
+
+`account_state.json`, `order_state.json`, `position_state.json`, in-memory `ai_history` (cap 5 on showcase).
+
+## Patch survival
+
+Research sync overwrites `bot.py`. All showcase gates MUST live in `scripts/patch-btc-bot-production.mjs` so they re-apply on every `npm run sync:btc-research-bot`.
+
+## Rule of thumb
+
+If needed to **operate, monitor, debug, or understand live execution** → keep visible.
+
+If exists only for **analysis, training, replay, counterfactuals, or offline exports** → strip from Railway runtime.
+
+Signal logic must stay **byte-for-byte parity** with research bot (`verify:signal-parity --full`).

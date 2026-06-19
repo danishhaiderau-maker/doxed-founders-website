@@ -915,6 +915,91 @@ if (execOnlyChanged) {
   console.log('Applied showcase execution-only telemetry suppression to bot.py');
 }
 
+// ─── Architecture B: skip research CPU + direct JSONL writes (signal + dashboard unchanged) ───
+let archBFix = readFileSync(TARGET, 'utf8');
+let archBChanged = false;
+
+/** Inject early return after anchor when showcase execution mirror is active. */
+function gateShowcaseResearch(src, anchor, replacement) {
+  if (!src.includes(anchor) || src.includes(replacement)) {
+    return src;
+  }
+  archBChanged = true;
+  return src.replace(anchor, replacement);
+}
+
+const researchGates = [
+  [
+    'def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):\n    """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""\n    if ai.get("decision")',
+    'def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):\n    """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""\n    if _showcase_execution_only():\n        return\n    if ai.get("decision")',
+  ],
+  [
+    'def tick_all_replay_buffers(price: float):\n    if price is None',
+    'def tick_all_replay_buffers(price: float):\n    if _showcase_execution_only():\n        return\n    if price is None',
+  ],
+  [
+    'def start_replay_buffer(trade_id: str, start_price: float, **meta):\n    sp = _buf_float(start_price, 0)',
+    'def start_replay_buffer(trade_id: str, start_price: float, **meta):\n    if _showcase_execution_only():\n        return\n    sp = _buf_float(start_price, 0)',
+  ],
+  [
+    'def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):\n    if not trade_id',
+    'def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):\n    if _showcase_execution_only():\n        return\n    if not trade_id',
+  ],
+  [
+    'def dump_replay(trade_id: str):\n    global write_counter',
+    'def dump_replay(trade_id: str):\n    if _showcase_execution_only():\n        return\n    global write_counter',
+  ],
+  [
+    'def service_post_exit_replays():\n    """Append mark-price ticks to post-exit replay buffers (no open position required)."""',
+    'def service_post_exit_replays():\n    """Append mark-price ticks to post-exit replay buffers (no open position required)."""\n    if _showcase_execution_only():\n        return',
+  ],
+  [
+    'def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):\n    """Keep replay alive for POST_EXIT_REPLAY_SEC after close — horizon recovery data."""',
+    'def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):\n    """Keep replay alive for POST_EXIT_REPLAY_SEC after close — horizon recovery data."""\n    if _showcase_execution_only():\n        close_replay_buffer(trade_id)\n        return',
+  ],
+  [
+    'def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):\n    """Persist APPROVE-time config for counterfactual / shadow research."""\n    try:',
+    'def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):\n    """Persist APPROVE-time config for counterfactual / shadow research."""\n    if _showcase_execution_only():\n        return\n    try:',
+  ],
+  [
+    'def patch_signal_snapshot_outcome(\n    trade_id: str,\n    executed: bool = None,\n    block_reason: str = None,\n    fill_price: float = None,\n    post_block_research: dict = None,\n    fill_dynamics: dict = None,\n):\n    """Merge execution outcome into signal_snapshot.jsonl for analyzer cohort joins."""\n    if not trade_id',
+    'def patch_signal_snapshot_outcome(\n    trade_id: str,\n    executed: bool = None,\n    block_reason: str = None,\n    fill_price: float = None,\n    post_block_research: dict = None,\n    fill_dynamics: dict = None,\n):\n    """Merge execution outcome into signal_snapshot.jsonl for analyzer cohort joins."""\n    if _showcase_execution_only():\n        return\n    if not trade_id',
+  ],
+  [
+    'def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):\n    """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""\n    try:',
+    'def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):\n    """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""\n    if _showcase_execution_only():\n        return\n    try:',
+  ],
+  [
+    'def log_golden_stack_rejection(\n    signal: dict,\n    ai: dict,\n    gs_eval: dict,\n    edge_score: float = None,\n    block_reason: str = None,\n    future_mfe: float = None,\n    future_mae: float = None,\n    executed: bool = None,\n):\n    """Log per-gate Golden Stack breakdown for every APPROVE (research shadow pipeline)."""\n    try:',
+    'def log_golden_stack_rejection(\n    signal: dict,\n    ai: dict,\n    gs_eval: dict,\n    edge_score: float = None,\n    block_reason: str = None,\n    future_mfe: float = None,\n    future_mae: float = None,\n    executed: bool = None,\n):\n    """Log per-gate Golden Stack breakdown for every APPROVE (research shadow pipeline)."""\n    if _showcase_execution_only():\n        return\n    try:',
+  ],
+  [
+    'def log_golden_stack_rejection_outcome(\n    trade_id: str,\n    post_block_research: dict = None,\n    executed: bool = False,\n    realized_mfe: float = None,\n    realized_mae: float = None,\n    failed_by: list = None,\n):\n    """Append counterfactual MFE/MAE after replay TTL for golden stack analysis."""\n    if not trade_id:',
+    'def log_golden_stack_rejection_outcome(\n    trade_id: str,\n    post_block_research: dict = None,\n    executed: bool = False,\n    realized_mfe: float = None,\n    realized_mae: float = None,\n    failed_by: list = None,\n):\n    """Append counterfactual MFE/MAE after replay TTL for golden stack analysis."""\n    if _showcase_execution_only():\n        return\n    if not trade_id:',
+  ],
+  [
+    'def log_trade_outcome_jsonl(trade_row: dict, pos: dict):\n    """Per-trade path summary for analyzer thesis/ladder counterfactuals."""\n    try:',
+    'def log_trade_outcome_jsonl(trade_row: dict, pos: dict):\n    """Per-trade path summary for analyzer thesis/ladder counterfactuals."""\n    if _showcase_execution_only():\n        return\n    try:',
+  ],
+  [
+    'def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):\n    """AI REJECT: shadow replay buffer for outcome collection without extra API calls."""\n    if not (_sole_ai_research_mode()',
+    'def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):\n    """AI REJECT: shadow replay buffer for outcome collection without extra API calls."""\n    if _showcase_execution_only():\n        return\n    if not (_sole_ai_research_mode()',
+  ],
+  [
+    '        hist_limit = 50 if _sole_ai_research_mode() else 5',
+    '        hist_limit = 5 if _showcase_execution_only() else (50 if _sole_ai_research_mode() else 5)',
+  ],
+];
+
+for (const [anchor, replacement] of researchGates) {
+  archBFix = gateShowcaseResearch(archBFix, anchor, replacement);
+}
+
+if (archBChanged) {
+  writeFileSync(TARGET, archBFix, 'utf8');
+  console.log('Applied Architecture B research CPU + direct-write suppression to bot.py');
+}
+
 // ─── Direct write paths + runtime_mode label for execution mirror ───
 let mirrorFix = readFileSync(TARGET, 'utf8');
 let mirrorChanged = false;
