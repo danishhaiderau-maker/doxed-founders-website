@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Add instant showcase-to-Bitfinex relay sync (policy v2).
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
