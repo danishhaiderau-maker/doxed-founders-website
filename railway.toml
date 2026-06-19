@@ -20,4 +20,4 @@ healthcheckPath = "/api/health/live"
 healthcheckTimeout = 180
 restartPolicyType = "ON_FAILURE"
 numReplicas = 1
-# Redeploy trigger: 2026-05-31 — production boot never blocks on prisma before listen
+# Redeploy trigger: 2026-06-19 — recover API after billing/502 outage
