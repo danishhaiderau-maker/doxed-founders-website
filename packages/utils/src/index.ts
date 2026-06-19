@@ -116,6 +116,7 @@ export * from './bitfinex-copy-policy';
 export * from './copy-relay-sim';
 export * from './copy-relay-capacity';
 export * from './trade-cycle-audit';
+export * from './trade-lifecycle-integrity';
 export * from './conservative-btc-agent-card';
 export * from './agent-directory-submissions';
 export * from './trading-agent-adapters';

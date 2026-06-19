@@ -16,6 +16,10 @@ import {
   type CopyRelaySimState,
   type CopyRelayCapacitySnapshot,
   type ExchangeProvider,
+  buildCopyRelayLimitChain,
+  buildTradeLifecycleIntegrity,
+  type CopyRelayLimitChainSnapshot,
+  type TradeLifecycleIntegritySnapshot,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -971,6 +975,8 @@ export class TradingAgentsService implements OnModuleInit {
     let relaySimLiveBook: TradingAgentDashboardState['liveBook'] | null = null;
     let copyRelayReconcile: CopyRelayReconcileSnapshot | null = null;
     let copyRelayCapacity: CopyRelayCapacitySnapshot | null = null;
+    let copyRelayLimitChain: CopyRelayLimitChainSnapshot | null = null;
+    let tradeLifecycleIntegrity: TradeLifecycleIntegritySnapshot | null = null;
 
     if (userId && agentRowId) {
       const inst = await this.prisma.tradingAgentInstance.findUnique({
@@ -985,6 +991,25 @@ export class TradingAgentsService implements OnModuleInit {
           null;
         copyRelayCapacity =
           (instDash.copyRelayCapacity as CopyRelayCapacitySnapshot | undefined) ?? null;
+        copyRelayLimitChain = buildCopyRelayLimitChain({
+          showcaseMaxActiveSignals: copyRelayCapacity?.showcaseMaxActiveSignals ?? null,
+          capacityLimit: copyRelayCapacity?.capacityLimit,
+          activeOpen: copyRelayCapacity?.activeOpen,
+          activePending: copyRelayCapacity?.activePending,
+          source: copyRelayCapacity?.source ?? null,
+        });
+
+        const recentParticipants = await this.prisma.signalCycleParticipant.findMany({
+          where: { userId, cycle: { agentId: agentRowId } },
+          include: {
+            cycle: { select: { tradeId: true } },
+            events: { select: { eventType: true } },
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 100,
+        });
+        tradeLifecycleIntegrity = buildTradeLifecycleIntegrity(recentParticipants);
+
         if (copyRelaySim.active) {
           const mark =
             typeof rest.dashboard.currentPrice === 'number' ? rest.dashboard.currentPrice : null;
@@ -1014,6 +1039,8 @@ export class TradingAgentsService implements OnModuleInit {
       relaySimLiveBook,
       copyRelayReconcile,
       copyRelayCapacity,
+      copyRelayLimitChain,
+      tradeLifecycleIntegrity,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'
           ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'

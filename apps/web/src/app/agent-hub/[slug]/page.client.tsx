@@ -8,6 +8,8 @@ import {
   type AgentShowcaseFlash,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
+  type CopyRelayLimitChainSnapshot,
+  type TradeLifecycleIntegritySnapshot,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
@@ -84,6 +86,11 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [copyRelayReconcile, setCopyRelayReconcile] = useState<CopyRelayReconcileSnapshot | null>(
     null,
   );
+  const [copyRelayLimitChain, setCopyRelayLimitChain] = useState<CopyRelayLimitChainSnapshot | null>(
+    null,
+  );
+  const [tradeLifecycleIntegrity, setTradeLifecycleIntegrity] =
+    useState<TradeLifecycleIntegritySnapshot | null>(null);
   const [relaySimBusy, setRelaySimBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
 
@@ -129,6 +136,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setCopyRelaySim(dashR.value.copyRelaySim ?? null);
         setRelaySimLiveBook(dashR.value.relaySimLiveBook ?? null);
         setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
+        setCopyRelayLimitChain(dashR.value.copyRelayLimitChain ?? null);
+        setTradeLifecycleIntegrity(dashR.value.tradeLifecycleIntegrity ?? null);
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
@@ -351,6 +360,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           relaySimLiveBook={relaySimLiveBook}
           copyRelaySim={copyRelaySim}
           copyRelayReconcile={copyRelayReconcile}
+          copyRelayLimitChain={copyRelayLimitChain}
+          tradeLifecycleIntegrity={tradeLifecycleIntegrity}
           showcaseActivity={showcaseActivity.length > 0 ? showcaseActivity : activity}
           userActivity={userActivity.length > 0 ? userActivity : activity}
           onFollow={toggleFollow}

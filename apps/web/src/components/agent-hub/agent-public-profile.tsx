@@ -7,6 +7,8 @@ import {
   formatUsd,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
+  type CopyRelayLimitChainSnapshot,
+  type TradeLifecycleIntegritySnapshot,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
@@ -247,6 +249,8 @@ export function AgentPublicProfile({
   relaySimLiveBook,
   copyRelaySim,
   copyRelayReconcile,
+  copyRelayLimitChain,
+  tradeLifecycleIntegrity,
   showcaseActivity: showcaseActivityProp,
   userActivity: userActivityProp,
   onFollow,
@@ -287,6 +291,8 @@ export function AgentPublicProfile({
   relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
+  copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
+  tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
   showcaseActivity?: TradingAgentActivityEntry[];
   userActivity?: TradingAgentActivityEntry[];
   onFollow?: () => void;
@@ -630,6 +636,9 @@ export function AgentPublicProfile({
                   liveBook={detailsLiveBook}
                   copyRelayReconcile={copyRelayReconcile}
                   copyRelaySim={copyRelaySim}
+                  copyRelayLimitChain={copyRelayLimitChain}
+                  tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+                  instanceStatus={instanceStatus}
                   mode={copyDetailsMode}
                 />
               ) : null}
