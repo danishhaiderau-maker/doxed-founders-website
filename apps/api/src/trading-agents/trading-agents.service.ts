@@ -36,6 +36,7 @@ import {
   mapBotStateToActivity,
   type BotActivityEntry,
 } from './bot-state.mapper';
+import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
 import {
   buildShowcaseFlashFromBot,
 } from './showcase-flash.util';
@@ -985,6 +986,7 @@ export class TradingAgentsService implements OnModuleInit {
     let copyRelayCapacity: CopyRelayCapacitySnapshot | null = null;
     let copyRelayLimitChain: CopyRelayLimitChainSnapshot | null = null;
     let tradeLifecycleIntegrity: TradeLifecycleIntegritySnapshot | null = null;
+    let relayFidelity = null;
 
     if (userId && agentRowId) {
       const inst = await this.prisma.tradingAgentInstance.findUnique({
@@ -1010,13 +1012,31 @@ export class TradingAgentsService implements OnModuleInit {
         const recentParticipants = await this.prisma.signalCycleParticipant.findMany({
           where: { userId, cycle: { agentId: agentRowId } },
           include: {
-            cycle: { select: { tradeId: true } },
-            events: { select: { eventType: true } },
+            cycle: {
+              select: {
+                id: true,
+                tradeId: true,
+                showcaseExitReason: true,
+                closedAt: true,
+              },
+            },
+            events: { orderBy: { createdAt: 'asc' } },
           },
           orderBy: { updatedAt: 'desc' },
-          take: 100,
+          take: 80,
         });
         tradeLifecycleIntegrity = buildTradeLifecycleIntegrity(recentParticipants);
+
+        const botRaw = this.botBridge.isEnabled()
+          ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
+          : null;
+        relayFidelity = buildRelayFidelitySnapshot({
+          bot: botRaw,
+          participants: recentParticipants.filter((p) =>
+            p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
+          ),
+          limit: 20,
+        });
 
         if (copyRelaySim.active) {
           const mark =
@@ -1049,6 +1069,7 @@ export class TradingAgentsService implements OnModuleInit {
       copyRelayCapacity,
       copyRelayLimitChain,
       tradeLifecycleIntegrity,
+      relayFidelity,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'
           ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'

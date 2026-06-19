@@ -10,6 +10,10 @@ import {
 } from '@dcf/utils';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
+import {
+  AgentRelayFidelityPanel,
+  type RelayFidelitySnapshot,
+} from '@/components/agent-hub/agent-relay-fidelity-panel';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
 function ReconcileMetric({
@@ -41,6 +45,7 @@ export function AgentRelaySimPanel({
   showcaseAgent,
   copyRelaySim,
   copyRelayReconcile,
+  relayFidelity,
   relaySimLiveBook,
   showcaseActivity,
   simActivity,
@@ -54,6 +59,7 @@ export function AgentRelaySimPanel({
   showcaseAgent: TradingAgentSummary;
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
+  relayFidelity?: RelayFidelitySnapshot | null;
   relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
   showcaseActivity: TradingAgentActivityEntry[];
   simActivity: TradingAgentActivityEntry[];
@@ -191,6 +197,8 @@ export function AgentRelaySimPanel({
         ) : active ? (
           <p className="text-xs text-zinc-500">Waiting for first reconcile tick…</p>
         ) : null}
+
+        <AgentRelayFidelityPanel fidelity={relayFidelity} reconcile={reconcile} />
 
         {relaySimLiveBook ? (
           <>

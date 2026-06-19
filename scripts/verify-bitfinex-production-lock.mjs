@@ -28,7 +28,7 @@ const API_MARKERS = [
     'resolveMaxConcurrentCopySignals',
     'reconcileUnattributedExchangeFills',
     'closeVirtualLot',
-    'evaluateScenarioCLotExit',
+    'evaluateSubscriberLotExit',
     'TradingAgentInstanceStatus.PAUSED',
     'BITFINEX_COPY_POLICY_VERSION',
   ]},

@@ -41,6 +41,7 @@ import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
+import { mapBotStateToAgentStats } from './bot-state.mapper';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -247,6 +248,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     await this.reconcileFilledParticipants(instance.userId, agentId, participantSince);
+
+    await this.reconcileImmediateExchangeFlat(agentId, instance.userId, creds, participantSince);
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -656,12 +659,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
 
     if (delta > MIN_QTY_BTC) {
-      await this.reconcileUnattributedExchangeFills(
-        agentId,
-        instance.userId,
-        creds,
-        managedOrderIds,
-      );
+      const pendingCount = summary.pending;
+      if (pendingCount === 0 && summary.open === 0) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            lastError: `UNATTRIBUTED_EXCHANGE_EXPOSURE: exchange ${exchangeQty.toFixed(5)} BTC with no ledger lots — manual add detected; relay will not synthesize lots.`,
+          },
+        });
+      } else {
+        await this.reconcileUnattributedExchangeFills(
+          agentId,
+          instance.userId,
+          creds,
+          managedOrderIds,
+        );
+      }
     }
 
     if (delta < -MIN_QTY_BTC) {
@@ -721,7 +734,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
         venue,
         exit_price: mark,
-        exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
+        exit_reason: 'MANUAL_PARTIAL_CLOSE',
         pnl_usd: 0,
         pnl_margin_pct: 0,
         qty_closed: meta.qty,
@@ -742,11 +755,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const reconcile =
       (dash.copyRelayReconcile as ReturnType<CopyRelaySimService['buildReconcileSnapshot']>) ??
       sim.reconcile;
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
-    const botStats = bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
-    if (botStats) {
-      sim.showcasePnlUsd = Number(botStats.total_pnl_usd ?? botStats.session_pnl_usd ?? 0);
-      sim.showcaseTradeCount = Number(botStats.trade_count ?? botStats.total_trades ?? 0);
+    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchStateForExecution(true).catch(() => null) : null;
+    if (bot && typeof bot === 'object') {
+      const stats = mapBotStateToAgentStats(bot);
+      sim.showcasePnlUsd = stats.sessionPnlUsd;
+      sim.showcaseTradeCount = stats.tradeCount;
     }
     await this.relaySim.persistSimState(instance.id, instance.userId, sim, reconcile);
   }
@@ -1749,6 +1762,75 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /**
+   * Scenario 1 — exchange flat while ledger OPEN: close virtual lots immediately (manual UI close).
+   */
+  private async reconcileImmediateExchangeFlat(
+    agentId: string,
+    userId: string,
+    creds: ExchangeCredentials,
+    participantScope: { createdAt?: { gte: Date } } = {},
+  ) {
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const exchangeQty = position ? Math.abs(position.amount) : 0;
+    if (exchangeQty >= MIN_QTY_BTC) return;
+
+    const openRows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId },
+        ...participantScope,
+      },
+      include: { cycle: true },
+    });
+    if (!openRows.length) return;
+
+    for (const row of openRows) {
+      if (await this.hasParticipantExited(row.id)) continue;
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.qty || !meta.direction) continue;
+
+      const mark = await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
+      const fillPrice =
+        row.fillPrice != null ? Number(row.fillPrice) : meta.limitPrice ?? mark;
+      const exitPrice = mark;
+      const pnlUsd =
+        fillPrice && exitPrice
+          ? meta.direction === 'LONG'
+            ? (exitPrice - fillPrice) * meta.qty
+            : (fillPrice - exitPrice) * meta.qty
+          : 0;
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+        venue: 'bitfinex',
+        exit_price: exitPrice,
+        exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
+        pnl_usd: Math.round(pnlUsd * 100) / 100,
+        source: 'hire',
+        event: 'IMMEDIATE_EXCHANGE_FLAT',
+      });
+      this.logger.warn(
+        `Immediate flat reconcile ${userId} cycle=${row.cycleId} — exchange 0, ledger OPEN closed`,
+      );
+    }
+  }
+
+  /** Scenario 5 — cancel resting entry limits linked to a showcase cycle before exit. */
+  private async cancelLinkedPendingLimits(
+    creds: ExchangeCredentials,
+    meta: ExecutionPayload,
+    activeOrderIdSet: Set<number>,
+  ) {
+    if (meta.bitfinexOrderId && activeOrderIdSet.has(meta.bitfinexOrderId)) {
+      try {
+        await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
+      } catch {
+        /* already filled or gone */
+      }
+    }
+  }
+
+  /**
    * User closed on Bitfinex (or stop filled) while our cycle still shows OPEN — reconcile without crashing.
    */
   private async reconcileManualClose(
@@ -1811,7 +1893,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
       venue: 'bitfinex',
       exit_price: exitPrice,
-      exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
+      exit_reason: meta.stopOrderId ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       source: 'hire',
@@ -1853,9 +1935,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    await this.cancelLinkedPendingLimits(creds, meta, new Set());
+
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
-      this.logger.log(`Exit skip ${userId} cycle=${cycle.id}: already flat on exchange`);
+      const fillPrice = participant.fillPrice != null ? Number(participant.fillPrice) : meta.limitPrice ?? 0;
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        venue: 'bitfinex',
+        exit_price: fillPrice,
+        exit_reason: 'SHOWCASE_MIRROR_ALREADY_FLAT',
+        pnl_usd: 0,
+        pnl_margin_pct: 0,
+        source: 'hire',
+      });
+      this.logger.log(`Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded`);
       return;
     }
 

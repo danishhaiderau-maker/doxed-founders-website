@@ -1089,6 +1089,76 @@ if (
   mirrorChanged = true;
 }
 
+// Showcase relay webhook — wake Bitfinex copy on approve / place / close (survives research sync)
+if (!mirrorFix.includes('def _push_showcase_relay_event(')) {
+  mirrorFix = mirrorFix.replace(
+    'def record_approve_outcome(status: str, reason: str = None',
+    `def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
+    """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
+    url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    if not url:
+        return
+    secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+    payload = {"event": event, "trade_id": trade_id, "ts": utc_iso()}
+    if extra and isinstance(extra, dict):
+        payload.update(extra)
+
+    def _post():
+        try:
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if secret:
+                headers["X-Bot-Control-Secret"] = secret
+            requests.post(url, json=payload, headers=headers, timeout=2.5)
+        except Exception as exc:
+            logger.debug(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def record_approve_outcome(status: str, reason: str = None`,
+  );
+  mirrorChanged = true;
+}
+
+if (
+  mirrorFix.includes('def record_approve_outcome') &&
+  !mirrorFix.includes('_push_showcase_relay_event("APPROVE_PENDING"')
+) {
+  mirrorFix = mirrorFix.replace(
+    `            "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
+        }
+
+def resolve_pending_approve_blocked`,
+    `            "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
+        }
+    if status == "PENDING" and trade_id:
+        _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+    elif status == "EXECUTED" and trade_id:
+        _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+
+def resolve_pending_approve_blocked`,
+  );
+  mirrorChanged = true;
+}
+
+if (
+  mirrorFix.includes('[CLOSE][') &&
+  !mirrorFix.includes('_push_showcase_relay_event(\n        "POSITION_CLOSED"')
+) {
+  mirrorFix = mirrorFix.replace(
+    `    logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
+    candidate_signal["active"] = False`,
+    `    logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
+    _push_showcase_relay_event(
+        "POSITION_CLOSED",
+        trade_id,
+        {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
+    )
+    candidate_signal["active"] = False`,
+  );
+  mirrorChanged = true;
+}
+
 if (mirrorChanged) {
   writeFileSync(TARGET, mirrorFix, 'utf8');
   console.log('Applied execution mirror write gates + runtime_mode to bot.py');

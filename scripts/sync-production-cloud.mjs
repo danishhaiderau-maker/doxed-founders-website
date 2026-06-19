@@ -239,6 +239,11 @@ async function main() {
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
+      SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
+      SUBSCRIBER_EXECUTION_ENABLED: 'true',
+      SUBSCRIBER_EXECUTION_POLL_MS: '250',
+      SIGNAL_CYCLE_POLL_MS: '250',
+      BITFINEX_COPY_POLICY_VERSION: '2',
     });
     if (!x402PayTo) {
       console.warn(

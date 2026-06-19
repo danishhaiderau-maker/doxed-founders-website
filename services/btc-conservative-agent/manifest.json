@@ -3,7 +3,7 @@
   "combo_version": "2026-06-19",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "COMBO_65_SP5_CHASE_3PLUS",
-  "signal_hash": "a89d8b8c0f75",
+  "signal_hash": "8a81eb5308d8",
   "source": "danishhaiderau-maker/bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-06-19T15:43:05.148Z"
+  "updated_at": "2026-06-19T16:12:16.623Z"
 }

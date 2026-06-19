@@ -120,6 +120,7 @@ export type BotApiState = {
   }>;
   leverage?: number;
   pullback_threshold?: number;
+  live_armed?: boolean;
   last_approve_outcome?: {
     trade_id?: string;
     status?: string;
@@ -133,13 +134,8 @@ export type BotApiState = {
   trades_map?: Record<
     string,
     {
-      signal_ref?: {
-        status?: string;
-        exit_reason?: string;
-        exit_price?: number;
-        closed_ts?: number;
-        net_pnl_usd?: number;
-      };
+      signal_ref?: Record<string, unknown>;
+      ai?: Record<string, unknown>;
     }
   >;
   signal_info?: {
@@ -163,29 +159,12 @@ export type BotApiState = {
       status?: string;
     }>;
   };
-  trades_map?: Record<
-    string,
-    {
-      signal_ref?: Record<string, unknown>;
-      ai?: Record<string, unknown>;
-    }
-  >;
   research_counters?: {
     last_trade_pnl_usd?: number;
     last_exit_reason?: string;
     trades_since_last_loss?: number;
     approve_index?: number;
   };
-  last_approve_outcome?: {
-    status?: string;
-    reason?: string;
-    trade_id?: string;
-    edge_at_approve?: number;
-    effective_threshold?: number;
-  };
-  pullback_threshold?: number;
-  leverage?: number;
-  live_armed?: boolean;
 };
 
 const STARTING_BALANCE = 500;
