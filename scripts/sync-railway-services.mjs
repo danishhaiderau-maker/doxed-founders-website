@@ -66,6 +66,14 @@ if (!jwtSecret || jwtSecret.length < 32) {
 
 const cors =
   'https://doxxedcrypto.digital,https://www.doxxedcrypto.digital,https://doxed-founders-website.vercel.app';
+const relayEnv = {
+  SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
+  SUBSCRIBER_EXECUTION_ENABLED: 'true',
+  SUBSCRIBER_EXECUTION_POLL_MS: '250',
+  SIGNAL_CYCLE_POLL_MS: '250',
+  BITFINEX_COPY_POLICY_VERSION: '2',
+};
+
 const apiVars = {
   DATABASE_URL: dbUrl,
   JWT_SECRET: jwtSecret,
@@ -73,6 +81,9 @@ const apiVars = {
   PRISMA_DB_PUSH: 'true',
   PRISMA_SCHEMA: 'prisma/schema.prisma',
   CORS_ORIGINS: cors,
+  TRADING_AGENT_BOT_URL: 'https://btc-conservative-agent-production.up.railway.app',
+  CONSERVATIVE_BTC_BOT_URL: 'https://btc-conservative-agent-production.up.railway.app',
+  ...relayEnv,
   SUBSCRIBER_EXECUTION_ENABLED: 'true',
   SUBSCRIBER_EXECUTION_POLL_MS: '250',
   SIGNAL_CYCLE_POLL_MS: '250',

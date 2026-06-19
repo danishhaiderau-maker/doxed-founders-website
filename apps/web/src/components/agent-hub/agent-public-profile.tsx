@@ -20,6 +20,7 @@ import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import { AgentDeskSwitcher, type AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
+import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
@@ -251,6 +252,7 @@ export function AgentPublicProfile({
   copyRelayReconcile,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
+  relayFidelity,
   showcaseActivity: showcaseActivityProp,
   userActivity: userActivityProp,
   onFollow,
@@ -293,6 +295,7 @@ export function AgentPublicProfile({
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relayFidelity?: RelayFidelitySnapshot | null;
   showcaseActivity?: TradingAgentActivityEntry[];
   userActivity?: TradingAgentActivityEntry[];
   onFollow?: () => void;
@@ -638,6 +641,7 @@ export function AgentPublicProfile({
                   copyRelaySim={copyRelaySim}
                   copyRelayLimitChain={copyRelayLimitChain}
                   tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+                  relayFidelity={relayFidelity}
                   instanceStatus={instanceStatus}
                   mode={copyDetailsMode}
                 />

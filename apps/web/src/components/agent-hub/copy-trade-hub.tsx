@@ -13,6 +13,10 @@ import {
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
+import {
+  AgentRelayFidelityPanel,
+  type RelayFidelitySnapshot,
+} from '@/components/agent-hub/agent-relay-fidelity-panel';
 import type { TradingAgentSummary } from '@/lib/api';
 
 type CopyMode = 'connect' | 'live' | 'sim' | 'observe';
@@ -96,6 +100,7 @@ export function CopyTradeDetailsStrip({
   copyRelaySim,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
+  relayFidelity,
   instanceStatus,
   mode,
 }: {
@@ -106,6 +111,7 @@ export function CopyTradeDetailsStrip({
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relayFidelity?: RelayFidelitySnapshot | null;
   instanceStatus?: string | null;
   mode: 'live' | 'sim' | null;
 }) {
@@ -239,6 +245,10 @@ export function CopyTradeDetailsStrip({
             : ''}
         </div>
       ) : null}
+
+      <div className="mt-4">
+        <AgentRelayFidelityPanel fidelity={relayFidelity} reconcile={reconcile} />
+      </div>
 
       {agent.walletStatusHint ? (
         <p className="mt-3 text-xs text-amber-200/85">{agent.walletStatusHint}</p>

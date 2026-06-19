@@ -91,6 +91,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   );
   const [tradeLifecycleIntegrity, setTradeLifecycleIntegrity] =
     useState<TradeLifecycleIntegritySnapshot | null>(null);
+  const [relayFidelity, setRelayFidelity] = useState<
+    import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null
+  >(null);
   const [relaySimBusy, setRelaySimBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
 
@@ -138,6 +141,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
         setCopyRelayLimitChain(dashR.value.copyRelayLimitChain ?? null);
         setTradeLifecycleIntegrity(dashR.value.tradeLifecycleIntegrity ?? null);
+        setRelayFidelity(dashR.value.relayFidelity ?? null);
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
@@ -362,6 +366,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           copyRelayReconcile={copyRelayReconcile}
           copyRelayLimitChain={copyRelayLimitChain}
           tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+          relayFidelity={relayFidelity}
           showcaseActivity={showcaseActivity.length > 0 ? showcaseActivity : activity}
           userActivity={userActivity.length > 0 ? userActivity : activity}
           onFollow={toggleFollow}
