@@ -13630,10 +13630,49 @@ ANALYZER_TEXT_OUTPUTS = (
     "execution_funnel_summary.json",
 )
 
+def _pathway_validation_artifact_paths() -> list:
+    """Startup validation JSON — stale after fresh collection; regenerated on next bot start."""
+    return [
+        "tile_independence_report.json",
+        "type_b_execution_audit.json",
+        "ai_scan_independence_report.json",
+        "ai_scan_role_validation.json",
+        "bot_analyzer_sync.json",
+        "repo_version_sync.json",
+        "exit_reports_validation.json",
+        "lane_memory_validation.json",
+        "lane_memory_violation.json",
+        "runtime_pathway_integrity.json",
+    ]
+
+
+def _legacy_redundant_log_paths() -> list:
+    """Old launcher/supervisor logs — not research data but consume disk."""
+    return [
+        "bot_stdout.log",
+        "bot_stderr.log",
+        "bot_restart.log",
+        "bot_supervisor.log",
+        "analyzer_run_latest.log",
+    ]
+
+
+def _wipe_reports_recursive() -> list:
+    """All analyzer outputs under reports/ including history/ subdirs."""
+    found = []
+    reports_dir = "reports"
+    if os.path.isdir(reports_dir):
+        for root, _, files in os.walk(reports_dir):
+            for name in files:
+                found.append(os.path.join(root, name))
+    return found
+
+
 def _analyzer_output_wipe_globs() -> list:
-    """All analyzer JSON/text artifacts in cwd and reports/ (not session archives)."""
+    """All analyzer JSON/text artifacts in cwd (not session archives)."""
     patterns = (
         "*_report.json",
+        "*_scorecard.json",
         "research_compact_summary.json",
         "report_manifest.json",
         "real_edge_summary.json",
@@ -13648,12 +13687,6 @@ def _analyzer_output_wipe_globs() -> list:
     found = list(ANALYZER_TEXT_OUTPUTS)
     for pat in patterns:
         found.extend(glob.glob(pat))
-    reports_dir = "reports"
-    if os.path.isdir(reports_dir):
-        for name in os.listdir(reports_dir):
-            path = os.path.join(reports_dir, name)
-            if os.path.isfile(path) and name.endswith((".json", ".html", ".txt")):
-                found.append(path)
     return sorted(set(p for p in found if p and "research_session" not in p))
 
 
@@ -13675,7 +13708,9 @@ def research_wipe_file_paths():
         "approval_ev_report.json", "confidence_calibration_report.json",
         "feature_drift_report.json", "profitable_reject_report.json", PROFITABLE_REJECT_FEATURES_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
-        CONFIG_FILE, POLICY_FILE, RESEARCH_SESSION_FILE,
+        LANE_OPPORTUNITY_CAPTURE_FILE, LANE_OPPORTUNITY_REPORT_FILE,
+        AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl",
+        LANE_PNL_LEDGER_FILE, "research_session_index.json", CSV_FALLBACK_JSONL,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
     return paths
@@ -13690,6 +13725,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, REVERSAL_STUDY_FILE, AI_REASON_RESEARCH_FILE,
         AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE, AI_INPUT_LOG_FILE, EDGE_CENSUS_FILE,
+        LANE_OPPORTUNITY_CAPTURE_FILE, AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl",
     ]
     found = []
     for base in bases:
@@ -13699,8 +13735,19 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     return sorted(set(found))
 
 
-def all_research_wipe_paths() -> list:
-    return sorted(set(research_wipe_file_paths()) | set(_research_wipe_rotated_jsonl_paths()) | set(_analyzer_output_wipe_globs()))
+def all_research_wipe_paths(
+    include_validation_artifacts: bool = True,
+    include_legacy_logs: bool = False,
+) -> list:
+    paths = set(research_wipe_file_paths())
+    paths |= set(_research_wipe_rotated_jsonl_paths())
+    paths |= set(_analyzer_output_wipe_globs())
+    paths |= set(_wipe_reports_recursive())
+    if include_validation_artifacts:
+        paths |= set(_pathway_validation_artifact_paths())
+    if include_legacy_logs:
+        paths |= set(_legacy_redundant_log_paths())
+    return sorted(paths)
 
 def _delete_paths(paths) -> tuple:
     deleted = []
@@ -13737,7 +13784,9 @@ def _reset_runtime_log_handlers():
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files() -> tuple:
-    deleted, errors = _delete_paths(all_research_wipe_paths())
+    deleted, errors = _delete_paths(
+        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+    )
     return deleted, errors
 
 def maintain_fresh_collection_files():
@@ -18691,21 +18740,15 @@ def main():
             raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
     else:
         try:
-            if research_mode and not state.get("live_armed"):
-                logger.info(
-                    "[STARTUP] RESEARCH showcase — skip private balance fetch (avoids nonce clash with copy relay) "
-                    "[PIPELINE ENFORCEMENT]"
-                )
-            else:
-                balance = bitfinex_private.fetch_balance()
-                logger.info(f"Bitfinex API keys validated - Balance: {balance}")
-                if state.get("live_armed"):
-                    usdt = STARTING_BALANCE
-                    if isinstance(balance, dict):
-                        usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
-                    state["account_balance"] = usdt
-                elif not research_mode:
-                    state["account_balance"] = STARTING_BALANCE
+            balance = bitfinex_private.fetch_balance()
+            logger.info(f"Bitfinex API keys validated - Balance: {balance}")
+            if state.get("live_armed"):
+                usdt = STARTING_BALANCE
+                if isinstance(balance, dict):
+                    usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
+                state["account_balance"] = usdt
+            elif not research_mode:
+                state["account_balance"] = STARTING_BALANCE
         except Exception as e:
             logger.error(f"Bitfinex API key test failed: {e}")
             if not research_mode or state.get("live_armed"):
@@ -18713,34 +18756,28 @@ def main():
     if not _deepseek_api_key():
         logger.warning("AI disabled: DEEPSEEK_API_KEY missing (see Final Bots\\.env)")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
-    try:
-        load_policy()
-        preload_candles()
-        for _ in range(3):
-            fetch_ohlcv()
-            time.sleep(1)
-        update_ema()
-        update_support_resistance()
-        trend_info()
-        update_market_context(force=True)
-        with state_lock:
-            if len(latest_candles) >= MIN_CANDLES:
-                logger.info("[BOOTSTRAP] Initial indicator computation completed after preload")
-        with state_lock:
-            closes = [c[4] for c in latest_candles]
-            if len(closes) >= EMA_LONG:
-                state["ema_status"] = {"ema9": ema(closes, EMA_FAST),"ema21": ema(closes, EMA_SLOW),"ema200": ema(closes, EMA_LONG),"prev_ema9": ema(closes, EMA_FAST),"prev_ema21": ema(closes, EMA_SLOW)}
-                state["ohlcv_ready"] = True
-        if LIVE_TRADING_ENABLED:
-            set_execution_paused("SIMULATION_ONLY")
-        load_positions()
-        rebuild_state_from_snapshots()
-        reconcile_stale_signals()
-    except Exception as startup_err:
-        logger.critical(
-            f"[STARTUP] Degraded boot — continuing with partial preload: {startup_err} [PIPELINE ENFORCEMENT]"
-        )
-        dump_system_state()
+    load_policy()
+    preload_candles()
+    for _ in range(3):
+        fetch_ohlcv()
+        time.sleep(1)
+    update_ema()
+    update_support_resistance()
+    trend_info()
+    update_market_context(force=True)
+    with state_lock:
+        if len(latest_candles) >= MIN_CANDLES:
+            logger.info("[BOOTSTRAP] Initial indicator computation completed after preload")
+    with state_lock:
+        closes = [c[4] for c in latest_candles]
+        if len(closes) >= EMA_LONG:
+            state["ema_status"] = {"ema9": ema(closes, EMA_FAST),"ema21": ema(closes, EMA_SLOW),"ema200": ema(closes, EMA_LONG),"prev_ema9": ema(closes, EMA_FAST),"prev_ema21": ema(closes, EMA_SLOW)}
+            state["ohlcv_ready"] = True
+    if LIVE_TRADING_ENABLED:
+        set_execution_paused("SIMULATION_ONLY")
+    load_positions()
+    rebuild_state_from_snapshots()
+    reconcile_stale_signals()
     boot_exposure = get_active_signal_count()
     m_fee, t_fee = get_trading_fee_rates()
     refresh_funding_state(force=True)
@@ -18811,7 +18848,7 @@ def main():
         )
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(
-            f"[{COMBO_BENCHMARK_ROLE}] {BENCHMARK_PROFILE_ID} — {BENCHMARK_LANE} | "
+            f"[{COMBO_BENCHMARK_ROLE}] {BENCHMARK_PROFILE_ID} — {COMBO_BENCHMARK_LANE} | "
             f"~{get_research_ai_cooldown_sec()}s AI_SCAN | 4 combo tiles independent | Scenario C exits "
             f"[PIPELINE ENFORCEMENT]"
         )
