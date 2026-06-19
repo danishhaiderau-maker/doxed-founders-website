@@ -8658,6 +8658,8 @@ def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
 
 def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):
     """AI REJECT: shadow replay buffer for outcome collection without extra API calls."""
+    if _showcase_execution_only():
+        return
     if not (_sole_ai_research_mode() and is_research_data_collection()):
         return
     trade_id = ai.get("trade_id") or ctx.get("trade_id")
@@ -8765,7 +8767,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
             "research_lane": ai_result.get("research_lane"),
             "research_model": ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane")),
         })
-        hist_limit = 50 if _sole_ai_research_mode() else 5
+        hist_limit = 5 if _showcase_execution_only() else (50 if _sole_ai_research_mode() else 5)
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
 
@@ -11270,6 +11272,8 @@ def atomic_freeze_signal(signal, edge_score, pipeline_eff_thr=None):
 
 def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):
     """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""
+    if _showcase_execution_only():
+        return
     try:
         features = features or {}
         edge_score = round(float(edge_score or 0), 2)
@@ -16975,6 +16979,8 @@ def patch_signal_snapshot_outcome(
     fill_dynamics: dict = None,
 ):
     """Merge execution outcome into signal_snapshot.jsonl for analyzer cohort joins."""
+    if _showcase_execution_only():
+        return
     if not trade_id or not os.path.exists(SIGNAL_SNAPSHOT_FILE):
         return
     try:
@@ -17026,6 +17032,8 @@ def patch_signal_snapshot_outcome(
 
 def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Persist APPROVE-time config for counterfactual / shadow research."""
+    if _showcase_execution_only():
+        return
     try:
         trade_id = signal.get("trade_id")
         if not trade_id or ai.get("decision") != "APPROVE":
@@ -17161,6 +17169,8 @@ def log_golden_stack_rejection(
     executed: bool = None,
 ):
     """Log per-gate Golden Stack breakdown for every APPROVE (research shadow pipeline)."""
+    if _showcase_execution_only():
+        return
     try:
         trade_id = signal.get("trade_id")
         if not trade_id:
@@ -17231,6 +17241,8 @@ def log_golden_stack_rejection_outcome(
     failed_by: list = None,
 ):
     """Append counterfactual MFE/MAE after replay TTL for golden stack analysis."""
+    if _showcase_execution_only():
+        return
     if not trade_id:
         return
     pb = post_block_research or {}
@@ -17286,6 +17298,8 @@ def log_trend_health_csv():
 
 def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""
+    if _showcase_execution_only():
+        return
     if ai.get("decision") != "APPROVE":
         return
     trade_id = signal.get("trade_id")
@@ -17380,6 +17394,8 @@ def _try_shadow_limit_fill(buf: dict, price: float, t_rel: float):
 
 
 def tick_all_replay_buffers(price: float):
+    if _showcase_execution_only():
+        return
     if price is None or price <= 0:
         return
     now = time.time()
@@ -17645,6 +17661,8 @@ def finalize_shadow_research(trade_id: str, block_reason: str, signal: dict = No
 
 
 def start_replay_buffer(trade_id: str, start_price: float, **meta):
+    if _showcase_execution_only():
+        return
     sp = _buf_float(start_price, 0)
     if not trade_id or sp <= 0:
         return
@@ -17677,6 +17695,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
 
 
 def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
+    if _showcase_execution_only():
+        return
     if not trade_id or price is None or price <= 0:
         return
     now = time.time()
@@ -17712,6 +17732,8 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
 
 def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
     """Per-trade path summary for analyzer thesis/ladder counterfactuals."""
+    if _showcase_execution_only():
+        return
     try:
         mfe = float(trade_row.get("max_profit") or pos.get("max_pnl_pct") or 0)
         direction = str(trade_row.get("dir") or pos.get("dir") or "LONG").upper()
@@ -17788,6 +17810,9 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
 
 def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
     """Keep replay alive for POST_EXIT_REPLAY_SEC after close — horizon recovery data."""
+    if _showcase_execution_only():
+        close_replay_buffer(trade_id)
+        return
     if not trade_id or exit_price is None or float(exit_price) <= 0:
         close_replay_buffer(trade_id)
         return
@@ -17830,6 +17855,8 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
 
 def service_post_exit_replays():
     """Append mark-price ticks to post-exit replay buffers (no open position required)."""
+    if _showcase_execution_only():
+        return
     with state_lock:
         price = float(state.get("price") or 0)
     if price <= 0:
@@ -17860,6 +17887,8 @@ def close_replay_buffer(trade_id):
             replay_buffers.pop(trade_id, None)
 
 def dump_replay(trade_id: str):
+    if _showcase_execution_only():
+        return
     global write_counter
     with replay_lock:
         buf = replay_buffers.get(trade_id)
