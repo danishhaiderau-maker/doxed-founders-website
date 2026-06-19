@@ -18,10 +18,16 @@ const POLICY_FILES = [
   'apps/api/src/trading-agents/signal-subscriber-execution.service.ts',
 ];
 
-function sha256File(rel) {
+function fileDigest(rel) {
   const abs = join(root, rel);
   if (!existsSync(abs)) throw new Error(`Missing ${rel}`);
-  return createHash('sha256').update(readFileSync(abs)).digest('hex');
+  // Normalize line endings so Windows dev + Linux CI agree on policy hashes.
+  const text = readFileSync(abs, 'utf8').replace(/\r\n/g, '\n');
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function sha256File(rel) {
+  return fileDigest(rel);
 }
 
 function fail(msg) {
