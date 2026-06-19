@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Sync showcase bot from bybit-15m-research-bot: fix BENCHMARK_LANE crash and fresh-collection wipe.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
