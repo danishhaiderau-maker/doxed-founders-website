@@ -16,10 +16,12 @@ const ROOT = join(__dirname, '..');
 const TARGET = join(ROOT, 'services/btc-conservative-agent/bot.py');
 const REPO = process.env.BTC_RESEARCH_REPO ?? 'danishhaiderau-maker/bybit-15m-research-bot';
 const SOURCE_FILE = process.env.BTC_RESEARCH_FILE ?? 'bybit_bot.py';
+/** Extra modules the research bot imports — must ship with Railway service. */
+const EXTRA_SOURCE_FILES = ['combo_pathway_config.py'];
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
 
-async function fetchResearchBot() {
-  const apiUrl = `https://api.github.com/repos/${REPO}/contents/${SOURCE_FILE}`;
+async function fetchResearchFile(fileName) {
+  const apiUrl = `https://api.github.com/repos/${REPO}/contents/${fileName}`;
   /** @type {Record<string, string>} */
   const headers = {
     Accept: 'application/vnd.github.raw',
@@ -30,11 +32,15 @@ async function fetchResearchBot() {
   const res = await fetch(apiUrl, { headers });
   if (!res.ok) {
     throw new Error(
-      `Failed to fetch ${REPO}/${SOURCE_FILE}: ${res.status}. ` +
+      `Failed to fetch ${REPO}/${fileName}: ${res.status}. ` +
         (GITHUB_TOKEN ? '' : 'Set GITHUB_TOKEN for private repos, or run via `gh auth login`.'),
     );
   }
   return res.text();
+}
+
+async function fetchResearchBot() {
+  return fetchResearchFile(SOURCE_FILE);
 }
 
 /** Strip hardcoded secrets from research repo — Railway uses Admin Control keys only. */
@@ -118,6 +124,18 @@ async function main() {
   }
 
   writeFileSync(TARGET, patchForProduction(raw), 'utf8');
+  for (const extra of EXTRA_SOURCE_FILES) {
+    const extraRaw = await fetchResearchFile(extra);
+    const extraTarget = join(ROOT, 'services/btc-conservative-agent', extra);
+    const extraOld = existsSync(extraTarget) ? sha256(readFileSync(extraTarget, 'utf8')) : null;
+    writeFileSync(extraTarget, extraRaw, 'utf8');
+    const extraNew = sha256(extraRaw);
+    console.log(
+      extraOld === extraNew
+        ? `${extra} unchanged (${(extraRaw.length / 1024).toFixed(1)} KB)`
+        : `Updated ${extraTarget} (${(extraRaw.length / 1024).toFixed(1)} KB)`,
+    );
+  }
   applyProductionPatches();
 
   const verify = execSync('node scripts/verify-bitfinex-production-lock.mjs', {
