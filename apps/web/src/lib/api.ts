@@ -3561,6 +3561,7 @@ export interface TradingAgentDashboard {
   copyRelayCapacity?: import('@dcf/utils').CopyRelayCapacitySnapshot | null;
   copyRelayLimitChain?: import('@dcf/utils').CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: import('@dcf/utils').TradeLifecycleIntegritySnapshot | null;
+  relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
 }
 
 export interface TradingAgentActivityEntry {

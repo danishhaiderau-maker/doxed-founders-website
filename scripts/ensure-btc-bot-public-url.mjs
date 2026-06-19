@@ -123,7 +123,7 @@ if (!botService) {
       environmentId: env.id,
       input: {
         rootDirectory: ROOT_DIR,
-        startCommand: 'python bot.py',
+        startCommand: 'python btc_conservative_agent.py',
         healthcheckPath: '/health',
         healthcheckTimeout: 120,
         builder: 'NIXPACKS',
