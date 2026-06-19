@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Architecture B: strip research CPU and storage from showcase runtime.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
