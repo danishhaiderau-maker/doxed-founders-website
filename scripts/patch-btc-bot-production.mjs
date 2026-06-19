@@ -950,12 +950,53 @@ if (mirrorFix.includes('rotate_log(NEAR_MISS_FILE)') && !mirrorFix.includes('if 
   mirrorChanged = true;
 }
 
-if (mirrorFix.includes('with open(SOFT_REJECT_SHADOW_FILE, "a"') && !mirrorFix.includes('_showcase_execution_only():\n            return\n        with open(SOFT_REJECT_SHADOW_FILE')) {
+if (mirrorFix.includes('rotate_log(SOFT_REJECT_SHADOW_FILE)') && !mirrorFix.includes('if _showcase_execution_only():\n            return\n        rotate_log(SOFT_REJECT_SHADOW_FILE)')) {
   mirrorFix = mirrorFix.replace(
-    '        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:',
+    '        rotate_log(SOFT_REJECT_SHADOW_FILE)\n        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:',
     `        if _showcase_execution_only():
             return
+        rotate_log(SOFT_REJECT_SHADOW_FILE)
         with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('with open(SOFT_REJECT_SHADOW_FILE, "a"') && mirrorFix.includes('rotate_log(SOFT_REJECT_SHADOW_FILE)\n        if _showcase_execution_only()')) {
+  mirrorFix = mirrorFix.replace(
+    `        rotate_log(SOFT_REJECT_SHADOW_FILE)
+        if _showcase_execution_only():
+            return
+        if _showcase_execution_only():
+            return
+        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+    `        if _showcase_execution_only():
+            return
+        rotate_log(SOFT_REJECT_SHADOW_FILE)
+        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorFix = mirrorFix.replace(
+    `        rotate_log(SOFT_REJECT_SHADOW_FILE)
+        if _showcase_execution_only():
+            return
+        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+    `        if _showcase_execution_only():
+            return
+        rotate_log(SOFT_REJECT_SHADOW_FILE)
+        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('with open(LANE_PNL_LEDGER_FILE, "w"') && mirrorFix.includes('if _showcase_execution_only():\n                return\n            if _showcase_execution_only()')) {
+  mirrorFix = mirrorFix.replace(
+    `            if _showcase_execution_only():
+                return
+            if _showcase_execution_only():
+                return
+            with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:`,
+    `            if _showcase_execution_only():
+                return
+            with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:`,
   );
   mirrorChanged = true;
 }

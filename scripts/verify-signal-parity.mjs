@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 /**
- * Signal parity gate — ensures showcase signal engine matches synced research engine.
- *
- * Phase 1: file identity (bot.py === btc-signal-engine/engine.py, manifest hash)
- * Phase 2: frozen-candle signal comparison (TODO: requires signal_probe.py)
+ * Signal parity gate — Phase 1 file hash + Phase 2 combo/signal-flag probe.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bot = join(root, 'services/btc-conservative-agent/bot.py');
@@ -16,6 +14,8 @@ const engine = join(root, 'services/btc-signal-engine/engine.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_config.py');
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
+const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
+const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 
 function sha256(path) {
   const text = readFileSync(path, 'utf8');
@@ -58,5 +58,26 @@ const wrapper = join(root, 'services/btc-conservative-agent/btc_conservative_age
 if (!existsSync(wrapper)) fail('Missing btc_conservative_agent.py entry point');
 console.log('OK  btc_conservative_agent.py entry point present');
 
-console.log('\nNote: candle-level signal parity (direction/edge/spread/AI/lane) requires Phase 2 probe.');
-console.log('All file-level parity checks passed.\n');
+if (!existsSync(fixtures)) fail('Missing tests/fixtures/signal-parity-cases.json');
+if (!existsSync(probe)) fail('Missing services/btc-signal-engine/signal_probe.py');
+
+console.log('\n--- Phase 2: combo fixture probe ---\n');
+try {
+  execSync(`python "${probe}"`, { cwd: root, stdio: 'inherit', encoding: 'utf8' });
+} catch {
+  fail('signal_probe.py failed');
+}
+
+const fullProbe = process.argv.includes('--full');
+if (fullProbe) {
+  console.log('\n--- Phase 2b: signal-flag probe (imports bot.py) ---\n');
+  try {
+    execSync(`python "${probe}" --full`, { cwd: root, stdio: 'inherit', encoding: 'utf8', timeout: 120_000 });
+  } catch {
+    fail('signal_probe.py --full failed');
+  }
+} else {
+  console.log('Tip: npm run verify:signal-parity -- --full for bot import flag parity\n');
+}
+
+console.log('All parity checks passed.\n');
