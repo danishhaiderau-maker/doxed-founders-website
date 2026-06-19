@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
+Add Phase 2 signal parity probe and complete showcase write gates.
 
 ## Last Activity
 
