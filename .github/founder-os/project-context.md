@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Unblock Bitfinex relay: expose trades_map, pending order hero, readiness script.
+Add instant showcase-to-Bitfinex relay sync (policy v2).
 
 ## Last Activity
 
