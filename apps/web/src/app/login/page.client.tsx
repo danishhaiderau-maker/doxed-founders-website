@@ -279,7 +279,7 @@ function oauthErrorMessage(code: string): string {
     case 'twitter':
       return 'Could not start X sign-in.';
     case 'AccessDenied':
-      return 'Sign-in was denied.';
+      return 'Sign-in was denied. If the site was down recently, wait a minute and try again.';
     case 'Configuration':
       return 'Login is misconfigured on the server.';
     default:

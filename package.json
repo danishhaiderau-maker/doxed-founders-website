@@ -62,6 +62,8 @@
     "probe:phala-cvm": "node scripts/probe-phala-cvm-workload.mjs",
     "fix:railway": "powershell -ExecutionPolicy Bypass -File scripts/fix-railway-production.ps1",
     "redeploy:railway": "node scripts/railway-redeploy-all.mjs",
+    "recover:production": "node scripts/recover-production-api.mjs",
+    "railway:status": "node scripts/railway-api-status.mjs",
     "deploy:web": "vercel deploy --prod --yes",
     "cleanup:railway": "node scripts/cleanup-railway-duplicates.mjs",
     "setup:admin-security": "node scripts/setup-admin-security.mjs",
