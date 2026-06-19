@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Add Phase 2 signal parity probe and complete showcase write gates.
+Unblock Bitfinex relay: expose trades_map, pending order hero, readiness script.
 
 ## Last Activity
 
