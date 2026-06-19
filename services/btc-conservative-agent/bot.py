@@ -2504,6 +2504,8 @@ def log_ai_input_full(
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
+        if _showcase_execution_only():
+            return
         rotate_log(AI_INPUT_LOG_FILE)
         with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
@@ -2953,6 +2955,9 @@ def get_execution_status() -> str:
 
 def get_display_balance():
     with state_lock:
+        # RESEARCH balance showcase [PIPELINE ENFORCEMENT]
+        if state.get("strategy_mode") == "RESEARCH":
+            return round(float(state.get("account_balance", STARTING_BALANCE)), 4)
         if not state.get("live_armed", False):
             return STARTING_BALANCE
         return state.get("account_balance", STARTING_BALANCE)
@@ -5357,6 +5362,10 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "win_prob": (ai or {}).get("win_prob") or state.get("last_ai", {}).get("win_prob"),
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
+    if status == "PENDING" and trade_id:
+        _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+    elif status == "EXECUTED" and trade_id:
+        _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
     """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
@@ -6637,6 +6646,8 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
 
 
 def dynamic_csv_writer(filename, row):
+    if _showcase_execution_only():
+        return
     last_err = None
     with csv_lock:
         for attempt in range(CSV_WRITE_RETRIES):
@@ -8342,6 +8353,8 @@ def log_near_miss(signal, ai, miss_type, margin, edge_score):
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
+        if _showcase_execution_only():
+            return
         rotate_log(NEAR_MISS_FILE)
         with open(NEAR_MISS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -8672,6 +8685,8 @@ def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_ta
         "analyzer_sync_id": ANALYZER_SYNC_ID,
     }
     try:
+        if _showcase_execution_only():
+            return
         rotate_log(SOFT_REJECT_SHADOW_FILE)
         with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -9782,10 +9797,10 @@ def _recompute_research_balance_from_trades():
     )
 
 def load_session_trades_from_csv():
-    """Load closed trades from CSV for the current session into in-memory trades list."""
-    if not bot_start_time or not os.path.exists(CSV_TRADES):
+    """Load closed trades from CSV into in-memory trades list (full history unless fresh-collection)."""
+    if not os.path.exists(CSV_TRADES):
         return 0
-    session_start = bot_start_time
+    session_start = _showcase_trade_session_start()
     existing_ids = {t.get("trade_id") for t in trades if t.get("trade_id")}
     loaded = 0
     float_fields = (
@@ -9947,6 +9962,10 @@ def is_engine_halted():
     return state.get("execution_paused", False) and state.get("execution_reason") == "STALE_DATA_HARD_STOP"
 
 def should_run_pipeline() -> bool:
+    if state.get("manual_admin_pause") or (
+        state.get("execution_paused") and state.get("execution_reason") == "ADMIN_MANUAL"
+    ):
+        return False
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
@@ -12610,25 +12629,28 @@ def state_monitor_loop():
             global _last_feature_drift_ts
             if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
                 _last_feature_drift_ts = time.time()
-                try:
-                    from feature_drift_monitor import build_report as _build_feature_drift_report
-                    drift_report = _build_feature_drift_report()
-                    alerts = drift_report.get("alerts") or []
-                    if alerts:
-                        logger.warning(
-                            f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
-                            + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
-                            + " [PIPELINE ENFORCEMENT]"
-                        )
-                    else:
-                        logger.info(
-                            f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
-                            f"[PIPELINE ENFORCEMENT]"
-                        )
-                except Exception as e:
-                    logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
+                if not _showcase_execution_only():
+                    try:
+                        from feature_drift_monitor import build_report as _build_feature_drift_report
+                        drift_report = _build_feature_drift_report()
+                        alerts = drift_report.get("alerts") or []
+                        if alerts:
+                            logger.warning(
+                                f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                                + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                                + " [PIPELINE ENFORCEMENT]"
+                            )
+                        else:
+                            logger.info(
+                                f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                                f"[PIPELINE ENFORCEMENT]"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
             global _last_research_kpi_ts, _cached_research_kpis
-            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+            if _showcase_execution_only():
+                pass
+            elif is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
                 try:
                     from research_kpi_engine import refresh_all_research_kpis
                     _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
@@ -13447,6 +13469,11 @@ def close_position(pos: dict, exit_reason: str):
         logger.error("State corrupted after closing position")
         set_execution_paused("ENGINE_FAILURE")
     logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
+    _push_showcase_relay_event(
+        "POSITION_CLOSED",
+        trade_id,
+        {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
+    )
     candidate_signal["active"] = False
     clear_pending_trade()
     pipeline_state_sync()
@@ -15944,7 +15971,7 @@ def api_state():
                 }
                 for ln in PATHWAY_LAB_LANES
             }
-        session_start = bot_start_time or 0.0
+        session_start = _showcase_trade_session_start()
         if session_start:
             trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
@@ -16053,9 +16080,19 @@ def api_state():
             "max": get_effective_max_active_signals(),
             "signals": active_list,
         }
+        _enrich_orders_for_relay(snapshot)
+        snapshot["trades_map"] = _relay_trades_map_lite()
         snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
+        snapshot["equity"] = snapshot["account_balance"] + total_unreal
+        session_trades = _session_trades_only(trades_copy)
+        snapshot["trades"] = session_trades
+        snapshot["trade_count_session"] = len(session_trades)
+        snapshot["bot_start_time"] = bot_start_time
+        snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        snapshot["showcase_execution_only"] = _showcase_execution_only()
+        snapshot["runtime_mode"] = "EXECUTION_MIRROR" if _showcase_execution_only() else "RESEARCH"
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -16124,12 +16161,17 @@ def api_state():
 def health():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
+    status = "paused" if paused else "alive"
     return jsonify({
-        "status": "alive",
+        "status": status,
         "last_heartbeat": hb,
         "time_since_heartbeat": time.time() - hb,
-        "execution_paused": state.get("execution_paused", False),
-        "execution_reason": state.get("execution_reason", "")
+        "execution_paused": paused,
+        "execution_reason": reason,
+        "manual_admin_pause": manual,
     })
 
 @app.route('/debug_state')
@@ -16137,10 +16179,24 @@ def get_debug_state():
     with state_lock:
         return jsonify(state.get("debug_state", {}))
 
+@app.route('/api/pause', methods=['POST'])
+def api_pause():
+    with state_lock:
+        state["manual_admin_pause"] = True
+        state["live_armed"] = False
+        save_persistent_config()
+    set_execution_paused("ADMIN_MANUAL")
+    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "paused", "execution_paused": True, "execution_reason": "ADMIN_MANUAL"})
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    with state_lock:
+        state["manual_admin_pause"] = False
+        save_persistent_config()
     set_execution_paused("")
-    return jsonify({"status": "resumed"})
+    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
+    return jsonify({"status": "resumed", "execution_paused": False})
 
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
@@ -16266,6 +16322,12 @@ def toggle_debug():
         save_persistent_config()
         update_logger_level()
     return jsonify({"debug_enabled": state["debug_enabled"]})
+
+@app.route('/api/reset', methods=['POST'])
+def api_reset_showcase():
+    """Admin/platform: wipe all research artifacts and restart session at $500."""
+    result = perform_fresh_collection_reset()
+    return jsonify({"ok": True, "reset": result, "account_balance": STARTING_BALANCE})
 
 @app.route('/api/toggle_fresh_collection', methods=['POST'])
 def toggle_fresh_collection():
@@ -18366,6 +18428,8 @@ def rotate_log(file):
 
 def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    if _showcase_execution_only():
+        return True
     line = json.dumps(row, default=str) + "\n"
     last_err = None
     for attempt in range(CSV_WRITE_RETRIES):
@@ -18400,6 +18464,10 @@ def _ensure_flask_port_available(port: int = None):
     if os.name != "nt":
         return
     if not _port_is_open("127.0.0.1", port):
+        return
+    import sys
+    if sys.platform != "win32":
+        logger.warning(f"[PORT] {port} appears in use on Linux — continuing (Railway) [PIPELINE ENFORCEMENT]")
         return
     try:
         out = subprocess.check_output(
@@ -18474,7 +18542,7 @@ def system_health_check():
                 if not state.get("system_ready"):
                     logger.info(f"[SYSTEM READY] STABLE for {READY_STABLE_SEC}s -> system_ready=True")
                 state["system_ready"] = True
-                if state.get("execution_paused"):
+                if state.get("execution_paused") and not state.get("manual_admin_pause"):
                     set_execution_paused("")
         else:
             state["last_ready_ts"] = 0
@@ -18707,17 +18775,28 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
-    reset_runtime_state()
+    load_persistent_config()
+    reset_transient_runtime_state()
     update_logger_level()
     validate_startup()
-    load_persistent_config()
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
-    bot_start_time = time.time()
+    session_meta = _load_research_session_meta()
+    persisted_start = session_meta.get("bot_start_time")
+    if persisted_start:
+        bot_start_time = float(persisted_start)
+        logger.info(
+            f"[STARTUP] Restored showcase session from research_session.json start={bot_start_time} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    else:
+        bot_start_time = time.time()
+        logger.info(f"[STARTUP] New showcase session start={bot_start_time} [PIPELINE ENFORCEMENT]")
     with state_lock:
         state["ai_history"] = []
+        state["bot_start_time"] = bot_start_time
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
@@ -18737,9 +18816,12 @@ def main():
     last_pipeline_run = 0.0
     last_heartbeat = time.time()
     last_edge_compute = 0.0
-    logger.info(f"[STARTUP] bot_start_time locked at {bot_start_time} - old data blocked")
     _write_research_session(bot_start_time)
     load_session_trades_from_csv()
+    _recompute_research_balance_from_trades()
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
+    logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
     research_mode = state.get("strategy_mode") == "RESEARCH"
     keys_ok = _private_api_keys_ok()
     if not keys_ok:
@@ -18760,11 +18842,12 @@ def main():
                 if isinstance(balance, dict):
                     usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
                 state["account_balance"] = usdt
-            else:
+            elif not research_mode:
                 state["account_balance"] = STARTING_BALANCE
         except Exception as e:
             logger.error(f"Bitfinex API key test failed: {e}")
-            state["account_balance"] = STARTING_BALANCE
+            if not research_mode or state.get("live_armed"):
+                state["account_balance"] = STARTING_BALANCE
     if not _deepseek_api_key():
         logger.warning("AI disabled: DEEPSEEK_API_KEY missing (see Final Bots\\.env)")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
@@ -18912,8 +18995,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
