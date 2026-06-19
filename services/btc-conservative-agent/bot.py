@@ -18691,15 +18691,21 @@ def main():
             raise RuntimeError("BITFINEX_API_KEY or BITFINEX_API_SECRET invalid or missing")
     else:
         try:
-            balance = bitfinex_private.fetch_balance()
-            logger.info(f"Bitfinex API keys validated - Balance: {balance}")
-            if state.get("live_armed"):
-                usdt = STARTING_BALANCE
-                if isinstance(balance, dict):
-                    usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
-                state["account_balance"] = usdt
-            elif not research_mode:
-                state["account_balance"] = STARTING_BALANCE
+            if research_mode and not state.get("live_armed"):
+                logger.info(
+                    "[STARTUP] RESEARCH showcase — skip private balance fetch (avoids nonce clash with copy relay) "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+            else:
+                balance = bitfinex_private.fetch_balance()
+                logger.info(f"Bitfinex API keys validated - Balance: {balance}")
+                if state.get("live_armed"):
+                    usdt = STARTING_BALANCE
+                    if isinstance(balance, dict):
+                        usdt = balance.get("total", {}).get("USDt", balance.get("total", {}).get("USDT", STARTING_BALANCE))
+                    state["account_balance"] = usdt
+                elif not research_mode:
+                    state["account_balance"] = STARTING_BALANCE
         except Exception as e:
             logger.error(f"Bitfinex API key test failed: {e}")
             if not research_mode or state.get("live_armed"):
@@ -18707,28 +18713,34 @@ def main():
     if not _deepseek_api_key():
         logger.warning("AI disabled: DEEPSEEK_API_KEY missing (see Final Bots\\.env)")
     logger.info(f"[STARTUP] BALANCE SET TO {state['account_balance']}")
-    load_policy()
-    preload_candles()
-    for _ in range(3):
-        fetch_ohlcv()
-        time.sleep(1)
-    update_ema()
-    update_support_resistance()
-    trend_info()
-    update_market_context(force=True)
-    with state_lock:
-        if len(latest_candles) >= MIN_CANDLES:
-            logger.info("[BOOTSTRAP] Initial indicator computation completed after preload")
-    with state_lock:
-        closes = [c[4] for c in latest_candles]
-        if len(closes) >= EMA_LONG:
-            state["ema_status"] = {"ema9": ema(closes, EMA_FAST),"ema21": ema(closes, EMA_SLOW),"ema200": ema(closes, EMA_LONG),"prev_ema9": ema(closes, EMA_FAST),"prev_ema21": ema(closes, EMA_SLOW)}
-            state["ohlcv_ready"] = True
-    if LIVE_TRADING_ENABLED:
-        set_execution_paused("SIMULATION_ONLY")
-    load_positions()
-    rebuild_state_from_snapshots()
-    reconcile_stale_signals()
+    try:
+        load_policy()
+        preload_candles()
+        for _ in range(3):
+            fetch_ohlcv()
+            time.sleep(1)
+        update_ema()
+        update_support_resistance()
+        trend_info()
+        update_market_context(force=True)
+        with state_lock:
+            if len(latest_candles) >= MIN_CANDLES:
+                logger.info("[BOOTSTRAP] Initial indicator computation completed after preload")
+        with state_lock:
+            closes = [c[4] for c in latest_candles]
+            if len(closes) >= EMA_LONG:
+                state["ema_status"] = {"ema9": ema(closes, EMA_FAST),"ema21": ema(closes, EMA_SLOW),"ema200": ema(closes, EMA_LONG),"prev_ema9": ema(closes, EMA_FAST),"prev_ema21": ema(closes, EMA_SLOW)}
+                state["ohlcv_ready"] = True
+        if LIVE_TRADING_ENABLED:
+            set_execution_paused("SIMULATION_ONLY")
+        load_positions()
+        rebuild_state_from_snapshots()
+        reconcile_stale_signals()
+    except Exception as startup_err:
+        logger.critical(
+            f"[STARTUP] Degraded boot — continuing with partial preload: {startup_err} [PIPELINE ENFORCEMENT]"
+        )
+        dump_system_state()
     boot_exposure = get_active_signal_count()
     m_fee, t_fee = get_trading_fee_rates()
     refresh_funding_state(force=True)
