@@ -69,7 +69,7 @@ export function AgentRelaySimPanel({
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaAlert =
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
-  const showcasePnl = sim?.showcasePnlUsd ?? showcaseAgent.sessionPnlUsd ?? 0;
+  const showcasePnl = showcaseAgent.sessionPnlUsd ?? sim?.showcasePnlUsd ?? 0;
   const simPnl = sim?.sessionPnlUsd ?? 0;
   const pnlGap = simPnl - showcasePnl;
   const paperBalance = sim?.ledger?.derivativesUsd ?? 500;

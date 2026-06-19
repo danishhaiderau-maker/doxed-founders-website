@@ -10,6 +10,7 @@ import { SignalCyclesController } from './signal-cycles.controller';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { ShowcaseSessionSyncService } from './showcase-session-sync.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
@@ -28,6 +29,7 @@ import { TradingAgentsService } from './trading-agents.service';
     TradeCycleAuditService,
     SignalApiKeyGuard,
     AgentRegistryService,
+    ShowcaseSessionSyncService,
   ],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],
 })

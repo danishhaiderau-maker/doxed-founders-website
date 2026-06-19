@@ -27,6 +27,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { ShowcaseSessionSyncService } from './showcase-session-sync.service';
 import {
   mapBotStateToPublicDashboard,
   sanitizeActivityForPublic,
@@ -266,6 +267,7 @@ export class TradingAgentsService implements OnModuleInit {
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
     private readonly relaySim: CopyRelaySimService,
+    private readonly showcaseSessionSync: ShowcaseSessionSyncService,
   ) {}
 
   async onModuleInit() {
@@ -284,6 +286,12 @@ export class TradingAgentsService implements OnModuleInit {
       },
     });
     await this.syncShowcaseMetricsFromBot().catch(() => undefined);
+    if (this.botBridge.isEnabled()) {
+      const bot = await this.botBridge.fetchState(true);
+      if (bot) {
+        await this.showcaseSessionSync.syncFromBotState(bot).catch(() => undefined);
+      }
+    }
   }
 
   /** Mirror live bot session stats into Neon so public profile never shows stale seed data. */
