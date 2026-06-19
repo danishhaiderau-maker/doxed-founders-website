@@ -8,6 +8,7 @@ import {
   EXCHANGE_API_GUIDES,
   EXCHANGE_PROVIDER_LABELS,
   EXCHANGE_PROVIDERS,
+  type CopyRelaySimState,
   type ExchangeProvider,
 } from '@dcf/utils';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
@@ -47,6 +48,10 @@ export function ExchangeHirePanel({
   onStopRelay,
   onStartRelay,
   relayBusy,
+  copyRelaySim,
+  onStartRelaySim,
+  onStopRelaySim,
+  relaySimBusy,
 }: {
   slug: string;
   signedIn: boolean;
@@ -62,6 +67,10 @@ export function ExchangeHirePanel({
   onStopRelay?: () => void;
   onStartRelay?: () => void;
   relayBusy?: boolean;
+  copyRelaySim?: CopyRelaySimState | null;
+  onStartRelaySim?: () => void;
+  onStopRelaySim?: () => void;
+  relaySimBusy?: boolean;
 }) {
   const [exchange, setExchange] = useState<ExchangeProvider>(
     (exchangeProvider as ExchangeProvider) || 'bitfinex',
@@ -93,48 +102,97 @@ export function ExchangeHirePanel({
     ? `/agent-hub/${slug}/hire?exchange=${exchange}`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=${exchange}`)}`;
 
-  const relayState =
-    hired && instanceMode === 'live'
-      ? instanceStatus === 'PAUSED'
-        ? ('paused' as const)
-        : ('active' as const)
-      : hired && instanceMode === 'copy'
-        ? ('copy' as const)
-        : ('idle' as const);
+  const simActive = Boolean(copyRelaySim?.active);
+  const isLiveHired = hired && instanceMode === 'live';
 
-  const steps = [
-    { n: 1, label: 'Choose exchange', detail: `${selectedLabel}${exchange === 'bitfinex' ? ' (Recommended)' : ''}` },
-    { n: 2, label: 'Connect exchange API', detail: 'Read + trade only — no withdraw' },
-    { n: 3, label: 'Admin DeepSeek copy', detail: 'No AI key needed' },
-    { n: 4, label: 'Risk acknowledgement', detail: `100x leverage · max $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin/trade` },
-    { n: 5, label: 'Activate agent', detail: `${costWeek.toLocaleString()} DDollar / week · Bitfinex auto-copy` },
+  const relayState =
+    isLiveHired
+      ? simActive
+        ? ('paused' as const)
+        : instanceStatus === 'PAUSED'
+          ? ('paused' as const)
+          : ('active' as const)
+      : ('idle' as const);
+
+  const copyModes = [
+    {
+      id: 'live',
+      title: 'Live relay',
+      detail: 'Real orders on your exchange when showcase signals fire.',
+      active: isLiveHired && !simActive && instanceStatus !== 'PAUSED',
+    },
+    {
+      id: 'sim',
+      title: 'Relay simulation',
+      detail: 'Paper book, real BTC prices — test reconcile before live.',
+      active: simActive,
+    },
+    {
+      id: 'observe',
+      title: 'Showcase observe',
+      detail: 'Admin research bot only — not your copy session.',
+      active: !isLiveHired,
+    },
   ];
 
   return (
     <>
       <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/15 p-5">
-        <p className="text-xs font-bold uppercase text-emerald-400">Showcase tested on Bitfinex</p>
+        <p className="text-xs font-bold uppercase text-emerald-400">Connect {selectedLabel} API</p>
         <p className="mt-2 text-xs text-emerald-100/75">{BITFINEX_RECOMMEND_BANNER}</p>
         <p className="mt-2 text-[11px] text-zinc-400">
-          Live hire uses Bitfinex at 100x leverage (same as showcase bot). Platform enforces $
-          {DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} max margin per trade — exchange balance cannot override this cap.
+          Authentic copy trading uses your exchange — not a dummy DDollar session. Platform enforces $
+          {DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} max margin per virtual lot at 100x leverage.
         </p>
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
-        {relayState === 'active' || relayState === 'paused' ? (
+        {isLiveHired ? (
           <>
-            <p className="font-semibold text-white">Live copy on {selectedLabel}</p>
+            <p className="font-semibold text-white">Your {selectedLabel} copy relay</p>
             {rentalExpiresAt && (
               <div className="mt-3">
                 <AgentRentalCountdown expiresAt={rentalExpiresAt} compact />
               </div>
             )}
             <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
-              Derivatives balance (tradeable):{' '}
+              Derivatives balance:{' '}
               <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
-              {' '}· platform caps each trade at ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin.
             </p>
+            <div className="mt-3 space-y-2">
+              {copyModes.slice(0, 2).map((m) => (
+                <div
+                  key={m.id}
+                  className={`rounded-lg border px-3 py-2 text-xs ${
+                    m.active
+                      ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
+                      : 'border-zinc-800 text-zinc-500'
+                  }`}
+                >
+                  <span className="font-semibold text-zinc-200">{m.title}</span>
+                  <span className="mt-0.5 block">{m.detail}</span>
+                </div>
+              ))}
+            </div>
+            {exchange === 'bitfinex' && simActive && onStopRelaySim ? (
+              <button
+                type="button"
+                disabled={relaySimBusy}
+                onClick={onStopRelaySim}
+                className="mt-3 w-full rounded-lg border border-red-500/50 bg-red-950/40 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
+              >
+                {relaySimBusy ? '…' : 'Stop relay simulation'}
+              </button>
+            ) : exchange === 'bitfinex' && onStartRelaySim ? (
+              <button
+                type="button"
+                disabled={relaySimBusy || simActive}
+                onClick={onStartRelaySim}
+                className="mt-3 w-full rounded-lg border border-sky-500/50 bg-sky-950/40 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50"
+              >
+                {relaySimBusy ? '…' : 'Start relay simulation'}
+              </button>
+            ) : null}
             {exchange === 'bitfinex' && (
               <div className="mt-3">
                 <BitfinexDerivativesFundingGuide compact />
@@ -143,91 +201,46 @@ export function ExchangeHirePanel({
           </>
         ) : (
           <>
-            <p className="font-semibold text-white">Hire this agent</p>
+            <p className="font-semibold text-white">Start real copy trading</p>
+            <p className="mt-2 text-xs text-zinc-500">
+              Connect API keys once — choose live relay or simulation from the main hub.
+            </p>
             <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
               Hiring fee:{' '}
-              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week of live copy
-              trading
+              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> / week
             </p>
+            <Link
+              href={hireHref}
+              className="mt-4 block rounded-lg bg-emerald-600 py-2.5 text-center text-sm font-bold text-white hover:bg-emerald-500"
+            >
+              Connect {selectedLabel} API
+            </Link>
           </>
         )}
 
         <div className="mt-4 rounded-xl border border-zinc-800 bg-black/25 p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Exchange & relay control</p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Relay control</p>
           <div className="mt-3">
             <ExchangeRelayControl
               slug={slug}
               signedIn={signedIn}
               exchange={exchange}
               exchangeLabel={selectedLabel}
-              exchangeConnected={exchangeConnected ?? (hired && instanceMode === 'live')}
+              exchangeConnected={exchangeConnected ?? isLiveHired}
               relayState={relayState}
               busy={relayBusy}
               onStop={onStopRelay}
               onStart={onStartRelay}
-              showSelector={!hired || instanceMode !== 'live'}
+              showSelector={!isLiveHired}
               providers={sorted}
               onExchangeChange={(id) => setExchange(id as ExchangeProvider)}
             />
           </div>
         </div>
 
-        {relayState === 'idle' && exchange === 'bitfinex' && (
+        {!isLiveHired && exchange === 'bitfinex' && (
           <div className="mt-4">
             <BitfinexDerivativesFundingGuide />
-          </div>
-        )}
-
-        {relayState === 'idle' && (
-          <>
-            <ol className="mt-4 space-y-3">
-              {steps.map((s) => (
-                <li key={s.n} className="flex gap-3 text-xs">
-                  <span
-                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                      s.n === 1 ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-500'
-                    }`}
-                  >
-                    {s.n}
-                  </span>
-                  <div>
-                    <p className={s.n === 1 ? 'font-semibold text-zinc-200' : 'text-zinc-500'}>{s.label}</p>
-                    {s.detail && <p className="text-zinc-500">{s.detail}</p>}
-                  </div>
-                </li>
-              ))}
-            </ol>
-
-            <Link
-              href={hireHref}
-              className="mt-4 block rounded-lg bg-violet-600 py-2.5 text-center text-sm font-semibold hover:bg-violet-500"
-            >
-              Start setup on {selectedLabel}
-            </Link>
-          </>
-        )}
-
-        {relayState === 'copy' && signedIn && (onStopRelay || onStartRelay) && (
-          <div className="mt-4 flex gap-2">
-            {instanceStatus === 'PAUSED' ? (
-              <button
-                type="button"
-                disabled={relayBusy}
-                onClick={onStartRelay}
-                className="flex-1 rounded-lg border border-emerald-500/50 bg-emerald-600 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {relayBusy ? '…' : 'Resume paper copy'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                disabled={relayBusy}
-                onClick={onStopRelay}
-                className="flex-1 rounded-lg border border-amber-500/50 bg-amber-900/40 py-2 text-sm font-semibold text-amber-100 hover:bg-amber-900/60 disabled:opacity-50"
-              >
-                {relayBusy ? '…' : 'Pause paper copy'}
-              </button>
-            )}
           </div>
         )}
       </div>

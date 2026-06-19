@@ -5,6 +5,7 @@ import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
+import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsService } from './trading-agents.service';
 
@@ -13,6 +14,7 @@ export class TradingAgentsController {
   constructor(
     private readonly tradingAgents: TradingAgentsService,
     private readonly instances: TradingAgentInstancesService,
+    private readonly relaySim: CopyRelaySimService,
   ) {}
 
   @Public()
@@ -90,6 +92,21 @@ export class TradingAgentsController {
   @Post(':slug/instance/resume')
   resumeInstance(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.setInstancePaused(user.id, slug, false);
+  }
+
+  @Post(':slug/relay-sim/start')
+  startRelaySim(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.relaySim.startRelaySim(user.id, slug);
+  }
+
+  @Post(':slug/relay-sim/stop')
+  stopRelaySim(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.relaySim.stopRelaySim(user.id, slug);
+  }
+
+  @Get(':slug/relay-sim/status')
+  relaySimStatus(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.relaySim.getRelaySimStatus(user.id, slug);
   }
 
   @Post(':id/hire')

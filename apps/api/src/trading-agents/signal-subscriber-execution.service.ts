@@ -10,6 +10,9 @@ import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   BITFINEX_COPY_POLICY_VERSION,
   resolveMaxConcurrentCopySignals,
+  isCopyRelaySimActive,
+  readCopyRelaySimState,
+  COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
   computeLimitFromMark,
@@ -30,6 +33,8 @@ import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import { SignalCyclesService } from './signal-cycles.service';
 import { BotBridgeService } from './bot-bridge.service';
+import { CopyRelaySimService } from './copy-relay-sim.service';
+import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
 const AGENT_SLUG = 'conservative-btc';
@@ -79,10 +84,13 @@ type VirtualLotSummary = {
   openQty: number;
 };
 
+type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
+
 @Injectable()
 export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
   private readonly bitfinex = new BitfinexTradingClient();
+  private activeTrading: ExecutionTradingClient;
   private readonly positionRuntime = new Map<string, PositionRuntime>();
   private readonly exitingLots = new Set<string>();
   private running = false;
@@ -92,7 +100,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     private readonly exchanges: ExchangesService,
     private readonly cycles: SignalCyclesService,
     private readonly botBridge: BotBridgeService,
-  ) {}
+    private readonly relaySim: CopyRelaySimService,
+  ) {
+    this.activeTrading = this.bitfinex;
+  }
 
   onModuleInit() {
     if (!executionEnabled()) {
@@ -128,8 +139,40 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       for (const instance of instances) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
+        const simActive = isCopyRelaySimActive(instance.dashboardState);
+
+        if (simActive) {
+          if (instance.status === TradingAgentInstanceStatus.ACTIVE) {
+            await this.prisma.tradingAgentInstance.update({
+              where: { id: instance.id },
+              data: {
+                status: TradingAgentInstanceStatus.PAUSED,
+                lastError: 'Relay simulation active — live orders blocked.',
+              },
+            });
+          }
+          try {
+            this.activeTrading = this.relaySim.getSimClient(
+              instance.userId,
+              readCopyRelaySimState(instance.dashboardState).ledger,
+            );
+            await (this.activeTrading as BitfinexSimTradingClient).processFillsOnMark();
+            await this.processInstance(agent.id, instance, true);
+            await this.persistSimTickState(agent.id, instance);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.logger.error(`Sim relay ${instance.userId}: ${msg}`);
+            await this.prisma.tradingAgentInstance.update({
+              where: { id: instance.id },
+              data: { lastError: msg.slice(0, 500) },
+            });
+          }
+          continue;
+        }
+
         try {
-          await this.processInstance(agent.id, instance);
+          this.activeTrading = this.bitfinex;
+          await this.processInstance(agent.id, instance, false);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.error(`Instance ${instance.userId}: ${msg}`);
@@ -144,8 +187,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
-  private async processInstance(agentId: string, instance: TradingAgentInstance) {
-    const exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED;
+  private async processInstance(
+    agentId: string,
+    instance: TradingAgentInstance,
+    simActive = false,
+  ) {
+    const exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED && !simActive;
+    const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
+    const simState = simActive ? readCopyRelaySimState(instance.dashboardState) : null;
+    const participantSince =
+      simState?.startedAt != null ? { createdAt: { gte: new Date(simState.startedAt) } } : {};
     const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
     if (!creds) {
       await this.prisma.tradingAgentInstance.update({
@@ -160,12 +211,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     let activeOrderIdSet = new Set<number>();
     if (instance.exchangeProvider === 'bitfinex') {
       try {
-        const funding = await this.bitfinex.ensureDerivativesMargin(creds, marginCap);
+        const funding = await this.activeTrading.ensureDerivativesMargin(creds, marginCap);
         if (funding.message && funding.transferredUsd > 0) {
           this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
         }
         await this.cancelAbsurdPendingOrders(creds, instance.userId);
-        const activeOrders = await this.bitfinex.listActiveOrders(creds);
+        const activeOrders = await this.activeTrading.listActiveOrders(creds);
         activeOrderIdSet = new Set(activeOrders.map((o) => o.id));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -173,7 +224,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
-    await this.reconcileFilledParticipants(instance.userId, agentId);
+    await this.reconcileFilledParticipants(instance.userId, agentId, participantSince);
 
     const MIN_INTENT_TTL_MS = 90_000;
 
@@ -228,6 +279,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       instance.userId,
       creds,
       activeOrderIdSet,
+      participantSince,
     );
 
     let managedOpenTrade = false;
@@ -295,6 +347,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         userId: instance.userId,
         status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
         cycle: { agentId },
+        ...participantSince,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -306,7 +359,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
     }
 
-    await this.reconcileLotLedger(instance.userId, openParticipantAfter, creds);
+    await this.reconcileLotLedger(
+      agentId,
+      instance,
+      openParticipantAfter,
+      creds,
+      managedOrderIds,
+      simActive,
+    );
 
     const lotSummary = await this.buildVirtualLotSummary(openParticipantAfter);
 
@@ -392,6 +452,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         creds,
         marginCap,
         cycle.tradeId,
+        venue,
       );
       if (!placed) break;
       entriesThisTick += 1;
@@ -464,23 +525,142 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async reconcileLotLedger(
-    userId: string,
+    agentId: string,
+    instance: TradingAgentInstance,
     participants: Array<{ id: string; status: SignalCycleStatus }>,
     creds: ExchangeCredentials,
+    managedOrderIds: Set<number>,
+    simActive: boolean,
   ) {
+    const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
     const summary = await this.buildVirtualLotSummary(participants);
-    if (summary.open === 0 || summary.openQty <= 0) return;
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const exchangeQty = position ? Math.abs(position.amount) : 0;
+    const ledgerOpenQty = summary.openQty;
+    const delta = exchangeQty - ledgerOpenQty;
+    const mark = await this.activeTrading.getMarkPrice().catch(() => null);
 
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
-    if (!position) return;
+    const reconcile = this.relaySim.buildReconcileSnapshot({
+      exchangePositionQty: exchangeQty,
+      ledgerOpenQty,
+      openLots: summary.open,
+      pendingLots: summary.pending,
+      markPrice: mark,
+    });
 
-    const exchangeQty = Math.abs(position.amount);
-    const drift = Math.abs(exchangeQty - summary.openQty);
-    if (drift > MIN_QTY_BTC * 3) {
-      this.logger.warn(
-        `Virtual lot drift ${userId}: Bitfinex ${exchangeQty.toFixed(5)} BTC vs ledger ${summary.openQty.toFixed(5)} BTC (${summary.open} open lots)`,
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        dashboardState: {
+          ...dash,
+          copyRelayReconcile: reconcile,
+          ...(simActive
+            ? {
+                copyRelaySim: {
+                  ...readCopyRelaySimState(dash),
+                  reconcile,
+                },
+              }
+            : {}),
+        },
+      },
+    });
+
+    if (Math.abs(delta) <= MIN_QTY_BTC) return;
+
+    this.logger.warn(
+      `Virtual lot drift ${instance.userId}: exchange ${exchangeQty.toFixed(5)} BTC vs ledger ${ledgerOpenQty.toFixed(5)} BTC (Δ ${delta.toFixed(5)}, ${summary.open} open)`,
+    );
+
+    if (delta > MIN_QTY_BTC) {
+      await this.reconcileUnattributedExchangeFills(
+        agentId,
+        instance.userId,
+        creds,
+        managedOrderIds,
       );
     }
+
+    if (delta < -MIN_QTY_BTC) {
+      await this.closeOrphanLedgerLots(
+        agentId,
+        instance.userId,
+        Math.abs(delta),
+        participants,
+        creds,
+        venue,
+      );
+    }
+
+    if (reconcile.alert) {
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError: `RECONCILE ALERT: exchange ${exchangeQty.toFixed(4)} BTC ≠ ledger ${ledgerOpenQty.toFixed(4)} BTC (Δ ${delta.toFixed(4)})`,
+        },
+      });
+    }
+  }
+
+  private async closeOrphanLedgerLots(
+    agentId: string,
+    userId: string,
+    excessBtc: number,
+    participants: Array<{ id: string; status: SignalCycleStatus }>,
+    creds: ExchangeCredentials,
+    venue = 'bitfinex',
+  ) {
+    let remaining = excessBtc;
+    const openRows = participants.filter((p) => p.status === SignalCycleStatus.OPEN);
+    for (const row of openRows) {
+      if (remaining < MIN_QTY_BTC) break;
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.qty || !meta.direction) continue;
+      const participant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: row.id },
+        include: { cycle: true },
+      });
+      if (!participant) continue;
+
+      const mark = await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
+      const fillPrice =
+        participant.fillPrice != null
+          ? Number(participant.fillPrice)
+          : meta.limitPrice ?? mark;
+      const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
+        venue,
+        exit_price: mark,
+        exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
+        pnl_usd: 0,
+        pnl_margin_pct: 0,
+        qty_closed: meta.qty,
+        source: 'hire',
+        event: 'ORPHAN_LEDGER_RECONCILE',
+      });
+
+      this.logger.warn(
+        `Orphan ledger lot closed ${userId} participant=${row.id} qty=${meta.qty} (ledger > exchange)`,
+      );
+      remaining -= meta.qty;
+    }
+  }
+
+  private async persistSimTickState(agentId: string, instance: TradingAgentInstance) {
+    const sim = readCopyRelaySimState(instance.dashboardState);
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const reconcile =
+      (dash.copyRelayReconcile as ReturnType<CopyRelaySimService['buildReconcileSnapshot']>) ??
+      sim.reconcile;
+    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
+    const botStats = bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
+    if (botStats) {
+      sim.showcasePnlUsd = Number(botStats.total_pnl_usd ?? botStats.session_pnl_usd ?? 0);
+      sim.showcaseTradeCount = Number(botStats.trade_count ?? botStats.total_trades ?? 0);
+    }
+    await this.relaySim.persistSimState(instance.id, instance.userId, sim, reconcile);
   }
 
   private async resolveMaxConcurrentSignals(): Promise<number> {
@@ -509,7 +689,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<EntryEligibility> {
     let available = 0;
     try {
-      available = await this.bitfinex.getDerivativesAvailableUsd(creds);
+      available = await this.activeTrading.getDerivativesAvailableUsd(creds);
     } catch (err) {
       this.logger.warn(
         `Could not read Bitfinex Derivatives balance: ${err instanceof Error ? err.message : err}`,
@@ -522,7 +702,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
 
-    const pendingOrders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    const pendingOrders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     const foreignPending = pendingOrders.filter((o) => !managedOrderIds.has(o.id));
     if (foreignPending.length > 0) {
       return {
@@ -603,6 +783,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     marginCap: number,
     tradeId?: string,
+    venue = 'bitfinex',
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
     if (!intent?.direction || intent.action !== 'ENTER') return false;
@@ -615,7 +796,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     let available = 0;
     try {
-      available = await this.bitfinex.getDerivativesAvailableUsd(creds);
+      available = await this.activeTrading.getDerivativesAvailableUsd(creds);
     } catch (err) {
       this.logger.warn(
         `Hire skip ${instance.userId} cycle=${cycleId}: Derivatives balance check failed — ${err instanceof Error ? err.message : err}`,
@@ -638,7 +819,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     try {
-    const mark = await this.bitfinex.getMarkPrice();
+    const mark = await this.activeTrading.getMarkPrice();
       const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
       let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
       if (limitPrice == null) {
@@ -666,7 +847,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
-    const orderId = await this.bitfinex.submitLimitOrder(creds, {
+    const orderId = await this.activeTrading.submitLimitOrder(creds, {
       direction: intent.direction,
       qty,
       price: limitPrice,
@@ -686,7 +867,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     };
 
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
-      venue: 'bitfinex',
+      venue,
       local_mark_at_signal: mark,
       limit_price: limitPrice,
         original_limit_price: limitPrice,
@@ -765,7 +946,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
       try {
-        await this.bitfinex.cancelOrder(creds, orderId);
+        await this.activeTrading.cancelOrder(creds, orderId);
       } catch {
         /* may already be gone */
       }
@@ -780,7 +961,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const active =
       activeOrderIdSet.size > 0
         ? activeOrderIdSet.has(orderId)
-        : !!(await this.bitfinex.findOrder(creds, orderId).catch(() => null));
+        : !!(await this.activeTrading.findOrder(creds, orderId).catch(() => null));
     if (active) {
       await this.applyLimitChase(
         agentId,
@@ -796,7 +977,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const position = await this.bitfinex.getOpenPositionDetail(creds).catch(() => null);
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     const expectedLong = meta.direction === 'LONG';
     const hasPosition =
       position &&
@@ -815,7 +996,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const fillPrice =
       meta.limitPrice && meta.limitPrice > 0
         ? meta.limitPrice
-        : await this.bitfinex.getMarkPrice();
+        : await this.activeTrading.getMarkPrice();
     const qty = meta.qty ?? MIN_QTY_BTC;
     const filledEvents = await this.prisma.signalCycleEvent.count({
       where: { participantId: participant.id, eventType: 'FILLED' },
@@ -843,7 +1024,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
-    const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+    const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
       positionDirection: meta.direction,
       qty,
       stopPrice,
@@ -893,8 +1074,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     userId: string,
     creds: ExchangeCredentials,
     activeOrderIdSet: Set<number>,
+    participantScope: { createdAt?: { gte: Date } } = {},
   ) {
-    const position = await this.bitfinex.getOpenPositionDetail(creds).catch(() => null);
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
 
     const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
@@ -905,6 +1087,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         userId,
         status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
         cycle: { agentId },
+        ...participantScope,
       },
       include: { cycle: true },
       orderBy: { createdAt: 'asc' },
@@ -944,7 +1127,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             ? meta.limitPrice
             : position.basePrice > 0
               ? position.basePrice
-              : await this.bitfinex.getMarkPrice();
+              : await this.activeTrading.getMarkPrice();
         await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
         gap -= meta.qty ?? MIN_QTY_BTC;
         continue;
@@ -956,13 +1139,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ? meta.limitPrice
           : position.basePrice > 0
             ? position.basePrice
-            : await this.bitfinex.getMarkPrice();
+            : await this.activeTrading.getMarkPrice();
       const qty = meta.qty ?? MIN_QTY_BTC;
       const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
-      const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+      const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
         positionDirection: meta.direction,
         qty,
         stopPrice,
@@ -989,13 +1172,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
-  private async reconcileFilledParticipants(userId: string, agentId: string) {
+  private async reconcileFilledParticipants(
+    userId: string,
+    agentId: string,
+    participantScope: { createdAt?: { gte: Date } } = {},
+  ) {
     const stuck = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
         status: SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId },
         events: { some: { eventType: 'FILLED' } },
+        ...participantScope,
       },
       include: {
         events: {
@@ -1055,11 +1243,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
 
     if (meta.stopOrderId) {
-      const existing = await this.bitfinex.findOrder(creds, meta.stopOrderId).catch(() => null);
+      const existing = await this.activeTrading.findOrder(creds, meta.stopOrderId).catch(() => null);
       if (existing) return;
     }
 
-    const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+    const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
       positionDirection: meta.direction,
       qty,
       stopPrice,
@@ -1093,7 +1281,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const lastChaseAtMs = meta.lastChaseAtMs ?? 0;
     const now = Date.now();
-    const mark = await this.bitfinex.getMarkPrice();
+    const mark = await this.activeTrading.getMarkPrice();
     const nearFill = isNearChaseFillZone(meta.direction, meta.limitPrice, mark);
     const chaseInterval = nearFill ? CHASE_NEAR_FILL_INTERVAL_MS : CHASE_INTERVAL_MS;
     if (!immediate && now - lastChaseAtMs < chaseInterval) return;
@@ -1157,8 +1345,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
 
     try {
-      await this.bitfinex.cancelOrder(creds, meta.bitfinexOrderId);
-      const newOrderId = await this.bitfinex.submitLimitOrder(creds, {
+      await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
+      const newOrderId = await this.activeTrading.submitLimitOrder(creds, {
         direction: meta.direction,
         qty,
         price: opts.newLimit,
@@ -1192,14 +1380,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   /** Cancel resting limits whose price is far from market (e.g. $904 on $64k BTC). */
   private async cancelAbsurdPendingOrders(creds: ExchangeCredentials, userId: string) {
-    const mark = await this.bitfinex.getMarkPrice().catch(() => null);
+    const mark = await this.activeTrading.getMarkPrice().catch(() => null);
     if (!mark) return;
-    const orders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     for (const order of orders) {
       const deviationPct = Math.abs((order.price - mark) / mark) * 100;
       if (deviationPct > 8) {
         try {
-          await this.bitfinex.cancelOrder(creds, order.id);
+          await this.activeTrading.cancelOrder(creds, order.id);
           this.logger.warn(
             `Cancelled absurd order ${order.id} for ${userId}: price ${order.price} vs mark ${mark.toFixed(2)}`,
           );
@@ -1225,7 +1413,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (await this.hasParticipantExited(participant.id)) return;
 
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const position = await this.activeTrading.getOpenPositionDetail(creds);
     const expectedLong = meta.direction === 'LONG';
     const hasExpected =
       position &&
@@ -1242,7 +1430,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
-    const mark = await this.bitfinex.getMarkPrice();
+    const mark = await this.activeTrading.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
 
     const runtime = this.hydrateRuntime(participant.id, meta);
@@ -1287,7 +1475,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (!meta.stopOrderId && fillPrice > 0) {
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
-      const stopOrderId = await this.bitfinex.submitStopOrder(creds, {
+      const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
         positionDirection: meta.direction,
       qty: meta.qty,
         stopPrice,
@@ -1311,8 +1499,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const priorFloor = runtime.lastProfitLockFloor ?? 0;
       if (lockFloorTrail > priorFloor + 0.5) {
         try {
-          await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
-          const newStopId = await this.bitfinex.submitStopOrder(creds, {
+          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
+          const newStopId = await this.activeTrading.submitStopOrder(creds, {
             positionDirection: meta.direction,
             qty: meta.qty,
             stopPrice: trailStop,
@@ -1367,18 +1555,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     this.exitingLots.add(participantId);
     try {
-    const closeQty = Math.min(meta.qty, Math.abs((await this.bitfinex.getOpenPositionDetail(creds))?.amount ?? meta.qty));
+    const closeQty = Math.min(meta.qty, Math.abs((await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? meta.qty));
 
     try {
       if (meta.stopOrderId) {
         try {
-          await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
+          await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
         } catch {
           /* may have fired */
         }
       }
       if (closeQty >= MIN_QTY_BTC) {
-        await this.bitfinex.submitMarketClose(creds, {
+        await this.activeTrading.submitMarketClose(creds, {
           positionDirection: meta.direction,
           qty: closeQty,
           leverage: opts.leverage,
@@ -1446,7 +1634,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return false;
     }
 
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const position = await this.activeTrading.getOpenPositionDetail(creds);
     const expectedLong = meta.direction === 'LONG';
     const hasExpected =
       position &&
@@ -1464,7 +1652,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (meta.stopOrderId) {
       try {
-        await this.bitfinex.cancelOrder(creds, meta.stopOrderId);
+        await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
       } catch {
         /* stop may have filled */
       }
@@ -1473,8 +1661,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const fillPrice =
       participant.fillPrice != null
         ? Number(participant.fillPrice)
-        : meta.limitPrice ?? (await this.bitfinex.getMarkPrice());
-    const exitPrice = await this.bitfinex.getMarkPrice().catch(() => fillPrice ?? 0);
+        : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
+    const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice ?? 0);
     const direction = meta.direction;
     const pnlUsd =
       fillPrice && exitPrice
@@ -1532,8 +1720,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const position = await this.bitfinex.getOpenPosition(creds);
-    if (!position) {
+    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
       this.logger.log(`Exit skip ${userId} cycle=${cycle.id}: already flat on exchange`);
       return;
     }
@@ -1545,13 +1733,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const leverage =
       (cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
     try {
-      exitPrice = await this.bitfinex.getMarkPrice();
-      const position = await this.bitfinex.getOpenPositionDetail(creds);
+      exitPrice = await this.activeTrading.getMarkPrice();
+      const position = await this.activeTrading.getOpenPositionDetail(creds);
       const closeQty = position
         ? Math.min(meta.qty, Math.abs(position.amount))
         : meta.qty;
       if (closeQty >= MIN_QTY_BTC) {
-      await this.bitfinex.submitMarketClose(creds, {
+      await this.activeTrading.submitMarketClose(creds, {
         positionDirection: meta.direction,
           qty: closeQty,
           leverage,
@@ -1595,11 +1783,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     managedOrderIds: Set<number>,
   ) {
-    const orders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+    const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     for (const order of orders) {
       if (managedOrderIds.has(order.id)) continue;
       try {
-        await this.bitfinex.cancelOrder(creds, order.id);
+        await this.activeTrading.cancelOrder(creds, order.id);
         this.logger.warn(
           `Cancelled orphan copy order ${order.id} (${order.orderType}) for ${userId}`,
         );
@@ -1623,7 +1811,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!meta.qty || !meta.direction) return false;
     if (await this.hasParticipantExited(participant.id)) return false;
 
-    const position = await this.bitfinex.getOpenPositionDetail(creds);
+    const position = await this.activeTrading.getOpenPositionDetail(creds);
     if (!position) return false;
 
     const expectedLong = meta.direction === 'LONG';
@@ -1649,14 +1837,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (deficit < meta.qty * 0.85 || deficit > meta.qty * 1.15) return false;
 
     if (!meta.stopOrderId) return false;
-    const stop = await this.bitfinex.findOrder(creds, meta.stopOrderId).catch(() => null);
+    const stop = await this.activeTrading.findOrder(creds, meta.stopOrderId).catch(() => null);
     if (stop) return false;
 
     const fillPrice =
       participant.fillPrice != null
         ? Number(participant.fillPrice)
         : meta.limitPrice ?? position.basePrice;
-    const exitPrice = await this.bitfinex.getMarkPrice().catch(() => fillPrice);
+    const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
     const direction = meta.direction;
     const closeQty = Math.min(meta.qty, deficit);
     const pnlUsd =

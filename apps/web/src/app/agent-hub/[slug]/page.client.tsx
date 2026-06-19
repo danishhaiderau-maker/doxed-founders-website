@@ -6,6 +6,8 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   buildTradingAgentFollowShareText,
   type AgentShowcaseFlash,
+  type CopyRelayReconcileSnapshot,
+  type CopyRelaySimState,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
@@ -20,9 +22,10 @@ import {
   fetchTradingAgentDashboard,
   fetchTradingAgents,
   followTradingAgent,
-  paperTrackAgent,
   pauseMyAgentInstance,
   resumeMyAgentInstance,
+  startCopyRelaySim,
+  stopCopyRelaySim,
   unfollowTradingAgent,
   type PublicAgentStatus,
   type TradingAgentSummary,
@@ -46,7 +49,6 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [followBusy, setFollowBusy] = useState(false);
-  const [paperBusy, setPaperBusy] = useState(false);
   const [instanceBusy, setInstanceBusy] = useState(false);
   const [instanceStatus, setInstanceStatus] = useState<string | null>(null);
   const [instanceMode, setInstanceMode] = useState<'copy' | 'live' | null>(null);
@@ -76,6 +78,13 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [showcaseNote, setShowcaseNote] = useState<string | null>(null);
   const [showcaseFlash, setShowcaseFlash] = useState<AgentShowcaseFlash | null>(null);
   const [showcaseAgent, setShowcaseAgent] = useState<TradingAgentSummary | null>(null);
+  const [copyRelaySim, setCopyRelaySim] = useState<CopyRelaySimState | null>(null);
+  const [relaySimLiveBook, setRelaySimLiveBook] =
+    useState<TradingAgentDashboardState['liveBook'] | null>(null);
+  const [copyRelayReconcile, setCopyRelayReconcile] = useState<CopyRelayReconcileSnapshot | null>(
+    null,
+  );
+  const [relaySimBusy, setRelaySimBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
@@ -117,6 +126,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExchangeLiveBook(dashR.value.exchangeLiveBook ?? null);
         setShowcaseActivity(dashR.value.showcaseActivity ?? []);
         setUserActivity(dashR.value.userActivity ?? dashR.value.showcaseActivity ?? []);
+        setCopyRelaySim(dashR.value.copyRelaySim ?? null);
+        setRelaySimLiveBook(dashR.value.relaySimLiveBook ?? null);
+        setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
+        if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
       } else {
@@ -179,26 +192,6 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     }
   }
 
-  async function handleCopyTrack() {
-    if (!session?.accessToken) {
-      setError('Sign in to paper-track this agent');
-      return;
-    }
-    setPaperBusy(true);
-    try {
-      await paperTrackAgent(slug, session.accessToken);
-      setHired(true);
-      setInstanceStatus('ACTIVE');
-      setInstanceMode('copy');
-      setViewScope('user');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Copy track failed');
-    } finally {
-      setPaperBusy(false);
-    }
-  }
-
   async function handlePauseInstance() {
     if (!session?.accessToken) return;
     setInstanceBusy(true);
@@ -222,6 +215,35 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       setError(err instanceof Error ? err.message : 'Resume failed');
     } finally {
       setInstanceBusy(false);
+    }
+  }
+
+  async function handleStartRelaySim() {
+    if (!session?.accessToken) return;
+    setRelaySimBusy(true);
+    try {
+      const res = await startCopyRelaySim(slug, session.accessToken);
+      setCopyRelaySim(res.copyRelaySim);
+      setInstanceStatus('PAUSED');
+      await loadLive();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Relay sim start failed');
+    } finally {
+      setRelaySimBusy(false);
+    }
+  }
+
+  async function handleStopRelaySim() {
+    if (!session?.accessToken) return;
+    setRelaySimBusy(true);
+    try {
+      const res = await stopCopyRelaySim(slug, session.accessToken);
+      setCopyRelaySim(res.copyRelaySim);
+      await loadLive();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Relay sim stop failed');
+    } finally {
+      setRelaySimBusy(false);
     }
   }
 
@@ -326,16 +348,20 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           showcaseAgent={showcaseAgent ?? agent}
           showcaseLiveBook={showcaseLiveBook}
           exchangeLiveBook={exchangeLiveBook}
+          relaySimLiveBook={relaySimLiveBook}
+          copyRelaySim={copyRelaySim}
+          copyRelayReconcile={copyRelayReconcile}
           showcaseActivity={showcaseActivity.length > 0 ? showcaseActivity : activity}
           userActivity={userActivity.length > 0 ? userActivity : activity}
           onFollow={toggleFollow}
           followBusy={followBusy}
-          onCopyAllocate={handleCopyTrack}
           onPauseInstance={handlePauseInstance}
           onResumeInstance={handleResumeInstance}
+          onStartRelaySim={handleStartRelaySim}
+          onStopRelaySim={handleStopRelaySim}
+          relaySimBusy={relaySimBusy}
           onAdminRefresh={load}
           instanceBusy={instanceBusy}
-          copyBusy={paperBusy}
           rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
         />
       )}

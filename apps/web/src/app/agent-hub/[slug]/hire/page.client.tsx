@@ -150,19 +150,19 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       </header>
 
       <div className="mx-auto max-w-3xl px-6 py-10">
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Go live · real money</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">
+          Connect Bitfinex · real copy relay
+        </p>
         <h1 className="mt-1 text-2xl font-bold">{agentName || 'Agent'}</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Connect Bitfinex only. Admin DeepSeek AI powers every trade — platform enforces $20 max margin per trade on
-          your account. No AI API key required.
+          Link your Bitfinex Derivatives API — the platform mirrors admin showcase signals on your account
+          with $20 virtual lots, Scenario C exits, and full order transparency. No AI key required.
         </p>
 
-        <div className="mt-4 rounded-xl border border-violet-500/25 bg-violet-950/15 px-4 py-3 text-sm text-violet-100/90">
-          Want to test first?{' '}
-          <Link href={`/agent-hub/${slug}`} className="font-semibold text-emerald-300 underline">
-            Use $500 DDollar copy track
-          </Link>{' '}
-          — no exchange or API keys.
+        <div className="mt-4 rounded-xl border border-sky-500/25 bg-sky-950/15 px-4 py-3 text-sm text-sky-100/90">
+          After connecting you can run <strong>live relay</strong> (real orders) or{' '}
+          <strong>relay simulation</strong> (paper book, real prices) from the agent profile — test reconcile
+          before risking capital.
         </div>
         {costWeek > 0 && (
           <div className="mt-3 space-y-2 text-sm text-zinc-300">

@@ -12,7 +12,7 @@ function relayLabel(state: RelayState, exchangeLabel: string) {
     case 'paused':
       return `Relay stopped — ${exchangeLabel} protected`;
     case 'copy':
-      return 'Paper copy track (no exchange relay)';
+      return 'Legacy paper track — connect exchange for real copy';
     default:
       return 'Not connected';
   }

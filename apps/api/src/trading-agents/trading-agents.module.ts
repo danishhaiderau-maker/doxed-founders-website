@@ -9,6 +9,7 @@ import { SignalApiKeyGuard } from './signal-api-key.guard';
 import { SignalCyclesController } from './signal-cycles.controller';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
+import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 import { TradingAgentsService } from './trading-agents.service';
@@ -22,9 +23,10 @@ import { TradingAgentsService } from './trading-agents.service';
     BotBridgeService,
     SignalCyclesService,
     SignalSubscriberExecutionService,
+    CopyRelaySimService,
     SignalApiKeyGuard,
     AgentRegistryService,
   ],
-  exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService],
+  exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],
 })
 export class TradingAgentsModule {}
