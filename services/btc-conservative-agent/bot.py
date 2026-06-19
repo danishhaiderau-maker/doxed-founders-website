@@ -47,6 +47,7 @@ from combo_pathway_config import (
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
+    EXPECTED_EXCHANGE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
@@ -173,19 +174,8 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
-AI_DIRECT_RESEARCH_LANES = frozenset(
-    COMBO_EXECUTION_LANES
-    + (
-        RESEARCH_LANE_CONTINUOUS,
-        RESEARCH_LANE_HIGH_EDGE_RUNNER,
-        RESEARCH_LANE_EDGE_ALPHA_4,
-        RESEARCH_LANE_TYPE_B_HUNTER,
-        RESEARCH_LANE_SHORT_BEAR_ALPHA,
-        RESEARCH_LANE_AI_60_65_ALPHA,
-        RESEARCH_LANE_URGENT_CHASE_ALPHA,
-        RESEARCH_LANE_CHASE_3PLUS_ALPHA,
-    )
-)
+# Production execution routing only — legacy alpha lanes excluded (DATA_RETIRED).
+AI_DIRECT_RESEARCH_LANES = frozenset(COMBO_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,))
 _lane_locks = {
     RESEARCH_LANE_AI_SCAN: threading.Lock(),
     RESEARCH_LANE_COMBO_65_SP5_CHASE: threading.Lock(),
@@ -473,6 +463,19 @@ def _should_wipe_research_on_startup() -> bool:
         return False
     return _wipe_csv_on_startup()
 
+class ArchiveIntegrityError(Exception):
+    """Archive copy failed hash verification — wipe must not proceed."""
+
+
+def _file_sha256(path: str) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def archive_research_session(reason: str = "manual") -> str:
     """Copy current research artifacts into research_archive/session_NNN before intentional wipe."""
     os.makedirs(RESEARCH_ARCHIVE_DIR, exist_ok=True)
@@ -489,9 +492,14 @@ def archive_research_session(reason: str = "manual") -> str:
     dest = os.path.join(RESEARCH_ARCHIVE_DIR, f"session_{next_num:03d}")
     os.makedirs(dest, exist_ok=True)
     copied = []
+    verified = []
+    total_src_bytes = 0
+    total_dest_bytes = 0
     for path in all_research_wipe_paths():
         if path and os.path.isfile(path):
             try:
+                src_size = os.path.getsize(path)
+                src_hash = _file_sha256(path)
                 dest_name = os.path.basename(path)
                 dest_path = os.path.join(dest, dest_name)
                 if os.path.exists(dest_path):
@@ -499,19 +507,50 @@ def archive_research_session(reason: str = "manual") -> str:
                     dest_name = f"{stem}_{len(copied)}{ext or ''}"
                     dest_path = os.path.join(dest, dest_name)
                 shutil.copy2(path, dest_path)
+                dest_size = os.path.getsize(dest_path)
+                dest_hash = _file_sha256(dest_path)
+                if dest_hash != src_hash:
+                    raise ArchiveIntegrityError(
+                        f"sha256 mismatch {path}: src={src_hash} dest={dest_hash}"
+                    )
                 copied.append(dest_name)
+                verified.append({
+                    "file": dest_name,
+                    "source": os.path.basename(path),
+                    "size": src_size,
+                    "sha256": src_hash,
+                })
+                total_src_bytes += src_size
+                total_dest_bytes += dest_size
+            except ArchiveIntegrityError:
+                raise
             except Exception as e:
                 logger.error(f"[ARCHIVE] copy failed {path}: {e}")
+                raise ArchiveIntegrityError(f"copy failed {path}: {e}") from e
+    if verified and total_src_bytes != total_dest_bytes:
+        raise ArchiveIntegrityError(
+            f"total bytes mismatch src={total_src_bytes} dest={total_dest_bytes}"
+        )
     meta = {
         "reason": reason,
         "archived_ts": utc_iso(),
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "files": copied,
+        "file_integrity": verified,
+        "integrity": {
+            "verified": bool(verified),
+            "method": "sha256",
+            "file_count": len(verified),
+            "total_bytes": total_dest_bytes,
+        },
     }
     with open(os.path.join(dest, "archive_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    logger.warning(f"[ARCHIVE] Saved {len(copied)} file(s) to {dest} reason={reason} [PIPELINE ENFORCEMENT]")
+    logger.warning(
+        f"[ARCHIVE] Saved {len(copied)} file(s) ({total_dest_bytes} bytes, sha256 verified) to {dest} "
+        f"reason={reason} [PIPELINE ENFORCEMENT]"
+    )
     return dest
 
 def _wipe_research_on_startup_if_needed():
@@ -2128,6 +2167,99 @@ def _ensure_lane_bucket(lane: str) -> str:
     return lane
 
 
+LANE_MEMORY_CHECK_INTERVAL_SEC = 600
+_last_lane_memory_check_ts = 0.0
+_PATHWAY_STARTUP_SNAPSHOT = {}
+
+
+def capture_pathway_startup_snapshot() -> dict:
+    """Immutable startup contract for runtime drift detection."""
+    global _PATHWAY_STARTUP_SNAPSHOT
+    _PATHWAY_STARTUP_SNAPSHOT = {
+        "captured_at": utc_iso(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "pathway_lane_status": dict(PATHWAY_LANE_STATUS),
+        "combo_execution_lanes": tuple(COMBO_EXECUTION_LANES),
+        "ai_direct_research_lanes": sorted(AI_DIRECT_RESEARCH_LANES),
+    }
+    return dict(_PATHWAY_STARTUP_SNAPSHOT)
+
+
+def validate_lane_memory() -> dict:
+    """Periodic: retired lanes must have zero pending/open; buckets bounded."""
+    retired = [
+        ln for ln, st in PATHWAY_LANE_STATUS.items()
+        if st in ("RETIRED", "DATA_RETIRED")
+    ]
+    reconcile_lane_position_registry()
+    pending_counts = {ln: len(get_lane_pending_orders(ln)) for ln in LANE_TRACKING_LANES}
+    open_counts = {ln: len(get_lane_open_positions(ln)) for ln in LANE_TRACKING_LANES}
+    try:
+        from pathway_lab_validation import validate_lane_memory_runtime
+        payload = validate_lane_memory_runtime(pending_counts, open_counts, tuple(retired))
+    except Exception as exc:
+        payload = {"verdict": "ERROR", "error": str(exc)}
+    verdict = payload.get("verdict")
+    if verdict == "CRITICAL":
+        logger.critical(
+            f"[LANE MEMORY] CRITICAL — {payload.get('critical_issues')} [PIPELINE ENFORCEMENT]"
+        )
+    elif verdict == "WARN":
+        logger.warning(
+            f"[LANE MEMORY] WARN — {payload.get('warn_issues')} [PIPELINE ENFORCEMENT]"
+        )
+    return payload
+
+
+def validate_runtime_pathway_integrity() -> dict:
+    """Every 10 min: detect runtime drift from startup pathway contract."""
+    if not _PATHWAY_STARTUP_SNAPSHOT:
+        return {"verdict": "SKIPPED", "detail": "startup snapshot not captured"}
+    try:
+        from pathway_lab_validation import validate_runtime_pathway_integrity as _validate
+        payload = _validate(
+            startup_snapshot=_PATHWAY_STARTUP_SNAPSHOT,
+            current_pathway_lane_status=dict(PATHWAY_LANE_STATUS),
+            current_combo_execution_lanes=tuple(COMBO_EXECUTION_LANES),
+            ai_direct_research_lanes=AI_DIRECT_RESEARCH_LANES,
+            research_spawn_lanes=tuple(RESEARCH_SPAWN_LANES),
+            ai_scan_orders_allowed=lane_orders_allowed(RESEARCH_LANE_AI_SCAN),
+        )
+    except Exception as exc:
+        payload = {"verdict": "ERROR", "error": str(exc)}
+    verdict = payload.get("verdict")
+    if verdict == "CRITICAL":
+        logger.critical(
+            f"[PATHWAY INTEGRITY] CRITICAL — {payload.get('critical_issues')} [PIPELINE ENFORCEMENT]"
+        )
+    elif verdict == "WARN":
+        logger.warning(
+            f"[PATHWAY INTEGRITY] WARN — {payload.get('issues')} [PIPELINE ENFORCEMENT]"
+        )
+    return payload
+
+
+def apply_pathway_safety_block(lm_payload: dict, ri_payload: dict) -> None:
+    """Block pipeline when any runtime pathway check is CRITICAL."""
+    critical = (
+        (lm_payload or {}).get("verdict") == "CRITICAL"
+        or (ri_payload or {}).get("verdict") == "CRITICAL"
+    )
+    with state_lock:
+        if critical:
+            state["system_ready"] = False
+            state["pathway_safety_block"] = True
+            reasons = []
+            if (lm_payload or {}).get("verdict") == "CRITICAL":
+                reasons.append("lane_memory")
+            if (ri_payload or {}).get("verdict") == "CRITICAL":
+                reasons.append("runtime_integrity")
+            state["pathway_safety_reason"] = "+".join(reasons) or "pathway_critical"
+        else:
+            state["pathway_safety_block"] = False
+            state.pop("pathway_safety_reason", None)
+
+
 def reconcile_lane_position_registry():
     """Rebuild lane-owned lists from global exposure (startup / state sync)."""
     if not research_isolation_enabled():
@@ -3099,6 +3231,18 @@ BITFINEX_WS_URL = "wss://api-pub.bitfinex.com/ws/2"
 BITFINEX_WS_SYMBOL = "tBTCF0:USTF0"
 SYMBOL = BITFINEX_WS_SYMBOL
 BOT_EXCHANGE = "bitfinex"
+
+
+def assert_exchange_venue_ready() -> None:
+    """Hard fail if ccxt venue does not match configured research exchange."""
+    actual = str(getattr(bitfinex_public, "id", BOT_EXCHANGE) or BOT_EXCHANGE).lower()
+    expected = str(EXPECTED_EXCHANGE or BOT_EXCHANGE).lower()
+    if actual != expected:
+        raise SystemExit(
+            f"SYSTEM_NOT_READY: exchange.id={actual} expected {expected} — "
+            f"bot uses Bitfinex API (file name bybit_bot.py is legacy)"
+        )
+    logger.info(f"[EXCHANGE] venue verified id={actual} symbol={SYMBOL_CCXT} [PIPELINE ENFORCEMENT]")
 # Shared with analyzer_research_engine_v62.py — bump both when bot/analyzer contract changes.
 ANALYZER_SYNC_ID = COMBO_ANALYZER_SYNC_ID
 SYMBOL_CCXT = "BTC/USDT:USDT"
@@ -9780,6 +9924,12 @@ def should_run_pipeline() -> bool:
     if len(latest_candles) < MIN_CANDLES:
         logger.warning("[WARMUP BLOCK] Not enough candles [PIPELINE ENFORCEMENT]")
         return False
+    if state.get("pathway_safety_block"):
+        logger.warning(
+            f"[PATHWAY SAFETY BLOCK] {state.get('pathway_safety_reason', 'integrity')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return False
     if not is_system_ready():
         logger.warning("[SYSTEM BLOCK] Not ready [PIPELINE ENFORCEMENT]")
         return False
@@ -13598,9 +13748,18 @@ def maintain_fresh_collection_files():
         _reset_runtime_log_handlers()
 
 def perform_fresh_collection_reset() -> dict:
-    """Dashboard-triggered archive+wipe: never delete without archiving first."""
+    """Dashboard-triggered archive+wipe: never delete without verified archive first."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
-    archive_path = archive_research_session(reason="fresh_collection_dashboard")
+    try:
+        archive_path = archive_research_session(reason="fresh_collection_dashboard")
+    except ArchiveIntegrityError as exc:
+        logger.error(f"[FRESH COLLECTION] ABORT WIPE — archive integrity failed: {exc} [PIPELINE ENFORCEMENT]")
+        return {
+            "ok": False,
+            "wipe_aborted": True,
+            "error": str(exc),
+            "summary": "ABORT WIPE — archive verification failed",
+        }
     logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, wiping session state")
     with replay_lock:
         replay_buffers.clear()
@@ -13631,7 +13790,7 @@ def perform_fresh_collection_reset() -> dict:
         state["_pause_priority"] = 0
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
-    return {"deleted": deleted, "errors": errors, "summary": summary, "archive_path": archive_path, "ts": utc_iso()}
+    return {"deleted": deleted, "errors": errors, "summary": summary, "archive_path": archive_path, "ts": utc_iso(), "ok": True, "wipe_aborted": False}
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
@@ -18202,14 +18361,19 @@ def is_ai_active():
     return state.get("ai_enabled", False) and bool(_deepseek_api_key())
 
 def ttl_monitor():
-    global _last_fresh_maintain_ts
+    global _last_fresh_maintain_ts, _last_lane_memory_check_ts
     logger.info("[TTL] Independent monitor started")
     while not shutdown_event.is_set():
         try:
             prune_signals()
             cleanup_expired_orders()
+            now = time.time()
+            if now - _last_lane_memory_check_ts >= LANE_MEMORY_CHECK_INTERVAL_SEC:
+                _last_lane_memory_check_ts = now
+                lm = validate_lane_memory()
+                ri = validate_runtime_pathway_integrity()
+                apply_pathway_safety_block(lm, ri)
             if state.get("fresh_collection_mode"):
-                now = time.time()
                 if now - _last_fresh_maintain_ts >= FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC:
                     _last_fresh_maintain_ts = now
                     maintain_fresh_collection_files()
@@ -18651,14 +18815,25 @@ def main():
             f"[PIPELINE ENFORCEMENT]"
         )
     write_static_pathway_lane_specs()
+    assert_exchange_venue_ready()
     try:
         from pathway_lab_validation import run_startup_pathway_validation
-        v = run_startup_pathway_validation(retired_status=dict(PATHWAY_LANE_STATUS))
+        with state_lock:
+            live_armed = bool(state.get("live_armed", False))
+            strategy_mode = str(state.get("strategy_mode", "RESEARCH"))
+        v = run_startup_pathway_validation(
+            retired_status=dict(PATHWAY_LANE_STATUS),
+            live_armed=live_armed,
+            strategy_mode=strategy_mode,
+            live_trading_enabled=bool(LIVE_TRADING_ENABLED),
+        )
+        capture_pathway_startup_snapshot()
         logger.info(
             f"[PATHWAY VALIDATION] {v['verdict']} type_b={v['type_b_audit']} "
-            f"tiles={v['tile_independence']} sync={v.get('version_sync', '?')} [PIPELINE ENFORCEMENT]"
+            f"tiles={v['tile_independence']} ai_scan={v.get('ai_scan_independence')} "
+            f"ai_scan_role={v.get('ai_scan_role')} sync={v.get('bot_analyzer_sync')} [PIPELINE ENFORCEMENT]"
         )
-    except SystemExit as exc:
+    except SystemExit:
         raise
     except Exception as exc:
         logger.warning(f"[PATHWAY VALIDATION] self-test error (non-fatal): {exc} [PIPELINE ENFORCEMENT]")
