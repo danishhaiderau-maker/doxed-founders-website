@@ -778,3 +778,20 @@ if (
   writeFileSync(TARGET, dupFix, 'utf8');
   console.log('Applied duplicate-limit AWAITING_MIN_AGE fix to bot.py');
 }
+
+// ─── Doxxedcrypto showcase: pathway limit-order policy markers (verify-bitfinex-production-lock) ───
+let pathwayFix = readFileSync(TARGET, 'utf8');
+if (!pathwayFix.includes('PATHWAY_LIMIT_ORDER_LANES')) {
+  const anchor = '_RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()';
+  if (pathwayFix.includes(anchor)) {
+    pathwayFix = pathwayFix.replace(
+      anchor,
+      `${anchor}
+# Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
+PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
+PATHWAY_SPAWN_LANE_POLICY_VERSION = 2`,
+    );
+    writeFileSync(TARGET, pathwayFix, 'utf8');
+    console.log('Applied pathway limit-order policy markers to bot.py');
+  }
+}
