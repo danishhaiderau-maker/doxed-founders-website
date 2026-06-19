@@ -219,6 +219,6 @@ export function mapSubscriberExchangeLiveBook(input: {
     positions,
     pendingOrders,
     expiredOrders: expiredOrders.slice(0, 10),
-    trades: trades.slice(0, 10),
+    trades: trades.slice(0, 30),
   };
 }

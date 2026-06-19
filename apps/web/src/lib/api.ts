@@ -3600,6 +3600,34 @@ export function fetchTradingAgentActivity(slug: string, limit = 30, token?: stri
   );
 }
 
+export async function downloadLiveTradeExport(
+  slug: string,
+  token: string,
+  format: 'csv' | 'json' = 'csv',
+): Promise<{ blob: Blob; filename: string }> {
+  let res: Response;
+  try {
+    res = await fetch(
+      apiUrl(`/trading-agents/${slug}/live-trades/export?format=${format}`),
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+  } catch {
+    const target = describeApiTarget();
+    throw new Error(`Cannot reach API at ${target}. Refresh and try again.`);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(parseApiError(body, res.status));
+  }
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const match = cd.match(/filename="?([^"]+)"?/);
+  const filename = match?.[1] ?? `bitfinex-live-trades-${slug}.${format}`;
+  const blob = await res.blob();
+  return { blob, filename };
+}
+
 export function followTradingAgent(agentId: string, token: string) {
   return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'POST' }, token);
 }

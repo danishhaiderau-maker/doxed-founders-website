@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { TradingAgentKind } from '@prisma/client';
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -55,6 +56,25 @@ export class TradingAgentsController {
   @Get(':slug/my-dashboard')
   myDashboard(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.getMyDashboard(user.id, slug);
+  }
+
+  @Get(':slug/live-trades/export')
+  async exportLiveTrades(
+    @CurrentUser() user: AuthUser,
+    @Param('slug') slug: string,
+    @Query('format') format: string | undefined,
+    @Res() res: Response,
+  ) {
+    const fmt = format === 'json' ? 'json' : 'csv';
+    const result = await this.tradingAgents.exportUserBitfinexLiveTrades(user.id, slug, fmt);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    if (fmt === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(JSON.stringify(result.payload, null, 2));
+      return;
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.send(result.csv ?? '');
   }
 
   @Post(':slug/paper-track')

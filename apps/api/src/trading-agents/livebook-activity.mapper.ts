@@ -8,10 +8,33 @@ function parseLiveBookTime(raw: string): string {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString();
 }
 
+export type LiveBookActivityMode = 'full' | 'positions-only';
+
+/** Drop limit-order churn — keep closed trades + open positions only. */
+export function filterLiveExchangeActivity(items: BotActivityEntry[]): BotActivityEntry[] {
+  return items.filter((item) => {
+    const t = item.type.toUpperCase();
+    const title = item.title.toUpperCase();
+    if (t.includes('ORDER') || t.includes('PENDING') || t.includes('EXPIRED') || t.includes('SIGNAL')) {
+      return false;
+    }
+    if (title.includes('LIMIT') || title.includes('PENDING')) return false;
+    return (
+      t.includes('POSITION') ||
+      t.includes('CLOSE') ||
+      t.includes('EXIT') ||
+      t.includes('FILLED') ||
+      item.profitPct != null ||
+      (item.entryPrice != null && item.exitPrice != null)
+    );
+  });
+}
+
 /** Turn liveBook rows into activity feed + trade-journey entries. */
 export function mapLiveBookToActivity(
   book: TradingAgentDashboardState['liveBook'] | null | undefined,
   prefix = 'livebook',
+  mode: LiveBookActivityMode = 'full',
 ): BotActivityEntry[] {
   if (!book) return [];
 
@@ -36,6 +59,29 @@ export function mapLiveBookToActivity(
       balanceUsd: null,
       netPnlUsd: t.netUsd ?? null,
     });
+  }
+
+  if (mode === 'positions-only') {
+    for (const p of book.positions ?? []) {
+      items.push({
+        id: `${prefix}-position-${p.side}-${p.entry}`,
+        type: 'POSITION_OPEN',
+        title: `${p.side} open · ${p.leg}`,
+        reason: `Entry ${p.entry}`,
+        outcome: 'Open',
+        profitPct: null,
+        edgeScore: null,
+        edgeRequired: null,
+        marketRegime: null,
+        shareText: null,
+        createdAt: new Date().toISOString(),
+        entryPrice: p.entry ?? null,
+        exitPrice: p.current ?? null,
+        balanceUsd: null,
+        netPnlUsd: p.pnlUsd ?? null,
+      });
+    }
+    return items.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   }
 
   for (const s of book.activeSignals ?? []) {

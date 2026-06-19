@@ -14,10 +14,11 @@ import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-sh
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
+import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import { AgentDeskSwitcher, type AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
-import { mergeDeskActivity, liveBookToActivity } from '@/lib/livebook-activity';
+import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
 import type {
   PublicAgentStatus,
   TradingAgentActivityEntry,
@@ -151,11 +152,13 @@ function HireSidebar({
   instanceBusy,
   copyBusy,
   rentalExpiresAt,
+  accessToken,
 }: {
   slug: string;
   agent: TradingAgentSummary;
   signedIn: boolean;
   hired: boolean;
+  accessToken?: string;
   instanceStatus?: string | null;
   instanceMode?: 'copy' | 'live' | null;
   exchangeProvider?: string | null;
@@ -193,6 +196,16 @@ function HireSidebar({
         onStartRelay={onResumeInstance}
         relayBusy={instanceBusy}
       />
+
+      {isLiveHired && (
+        <AgentLiveTradeExportButton
+          slug={slug}
+          token={accessToken}
+          signedIn={signedIn}
+          exchangeLabel={exchangeLabel ?? 'Bitfinex'}
+          compact
+        />
+      )}
 
       {!isLiveHired && (
         <div className="rounded-2xl border border-red-500/40 bg-red-950/25 p-5">
@@ -233,6 +246,7 @@ export function AgentPublicProfile({
   signedIn,
   isAdmin,
   adminToken,
+  accessToken,
   botConnected,
   executionPaused,
   publicStatus,
@@ -268,6 +282,7 @@ export function AgentPublicProfile({
   signedIn: boolean;
   isAdmin?: boolean;
   adminToken?: string;
+  accessToken?: string;
   botConnected?: boolean;
   executionPaused?: boolean;
   publicStatus: PublicAgentStatus;
@@ -346,10 +361,14 @@ export function AgentPublicProfile({
     showcaseActivityProp ?? activity,
     liveBookToActivity(showcaseLive, 'showcase-ui'),
   );
-  const userAct = mergeDeskActivity(
-    userActivityProp ?? activity,
-    liveBookToActivity(exchangeLiveBook, 'user-ui'),
-  );
+  const userAct = isLiveSession
+    ? filterLiveExchangeActivity(
+        liveBookToActivity(exchangeLiveBook, 'user-ui', 'positions-only'),
+      )
+    : mergeDeskActivity(
+        userActivityProp ?? activity,
+        liveBookToActivity(exchangeLiveBook, 'user-ui'),
+      );
   const deskActivity = activeDesk === 'live' ? userAct : showcaseAct;
 
   useEffect(() => {
@@ -564,6 +583,8 @@ export function AgentPublicProfile({
                 showcaseLiveBook={showcaseLive}
                 userActivity={userAct}
                 showcaseActivity={showcaseAct}
+                slug={slug}
+                accessToken={accessToken ?? adminToken}
               />
               {activeDesk === 'live' && liveDeskAvailable ? (
                 <LiveRelayReasoningPanel
@@ -619,6 +640,8 @@ export function AgentPublicProfile({
               showcaseLiveBook={showcaseLive}
               userActivity={userAct}
               showcaseActivity={showcaseAct}
+              slug={slug}
+              accessToken={accessToken ?? adminToken}
             />
           )}
           {tab === 'Reasoning' &&
@@ -651,6 +674,8 @@ export function AgentPublicProfile({
                 showcaseLiveBook={showcaseLive}
                 userActivity={userAct}
                 showcaseActivity={showcaseAct}
+                slug={slug}
+                accessToken={accessToken ?? adminToken}
               />
             </div>
           )}
@@ -702,6 +727,7 @@ export function AgentPublicProfile({
           instanceBusy={instanceBusy}
           copyBusy={copyBusy}
           rentalExpiresAt={rentalExpiresAt}
+          accessToken={accessToken ?? adminToken}
         />
       </div>
     </div>
