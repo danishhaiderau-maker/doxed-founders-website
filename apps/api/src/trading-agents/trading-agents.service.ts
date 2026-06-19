@@ -11,6 +11,9 @@ import {
   TradingAgentDashboardState,
   buildTradingAgentActionShareText,
   EXCHANGE_PROVIDER_LABELS,
+  readCopyRelaySimState,
+  type CopyRelayReconcileSnapshot,
+  type CopyRelaySimState,
   type ExchangeProvider,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -18,6 +21,7 @@ import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BotBridgeService } from './bot-bridge.service';
+import { CopyRelaySimService } from './copy-relay-sim.service';
 import {
   mapBotStateToPublicDashboard,
   sanitizeActivityForPublic,
@@ -256,6 +260,7 @@ export class TradingAgentsService implements OnModuleInit {
     private readonly points: PointsService,
     private readonly notifications: NotificationsService,
     private readonly exchanges: ExchangesService,
+    private readonly relaySim: CopyRelaySimService,
   ) {}
 
   async onModuleInit() {
@@ -961,6 +966,34 @@ export class TradingAgentsService implements OnModuleInit {
       }
     }
 
+    let copyRelaySim: CopyRelaySimState | null = null;
+    let relaySimLiveBook: TradingAgentDashboardState['liveBook'] | null = null;
+    let copyRelayReconcile: CopyRelayReconcileSnapshot | null = null;
+
+    if (userId && agentRowId) {
+      const inst = await this.prisma.tradingAgentInstance.findUnique({
+        where: { agentId_userId: { agentId: agentRowId, userId } },
+      });
+      if (inst && inst.exchangeProvider === 'bitfinex') {
+        const instDash = (inst.dashboardState ?? {}) as Record<string, unknown>;
+        copyRelaySim = readCopyRelaySimState(instDash);
+        copyRelayReconcile =
+          (instDash.copyRelayReconcile as CopyRelayReconcileSnapshot | undefined) ??
+          copyRelaySim.reconcile ??
+          null;
+        if (copyRelaySim.active) {
+          const mark =
+            typeof rest.dashboard.currentPrice === 'number' ? rest.dashboard.currentPrice : null;
+          relaySimLiveBook = await this.relaySim.buildSimLiveBook(
+            userId,
+            agentRowId,
+            copyRelaySim,
+            mark,
+          );
+        }
+      }
+    }
+
     return {
       ...rest,
       agent,
@@ -973,6 +1006,9 @@ export class TradingAgentsService implements OnModuleInit {
       exchangeLiveBook,
       showcaseActivity,
       userActivity,
+      copyRelaySim,
+      relaySimLiveBook,
+      copyRelayReconcile,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'
           ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'

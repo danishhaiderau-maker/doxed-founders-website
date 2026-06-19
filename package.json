@@ -81,6 +81,7 @@
     "sync:btc-research-bot": "node scripts/sync-btc-research-bot.mjs",
     "verify:bitfinex-lock": "node scripts/verify-bitfinex-production-lock.mjs",
     "watch:copy-cycle": "node scripts/watch-copy-cycle-loop.mjs --hours=2 --interval=120",
+    "watch:copy-relay-sim": "node scripts/watch-copy-relay-sim.mjs --hours=4 --interval=60",
     "prepare:agent-registrations": "npm run build:utils && node scripts/prepare-agent-registrations.mjs",
     "register:said-simple": "node scripts/said-register-simple.mjs",
     "mark:said-complete": "node scripts/mark-said-complete.mjs",

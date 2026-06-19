@@ -1,64 +1,66 @@
 'use client';
 
-export type AgentDeskId = 'showcase' | 'live';
+export type AgentDeskId = 'showcase' | 'live' | 'relay-sim';
 
+/** Compact desk tabs — primary navigation lives in CopyTradeHub; these mirror the active desk. */
 export function AgentDeskSwitcher({
   activeDesk,
   onChange,
   exchangeLabel,
   liveAvailable,
-  liveHired,
+  relaySimAvailable,
+  relaySimActive,
 }: {
   activeDesk: AgentDeskId;
   onChange: (desk: AgentDeskId) => void;
   exchangeLabel?: string | null;
   liveAvailable: boolean;
-  liveHired: boolean;
+  liveHired?: boolean;
+  relaySimAvailable?: boolean;
+  relaySimActive?: boolean;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
+  const simDeskOn = relaySimAvailable ?? liveAvailable;
+
+  const tabs: { id: AgentDeskId; label: string; short: string; color: string }[] = [
+    { id: 'live', label: `${exchange} live copy`, short: 'Live', color: 'emerald' },
+    { id: 'relay-sim', label: `${exchange} relay sim`, short: 'Sim', color: 'sky' },
+    { id: 'showcase', label: 'Showcase observe', short: 'Showcase', color: 'violet' },
+  ];
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      <button
-        type="button"
-        onClick={() => onChange('showcase')}
-        className={`rounded-2xl border-2 p-4 text-left transition ${
-          activeDesk === 'showcase'
-            ? 'border-violet-500/70 bg-violet-950/35 ring-2 ring-violet-500/30'
-            : 'border-zinc-800 bg-zinc-950/40 hover:border-violet-500/40'
-        }`}
-      >
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-300">
-          Admin showcase
-        </p>
-        <p className="mt-1 text-base font-bold text-white">Conservative BTC Agent</p>
-        <p className="mt-1 text-xs text-zinc-500">
-          Public research bot on Railway — signals, limits, positions, and paper trades.
-        </p>
-      </button>
+    <div className="flex flex-wrap gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-1.5">
+      {tabs.map((t) => {
+        const disabled = t.id === 'live' && !liveAvailable ? true : t.id === 'relay-sim' && !simDeskOn;
+        const active = activeDesk === t.id;
+        const colorMap = {
+          emerald: active
+            ? 'bg-emerald-600 text-white shadow-emerald-900/30'
+            : 'text-emerald-300/80 hover:bg-emerald-950/40',
+          sky: active
+            ? 'bg-sky-600 text-white shadow-sky-900/30'
+            : 'text-sky-300/80 hover:bg-sky-950/40',
+          violet: active
+            ? 'bg-violet-600 text-white shadow-violet-900/30'
+            : 'text-violet-300/80 hover:bg-violet-950/40',
+        }[t.color];
 
-      <button
-        type="button"
-        onClick={() => liveAvailable && onChange('live')}
-        disabled={!liveAvailable}
-        className={`rounded-2xl border-2 p-4 text-left transition ${
-          !liveAvailable
-            ? 'cursor-not-allowed border-zinc-800/80 bg-zinc-950/20 opacity-60'
-            : activeDesk === 'live'
-              ? 'border-emerald-500/70 bg-emerald-950/30 ring-2 ring-emerald-500/30'
-              : 'border-zinc-800 bg-zinc-950/40 hover:border-emerald-500/40'
-        }`}
-      >
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300">
-          {exchange} · live copy
-        </p>
-        <p className="mt-1 text-base font-bold text-white">Your live bot on {exchange}</p>
-        <p className="mt-1 text-xs text-zinc-500">
-          {liveHired
-            ? 'Real orders, open positions, expired limits, and closed copy trades on your exchange.'
-            : `Hire the agent and connect ${exchange} to unlock your live desk.`}
-        </p>
-      </button>
+        return (
+          <button
+            key={t.id}
+            type="button"
+            disabled={disabled}
+            onClick={() => !disabled && onChange(t.id)}
+            className={`flex-1 min-w-[100px] rounded-lg px-3 py-2.5 text-center text-sm font-semibold transition shadow-sm disabled:cursor-not-allowed disabled:opacity-40 ${colorMap}`}
+          >
+            <span className="hidden sm:inline">{t.label}</span>
+            <span className="sm:hidden">{t.short}</span>
+            {t.id === 'relay-sim' && relaySimActive ? (
+              <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+            ) : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

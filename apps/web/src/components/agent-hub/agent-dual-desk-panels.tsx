@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import type { TradingAgentDashboardState } from '@dcf/utils';
 import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-exchange-equity';
 import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
@@ -7,6 +8,11 @@ import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
+import { AgentRelaySimPanel } from '@/components/agent-hub/agent-relay-sim-panel';
+import type {
+  CopyRelayReconcileSnapshot,
+  CopyRelaySimState,
+} from '@dcf/utils';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
 type DeskPanelProps = {
@@ -50,10 +56,18 @@ export function AgentDeskView({
   showcaseAgent,
   exchangeLiveBook,
   showcaseLiveBook,
+  relaySimLiveBook,
+  copyRelaySim,
+  copyRelayReconcile,
   userActivity,
   showcaseActivity,
   slug,
   accessToken,
+  signedIn,
+  instanceStatus,
+  onStartRelaySim,
+  onStopRelaySim,
+  relaySimBusy,
 }: {
   activeDesk: AgentDeskId;
   mode: 'live' | 'copy' | 'showcase';
@@ -62,11 +76,38 @@ export function AgentDeskView({
   showcaseAgent: TradingAgentSummary;
   exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
   showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
+  relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  copyRelaySim?: CopyRelaySimState | null;
+  copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
   slug?: string;
   accessToken?: string;
+  signedIn?: boolean;
+  instanceStatus?: string | null;
+  onStartRelaySim?: () => void;
+  onStopRelaySim?: () => void;
+  relaySimBusy?: boolean;
 }) {
+  if (activeDesk === 'relay-sim') {
+    return (
+      <AgentRelaySimPanel
+        signedIn={Boolean(signedIn)}
+        exchangeLabel={exchangeLabel}
+        showcaseAgent={showcaseAgent}
+        copyRelaySim={copyRelaySim}
+        copyRelayReconcile={copyRelayReconcile}
+        relaySimLiveBook={relaySimLiveBook}
+        showcaseActivity={showcaseActivity}
+        simActivity={userActivity}
+        onStart={onStartRelaySim}
+        onStop={onStopRelaySim}
+        busy={relaySimBusy}
+        instanceStatus={instanceStatus}
+      />
+    );
+  }
+
   if (activeDesk === 'showcase' || mode === 'showcase') {
     return (
       <DeskPanel
@@ -91,23 +132,55 @@ export function AgentDeskView({
   const exchange = exchangeLabel ?? 'Bitfinex';
   const isLive = mode === 'live';
 
+  if (!isLive) {
+    const hireHref = slug
+      ? signedIn
+        ? `/agent-hub/${slug}/hire?exchange=bitfinex`
+        : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=bitfinex`)}`
+      : '/agent-hub';
+
+    return (
+      <DeskPanel
+        badge={`${exchange} · live copy`}
+        badgeClassName="text-emerald-300"
+        borderClassName="border-emerald-500/45"
+        title={`Connect ${exchange} to copy trades`}
+        subtitle="Real API relay on your exchange — not a dummy paper session. Same signals, limits, and exits as the admin showcase."
+      >
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-5 text-center">
+          <p className="text-sm text-emerald-100/90">
+            Connect read+trade API keys on Bitfinex Derivatives. Platform enforces virtual $20/lot caps on
+            your real account.
+          </p>
+          <Link
+            href={hireHref}
+            className="mt-4 inline-block rounded-xl bg-emerald-600 px-8 py-3 text-sm font-bold text-white hover:bg-emerald-500"
+          >
+            Connect {exchange} API
+          </Link>
+          <p className="mt-3 text-[11px] text-zinc-500">
+            Or run relay simulation after connecting — test Option B without real orders.
+          </p>
+        </div>
+        <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={6} />
+        <p className="text-xs text-zinc-500">
+          Below: showcase reference trades (admin bot). Your copy desk fills in once API is connected.
+        </p>
+      </DeskPanel>
+    );
+  }
+
   return (
     <DeskPanel
       badge={`${exchange} · live copy`}
       badgeClassName="text-emerald-300"
       borderClassName="border-emerald-500/45"
-      title={isLive ? `Your ${exchange} account` : 'Your paper-track session'}
-      subtitle={
-        isLive
-          ? 'Real money on your exchange — every open order, position, expired limit, and closed copy trade.'
-          : 'Your isolated DDollar session — signals and trades from when you started paper tracking.'
-      }
+      title={`Your ${exchange} account`}
+      subtitle="Real money on your exchange — every open order, position, expired limit, and closed copy trade."
     >
       {isLive ? (
         <AgentLiveExchangeEquity agent={userAgent} exchangeLabel={exchange} />
-      ) : (
-        <AgentShowcaseEquity agent={userAgent} title="Your session equity" compact />
-      )}
+      ) : null}
       {isLive && slug ? (
         <AgentLiveTradeExportButton
           slug={slug}
@@ -124,7 +197,7 @@ export function AgentDeskView({
         </p>
       ) : (
         <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
-          Start a paper-track session to see your signals, pending limits, and closed trades here.
+          Waiting for exchange sync — relay tick loads orders and positions within seconds.
         </p>
       )}
       <AgentTradeJourney
@@ -147,11 +220,19 @@ export function AgentDualDeskPanels(props: {
   showcaseAgent: TradingAgentSummary;
   exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
   showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
+  relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  copyRelaySim?: CopyRelaySimState | null;
+  copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
   activeDesk?: AgentDeskId;
   slug?: string;
   accessToken?: string;
+  signedIn?: boolean;
+  instanceStatus?: string | null;
+  onStartRelaySim?: () => void;
+  onStopRelaySim?: () => void;
+  relaySimBusy?: boolean;
 }) {
   const desk: AgentDeskId =
     props.activeDesk ?? (props.mode === 'showcase' ? 'showcase' : 'live');

@@ -3,9 +3,10 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
-  AGENT_BETA_RISK_COPY,
   formatPercent,
   formatUsd,
+  type CopyRelayReconcileSnapshot,
+  type CopyRelaySimState,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
@@ -16,6 +17,7 @@ import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import { AgentDeskSwitcher, type AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
+import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
@@ -146,11 +148,13 @@ function HireSidebar({
   exchangeProvider,
   exchangeLabel,
   exchangeConnected,
-  onCopyAllocate,
   onPauseInstance,
   onResumeInstance,
+  onStartRelaySim,
+  onStopRelaySim,
+  relaySimBusy,
+  copyRelaySim,
   instanceBusy,
-  copyBusy,
   rentalExpiresAt,
   accessToken,
 }: {
@@ -164,14 +168,15 @@ function HireSidebar({
   exchangeProvider?: string | null;
   exchangeLabel?: string | null;
   exchangeConnected?: boolean;
-  onCopyAllocate?: () => void;
   onPauseInstance?: () => void;
   onResumeInstance?: () => void;
+  onStartRelaySim?: () => void;
+  onStopRelaySim?: () => void;
+  relaySimBusy?: boolean;
+  copyRelaySim?: CopyRelaySimState | null;
   instanceBusy?: boolean;
-  copyBusy?: boolean;
   rentalExpiresAt?: string | null;
 }) {
-  const [riskOk, setRiskOk] = useState(false);
   const isLiveHired = hired && instanceMode === 'live';
 
   return (
@@ -195,6 +200,10 @@ function HireSidebar({
         onStopRelay={onPauseInstance}
         onStartRelay={onResumeInstance}
         relayBusy={instanceBusy}
+        copyRelaySim={copyRelaySim}
+        onStartRelaySim={onStartRelaySim}
+        onStopRelaySim={onStopRelaySim}
+        relaySimBusy={relaySimBusy}
       />
 
       {isLiveHired && (
@@ -205,31 +214,6 @@ function HireSidebar({
           exchangeLabel={exchangeLabel ?? 'Bitfinex'}
           compact
         />
-      )}
-
-      {!isLiveHired && (
-        <div className="rounded-2xl border border-red-500/40 bg-red-950/25 p-5">
-          <p className="text-sm font-bold uppercase text-red-200">{AGENT_BETA_RISK_COPY.title}</p>
-          <ul className="mt-2 space-y-1 text-xs text-red-100/80">
-            {AGENT_BETA_RISK_COPY.bullets.slice(0, 4).map((b) => (
-              <li key={b}>• {b}</li>
-            ))}
-          </ul>
-          <label className="mt-3 flex items-start gap-2 text-xs text-red-100/90">
-            <input type="checkbox" checked={riskOk} onChange={(e) => setRiskOk(e.target.checked)} className="mt-0.5" />
-            {AGENT_BETA_RISK_COPY.checkboxLabel}
-          </label>
-          {signedIn && onCopyAllocate && (
-            <button
-              type="button"
-              disabled={!riskOk || copyBusy || (hired && instanceMode === 'copy')}
-              onClick={onCopyAllocate}
-              className="mt-3 w-full rounded-lg border border-emerald-500/50 bg-emerald-950/40 py-2 text-sm font-semibold text-emerald-200 disabled:opacity-40"
-            >
-              {copyBusy ? 'Allocating…' : 'Paper track $500 (DDollar)'}
-            </button>
-          )}
-        </div>
       )}
     </aside>
   );
@@ -260,16 +244,20 @@ export function AgentPublicProfile({
   showcaseAgent,
   showcaseLiveBook,
   exchangeLiveBook,
+  relaySimLiveBook,
+  copyRelaySim,
+  copyRelayReconcile,
   showcaseActivity: showcaseActivityProp,
   userActivity: userActivityProp,
   onFollow,
   followBusy,
-  onCopyAllocate,
   onPauseInstance,
   onResumeInstance,
+  onStartRelaySim,
+  onStopRelaySim,
+  relaySimBusy,
   onAdminRefresh,
   instanceBusy,
-  copyBusy,
   rentalExpiresAt,
 }: {
   slug: string;
@@ -296,35 +284,38 @@ export function AgentPublicProfile({
   showcaseAgent?: TradingAgentSummary;
   showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
   exchangeLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
+  copyRelaySim?: CopyRelaySimState | null;
+  copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   showcaseActivity?: TradingAgentActivityEntry[];
   userActivity?: TradingAgentActivityEntry[];
   onFollow?: () => void;
   followBusy?: boolean;
-  onCopyAllocate?: () => void;
   onPauseInstance?: () => void;
   onResumeInstance?: () => void;
+  onStartRelaySim?: () => void;
+  onStopRelaySim?: () => void;
+  relaySimBusy?: boolean;
   onAdminRefresh?: () => void;
   instanceBusy?: boolean;
-  copyBusy?: boolean;
   rentalExpiresAt?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const isCopySession = hired && instanceMode === 'copy';
   const isLiveSession = hired && instanceMode === 'live';
-  const [activeDesk, setActiveDesk] = useState<AgentDeskId>('showcase');
+  const relaySimActive = Boolean(copyRelaySim?.active);
+  const relaySimDeskAvailable = isLiveSession && exchangeProvider === 'bitfinex';
+  const [activeDesk, setActiveDesk] = useState<AgentDeskId>('live');
   const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
   const heroBadge = isLiveSession
     ? instanceStatus === 'PAUSED'
       ? { label: 'Relay off', className: 'bg-red-500/20 text-red-200 ring-1 ring-red-500/40' }
-      : { label: 'Live copy', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
-    : isUserSession
-      ? instanceStatus === 'PAUSED'
-        ? { label: 'Paused', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
-        : {
-            label: 'Paper tracking',
-            className: 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40',
-          }
+      : relaySimActive
+        ? { label: 'Sim active', className: 'bg-sky-500/20 text-sky-200 ring-1 ring-sky-500/40' }
+        : { label: 'Live copy', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
+    : isCopySession
+      ? { label: 'Legacy paper', className: 'bg-zinc-800 text-zinc-400 ring-1 ring-zinc-600' }
     : isLive
       ? { label: 'Live', className: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' }
       : publicStatus === 'updating'
@@ -333,11 +324,11 @@ export function AgentPublicProfile({
   const statusLabel = isLiveSession
     ? instanceStatus === 'PAUSED'
       ? `Relay stopped · ${exchangeLabel ?? 'Exchange'} protected`
-      : `Live copy on ${exchangeLabel ?? 'your exchange'}`
-    : isUserSession
-      ? instanceMode === 'live'
-        ? 'Your live copy session'
-        : `Your copy track · ${formatUsd(agent.startingBalance || 500, 0)} start`
+      : relaySimActive
+        ? `Relay simulation on ${exchangeLabel ?? 'Bitfinex'}`
+        : `Live copy on ${exchangeLabel ?? 'your exchange'}`
+    : isCopySession
+      ? 'Legacy DDollar paper — connect Bitfinex for real copy'
     : isLive
       ? 'Admin showcase (observe only)'
       : publicStatus === 'offline' && !botConnected
@@ -356,10 +347,13 @@ export function AgentPublicProfile({
   const deskShowcaseAgent = showcaseAgent ?? agent;
   const showcaseLive = showcaseLiveBook ?? dashboard.liveBook;
   const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
-  const liveDeskAvailable = isLiveSession || isCopySession;
   const showcaseAct = mergeDeskActivity(
     showcaseActivityProp ?? activity,
     liveBookToActivity(showcaseLive, 'showcase-ui'),
+  );
+  const simAct = mergeDeskActivity(
+    userActivityProp ?? activity,
+    liveBookToActivity(relaySimLiveBook, 'relay-sim-ui'),
   );
   const userAct = isLiveSession
     ? filterLiveExchangeActivity(
@@ -369,11 +363,53 @@ export function AgentPublicProfile({
         userActivityProp ?? activity,
         liveBookToActivity(exchangeLiveBook, 'user-ui'),
       );
-  const deskActivity = activeDesk === 'live' ? userAct : showcaseAct;
+  const deskActivity =
+    activeDesk === 'relay-sim' ? simAct : activeDesk === 'live' ? userAct : showcaseAct;
+
+  const resolvedDesk: AgentDeskId =
+    activeDesk === 'relay-sim' && relaySimDeskAvailable
+      ? 'relay-sim'
+      : activeDesk;
+
+  const hireHref = signedIn
+    ? `/agent-hub/${slug}/hire?exchange=bitfinex`
+    : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=bitfinex`)}`;
+
+  const copyDetailsMode: 'live' | 'sim' | null = relaySimActive
+    ? 'sim'
+    : isLiveSession
+      ? 'live'
+      : null;
+
+  const detailsLiveBook =
+    relaySimActive && relaySimLiveBook ? relaySimLiveBook : exchangeLiveBook;
+
+  const deskViewProps = {
+    activeDesk: resolvedDesk,
+    mode: dualDeskMode,
+    exchangeLabel,
+    userAgent: agent,
+    showcaseAgent: deskShowcaseAgent,
+    exchangeLiveBook,
+    showcaseLiveBook: showcaseLive,
+    relaySimLiveBook,
+    copyRelaySim,
+    copyRelayReconcile,
+    userActivity: resolvedDesk === 'relay-sim' ? simAct : userAct,
+    showcaseActivity: showcaseAct,
+    slug,
+    accessToken: accessToken ?? adminToken,
+    signedIn,
+    instanceStatus,
+    onStartRelaySim,
+    onStopRelaySim,
+    relaySimBusy,
+  } as const;
 
   useEffect(() => {
-    if (isLiveSession) setActiveDesk('live');
-  }, [isLiveSession]);
+    if (relaySimActive) setActiveDesk('relay-sim');
+    else if (isLiveSession) setActiveDesk('live');
+  }, [isLiveSession, relaySimActive]);
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
@@ -477,30 +513,24 @@ export function AgentPublicProfile({
             )}
 
             <div className="mt-6 flex flex-wrap gap-3">
-              <span className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200">
-                <span aria-hidden>👁</span> Observe live
-              </span>
-              {!isLiveSession && (
-                <>
-                  <button
-                    type="button"
-                    disabled={copyBusy || !signedIn || isCopySession}
-                    onClick={onCopyAllocate}
-                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                  >
-                    <span aria-hidden>🌐</span>
-                    {copyBusy ? 'Starting…' : isCopySession ? 'Paper tracking ✓' : 'Paper trade'}
-                  </button>
-                  {!hired && (
-                    <Link
-                      href={signedIn ? `/agent-hub/${slug}/hire` : `/login?callbackUrl=/agent-hub/${slug}/hire`}
-                      className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
-                    >
-                      <span aria-hidden>➕</span> Hire agent
-                    </Link>
-                  )}
-                </>
-              )}
+              {!isLiveSession ? (
+                <Link
+                  href={hireHref}
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-md shadow-emerald-900/30 hover:bg-emerald-500"
+                >
+                  Connect {exchangeLabel ?? 'Bitfinex'} &amp; copy
+                </Link>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setTab('Overview');
+                  setActiveDesk('showcase');
+                }}
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:border-violet-500/50"
+              >
+                Observe showcase
+              </button>
               {isLiveSession && rentalExpiresAt && (
                 <LiveCopyRentalBadge expiresAt={rentalExpiresAt} />
               )}
@@ -556,37 +586,54 @@ export function AgentPublicProfile({
             </div>
           </div>
 
-          <div className="mt-6">
+          {tab === 'Overview' && (
+            <div className="mt-6">
+              <CopyTradeHub
+                slug={slug}
+                signedIn={signedIn}
+                agent={agent}
+                exchangeLabel={exchangeLabel}
+                exchangeProvider={exchangeProvider}
+                hired={hired}
+                instanceMode={instanceMode}
+                instanceStatus={instanceStatus}
+                copyRelaySim={copyRelaySim}
+                showcaseAgent={deskShowcaseAgent}
+                activeDesk={activeDesk}
+                onSelectDesk={setActiveDesk}
+                onStartRelaySim={onStartRelaySim}
+                onStopRelaySim={onStopRelaySim}
+                relaySimBusy={relaySimBusy}
+                hireHref={hireHref}
+              />
+            </div>
+          )}
+
+          <div className="mt-4">
             <AgentDeskSwitcher
               activeDesk={activeDesk}
               onChange={setActiveDesk}
               exchangeLabel={exchangeLabel}
-              liveAvailable={liveDeskAvailable || slug === 'conservative-btc'}
-              liveHired={isLiveSession || isCopySession}
+              liveAvailable={slug === 'conservative-btc'}
+              relaySimAvailable={relaySimDeskAvailable}
+              relaySimActive={relaySimActive}
             />
           </div>
 
           {tab === 'Overview' && (
             <div className="space-y-6">
-              {activeDesk === 'live' && !liveDeskAvailable && (
-                <p className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 px-4 py-3 text-sm text-emerald-100/90">
-                  Hire the agent and connect {exchangeLabel ?? 'Bitfinex'} to see your live orders, positions, and trade history here.
-                </p>
-              )}
-              <AgentDeskView
-                activeDesk={liveDeskAvailable ? activeDesk : 'showcase'}
-                mode={dualDeskMode}
-                exchangeLabel={exchangeLabel}
-                userAgent={agent}
-                showcaseAgent={deskShowcaseAgent}
-                exchangeLiveBook={exchangeLiveBook}
-                showcaseLiveBook={showcaseLive}
-                userActivity={userAct}
-                showcaseActivity={showcaseAct}
-                slug={slug}
-                accessToken={accessToken ?? adminToken}
-              />
-              {activeDesk === 'live' && liveDeskAvailable ? (
+              <AgentDeskView {...deskViewProps} />
+              {copyDetailsMode ? (
+                <CopyTradeDetailsStrip
+                  agent={agent}
+                  exchangeLabel={exchangeLabel}
+                  liveBook={detailsLiveBook}
+                  copyRelayReconcile={copyRelayReconcile}
+                  copyRelaySim={copyRelaySim}
+                  mode={copyDetailsMode}
+                />
+              ) : null}
+              {activeDesk === 'live' && isLiveSession ? (
                 <LiveRelayReasoningPanel
                   agent={agent}
                   exchangeLabel={exchangeLabel}
@@ -599,19 +646,21 @@ export function AgentPublicProfile({
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
                   title={
-                    activeDesk === 'live' && liveDeskAvailable
-                      ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
-                      : 'Showcase bot feed'
+                    activeDesk === 'relay-sim'
+                      ? 'Relay sim feed'
+                      : activeDesk === 'live' && isLiveSession
+                        ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
+                        : 'Showcase bot feed'
                   }
                 />
                 <AgentPerformanceChart
                   agentReturnPct={
-                    activeDesk === 'live' && liveDeskAvailable
+                    activeDesk === 'live' && isLiveSession
                       ? agent.netReturnPct
                       : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
                   }
                   label={
-                    activeDesk === 'live' && liveDeskAvailable ? 'Your session' : deskShowcaseAgent.name
+                    activeDesk === 'live' && isLiveSession ? 'Your session' : deskShowcaseAgent.name
                   }
                 />
               </div>
@@ -620,32 +669,20 @@ export function AgentPublicProfile({
           {tab === 'Performance' && (
             <AgentPerformanceChart
               agentReturnPct={
-                activeDesk === 'live' && liveDeskAvailable
+                activeDesk === 'live' && isLiveSession
                   ? agent.netReturnPct
                   : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
               }
               label={
-                activeDesk === 'live' && liveDeskAvailable ? 'Your session' : deskShowcaseAgent.name
+                activeDesk === 'live' && isLiveSession ? 'Your session' : deskShowcaseAgent.name
               }
             />
           )}
           {tab === 'Trade Journey' && (
-            <AgentDeskView
-              activeDesk={liveDeskAvailable ? activeDesk : 'showcase'}
-              mode={dualDeskMode}
-              exchangeLabel={exchangeLabel}
-              userAgent={agent}
-              showcaseAgent={deskShowcaseAgent}
-              exchangeLiveBook={exchangeLiveBook}
-              showcaseLiveBook={showcaseLive}
-              userActivity={userAct}
-              showcaseActivity={showcaseAct}
-              slug={slug}
-              accessToken={accessToken ?? adminToken}
-            />
+            <AgentDeskView {...deskViewProps} />
           )}
           {tab === 'Reasoning' &&
-            (activeDesk === 'live' && liveDeskAvailable ? (
+            (activeDesk === 'live' && isLiveSession ? (
               <LiveRelayReasoningPanel
                 agent={agent}
                 exchangeLabel={exchangeLabel}
@@ -659,24 +696,14 @@ export function AgentPublicProfile({
               <AgentActivityFeed
                 items={deskActivity}
                 title={
-                  activeDesk === 'live' && liveDeskAvailable
-                    ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
-                    : 'Conservative BTC showcase activity'
+                  activeDesk === 'relay-sim'
+                    ? 'Relay sim activity'
+                    : activeDesk === 'live' && isLiveSession
+                      ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
+                      : 'Conservative BTC showcase activity'
                 }
               />
-              <AgentDeskView
-                activeDesk={liveDeskAvailable ? activeDesk : 'showcase'}
-                mode={dualDeskMode}
-                exchangeLabel={exchangeLabel}
-                userAgent={agent}
-                showcaseAgent={deskShowcaseAgent}
-                exchangeLiveBook={exchangeLiveBook}
-                showcaseLiveBook={showcaseLive}
-                userActivity={userAct}
-                showcaseActivity={showcaseAct}
-                slug={slug}
-                accessToken={accessToken ?? adminToken}
-              />
+              <AgentDeskView {...deskViewProps} />
             </div>
           )}
           {tab === 'Followers' && (
@@ -721,11 +748,13 @@ export function AgentPublicProfile({
           exchangeProvider={exchangeProvider}
           exchangeLabel={exchangeLabel}
           exchangeConnected={exchangeConnected}
-          onCopyAllocate={onCopyAllocate}
           onPauseInstance={onPauseInstance}
           onResumeInstance={onResumeInstance}
+          onStartRelaySim={onStartRelaySim}
+          onStopRelaySim={onStopRelaySim}
+          relaySimBusy={relaySimBusy}
+          copyRelaySim={copyRelaySim}
           instanceBusy={instanceBusy}
-          copyBusy={copyBusy}
           rentalExpiresAt={rentalExpiresAt}
           accessToken={accessToken ?? adminToken}
         />

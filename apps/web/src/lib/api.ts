@@ -3555,6 +3555,9 @@ export interface TradingAgentDashboard {
   exchangeLiveBook?: import('@dcf/utils').TradingAgentDashboardState['liveBook'] | null;
   showcaseActivity?: TradingAgentActivityEntry[];
   userActivity?: TradingAgentActivityEntry[];
+  copyRelaySim?: import('@dcf/utils').CopyRelaySimState | null;
+  relaySimLiveBook?: import('@dcf/utils').TradingAgentDashboardState['liveBook'] | null;
+  copyRelayReconcile?: import('@dcf/utils').CopyRelayReconcileSnapshot | null;
 }
 
 export interface TradingAgentActivityEntry {
@@ -3890,6 +3893,31 @@ export function resumeMyAgentInstance(slug: string, token: string) {
     { method: 'POST' },
     token,
   );
+}
+
+export function startCopyRelaySim(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; copyRelaySim: import('@dcf/utils').CopyRelaySimState }>(
+    `/trading-agents/${slug}/relay-sim/start`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function stopCopyRelaySim(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; copyRelaySim: import('@dcf/utils').CopyRelaySimState }>(
+    `/trading-agents/${slug}/relay-sim/stop`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function fetchCopyRelaySimStatus(slug: string, token: string) {
+  return apiFetch<{
+    copyRelaySim: import('@dcf/utils').CopyRelaySimState;
+    relaySimLiveBook: import('@dcf/utils').TradingAgentDashboardState['liveBook'] | null;
+    markPrice: number | null;
+    instanceStatus: string;
+  }>(`/trading-agents/${slug}/relay-sim/status`, {}, token);
 }
 
 export function updateShowcaseConfig(
