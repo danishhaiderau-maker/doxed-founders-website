@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-fix(ops): add Railway API auto-recover and clearer login errors
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
