@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Add Bitfinex relay sim and redesign copy-trade hub around API connect.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
