@@ -14,6 +14,7 @@ import {
   readCopyRelaySimState,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
+  type CopyRelayCapacitySnapshot,
   type ExchangeProvider,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -969,6 +970,7 @@ export class TradingAgentsService implements OnModuleInit {
     let copyRelaySim: CopyRelaySimState | null = null;
     let relaySimLiveBook: TradingAgentDashboardState['liveBook'] | null = null;
     let copyRelayReconcile: CopyRelayReconcileSnapshot | null = null;
+    let copyRelayCapacity: CopyRelayCapacitySnapshot | null = null;
 
     if (userId && agentRowId) {
       const inst = await this.prisma.tradingAgentInstance.findUnique({
@@ -981,6 +983,8 @@ export class TradingAgentsService implements OnModuleInit {
           (instDash.copyRelayReconcile as CopyRelayReconcileSnapshot | undefined) ??
           copyRelaySim.reconcile ??
           null;
+        copyRelayCapacity =
+          (instDash.copyRelayCapacity as CopyRelayCapacitySnapshot | undefined) ?? null;
         if (copyRelaySim.active) {
           const mark =
             typeof rest.dashboard.currentPrice === 'number' ? rest.dashboard.currentPrice : null;
@@ -1009,6 +1013,7 @@ export class TradingAgentsService implements OnModuleInit {
       copyRelaySim,
       relaySimLiveBook,
       copyRelayReconcile,
+      copyRelayCapacity,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'
           ? 'Your live copy session — balance from your connected exchange. Relay mirrors admin showcase signals.'

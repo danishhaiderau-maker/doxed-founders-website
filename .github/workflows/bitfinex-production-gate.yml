@@ -1,0 +1,17 @@
+name: Bitfinex production gate
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  bitfinex-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node scripts/verify-bitfinex-production-lock.mjs
+      - run: node scripts/verify-bitfinex-policy-lock.mjs

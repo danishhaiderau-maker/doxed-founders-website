@@ -23,6 +23,10 @@ console.log('\n=== Full production sync ===\n');
 console.log('--- 0/6 Production secrets (vault) ---');
 run('node scripts/ensure-production-secrets.mjs');
 
+console.log('--- 0b/6 Bitfinex policy lock ---');
+run('node scripts/verify-bitfinex-production-lock.mjs');
+run('node scripts/verify-bitfinex-policy-lock.mjs');
+
 console.log('--- 1/6 Neon schema ---');
 run('npm run db:push:neon');
 
