@@ -915,6 +915,78 @@ if (execOnlyChanged) {
   console.log('Applied showcase execution-only telemetry suppression to bot.py');
 }
 
+// ─── Direct write paths + runtime_mode label for execution mirror ───
+let mirrorFix = readFileSync(TARGET, 'utf8');
+let mirrorChanged = false;
+
+if (!mirrorFix.includes('snapshot["runtime_mode"]')) {
+  mirrorFix = mirrorFix.replace(
+    'snapshot["showcase_execution_only"] = _showcase_execution_only()',
+    `snapshot["showcase_execution_only"] = _showcase_execution_only()
+        snapshot["runtime_mode"] = "EXECUTION_MIRROR" if _showcase_execution_only() else "RESEARCH"`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('rotate_log(AI_INPUT_LOG_FILE)') && !mirrorFix.includes('if _showcase_execution_only():\n            return\n        rotate_log(AI_INPUT_LOG_FILE)')) {
+  mirrorFix = mirrorFix.replace(
+    '        rotate_log(AI_INPUT_LOG_FILE)\n        with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:',
+    `        if _showcase_execution_only():
+            return
+        rotate_log(AI_INPUT_LOG_FILE)
+        with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('rotate_log(NEAR_MISS_FILE)') && !mirrorFix.includes('if _showcase_execution_only():\n            return\n        rotate_log(NEAR_MISS_FILE)')) {
+  mirrorFix = mirrorFix.replace(
+    '        rotate_log(NEAR_MISS_FILE)\n        with open(NEAR_MISS_FILE, "a", encoding="utf-8") as f:',
+    `        if _showcase_execution_only():
+            return
+        rotate_log(NEAR_MISS_FILE)
+        with open(NEAR_MISS_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('with open(SOFT_REJECT_SHADOW_FILE, "a"') && !mirrorFix.includes('_showcase_execution_only():\n            return\n        with open(SOFT_REJECT_SHADOW_FILE')) {
+  mirrorFix = mirrorFix.replace(
+    '        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:',
+    `        if _showcase_execution_only():
+            return
+        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('with open(LANE_PNL_LEDGER_FILE, "w"') && !mirrorFix.includes('_showcase_execution_only():\n                return\n            with open(LANE_PNL_LEDGER_FILE')) {
+  mirrorFix = mirrorFix.replace(
+    '            with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:',
+    `            if _showcase_execution_only():
+                return
+            with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorFix.includes('from research_kpi_engine import refresh_all_research_kpis') && !mirrorFix.includes('if _showcase_execution_only():\n                    pass\n                elif is_research_data_collection()')) {
+  mirrorFix = mirrorFix.replace(
+    '            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:\n                try:\n                    from research_kpi_engine import refresh_all_research_kpis',
+    `            if _showcase_execution_only():
+                pass
+            elif is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+                try:
+                    from research_kpi_engine import refresh_all_research_kpis`,
+  );
+  mirrorChanged = true;
+}
+
+if (mirrorChanged) {
+  writeFileSync(TARGET, mirrorFix, 'utf8');
+  console.log('Applied execution mirror write gates + runtime_mode to bot.py');
+}
+
 // execution_funnel.py — skip JSONL writes on Railway showcase
 const funnelPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'services/btc-conservative-agent/execution_funnel.py');
 if (existsSync(funnelPath)) {

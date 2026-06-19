@@ -1,0 +1,9 @@
+{
+  "engine_version": "v1.1.54-runtime-integrity-hardening",
+  "combo_version": "2026-06-19",
+  "exit_version": "scenario-c-v4",
+  "benchmark_lane": "COMBO_65_SP5_CHASE_3PLUS",
+  "signal_hash": "ecd999008ece",
+  "source": "bybit-15m-research-bot/bybit_bot.py",
+  "updated_at": "2026-06-19T14:53:18.711Z"
+}
