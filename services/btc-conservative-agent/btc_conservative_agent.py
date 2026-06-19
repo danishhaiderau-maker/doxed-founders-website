@@ -22,7 +22,7 @@ if _SERVICE_DIR not in sys.path:
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402
 
-register_showcase_ui(signal_engine.app)
+register_showcase_ui(signal_engine.app, bot_module=signal_engine)
 
 
 def main() -> None:
