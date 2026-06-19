@@ -311,6 +311,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           hired={hired}
           signedIn={signedIn}
           isAdmin={isAdmin}
+          accessToken={session?.accessToken}
           adminToken={session?.accessToken}
           botConnected={botConnected}
           executionPaused={executionPaused}

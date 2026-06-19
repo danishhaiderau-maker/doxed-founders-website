@@ -20,6 +20,7 @@ import { PublicMessagingAddress } from '@/components/account/public-messaging-ad
 import { TwitterIdentityLink } from '@/components/account/twitter-identity-link';
 import { IdentityBadge } from '@/components/account/identity-badge';
 import { ReferralPanel } from '@/components/account/referral-panel';
+import { AccountAgentTradeExports } from '@/components/account/account-agent-trade-exports';
 import { useUnreadMessageCount } from '@/components/platform-messages-bell';
 import { TopUpPanel } from '@/components/account/topup-panel';
 import {
@@ -305,6 +306,7 @@ export function AccountHub({
             </div>
 
             {token && <ReferralPanel accessToken={token} />}
+            {token && <AccountAgentTradeExports token={token} />}
           </section>
         )}
 

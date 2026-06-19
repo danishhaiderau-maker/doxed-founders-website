@@ -5,6 +5,7 @@ import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-excha
 import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
+import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
@@ -51,6 +52,8 @@ export function AgentDeskView({
   showcaseLiveBook,
   userActivity,
   showcaseActivity,
+  slug,
+  accessToken,
 }: {
   activeDesk: AgentDeskId;
   mode: 'live' | 'copy' | 'showcase';
@@ -61,6 +64,8 @@ export function AgentDeskView({
   showcaseLiveBook?: TradingAgentDashboardState['liveBook'];
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
+  slug?: string;
+  accessToken?: string;
 }) {
   if (activeDesk === 'showcase' || mode === 'showcase') {
     return (
@@ -103,6 +108,14 @@ export function AgentDeskView({
       ) : (
         <AgentShowcaseEquity agent={userAgent} title="Your session equity" compact />
       )}
+      {isLive && slug ? (
+        <AgentLiveTradeExportButton
+          slug={slug}
+          token={accessToken}
+          signedIn={Boolean(accessToken)}
+          exchangeLabel={exchange}
+        />
+      ) : null}
       {exchangeLiveBook ? (
         <AgentTransparencyTables liveBook={exchangeLiveBook} maxRows={10} />
       ) : isLive ? (
@@ -120,6 +133,7 @@ export function AgentDeskView({
         layout="horizontal"
         showBalance
         windowMinutes={30}
+        liveExchangeOnly={isLive}
       />
     </DeskPanel>
   );
@@ -136,6 +150,8 @@ export function AgentDualDeskPanels(props: {
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
   activeDesk?: AgentDeskId;
+  slug?: string;
+  accessToken?: string;
 }) {
   const desk: AgentDeskId =
     props.activeDesk ?? (props.mode === 'showcase' ? 'showcase' : 'live');

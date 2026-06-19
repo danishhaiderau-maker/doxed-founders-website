@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import {
   NotificationType,
   Prisma,
@@ -44,6 +44,11 @@ import {
   mapLiveBookToActivity,
   mergeActivityFeeds,
 } from './livebook-activity.mapper';
+import {
+  liveTradesToCsv,
+  mapParticipantToExportRow,
+  type LiveTradeExportPayload,
+} from './live-trade-export.mapper';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -794,7 +799,7 @@ export class TradingAgentsService implements OnModuleInit {
         },
       },
       orderBy: { updatedAt: 'desc' },
-      take: 40,
+      take: 100,
     });
 
     const participants: SubscriberCycleRow[] = rows.map((r) => {
@@ -940,12 +945,20 @@ export class TradingAgentsService implements OnModuleInit {
           rest.dashboard.currentPrice,
         );
       }
-      const userBookActivity = mapLiveBookToActivity(
-        exchangeLiveBook,
-        `user-${userId}`,
-      );
-      const scopedList = await this.listActivity(slug, 50, true, userId);
-      userActivity = mergeActivityFeeds(userBookActivity, scopedList);
+      if (overlayMeta?.instanceMode === 'live') {
+        userActivity = mapLiveBookToActivity(
+          exchangeLiveBook,
+          `user-${userId}`,
+          'positions-only',
+        );
+      } else {
+        const userBookActivity = mapLiveBookToActivity(
+          exchangeLiveBook,
+          `user-${userId}`,
+        );
+        const scopedList = await this.listActivity(slug, 50, true, userId);
+        userActivity = mergeActivityFeeds(userBookActivity, scopedList);
+      }
     }
 
     return {
@@ -1243,5 +1256,109 @@ export class TradingAgentsService implements OnModuleInit {
       ),
     );
     this.logger.log(`Notified ${followers.length} follower(s): ${alert.title}`);
+  }
+
+  /** Full Bitfinex live-copy history for the signed-in user's hired instance (no row cap). */
+  async exportUserBitfinexLiveTrades(
+    userId: string,
+    slug: string,
+    format: 'csv' | 'json' = 'csv',
+  ): Promise<{ filename: string; csv?: string; payload: LiveTradeExportPayload }> {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance) {
+      throw new ForbiddenException('Hire this agent to export your live Bitfinex trades');
+    }
+    if (instance.exchangeProvider === 'paper') {
+      throw new ForbiddenException(
+        'This export is for Bitfinex live copy only — switch from paper track or hire with Bitfinex API keys',
+      );
+    }
+    if (instance.exchangeProvider !== 'bitfinex') {
+      throw new ForbiddenException(
+        `Live trade export is only available for Bitfinex (your venue: ${instance.exchangeProvider})`,
+      );
+    }
+
+    const scope = readInstanceScope(instance);
+
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        cycle: { agentId: agent.id },
+      },
+      include: {
+        cycle: {
+          select: {
+            id: true,
+            tradeId: true,
+            status: true,
+            intentEnvelope: true,
+            showcaseExitReason: true,
+            createdAt: true,
+            closedAt: true,
+          },
+        },
+        events: {
+          orderBy: { createdAt: 'asc' },
+          select: { eventType: true, payload: true, createdAt: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const rows = participants.map((p) =>
+      mapParticipantToExportRow({
+        participant: {
+          id: p.id,
+          status: p.status,
+          venue: p.venue,
+          fillPrice: p.fillPrice,
+          exitPrice: p.exitPrice,
+          pnlUsd: p.pnlUsd,
+          pnlMarginPct: p.pnlMarginPct,
+          feeUsd: p.feeUsd,
+          createdAt: p.createdAt,
+          updatedAt: p.updatedAt,
+          events: p.events,
+        },
+        cycle: {
+          id: p.cycle.id,
+          tradeId: p.cycle.tradeId,
+          intentEnvelope: p.cycle.intentEnvelope,
+          showcaseExitReason: p.cycle.showcaseExitReason,
+          createdAt: p.cycle.createdAt,
+          closedAt: p.cycle.closedAt,
+        },
+      }),
+    );
+
+    const closedRows = rows.filter((r) => r.status === 'CLOSED' || r.status === 'EXPIRED');
+    const totalPnlUsd = closedRows.reduce((sum, r) => sum + (r.pnlUsd ?? 0), 0);
+
+    const payload: LiveTradeExportPayload = {
+      exportedAt: new Date().toISOString(),
+      agentSlug: slug,
+      agentName: agent.name,
+      exchange: 'bitfinex',
+      sessionStartedAt: scope.sessionStartedAt.toISOString(),
+      userId,
+      tradeCount: rows.length,
+      closedCount: closedRows.length,
+      totalPnlUsd: Number(totalPnlUsd.toFixed(4)),
+      rows,
+    };
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const filename = `bitfinex-live-trades-${slug}-${stamp}.${format === 'json' ? 'json' : 'csv'}`;
+
+    if (format === 'json') {
+      return { filename, payload };
+    }
+    return { filename, csv: liveTradesToCsv(payload), payload };
   }
 }

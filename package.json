@@ -64,6 +64,7 @@
     "redeploy:railway": "node scripts/railway-redeploy-all.mjs",
     "recover:production": "node scripts/recover-production-api.mjs",
     "railway:status": "node scripts/railway-api-status.mjs",
+    "export:bitfinex-live-trades": "node scripts/export-bitfinex-live-trades.mjs",
     "deploy:web": "vercel deploy --prod --yes",
     "cleanup:railway": "node scripts/cleanup-railway-duplicates.mjs",
     "setup:admin-security": "node scripts/setup-admin-security.mjs",

@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { formatPercent, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { ShareOnXButton } from '@/components/share-on-x-button';
-import { filterActivitySince, liveBookToActivity, mergeDeskActivity } from '@/lib/livebook-activity';
+import { filterActivitySince, liveBookToActivity, mergeDeskActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
 
 type JourneyNode = {
   id: string;
@@ -13,11 +13,27 @@ type JourneyNode = {
   type: 'buy' | 'add' | 'reduce' | 'exit' | 'wait' | 'skip';
 };
 
-function isJourneyEvent(item: TradingAgentActivityEntry): boolean {
+function isJourneyEvent(item: TradingAgentActivityEntry, liveExchangeOnly = false): boolean {
   const t = item.type.toUpperCase();
   const title = item.title.toUpperCase();
   if (t === 'NO_TRADE' || t === 'AI_REJECTED') return false;
   if (title.includes('NO TRADE') || title.includes('AI REJECTED')) return false;
+
+  if (liveExchangeOnly) {
+    if (t.includes('ORDER') || t.includes('PENDING') || t.includes('EXPIRED') || t.includes('SIGNAL')) {
+      return false;
+    }
+    if (title.includes('LIMIT') || title.includes('PENDING')) return false;
+    return (
+      t.includes('POSITION') ||
+      t.includes('CLOSE') ||
+      t.includes('EXIT') ||
+      t.includes('FILLED') ||
+      item.profitPct != null ||
+      (item.entryPrice != null && item.exitPrice != null)
+    );
+  }
+
   return (
     t.includes('POSITION') ||
     t.includes('TRADE') ||
@@ -31,8 +47,8 @@ function isJourneyEvent(item: TradingAgentActivityEntry): boolean {
   );
 }
 
-function activityToNodes(items: TradingAgentActivityEntry[]): JourneyNode[] {
-  return items.filter(isJourneyEvent).slice(0, 12).map((item) => {
+function activityToNodes(items: TradingAgentActivityEntry[], liveExchangeOnly = false): JourneyNode[] {
+  return items.filter((item) => isJourneyEvent(item, liveExchangeOnly)).slice(0, 12).map((item) => {
     const t = item.type.toLowerCase();
     let type: JourneyNode['type'] = 'exit';
     if (t.includes('expired') || t.includes('skip')) type = 'skip';
@@ -79,19 +95,24 @@ export function AgentTradeJourney({
   layout = 'vertical',
   showBalance = true,
   windowMinutes = 30,
+  liveExchangeOnly = false,
 }: {
   activity: TradingAgentActivityEntry[];
   liveBook?: TradingAgentDashboardState['liveBook'] | null;
   layout?: 'vertical' | 'horizontal';
   showBalance?: boolean;
   windowMinutes?: number;
+  /** Bitfinex live copy: real fills/positions only — no limit-order churn. */
+  liveExchangeOnly?: boolean;
 }) {
   const [showAllSession, setShowAllSession] = useState(false);
 
-  const mergedActivity = useMemo(
-    () => mergeDeskActivity(activity, liveBookToActivity(liveBook, 'journey')),
-    [activity, liveBook],
-  );
+  const mergedActivity = useMemo(() => {
+    if (liveExchangeOnly) {
+      return liveBookToActivity(liveBook, 'journey', 'positions-only');
+    }
+    return mergeDeskActivity(activity, liveBookToActivity(liveBook, 'journey'));
+  }, [activity, liveBook, liveExchangeOnly]);
 
   const windowed = useMemo(
     () =>
@@ -101,8 +122,14 @@ export function AgentTradeJourney({
     [mergedActivity, showAllSession, windowMinutes],
   );
 
-  const executed = useMemo(() => windowed.filter(isJourneyEvent), [windowed]);
-  const nodes = activityToNodes(executed);
+  const executed = useMemo(
+    () =>
+      liveExchangeOnly
+        ? filterLiveExchangeActivity(windowed)
+        : windowed.filter((item) => isJourneyEvent(item, false)),
+    [windowed, liveExchangeOnly],
+  );
+  const nodes = activityToNodes(executed, liveExchangeOnly);
   const [selected, setSelected] = useState<TradingAgentActivityEntry | null>(null);
 
   const activeSelected = selected ?? executed[0] ?? null;
@@ -123,7 +150,9 @@ export function AgentTradeJourney({
           </button>
         </div>
         <p className="mt-4 text-sm text-zinc-500">
-          No trades in this window yet — limit fills, closes, and relay events appear here as they happen.
+          {liveExchangeOnly
+            ? 'No filled positions or closed trades in this window — real Bitfinex fills and exits appear here.'
+            : 'No trades in this window yet — limit fills, closes, and relay events appear here as they happen.'}
         </p>
       </section>
     );
@@ -146,7 +175,9 @@ export function AgentTradeJourney({
         </button>
       </div>
       <p className="mt-1 text-xs text-zinc-500">
-        Executed trades, fills, and relay events · {executed.length} in view
+        {liveExchangeOnly
+          ? `Real exchange fills & positions · ${executed.length} in view`
+          : `Executed trades, fills, and relay events · ${executed.length} in view`}
       </p>
 
       <div
