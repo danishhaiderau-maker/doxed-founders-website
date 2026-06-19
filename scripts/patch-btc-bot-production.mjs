@@ -5,7 +5,7 @@
  * - ADMIN_MANUAL pause that health-check auto-recovery will not clear
  * - Railway PORT binding + early /health before slow preload (fixes healthcheck failure)
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -793,5 +793,149 @@ PATHWAY_SPAWN_LANE_POLICY_VERSION = 2`,
     );
     writeFileSync(TARGET, pathwayFix, 'utf8');
     console.log('Applied pathway limit-order policy markers to bot.py');
+  }
+}
+
+// ─── Showcase execution-only: suppress research telemetry on Railway (signal logic unchanged) ───
+let execOnlyFix = readFileSync(TARGET, 'utf8');
+let execOnlyChanged = false;
+
+const showcaseExecOnlyHelper = `def _showcase_execution_only() -> bool:
+    """Doxxedcrypto.digital Railway: exact signal replica, no research CSV/JSONL/telemetry writes."""
+    flag = os.getenv("SHOWCASE_EXECUTION_ONLY", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+
+`;
+
+if (!execOnlyFix.includes('def _showcase_execution_only()')) {
+  execOnlyFix = execOnlyFix.replace(
+    'def is_research_data_collection() -> bool:',
+    `${showcaseExecOnlyHelper}def is_research_data_collection() -> bool:`,
+  );
+  execOnlyChanged = true;
+}
+
+if (
+  execOnlyFix.includes('def dynamic_csv_writer(filename, row):') &&
+  !execOnlyFix.includes('if _showcase_execution_only():')
+) {
+  execOnlyFix = execOnlyFix.replace(
+    'def dynamic_csv_writer(filename, row):\n    last_err = None',
+    `def dynamic_csv_writer(filename, row):
+    if _showcase_execution_only():
+        return
+    last_err = None`,
+  );
+  execOnlyChanged = true;
+}
+
+if (
+  execOnlyFix.includes('def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):') &&
+  !execOnlyFix.includes('_showcase_execution_only():\n        return True')
+) {
+  execOnlyFix = execOnlyFix.replace(
+    `def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
+    """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    line = json.dumps(row, default=str) + "\\n"`,
+    `def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
+    """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    if _showcase_execution_only():
+        return True
+    line = json.dumps(row, default=str) + "\\n"`,
+  );
+  execOnlyChanged = true;
+}
+
+if (
+  execOnlyFix.includes('from feature_drift_monitor import build_report') &&
+  !execOnlyFix.includes('if _showcase_execution_only():\n                    pass')
+) {
+  execOnlyFix = execOnlyFix.replace(
+    `            if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
+                _last_feature_drift_ts = time.time()
+                try:
+                    from feature_drift_monitor import build_report as _build_feature_drift_report
+                    drift_report = _build_feature_drift_report()
+                    alerts = drift_report.get("alerts") or []
+                    if alerts:
+                        logger.warning(
+                            f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                            + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                            + " [PIPELINE ENFORCEMENT]"
+                        )
+                    else:
+                        logger.info(
+                            f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                            f"[PIPELINE ENFORCEMENT]"
+                        )
+                except Exception as e:
+                    logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")`,
+    `            if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
+                _last_feature_drift_ts = time.time()
+                if not _showcase_execution_only():
+                    try:
+                        from feature_drift_monitor import build_report as _build_feature_drift_report
+                        drift_report = _build_feature_drift_report()
+                        alerts = drift_report.get("alerts") or []
+                        if alerts:
+                            logger.warning(
+                                f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                                + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                                + " [PIPELINE ENFORCEMENT]"
+                            )
+                        else:
+                            logger.info(
+                                f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                                f"[PIPELINE ENFORCEMENT]"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")`,
+  );
+  execOnlyChanged = true;
+}
+
+if (
+  execOnlyFix.includes('snapshot["fresh_collection_mode"]') &&
+  !execOnlyFix.includes('"showcase_execution_only"')
+) {
+  execOnlyFix = execOnlyFix.replace(
+    'snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))',
+    `snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        snapshot["showcase_execution_only"] = _showcase_execution_only()`,
+  );
+  execOnlyChanged = true;
+}
+
+if (execOnlyChanged) {
+  writeFileSync(TARGET, execOnlyFix, 'utf8');
+  console.log('Applied showcase execution-only telemetry suppression to bot.py');
+}
+
+// execution_funnel.py — skip JSONL writes on Railway showcase
+const funnelPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'services/btc-conservative-agent/execution_funnel.py');
+if (existsSync(funnelPath)) {
+  let funnelSrc = readFileSync(funnelPath, 'utf8');
+  if (!funnelSrc.includes('def _showcase_execution_only()')) {
+    funnelSrc = funnelSrc.replace(
+      'def _append_jsonl(path: str, row: dict) -> None:',
+      `def _showcase_execution_only() -> bool:
+    flag = os.getenv("SHOWCASE_EXECUTION_ONLY", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+
+
+def _append_jsonl(path: str, row: dict) -> None:
+    if _showcase_execution_only():
+        return`,
+    );
+    writeFileSync(funnelPath, funnelSrc, 'utf8');
+    console.log('Applied showcase execution-only patch to execution_funnel.py');
   }
 }
