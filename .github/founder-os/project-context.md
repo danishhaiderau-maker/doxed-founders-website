@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-Merge remote master
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
