@@ -6616,6 +6616,8 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
 
 
 def dynamic_csv_writer(filename, row):
+    if _showcase_execution_only():
+        return
     last_err = None
     with csv_lock:
         for attempt in range(CSV_WRITE_RETRIES):
@@ -9491,6 +9493,15 @@ def evaluate_signal_with_ai(
             f"prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]"
         )
         return ai_result
+
+def _showcase_execution_only() -> bool:
+    """Doxxedcrypto.digital Railway: exact signal replica, no research CSV/JSONL/telemetry writes."""
+    flag = os.getenv("SHOWCASE_EXECUTION_ONLY", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
 
 def is_research_data_collection() -> bool:
     with state_lock:
@@ -12584,23 +12595,26 @@ def state_monitor_loop():
             global _last_feature_drift_ts
             if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
                 _last_feature_drift_ts = time.time()
-                try:
-                    from feature_drift_monitor import build_report as _build_feature_drift_report
-                    drift_report = _build_feature_drift_report()
-                    alerts = drift_report.get("alerts") or []
-                    if alerts:
-                        logger.warning(
-                            f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
-                            + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
-                            + " [PIPELINE ENFORCEMENT]"
-                        )
-                    else:
-                        logger.info(
-                            f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
-                            f"[PIPELINE ENFORCEMENT]"
-                        )
-                except Exception as e:
-                    logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
+                if _showcase_execution_only():
+                    pass
+                else:
+                    try:
+                        from feature_drift_monitor import build_report as _build_feature_drift_report
+                        drift_report = _build_feature_drift_report()
+                        alerts = drift_report.get("alerts") or []
+                        if alerts:
+                            logger.warning(
+                                f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                                + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                                + " [PIPELINE ENFORCEMENT]"
+                            )
+                        else:
+                            logger.info(
+                                f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                                f"[PIPELINE ENFORCEMENT]"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
             global _last_research_kpi_ts, _cached_research_kpis
             if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
                 try:
@@ -16000,6 +16014,7 @@ def api_state():
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        snapshot["showcase_execution_only"] = _showcase_execution_only()
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -18335,6 +18350,8 @@ def rotate_log(file):
 
 def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    if _showcase_execution_only():
+        return True
     line = json.dumps(row, default=str) + "\n"
     last_err = None
     for attempt in range(CSV_WRITE_RETRIES):
