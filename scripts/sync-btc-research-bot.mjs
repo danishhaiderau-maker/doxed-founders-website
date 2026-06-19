@@ -175,6 +175,10 @@ async function main() {
     const comboSrc = readFileSync(comboPath, 'utf8');
     writeFileSync(COMBOS_MIRROR, comboSrc, 'utf8');
     updateSignalEngineManifest(newHash, comboSrc);
+    const agentManifest = join(ROOT, 'services/btc-conservative-agent/manifest.json');
+    if (existsSync(MANIFEST_PATH)) {
+      writeFileSync(agentManifest, readFileSync(MANIFEST_PATH, 'utf8'));
+    }
   }
 
   console.log(`Research bot size: ${(finalSrc.length / 1024).toFixed(0)} KB`);
