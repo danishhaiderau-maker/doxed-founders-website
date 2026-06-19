@@ -73,6 +73,10 @@ const apiVars = {
   PRISMA_DB_PUSH: 'true',
   PRISMA_SCHEMA: 'prisma/schema.prisma',
   CORS_ORIGINS: cors,
+  SUBSCRIBER_EXECUTION_ENABLED: 'true',
+  SUBSCRIBER_EXECUTION_POLL_MS: '250',
+  SIGNAL_CYCLE_POLL_MS: '250',
+  SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
   ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
   ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
   ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
@@ -106,6 +110,8 @@ for (const project of data.projects?.edges?.map((e) => e.node) ?? []) {
       PORT: '5000',
       DASHBOARD_PORT: '5000',
       DASHBOARD_PUBLIC_URL: 'https://btc-conservative-agent-production.up.railway.app',
+      SHOWCASE_RELAY_WEBHOOK_URL:
+        'https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event',
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
     };
     console.log(`Sync ${project.name} / ${svc.name}…`);

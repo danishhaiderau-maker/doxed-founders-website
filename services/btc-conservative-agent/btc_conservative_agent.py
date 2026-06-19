@@ -13,6 +13,10 @@ import sys
 # Execution mirror flags — set before importing signal engine.
 os.environ.setdefault("SHOWCASE_EXECUTION_ONLY", "1")
 os.environ.setdefault("SHOWCASE_AGENT", "1")
+os.environ.setdefault(
+    "SHOWCASE_RELAY_WEBHOOK_URL",
+    "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
+)
 
 # Ensure service directory is on path for bot + showcase_ui imports.
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))

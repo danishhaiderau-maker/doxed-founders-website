@@ -154,10 +154,12 @@ export const SUBSCRIBER_CHASE_MIN_BUFFER_USD = 15;
 export const SUBSCRIBER_CHASE_NEAR_FILL_USD = 10;
 export const SUBSCRIBER_CHASE_MAX_GAP_CLOSE_PCT = 0.9;
 export const SUBSCRIBER_CHASE_STEP_PCT = 0.25;
-/** Matches bot LIMIT_CHASE_INTERVAL_SEC_DEFAULT (60s). */
+/** Autonomous chase when no bot limit anchor (legacy). */
 export const SUBSCRIBER_CHASE_INTERVAL_MS = 60_000;
-/** Near-fill zone: chase every tick (500ms poll) to mirror bot limit moves. */
-export const SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS = 500;
+/** Bot-anchored limit sync — match showcase limit moves within one poll tick. */
+export const SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS = 250;
+/** Near-fill zone: chase every tick to mirror bot limit moves. */
+export const SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS = 250;
 /** Scenario C thesis fast-cut (margin %) — bot THESIS_FAST_EXIT_UNREAL_PCT. */
 export const SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT = -12;
 /** Skip thesis fast-cut when peak ever reached this margin % — bot THESIS_MFE_PROTECT_PCT. */
@@ -202,6 +204,20 @@ export function resolveMaxConcurrentCopySignals(opts?: {
 }
 
 export type VirtualLotExitReason = 'PROFIT_LOCK' | 'THESIS_FAST_CUT' | 'HARD_STOP' | null;
+
+/** Subscriber lot exit — defers thesis/profit-lock when showcase-mirror-only (default). */
+export function evaluateSubscriberLotExit(opts: {
+  unrealMarginPct: number;
+  peakMarginPct: number;
+  stopLossMarginPct?: number;
+  showcaseMirrorOnly?: boolean;
+}): { reason: VirtualLotExitReason; lockFloor?: number } {
+  const result = evaluateScenarioCLotExit(opts);
+  const mirrorOnly = opts.showcaseMirrorOnly ?? true;
+  if (!mirrorOnly) return result;
+  if (result.reason === 'HARD_STOP') return result;
+  return { reason: null };
+}
 
 /** Scenario C exit evaluation per virtual lot (margin %, same formula as showcase bot). */
 export function evaluateScenarioCLotExit(opts: {

@@ -5,13 +5,13 @@ export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
 
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS. */
-export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 500;
+export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 250;
 
 /** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS. */
-export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 500;
+export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 250;
 
-/** Minimum allowed poll interval (ms) — 0.5s for tight bot copy parity. */
-export const MIN_SUBSCRIBER_POLL_MS = 500;
+/** Minimum allowed poll interval (ms) — 100ms for instant showcase relay wake. */
+export const MIN_SUBSCRIBER_POLL_MS = 100;
 
 export function resolveSubscriberMaxMarginUsd(input?: {
   envValue?: string | number | null;

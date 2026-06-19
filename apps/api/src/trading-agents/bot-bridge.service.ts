@@ -13,7 +13,7 @@ export class BotBridgeService {
   private readonly logger = new Logger(BotBridgeService.name);
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
-  private cacheMs = 8000;
+  private cacheMs = 1000;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -33,6 +33,11 @@ export class BotBridgeService {
   invalidateCache() {
     this.cached = null;
     this.lastFetchAt = 0;
+  }
+
+  /** Execution paths bypass cache for instant showcase parity. */
+  async fetchStateForExecution(force = true): Promise<BotApiState | null> {
+    return this.fetchState(force);
   }
 
   async fetchState(force = false): Promise<BotApiState | null> {

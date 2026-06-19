@@ -162,33 +162,33 @@ export class SignalCyclesService implements OnModuleInit {
     return { userId: row.userId, agentId: row.agentId, keyId: row.id };
   }
 
-  async pollBotForIntents() {
-    if (!this.botBridge.isEnabled()) return;
+  async pollBotForIntents(): Promise<boolean> {
+    if (!this.botBridge.isEnabled()) return false;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
     });
-    if (!agent) return;
+    if (!agent) return false;
 
-    const bot = await this.botBridge.fetchState(true);
-    if (!bot) return;
+    const bot = await this.botBridge.fetchStateForExecution(true);
+    if (!bot) return false;
 
     const lao = extractBotApproveSnapshot(bot);
-    if (!lao?.trade_id) return;
-    if (lao.trade_id === this.lastSeenTradeId) return;
-    if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return;
+    if (!lao?.trade_id) return false;
+    if (lao.trade_id === this.lastSeenTradeId) return false;
+    if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
     const existing = await this.prisma.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId: agent.id, tradeId: lao.trade_id } },
     });
     if (existing) {
       this.lastSeenTradeId = lao.trade_id;
-      return;
+      return false;
     }
 
     const cycleId = `cyc_${randomBytes(8).toString('hex')}`;
     const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
     const envelope = buildIntentEnvelope(cycleId, lao.trade_id, bot, { maxMarginUsd });
-    if (!envelope) return;
+    if (!envelope) return false;
 
     const ttlSec = envelope.entry.ttl_sec;
     await this.prisma.signalCycle.create({
@@ -205,9 +205,24 @@ export class SignalCyclesService implements OnModuleInit {
     });
     this.lastSeenTradeId = lao.trade_id;
     this.logger.log(`Signal cycle INTENT ${cycleId} trade=${lao.trade_id}`);
+    return true;
   }
 
-  async syncShowcaseCycleClosures() {
+  /** Push wake from showcase bot — returns true when a new INTENT was created. */
+  async wakeFromShowcase(opts?: { intents?: boolean; closures?: boolean }) {
+    const intents = opts?.intents !== false;
+    const closures = opts?.closures !== false;
+    let created = false;
+    if (intents) {
+      created = await this.pollBotForIntents();
+    }
+    if (closures) {
+      await this.syncShowcaseCycleClosures(true);
+    }
+    return created;
+  }
+
+  async syncShowcaseCycleClosures(force = false) {
     if (!this.botBridge.isEnabled()) return;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
@@ -223,20 +238,36 @@ export class SignalCyclesService implements OnModuleInit {
     });
     if (!openCycles.length) return;
 
-    const bot = await this.botBridge.fetchState();
+    const bot = await this.botBridge.fetchStateForExecution(force);
     if (!bot) return;
 
     const trades = bot.trades ?? [];
+    const tradesMap = bot.trades_map ?? {};
     for (const cycle of openCycles) {
       const trade = trades.find((t) => t.trade_id === cycle.tradeId);
-      if (trade?.exit != null && trade.pnl != null) {
+      const mapEntry = tradesMap[cycle.tradeId] as
+        | { signal_ref?: Record<string, unknown> }
+        | undefined;
+      const sigRef = mapEntry?.signal_ref;
+      const mapClosed =
+        sigRef &&
+        String(sigRef.status ?? '') === 'CLOSED' &&
+        (sigRef.exit_price != null || sigRef.closed_ts != null);
+      const listedClosed = trade?.exit != null && trade.pnl != null;
+
+      if (listedClosed || mapClosed) {
+        const netPnl =
+          trade?.net_pnl_usd ??
+          (typeof sigRef?.net_pnl_usd === 'number' ? Number(sigRef.net_pnl_usd) : trade?.pnl);
         await this.prisma.signalCycle.update({
           where: { id: cycle.id },
           data: {
             status: SignalCycleStatus.CLOSED,
             closedAt: new Date(),
-            showcasePnlUsd: trade.net_pnl_usd ?? trade.pnl,
-            showcaseExitReason: trade.exit_reason ?? 'SHOWCASE_CLOSED',
+            showcasePnlUsd: netPnl ?? undefined,
+            showcaseExitReason:
+              trade?.exit_reason ??
+              (typeof sigRef?.exit_reason === 'string' ? sigRef.exit_reason : 'SHOWCASE_CLOSED'),
           },
         });
       } else if (cycle.expiresAt && cycle.expiresAt < new Date() && cycle.status === SignalCycleStatus.INTENT) {

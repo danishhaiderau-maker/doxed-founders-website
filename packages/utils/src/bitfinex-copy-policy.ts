@@ -2,7 +2,14 @@
  * Frozen Bitfinex live-copy policy (NestJS relay).
  * NOT overwritten by bybit_bot.py / sync-btc-research-bot — real money execution lives here.
  */
-export const BITFINEX_COPY_POLICY_VERSION = 1;
+export const BITFINEX_COPY_POLICY_VERSION = 2;
+
+/** When true (default), subscribers exit only on showcase close + exchange hard stop — no independent Scenario C. */
+export function isShowcaseMirrorOnlyMode(): boolean {
+  const raw = process.env.SUBSCRIBER_SHOWCASE_MIRROR_ONLY;
+  if (raw === 'false' || raw === '0') return false;
+  return true;
+}
 
 /** Showcase dashboard max_active_signals drives copy concurrency when bot bridge is up. */
 export const BITFINEX_COPY_DEFAULT_MAX_CONCURRENT = 3;

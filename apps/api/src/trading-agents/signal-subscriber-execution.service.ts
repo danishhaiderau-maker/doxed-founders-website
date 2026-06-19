@@ -15,13 +15,15 @@ import {
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
   SUBSCRIBER_CHASE_INTERVAL_MS,
   SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS,
+  SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS,
   computeLimitFromMark,
   computeStopPrice,
   computeProfitLockStopPrice,
   computeQty,
   computeLimitChaseTarget,
   computeUnrealizedMarginPct,
-  evaluateScenarioCLotExit,
+  evaluateSubscriberLotExit,
+  isShowcaseMirrorOnlyMode,
   isNearChaseFillZone,
   sanitizeLimitPrice,
   getProfitLockFloor,
@@ -44,7 +46,8 @@ const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
 const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
-const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 500;
+const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
+const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 
 type ExecutionPayload = {
   bitfinexOrderId?: number;
@@ -97,6 +100,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly positionRuntime = new Map<string, PositionRuntime>();
   private readonly exitingLots = new Set<string>();
   private running = false;
+  private wakeQueued = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -121,6 +125,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
     setInterval(() => void this.tick(), POLL_MS);
     setTimeout(() => void this.tick(), POLL_MS);
+  }
+
+  /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
+  async wakeNow() {
+    if (!executionEnabled()) return;
+    if (this.running) {
+      this.wakeQueued = true;
+      return;
+    }
+    await this.tick();
   }
 
   private async tick() {
@@ -188,6 +202,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     } finally {
       this.running = false;
+      if (this.wakeQueued) {
+        this.wakeQueued = false;
+        setImmediate(() => void this.tick());
+      }
     }
   }
 
@@ -377,7 +395,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
 
     const maxConcurrent = await this.resolveMaxConcurrentSignals();
-    const botStateForCap = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    const botStateForCap = this.botBridge.isEnabled()
+      ? await this.botBridge.fetchStateForExecution(true)
+      : null;
     const botMaxRaw = botStateForCap?.max_active_signals;
     const botMax =
       typeof botMaxRaw === 'number'
@@ -914,7 +934,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
 
       if (tradeId && this.botBridge.isEnabled()) {
-        const botState = await this.botBridge.fetchState().catch(() => null);
+        const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
         const botLimit = this.resolveBotLimitPrice(botState, tradeId);
         if (botLimit != null && botLimit > 0) {
           const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
@@ -1388,11 +1408,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const now = Date.now();
     const mark = await this.activeTrading.getMarkPrice();
     const nearFill = isNearChaseFillZone(meta.direction, meta.limitPrice, mark);
-    const chaseInterval = nearFill ? CHASE_NEAR_FILL_INTERVAL_MS : CHASE_INTERVAL_MS;
+    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchStateForExecution(true) : null;
+    const botLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
+    const chaseInterval =
+      botLimit != null && botLimit > 0
+        ? CHASE_BOT_ANCHOR_MS
+        : nearFill
+          ? CHASE_NEAR_FILL_INTERVAL_MS
+          : CHASE_INTERVAL_MS;
     if (!immediate && now - lastChaseAtMs < chaseInterval) return;
 
-    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
-    const botLimit = tradeId ? this.resolveBotLimitPrice(botState, tradeId) : null;
     if (botLimit != null && botLimit > 0) {
       const safeBot = sanitizeLimitPrice(mark, botLimit, meta.direction);
       if (safeBot != null && Math.abs(safeBot - meta.limitPrice) >= 0.01) {
@@ -1409,6 +1434,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (nearFill) return;
+
+    if (isShowcaseMirrorOnlyMode()) return;
 
     const originalLimit = meta.originalLimitPrice ?? meta.limitPrice;
     const { newLimit, reason } = computeLimitChaseTarget(
@@ -1557,10 +1584,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
 
-    const { reason: exitReason, lockFloor } = evaluateScenarioCLotExit({
+    const { reason: exitReason, lockFloor } = evaluateSubscriberLotExit({
       unrealMarginPct,
       peakMarginPct: runtime.peakMarginPct,
       stopLossMarginPct,
+      showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
     });
 
     if (exitReason) {
