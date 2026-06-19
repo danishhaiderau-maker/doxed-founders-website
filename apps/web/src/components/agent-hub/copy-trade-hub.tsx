@@ -8,6 +8,8 @@ import {
   formatUsd,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
+  type CopyRelayLimitChainSnapshot,
+  type TradeLifecycleIntegritySnapshot,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
@@ -92,6 +94,9 @@ export function CopyTradeDetailsStrip({
   liveBook,
   copyRelayReconcile,
   copyRelaySim,
+  copyRelayLimitChain,
+  tradeLifecycleIntegrity,
+  instanceStatus,
   mode,
 }: {
   agent: TradingAgentSummary;
@@ -99,6 +104,9 @@ export function CopyTradeDetailsStrip({
   liveBook?: TradingAgentDashboardState['liveBook'] | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelaySim?: CopyRelaySimState | null;
+  copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
+  tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  instanceStatus?: string | null;
   mode: 'live' | 'sim' | null;
 }) {
   if (!mode) return null;
@@ -109,6 +117,11 @@ export function CopyTradeDetailsStrip({
   const reconcile = copyRelayReconcile ?? copyRelaySim?.reconcile ?? null;
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaBad = reconcile?.alert ?? Math.abs(delta) > 0.001;
+  const limitChain = copyRelayLimitChain;
+  const limitBad = limitChain != null && !limitChain.aligned;
+  const lifecycle = tradeLifecycleIntegrity;
+  const lifecycleBad = lifecycle != null && lifecycle.integrityPct < 100;
+  const paused = instanceStatus === 'PAUSED';
 
   return (
     <section className="rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-950/90 to-emerald-950/10 p-5">
@@ -118,10 +131,14 @@ export function CopyTradeDetailsStrip({
         </h3>
         <span
           className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-            mode === 'sim' ? 'bg-sky-500/20 text-sky-200' : 'bg-emerald-500/20 text-emerald-200'
+            mode === 'sim'
+              ? 'bg-sky-500/20 text-sky-200'
+              : paused
+                ? 'bg-amber-500/20 text-amber-200'
+                : 'bg-emerald-500/20 text-emerald-200'
           }`}
         >
-          {mode === 'sim' ? 'Relay simulation' : 'Live relay'}
+          {mode === 'sim' ? 'Relay simulation' : paused ? 'Relay paused' : 'Live relay'}
         </span>
       </div>
 
@@ -165,14 +182,61 @@ export function CopyTradeDetailsStrip({
         <div
           className={`mt-4 rounded-xl border px-4 py-3 text-xs ${
             deltaBad
-              ? 'border-red-500/40 bg-red-950/20 text-red-100'
+              ? 'border-red-500/60 bg-red-950/35 text-red-50 ring-2 ring-red-500/30'
               : 'border-emerald-500/30 bg-emerald-950/15 text-emerald-100'
           }`}
         >
-          <strong>Ledger sync:</strong> exchange {reconcile.exchangePositionQty.toFixed(5)} BTC · ledger{' '}
-          {reconcile.ledgerOpenQty.toFixed(5)} BTC · Δ {delta >= 0 ? '+' : ''}
-          {delta.toFixed(5)} · {reconcile.openLots} open / {reconcile.pendingLots} pending lots
-          {deltaBad ? ' — reconcile alert' : ' — in sync'}
+          {deltaBad ? (
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-red-300">
+              Red alert — exchange desync
+            </p>
+          ) : null}
+          <p className={deltaBad ? 'mt-1' : ''}>
+            <strong>Exchange authority:</strong> exchange qty{' '}
+            <span className="font-mono">{reconcile.exchangePositionQty.toFixed(5)}</span> BTC · ledger
+            qty <span className="font-mono">{reconcile.ledgerOpenQty.toFixed(5)}</span> BTC · Δ{' '}
+            <span className="font-mono">
+              {delta >= 0 ? '+' : ''}
+              {delta.toFixed(5)}
+            </span>{' '}
+            BTC · {reconcile.openLots} open / {reconcile.pendingLots} pending lots
+            {deltaBad ? ' — reconcile healing active' : ' — in sync'}
+          </p>
+        </div>
+      ) : null}
+
+      {limitChain ? (
+        <div
+          className={`mt-3 rounded-xl border px-4 py-3 text-xs ${
+            limitBad
+              ? 'border-amber-500/50 bg-amber-950/25 text-amber-100'
+              : 'border-zinc-800 bg-black/25 text-zinc-300'
+          }`}
+        >
+          <strong>Limit chain:</strong> configured{' '}
+          <span className="font-mono">{limitChain.configuredLimit ?? '—'}</span> · relay{' '}
+          <span className="font-mono">{limitChain.relayLimit ?? '—'}</span> · execution{' '}
+          <span className="font-mono">
+            {limitChain.executionOpen}+{limitChain.executionPending}={limitChain.executionTotal}
+          </span>
+          {limitBad ? ' — mismatch or over capacity' : ' — aligned'}
+        </div>
+      ) : null}
+
+      {lifecycle && lifecycle.sampleSize > 0 ? (
+        <div
+          className={`mt-3 rounded-xl border px-4 py-3 text-xs ${
+            lifecycleBad
+              ? 'border-amber-500/50 bg-amber-950/25 text-amber-100'
+              : 'border-zinc-800 bg-black/25 text-zinc-300'
+          }`}
+        >
+          <strong>Lifecycle integrity:</strong>{' '}
+          <span className="font-mono text-sm font-bold">{lifecycle.integrityPct}%</span> (
+          {lifecycle.completeCount}/{lifecycle.sampleSize} trades complete ORDER→FILLED→EXIT)
+          {lifecycleBad && lifecycle.recentGaps.length > 0
+            ? ` — gap on ${lifecycle.recentGaps[0]?.tradeId} missing ${lifecycle.recentGaps[0]?.missingStages.join(', ')}`
+            : ''}
         </div>
       ) : null}
 

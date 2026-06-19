@@ -3558,6 +3558,9 @@ export interface TradingAgentDashboard {
   copyRelaySim?: import('@dcf/utils').CopyRelaySimState | null;
   relaySimLiveBook?: import('@dcf/utils').TradingAgentDashboardState['liveBook'] | null;
   copyRelayReconcile?: import('@dcf/utils').CopyRelayReconcileSnapshot | null;
+  copyRelayCapacity?: import('@dcf/utils').CopyRelayCapacitySnapshot | null;
+  copyRelayLimitChain?: import('@dcf/utils').CopyRelayLimitChainSnapshot | null;
+  tradeLifecycleIntegrity?: import('@dcf/utils').TradeLifecycleIntegritySnapshot | null;
 }
 
 export interface TradingAgentActivityEntry {
