@@ -118,6 +118,30 @@ export type BotApiState = {
     final_direction?: string;
     ai_direction_raw?: string;
   }>;
+  leverage?: number;
+  pullback_threshold?: number;
+  last_approve_outcome?: {
+    trade_id?: string;
+    status?: string;
+    reason?: string;
+    edge_at_approve?: number;
+    effective_threshold?: number;
+    win_prob?: number;
+    direction?: string;
+    ts?: string;
+  };
+  trades_map?: Record<
+    string,
+    {
+      signal_ref?: {
+        status?: string;
+        exit_reason?: string;
+        exit_price?: number;
+        closed_ts?: number;
+        net_pnl_usd?: number;
+      };
+    }
+  >;
   signal_info?: {
     count?: number;
     active?: boolean;

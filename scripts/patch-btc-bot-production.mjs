@@ -1023,6 +1023,72 @@ if (mirrorFix.includes('from research_kpi_engine import refresh_all_research_kpi
   mirrorChanged = true;
 }
 
+if (!mirrorFix.includes('def _relay_trades_map_lite()')) {
+  mirrorFix = mirrorFix.replace(
+    'def _collect_dashboard_active_signals(',
+    `def _relay_trades_map_lite() -> dict:
+    """Slim trades_map for NestJS relay closure sync (no full signal dump)."""
+    lite = {}
+    with trade_lock:
+        for tid, entry in trades_map.items():
+            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+            if not isinstance(sig, dict):
+                continue
+            lite[str(tid)] = {
+                "signal_ref": {
+                    "status": sig.get("status"),
+                    "exit_reason": sig.get("exit_reason"),
+                    "exit_price": sig.get("exit_price"),
+                    "closed_ts": sig.get("closed_ts"),
+                    "net_pnl_usd": sig.get("net_pnl_usd"),
+                }
+            }
+    return lite
+
+
+def _enrich_orders_for_relay(snapshot: dict) -> None:
+    signals = ((snapshot.get("signal_info") or {}).get("signals") or [])
+    by_id = {s.get("trade_id"): s for s in signals if s.get("trade_id")}
+    for oc in snapshot.get("orders") or []:
+        sig = by_id.get(oc.get("trade_id"))
+        if not sig:
+            continue
+        oc["limit_chase_count"] = sig.get("limit_chase_count")
+        oc["chase_3plus_virtual_chase_count"] = sig.get("chase_3plus_virtual_chase_count")
+        oc["ttl_remaining"] = sig.get("ttl_remaining")
+        oc["research_lane"] = sig.get("research_lane")
+        if oc.get("limit_price") is None:
+            oc["limit_price"] = sig.get("limit_price")
+
+
+def _collect_dashboard_active_signals(`,
+  );
+  mirrorChanged = true;
+}
+
+if (
+  mirrorFix.includes('"signals": active_list,') &&
+  !mirrorFix.includes('_enrich_orders_for_relay(snapshot)')
+) {
+  mirrorFix = mirrorFix.replace(
+    `        snapshot["signal_info"] = {
+            "active": len(active_list) > 0,
+            "count": get_active_signal_count(),
+            "max": get_effective_max_active_signals(),
+            "signals": active_list,
+        }`,
+    `        snapshot["signal_info"] = {
+            "active": len(active_list) > 0,
+            "count": get_active_signal_count(),
+            "max": get_effective_max_active_signals(),
+            "signals": active_list,
+        }
+        _enrich_orders_for_relay(snapshot)
+        snapshot["trades_map"] = _relay_trades_map_lite()`,
+  );
+  mirrorChanged = true;
+}
+
 if (mirrorChanged) {
   writeFileSync(TARGET, mirrorFix, 'utf8');
   console.log('Applied execution mirror write gates + runtime_mode to bot.py');

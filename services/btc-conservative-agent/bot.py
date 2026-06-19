@@ -5328,6 +5328,27 @@ def get_dynamic_flat_momentum_floor(base: float = None) -> float:
     t = (base - FLAT_MOMENTUM_FLOOR_LOW_EDGE) / span
     return round(FLAT_MOMENTUM_FLOOR_LOW_EDGE + t * (FLAT_MOMENTUM_EDGE_FLOOR - FLAT_MOMENTUM_FLOOR_LOW_EDGE), 1)
 
+def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
+    """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
+    url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    if not url:
+        return
+    secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+    payload = {"event": event, "trade_id": trade_id, "ts": utc_iso()}
+    if extra and isinstance(extra, dict):
+        payload.update(extra)
+
+    def _post():
+        try:
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if secret:
+                headers["X-Bot-Control-Secret"] = secret
+            requests.post(url, json=payload, headers=headers, timeout=2.5)
+        except Exception as exc:
+            logger.debug(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
+
+    threading.Thread(target=_post, daemon=True).start()
+
 def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None):
     with state_lock:
         state["last_approve_outcome"] = {
@@ -5340,6 +5361,10 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "win_prob": (ai or {}).get("win_prob") or state.get("last_ai", {}).get("win_prob"),
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
+    if status == "PENDING" and trade_id:
+        _push_showcase_relay_event("APPROVE_PENDING", trade_id)
+    elif status == "EXECUTED" and trade_id:
+        _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
     """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
@@ -13443,6 +13468,11 @@ def close_position(pos: dict, exit_reason: str):
         logger.error("State corrupted after closing position")
         set_execution_paused("ENGINE_FAILURE")
     logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
+    _push_showcase_relay_event(
+        "POSITION_CLOSED",
+        trade_id,
+        {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
+    )
     candidate_signal["active"] = False
     clear_pending_trade()
     pipeline_state_sync()
@@ -15761,6 +15791,41 @@ def dashboard():
     return render_template_string(page)
 
 
+def _relay_trades_map_lite() -> dict:
+    """Slim trades_map for NestJS relay closure sync (no full signal dump)."""
+    lite = {}
+    with trade_lock:
+        for tid, entry in trades_map.items():
+            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+            if not isinstance(sig, dict):
+                continue
+            lite[str(tid)] = {
+                "signal_ref": {
+                    "status": sig.get("status"),
+                    "exit_reason": sig.get("exit_reason"),
+                    "exit_price": sig.get("exit_price"),
+                    "closed_ts": sig.get("closed_ts"),
+                    "net_pnl_usd": sig.get("net_pnl_usd"),
+                }
+            }
+    return lite
+
+
+def _enrich_orders_for_relay(snapshot: dict) -> None:
+    signals = ((snapshot.get("signal_info") or {}).get("signals") or [])
+    by_id = {s.get("trade_id"): s for s in signals if s.get("trade_id")}
+    for oc in snapshot.get("orders") or []:
+        sig = by_id.get(oc.get("trade_id"))
+        if not sig:
+            continue
+        oc["limit_chase_count"] = sig.get("limit_chase_count")
+        oc["chase_3plus_virtual_chase_count"] = sig.get("chase_3plus_virtual_chase_count")
+        oc["ttl_remaining"] = sig.get("ttl_remaining")
+        oc["research_lane"] = sig.get("research_lane")
+        if oc.get("limit_price") is None:
+            oc["limit_price"] = sig.get("limit_price")
+
+
 def _collect_dashboard_active_signals(
     pending_orders_list,
     positions_list,
@@ -16013,6 +16078,8 @@ def api_state():
             "max": get_effective_max_active_signals(),
             "signals": active_list,
         }
+        _enrich_orders_for_relay(snapshot)
+        snapshot["trades_map"] = _relay_trades_map_lite()
         snapshot.setdefault("diag", {})
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()

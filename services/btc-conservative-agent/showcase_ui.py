@@ -71,6 +71,13 @@ SHOWCASE_HTML = """<!DOCTYPE html>
     .ai-summary { margin-top: 8px; padding: 10px; background: #0d1117; border-radius: 6px; font-size: 0.85rem; line-height: 1.45; color: #c9d1d9; }
     .sync-ok { color: #3fb950; }
     .sync-warn { color: #d29922; }
+    .hero-order { border: 2px solid #388bfd; background: linear-gradient(135deg, #0d1117 0%, #161b22 100%); }
+    .hero-order h2 { margin: 0 0 12px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em; color: #58a6ff; }
+    .hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .hero-grid .lbl { font-size: 0.72rem; color: #8b949e; text-transform: uppercase; }
+    .hero-grid .num { font-size: 1.15rem; font-weight: 700; margin-top: 4px; }
+    .reject-box { margin-top: 10px; padding: 10px; border-radius: 6px; background: #1c1214; border: 1px solid #f8514944; }
+    .reject-box h4 { margin: 0 0 8px; font-size: 0.72rem; color: #f85149; text-transform: uppercase; }
   </style>
 </head>
 <body>
@@ -82,6 +89,11 @@ SHOWCASE_HTML = """<!DOCTYPE html>
       <button class="btn danger" id="freshStartBtn" onclick="freshStart()">Fresh start ($500)</button>
       <span class="muted" id="lastReset">—</span>
       <span class="muted" id="refreshTs">—</span>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Pending limit order</div>
+      <div class="card hero-order" id="pendingHero"><span class="muted">No pending limit — waiting for signal</span></div>
     </div>
 
     <div class="section">
@@ -212,6 +224,58 @@ SHOWCASE_HTML = """<!DOCTYPE html>
       ];
     }
 
+    function pickPending(s) {
+      const orders = s.orders || [];
+      if (orders.length) return orders[0];
+      const sigs = (s.signal_info && s.signal_info.signals) || [];
+      return sigs.find(x => x.status === 'ORDERED' || x.status === 'PENDING') || sigs[0] || null;
+    }
+
+    function renderPendingHero(s) {
+      const p = pickPending(s);
+      if (!p) return '<span class="muted">No pending limit — waiting for signal</span>';
+      const side = (p.side || p.dir || p.final_direction || '—').toString().toUpperCase();
+      const ageSec = p.ttl_remaining != null
+        ? null
+        : ((p.age_min || p.age / 60 || 0) * 60);
+      const ttlLeft = p.ttl_remaining != null
+        ? Math.max(0, Number(p.ttl_remaining))
+        : Math.max(0, LIMIT_TTL_SEC - (ageSec || 0));
+      const chase = p.limit_chase_count ?? p.chase_3plus_virtual_chase_count ?? 0;
+      const qty = p.qty != null ? Number(p.qty).toFixed(4) : '—';
+      const price = p.limit_price != null ? '$' + Number(p.limit_price).toLocaleString() : '—';
+      const ageLabel = p.age_min != null ? fmtAge(p.age_min * 60) : (p.age != null ? fmtAge(p.age) : '—');
+      return '<h2>Pending limit order</h2><div class="hero-grid">' +
+        '<div><div class="lbl">Side</div><div class="num">' + esc(side) + '</div></div>' +
+        '<div><div class="lbl">Price</div><div class="num">' + price + '</div></div>' +
+        '<div><div class="lbl">Size</div><div class="num">' + qty + ' BTC</div></div>' +
+        '<div><div class="lbl">Age</div><div class="num">' + ageLabel + '</div></div>' +
+        '<div><div class="lbl">Chase</div><div class="num">' + chase + '</div></div>' +
+        '<div><div class="lbl">TTL remaining</div><div class="num">' + fmtAge(ttlLeft) + '</div></div>' +
+        '</div><p class="muted" style="margin-top:10px">Lane: ' + esc(p.research_lane || '—') + '</p>';
+    }
+
+    function buildAiRejectDetail(s) {
+      const la = s.last_ai || {};
+      const dbg = s.debug_state || {};
+      const thr = s.ai_threshold ?? 65;
+      if (la.decision !== 'REJECT' && la.decision !== 'AI_REJECT') return '';
+      const prob = la.win_prob != null ? la.win_prob + '%' : '—';
+      const struct = dbg.edge_components?.structure_score ?? dbg.last_edge_score ?? '—';
+      const spread = dbg.edge_components?.directional_spread ?? dbg.directional_spread ?? '—';
+      const parts = [
+        'Confidence: ' + prob,
+        'Required: ' + thr + '%',
+        'Structure edge: ' + struct,
+        'Spread: ' + spread,
+      ];
+      const ctx = la.comment || la.reason || (s.display_ai && s.display_ai.note) || '';
+      return '<div class="reject-box"><h4>AI rejected because</h4><ul style="margin:0;padding-left:18px;line-height:1.6">' +
+        parts.map(x => '<li>' + esc(x) + '</li>').join('') +
+        (ctx ? '<li>' + esc(String(ctx).slice(0, 280)) + '</li>' : '') +
+        '</ul></div>';
+    }
+
     function rejectionReason(s) {
       const la = s.last_ai || {};
       const disp = s.display_skip_block || {};
@@ -232,7 +296,9 @@ SHOWCASE_HTML = """<!DOCTYPE html>
       let html = '<table><thead><tr><th>Side</th><th>Limit</th><th>Qty</th><th>Age</th><th>TTL left</th><th>Lane</th></tr></thead><tbody>';
       for (const o of orders) {
         const ageSec = (o.age_min || 0) * 60;
-        const ttlLeft = Math.max(0, LIMIT_TTL_SEC - ageSec);
+        const ttlLeft = o.ttl_remaining != null
+          ? Math.max(0, Number(o.ttl_remaining))
+          : Math.max(0, LIMIT_TTL_SEC - ageSec);
         html += '<tr><td>' + esc(o.side || o.dir || '—') + '</td><td>' +
           (o.limit_price != null ? '$' + Number(o.limit_price).toLocaleString() : '—') + '</td><td>' +
           (o.qty != null ? Number(o.qty).toFixed(4) : '—') + '</td><td>' + fmtAge(ageSec) + '</td><td>' +
@@ -292,6 +358,8 @@ SHOWCASE_HTML = """<!DOCTYPE html>
         document.getElementById('priceMeta').textContent =
           (s.regime || '—') + ' · ws ' + (s.diag && s.diag.ws_status ? s.diag.ws_status : (s.data_source || '—'));
 
+        document.getElementById('pendingHero').innerHTML = renderPendingHero(s);
+
         const laneSpec = findBenchmarkLane(s.pathway_lane_specs);
         const entry = laneSpec && laneSpec.entry ? laneSpec.entry : {};
         const exit = laneSpec && laneSpec.exit ? laneSpec.exit : {};
@@ -342,7 +410,8 @@ SHOWCASE_HTML = """<!DOCTYPE html>
           'Decision': esc(la.decision || (s.display_ai && s.display_ai.status) || '—'),
         });
         const summary = la.comment || la.reason || (s.display_ai && s.display_ai.note) || '';
-        document.getElementById('aiSummary').textContent = summary ? summary.slice(0, 400) : 'No AI summary yet.';
+        document.getElementById('aiSummary').innerHTML = buildAiRejectDetail(s) +
+          (summary && la.decision !== 'REJECT' ? '<div class="ai-summary">' + esc(summary.slice(0, 400)) + '</div>' : '');
 
         const pipe = buildPipeline(s);
         document.getElementById('pipeline').innerHTML = pipe.map(([k,v]) =>
@@ -398,7 +467,8 @@ def _blocked_handler():
 
 def load_manifest_versions() -> dict:
     """Load signal engine manifest for sync status."""
-    manifest_path = Path(__file__).resolve().parent.parent / "btc-signal-engine" / "manifest.json"
+    local = Path(__file__).resolve().parent / "manifest.json"
+    manifest_path = local if local.is_file() else Path(__file__).resolve().parent.parent / "btc-signal-engine" / "manifest.json"
     if not manifest_path.is_file():
         return {}
     try:

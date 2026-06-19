@@ -120,7 +120,9 @@
     "stop:dev": "powershell -ExecutionPolicy Bypass -File scripts/stop-dev.ps1",
     "secrets:link": "powershell -ExecutionPolicy Bypass -File scripts/link-secrets.ps1",
     "secrets:strip": "powershell -ExecutionPolicy Bypass -File scripts/strip-repo-secrets.ps1",
-    "audit:export": "node scripts/prepare-audit-export.mjs",
+    "watch:relay-sim": "node scripts/watch-copy-relay-sim.mjs --hours=24 --interval=120",
+    "snapshot:relay-sim": "node scripts/relay-sim-snapshot-once.mjs",
+    "prepare:bitfinex-relay-test": "node scripts/prepare-bitfinex-relay-test.mjs",
     "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs"
   },
   "devDependencies": {
