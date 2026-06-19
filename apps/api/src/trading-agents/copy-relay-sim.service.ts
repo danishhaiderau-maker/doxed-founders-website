@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { BotBridgeService } from './bot-bridge.service';
+import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
 
 @Injectable()
@@ -53,10 +54,10 @@ export class CopyRelaySimService {
     sim.ledger = emptyCopyRelaySimState(COPY_RELAY_SIM_DEFAULT_BALANCE_USD).ledger;
 
     const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
-    const botStats = bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
-    if (botStats) {
-      sim.showcasePnlUsd = 0;
-      sim.showcaseTradeCount = 0;
+    if (bot && typeof bot === 'object') {
+      const stats = mapBotStateToAgentStats(bot as BotApiState);
+      sim.showcasePnlUsd = stats.sessionPnlUsd;
+      sim.showcaseTradeCount = stats.tradeCount;
     }
 
     await this.prisma.tradingAgentInstance.update({
@@ -216,11 +217,10 @@ export class CopyRelaySimService {
     const ledger = client?.getLedger() ?? sim.ledger;
     const sessionPnlUsd = client ? client.sessionPnlUsd(mark) : sim.sessionPnlUsd;
     const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
-    const botStats =
-      bot && typeof bot === 'object' ? (bot as { stats?: Record<string, unknown> }).stats : null;
-    const showcasePnlUsd = botStats
-      ? Number(botStats.session_pnl_usd ?? botStats.total_pnl_usd ?? 0)
-      : sim.showcasePnlUsd;
+    const showcasePnlUsd =
+      bot && typeof bot === 'object'
+        ? mapBotStateToAgentStats(bot as BotApiState).sessionPnlUsd
+        : sim.showcasePnlUsd;
 
     await this.prisma.tradingAgentInstance.update({
       where: { id: instanceId },

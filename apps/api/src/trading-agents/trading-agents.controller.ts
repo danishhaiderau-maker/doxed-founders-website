@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { TradingAgentKind } from '@prisma/client';
 import { AuthUser } from '../auth/auth.types';
@@ -6,6 +6,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { ShowcaseRelayEventsService, type ShowcaseRelayEventBody } from './showcase-relay-events.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsService } from './trading-agents.service';
 
@@ -15,6 +16,7 @@ export class TradingAgentsController {
     private readonly tradingAgents: TradingAgentsService,
     private readonly instances: TradingAgentInstancesService,
     private readonly relaySim: CopyRelaySimService,
+    private readonly showcaseRelay: ShowcaseRelayEventsService,
   ) {}
 
   @Public()
@@ -92,6 +94,17 @@ export class TradingAgentsController {
   @Post(':slug/instance/resume')
   resumeInstance(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.setInstancePaused(user.id, slug, false);
+  }
+
+  @Public()
+  @Post(':slug/showcase-relay-event')
+  showcaseRelayEvent(
+    @Param('slug') slug: string,
+    @Headers('x-bot-control-secret') secret: string | undefined,
+    @Body() body: ShowcaseRelayEventBody,
+  ) {
+    this.showcaseRelay.assertAuthorized(secret);
+    return this.showcaseRelay.ingest(slug, body);
   }
 
   @Post(':slug/relay-sim/start')

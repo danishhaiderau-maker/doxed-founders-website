@@ -46,6 +46,28 @@ function log(line) {
   fs.appendFileSync(logFile, row + '\n');
 }
 
+function showcaseSessionPnlFromBot(bot) {
+  if (!bot || typeof bot !== 'object') return 0;
+  const start = Number(bot.bot_start_time ?? 0);
+  const trades = Array.isArray(bot.trades) ? bot.trades : [];
+  if (trades.length > 0) {
+    return trades.reduce((sum, t) => {
+      const net = Number(t?.net_pnl_usd ?? 0);
+      return sum + (Number.isFinite(net) ? net : 0);
+    }, 0);
+  }
+  const balance = Number(bot.account_balance ?? 500);
+  return Number.isFinite(balance) ? balance - 500 : 0;
+}
+
+function formatUserLabel(user) {
+  if (!user) return 'unknown';
+  const raw = user.platformHandle ?? user.name ?? '';
+  if (typeof raw === 'string' && raw.trim()) {
+    return raw.replace(/\s*·\s*undefined\s*$/i, '').trim() || raw.trim();
+  }
+  return user.name?.trim() || 'user';
+}
 function readSimState(dash) {
   if (!dash || typeof dash !== 'object') return { active: false };
   const raw = /** @type {Record<string, unknown>} */ (dash).copyRelaySim;
@@ -72,9 +94,7 @@ async function snapshot() {
     log(`WARN bot fetch: ${e instanceof Error ? e.message : e}`);
   }
 
-  const showcasePnl = Number(
-    bot.stats?.total_pnl_usd ?? bot.stats?.session_pnl_usd ?? bot.session_pnl_usd ?? 0,
-  );
+  const showcasePnl = showcaseSessionPnlFromBot(bot);
 
   const instances = await prisma.tradingAgentInstance.findMany({
     where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
@@ -89,7 +109,7 @@ async function snapshot() {
     if (!sim.active) continue;
     simCount += 1;
 
-    const who = inst.user?.platformHandle ?? inst.user?.name ?? inst.userId;
+    const who = formatUserLabel(inst.user) || inst.userId;
     const since = sim.startedAt ? new Date(sim.startedAt) : new Date(0);
     const reconcile =
       (dash.copyRelayReconcile ?? sim.reconcile) && typeof dash === 'object'
