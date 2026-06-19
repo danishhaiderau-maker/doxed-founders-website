@@ -25,6 +25,8 @@ import {
   isNearChaseFillZone,
   sanitizeLimitPrice,
   getProfitLockFloor,
+  buildCopyRelayCapacity,
+  type CopyRelayCapacitySnapshot,
   type VirtualLotExitReason,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -34,6 +36,7 @@ import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interfac
 import { SignalCyclesService } from './signal-cycles.service';
 import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
@@ -101,6 +104,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     private readonly cycles: SignalCyclesService,
     private readonly botBridge: BotBridgeService,
     private readonly relaySim: CopyRelaySimService,
+    private readonly cycleAudit: TradeCycleAuditService,
   ) {
     this.activeTrading = this.bitfinex;
   }
@@ -294,7 +298,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const meta = await this.loadExecutionMeta(participant.id);
 
       if (participant.status === SignalCycleStatus.PENDING_ENTRY) {
-        if (exitOnly) continue;
         managedOpenTrade = true;
         await this.monitorEntry(
           agentId,
@@ -304,6 +307,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           meta,
           creds,
           activeOrderIdSet,
+          exitOnly,
         );
         continue;
       }
@@ -372,7 +376,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
 
+    const maxConcurrent = await this.resolveMaxConcurrentSignals();
+    const botStateForCap = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    const botMaxRaw = botStateForCap?.max_active_signals;
+    const botMax =
+      typeof botMaxRaw === 'number'
+        ? botMaxRaw
+        : typeof botMaxRaw === 'string'
+          ? Number.parseInt(botMaxRaw, 10)
+          : null;
+
     if (exitOnly) {
+      await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
       if (managedOpenTrade) {
         await this.prisma.tradingAgentInstance.update({
           where: { id: instance.id },
@@ -385,8 +400,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    const maxConcurrent = await this.resolveMaxConcurrentSignals();
-    const botState = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+    await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
+
+    const botState = botStateForCap;
     if (botState?.execution_paused) {
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
@@ -435,6 +451,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         intent.direction,
       );
       if (!eligibility.canEnter) {
+        this.cycleAudit.stage('CAPACITY_REJECT', {
+          userId: instance.userId,
+          agentId,
+          cycleId: cycle.id,
+          tradeId: cycle.tradeId,
+          detail: eligibility.reason ?? 'capacity',
+          meta: {
+            open: lotSummary.open,
+            pending: lotSummary.pending + entriesThisTick,
+            limit: maxConcurrent,
+          },
+        });
+        await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax, {
+          reason: eligibility.reason,
+        });
         if (entriesThisTick === 0) {
           await this.prisma.tradingAgentInstance.update({
             where: { id: instance.id },
@@ -524,6 +555,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     return { open, pending, direction, openQty };
   }
 
+  private async persistCapacityState(
+    instance: TradingAgentInstance,
+    lotSummary: VirtualLotSummary,
+    maxConcurrent: number,
+    botMax: number | null,
+    reject?: { reason: string | null } | null,
+  ) {
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const prev = dash.copyRelayCapacity as CopyRelayCapacitySnapshot | undefined;
+    const capacity = buildCopyRelayCapacity({
+      open: lotSummary.open,
+      pending: lotSummary.pending,
+      capacityLimit: maxConcurrent,
+      source:
+        botMax != null && Number.isFinite(botMax)
+          ? 'showcase_dashboard'
+          : process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS
+            ? 'env_override'
+            : 'default',
+      showcaseMaxActiveSignals: botMax,
+      lastRejectReason: reject?.reason ?? prev?.lastRejectReason ?? null,
+      lastRejectAt: reject?.reason ? new Date().toISOString() : (prev?.lastRejectAt ?? null),
+    });
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        dashboardState: { ...dash, copyRelayCapacity: capacity },
+      },
+    });
+  }
+
   private async reconcileLotLedger(
     agentId: string,
     instance: TradingAgentInstance,
@@ -594,6 +656,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     if (reconcile.alert) {
+      this.cycleAudit.stage('RECONCILE', {
+        userId: instance.userId,
+        agentId,
+        detail: `exchange ${exchangeQty.toFixed(5)} ledger ${ledgerOpenQty.toFixed(5)} Δ ${delta.toFixed(5)}`,
+        meta: { reconcile },
+      });
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
         data: {
@@ -726,9 +794,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
 
+    const totalLegs = managed.open + managed.pending;
+
+    if (totalLegs >= maxConcurrent) {
+      return {
+        canEnter: false,
+        reason: `Capacity cap: OPEN(${managed.open}) + PENDING(${managed.pending}) = ${totalLegs} >= limit ${maxConcurrent} (showcase max_active_signals).`,
+        availableUsd: available,
+        slotsRemaining: 0,
+      };
+    }
+
     const maxByMargin = Math.max(0, Math.floor((available * 0.95) / marginCap));
     const maxLegs = Math.min(maxConcurrent, maxByMargin);
-    const totalLegs = managed.open + managed.pending;
 
     if (totalLegs >= maxLegs) {
       return {
@@ -878,6 +956,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       ...payload,
     });
 
+    this.cycleAudit.stage('ORDER_PLACED', {
+      userId: instance.userId,
+      agentId,
+      cycleId,
+      tradeId,
+      venue,
+      meta: { qty, limitPrice, orderId },
+    });
+
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId, userId: instance.userId } },
       });
@@ -932,6 +1019,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
     activeOrderIdSet: Set<number>,
+    exitOnly = false,
   ) {
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
     const orderId = meta.bitfinexOrderId;
@@ -963,6 +1051,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? activeOrderIdSet.has(orderId)
         : !!(await this.activeTrading.findOrder(creds, orderId).catch(() => null));
     if (active) {
+      if (exitOnly) return;
       await this.applyLimitChase(
         agentId,
         userId,
@@ -1044,6 +1133,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
       source: 'hire',
+    });
+
+    this.cycleAudit.stage('FILLED', {
+      userId,
+      agentId,
+      cycleId: cycle.id,
+      participantId: participant.id,
+      tradeId: cycle.tradeId,
+      meta: { fillPrice, qty },
+    });
+    this.cycleAudit.stage('OPEN', {
+      userId,
+      agentId,
+      cycleId: cycle.id,
+      participantId: participant.id,
+      tradeId: cycle.tradeId,
     });
 
     await this.healStuckPendingFill(participant.id, cycle.id, fillPrice);
