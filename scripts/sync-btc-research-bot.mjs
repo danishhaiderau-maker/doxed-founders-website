@@ -14,6 +14,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const TARGET = join(ROOT, 'services/btc-conservative-agent/bot.py');
+const ENGINE_MIRROR = join(ROOT, 'services/btc-signal-engine/engine.py');
+const MANIFEST_PATH = join(ROOT, 'services/btc-signal-engine/manifest.json');
+const COMBOS_MIRROR = join(ROOT, 'services/btc-signal-engine/combos.py');
 const REPO = process.env.BTC_RESEARCH_REPO ?? 'danishhaiderau-maker/bybit-15m-research-bot';
 const SOURCE_FILE = process.env.BTC_RESEARCH_FILE ?? 'bybit_bot.py';
 /** Extra modules the research bot imports — must ship with Railway service. */
@@ -86,6 +89,22 @@ function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
 
+function updateSignalEngineManifest(engineHash, comboSrc) {
+  const versionMatch = comboSrc.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/);
+  const engineVersion = versionMatch?.[1] ?? 'unknown';
+  const manifest = {
+    engine_version: engineVersion,
+    combo_version: new Date().toISOString().slice(0, 10),
+    exit_version: 'scenario-c-v4',
+    benchmark_lane: 'COMBO_65_SP5_CHASE_3PLUS',
+    signal_hash: engineHash,
+    source: `${REPO}/${SOURCE_FILE}`,
+    updated_at: new Date().toISOString(),
+  };
+  writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  console.log(`Updated ${MANIFEST_PATH} (engine=${engineVersion} hash=${engineHash})`);
+}
+
 function applyProductionPatches() {
   execSync('node scripts/patch-btc-bot-production.mjs', { cwd: ROOT, stdio: 'inherit' });
 }
@@ -148,15 +167,32 @@ async function main() {
   const finalSrc = readFileSync(TARGET, 'utf8');
   const newHash = sha256(finalSrc);
 
+  writeFileSync(ENGINE_MIRROR, finalSrc, 'utf8');
+  console.log(`Mirrored signal engine → ${ENGINE_MIRROR}`);
+
+  const comboPath = join(ROOT, 'services/btc-conservative-agent/combo_pathway_config.py');
+  if (existsSync(comboPath)) {
+    const comboSrc = readFileSync(comboPath, 'utf8');
+    writeFileSync(COMBOS_MIRROR, comboSrc, 'utf8');
+    updateSignalEngineManifest(newHash, comboSrc);
+  }
+
   console.log(`Research bot size: ${(finalSrc.length / 1024).toFixed(0)} KB`);
   console.log(`Hash: ${newHash}${oldHash ? ` (was ${oldHash})` : ''}`);
 
   if (oldHash === newHash) {
     console.log('Already up to date — no changes.');
+    if (existsSync(comboPath)) {
+      const comboSrc = readFileSync(comboPath, 'utf8');
+      writeFileSync(COMBOS_MIRROR, comboSrc, 'utf8');
+      updateSignalEngineManifest(newHash, comboSrc);
+    }
+    writeFileSync(ENGINE_MIRROR, finalSrc, 'utf8');
     return;
   }
 
   console.log(`Updated ${TARGET}`);
+  console.log('Railway entry: python btc_conservative_agent.py (execution wrapper)');
   console.log('Push to master → Railway redeploys btc-conservative-agent automatically.');
   console.log(
     'IMPORTANT: DeepSeek + Bitfinex keys come from Admin Control (/admin/control), NOT from bybit_bot.py.',

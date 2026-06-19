@@ -1,0 +1,9 @@
+research/
+analyzer_research_engine_v62.py
+research_dashboard.py
+execution_insight_report.py
+__pycache__/
+*.pyc
+.env
+exports/
+logs/

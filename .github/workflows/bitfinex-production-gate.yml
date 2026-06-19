@@ -15,3 +15,4 @@ jobs:
           node-version: '20'
       - run: node scripts/verify-bitfinex-production-lock.mjs
       - run: node scripts/verify-bitfinex-policy-lock.mjs
+      - run: node scripts/verify-signal-parity.mjs

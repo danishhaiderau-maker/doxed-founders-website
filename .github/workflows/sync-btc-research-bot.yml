@@ -36,10 +36,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet services/btc-conservative-agent/bot.py; then
+          if git diff --quiet services/btc-conservative-agent/bot.py services/btc-signal-engine/; then
             echo "No bot changes."
             exit 0
           fi
-          git add services/btc-conservative-agent/bot.py
-          git commit -m "chore(bot): sync conservative BTC agent from bybit-15m-research-bot"
+          git add services/btc-conservative-agent/bot.py services/btc-conservative-agent/combo_pathway_config.py services/btc-signal-engine/
+          git commit -m "chore(bot): sync signal engine from bybit-15m-research-bot"
           git push
