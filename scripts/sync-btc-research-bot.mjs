@@ -94,14 +94,20 @@ function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
 
+function extractEngineVersion(comboSrc) {
+  const direct = comboSrc.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/);
+  if (direct?.[1]) return direct[1];
+  const stack = comboSrc.match(/RESEARCH_STACK_VERSION\s*=\s*"([^"]+)"/);
+  return stack?.[1] ?? 'unknown';
+}
+
 function updateSignalEngineManifest(engineHash, comboSrc) {
-  const versionMatch = comboSrc.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/);
-  const engineVersion = versionMatch?.[1] ?? 'unknown';
+  const engineVersion = extractEngineVersion(comboSrc);
   const manifest = {
     engine_version: engineVersion,
     combo_version: new Date().toISOString().slice(0, 10),
     exit_version: 'scenario-c-v4',
-    benchmark_lane: 'COMBO_65_SP5_CHASE_3PLUS',
+    benchmark_lane: 'CONTINUOUS',
     signal_hash: engineHash,
     source: `${REPO}/${SOURCE_FILE}`,
     updated_at: new Date().toISOString(),

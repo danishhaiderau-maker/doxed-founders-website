@@ -14098,6 +14098,7 @@ logger.addHandler(file_handler)
 
 FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC = 3600
 _last_fresh_maintain_ts = 0.0
+_fresh_collection_lock = threading.Lock()
 
 # Analyzer outputs — must be wiped with CSVs on fresh collection or dashboard shows stale PnL.
 ANALYZER_TEXT_OUTPUTS = (
@@ -14250,6 +14251,8 @@ def _delete_paths(paths) -> tuple:
             if os.path.exists(path):
                 os.remove(path)
                 deleted.append(path)
+        except PermissionError as e:
+            errors.append(f"{path}: locked — {e}")
         except Exception as e:
             errors.append(f"{path}: {e}")
     return deleted, errors
@@ -14287,6 +14290,22 @@ def maintain_fresh_collection_files():
 
 def perform_fresh_collection_reset() -> dict:
     """Dashboard-triggered archive+wipe: never delete without verified archive first."""
+    if not _fresh_collection_lock.acquire(blocking=False):
+        logger.warning("[FRESH COLLECTION] Reset already in progress — ignored duplicate request [PIPELINE ENFORCEMENT]")
+        return {
+            "ok": False,
+            "wipe_aborted": True,
+            "error": "reset_already_in_progress",
+            "summary": "Reset already running — wait a few seconds and refresh",
+        }
+    try:
+        return _perform_fresh_collection_reset_locked()
+    finally:
+        _fresh_collection_lock.release()
+
+
+def _perform_fresh_collection_reset_locked() -> dict:
+    """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     try:
         archive_path = archive_research_session(reason="fresh_collection_dashboard")
@@ -14320,6 +14339,8 @@ def perform_fresh_collection_reset() -> dict:
     _write_research_session(bot_start_time, fresh_collection_reset=True)
     load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    for err in errors:
+        logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
     with state_lock:
         state["last_fresh_reset_ts"] = time.time()
         state["last_fresh_reset_summary"] = summary
@@ -14403,15 +14424,62 @@ def _recovery_monster_exit_spec():
     }
 
 
+def _pathway_shared_execution_spec() -> dict:
+    """Frozen execution defaults shown on every Pathway Lab tile."""
+    try:
+        chase_step = get_limit_chase_step_pct()
+    except Exception:
+        chase_step = LIMIT_CHASE_STEP_PCT_DEFAULT
+    cd = int(RESEARCH_AI_COOLDOWN_SEC)
+    cd_min = max(1, round(cd / 60))
+    return {
+        "ai_scan_cadence_sec": cd,
+        "ai_scan_cadence_label": f"~{cd}s (~{cd_min} min) AI_SCAN periodic DeepSeek",
+        "limit_chase_enabled": limit_chase_enabled(),
+        "limit_chase_step_pct": chase_step,
+        "limit_chase_label": f"25% limit chase (step={chase_step * 100:.0f}% of distance)",
+        "margin_usd": float(FIXED_MARGIN_USDT),
+        "signal_ttl_min": max(1, int(SIGNAL_TTL_SEC // 60)),
+        "post_ai_gates": "log-only telemetry (sole-AI research — gates do not block tiles)",
+        "independence": "Per-tile lock · toggle · orders · CSV · tick replay",
+    }
+
+
+def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
+    """Human-readable strategy block for dashboard tiles (architecture frozen)."""
+    shared = _pathway_shared_execution_spec()
+    lines = [
+        str(entry.get("spawn") or entry.get("trigger") or entry.get("ai_path") or "—"),
+        f"Entry: {entry.get('execution') or entry.get('entry_path') or '—'}",
+        f"Chase: {entry.get('chase_detail') or shared['limit_chase_label']}",
+        f"AI cadence: {entry.get('ai_cadence') or shared['ai_scan_cadence_label']}",
+        f"Exit: {exit.get('profile')} · ladder {exit.get('ladder')}",
+        f"Thesis stop: {exit.get('thesis_stop_margin_pct')}% margin unreal",
+        f"MFE protect: peak ≥{exit.get('mfe_protect_margin_pct')}% margin → skip fast thesis cut",
+        f"Thesis pause above: +{exit.get('thesis_pause_above_margin_pct')}% unreal",
+        f"Time cap: {exit.get('fixed_time_exit')}",
+        f"Margin: ${entry.get('margin_usd', shared['margin_usd']):.0f} · signal TTL {shared['signal_ttl_min']}m",
+        f"Post-AI: {shared['post_ai_gates']}",
+    ]
+    if extra:
+        lines.extend(extra)
+    return lines
+
+
 def build_static_pathway_lane_specs() -> dict:
-    """Combo Pathway Lab v2 — four independent execution tiles (2026-06-19)."""
+    """Combo Pathway Lab v2 — tile specs for dashboard (architecture frozen; change tiles only)."""
     scenario_c = _scenario_c_exit_spec()
+    shared = _pathway_shared_execution_spec()
+    chase_detail = shared["limit_chase_label"]
+    ai_cadence = shared["ai_scan_cadence_label"]
     ai_direct = {
         "entry_path": "AI_DIRECT",
         "fill_path": "AI_DIRECT_CHASE",
-        "ai_path": "AI_SCAN periodic approve",
-        "post_ai_gates": "log-only telemetry",
-        "margin_usd": float(FIXED_MARGIN_USDT),
+        "ai_path": "AI_SCAN periodic → spawn on APPROVE",
+        "ai_cadence": ai_cadence,
+        "chase_detail": chase_detail,
+        "post_ai_gates": shared["post_ai_gates"],
+        "margin_usd": shared["margin_usd"],
     }
     promote = "Per-trade EV > COMBO_65_SP5_CHASE_3PLUS benchmark"
     kill = "EV <= benchmark over rolling window"
@@ -14446,6 +14514,8 @@ def build_static_pathway_lane_specs() -> dict:
                 f"AI {ai_label}",
                 f"Spread {spread_label}",
                 entry_mode_label,
+                "25% chase",
+                "Scenario C",
             ],
             "toggle_key": "research_lane_enabled",
             "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
@@ -14468,14 +14538,24 @@ def build_static_pathway_lane_specs() -> dict:
             "expected_risk": "TYPE_A drag if filters too loose — monitor exit leakage",
             "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
             "diff_vs_benchmark": [
-                f"Entry: {entry_mode_label} vs Continuous Direct proxy",
+                f"Entry: {entry_mode_label} vs CONTINUOUS benchmark",
                 f"Filters: AI {ai_label} spread {spread_label}",
+                "Beat benchmark on EV/appr to promote",
             ],
+            "strategy_detail": _strategy_detail_lines(
+                {
+                    "spawn": f"Spawn on AI_SCAN APPROVE · filters {trigger}",
+                    "execution": execution,
+                    **ai_direct,
+                },
+                scenario_c,
+                [f"Independence: {shared['independence']}"],
+            ),
         })
     lanes.append({
         "lane": RESEARCH_LANE_CONTINUOUS,
         "label": RESEARCH_LANE_LABELS.get(RESEARCH_LANE_CONTINUOUS, "Continuous AI Research"),
-        "subtitle": "Benchmark yardstick · toggle ON = limit orders · OFF = shadow data only",
+        "subtitle": "BENCHMARK · beat this lane on EV/appr · toggle ON = limits + chase",
         "role": "continuous_direct_benchmark",
         "status": "BENCHMARK",
         "is_benchmark": True,
@@ -14483,28 +14563,53 @@ def build_static_pathway_lane_specs() -> dict:
         "badge": "BENCHMARK",
         "tile_number": 5,
         "entry_mode_label": "Continuous",
-        "filter_chips": ["AI_SCAN mirror", "Scenario C", "Toggle orders"],
+        "filter_chips": [
+            f"AI ~{shared['ai_scan_cadence_sec']}s",
+            "AI_SCAN mirror",
+            "Scenario C",
+            "25% chase",
+            "Toggle orders",
+        ],
         "toggle_key": "continuous_ai_research_enabled",
-        "hypothesis": "Aggregate of immediate-entry COMBO Direct lanes — comparison index for all tiles.",
-        "research_question": "Does each tile beat the Continuous Direct entry yardstick on EV/appr?",
+        "hypothesis": "Yardstick lane — every tile must beat CONTINUOUS on EV/appr vs approves.",
+        "research_question": "Does each combo/experimental tile beat CONTINUOUS benchmark?",
         "entry": {
-            "trigger": "Proxy: COMBO_65_SP5_DIRECT + COMBO_604_SP4_DIRECT",
+            "spawn": "Spawn on every AI_SCAN DeepSeek result (APPROVE + REJECT logged)",
+            "trigger": "CONTINUOUS_FROM_AI_SCAN after each AI_SCAN call",
             "entry_path": "AI_DIRECT",
             "fill_path": "AI_DIRECT_CHASE",
-            "ai_path": "AI_SCAN periodic approve",
-            "post_ai_gates": "log-only telemetry",
-            "margin_usd": float(FIXED_MARGIN_USDT),
-            "execution": "Immediate limit + 25% chase + Scenario C",
-            "filters": {"entry_mode": "IMMEDIATE", "proxy_lanes": list(CONTINUOUS_PROXY_LANES)},
+            "ai_path": "AI_SCAN mirror (same AI decision, no second DeepSeek)",
+            "ai_cadence": ai_cadence,
+            "chase_detail": chase_detail,
+            "post_ai_gates": shared["post_ai_gates"],
+            "margin_usd": shared["margin_usd"],
+            "execution": "Immediate AI-direct limit + 25% chase + Scenario C (toggle ON)",
+            "orders": "Toggle ON → limit orders; OFF → shadow/data only (no limits)",
+            "filters": {"spawn": "AI_SCAN_MIRROR", "entry_mode": "IMMEDIATE"},
         },
         "exit": scenario_c,
-        "exit_path": "Scenario C frozen — exit combo optimization next",
-        "promotion_criteria": "N/A — benchmark index",
+        "exit_path": "Scenario C frozen — ladder + thesis + MFE (see strategy block)",
+        "promotion_criteria": "N/A — benchmark index (other tiles beat this)",
         "kill_criteria": "N/A — benchmark index",
-        "expected_advantage": "Stable yardstick for lane comparisons",
-        "expected_risk": "Proxy aggregate — not a live execution lane",
-        "benchmark_comparison": "BENCHMARK baseline",
+        "expected_advantage": "Continuous AI-direct baseline for all pathway comparisons",
+        "expected_risk": "Benchmark path — not a combo filter experiment",
+        "benchmark_comparison": "BENCHMARK baseline — all tiles compare here",
         "diff_vs_benchmark": [],
+        "strategy_detail": _strategy_detail_lines(
+            {
+                "spawn": "Spawn on every AI_SCAN DeepSeek result (APPROVE + REJECT logged)",
+                "execution": "Immediate AI-direct limit + 25% chase + Scenario C when toggle ON",
+                "ai_path": "AI_SCAN mirror (same AI decision, no second DeepSeek)",
+                "ai_cadence": ai_cadence,
+                "chase_detail": chase_detail,
+                "margin_usd": shared["margin_usd"],
+            },
+            scenario_c,
+            [
+                "Orders: dashboard toggle ON → limits; OFF → shadow replay only",
+                f"Independence: {shared['independence']}",
+            ],
+        ),
     })
     recovery_exit = _recovery_monster_exit_spec()
     exp_tile_start = len(COMBO_TILE_DISPLAY_ORDER) + 2
@@ -14544,9 +14649,22 @@ def build_static_pathway_lane_specs() -> dict:
             "expected_advantage": "Isolated alpha test vs combo tiles",
             "expected_risk": "Sparse spawn rate on filter-heavy tiles",
             "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
-            "diff_vs_benchmark": [f"Experimental: {lane_id}"],
+            "diff_vs_benchmark": [f"Experimental: {lane_id}", f"vs {COMPARISON_BENCHMARK_LANE} benchmark"],
+            "strategy_detail": _strategy_detail_lines(
+                {
+                    "spawn": f"Spawn on AI_SCAN {spec.get('spawn_on', 'APPROVE')}",
+                    "execution": "Immediate AI limit + 25% chase + Scenario C",
+                    **ai_direct,
+                },
+                exit_spec,
+                [f"Independence: {shared['independence']}"],
+            ),
         })
     return {
+        "architecture_frozen": True,
+        "architecture_freeze_note": "Pipeline/execution frozen — change tile labels, filters, toggles only unless explicitly approved",
+        "architecture_doc": "PATHWAY_ARCHITECTURE_FREEZE.md",
+        "shared_execution": shared,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
@@ -15019,7 +15137,8 @@ HTML = """<!DOCTYPE html>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Production</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">4 independent tiles · TYPE_B is post-trade only · PRIMARY_PRODUCTION = Tile 2 (AI65+ Spread5+ Chase 3+)</p>
+  <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
+  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">9 tiles · each independent · beat CONTINUOUS on EV/appr · PRIMARY_PRODUCTION = Tile 2 (AI65+ Spread5+ Chase 3+)</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
@@ -15279,6 +15398,7 @@ DASHBOARD_JS = """(function () {
       return p;
     }
     let laneToggleInFlight = false;
+    let freshCollectionInFlight = false;
     function laneBadge(lane, model) {
       const m = model || lane || '-';
       const colors = {
@@ -15618,7 +15738,18 @@ DASHBOARD_JS = """(function () {
             + statsGrid
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
             + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
-            + '<div style="margin-top:6px;font-size:0.78em;color:#8b949e;">Exit: ' + (exit.profile || 'Scenario C') + ' · ladder ' + (exit.ladder || '—') + '</div>'
+            + (function () {
+              const lines = spec.strategy_detail || [];
+              if (!lines.length) {
+                return '<div style="margin-top:6px;font-size:0.78em;color:#8b949e;">Exit: ' + (exit.profile || 'Scenario C') + ' · ladder ' + (exit.ladder || '—') + '</div>';
+              }
+              const body = lines.map(function (line) {
+                return '<div style="font-size:0.74em;color:#8b949e;line-height:1.4;">' + line + '</div>';
+              }).join('');
+              return '<div style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
+                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY (frozen)</div>'
+                + body + '</div>';
+            })()
             + '</div>';
         }).join('');
       } else if (tiles) {
@@ -15713,6 +15844,7 @@ DASHBOARD_JS = """(function () {
       refresh();
     }
     async function toggleFreshCollection() {
+      if (freshCollectionInFlight) return;
       const turningOn = document.getElementById('freshCollectionLabel').innerText.includes('OFF');
       if (turningOn) {
         const ok = confirm(
@@ -15720,16 +15852,33 @@ DASHBOARD_JS = """(function () {
         );
         if (!ok) return;
       }
-      const res = await post('/api/toggle_fresh_collection', {enabled: turningOn});
+      freshCollectionInFlight = true;
+      const freshBtn = document.getElementById('freshCollectionBtn');
+      if (freshBtn) freshBtn.disabled = true;
       try {
+        const res = await post('/api/toggle_fresh_collection', {enabled: turningOn});
         const body = await res.json();
         if (body.error) {
           alert('Fresh Collection blocked: ' + body.error);
+        } else if (body.reset && body.reset.ok === false) {
+          alert('Fresh Collection failed: ' + (body.reset.summary || body.reset.error || 'unknown'));
         } else if (body.reset && body.reset.summary) {
-          alert('Fresh collection reset complete: ' + body.reset.summary);
+          let msg = 'Fresh collection reset complete: ' + body.reset.summary;
+          if (body.reset.archive_path) {
+            msg += '\\n\\nArchived to: ' + body.reset.archive_path;
+          }
+          if (body.reset.errors && body.reset.errors.length) {
+            msg += '\\n\\nNote: some files were locked (usually analyzer log) and will be trimmed on next run:\\n' + body.reset.errors.slice(0, 5).join('\\n');
+          }
+          alert(msg);
         }
-      } catch (e) {}
-      refresh();
+      } catch (e) {
+        alert('Fresh Collection request failed: ' + e);
+      } finally {
+        freshCollectionInFlight = false;
+        if (freshBtn) freshBtn.disabled = false;
+        refresh();
+      }
     }
     function downloadDebug() {
       window.open('/api/export_debug', '_blank');
@@ -17020,6 +17169,12 @@ def toggle_fresh_collection():
             if state.get("live_armed"):
                 return jsonify({"error": "Disable LIVE ARM before fresh collection reset"}), 400
         result = perform_fresh_collection_reset()
+        if not result.get("ok"):
+            return jsonify({
+                "error": result.get("summary") or result.get("error") or "reset failed",
+                "fresh_collection_mode": bool(state.get("fresh_collection_mode")),
+                "reset": result,
+            }), 409
         return jsonify({"fresh_collection_mode": True, "reset": result})
     with state_lock:
         state["fresh_collection_mode"] = False
