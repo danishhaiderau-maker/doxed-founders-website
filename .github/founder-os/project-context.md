@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Remove Python bytecode cache from git tracking.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
