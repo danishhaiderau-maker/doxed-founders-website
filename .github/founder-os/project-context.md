@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(bitfinex): refresh policy lock after relay sim race fix
 
 ## Last Activity
 
