@@ -2,7 +2,9 @@
 Combo Pathway Lab v2 — four execution tiles + CONTINUOUS benchmark yardstick.
 
 PRIMARY_PRODUCTION: COMBO_65_SP5_CHASE_3PLUS (live deployable edge).
-COMPARISON_BENCHMARK: CONTINUOUS — yardstick index (Direct-entry proxy, no orders).
+COMPARISON_BENCHMARK: CONTINUOUS (Continuous AI Research) — AI_SCAN mirror every ~180s;
+  toggle ON = limit orders + 25% chase + Scenario C; OFF = shadow/data only.
+Architecture frozen — see PATHWAY_ARCHITECTURE_FREEZE.md (change tiles/filters only).
 """
 from __future__ import annotations
 
@@ -91,7 +93,7 @@ BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
 # Single release id — bot, analyzer, and research dashboard stay on one version string.
-RESEARCH_STACK_VERSION = "v9.80-continuous-benchmark-toggle-2026-06-20"
+RESEARCH_STACK_VERSION = "v9.81-architecture-freeze-tile-detail-2026-06-20"
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
 RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
