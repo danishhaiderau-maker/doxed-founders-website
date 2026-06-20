@@ -56,9 +56,14 @@
       "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
     },
     {
-      "id": "benchmark-flag",
-      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "id": "benchmark-flag-continuous",
+      "lane": "CONTINUOUS",
       "expect_benchmark": true
+    },
+    {
+      "id": "primary-not-benchmark",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "expect_benchmark": false
     }
   ]
 }
