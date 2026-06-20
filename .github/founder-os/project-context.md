@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Sync research bot v9.80 for Bitfinex showcase replica.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
