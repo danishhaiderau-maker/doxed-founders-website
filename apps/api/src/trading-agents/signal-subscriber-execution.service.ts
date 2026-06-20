@@ -58,6 +58,9 @@ type ExecutionPayload = {
   localMark?: number;
   qty?: number;
   direction?: 'LONG' | 'SHORT';
+  /** Exchange merged position qty (BTC) captured at ORDER_PLACED — avoids false fills. */
+  exchangeQtyAtOrder?: number;
+  margin_usd?: number;
   source?: 'hire';
   peakMarginPct?: number;
   profitLockFloor?: number;
@@ -249,6 +252,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     await this.reconcileFilledParticipants(instance.userId, agentId, participantSince);
 
+    await this.reconcileGhostOpenLots(
+      agentId,
+      instance.userId,
+      participantSince,
+      marginCap,
+    );
+
     await this.reconcileImmediateExchangeFlat(agentId, instance.userId, creds, participantSince);
 
     const MIN_INTENT_TTL_MS = 90_000;
@@ -316,7 +326,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
       if (!participant) continue;
 
-      const meta = await this.loadExecutionMeta(participant.id);
+      const meta = await this.resolveLotMeta(
+        participant.id,
+        cycle.id,
+        instance.userId,
+        agentId,
+        cycle.intentEnvelope,
+        marginCap,
+      );
 
       if (participant.status === SignalCycleStatus.PENDING_ENTRY) {
         managedOpenTrade = true;
@@ -361,6 +378,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             participant,
             meta,
             creds,
+            simActive,
           );
         await this.monitorExit(agentId, instance.userId, cycle, participant, meta, creds);
         }
@@ -563,10 +581,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     for (const p of participants) {
       const meta = await this.loadExecutionMeta(p.id);
+      let qty = meta.qty ?? 0;
+      if (qty <= MIN_QTY_BTC && meta.margin_usd && meta.limitPrice) {
+        qty = computeQty(
+          meta.margin_usd,
+          DEFAULT_SUBSCRIBER_LEVERAGE,
+          meta.limitPrice,
+          MIN_QTY_BTC,
+        );
+      }
       if (!meta.direction) continue;
       if (direction != null && meta.direction !== direction) continue;
       direction = meta.direction;
-      const qty = meta.qty ?? 0;
       if (p.status === SignalCycleStatus.OPEN) {
         open += 1;
         openQty += qty;
@@ -958,6 +984,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const leverage = intent.risk.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
+    const prePosition = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
+
     const orderId = await this.activeTrading.submitLimitOrder(creds, {
       direction: intent.direction,
       qty,
@@ -972,6 +1001,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       localMark: mark,
       qty,
       direction: intent.direction,
+      exchangeQtyAtOrder,
+      margin_usd: marginUsd,
       source: 'hire',
         lastChaseAtMs: 0,
         limitChaseCount: 0,
@@ -1111,6 +1142,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         venue: 'bitfinex',
         pnl_usd: 0,
         source: 'hire',
+      });
+      return;
+    }
+
+    const exchangeQtyAtOrder = meta.exchangeQtyAtOrder ?? 0;
+    const currentExchangeQty = Math.abs(position!.amount);
+    const lotQty = meta.qty ?? MIN_QTY_BTC;
+    const expectedMinQty = exchangeQtyAtOrder + lotQty * 0.85;
+    if (currentExchangeQty + MIN_QTY_BTC < expectedMinQty) {
+      this.logger.warn(
+        `Order ${orderId} gone but merged position ${currentExchangeQty.toFixed(5)} BTC did not grow for lot ${lotQty.toFixed(5)} (baseline ${exchangeQtyAtOrder.toFixed(5)}) — expire phantom pending`,
+      );
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+        venue: 'bitfinex',
+        pnl_usd: 0,
+        source: 'hire',
+        event: 'PHANTOM_FILL_REJECTED',
       });
       return;
     }
@@ -1306,6 +1354,52 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       this.logger.log(
         `Reconciled fill ${userId} cycle=${row.cycleId} ${meta.direction} @ ${fillPrice.toFixed(2)} qty=${qty}`,
+      );
+    }
+  }
+
+  private async reconcileGhostOpenLots(
+    agentId: string,
+    userId: string,
+    participantScope: { createdAt?: { gte: Date } } = {},
+    marginCap: number,
+  ) {
+    const ghosts = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId },
+        ...participantScope,
+      },
+      include: { cycle: true },
+    });
+
+    for (const row of ghosts) {
+      if (await this.hasParticipantExited(row.id)) continue;
+
+      const meta = await this.resolveLotMeta(
+        row.id,
+        row.cycleId,
+        userId,
+        agentId,
+        row.cycle.intentEnvelope,
+        marginCap,
+      );
+      if (meta.qty && meta.qty > MIN_QTY_BTC && meta.direction) continue;
+
+      const ageMs = Date.now() - row.updatedAt.getTime();
+      if (ageMs < 120_000) continue;
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+        venue: 'bitfinex',
+        pnl_usd: 0,
+        exit_reason: 'GHOST_LOT_REPAIRED',
+        event: 'GHOST_LOT_REPAIRED',
+        source: 'hire',
+      });
+      this.positionRuntime.delete(row.id);
+      this.logger.warn(
+        `Closed ghost OPEN lot ${userId} participant=${row.id} cycle=${row.cycleId} (missing qty/direction)`,
       );
     }
   }
@@ -1553,6 +1647,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     participant: { id: string; fillPrice: { toNumber?: () => number } | null },
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
+    simActive = false,
   ) {
     if (!meta.qty || !meta.direction) return;
     if (await this.hasParticipantExited(participant.id)) return;
@@ -1601,7 +1696,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       unrealMarginPct,
       peakMarginPct: runtime.peakMarginPct,
       stopLossMarginPct,
-      showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
+      // Relay sim: per-lot Scenario C exits (profit lock / thesis) for realistic soak tests.
+      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode(),
     });
 
     if (exitReason) {
@@ -2116,6 +2212,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       where: { participantId, eventType: 'EXIT' },
     });
     return exits > 0;
+  }
+
+  private async resolveLotMeta(
+    participantId: string,
+    cycleId: string,
+    userId: string,
+    agentId: string,
+    intentEnvelope: unknown,
+    marginCap: number,
+  ): Promise<ExecutionPayload> {
+    const meta = await this.loadExecutionMeta(participantId);
+    if (meta.qty && meta.qty > MIN_QTY_BTC && meta.direction) return meta;
+
+    const intent = intentEnvelope as SignalIntentEnvelope;
+    const direction = meta.direction ?? intent?.direction;
+    let limitPrice = meta.limitPrice ?? meta.originalLimitPrice;
+    if ((!limitPrice || limitPrice <= 0) && intent?.entry?.offset_pct != null && direction) {
+      const mark = await this.activeTrading.getMarkPrice().catch(() => null);
+      if (mark && mark > 0) {
+        const raw = computeLimitFromMark(mark, intent.entry.offset_pct);
+        limitPrice = sanitizeLimitPrice(mark, raw, direction) ?? limitPrice;
+      }
+    }
+    const leverage = intent?.risk?.leverage_hint ?? DEFAULT_SUBSCRIBER_LEVERAGE;
+    const marginUsd =
+      meta.margin_usd ??
+      (intent?.risk?.max_margin_usd && intent.risk.max_margin_usd > 0
+        ? Math.min(marginCap, intent.risk.max_margin_usd)
+        : marginCap);
+
+    let qty = meta.qty;
+    if ((!qty || qty <= MIN_QTY_BTC) && limitPrice && limitPrice > 0 && marginUsd > 0) {
+      qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
+    }
+
+    if (qty && qty > MIN_QTY_BTC && direction) {
+      if (!meta.qty || meta.qty <= MIN_QTY_BTC) {
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+          venue: 'bitfinex',
+          event: 'META_QTY_REPAIR',
+          qty,
+          direction,
+          margin_usd: marginUsd,
+          source: 'hire',
+        });
+        this.logger.warn(
+          `Repaired missing lot meta ${userId} participant=${participantId} qty=${qty.toFixed(5)}`,
+        );
+      }
+      return { ...meta, qty, direction, margin_usd: marginUsd };
+    }
+
+    return meta;
   }
 
   private async loadExecutionMeta(participantId: string): Promise<ExecutionPayload> {
