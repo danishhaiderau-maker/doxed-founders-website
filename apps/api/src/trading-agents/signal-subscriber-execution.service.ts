@@ -1345,9 +1345,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         stop_loss_placed: stopOrderId != null,
         stop_loss_margin_pct: stopLossMarginPct,
         stopOrderId: stopOrderId ?? undefined,
+        stop_price: stopOrderId != null ? stopPrice : undefined,
         source: 'hire',
         event: 'EXCHANGE_FILL_RECONCILE',
       });
+
+      if (stopOrderId != null) {
+        await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'STOP_LOSS_ARMED', {
+          venue: 'bitfinex',
+          stop_price: stopPrice,
+          stopOrderId,
+          qty,
+          source: 'hire',
+        });
+      }
 
       await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
       gap -= qty;
@@ -1732,6 +1743,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       source: 'hire',
     });
         this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${meta.qty}`);
+      }
+    } else if (meta.stopOrderId && fillPrice > 0) {
+      const armed = await this.prisma.signalCycleEvent.count({
+        where: { participantId: participant.id, eventType: 'STOP_LOSS_ARMED' },
+      });
+      if (armed === 0) {
+        const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
+          venue: 'bitfinex',
+          stop_price: stopPrice,
+          stopOrderId: meta.stopOrderId,
+          qty: meta.qty,
+          source: 'hire',
+          event: 'STOP_LOSS_EVENT_HEAL',
+        });
+        this.logger.warn(
+          `Healed missing STOP_LOSS_ARMED ${userId} cycle=${cycle.id} stop=${stopPrice.toFixed(2)}`,
+        );
       }
     }
 
