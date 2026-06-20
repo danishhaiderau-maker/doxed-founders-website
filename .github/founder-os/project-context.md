@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(bitfinex): refresh policy lock after relay sim race fix
+Remove Asia region pin from showcase bot Railway config.
 
 ## Last Activity
 
