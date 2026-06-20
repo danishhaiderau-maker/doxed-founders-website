@@ -1,9 +1,9 @@
 {
-  "engine_version": "v1.1.55-combo-chase-sync",
-  "combo_version": "2026-06-19",
+  "engine_version": "v9.80-continuous-benchmark-toggle-2026-06-20",
+  "combo_version": "2026-06-20",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "COMBO_65_SP5_CHASE_3PLUS",
-  "signal_hash": "25680bc8a3b3",
+  "signal_hash": "f804cbeebb3f",
   "source": "danishhaiderau-maker/bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-06-19T16:45:50.207Z"
+  "updated_at": "2026-06-20T06:48:21.814Z"
 }

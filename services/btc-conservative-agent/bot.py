@@ -42,12 +42,16 @@ from combo_pathway_config import (
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
     BENCHMARK_PROFILE_ID as COMBO_BENCHMARK_PROFILE_ID,
     BENCHMARK_ROLE as COMBO_BENCHMARK_ROLE,
+    COMPARISON_BENCHMARK_LANE,
+    CONTINUOUS_PROXY_LANES,
     COMBO_EXECUTION_LANES,
     COMBO_LANE_LABELS,
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
     EXPECTED_EXCHANGE,
+    PRIMARY_PRODUCTION_LANE,
+    PRIMARY_PRODUCTION_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
@@ -62,6 +66,38 @@ from combo_pathway_config import (
     is_chase_3plus_entry_lane,
     is_combo_execution_lane,
     is_immediate_entry_lane,
+)
+from legacy_pathway_config import (
+    PATHWAY_STATUS_SHADOW_COLLECTING,
+    SHADOW_COLLECTING_ID_PREFIX,
+    SHADOW_COLLECTING_LANES,
+    is_shadow_collecting_lane,
+    legacy_lane_matches,
+    shadow_collecting_toggle_defaults,
+)
+from scenario_c_config import (
+    SCENARIO_C_LADDER_LABEL,
+    SCENARIO_C_PROFILE_ID,
+    TRAIL_LADDER_SCENARIO_C,
+)
+from experimental_pathway_config import (
+    EXPERIMENTAL_EXECUTION_LANES,
+    EXPERIMENTAL_LANE_LABELS,
+    EXPERIMENTAL_LANE_SPECS,
+    EXPERIMENTAL_TILE_DISPLAY_ORDER,
+    RECOVERY_MONSTER_LADDER,
+    RECOVERY_MONSTER_MFE_PROTECT_PCT,
+    RECOVERY_MONSTER_PROFILE_ID,
+    RECOVERY_MONSTER_THESIS_PCT,
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
+    RESEARCH_LANE_RECOVERY_MONSTER_V1,
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
+    ai_disagreement_alpha_matches,
+    ai_disagreement_replay_matches,
+    experimental_toggle_defaults,
+    is_experimental_execution_lane,
+    type_b_predictor_matches,
 )
 
 # #region agent log
@@ -129,17 +165,21 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "ACTIVE",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "ACTIVE",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
-    RESEARCH_LANE_CONTINUOUS: "DATA_RETIRED",
-    RESEARCH_LANE_HIGH_EDGE_RUNNER: "DATA_RETIRED",
+    RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
     RESEARCH_LANE_EXTREME_EDGE: "RETIRED",
     RESEARCH_LANE_EDGE_PLUS_STACK: "RETIRED",
-    RESEARCH_LANE_SHADOW_RUNNER: "DATA_RETIRED",
-    RESEARCH_LANE_EDGE_ALPHA_4: "DATA_RETIRED",
-    RESEARCH_LANE_TYPE_B_HUNTER: "DATA_RETIRED",
-    RESEARCH_LANE_SHORT_BEAR_ALPHA: "DATA_RETIRED",
-    RESEARCH_LANE_AI_60_65_ALPHA: "DATA_RETIRED",
-    RESEARCH_LANE_URGENT_CHASE_ALPHA: "DATA_RETIRED",
-    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_SHADOW_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_EDGE_ALPHA_4: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_TYPE_B_HUNTER: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_AI_60_65_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "ACTIVE",
+    RESEARCH_LANE_RECOVERY_MONSTER_V1: "ACTIVE",
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "ACTIVE",
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "ACTIVE",
 }
 RETIRED_PATHWAY_LANES = frozenset({
     RESEARCH_LANE_EXTREME_EDGE,
@@ -160,6 +200,7 @@ RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CHASE_3PLUS_ALPHA: "Chase 3+ Alpha",
     RESEARCH_LANE_PROFIT_GATES: "Profit Gates",
     **COMBO_LANE_LABELS,
+    **EXPERIMENTAL_LANE_LABELS,
 }
 RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
@@ -170,12 +211,19 @@ RESEARCH_SPAWN_LANES = (
     RESEARCH_LANE_URGENT_CHASE_ALPHA,
     RESEARCH_LANE_CHASE_3PLUS_ALPHA,
 )
-_RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
+_RESEARCH_LANE_TOGGLE_DEFAULTS = {
+    **combo_toggle_defaults(),
+    **experimental_toggle_defaults(),
+    **shadow_collecting_toggle_defaults(),
+}
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
+
 # Production execution routing only — legacy alpha lanes excluded (DATA_RETIRED).
-AI_DIRECT_RESEARCH_LANES = frozenset(COMBO_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,))
+AI_DIRECT_RESEARCH_LANES = frozenset(
+    COMBO_EXECUTION_LANES + EXPERIMENTAL_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,)
+)
 _lane_locks = {
     RESEARCH_LANE_AI_SCAN: threading.Lock(),
     RESEARCH_LANE_COMBO_65_SP5_CHASE: threading.Lock(),
@@ -194,8 +242,12 @@ _lane_locks = {
     RESEARCH_LANE_AI_60_65_ALPHA: threading.Lock(),
     RESEARCH_LANE_URGENT_CHASE_ALPHA: threading.Lock(),
     RESEARCH_LANE_CHASE_3PLUS_ALPHA: threading.Lock(),
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1: threading.Lock(),
+    RESEARCH_LANE_RECOVERY_MONSTER_V1: threading.Lock(),
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: threading.Lock(),
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: threading.Lock(),
 }
-PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
+PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES + EXPERIMENTAL_EXECUTION_LANES
 LEGACY_PATHWAY_LANES = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
@@ -228,7 +280,7 @@ PROFIT_MIN_AI_PROB = 50
 PROFIT_MIN_LONG_EDGE = 3.0
 RUNNER_BREATHE_MIN_PEAK_PCT = 5.0
 CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED = True
-CONTINUOUS_AI_DEFAULT_ENABLED = False
+CONTINUOUS_AI_DEFAULT_ENABLED = True
 RESEARCH_AI_TEMPERATURE = 0.0
 LEGACY_AI_TEMPERATURE = 0.4
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
@@ -442,15 +494,70 @@ def _load_research_session_meta() -> dict:
         pass
     return {}
 
-def _write_research_session(start_ts: float):
+
+def _infer_fresh_collection_start_ts():
+    """Recover fresh-collection anchor from latest verified archive wipe."""
+    archive_root = "research_archive"
+    if not os.path.isdir(archive_root):
+        return None
+    best_ts = None
+    for name in os.listdir(archive_root):
+        meta_path = os.path.join(archive_root, name, "archive_meta.json")
+        if not os.path.isfile(meta_path):
+            continue
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("reason") != "fresh_collection_dashboard":
+                continue
+            archived = meta.get("archived_ts")
+            if not archived:
+                continue
+            ts = datetime.fromisoformat(str(archived).replace("Z", "+00:00")).timestamp()
+            best_ts = max(best_ts or 0.0, float(ts))
+        except Exception:
+            continue
+    return best_ts
+
+
+def _research_data_start_ts() -> float:
+    """Analysis window start: fresh-collection anchor when ON, else current process start."""
     with state_lock:
         fcm = bool(state.get("fresh_collection_mode", False))
+    if fcm:
+        meta = _load_research_session_meta()
+        raw = meta.get("fresh_collection_start_time")
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    return float(bot_start_time or 0.0)
+
+
+def _write_research_session(start_ts: float, fresh_collection_reset: bool = False):
+    with state_lock:
+        fcm = bool(state.get("fresh_collection_mode", False))
+    prev = _load_research_session_meta()
+    fresh_start = None
+    fresh_iso = None
+    if fcm:
+        if fresh_collection_reset or not prev.get("fresh_collection_mode"):
+            fresh_start = float(start_ts)
+        elif prev.get("fresh_collection_start_time") is not None:
+            fresh_start = float(prev.get("fresh_collection_start_time"))
+        else:
+            recovered = _infer_fresh_collection_start_ts()
+            fresh_start = float(recovered if recovered is not None else start_ts)
+        fresh_iso = datetime.fromtimestamp(fresh_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = {
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "bot_start_time": start_ts,
         "bot_start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "fresh_collection_mode": fcm,
+        "fresh_collection_start_time": fresh_start,
+        "fresh_collection_start_iso": fresh_iso,
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
     }
@@ -1181,13 +1288,21 @@ def capture_entry_gate_snapshot(signal: dict, ai: dict, edge_score: float, featu
 def get_exit_config_snapshot(research_lane: str = None) -> dict:
     """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
+    thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
+    mfe_protect = THESIS_MFE_PROTECT_PCT
     if lane == RESEARCH_LANE_HIGH_EDGE_RUNNER:
         ladder = TRAIL_LADDER_RUNNER
         profile_id = RUNNER_EXIT_PROFILE_ID
         scenario_c = False
+    elif lane == RESEARCH_LANE_RECOVERY_MONSTER_V1:
+        ladder = list(RECOVERY_MONSTER_LADDER)
+        profile_id = RECOVERY_MONSTER_PROFILE_ID
+        scenario_c = False
+        thesis_pct = RECOVERY_MONSTER_THESIS_PCT
+        mfe_protect = RECOVERY_MONSTER_MFE_PROTECT_PCT
     else:
-        ladder = TRAIL_LADDER_SCENARIO_C
-        profile_id = BENCHMARK_PROFILE_ID
+        ladder = list(TRAIL_LADDER_SCENARIO_C)
+        profile_id = SCENARIO_C_PROFILE_ID
         scenario_c = SCENARIO_C_EXIT_PROFILE
     return {
         "trail_ladder": ladder,
@@ -1196,8 +1311,8 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
         "exit_profile_id": profile_id,
         "peak_never_loser_min_peak": PEAK_NEVER_LOSER_MIN_PEAK,
         "peak_never_loser_floor": PEAK_NEVER_LOSER_FLOOR,
-        "thesis_fast_exit_unreal_pct": THESIS_FAST_EXIT_UNREAL_PCT,
-        "thesis_mfe_protect_pct": THESIS_MFE_PROTECT_PCT,
+        "thesis_fast_exit_unreal_pct": thesis_pct,
+        "thesis_mfe_protect_pct": mfe_protect,
         "thesis_exit_if_above_unreal_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "thesis_min_age_sec": THESIS_MIN_AGE_SEC,
         "thesis_score_flip_margin": THESIS_SCORE_FLIP_MARGIN,
@@ -1931,6 +2046,8 @@ def is_research_lane_enabled(lane: str) -> bool:
         return any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
     if is_combo_execution_lane(lane):
         return bool(research_lane_enabled_map().get(lane, True))
+    if is_experimental_execution_lane(lane):
+        return bool(research_lane_enabled_map().get(lane, True))
     if lane == RESEARCH_LANE_CONTINUOUS:
         return continuous_ai_research_enabled()
     if lane not in _RESEARCH_LANE_TOGGLE_DEFAULTS:
@@ -1942,6 +2059,8 @@ def lane_orders_allowed(lane: str = None) -> bool:
     """Pathway Lab toggle — OFF means no new/chased limit orders for this lane."""
     lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
     if is_ai_scan_lane(lane):
+        return False
+    if lane_blocks_live_orders(lane):
         return False
     return is_research_lane_enabled(lane)
 
@@ -2010,13 +2129,28 @@ def get_pathway_lane_status(lane: str) -> str:
     return PATHWAY_LANE_STATUS.get(str(lane or "").upper(), "ACTIVE")
 
 def is_research_lane_retired(lane: str) -> bool:
-    return get_pathway_lane_status(lane) in ("RETIRED", "DATA_RETIRED")
+    lane = str(lane or "").upper()
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        return False
+    status = get_pathway_lane_status(lane)
+    return status in ("RETIRED", "DATA_RETIRED", "BENCHMARK")
+
+
+def lane_blocks_live_orders(lane: str) -> bool:
+    """Hard block retired/shadow lanes. CONTINUOUS limit orders gated by continuous_ai toggle."""
+    lane = str(lane or "").upper()
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        return False
+    status = get_pathway_lane_status(lane)
+    if status in ("RETIRED", "DATA_RETIRED", "BENCHMARK"):
+        return True
+    return is_shadow_collecting_lane(lane)
 
 
 def guard_retired_lane_execution(lane: str, context: str, trade_id: str = None) -> bool:
-    """Block order paths on DATA_RETIRED / RETIRED lanes; log violation."""
+    """Block order paths on retired, benchmark, and shadow-collecting lanes."""
     lane = str(lane or "").upper()
-    if not is_research_lane_retired(lane):
+    if not lane_blocks_live_orders(lane):
         return True
     try:
         from pathway_lab_validation import log_retired_lane_violation
@@ -2038,12 +2172,16 @@ def lane_pipeline_allowed(lane: str = None) -> bool:
     lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
     if is_ai_scan_lane(lane):
         return any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
+    if lane_blocks_live_orders(lane):
+        return False
     if is_research_lane_retired(lane):
         return False
     if is_combo_execution_lane(lane):
         return is_research_lane_enabled(lane)
+    if is_experimental_execution_lane(lane):
+        return is_research_lane_enabled(lane)
     if lane == RESEARCH_LANE_CONTINUOUS:
-        return continuous_ai_research_enabled()
+        return True
     return is_research_lane_enabled(lane)
 
 def get_lane_lock(lane: str):
@@ -2349,6 +2487,28 @@ def get_lane_pnl_ledger(lane: str = None) -> dict:
     return ledger
 
 
+def get_retired_lane_archive_rows() -> list:
+    """Retired lanes: show session PnL/stats — orders blocked, data still visible."""
+    metrics_by_lane = _load_lane_metrics_from_disk()
+    rows = []
+    for lane in LEGACY_PATHWAY_LANES:
+        dm = metrics_by_lane.get(lane) or {}
+        pnl = float(dm.get("net_pnl_real") or 0)
+        rows.append({
+            "lane": lane,
+            "label": RESEARCH_LANE_LABELS.get(lane, lane),
+            "pathway_status": get_pathway_lane_status(lane),
+            "net_pnl_usd": round(pnl, 2),
+            "closes": int(dm.get("real_fills") or 0),
+            "wins": 0,
+            "losses": 0,
+            "approves": int(dm.get("approves") or 0),
+            "per_approve_ev": round(float(dm.get("per_approve_ev") or 0), 2),
+        })
+    rows.sort(key=lambda r: -float(r.get("net_pnl_usd") or 0))
+    return rows
+
+
 def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None):
     """Per-lane equity curve stats — independent attribution for Pathway Lab."""
     ln = _normalize_lane_key(lane)
@@ -2510,6 +2670,12 @@ def log_ai_input_full(
         with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
             f.flush()
+        logger.info(
+            f"[AI INPUT LOGGED] lane={research_lane} trade_id={row.get('trade_id')} "
+            f"decision={ai_result.get('decision')} dir={ai_result.get('direction')} "
+            f"prob={ai_result.get('win_prob')} trigger={row.get('trigger_reason')} "
+            f"-> {AI_INPUT_LOG_FILE} [PIPELINE ENFORCEMENT]"
+        )
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
     except Exception as e:
@@ -4722,11 +4888,7 @@ CANDLE_INTERVAL_SEC = 15 * 60
 FIXED_TIME_EXIT_ENABLED = True
 MAX_POSITION_AGE_SEC = 2 * 3600
 EMERGENCY_MAX_HOLD_SEC = MAX_POSITION_AGE_SEC
-# v1.1.21 Scenario C: first rung 12→8% (replay-optimal risk-adjusted profile)
-TRAIL_LADDER_SCENARIO_C = [
-    (12, 8), (15, 10), (25, 18), (40, 28),
-]
-# Runner variant — wider first rung for high-edge continuation trades
+# Scenario C ladder imported from scenario_c_config (single source of truth)
 TRAIL_LADDER_RUNNER = [
     (18, 14), (25, 18), (40, 28), (55, 38),
 ]
@@ -9075,6 +9237,10 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "c65d",
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "c604c",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "c604d",
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "tbv1",
+    RESEARCH_LANE_RECOVERY_MONSTER_V1: "rcv1",
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "aida",
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "rida",
 }
 
 SHADOW_RUNNER_HORIZON_SECS = {
@@ -9232,6 +9398,114 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             ctx, ai, edge_score, features, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
+    spawn_experimental_lanes_from_ai_scan(
+        ctx, ai, edge_score, features, source_lane, final_direction, spread,
+    )
+    spawn_shadow_collecting_lanes_from_ai_scan(
+        ctx, ai, edge_score, features, source_lane, final_direction, spread,
+    )
+
+
+def _spawn_experimental_lane(
+    ctx, ai, edge_score, features, target_lane: str, trigger_reason: str,
+):
+    if not is_research_data_collection():
+        return
+    if not guard_retired_lane_execution(target_lane, "spawn_experimental_lane", (ctx or {}).get("trade_id")):
+        return
+    if not is_research_lane_enabled(target_lane):
+        logger.info(f"[{target_lane}] spawn skipped - lane OFF [PIPELINE ENFORCEMENT]")
+        log_lane_opportunity_event(
+            target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
+            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+            block_reason="LANE_TOGGLE_OFF",
+        )
+        return
+    spec = EXPERIMENTAL_LANE_SPECS.get(target_lane, {})
+    prefix = spec.get("id_prefix") or _SPAWN_LANE_ID_PREFIX.get(target_lane, "exp")
+    spawn_ctx = copy.deepcopy(ctx)
+    spawn_ctx["trade_id"] = f"{prefix}-{uuid.uuid4().hex[:12]}"
+    spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
+    logger.info(
+        f"[{target_lane}] experimental spawn trade_id={spawn_ctx['trade_id']} "
+        f"reason={trigger_reason} [PIPELINE ENFORCEMENT]"
+    )
+    process_signal({
+        "event_trigger": True,
+        "research_lane": target_lane,
+        "edge_trigger_reason": trigger_reason,
+        "edge_score": round(float(edge_score), 1),
+        "price": nz(state.get("price")),
+        "timestamp": utc_iso(),
+        "features": features or {},
+        "skip_ai": True,
+        "pre_ai": copy.deepcopy(ai),
+        "pre_ctx": spawn_ctx,
+    })
+
+
+def spawn_experimental_lanes_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str,
+    final_direction: str = None, spread: int = None,
+):
+    """Spawn experimental tiles on AI_SCAN APPROVE (independent orders, log-only gates)."""
+    if not is_ai_scan_lane(source_lane) or ai.get("decision") != "APPROVE":
+        return
+    if not is_research_data_collection():
+        return
+    ai_direction = ai.get("direction")
+    direction = final_direction or ai_direction
+    if spread is None:
+        spread = int(compute_directional_spread(direction, ai))
+    with state_lock:
+        replay_eval = copy.deepcopy(state.get("last_replay_model_eval") or {})
+    if ai_disagreement_alpha_matches(ai, replay_eval):
+        if is_research_lane_enabled(RESEARCH_LANE_AI_DISAGREEMENT_ALPHA):
+            _spawn_experimental_lane(
+                ctx, ai, edge_score, features,
+                RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
+                "AI_DISAGREE_AI_APPROVE",
+            )
+    if type_b_predictor_matches(ai, direction, spread, ctx, features):
+        if is_research_lane_enabled(RESEARCH_LANE_TYPE_B_PREDICTOR_V1):
+            _spawn_experimental_lane(
+                ctx, ai, edge_score, features,
+                RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
+                "TYPE_B_PREDICTOR_MATCH",
+            )
+    if is_research_lane_enabled(RESEARCH_LANE_RECOVERY_MONSTER_V1):
+        _spawn_experimental_lane(
+            ctx, ai, edge_score, features,
+            RESEARCH_LANE_RECOVERY_MONSTER_V1,
+            "RECOVERY_MONSTER_BENCHMARK_ENTRY",
+        )
+
+
+def spawn_experimental_disagreement_replay(ctx, ai, edge_score, features, source_lane: str):
+    """Spawn when AI rejected but replay model approves (counterfactual execution lane)."""
+    if not is_ai_scan_lane(source_lane) or not is_research_data_collection():
+        return
+    with state_lock:
+        replay_eval = copy.deepcopy(state.get("last_replay_model_eval") or {})
+    if not ai_disagreement_replay_matches(ai, replay_eval):
+        return
+    if not is_research_lane_enabled(RESEARCH_LANE_AI_DISAGREEMENT_REPLAY):
+        return
+    spawn_ai = copy.deepcopy(ai)
+    spawn_ai["decision"] = "APPROVE"
+    spawn_ai["execution_tier"] = "APPROVE"
+    spawn_ai["approved"] = True
+    direction = spawn_ai.get("direction")
+    if str(direction or "").upper() in ("NO_TRADE", "NONE", ""):
+        direction = (spawn_ai.get("factors") or {}).get("preferred_direction")
+    if str(direction or "").upper() in ("NO_TRADE", "NONE", ""):
+        direction = "SHORT"
+    spawn_ai["direction"] = direction
+    _spawn_experimental_lane(
+        ctx, spawn_ai, edge_score, features,
+        RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
+        "AI_DISAGREE_REPLAY_APPROVE",
+    )
 
 
 def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target_lane: str, trigger_reason: str):
@@ -9241,7 +9515,7 @@ def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target
 
 def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
     """Shadow-only horizon study — no orders submitted."""
-    if source_lane != RESEARCH_LANE_CONTINUOUS or ai.get("decision") != "APPROVE":
+    if ai.get("decision") != "APPROVE":
         return
     if not is_research_data_collection():
         return
@@ -9302,9 +9576,128 @@ def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
     )
 
 
+def spawn_shadow_collecting_lanes_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str, final_direction: str, spread: int,
+):
+    """Shadow sim for legacy lanes — no orders; outcomes → shadow_lane_outcome.jsonl."""
+    if not is_research_data_collection() or str(ai.get("decision") or "").upper() != "APPROVE":
+        return
+    for lane in SHADOW_COLLECTING_LANES:
+        if lane == RESEARCH_LANE_SHADOW_RUNNER:
+            spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
+            continue
+        if not is_research_lane_enabled(lane):
+            continue
+        if not legacy_lane_matches(lane, ai, edge_score, features, final_direction, spread):
+            continue
+        _spawn_shadow_collecting_lane(
+            ctx, ai, edge_score, features, lane, source_lane, final_direction,
+        )
+
+
+def _spawn_shadow_collecting_lane(
+    ctx, ai, edge_score, features, target_lane: str, source_lane: str, final_direction: str,
+):
+    prefix = SHADOW_COLLECTING_ID_PREFIX.get(target_lane, "shcol")
+    study_id = f"{prefix}-{uuid.uuid4().hex[:12]}"
+    direction = str(final_direction or ai.get("direction") or "LONG").upper()
+    if state.get("invert_signal", False):
+        if direction == "LONG":
+            direction = "SHORT"
+        elif direction == "SHORT":
+            direction = "LONG"
+    price = float(nz(state.get("price")) or 0)
+    if price <= 0:
+        return
+    exit_cfg = get_exit_config_for_lane(target_lane)
+    start_replay_buffer(
+        study_id,
+        price,
+        lane=f"shadow_collect_{target_lane}",
+        direction=direction,
+        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
+        margin_usdt=float(FIXED_MARGIN_USDT),
+        pullback_pct=float(state.get("pullback_threshold", 0.001)),
+        early_fail_enabled=False,
+        exit_config=exit_cfg,
+        ai_win_prob=ai.get("win_prob"),
+        edge_score=round(float(edge_score), 1),
+        research_lane=target_lane,
+        source_trade_id=(ctx or {}).get("trade_id"),
+        collection_mode=PATHWAY_STATUS_SHADOW_COLLECTING,
+    )
+    append_replay_tick(study_id, price, None)
+    log_lane_opportunity_event(
+        target_lane,
+        "SHADOW_COLLECT_SPAWN",
+        study_id,
+        direction,
+        ai.get("win_prob"),
+        edge_score,
+        block_reason="SHADOW_COLLECTING",
+    )
+    logger.info(
+        f"[{target_lane}] shadow collect study_id={study_id} source={source_lane} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+
+
+def finalize_shadow_lane_collecting(study_id: str, buf: dict):
+    """Simulate virtual fill + Scenario C exit for off-dashboard shadow lanes."""
+    outcome = simulate_replay_outcome(buf)
+    lane = str(buf.get("research_lane") or "").upper()
+    row = {
+        "schema": "shadow_lane_outcome_v1",
+        "ts": utc_iso(),
+        "study_id": study_id,
+        "trade_id": study_id,
+        "research_lane": lane,
+        "source_trade_id": buf.get("source_trade_id"),
+        "collection_mode": buf.get("collection_mode") or PATHWAY_STATUS_SHADOW_COLLECTING,
+        "executed": False,
+        "direction": buf.get("direction"),
+        "exit_config": buf.get("exit_config"),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        **outcome,
+    }
+    _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
+    logger.info(
+        f"[SHADOW_COLLECT] lane={lane} study_id={study_id} filled={outcome.get('filled')} "
+        f"pnl=${outcome.get('net_pnl_usd')} exit={outcome.get('exit_reason')} [PIPELINE ENFORCEMENT]"
+    )
+    close_replay_buffer(study_id)
+
+
+def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
+    """CONTINUOUS benchmark tile — mirrors AI_SCAN AI; toggle ON places limits, OFF logs shadow data only."""
+    if not is_ai_scan_lane(source_lane) or not ai:
+        return
+    spawn_ctx = copy.deepcopy(ctx or {})
+    spawn_ctx["trade_id"] = f"cont-{uuid.uuid4().hex[:12]}"
+    orders_on = continuous_ai_research_enabled()
+    logger.info(
+        f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
+        f"decision={ai.get('decision')} orders={'ON' if orders_on else 'OFF(data-only)'} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    process_signal({
+        "event_trigger": True,
+        "research_lane": RESEARCH_LANE_CONTINUOUS,
+        "edge_trigger_reason": f"CONTINUOUS_FROM_{source_lane}",
+        "edge_score": round(float(edge_score or 0), 1),
+        "price": nz(state.get("price")),
+        "timestamp": utc_iso(),
+        "features": features or {},
+        "skip_ai": True,
+        "pre_ai": copy.deepcopy(ai),
+        "pre_ctx": spawn_ctx,
+    })
+
+
 def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Legacy — retired pathway spawns replaced by spawn_combo_lanes_from_ai_scan."""
-    return
+    """Legacy alias — CONTINUOUS spawn handled by spawn_continuous_lane_from_ai_scan."""
+    spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane)
 
 
 def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
@@ -9799,10 +10192,10 @@ def _recompute_research_balance_from_trades():
     )
 
 def load_session_trades_from_csv():
-    """Load closed trades from CSV into in-memory trades list (full history unless fresh-collection)."""
-    if not os.path.exists(CSV_TRADES):
+    """Load closed trades from CSV for the current analysis window into in-memory trades list."""
+    session_start = _research_data_start_ts()
+    if not session_start or not os.path.exists(CSV_TRADES):
         return 0
-    session_start = _showcase_trade_session_start()
     existing_ids = {t.get("trade_id") for t in trades if t.get("trade_id")}
     loaded = 0
     float_fields = (
@@ -10009,14 +10402,19 @@ def detect_event_light():
             return {"event_trigger": False, "edge_score": edge_score, "price": price, "timestamp": utc_iso(), "features": features}
 
         is_edge_valid(edge_score)
-        if _sole_ai_research_mode() and continuous_ai_research_enabled():
-            cd = ai_cooldown_remaining_sec(RESEARCH_LANE_CONTINUOUS)
-            if cd == 0 and round(edge_score, 1) >= 0.0:
-                event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
-            elif cd > 0:
-                event_trigger, trigger_reason = False, f"AI_COOLDOWN_{cd}s"
+        if _sole_ai_research_mode():
+            if not any_combo_execution_enabled(
+                research_lane_enabled_map(), continuous_ai_research_enabled()
+            ):
+                event_trigger, trigger_reason = False, "ALL_COMBO_OFF"
             else:
-                event_trigger, trigger_reason = False, "EDGE_BELOW_MIN"
+                cd_rem = ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)
+                if cd_rem == 0 and round(edge_score, 1) >= 0.0:
+                    event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
+                elif cd_rem > 0:
+                    event_trigger, trigger_reason = False, f"AI_COOLDOWN_{cd_rem}s"
+                else:
+                    event_trigger, trigger_reason = False, "EDGE_BELOW_MIN"
         else:
             event_trigger, trigger_reason = should_trigger_edge_event(edge_score)
 
@@ -11420,8 +11818,13 @@ def process_signal(event: dict):
                 return
 
             if sole:
-                trigger_ok = True
                 trigger_reason = event_obj.get("edge_trigger_reason", "PERIODIC_RESEARCH_AI")
+                ai_rem = ai_cooldown_remaining_sec(research_lane)
+                if is_ai_scan_lane(research_lane) and ai_rem > 0:
+                    trigger_ok = False
+                    trigger_reason = f"AI_COOLDOWN_{ai_rem}s"
+                else:
+                    trigger_ok = True
             elif event_obj.get("event_trigger") and event:
                 trigger_ok = True
                 trigger_reason = event_obj.get("edge_trigger_reason", "EDGE_EVENT_PASSTHROUGH")
@@ -11529,10 +11932,12 @@ def process_signal(event: dict):
                 log_ai_tranche_outcome(ai, event="AI_SPAWN")
                 _append_ai_history_row(ai)
             else:
-                ai_cd = get_effective_ai_cooldown_sec()
-                if is_ai_scan_lane(research_lane) and now - state.get("last_ai_call_ts", 0) < ai_cd:
+                ai_rem = ai_cooldown_remaining_sec(research_lane)
+                ai_cd = get_effective_ai_cooldown_sec(research_lane)
+                if is_ai_scan_lane(research_lane) and ai_rem > 0:
                     logger.info(
-                        f"[AI] COOLDOWN ACTIVE ({ai_cd}s) - BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]"
+                        f"[AI] COOLDOWN ACTIVE ({ai_rem}s of {ai_cd}s) lane={research_lane} "
+                        f"- BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]"
                     )
                     log_no_signal_with_context(reason="AI_COOLDOWN_ACTIVE", skip_stage="COOLDOWN")
                     full_pipeline_trace("BLOCKED", "AI_COOLDOWN_ACTIVE", None)
@@ -11636,6 +12041,10 @@ def process_signal(event: dict):
                     return
 
                 ai = evaluate_signal_with_ai(ctx, research_lane=research_lane, shadow_only=False)
+                if is_ai_scan_lane(research_lane) and ai:
+                    spawn_continuous_lane_from_ai_scan(
+                        ctx, ai, edge_score, features, research_lane,
+                    )
 
             if not ai:
                 enforce_log({"trade_id": ctx["trade_id"]}, "BLOCKED", "AI_FAIL")
@@ -11681,6 +12090,10 @@ def process_signal(event: dict):
                     state["debug_state"]["skip_reason"] = block_tag
                 update_debug_state_always(block_tag, {"edge": edge_score, "bull": ai.get("bull_score"), "bear": ai.get("bear_score")})
                 start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag)
+                if is_ai_scan_lane(research_lane):
+                    spawn_experimental_disagreement_replay(
+                        ctx, ai, edge_score, features, research_lane,
+                    )
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
@@ -12229,6 +12642,22 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
             if not success:
+                if (
+                    research_lane == RESEARCH_LANE_CONTINUOUS
+                    and not continuous_ai_research_enabled()
+                ):
+                    finalize_signal(signal, ai, "DATA_COLLECT_ONLY")
+                    record_approve_outcome(
+                        "SHADOW_COLLECT", "CONTINUOUS_TOGGLE_OFF",
+                        pipeline_eff_thr, trade_id, edge_score, ai,
+                    )
+                    log_lane_opportunity_event(
+                        research_lane, "DATA_COLLECT_ONLY", trade_id, final_direction,
+                        ai.get("win_prob"), edge_score, block_reason="CONTINUOUS_TOGGLE_OFF",
+                    )
+                    _set_lane_pipeline_stage(research_lane, "IDLE")
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
                 exit_pipeline(signal, ai, "ORDER_FAILED")
                 state["last_pipeline_stage"] = "IDLE"
                 return
@@ -12728,6 +13157,8 @@ def state_monitor_loop():
                     finalize_reversal_study(tid, buf_copy)
                 elif lane == "golden_stack_reject":
                     finalize_golden_stack_reject_study(tid, buf_copy)
+                elif buf.get("research_lane") in SHADOW_COLLECTING_LANES or str(lane or "").startswith("shadow_collect_"):
+                    finalize_shadow_lane_collecting(tid, buf_copy)
                 elif lane not in ("executed", "shadow_blocked"):
                     finalize_shadow_research(tid, block_reason)
                 else:
@@ -12753,7 +13184,7 @@ def state_monitor_loop():
                 elif (
                     _sole_ai_research_mode()
                     and any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
-                    and ai_cooldown_remaining_sec() == 0
+                    and ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN) == 0
                 ):
                     features = build_full_feature_snapshot()
                     if features:
@@ -13605,6 +14036,7 @@ RESEARCH DATA COLLECTION MODE (active):
   LONG limit_price must be BELOW current price (pullback). SHORT limit_price must be ABOVE current price.
   If unsure, use zone midpoint: limit_price = (entry_zone_low + entry_zone_high) / 2
 - Spawn lanes inherit CONTINUOUS AI_DIRECT entry unless noted (HIGH_EDGE_RUNNER uses runner exit profile)
+- Context hint (not a block): SHORT entries initiated near support historically show reduced expectancy unless strong bearish continuation is present — weigh continuation vs bounce risk in your comment.
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -13766,7 +14198,7 @@ def research_wipe_file_paths():
         "feature_drift_report.json", "profitable_reject_report.json", PROFITABLE_REJECT_FEATURES_FILE,
         "near_edge.log", "signal_persist.log", "crash_dump.json", POSITIONS_FILE,
         LANE_OPPORTUNITY_CAPTURE_FILE, LANE_OPPORTUNITY_REPORT_FILE,
-        AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl",
+        AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl", SHADOW_LANE_OUTCOME_FILE,
         LANE_PNL_LEDGER_FILE, "research_session_index.json", CSV_FALLBACK_JSONL,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
     ]
@@ -13885,7 +14317,7 @@ def perform_fresh_collection_reset() -> dict:
     _last_fresh_maintain_ts = time.time()
     with state_lock:
         state["fresh_collection_mode"] = True
-    _write_research_session(bot_start_time)
+    _write_research_session(bot_start_time, fresh_collection_reset=True)
     load_session_trades_from_csv()
     summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     with state_lock:
@@ -13929,6 +14361,8 @@ def _pathway_lanes_live() -> dict:
     live = {RESEARCH_LANE_AI_SCAN: any_combo_execution_enabled(enabled, continuous_ai_research_enabled())}
     for lane in COMBO_EXECUTION_LANES:
         live[lane] = bool(enabled.get(lane, True))
+    for lane in EXPERIMENTAL_EXECUTION_LANES:
+        live[lane] = bool(enabled.get(lane, True))
     live[RESEARCH_LANE_CONTINUOUS] = continuous_ai_research_enabled()
     return live
 
@@ -13936,7 +14370,7 @@ def _pathway_lanes_live() -> dict:
 def _scenario_c_exit_spec():
     return {
         "profile": "Scenario C",
-        "ladder": "12→8, 15→10, 25→18, 40→28",
+        "ladder": SCENARIO_C_LADDER_LABEL,
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
@@ -13951,6 +14385,18 @@ def _runner_exit_spec():
         "ladder": "18→14, 25→18, 40→28, 55→38",
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
+        "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)",
+    }
+
+
+def _recovery_monster_exit_spec():
+    return {
+        "profile": "Recovery Monster v1",
+        "ladder": "18→14, 25→18, 40→28, 55→38",
+        "thesis_stop_margin_pct": RECOVERY_MONSTER_THESIS_PCT,
+        "mfe_protect_margin_pct": RECOVERY_MONSTER_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
         "fixed_time_exit": "2h global (7200s)",
@@ -13984,15 +14430,16 @@ def build_static_pathway_lane_specs() -> dict:
             if chase
             else "Immediate AI limit + 25% chase + Scenario C"
         )
-        is_primary = bool(spec.get("is_benchmark"))
+        is_primary = bool(spec.get("is_primary_production"))
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
             "subtitle": spec.get("subtitle", ""),
             "role": spec.get("combo_key", lane_id),
-            "status": COMBO_BENCHMARK_ROLE if is_primary else "ACTIVE",
-            "is_benchmark": is_primary,
-            "badge": COMBO_BENCHMARK_ROLE if is_primary else "",
+            "status": PRIMARY_PRODUCTION_ROLE if is_primary else "ACTIVE",
+            "is_benchmark": False,
+            "is_primary_production": is_primary,
+            "badge": PRIMARY_PRODUCTION_ROLE if is_primary else "",
             "tile_number": tile_idx,
             "entry_mode_label": entry_mode_label,
             "filter_chips": [
@@ -14015,47 +14462,229 @@ def build_static_pathway_lane_specs() -> dict:
             },
             "exit": scenario_c,
             "exit_path": "Scenario C frozen — exit combo optimization next",
-            "promotion_criteria": "N/A — benchmark" if spec.get("is_benchmark") else promote,
-            "kill_criteria": "N/A — benchmark" if spec.get("is_benchmark") else kill,
+            "promotion_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else promote,
+            "kill_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else kill,
             "expected_advantage": "Historical winners: strong AI + spread ≥4 at entry",
             "expected_risk": "TYPE_A drag if filters too loose — monitor exit leakage",
-            "benchmark_comparison": COMBO_BENCHMARK_ROLE if is_primary else f"vs {COMBO_BENCHMARK_LANE}",
-            "diff_vs_benchmark": [] if is_primary else [
-                f"Entry: {entry_mode_label} vs PRIMARY_PRODUCTION Chase 3+",
+            "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
+            "diff_vs_benchmark": [
+                f"Entry: {entry_mode_label} vs Continuous Direct proxy",
                 f"Filters: AI {ai_label} spread {spread_label}",
             ],
+        })
+    lanes.append({
+        "lane": RESEARCH_LANE_CONTINUOUS,
+        "label": RESEARCH_LANE_LABELS.get(RESEARCH_LANE_CONTINUOUS, "Continuous AI Research"),
+        "subtitle": "Benchmark yardstick · toggle ON = limit orders · OFF = shadow data only",
+        "role": "continuous_direct_benchmark",
+        "status": "BENCHMARK",
+        "is_benchmark": True,
+        "is_primary_production": False,
+        "badge": "BENCHMARK",
+        "tile_number": 5,
+        "entry_mode_label": "Continuous",
+        "filter_chips": ["AI_SCAN mirror", "Scenario C", "Toggle orders"],
+        "toggle_key": "continuous_ai_research_enabled",
+        "hypothesis": "Aggregate of immediate-entry COMBO Direct lanes — comparison index for all tiles.",
+        "research_question": "Does each tile beat the Continuous Direct entry yardstick on EV/appr?",
+        "entry": {
+            "trigger": "Proxy: COMBO_65_SP5_DIRECT + COMBO_604_SP4_DIRECT",
+            "entry_path": "AI_DIRECT",
+            "fill_path": "AI_DIRECT_CHASE",
+            "ai_path": "AI_SCAN periodic approve",
+            "post_ai_gates": "log-only telemetry",
+            "margin_usd": float(FIXED_MARGIN_USDT),
+            "execution": "Immediate limit + 25% chase + Scenario C",
+            "filters": {"entry_mode": "IMMEDIATE", "proxy_lanes": list(CONTINUOUS_PROXY_LANES)},
+        },
+        "exit": scenario_c,
+        "exit_path": "Scenario C frozen — exit combo optimization next",
+        "promotion_criteria": "N/A — benchmark index",
+        "kill_criteria": "N/A — benchmark index",
+        "expected_advantage": "Stable yardstick for lane comparisons",
+        "expected_risk": "Proxy aggregate — not a live execution lane",
+        "benchmark_comparison": "BENCHMARK baseline",
+        "diff_vs_benchmark": [],
+    })
+    recovery_exit = _recovery_monster_exit_spec()
+    exp_tile_start = len(COMBO_TILE_DISPLAY_ORDER) + 2
+    for tile_offset, lane_id in enumerate(EXPERIMENTAL_TILE_DISPLAY_ORDER):
+        spec = EXPERIMENTAL_LANE_SPECS[lane_id]
+        exit_spec = recovery_exit if spec.get("exit_profile") == "RECOVERY_MONSTER" else scenario_c
+        exit_path = (
+            "Recovery Monster — thesis −40% · ladder 18→14 · MFE 2%"
+            if spec.get("exit_profile") == "RECOVERY_MONSTER"
+            else "Scenario C frozen"
+        )
+        lanes.append({
+            "lane": lane_id,
+            "label": spec["label"],
+            "subtitle": spec.get("subtitle", ""),
+            "role": lane_id,
+            "status": "ACTIVE",
+            "is_benchmark": False,
+            "is_primary_production": False,
+            "badge": "EXPERIMENTAL",
+            "tile_number": exp_tile_start + tile_offset,
+            "entry_mode_label": "Continuous",
+            "filter_chips": [spec.get("spawn_on", "APPROVE")],
+            "toggle_key": "research_lane_enabled",
+            "hypothesis": spec.get("hypothesis", ""),
+            "research_question": spec.get("research_question", ""),
+            "entry": {
+                "trigger": f"Spawn on AI_SCAN {spec.get('spawn_on', 'APPROVE')}",
+                **ai_direct,
+                "execution": "Immediate AI limit + 25% chase",
+                "filters": spec.get("entry_filters"),
+            },
+            "exit": exit_spec,
+            "exit_path": exit_path,
+            "promotion_criteria": promote,
+            "kill_criteria": kill,
+            "expected_advantage": "Isolated alpha test vs combo tiles",
+            "expected_risk": "Sparse spawn rate on filter-heavy tiles",
+            "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
+            "diff_vs_benchmark": [f"Experimental: {lane_id}"],
         })
     return {
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
-        "benchmark_lane": COMBO_BENCHMARK_LANE,
+        "benchmark_lane": COMPARISON_BENCHMARK_LANE,
+        "primary_production_lane": PRIMARY_PRODUCTION_LANE,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "benchmark_profile_id": BENCHMARK_PROFILE_ID,
+        "primary_production_role": PRIMARY_PRODUCTION_ROLE,
+        "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(LEGACY_PATHWAY_LANES),
         "lanes": lanes,
+    }
+
+
+def _load_lane_metrics_from_disk() -> dict:
+    """Benchmark report + ledger — PnL/fills for live tiles and retired archive."""
+    bench_lanes = {}
+    ledger = {}
+    try:
+        bench_path = os.path.join(os.getcwd(), "benchmark_vs_lanes_report.json")
+        if os.path.isfile(bench_path):
+            with open(bench_path, encoding="utf-8") as f:
+                bench_lanes = (json.load(f) or {}).get("lanes") or {}
+    except Exception as e:
+        logger.debug(f"[LANE_METRICS] benchmark read failed: {e}")
+    try:
+        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+            with open(LANE_PNL_LEDGER_FILE, encoding="utf-8") as f:
+                ledger = (json.load(f) or {}).get("lanes") or {}
+    except Exception as e:
+        logger.debug(f"[LANE_METRICS] ledger read failed: {e}")
+    out = {}
+    for lane in set(bench_lanes.keys()) | set(ledger.keys()):
+        bm = bench_lanes.get(lane) or {}
+        lb = ledger.get(lane) or {}
+        fills = int(bm.get("real_fills") or bm.get("fills") or lb.get("closes") or 0)
+        pnl = float(bm.get("net_pnl_real") or bm.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
+        approves = int(bm.get("approves") or 0)
+        fill_pct = bm.get("approve_to_fill_pct")
+        if approves and fill_pct is None:
+            fill_pct = round(100.0 * fills / approves, 1)
+        out[lane] = {
+            "approves": approves,
+            "real_fills": fills,
+            "approve_to_fill_pct": float(fill_pct or 0),
+            "shadow_fill_pct": float(bm.get("shadow_fill_pct") or 0),
+            "net_pnl_real": round(pnl, 2),
+            "per_approve_ev": round(float(bm.get("per_approve_ev") or 0), 2),
+            "verdict": bm.get("verdict"),
+        }
+    # CONTINUOUS benchmark proxy from Direct COMBO lanes
+    if COMPARISON_BENCHMARK_LANE not in out or not int(out.get(COMPARISON_BENCHMARK_LANE, {}).get("real_fills") or 0):
+        parts = [out.get(ln) for ln in CONTINUOUS_PROXY_LANES if out.get(ln)]
+        if parts:
+            approves = sum(int(p.get("approves") or 0) for p in parts)
+            fills = sum(int(p.get("real_fills") or 0) for p in parts)
+            pnl = round(sum(float(p.get("net_pnl_real") or 0) for p in parts), 2)
+            ev = round(sum(float(p.get("per_approve_ev") or 0) for p in parts) / len(parts), 2) if parts else 0.0
+            if approves:
+                ev = round(pnl / approves, 2)
+            out[COMPARISON_BENCHMARK_LANE] = {
+                "approves": approves,
+                "real_fills": fills,
+                "approve_to_fill_pct": round(100.0 * fills / approves, 1) if approves else 0.0,
+                "shadow_fill_pct": 0.0,
+                "net_pnl_real": pnl,
+                "per_approve_ev": ev,
+                "verdict": "benchmark baseline",
+            }
+    return out
+
+
+def _session_stats_from_lane_metrics(metrics: dict) -> dict:
+    m = metrics or {}
+    approves = int(m.get("approves") or 0)
+    fills = int(m.get("real_fills") or 0)
+    pnl = float(m.get("net_pnl_real") or 0)
+    ev = float(m.get("per_approve_ev") or 0)
+    fill_pct = m.get("approve_to_fill_pct")
+    if approves and fill_pct is None:
+        fill_pct = round(100.0 * fills / approves, 1)
+    return {
+        "approves": approves,
+        "real_fills": fills,
+        "approve_to_fill_pct": float(fill_pct or 0),
+        "shadow_fill_pct": float(m.get("shadow_fill_pct") or 0),
+        "net_pnl_real": pnl,
+        "per_approve_ev": ev,
+        "verdict": m.get("verdict"),
+        "summary_line": (
+            f"n={approves} approves · {fills} trades · "
+            f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
+        ),
     }
 
 
 def write_static_pathway_lane_specs(cwd: str = None) -> dict:
     payload = build_static_pathway_lane_specs()
     path = os.path.join(cwd or os.getcwd(), PATHWAY_LANE_SPECS_FILE)
+    existing = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+    merged = _merge_pathway_specs_with_session_stats(payload, existing)
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(merged, f, indent=2)
     except Exception as e:
         logger.debug(f"[PATHWAY_LANE_SPECS] write failed: {e}")
-    return payload
+    return merged
 
 
 def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: dict = None) -> dict:
-    """Code-owned lane tiles + optional session_stats from analyzer-written JSON."""
+    """Code-owned lane tiles + session_stats from analyzer JSON and live reports."""
     file_payload = file_payload or {}
     file_by_lane = {
         str(s.get("lane") or ""): s
         for s in (file_payload.get("lanes") or [])
         if s.get("lane")
     }
+    disk_metrics = _load_lane_metrics_from_disk()
+    live_ledger = get_lane_pnl_ledger()
+    for lane, lb in live_ledger.items():
+        closes = int(lb.get("closes") or 0)
+        pnl = float(lb.get("net_pnl_usd") or 0)
+        if closes or pnl:
+            prev = disk_metrics.get(lane) or {}
+            disk_metrics[lane] = {
+                "approves": int(prev.get("approves") or 0),
+                "real_fills": closes or int(prev.get("real_fills") or 0),
+                "approve_to_fill_pct": prev.get("approve_to_fill_pct"),
+                "shadow_fill_pct": float(prev.get("shadow_fill_pct") or 0),
+                "net_pnl_real": round(pnl, 2),
+                "per_approve_ev": float(prev.get("per_approve_ev") or 0),
+                "verdict": prev.get("verdict"),
+            }
     merged = []
     for spec in static_payload.get("lanes") or []:
         lane = spec.get("lane")
@@ -14064,6 +14693,9 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         for key in ("session_stats", "delta_vs_benchmark"):
             if extra.get(key):
                 row[key] = copy.deepcopy(extra[key])
+        dm = disk_metrics.get(lane)
+        if dm:
+            row["session_stats"] = _session_stats_from_lane_metrics(dm)
         merged.append(row)
     out = copy.deepcopy(static_payload)
     out["lanes"] = merged
@@ -14079,12 +14711,24 @@ def get_pathway_lane_specs_cached() -> dict:
     path = os.path.join(os.getcwd(), PATHWAY_LANE_SPECS_FILE)
     file_payload = {}
     mtime = None
+    ledger_mtime = None
+    if os.path.isfile(LANE_PNL_LEDGER_FILE):
+        try:
+            ledger_mtime = os.path.getmtime(LANE_PNL_LEDGER_FILE)
+        except Exception:
+            pass
     if os.path.isfile(path):
         try:
             mtime = os.path.getmtime(path)
             cached_at = (_cached_pathway_lane_specs or {}).get("_cached_mtime")
             cached_ver = (_cached_pathway_lane_specs or {}).get("_cached_static_version")
-            if cached_at == mtime and cached_ver == EXECUTION_FIX_VERSION and _cached_pathway_lane_specs.get("lanes"):
+            cached_ledger = (_cached_pathway_lane_specs or {}).get("_cached_ledger_mtime")
+            if (
+                cached_at == mtime
+                and cached_ver == EXECUTION_FIX_VERSION
+                and cached_ledger == ledger_mtime
+                and _cached_pathway_lane_specs.get("lanes")
+            ):
                 return _cached_pathway_lane_specs
             with open(path, encoding="utf-8") as f:
                 file_payload = json.load(f)
@@ -14094,6 +14738,7 @@ def get_pathway_lane_specs_cached() -> dict:
     merged["_cached_static_version"] = EXECUTION_FIX_VERSION
     if mtime is not None:
         merged["_cached_mtime"] = mtime
+    merged["_cached_ledger_mtime"] = ledger_mtime
     _cached_pathway_lane_specs = merged
     return merged
 
@@ -14195,6 +14840,7 @@ EDGE_CENSUS_FILE = "edge_census.jsonl"
 SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
+SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 _sim_processed_trade_ids: set = set()
 POLICY_FILE = "policy.json"
@@ -14364,7 +15010,7 @@ HTML = """<!DOCTYPE html>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleContinuousAi()" title="Legacy CONTINUOUS lane — DATA RETIRED (does not gate combo tiles)">Legacy Continuous AI: <span id="continuousAiBtn">OFF</span></button>
+    <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipe research CSVs/logs and reset session counters">Fresh Collection: <span id="freshCollectionLabel">OFF</span></button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
@@ -14820,8 +15466,11 @@ DASHBOARD_JS = """(function () {
     function pathwayLaneToggleState(d, spec) {
       if (!spec || spec.planned) return null;
       if (spec.status === 'RETIRED') return false;
+      if (spec.lane === 'CONTINUOUS' || spec.toggle_key === 'continuous_ai_research_enabled') {
+        return d.continuous_ai_research_enabled !== false;
+      }
+      if (spec.status === 'BENCHMARK') return false;
       const key = spec.toggle_key;
-      if (key === 'continuous_ai_research_enabled') return d.continuous_ai_research_enabled !== false;
       if (key === 'research_lane_enabled') {
         const m = d.research_lane_enabled || {};
         return m[spec.lane] !== false;
@@ -14830,13 +15479,17 @@ DASHBOARD_JS = """(function () {
     }
     function pathwayLaneToggleFn(spec, on) {
       if (!spec || spec.planned || spec.status === 'RETIRED') return '';
-      if (spec.lane === 'CONTINUOUS') return "setContinuousAi(" + (!on) + ")";
+      if (spec.lane === 'CONTINUOUS' || spec.toggle_key === 'continuous_ai_research_enabled') {
+        return "setContinuousAi(" + (!on) + ")";
+      }
+      if (spec.status === 'BENCHMARK') return '';
       if (spec.toggle_key === 'research_lane_enabled') {
         return "setResearchLane('" + spec.lane + "', " + (!on) + ")";
       }
       return '';
     }
     function pathwayLaneBorderColor(spec) {
+      if (spec.status === 'BENCHMARK') return '#d4a72c';
       if (spec.status === 'RETIRED' || spec.status === 'DATA_RETIRED') return '#484f58';
       if (spec.is_benchmark || spec.status === 'PRIMARY_PRODUCTION') return '#d4a72c';
       if ((spec.lane || '').indexOf('604') >= 0) return '#58a6ff';
@@ -14848,15 +15501,29 @@ DASHBOARD_JS = """(function () {
     function renderPathwayArchive(d) {
       const el = document.getElementById('pathwayArchiveList');
       if (!el) return;
-      const retired = (d.pathway_lane_specs && d.pathway_lane_specs.legacy_lanes_retired) || [];
+      const archive = d.retired_lane_archive || [];
       const labels = d.research_lane_labels || {};
       const statusMap = d.pathway_lane_status || {};
-      el.innerHTML = retired.map(function (lane) {
-        const st = statusMap[lane] || 'DATA_RETIRED';
-        return '<div style="padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:6px;">'
-          + '<strong style="color:#6e7681;">' + (labels[lane] || lane) + '</strong>'
-          + '<div style="color:#484f58;margin-top:4px;">' + st + ' · Research Only · No Orders</div></div>';
-      }).join('') || '<span style="color:#6e7681;">No retired lanes listed.</span>';
+      const retiredLanes = (d.pathway_lane_specs && d.pathway_lane_specs.legacy_lanes_retired) || [];
+      const byLane = {};
+      archive.forEach(function (row) { byLane[row.lane] = row; });
+      const lanes = retiredLanes.length ? retiredLanes : archive.map(function (r) { return r.lane; });
+      el.innerHTML = lanes.map(function (lane) {
+        const row = byLane[lane] || {};
+        const st = row.pathway_status || statusMap[lane] || 'DATA_RETIRED';
+        const pnl = row.net_pnl_usd != null ? row.net_pnl_usd : 0;
+        const col = pnl >= 0 ? '#3fb950' : '#f85149';
+        const trades = row.closes != null ? row.closes : 0;
+        const ev = row.per_approve_ev != null ? row.per_approve_ev : 0;
+        return '<div style="padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
+          + '<strong style="color:#8b949e;">' + (row.label || labels[lane] || lane) + '</strong>'
+          + '<div style="color:#484f58;margin-top:4px;font-size:0.78em;">' + st + ' · Research only · no new orders</div>'
+          + '<div style="margin-top:8px;font-size:0.85em;">Trades <strong>' + trades + '</strong>'
+          + ' · Approves <strong>' + (row.approves || 0) + '</strong>'
+          + ' · PnL <strong style="color:' + col + ';">$' + Number(pnl).toFixed(2) + '</strong>'
+          + ' · EV/appr <strong>$' + Number(ev).toFixed(2) + '</strong></div>'
+          + '</div>';
+      }).join('') || '<span style="color:#6e7681;">No retired lane data yet.</span>';
     }
     function renderBinanceFeeStress(d) {
       const el = document.getElementById('binanceFeeContent');
@@ -14918,6 +15585,14 @@ DASHBOARD_JS = """(function () {
           let orderBanner = '';
           if (spec.planned) {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#6e7681;font-size:0.82em;font-weight:600;">PLANNED — no orders</div>';
+          } else if (spec.lane === 'CONTINUOUS') {
+            if (on) {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — benchmark lane places limits</div>';
+            } else {
+              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">DATA ONLY — no limits · AI + shadow replay still logged</div>';
+            }
+          } else if (spec.status === 'BENCHMARK') {
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">BENCHMARK yardstick — data only · no orders</div>';
           } else if (spec.status === 'RETIRED') {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#21262d;border-radius:6px;color:#484f58;font-size:0.82em;font-weight:600;">RETIRED — research data only</div>';
           } else if (on) {
@@ -14928,7 +15603,7 @@ DASHBOARD_JS = """(function () {
           let toggleHtml = '';
           if (spec.planned || spec.status === 'RETIRED') {
             toggleHtml = '';
-          } else if (toggleFn) {
+          } else if (spec.lane === 'CONTINUOUS' || spec.toggle_key === 'continuous_ai_research_enabled' || toggleFn) {
             const bg = on ? '#238636' : '#da3633';
             const action = on ? 'Turn OFF' : 'Turn ON';
             toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:6px 14px;font-weight:bold;background:' + bg + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + action + '</button>';
@@ -15999,6 +16674,7 @@ def api_state():
         snapshot["research_isolation_mode"] = research_isolation_enabled()
         snapshot["lane_opportunity_counters"] = copy.deepcopy(snapshot.get("lane_opportunity_counters") or {})
         snapshot["lane_pnl_ledger"] = get_lane_pnl_ledger()
+        snapshot["retired_lane_archive"] = get_retired_lane_archive_rows()
         snapshot["lane_position_counts"] = lane_position_counts
         snapshot["research_execution_mode"] = (
             "INDEPENDENT_LANES" if is_research_data_collection() else "LIVE"
@@ -16348,6 +17024,7 @@ def toggle_fresh_collection():
     with state_lock:
         state["fresh_collection_mode"] = False
         save_persistent_config()
+    _write_research_session(bot_start_time)
     logger.info("[FRESH COLLECTION] Mode turned OFF - no file wipe [PIPELINE ENFORCEMENT]")
     return jsonify({"fresh_collection_mode": False})
 
@@ -17691,6 +18368,9 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "block_reason": meta.get("block_reason"),
             "ai_win_prob": meta.get("ai_win_prob"),
             "edge_score": meta.get("edge_score"),
+            "research_lane": meta.get("research_lane"),
+            "source_trade_id": meta.get("source_trade_id"),
+            "collection_mode": meta.get("collection_mode"),
         }
 
 

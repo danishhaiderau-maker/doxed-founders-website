@@ -1,8 +1,8 @@
 """
-Combo Pathway Lab v2 — four independent execution tiles + AI scan lane.
+Combo Pathway Lab v2 — four execution tiles + CONTINUOUS benchmark yardstick.
 
-PRIMARY_PRODUCTION benchmark: COMBO_65_SP5_CHASE_3PLUS
-  AI65+ · Spread5+ · Chase 3+ — tradable at entry (TYPE_B is post-trade only).
+PRIMARY_PRODUCTION: COMBO_65_SP5_CHASE_3PLUS (live deployable edge).
+COMPARISON_BENCHMARK: CONTINUOUS — yardstick index (Direct-entry proxy, no orders).
 """
 from __future__ import annotations
 
@@ -38,7 +38,8 @@ COMBO_LANE_SPECS = {
         "spread_min": 5,
         "spread_max": 99,
         "entry_mode": "CHASE_3PLUS",
-        "is_benchmark": True,
+        "is_benchmark": False,
+        "is_primary_production": True,
         "id_prefix": "c65c",
     },
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: {
@@ -79,13 +80,22 @@ COMBO_LANE_SPECS = {
     },
 }
 
-BENCHMARK_LANE = RESEARCH_LANE_COMBO_65_SP5_CHASE
-BENCHMARK_PROFILE_ID = "PRIMARY_PRODUCTION_v1"
-BENCHMARK_ROLE = "PRIMARY_PRODUCTION"
-EXECUTION_FIX_VERSION = "v1.1.55-combo-chase-sync"
-ANALYZER_SYNC_ID = "v9.75-combo-chase-sync-2026-06-20"
+COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
+CONTINUOUS_PROXY_LANES = (
+    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
+    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
+)
+PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_COMBO_65_SP5_CHASE
+BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
+BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
+BENCHMARK_ROLE = "BENCHMARK"
+PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
+# Single release id — bot, analyzer, and research dashboard stay on one version string.
+RESEARCH_STACK_VERSION = "v9.80-continuous-benchmark-toggle-2026-06-20"
+EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
+ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
+RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
 EXPECTED_EXCHANGE = "bitfinex"
-RESEARCH_DASHBOARD_VERSION = "v1.4"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
 # Analyzer chase reports + dashboard Chase Delay tab (combo tiles, not legacy lanes)
@@ -152,7 +162,7 @@ def combo_toggle_defaults() -> dict:
 
 
 def any_combo_execution_enabled(enabled_map: dict = None, continuous_enabled: bool = False) -> bool:
-    """True when at least one combo tile can place orders (CONTINUOUS ignored by default)."""
+    """True when at least one combo or experimental tile can place orders."""
     merged = combo_toggle_defaults()
     if enabled_map:
         for lane, val in enabled_map.items():
@@ -160,4 +170,16 @@ def any_combo_execution_enabled(enabled_map: dict = None, continuous_enabled: bo
                 merged[lane] = bool(val)
     if any(merged.values()):
         return True
+    try:
+        from experimental_pathway_config import experimental_toggle_defaults
+
+        exp = experimental_toggle_defaults()
+        if enabled_map:
+            for lane, val in enabled_map.items():
+                if lane in exp:
+                    exp[lane] = bool(val)
+        if any(exp.values()):
+            return True
+    except ImportError:
+        pass
     return bool(continuous_enabled)
