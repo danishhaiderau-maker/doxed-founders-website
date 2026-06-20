@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Remove Asia region pin from showcase bot Railway config.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
