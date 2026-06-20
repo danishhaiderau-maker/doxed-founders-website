@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(copy-relay): persist and display per-lot stop prices
 
 ## Last Activity
 
-Just now
+29m ago
