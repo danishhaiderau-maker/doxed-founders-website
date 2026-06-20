@@ -24,7 +24,7 @@ This is NOT "remove dashboard features." It IS "remove research infrastructure."
 
 Account, positions, orders, signal pipeline, AI snapshot + last 5 decisions, system status (engine version, runtime mode, signal hash, parity/sync).
 
-Dashboard lives in `showcase_ui.py`. `/api/state` must remain rich for NestJS relay + operator desk.
+Dashboard lives in **bot.py full HTML** (pathway lab, toggles, trade tables). `showcase_ui.py` only blocks warehouse export routes and adds `/api/sync_status` + `/api/fresh_start`. Do not swap in the minimal mirror HTML unless explicitly requested.
 
 ## REMOVE on Railway (research-only)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execution-mirror dashboard for doxxedcrypto.digital — operator visibility, no research UI."""
+"""Execution-mirror helpers for doxxedcrypto.digital — sync APIs + warehouse route guards."""
 from __future__ import annotations
 
 import json
@@ -8,15 +8,13 @@ from pathlib import Path
 
 from flask import Response, jsonify, render_template_string, request
 
-# Research endpoints blocked on the public execution mirror.
-BLOCKED_ROUTES = frozenset({
+# Research warehouse routes blocked on execution mirror (exports + mass file wipe).
+# Full operator dashboard, toggles, pathway lab, and trade history remain available.
+WAREHOUSE_BLOCKED_ROUTES = frozenset({
     "/api/toggle_fresh_collection",
     "/api/export_csv",
     "/api/export_debug",
     "/api/download_debug_config",
-    "/api/toggle_continuous_ai_research",
-    "/api/toggle_research_lane",
-    "/api/toggle_continuous_ai_direct",
     "/api/reset",
 })
 
@@ -462,7 +460,11 @@ SHOWCASE_HTML = """<!DOCTYPE html>
 
 
 def _blocked_handler():
-    return jsonify({"error": "Not available on execution mirror", "runtime_mode": "EXECUTION_MIRROR"}), 404
+    return jsonify({
+        "error": "Research warehouse export not available on execution mirror",
+        "runtime_mode": "EXECUTION_MIRROR",
+        "hint": "Use Fresh start ($500) for session reset; CSV/JSONL exports stay on research bot.",
+    }), 404
 
 
 def load_manifest_versions() -> dict:
@@ -535,15 +537,10 @@ def perform_showcase_fresh_start(bot_module) -> dict:
 
 
 def register_showcase_ui(app, bot_module=None) -> None:
-    """Replace research dashboard and block research-only API routes."""
-
-    def showcase_dashboard():
-        return render_template_string(SHOWCASE_HTML)
-
-    app.view_functions["dashboard"] = showcase_dashboard
+    """Keep full bot dashboard; block research warehouse exports only; add sync APIs."""
 
     for rule in list(app.url_map.iter_rules()):
-        if rule.rule in BLOCKED_ROUTES:
+        if rule.rule in WAREHOUSE_BLOCKED_ROUTES:
             app.view_functions[rule.endpoint] = _blocked_handler
 
     @app.route("/api/sync_status")
