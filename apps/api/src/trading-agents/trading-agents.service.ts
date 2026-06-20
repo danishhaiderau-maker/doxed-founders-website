@@ -51,6 +51,7 @@ import {
   mapSubscriberExchangeLiveBook,
   type SubscriberCycleRow,
 } from './subscriber-exchange-live.mapper';
+import { foldParticipantExecutionMeta } from './participant-execution-meta.util';
 import {
   mapLiveBookToActivity,
   mergeActivityFeeds,
@@ -237,23 +238,6 @@ function serializeAgent(
     currentAction: live?.currentAction,
     leverage: live?.leverage ?? 100,
   };
-}
-
-function latestParticipantExecutionMeta(
-  events: Array<{ eventType: string; payload: unknown }>,
-): { limitPrice: number | null; qty: number | null } {
-  for (const e of events) {
-    const p = (e.payload ?? {}) as Record<string, unknown>;
-    const limit = Number(p.limitPrice ?? p.limit_price ?? 0);
-    const qty = Number(p.qty ?? 0);
-    if (limit > 0 || qty > 0) {
-      return {
-        limitPrice: limit > 0 ? limit : null,
-        qty: qty > 0 ? qty : null,
-      };
-    }
-  }
-  return { limitPrice: null, qty: null };
 }
 
 @Injectable()
@@ -812,8 +796,7 @@ export class TradingAgentsService implements OnModuleInit {
           },
         },
         events: {
-          orderBy: { createdAt: 'desc' },
-          take: 5,
+          orderBy: { createdAt: 'asc' },
           select: { eventType: true, payload: true },
         },
       },
@@ -822,7 +805,7 @@ export class TradingAgentsService implements OnModuleInit {
     });
 
     const participants: SubscriberCycleRow[] = rows.map((r) => {
-      const meta = latestParticipantExecutionMeta(r.events);
+      const meta = foldParticipantExecutionMeta(r.events);
       return {
         status: r.status,
         fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
@@ -831,6 +814,8 @@ export class TradingAgentsService implements OnModuleInit {
         pnlMarginPct: r.pnlMarginPct != null ? Number(r.pnlMarginPct) : null,
         limitPrice: meta.limitPrice,
         qty: meta.qty,
+        stopLoss: meta.stopPrice,
+        takeProfit: meta.profitLockFloor,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

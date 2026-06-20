@@ -24,6 +24,8 @@ export type SubscriberCycleRow = {
   pnlMarginPct: number | null;
   limitPrice?: number | null;
   qty?: number | null;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -34,6 +36,18 @@ export type SubscriberCycleRow = {
     createdAt: Date;
   };
 };
+
+function lotUnrealizedPnlUsd(
+  entry: number,
+  mark: number,
+  direction: string,
+  qty: number,
+): number {
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(mark) || mark <= 0 || qty <= 0) {
+    return 0;
+  }
+  return direction === 'SHORT' ? (entry - mark) * qty : (mark - entry) * qty;
+}
 
 const ACTIVE_CYCLE_STATUSES = new Set<SignalCycleStatus>([
   'INTENT',
@@ -127,15 +141,22 @@ export function mapSubscriberExchangeLiveBook(input: {
 
     if (row.status === 'OPEN') {
       const entry = Number(row.fillPrice ?? limitPrice);
+      const legQty = qty > 0 ? qty : 0;
+      if (legQty <= 0) continue;
+      const side = direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG';
+      const current = mark > 0 ? mark : entry;
       positions.push({
         leg: row.cycle.tradeId.slice(0, 10),
-        side: direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG',
-        qty: qty > 0 ? qty : 0,
+        side,
+        qty: legQty,
         entry,
-        current: mark > 0 ? mark : entry,
-        stopLoss: 0,
-        takeProfit: 0,
-        pnlUsd: row.pnlUsd ?? 0,
+        current,
+        stopLoss: row.stopLoss ?? 0,
+        takeProfit: row.takeProfit ?? 0,
+        pnlUsd:
+          row.pnlUsd != null && Number.isFinite(row.pnlUsd)
+            ? row.pnlUsd
+            : lotUnrealizedPnlUsd(entry, current, side, legQty),
       });
       activeSignals.push({
         time: fmtTime(row.createdAt),

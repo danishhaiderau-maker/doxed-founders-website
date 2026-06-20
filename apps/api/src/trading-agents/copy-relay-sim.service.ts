@@ -14,6 +14,7 @@ import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.clie
 import { BotBridgeService } from './bot-bridge.service';
 import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
+import { foldParticipantExecutionMeta } from './participant-execution-meta.util';
 
 @Injectable()
 export class CopyRelaySimService {
@@ -159,6 +160,10 @@ export class CopyRelaySimService {
             createdAt: true,
           },
         },
+        events: {
+          orderBy: { createdAt: 'asc' },
+          select: { eventType: true, payload: true },
+        },
       },
       orderBy: { updatedAt: 'desc' },
       take: 80,
@@ -168,18 +173,23 @@ export class CopyRelaySimService {
       orders,
       position,
       markPrice: markPrice ?? undefined,
-      participants: participants.map((p) => ({
-        status: p.status,
-        fillPrice: p.fillPrice != null ? Number(p.fillPrice) : null,
-        exitPrice: p.exitPrice != null ? Number(p.exitPrice) : null,
-        pnlUsd: p.pnlUsd != null ? Number(p.pnlUsd) : null,
-        pnlMarginPct: p.pnlMarginPct != null ? Number(p.pnlMarginPct) : null,
-        limitPrice: null,
-        qty: null,
-        updatedAt: p.updatedAt,
-        createdAt: p.createdAt,
-        cycle: p.cycle,
-      })),
+      participants: participants.map((p) => {
+        const meta = foldParticipantExecutionMeta(p.events);
+        return {
+          status: p.status,
+          fillPrice: p.fillPrice != null ? Number(p.fillPrice) : null,
+          exitPrice: p.exitPrice != null ? Number(p.exitPrice) : null,
+          pnlUsd: p.pnlUsd != null ? Number(p.pnlUsd) : null,
+          pnlMarginPct: p.pnlMarginPct != null ? Number(p.pnlMarginPct) : null,
+          limitPrice: meta.limitPrice,
+          qty: meta.qty,
+          stopLoss: meta.stopPrice,
+          takeProfit: meta.profitLockFloor,
+          updatedAt: p.updatedAt,
+          createdAt: p.createdAt,
+          cycle: p.cycle,
+        };
+      }),
     });
   }
 
