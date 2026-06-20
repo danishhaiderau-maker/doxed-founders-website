@@ -3714,6 +3714,7 @@ export interface PrivateAgentDashboard {
     openPositions: number;
     pnlPct: number;
   };
+  copyRelaySim?: import('@dcf/utils').CopyRelaySimState | null;
 }
 
 export function fetchMyAgentDashboard(slug: string, token: string) {

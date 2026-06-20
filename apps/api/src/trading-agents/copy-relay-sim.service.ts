@@ -7,7 +7,7 @@ import {
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
 } from '@dcf/utils';
-import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
+import { SignalCycleStatus, TradingAgentInstanceStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
@@ -15,6 +15,7 @@ import { BotBridgeService } from './bot-bridge.service';
 import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
 import { foldParticipantExecutionMeta } from './participant-execution-meta.util';
+import { applyDashboardPatch } from './instance-view.mapper';
 
 @Injectable()
 export class CopyRelaySimService {
@@ -235,9 +236,9 @@ export class CopyRelaySimService {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instanceId },
       data: {
-        dashboardState: {
-          ...dash,
+        dashboardState: applyDashboardPatch(dash, {
           copyRelaySim: {
+            ...readCopyRelaySimState(dash),
             ...sim,
             ledger,
             reconcile,
@@ -245,7 +246,7 @@ export class CopyRelaySimService {
             showcasePnlUsd,
           },
           copyRelayReconcile: reconcile,
-        },
+        }) as unknown as Prisma.InputJsonValue,
       },
     });
   }

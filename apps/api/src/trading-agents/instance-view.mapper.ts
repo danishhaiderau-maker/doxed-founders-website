@@ -133,3 +133,23 @@ export function buildFreshInstanceDashboardState(
     ...extra,
   };
 }
+
+/** Merge a partial dashboard patch without clobbering nested relay-sim fields. */
+export function applyDashboardPatch(
+  dash: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...dash, ...patch };
+  if (
+    patch.copyRelaySim &&
+    dash.copyRelaySim &&
+    typeof patch.copyRelaySim === 'object' &&
+    typeof dash.copyRelaySim === 'object'
+  ) {
+    next.copyRelaySim = {
+      ...(dash.copyRelaySim as Record<string, unknown>),
+      ...(patch.copyRelaySim as Record<string, unknown>),
+    };
+  }
+  return next;
+}
