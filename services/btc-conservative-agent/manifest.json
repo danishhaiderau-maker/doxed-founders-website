@@ -1,9 +1,9 @@
 {
-  "engine_version": "v9.81-architecture-freeze-tile-detail-2026-06-20",
+  "engine_version": "v9.82-scenario-c-ladder-12-8-frozen-2026-06-20",
   "combo_version": "2026-06-20",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "3b7ca937388e",
+  "signal_hash": "b6ee1ca42f38",
   "source": "danishhaiderau-maker/bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-06-20T07:51:58.167Z"
+  "updated_at": "2026-06-20T14:47:16.852Z"
 }

@@ -541,6 +541,7 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
     prev = _load_research_session_meta()
     fresh_start = None
     fresh_iso = None
+    fresh_iso_utc = None
     if fcm:
         if fresh_collection_reset or not prev.get("fresh_collection_mode"):
             fresh_start = float(start_ts)
@@ -549,15 +550,21 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         else:
             recovered = _infer_fresh_collection_start_ts()
             fresh_start = float(recovered if recovered is not None else start_ts)
-        fresh_iso = datetime.fromtimestamp(fresh_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        fresh_iso = _timestamp_to_melbourne_display(fresh_start)
+        fresh_iso_utc = datetime.fromtimestamp(fresh_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    bot_start_mel = _timestamp_to_melbourne_display(start_ts)
+    bot_start_utc = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     payload = {
         "bot_version": EXECUTION_FIX_VERSION,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "bot_start_time": start_ts,
-        "bot_start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "bot_start_iso": bot_start_mel,
+        "bot_start_iso_utc": bot_start_utc,
+        "display_timezone": "Australia/Melbourne",
         "fresh_collection_mode": fcm,
         "fresh_collection_start_time": fresh_start,
         "fresh_collection_start_iso": fresh_iso,
+        "fresh_collection_start_iso_utc": fresh_iso_utc,
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
     }
@@ -3276,10 +3283,52 @@ def _normalize_order_side_to_dir(side) -> str:
 
 melbourne_tz = pytz.timezone("Australia/Melbourne")
 
+def _timestamp_to_melbourne_display(ts: float) -> str:
+    """Unix epoch (UTC) → Melbourne display string."""
+    if not ts:
+        return "-"
+    try:
+        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        mel = dt.astimezone(ZoneInfo("Australia/Melbourne"))
+        return mel.strftime("%Y-%m-%d %H:%M Melbourne")
+    except Exception:
+        return "-"
+
+
+def _utc_iso_to_melbourne_display(ts_str: str) -> str:
+    return _format_melbourne_hm(ts_str)
+
+
+def _experimental_entry_filter_detail(lane_id: str, spec: dict) -> list:
+    """Pre-entry gates shown on experimental Pathway Lab tiles."""
+    ef = spec.get("entry_filters")
+    if ef == "benchmark_all_approve":
+        return ["Entry filters: every AI_SCAN APPROVE (no extra pre-entry gates)"]
+    if ef == "ai_approve_replay_reject":
+        return ["Entry filters: AI APPROVE + replay model would REJECT"]
+    if ef == "ai_reject_replay_approve":
+        return ["Entry filters: AI REJECT (or soft reject) + replay model APPROVE"]
+    if isinstance(ef, dict):
+        parts = [
+            "Entry filters (ALL must pass on AI_SCAN APPROVE):",
+            f"  · AI win_prob ≥ {ef.get('ai_min', '?')}%",
+            f"  · Directional spread ≥ {ef.get('spread_min', '?')}",
+            f"  · ADX ≥ {ef.get('adx_min', '?')}",
+            f"  · Volume ratio ≥ {ef.get('volume_ratio_min', '?')}",
+            f"  · Structure score ≤ {ef.get('structure_max', '?')} (bearish structure)",
+        ]
+        if lane_id == RESEARCH_LANE_TYPE_B_PREDICTOR_V1:
+            parts.append(
+                "  · Rare combo — most APPROVEs fail ADX/vol/structure even when AI/spread pass"
+            )
+        return parts
+    return []
+
+
 def to_melbourne_time(utc_iso_str):
     try:
         dt = datetime.fromisoformat(utc_iso_str.replace("Z", "+00:00"))
-        return dt.astimezone(melbourne_tz).strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone(melbourne_tz).strftime("%Y-%m-%d %H:%M Melbourne")
     except:
         return utc_iso_str
 
@@ -14621,6 +14670,18 @@ def build_static_pathway_lane_specs() -> dict:
             if spec.get("exit_profile") == "RECOVERY_MONSTER"
             else "Scenario C frozen"
         )
+        exp_chips = [spec.get("spawn_on", "APPROVE")]
+        ef = spec.get("entry_filters")
+        if isinstance(ef, dict):
+            exp_chips.extend([
+                f"AI≥{ef.get('ai_min')}",
+                f"spread≥{ef.get('spread_min')}",
+                f"ADX≥{ef.get('adx_min')}",
+                f"vol≥{ef.get('volume_ratio_min')}",
+                f"struct≤{ef.get('structure_max')}",
+            ])
+        elif ef == "benchmark_all_approve":
+            exp_chips.append("all APPROVE")
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
@@ -14632,7 +14693,7 @@ def build_static_pathway_lane_specs() -> dict:
             "badge": "EXPERIMENTAL",
             "tile_number": exp_tile_start + tile_offset,
             "entry_mode_label": "Continuous",
-            "filter_chips": [spec.get("spawn_on", "APPROVE")],
+            "filter_chips": exp_chips,
             "toggle_key": "research_lane_enabled",
             "hypothesis": spec.get("hypothesis", ""),
             "research_question": spec.get("research_question", ""),
@@ -14657,7 +14718,7 @@ def build_static_pathway_lane_specs() -> dict:
                     **ai_direct,
                 },
                 exit_spec,
-                [f"Independence: {shared['independence']}"],
+                _experimental_entry_filter_detail(lane_id, spec) + [f"Independence: {shared['independence']}"],
             ),
         })
     return {
@@ -15245,7 +15306,7 @@ HTML = """<!DOCTYPE html>
 
 <h3>Exchange &amp; Cost Model (Research Sim)</h3>
 <p><strong>Exchange:</strong> <span id="exchangeLabel">Bitfinex</span> · <strong>Fee profile:</strong> <span id="feeProfile">-</span> · <strong>Trading fees:</strong> <span id="tradingFeeRates">-</span></p>
-<p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (UTC):</strong> <span id="fundingNextSettle">-</span></p>
+<p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (Melbourne):</strong> <span id="fundingNextSettle">-</span></p>
 <p><strong>Funding meaning:</strong> <span id="fundingMeaning">-</span> · <strong>Open-interest:</strong> <span id="fundingOpenInterest">-</span></p>
 
 <div id="binanceFeePanel" style="margin:16px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -15379,6 +15440,9 @@ DASHBOARD_JS = """(function () {
         const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
         return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} Melbourne`;
       } catch (e) { return ts; }
+    }
+    function formatMelbourneNow() {
+      return formatMelbourneDateTime(new Date().toISOString());
     }
     function safeText(id, value) {
       const el = document.getElementById(id);
@@ -15910,7 +15974,7 @@ DASHBOARD_JS = """(function () {
         }
         const skipBlk = d.display_skip_block || {};
         const rs = document.getElementById('refreshStatus');
-        if (rs) rs.innerText = 'Last updated ' + new Date().toLocaleTimeString() + ' (live)';
+        if (rs) rs.innerText = 'Last updated ' + formatMelbourneNow() + ' (Melbourne)';
         const sb = document.getElementById('serverBanner');
         if (sb) {
           const pid = d.bot_pid;
@@ -15918,7 +15982,8 @@ DASHBOARD_JS = """(function () {
           let txt = pid
             ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
             : 'LIVE (PID unknown — restart bot)';
-          if (d.server_ts) txt += ' · server ' + d.server_ts;
+          if (d.server_ts_melbourne) txt += ' · server ' + d.server_ts_melbourne;
+          else if (d.server_ts) txt += ' · server ' + formatMelbourneDateTime(d.server_ts);
           if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
           if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
           txt += ' · Stop: run stop_bot.ps1 in Final Bots (closing CMD alone may not stop a background bot)';
@@ -16007,7 +16072,7 @@ DASHBOARD_JS = """(function () {
         safeText('bidSizeBtc', d.bid_size_btc != null ? d.bid_size_btc.toFixed(4) : '-');
         safeText('askSizeBtc', d.ask_size_btc != null ? d.ask_size_btc.toFixed(4) : '-');
         safeText('accountBalance', '$' + (d.account_balance != null ? d.account_balance.toFixed(2) : '500.00'));
-        safeText('dailyPnl', '$' + (d.daily_pnl_usd != null ? d.daily_pnl_usd.toFixed(2) : '0.00') + ' net (UTC day)');
+        safeText('dailyPnl', '$' + (d.daily_pnl_usd != null ? d.daily_pnl_usd.toFixed(2) : '0.00') + ' net (UTC calendar day)');
         safeText('equity', '$' + (d.equity != null ? d.equity.toFixed(2) : '500.00'));
         safeText('exchangeLabel', d.exchange_label || 'Bitfinex');
         const fp = d.fee_profile || 'BITFINEX_ZERO';
@@ -16019,7 +16084,9 @@ DASHBOARD_JS = """(function () {
         const frPct = fund.rate_pct_per_8h != null ? fund.rate_pct_per_8h : (fund.rate != null ? (fund.rate * 100).toFixed(5) : '-');
         safeText('fundingRateLive', frPct !== '-' ? frPct + '% per 8h' : '-');
         safeText('fundingSource', fund.source || '-');
-        safeText('fundingNextSettle', fund.next_time_iso || (fund.next_time ? new Date(fund.next_time * 1000).toISOString() : '-'));
+        safeText('fundingNextSettle', formatMelbourneDateTime(
+          fund.next_time_melbourne || fund.next_time_iso || (fund.next_time ? new Date(fund.next_time * 1000).toISOString() : null)
+        ));
         let fMean = 'neutral';
         if (fund.rate > 0) fMean = 'positive rate → longs pay, shorts receive';
         else if (fund.rate < 0) fMean = 'negative rate → shorts pay, longs receive';
@@ -16244,7 +16311,7 @@ DASHBOARD_JS = """(function () {
         if (freshStatus) {
           if (d.last_fresh_reset_summary) {
             freshStatus.innerText = 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
-              (d.last_fresh_reset_ts ? ' @ ' + new Date(d.last_fresh_reset_ts * 1000).toLocaleString() : '');
+              (d.last_fresh_reset_ts ? ' @ ' + formatMelbourneDateTime(new Date(d.last_fresh_reset_ts * 1000).toISOString()) : '');
           } else {
             freshStatus.innerText = d.fresh_collection_mode
               ? 'Auto-trim active — aux logs checked hourly'
@@ -16295,7 +16362,7 @@ DASHBOARD_JS = """(function () {
         }
         safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS")).map(s => `
           <tr>
-            <td>${s.created_ts || '-'}</td>
+            <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts || s.time)}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
             <td>${laneBadge(s.research_lane, s.research_model)}</td>
             <td>${s.final_direction || s.dir || '-'}</td>
@@ -16484,7 +16551,7 @@ DASHBOARD_JS = """(function () {
         console.error("Refresh failed:", e);
         const rs = document.getElementById('refreshStatus');
         const isTimeout = (e && e.name === 'AbortError');
-        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >45s (bot may still be running)' : 'OFFLINE — refresh failed') + ' (' + new Date().toLocaleTimeString() + ')';
+        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >45s (bot may still be running)' : 'OFFLINE — refresh failed') + ' (' + formatMelbourneNow() + ')';
         const sb = document.getElementById('serverBanner');
         if (sb) {
           sb.style.borderColor = '#f85149';
@@ -16724,6 +16791,7 @@ def _collect_dashboard_active_signals(
             "regime": s.get("regime"),
             "strategy": s.get("strategy") or s.get("strategy_birth", default_strategy),
             "created_ts": s.get("created_ts"),
+            "created_ts_melbourne": _timestamp_to_melbourne_display(created_ts) if created_ts else "-",
             "expires_ts": expires_ts,
             "ttl_remaining": (expires_ts - now),
             "age": now - created_ts,
@@ -16958,6 +17026,22 @@ def api_state():
         with state_lock:
             snapshot["last_replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
             snapshot["funding"] = copy.deepcopy(state.get("funding") or {})
+        snapshot["display_timezone"] = "Australia/Melbourne"
+        snapshot["server_ts_melbourne"] = _format_melbourne_hm(snapshot.get("server_ts") or utc_iso())
+        snapshot["ai_input_time_melbourne"] = (
+            _format_melbourne_hm(LAST_AI_TIMESTAMP) if LAST_AI_TIMESTAMP else "-"
+        )
+        session_meta = _load_research_session_meta()
+        if session_meta.get("fresh_collection_start_time"):
+            snapshot["fresh_collection_start_melbourne"] = _timestamp_to_melbourne_display(
+                session_meta["fresh_collection_start_time"]
+            )
+        fund_out = snapshot.get("funding") or {}
+        if fund_out.get("next_time"):
+            fund_out["next_time_melbourne"] = _timestamp_to_melbourne_display(fund_out["next_time"])
+        elif fund_out.get("next_time_iso"):
+            fund_out["next_time_melbourne"] = _format_melbourne_hm(fund_out["next_time_iso"])
+        snapshot["funding"] = fund_out
         logger.info(
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
             f"elapsed_ms={int((time.perf_counter() - t0) * 1000)} [PIPELINE ENFORCEMENT]"
