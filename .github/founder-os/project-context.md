@@ -12,7 +12,7 @@ Product & platform (9 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Restore full operator dashboard on Railway showcase.
 
 ## Last Activity
 
