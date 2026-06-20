@@ -3,12 +3,14 @@
 import Link from 'next/link';
 import { EXCHANGE_PROVIDER_LABELS, type ExchangeProvider } from '@dcf/utils';
 
-type RelayState = 'idle' | 'active' | 'paused' | 'copy';
+type RelayState = 'idle' | 'active' | 'paused' | 'copy' | 'sim';
 
 function relayLabel(state: RelayState, exchangeLabel: string) {
   switch (state) {
     case 'active':
       return `Copying showcase signals on ${exchangeLabel}`;
+    case 'sim':
+      return `Relay simulation active — paper book on ${exchangeLabel}; live orders blocked`;
     case 'paused':
       return `Relay stopped — ${exchangeLabel} protected`;
     case 'copy':
@@ -48,6 +50,7 @@ export function ExchangeRelayControl({
   onExchangeChange?: (id: string) => void;
 }) {
   const isLiveRelay = relayState === 'active' || relayState === 'paused';
+  const isSimRelay = relayState === 'sim';
   const canToggle = signedIn && isLiveRelay && (onStop || onStart);
   const hireHref = signedIn
     ? `/agent-hub/${slug}/hire?exchange=${exchange}`
@@ -68,12 +71,20 @@ export function ExchangeRelayControl({
             className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
               relayState === 'active'
                 ? 'bg-emerald-500/20 text-emerald-200'
+                : relayState === 'sim'
+                  ? 'bg-sky-500/20 text-sky-200'
                 : relayState === 'paused'
                   ? 'bg-red-500/20 text-red-200'
                   : 'bg-zinc-800 text-zinc-400'
             }`}
           >
-            {relayState === 'active' ? 'Relay on' : relayState === 'paused' ? 'Relay off' : relayState}
+            {relayState === 'active'
+              ? 'Relay on'
+              : relayState === 'sim'
+                ? 'Sim on'
+              : relayState === 'paused'
+                ? 'Relay off'
+                : relayState}
           </span>
         </div>
       )}
@@ -138,6 +149,13 @@ export function ExchangeRelayControl({
           </Link>
         ) : relayState === 'copy' && canToggle ? null : null}
       </div>
+
+      {isSimRelay && (
+        <p className="text-[11px] leading-relaxed text-sky-200/80">
+          Relay simulation is running from the main agent hub. Stop the sim there before using Start to resume live
+          copy on {exchangeLabel}.
+        </p>
+      )}
 
       {isLiveRelay && (
         <p className="text-[11px] leading-relaxed text-zinc-500">

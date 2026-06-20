@@ -16,7 +16,7 @@ import {
   readInstanceScope,
   USER_INSTANCE_STARTING_BALANCE,
 } from './instance-view.mapper';
-import { emptyCopyRelaySimState } from '@dcf/utils';
+import { emptyCopyRelaySimState, readCopyRelaySimState, isCopyRelaySimActive } from '@dcf/utils';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 
@@ -183,9 +183,10 @@ export class TradingAgentInstancesService {
         });
 
     const executionLive = process.env.SUBSCRIBER_EXECUTION_ENABLED !== 'false';
-    const relayPaused = instance.status === TradingAgentInstanceStatus.PAUSED;
     const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
     const dashState = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const relaySimActive = isCopyRelaySimActive(dashState);
+    const relayPaused = instance.status === TradingAgentInstanceStatus.PAUSED && !relaySimActive;
     const scope = readInstanceScope(instance);
     const exchangeStatus = isCopy
       ? { connected: false, provider: 'copy', accountLabel: 'DDollar copy track' }
@@ -238,17 +239,20 @@ export class TradingAgentInstancesService {
             : 'USDT in Derivatives wallet — ready for live copy signals.',
       },
       runtime: {
-        connected: instance.status === TradingAgentInstanceStatus.ACTIVE,
+        connected: instance.status === TradingAgentInstanceStatus.ACTIVE || relaySimActive,
         message: isCopy
           ? 'Copy-trading admin DeepSeek decisions with DDollar — no API keys required.'
-          : relayPaused
-            ? 'Relay stopped — showcase signals will not execute on your exchange until you press Start.'
-            : executionLive
-              ? `Live copy execution active — platform places Bitfinex limit orders from admin signals (max $${marginCap} margin/trade).`
-              : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
+          : relaySimActive
+            ? 'Relay simulation active — paper book mirrors showcase signals; live Bitfinex orders blocked.'
+            : relayPaused
+              ? 'Relay stopped — showcase signals will not execute on your exchange until you press Start.'
+              : executionLive
+                ? `Live copy execution active — platform places Bitfinex limit orders from admin signals (max $${marginCap} margin/trade).`
+                : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
         openPositions: openHirePositions,
         pnlPct: 0,
       },
+      copyRelaySim: readCopyRelaySimState(dashState),
     };
   }
 
@@ -334,6 +338,13 @@ export class TradingAgentInstancesService {
     });
     if (!instance) {
       throw new NotFoundException('No private instance — hire or paper-track this agent first');
+    }
+
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    if (!paused && isCopyRelaySimActive(dash)) {
+      throw new BadRequestException(
+        'Stop relay simulation first — live copy cannot resume while the paper sim book is active.',
+      );
     }
 
     const status = paused ? TradingAgentInstanceStatus.PAUSED : TradingAgentInstanceStatus.ACTIVE;

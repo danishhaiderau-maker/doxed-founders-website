@@ -3,6 +3,7 @@ import {
   SignalCycleStatus,
   TradingAgentInstanceStatus,
   type TradingAgentInstance,
+  Prisma,
 } from '@prisma/client';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
@@ -40,6 +41,7 @@ import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
+import { applyDashboardPatch } from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 import { mapBotStateToAgentStats } from './bot-state.mapper';
 
@@ -159,7 +161,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         },
       });
 
-      for (const instance of instances) {
+      for (const row of instances) {
+        const instance =
+          (await this.prisma.tradingAgentInstance.findUnique({ where: { id: row.id } })) ?? row;
         if (instance.exchangeProvider !== 'bitfinex') continue;
         const simActive = isCopyRelaySimActive(instance.dashboardState);
 
@@ -611,7 +615,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     botMax: number | null,
     reject?: { reason: string | null } | null,
   ) {
-    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     const prev = dash.copyRelayCapacity as CopyRelayCapacitySnapshot | undefined;
     const capacity = buildCopyRelayCapacity({
       open: lotSummary.open,
@@ -630,7 +639,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        dashboardState: { ...dash, copyRelayCapacity: capacity },
+        dashboardState: applyDashboardPatch(dash, {
+          copyRelayCapacity: capacity,
+        }) as unknown as Prisma.InputJsonValue,
       },
     });
   }
@@ -659,14 +670,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       markPrice: mark,
     });
 
-    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const simActiveNow = isCopyRelaySimActive(dash);
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        dashboardState: {
-          ...dash,
+        dashboardState: applyDashboardPatch(dash, {
           copyRelayReconcile: reconcile,
-          ...(simActive
+          ...(simActiveNow
             ? {
                 copyRelaySim: {
                   ...readCopyRelaySimState(dash),
@@ -674,7 +690,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
                 },
               }
             : {}),
-        },
+        }) as unknown as Prisma.InputJsonValue,
       },
     });
 
@@ -776,8 +792,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async persistSimTickState(agentId: string, instance: TradingAgentInstance) {
-    const sim = readCopyRelaySimState(instance.dashboardState);
-    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true },
+    });
+    if (!fresh || !isCopyRelaySimActive(fresh.dashboardState)) return;
+    const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
+    const sim = readCopyRelaySimState(dash);
     const reconcile =
       (dash.copyRelayReconcile as ReturnType<CopyRelaySimService['buildReconcileSnapshot']>) ??
       sim.reconcile;

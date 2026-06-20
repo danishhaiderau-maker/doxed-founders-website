@@ -80,12 +80,15 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
   }
 
   const isLive = data?.kind === 'live' || data?.instance.exchangeProvider !== 'paper';
+  const relaySimActive = Boolean(data?.copyRelaySim?.active);
   const relayState =
-    data?.instance.status === 'PAUSED'
-      ? ('paused' as const)
-      : isLive
-        ? ('active' as const)
-        : ('copy' as const);
+    relaySimActive
+      ? ('sim' as const)
+      : data?.instance.status === 'PAUSED'
+        ? ('paused' as const)
+        : isLive
+          ? ('active' as const)
+          : ('copy' as const);
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
