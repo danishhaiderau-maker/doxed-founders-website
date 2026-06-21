@@ -43,7 +43,19 @@ Copy the https://*.trycloudflare.com URL, then from repo machine:
 Press Ctrl+C to stop.
 
 "@
-  cloudflared tunnel --url $localUrl
+  $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $repoRoot = Split-Path -Parent $scriptDir
+  $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
+  $logFile = Join-Path $repoRoot ".home-tunnel.log"
+  Write-Host "Tunnel log: $logFile"
+  Write-Host "URL file:   $tunnelUrlFile (auto-updated when URL appears)"
+  Write-Host ""
+  cloudflared tunnel --url $localUrl 2>&1 | Tee-Object -FilePath $logFile | ForEach-Object {
+    Write-Host $_
+    if ($_ -match '(https://[a-z0-9-]+\.trycloudflare\.com)') {
+      Set-Content -Path $tunnelUrlFile -Value $matches[1] -NoNewline
+    }
+  }
   exit 0
 }
 

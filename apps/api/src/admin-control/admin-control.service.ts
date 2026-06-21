@@ -163,9 +163,40 @@ export class AdminControlService {
     };
   }
 
+  private async isHomeHostedShowcase(): Promise<boolean> {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const url = row?.showcaseBotPublicUrl?.trim() ?? this.botBridge.getBotUrl() ?? '';
+    if (!url) return false;
+    return (
+      url.includes('trycloudflare.com') ||
+      url.includes('bot.doxxedcrypto.digital') ||
+      url.includes('127.0.0.1') ||
+      url.includes('10.0.0.102')
+    );
+  }
+
   async pauseAgentTrading() {
     // Save bot state before kill (best-effort — may fail if already stopping)
     await this.botBridge.proxyBotPost('/api/pause', {}).catch(() => undefined);
+
+    if (await this.isHomeHostedShowcase()) {
+      const res = await this.botBridge.proxyBotPost('/api/pause', {});
+      const data = (res.data ?? {}) as Record<string, unknown>;
+      const paused =
+        data.execution_paused === true ||
+        data.status === 'paused' ||
+        data.execution_reason === 'ADMIN_MANUAL';
+      this.botBridge.invalidateCache();
+      return {
+        ...res,
+        ok: paused,
+        paused,
+        killed: false,
+        message: paused
+          ? 'Home bot paused — execution stopped until you resume.'
+          : 'Pause failed — is the home bot running on :7800?',
+      };
+    }
 
     const rail = await this.showcaseRuntime.stopShowcaseDeployment();
     this.botBridge.invalidateCache();
@@ -195,6 +226,29 @@ export class AdminControlService {
   }
 
   async resumeAgentTrading() {
+    if (await this.isHomeHostedShowcase()) {
+      const health = await this.botBridge.fetchHealth();
+      if (!health) {
+        return {
+          ok: false,
+          error:
+            'Home bot offline. On this PC run START-LAUNCHER.cmd once, then click Start home stack on this PC (or START-HOME.cmd).',
+          resumed: false,
+        };
+      }
+      const res = await this.botBridge.proxyBotPost('/api/resume', {});
+      const data = (res.data ?? {}) as Record<string, unknown>;
+      const resumed = data.execution_paused === false || data.status === 'resumed' || res.ok;
+      return {
+        ...res,
+        ok: resumed,
+        resumed,
+        message: resumed
+          ? 'Home bot execution resumed.'
+          : 'Resume failed — check bot dashboard on :7800.',
+      };
+    }
+
     const rail = await this.showcaseRuntime.startShowcaseDeployment();
     if (!rail.ok) {
       return { ok: false, error: rail.message, resumed: false };

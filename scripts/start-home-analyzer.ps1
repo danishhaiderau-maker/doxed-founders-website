@@ -14,7 +14,13 @@ Get-Content $vaultEnv | ForEach-Object {
   }
 }
 
+Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
+Write-Host "  $agentDir"
+Write-Host "Do NOT run analyzer from Final Bots root (stale/missing trades_3factor.csv)."
+Write-Host ""
+
 $args = @("research\analyzer_research_engine_v62.py")
 if ($Once) { $args += "--once" }
 Write-Host "Starting analyzer in $agentDir ..."
+Write-Host "Dashboard: http://127.0.0.1:9001/ (embedded in analyzer when enabled)"
 python @args
