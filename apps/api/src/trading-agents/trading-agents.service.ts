@@ -465,15 +465,16 @@ export class TradingAgentsService implements OnModuleInit {
     if (agent.slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
       return serializeAgent(agent, extra);
     }
-    const [live, health] = await Promise.all([
-      this.botBridge.getLiveDashboard(agent.name, false),
-      this.botBridge.fetchHealth(),
-    ]);
+    const health = await this.botBridge.fetchHealth();
+    const connected = Boolean(
+      health && (health.status === 'alive' || health.status === 'ok'),
+    );
+    if (!connected) {
+      return serializeAgent(agent, { ...extra, botConnected: false });
+    }
+    const live = await this.botBridge.getLiveDashboard(agent.name, false);
     if (!live) {
-      const connected = Boolean(
-        health && (health.status === "alive" || health.status === "ok"),
-      );
-      return serializeAgent(agent, { ...extra, botConnected: connected });
+      return serializeAgent(agent, { ...extra, botConnected: true });
     }
     return serializeAgent(agent, {
       ...extra,
