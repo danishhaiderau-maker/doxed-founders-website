@@ -130,7 +130,7 @@ export function ExchangeHirePanel({
     {
       id: 'observe',
       title: 'Showcase observe',
-      detail: 'Admin research bot only — not your copy session.',
+      detail: 'Home research bot — signals only, not your copy session.',
       active: !isLiveHired,
     },
   ];

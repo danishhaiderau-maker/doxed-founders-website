@@ -2,8 +2,6 @@
 
 import Link from 'next/link';
 import type { TradingAgentDashboardState } from '@dcf/utils';
-import { AgentLiveExchangeEquity } from '@/components/agent-hub/agent-live-exchange-equity';
-import { AgentShowcaseEquity } from '@/components/agent-hub/agent-showcase-equity';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
@@ -12,6 +10,8 @@ import { AgentRelaySimPanel } from '@/components/agent-hub/agent-relay-sim-panel
 import type {
   CopyRelayReconcileSnapshot,
   CopyRelaySimState,
+  CopyRelayLimitChainSnapshot,
+  TradeLifecycleIntegritySnapshot,
 } from '@dcf/utils';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
@@ -59,6 +59,10 @@ export function AgentDeskView({
   relaySimLiveBook,
   copyRelaySim,
   copyRelayReconcile,
+  copyRelayLimitChain,
+  tradeLifecycleIntegrity,
+  relayFidelity,
+  botConnected,
   userActivity,
   showcaseActivity,
   slug,
@@ -79,6 +83,10 @@ export function AgentDeskView({
   relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
+  copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
+  tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
+  botConnected?: boolean;
   userActivity: TradingAgentActivityEntry[];
   showcaseActivity: TradingAgentActivityEntry[];
   slug?: string;
@@ -97,13 +105,19 @@ export function AgentDeskView({
         showcaseAgent={showcaseAgent}
         copyRelaySim={copyRelaySim}
         copyRelayReconcile={copyRelayReconcile}
+        relayFidelity={relayFidelity}
         relaySimLiveBook={relaySimLiveBook}
+        showcaseLiveBook={showcaseLiveBook}
         showcaseActivity={showcaseActivity}
         simActivity={userActivity}
+        copyRelayLimitChain={copyRelayLimitChain}
+        tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+        botConnected={botConnected}
         onStart={onStartRelaySim}
         onStop={onStopRelaySim}
         busy={relaySimBusy}
         instanceStatus={instanceStatus}
+        hideSummaryMetrics
       />
     );
   }
@@ -111,13 +125,12 @@ export function AgentDeskView({
   if (activeDesk === 'showcase' || mode === 'showcase') {
     return (
       <DeskPanel
-        badge="Admin showcase"
+        badge="Research showcase"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
         title="Conservative BTC Agent · showcase bot"
-        subtitle="Public research run on Railway — signals, limit orders, open positions, expired orders, and closed trades."
+        subtitle="Home research bot — signals, limit orders, open positions, expired orders, and closed trades."
       >
-        <AgentShowcaseEquity agent={showcaseAgent} title="Showcase equity" />
         <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={10} />
         <AgentTradeJourney
           activity={showcaseActivity}
@@ -178,10 +191,7 @@ export function AgentDeskView({
       title={`Your ${exchange} account`}
       subtitle="Real money on your exchange — every open order, position, expired limit, and closed copy trade."
     >
-      {isLive ? (
-        <AgentLiveExchangeEquity agent={userAgent} exchangeLabel={exchange} />
-      ) : null}
-      {isLive && slug ? (
+      {slug ? (
         <AgentLiveTradeExportButton
           slug={slug}
           token={accessToken}

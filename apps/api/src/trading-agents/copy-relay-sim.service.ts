@@ -148,8 +148,12 @@ export class CopyRelaySimService {
     const participants = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
-        createdAt: { gte: startedAt },
         cycle: { agentId },
+        OR: [
+          { createdAt: { gte: startedAt } },
+          { updatedAt: { gte: startedAt } },
+          { status: { in: ['PENDING_ENTRY', 'OPEN'] } },
+        ],
       },
       include: {
         cycle: {

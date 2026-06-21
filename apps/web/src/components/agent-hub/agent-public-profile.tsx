@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   formatPercent,
   formatUsd,
@@ -18,7 +18,7 @@ import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-ba
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
-import { AgentDeskSwitcher, type AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
+import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
@@ -384,14 +384,8 @@ export function AgentPublicProfile({
     ? `/agent-hub/${slug}/hire?exchange=bitfinex`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=bitfinex`)}`;
 
-  const copyDetailsMode: 'live' | 'sim' | null = relaySimActive
-    ? 'sim'
-    : isLiveSession
-      ? 'live'
-      : null;
-
-  const detailsLiveBook =
-    relaySimActive && relaySimLiveBook ? relaySimLiveBook : exchangeLiveBook;
+  const copyDetailsMode: 'live' | null =
+    activeDesk === 'live' && isLiveSession ? 'live' : null;
 
   const deskViewProps = {
     activeDesk: resolvedDesk,
@@ -404,6 +398,10 @@ export function AgentPublicProfile({
     relaySimLiveBook,
     copyRelaySim,
     copyRelayReconcile,
+    copyRelayLimitChain,
+    tradeLifecycleIntegrity,
+    relayFidelity,
+    botConnected,
     userActivity: resolvedDesk === 'relay-sim' ? simAct : userAct,
     showcaseActivity: showcaseAct,
     slug,
@@ -414,11 +412,6 @@ export function AgentPublicProfile({
     onStopRelaySim,
     relaySimBusy,
   } as const;
-
-  useEffect(() => {
-    if (relaySimActive) setActiveDesk('relay-sim');
-    else if (isLiveSession) setActiveDesk('live');
-  }, [isLiveSession, relaySimActive]);
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
@@ -618,32 +611,21 @@ export function AgentPublicProfile({
             </div>
           )}
 
-          <div className="mt-4">
-            <AgentDeskSwitcher
-              activeDesk={activeDesk}
-              onChange={setActiveDesk}
-              exchangeLabel={exchangeLabel}
-              liveAvailable={slug === 'conservative-btc'}
-              relaySimAvailable={relaySimDeskAvailable}
-              relaySimActive={relaySimActive}
-            />
-          </div>
-
           {tab === 'Overview' && (
-            <div className="space-y-6">
+            <div className="space-y-4">
               <AgentDeskView {...deskViewProps} />
               {copyDetailsMode ? (
                 <CopyTradeDetailsStrip
                   agent={agent}
                   exchangeLabel={exchangeLabel}
-                  liveBook={detailsLiveBook}
                   copyRelayReconcile={copyRelayReconcile}
                   copyRelaySim={copyRelaySim}
                   copyRelayLimitChain={copyRelayLimitChain}
                   tradeLifecycleIntegrity={tradeLifecycleIntegrity}
                   relayFidelity={relayFidelity}
                   instanceStatus={instanceStatus}
-                  mode={copyDetailsMode}
+                  botConnected={botConnected}
+                  mode="live"
                 />
               ) : null}
               {activeDesk === 'live' && isLiveSession ? (

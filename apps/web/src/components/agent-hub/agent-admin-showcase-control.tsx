@@ -39,8 +39,8 @@ export function AgentAdminShowcaseControl({
         setMsg(
           message ??
             (stopped
-              ? 'Showcase bot starting on Railway (~60–120s)'
-              : 'Showcase bot killed — Railway URL offline'),
+              ? 'Showcase bot starting on home PC (~30–60s)'
+              : 'Showcase bot stopped — home bot offline'),
         );
         onUpdated?.();
         if (stopped) {
@@ -59,16 +59,8 @@ export function AgentAdminShowcaseControl({
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">Admin account</p>
       <p className="mt-1 text-xs text-zinc-400">
-        <strong>Stop</strong> kills the Railway deployment —{' '}
-        <a
-          href="https://btc-conservative-agent-production.up.railway.app/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-violet-300 hover:underline"
-        >
-          bot dashboard
-        </a>{' '}
-        goes offline (502). <strong>Start</strong> redeploys it (~2 min). Status:{' '}
+        <strong>Stop</strong> pauses the home research bot — the showcase feed goes offline until you
+        start it again via <code className="text-violet-300">START-HOME.cmd</code>. Status:{' '}
         {botConnected ? 'online' : 'offline'}.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">

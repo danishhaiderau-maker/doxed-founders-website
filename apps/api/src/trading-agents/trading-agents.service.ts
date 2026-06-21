@@ -1021,6 +1021,10 @@ export class TradingAgentsService implements OnModuleInit {
             p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
           ),
           limit: 20,
+          sessionStartedAt:
+            copyRelaySim.active && copyRelaySim.startedAt
+              ? new Date(copyRelaySim.startedAt)
+              : null,
         });
 
         if (copyRelaySim.active) {
