@@ -118,6 +118,19 @@ export function resolveShowcaseTradePrices(
     }
   }
 
+  for (const sig of bot.signal_info?.signals ?? []) {
+    if (!sig || typeof sig !== 'object') continue;
+    const refId = String(sig.trade_id ?? '');
+    if (refId !== tradeId && !refId.startsWith(tradeId) && !tradeId.startsWith(refId)) continue;
+    return extractShowcaseFromSignalRef(sig as Record<string, unknown>);
+  }
+
+  for (const pos of bot.positions ?? []) {
+    if (pos.trade_id === tradeId && typeof pos.entry === 'number') {
+      return { entry: pos.entry };
+    }
+  }
+
   return {};
 }
 
@@ -144,7 +157,7 @@ export function buildRelayFidelitySnapshot(input: {
   limit?: number;
   sessionStartedAt?: Date | null;
 }): RelayFidelitySnapshot {
-  const limit = input.limit ?? 20;
+  const limit = input.limit ?? 50;
   const sessionStart = input.sessionStartedAt?.getTime() ?? 0;
 
   const rows: RelayFidelityRow[] = [];
