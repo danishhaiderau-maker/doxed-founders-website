@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Doxxedcrypto.digital — Lightweight execution mirror entry point.
+Home or Railway entry — full research bot + Bitfinex relay hooks for doxxedcrypto.digital.
 
-Railway MUST start this file, not bot.py directly.
-bot.py remains the synced signal engine backend until full signal_engine/ extraction completes.
+Prefer running bot.py at home with home-bot.env (see docs/HOME_BOT_MIGRATION.md).
 """
 from __future__ import annotations
 
 import os
 import sys
 
-# Execution mirror flags — set before importing signal engine.
-os.environ.setdefault("SHOWCASE_EXECUTION_ONLY", "1")
 os.environ.setdefault("SHOWCASE_AGENT", "1")
 os.environ.setdefault(
     "SHOWCASE_RELAY_WEBHOOK_URL",

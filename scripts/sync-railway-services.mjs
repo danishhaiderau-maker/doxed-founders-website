@@ -1,9 +1,11 @@
 /**
- * Upsert DATABASE_URL + schema push flags and redeploy API + btc bot services.
+ * Upsert DATABASE_URL + schema push flags and redeploy Railway API only.
+ * Bot runs at home — see docs/HOME_BOT_MIGRATION.md
  */
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vault = join(root, '..', 'doxedcryptofounder-secrets', 'vault');
@@ -74,6 +76,8 @@ const relayEnv = {
   BITFINEX_COPY_POLICY_VERSION: '2',
 };
 
+const homeBotUrl = resolveHomeBotPublicUrl();
+
 const apiVars = {
   DATABASE_URL: dbUrl,
   JWT_SECRET: jwtSecret,
@@ -81,8 +85,8 @@ const apiVars = {
   PRISMA_DB_PUSH: 'true',
   PRISMA_SCHEMA: 'prisma/schema.prisma',
   CORS_ORIGINS: cors,
-  TRADING_AGENT_BOT_URL: 'https://btc-conservative-agent-production.up.railway.app',
-  CONSERVATIVE_BTC_BOT_URL: 'https://btc-conservative-agent-production.up.railway.app',
+  TRADING_AGENT_BOT_URL: homeBotUrl,
+  CONSERVATIVE_BTC_BOT_URL: homeBotUrl,
   ...relayEnv,
   ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
   ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
@@ -90,7 +94,7 @@ const apiVars = {
   ...(railwayToken ? { RAILWAY_TOKEN: railwayToken } : {}),
 };
 
-const TARGET_SERVICES = new Set(['doxed-founders-website', 'btc-conservative-agent']);
+const TARGET_SERVICES = new Set(['doxed-founders-website']);
 
 const data = await gql(
   token,
@@ -113,15 +117,8 @@ for (const project of data.projects?.edges?.map((e) => e.node) ?? []) {
     const svc = svcEdge.node;
     if (!TARGET_SERVICES.has(svc.name)) continue;
 
-    const variables = svc.name === 'doxed-founders-website' ? apiVars : {
-      PORT: '5000',
-      DASHBOARD_PORT: '5000',
-      DASHBOARD_PUBLIC_URL: 'https://btc-conservative-agent-production.up.railway.app',
-      SHOWCASE_RELAY_WEBHOOK_URL:
-        'https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event',
-      ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
-    };
-    console.log(`Sync ${project.name} / ${svc.name}…`);
+    const variables = apiVars;
+    console.log(`Sync ${project.name} / ${svc.name} (home bot → ${homeBotUrl})…`);
     await gql(
       token,
       `mutation($input: VariableCollectionUpsertInput!) {
