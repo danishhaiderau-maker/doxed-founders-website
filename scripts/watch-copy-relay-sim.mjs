@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { PrismaClient } from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
+import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
 const hours = Number(process.argv.find((a) => a.startsWith('--hours='))?.split('=')[1] ?? 4);
 const intervalSec = Number(
@@ -35,8 +36,7 @@ if (fs.existsSync(neonPath)) {
 }
 
 const prisma = new PrismaClient();
-const BOT_URL =
-  process.env.TRADING_AGENT_BOT_URL ?? 'https://btc-conservative-agent-production.up.railway.app';
+const BOT_URL = process.env.TRADING_AGENT_BOT_URL?.trim() || resolveHomeBotPublicUrl();
 const endAt = Date.now() + hours * 3600_000;
 
 function log(line) {
