@@ -51,7 +51,7 @@ export class BotBridgeService {
 
     try {
       const res = await fetch(`${base}/api/state`, {
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(45000),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) {
