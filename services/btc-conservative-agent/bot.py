@@ -2553,8 +2553,6 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
                 bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
                 bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + net_pnl_usd, 2)
         try:
-            if _showcase_execution_only():
-                return
             with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
                 json.dump(
                     {"schema": "lane_pnl_ledger_v1", "ts": utc_iso(), "lanes": ledger},
@@ -2671,8 +2669,6 @@ def log_ai_input_full(
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        if _showcase_execution_only():
-            return
         rotate_log(AI_INPUT_LOG_FILE)
         with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
@@ -6857,8 +6853,6 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
 
 
 def dynamic_csv_writer(filename, row):
-    if _showcase_execution_only():
-        return
     last_err = None
     with csv_lock:
         for attempt in range(CSV_WRITE_RETRIES):
@@ -8564,8 +8558,6 @@ def log_near_miss(signal, ai, miss_type, margin, edge_score):
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        if _showcase_execution_only():
-            return
         rotate_log(NEAR_MISS_FILE)
         with open(NEAR_MISS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -8869,8 +8861,6 @@ def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
 
 def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag):
     """AI REJECT: shadow replay buffer for outcome collection without extra API calls."""
-    if _showcase_execution_only():
-        return
     if not (_sole_ai_research_mode() and is_research_data_collection()):
         return
     trade_id = ai.get("trade_id") or ctx.get("trade_id")
@@ -8898,8 +8888,6 @@ def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_ta
         "analyzer_sync_id": ANALYZER_SYNC_ID,
     }
     try:
-        if _showcase_execution_only():
-            return
         rotate_log(SOFT_REJECT_SHADOW_FILE)
         with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -8978,7 +8966,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
             "research_lane": ai_result.get("research_lane"),
             "research_model": ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane")),
         })
-        hist_limit = 5 if _showcase_execution_only() else (50 if _sole_ai_research_mode() else 5)
+        hist_limit = 50 if _sole_ai_research_mode() else 5
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
 
@@ -9971,15 +9959,6 @@ def evaluate_signal_with_ai(
             f"prob={ai_result['win_prob']} err={ai_result.get('error_type')} [PIPELINE ENFORCEMENT]"
         )
         return ai_result
-
-def _showcase_execution_only() -> bool:
-    """Doxxedcrypto.digital Railway: exact signal replica, no research CSV/JSONL/telemetry writes."""
-    flag = os.getenv("SHOWCASE_EXECUTION_ONLY", "").strip().lower()
-    if flag in ("0", "false", "no", "off"):
-        return False
-    if flag in ("1", "true", "yes", "on"):
-        return True
-    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
 
 def is_research_data_collection() -> bool:
     with state_lock:
@@ -11719,8 +11698,6 @@ def atomic_freeze_signal(signal, edge_score, pipeline_eff_thr=None):
 
 def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):
     """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""
-    if _showcase_execution_only():
-        return
     try:
         features = features or {}
         edge_score = round(float(edge_score or 0), 2)
@@ -13111,28 +13088,25 @@ def state_monitor_loop():
             global _last_feature_drift_ts
             if time.time() - _last_feature_drift_ts >= FEATURE_DRIFT_INTERVAL_SEC:
                 _last_feature_drift_ts = time.time()
-                if not _showcase_execution_only():
-                    try:
-                        from feature_drift_monitor import build_report as _build_feature_drift_report
-                        drift_report = _build_feature_drift_report()
-                        alerts = drift_report.get("alerts") or []
-                        if alerts:
-                            logger.warning(
-                                f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
-                                + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
-                                + " [PIPELINE ENFORCEMENT]"
-                            )
-                        else:
-                            logger.info(
-                                f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
-                                f"[PIPELINE ENFORCEMENT]"
-                            )
-                    except Exception as e:
-                        logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
+                try:
+                    from feature_drift_monitor import build_report as _build_feature_drift_report
+                    drift_report = _build_feature_drift_report()
+                    alerts = drift_report.get("alerts") or []
+                    if alerts:
+                        logger.warning(
+                            f"[FEATURE_DRIFT] {len(alerts)} alert(s): "
+                            + ", ".join(f"{a['feature']}:{a['drift_pct']:+.1f}%" for a in alerts[:5])
+                            + " [PIPELINE ENFORCEMENT]"
+                        )
+                    else:
+                        logger.info(
+                            f"[FEATURE_DRIFT] report ok samples={drift_report.get('sample_count', 0)} "
+                            f"[PIPELINE ENFORCEMENT]"
+                        )
+                except Exception as e:
+                    logger.warning(f"[FEATURE_DRIFT] periodic run failed: {e}")
             global _last_research_kpi_ts, _cached_research_kpis
-            if _showcase_execution_only():
-                pass
-            elif is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
+            if is_research_data_collection() and time.time() - _last_research_kpi_ts >= RESEARCH_KPI_INTERVAL_SEC:
                 try:
                     from research_kpi_engine import refresh_all_research_kpis
                     _cached_research_kpis = refresh_all_research_kpis(os.getcwd())
@@ -16988,8 +16962,6 @@ def api_state():
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
-        snapshot["showcase_execution_only"] = _showcase_execution_only()
-        snapshot["runtime_mode"] = "EXECUTION_MIRROR" if _showcase_execution_only() else "RESEARCH"
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -17895,8 +17867,6 @@ def patch_signal_snapshot_outcome(
     fill_dynamics: dict = None,
 ):
     """Merge execution outcome into signal_snapshot.jsonl for analyzer cohort joins."""
-    if _showcase_execution_only():
-        return
     if not trade_id or not os.path.exists(SIGNAL_SNAPSHOT_FILE):
         return
     try:
@@ -17948,8 +17918,6 @@ def patch_signal_snapshot_outcome(
 
 def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Persist APPROVE-time config for counterfactual / shadow research."""
-    if _showcase_execution_only():
-        return
     try:
         trade_id = signal.get("trade_id")
         if not trade_id or ai.get("decision") != "APPROVE":
@@ -18085,8 +18053,6 @@ def log_golden_stack_rejection(
     executed: bool = None,
 ):
     """Log per-gate Golden Stack breakdown for every APPROVE (research shadow pipeline)."""
-    if _showcase_execution_only():
-        return
     try:
         trade_id = signal.get("trade_id")
         if not trade_id:
@@ -18157,8 +18123,6 @@ def log_golden_stack_rejection_outcome(
     failed_by: list = None,
 ):
     """Append counterfactual MFE/MAE after replay TTL for golden stack analysis."""
-    if _showcase_execution_only():
-        return
     if not trade_id:
         return
     pb = post_block_research or {}
@@ -18214,8 +18178,6 @@ def log_trend_health_csv():
 
 def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""
-    if _showcase_execution_only():
-        return
     if ai.get("decision") != "APPROVE":
         return
     trade_id = signal.get("trade_id")
@@ -18310,8 +18272,6 @@ def _try_shadow_limit_fill(buf: dict, price: float, t_rel: float):
 
 
 def tick_all_replay_buffers(price: float):
-    if _showcase_execution_only():
-        return
     if price is None or price <= 0:
         return
     now = time.time()
@@ -18577,8 +18537,6 @@ def finalize_shadow_research(trade_id: str, block_reason: str, signal: dict = No
 
 
 def start_replay_buffer(trade_id: str, start_price: float, **meta):
-    if _showcase_execution_only():
-        return
     sp = _buf_float(start_price, 0)
     if not trade_id or sp <= 0:
         return
@@ -18614,8 +18572,6 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
 
 
 def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
-    if _showcase_execution_only():
-        return
     if not trade_id or price is None or price <= 0:
         return
     now = time.time()
@@ -18651,8 +18607,6 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
 
 def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
     """Per-trade path summary for analyzer thesis/ladder counterfactuals."""
-    if _showcase_execution_only():
-        return
     try:
         mfe = float(trade_row.get("max_profit") or pos.get("max_pnl_pct") or 0)
         direction = str(trade_row.get("dir") or pos.get("dir") or "LONG").upper()
@@ -18729,9 +18683,6 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
 
 def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
     """Keep replay alive for POST_EXIT_REPLAY_SEC after close — horizon recovery data."""
-    if _showcase_execution_only():
-        close_replay_buffer(trade_id)
-        return
     if not trade_id or exit_price is None or float(exit_price) <= 0:
         close_replay_buffer(trade_id)
         return
@@ -18774,8 +18725,6 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
 
 def service_post_exit_replays():
     """Append mark-price ticks to post-exit replay buffers (no open position required)."""
-    if _showcase_execution_only():
-        return
     with state_lock:
         price = float(state.get("price") or 0)
     if price <= 0:
@@ -18806,8 +18755,6 @@ def close_replay_buffer(trade_id):
             replay_buffers.pop(trade_id, None)
 
 def dump_replay(trade_id: str):
-    if _showcase_execution_only():
-        return
     global write_counter
     with replay_lock:
         buf = replay_buffers.get(trade_id)
@@ -19376,8 +19323,6 @@ def rotate_log(file):
 
 def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
-    if _showcase_execution_only():
-        return True
     line = json.dumps(row, default=str) + "\n"
     last_err = None
     for attempt in range(CSV_WRITE_RETRIES):

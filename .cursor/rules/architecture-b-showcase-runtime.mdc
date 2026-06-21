@@ -1,49 +1,26 @@
 ---
-description: Architecture B — lightweight Railway showcase runtime (execution mirror, not minimal dashboard)
-globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs,scripts/sync-btc-research-bot.mjs
+description: Bitfinex showcase — full research bot replica on Railway (no Architecture B trimming)
+globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs
 alwaysApply: false
 ---
 
-# Architecture B — Showcase execution runtime
+# Bitfinex showcase — full research replica
 
 ## Goal
 
-**Full execution transparency. Minimal research storage. Minimal disk writes. Minimal Railway resource usage.**
+Railway showcase runs the **same behavior** as synced `bybit_bot.py`: CSV/JSONL, replay buffers, exports, full dashboard.
 
-This is NOT "remove dashboard features." It IS "remove research infrastructure."
+**Do not** re-add Architecture B write gates or `SHOWCASE_EXECUTION_ONLY` trimming — it does not reduce Railway cost (RAM/CPU limits do).
 
-## Three roles
+## Keep (Bitfinex-specific only)
 
-| Runtime | Purpose |
-|---------|---------|
-| Research bot (`bybit-15m-research-bot`) | Collect everything, log everything, export everything |
-| Showcase bot (Railway `btc_conservative_agent.py`) | Trade, mirror signals, display operator state — **no research warehouse** |
-| NestJS API | Bitfinex copy execution, relay wake, subscriber lots |
-
-## KEEP (execution visibility)
-
-Account, positions, orders, signal pipeline, AI snapshot + last 5 decisions, system status (engine version, runtime mode, signal hash, parity/sync).
-
-Dashboard lives in **bot.py full HTML** (pathway lab, toggles, trade tables). `showcase_ui.py` only blocks warehouse export routes and adds `/api/sync_status` + `/api/fresh_start`. Do not swap in the minimal mirror HTML unless explicitly requested.
-
-## REMOVE on Railway (research-only)
-
-Disable writes and CPU for: replay buffers, counterfactual studies, signal_snapshot/replay JSONL, CSV exports, ai_input_log, near_miss, shadow_reject, feature drift, research KPI refresh, analytics exports.
-
-Gate with `_showcase_execution_only()` — set by `btc_conservative_agent.py` via `SHOWCASE_EXECUTION_ONLY=1`.
-
-## ALLOW (small operational state)
-
-`account_state.json`, `order_state.json`, `position_state.json`, in-memory `ai_history` (cap 5 on showcase).
-
-## Patch survival
-
-Research sync overwrites `bot.py`. All showcase gates MUST live in `scripts/patch-btc-bot-production.mjs` so they re-apply on every `npm run sync:btc-research-bot`.
+- `scripts/patch-btc-bot-production.mjs`: pause/resume, health, credentials guard, showcase balance/history, pathway markers, **relay webhooks** (`_push_showcase_relay_event`)
+- `btc_conservative_agent.py`: relay webhook URL + `register_showcase_ui()` (sync APIs only)
+- `showcase_ui.py`: `/api/sync_status`, `/api/fresh_start` — **do not** block export/reset routes
+- NestJS copy execution unchanged
 
 ## Rule of thumb
 
-If needed to **operate, monitor, debug, or understand live execution** → keep visible.
+Signal + research behavior = **identical** to research bot.
 
-If exists only for **analysis, training, replay, counterfactuals, or offline exports** → strip from Railway runtime.
-
-Signal logic must stay **byte-for-byte parity** with research bot (`verify:signal-parity --full`).
+Platform-only additions = relay wake, Admin credentials, sync status API.

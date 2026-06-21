@@ -1,9 +1,9 @@
 {
   "engine_version": "v9.82-scenario-c-ladder-12-8-frozen-2026-06-20",
-  "combo_version": "2026-06-20",
+  "combo_version": "2026-06-21",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "b6ee1ca42f38",
+  "signal_hash": "74b09a9b3ab1",
   "source": "danishhaiderau-maker/bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-06-20T14:47:16.852Z"
+  "updated_at": "2026-06-21T08:57:29.026Z"
 }

@@ -23,18 +23,7 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _showcase_execution_only() -> bool:
-    flag = os.getenv("SHOWCASE_EXECUTION_ONLY", "").strip().lower()
-    if flag in ("0", "false", "no", "off"):
-        return False
-    if flag in ("1", "true", "yes", "on"):
-        return True
-    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
-
-
 def _append_jsonl(path: str, row: dict) -> None:
-    if _showcase_execution_only():
-        return
     with _lock:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")

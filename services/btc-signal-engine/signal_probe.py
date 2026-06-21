@@ -88,9 +88,10 @@ SIGNAL_PATH_KEYS = (
 
 
 def _signal_flags_snapshot(bot_mod) -> dict:
+    showcase_fn = getattr(bot_mod, "_showcase_execution_only", None)
     return {
         "research_data_collection": bot_mod.is_research_data_collection(),
-        "showcase_execution_only": bot_mod._showcase_execution_only(),
+        "showcase_execution_only": showcase_fn() if callable(showcase_fn) else False,
         "golden_stack": bot_mod.get_golden_stack_thresholds(),
         "ai_temperature": bot_mod.research_ai_temperature(),
         "edge_threshold": bot_mod.get_edge_threshold(),
