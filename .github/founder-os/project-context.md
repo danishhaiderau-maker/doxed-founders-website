@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Sync v9.83 research bot, pathway_lane_roster, and fix START-HOME launcher.
 
 ## Last Activity
 
