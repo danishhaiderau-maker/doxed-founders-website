@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Housekeep home bot migration after Railway showcase delete.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
