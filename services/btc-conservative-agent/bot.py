@@ -16658,6 +16658,50 @@ def _relay_trades_map_lite() -> dict:
     return lite
 
 
+@app.route('/api/relay-state')
+def api_relay_state():
+    """Fast subset for NestJS relay fidelity + copy sync (skips heavy /api/state work)."""
+    try:
+        now_ts = time.time()
+        with trade_lock:
+            for pos in open_positions:
+                if pos.get("status") == "OPEN":
+                    accrue_position_funding(pos, now_ts)
+            positions_copy = copy.deepcopy(open_positions)
+            pending_orders_copy = copy.deepcopy(pending_orders)
+            active_list, _ = _collect_dashboard_active_signals(
+                pending_orders_copy,
+                positions_copy,
+                trades_map,
+                default_strategy="-",
+                default_regime="-",
+            )
+            session_trades = _session_trades_only(copy.deepcopy(trades))
+        with state_lock:
+            snapshot = {
+                "strategy_mode": state.get("strategy_mode", "RESEARCH"),
+                "execution_paused": state.get("execution_paused", False),
+                "execution_reason": state.get("execution_reason"),
+                "price": state.get("price"),
+                "account_balance": get_display_balance(),
+                "bot_start_time": bot_start_time,
+                "trade_count_session": len(session_trades),
+            }
+        snapshot["trades"] = session_trades
+        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["orders"] = pending_orders_copy
+        snapshot["positions"] = positions_copy
+        snapshot["signal_info"] = {
+            "active": len(active_list) > 0,
+            "count": len(active_list),
+            "signals": active_list,
+        }
+        return jsonify(snapshot), 200
+    except Exception as e:
+        logger.error(f"/api/relay-state error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 def _enrich_orders_for_relay(snapshot: dict) -> None:
     signals = ((snapshot.get("signal_info") or {}).get("signals") or [])
     by_id = {s.get("trade_id"): s for s in signals if s.get("trade_id")}

@@ -37,10 +37,10 @@ export class BotBridgeService {
 
   /** Execution paths bypass cache for instant showcase parity. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
-    return this.fetchState(force);
+    return this.fetchState(force, 'relay');
   }
 
-  async fetchState(force = false): Promise<BotApiState | null> {
+  async fetchState(force = false, mode: 'full' | 'relay' = 'full'): Promise<BotApiState | null> {
     const base = this.getBotUrl();
     if (!base) return null;
 
@@ -49,43 +49,62 @@ export class BotBridgeService {
       return this.cached;
     }
 
-    try {
-      const res = await fetch(`${base}/api/state`, {
-        signal: AbortSignal.timeout(45000),
-        headers: { Accept: 'application/json' },
-      });
-      if (!res.ok) {
-        this.logger.warn(`Bot /api/state HTTP ${res.status}`);
-        this.invalidateCache();
-        return null;
+    const paths =
+      mode === 'relay'
+        ? ['/api/relay-state', '/api/state']
+        : ['/api/state', '/api/relay-state'];
+
+    for (const path of paths) {
+      const timeoutMs = path.includes('relay-state') ? 20_000 : 45_000;
+      try {
+        const res = await fetch(`${base}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Bot ${path} HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as BotApiState;
+        if (!data || typeof data !== 'object') continue;
+        this.cached = data;
+        this.lastFetchAt = now;
+        return data;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Bot ${path} fetch failed: ${msg}`);
       }
-      const data = (await res.json()) as BotApiState;
-      if (!data || typeof data !== 'object') {
-        this.invalidateCache();
-        return null;
-      }
-      this.cached = data;
-      this.lastFetchAt = now;
-      return data;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`Bot fetch failed: ${msg}`);
-      this.invalidateCache();
-      return null;
     }
+
+    this.invalidateCache();
+    return null;
   }
 
   /** True when the showcase bot HTTP endpoints respond (not killed on Railway). */
   async isReachable(force = false): Promise<boolean> {
-    const state = await this.fetchState(force);
+    const state = await this.fetchState(force, 'relay');
     if (state) return true;
     const health = await this.fetchHealth();
     return Boolean(health);
   }
 
   async getLiveDashboard(agentName: string, force = false) {
-    const bot = await this.fetchState(force);
-    if (!bot) return null;
+    const bot = await this.fetchState(force, 'relay');
+    if (!bot) {
+      const health = await this.fetchHealth();
+      if (!health) return null;
+      return {
+        dashboard: mapBotStateToDashboard({}),
+        stats: mapBotStateToAgentStats({}),
+        activity: [],
+        rawState: {} as BotApiState,
+        botConnected: true,
+        botUrl: this.getBotUrl(),
+        strategyMode: 'RESEARCH',
+        executionPaused: Boolean(health.execution_paused),
+        executionReason: typeof health.execution_reason === 'string' ? health.execution_reason : null,
+      };
+    }
     return {
       dashboard: mapBotStateToDashboard(bot),
       stats: mapBotStateToAgentStats(bot),
