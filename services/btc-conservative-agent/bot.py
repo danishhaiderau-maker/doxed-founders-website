@@ -99,6 +99,10 @@ from experimental_pathway_config import (
     is_experimental_execution_lane,
     type_b_predictor_matches,
 )
+from pathway_lane_roster import (
+    PATHWAY_SHADOW_COLLECTING_ENABLED,
+    RETIRED_PATHWAY_LANES as ROSTER_RETIRED_PATHWAY_LANES,
+)
 
 # #region agent log
 _AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
@@ -161,30 +165,27 @@ RESEARCH_LANE_CHASE_3PLUS_ALPHA = "CHASE_3PLUS_ALPHA"
 RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
 PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_65_SP5_CHASE: "PRIMARY_PRODUCTION",
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT: "ACTIVE",
+    RESEARCH_LANE_COMBO_65_SP5_DIRECT: "RETIRED",
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "ACTIVE",
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT: "ACTIVE",
+    RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
-    RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
+    RESEARCH_LANE_HIGH_EDGE_RUNNER: "DATA_RETIRED",
     RESEARCH_LANE_EXTREME_EDGE: "RETIRED",
     RESEARCH_LANE_EDGE_PLUS_STACK: "RETIRED",
-    RESEARCH_LANE_SHADOW_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_EDGE_ALPHA_4: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_TYPE_B_HUNTER: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_SHORT_BEAR_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_AI_60_65_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_URGENT_CHASE_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_CHASE_3PLUS_ALPHA: PATHWAY_STATUS_SHADOW_COLLECTING,
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "ACTIVE",
-    RESEARCH_LANE_RECOVERY_MONSTER_V1: "ACTIVE",
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "ACTIVE",
+    RESEARCH_LANE_SHADOW_RUNNER: "DATA_RETIRED",
+    RESEARCH_LANE_EDGE_ALPHA_4: "DATA_RETIRED",
+    RESEARCH_LANE_TYPE_B_HUNTER: "DATA_RETIRED",
+    RESEARCH_LANE_SHORT_BEAR_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_AI_60_65_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_URGENT_CHASE_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_CHASE_3PLUS_ALPHA: "DATA_RETIRED",
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "RETIRED",
+    RESEARCH_LANE_RECOVERY_MONSTER_V1: "RETIRED",
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "RETIRED",
     RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "ACTIVE",
 }
-RETIRED_PATHWAY_LANES = frozenset({
-    RESEARCH_LANE_EXTREME_EDGE,
-    RESEARCH_LANE_EDGE_PLUS_STACK,
-})
+RETIRED_PATHWAY_LANES = ROSTER_RETIRED_PATHWAY_LANES
 RESEARCH_LANE_LABELS = {
     RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: "High Edge Runner",
@@ -9485,37 +9486,8 @@ def spawn_experimental_lanes_from_ai_scan(
     ctx, ai, edge_score, features, source_lane: str,
     final_direction: str = None, spread: int = None,
 ):
-    """Spawn experimental tiles on AI_SCAN APPROVE (independent orders, log-only gates)."""
-    if not is_ai_scan_lane(source_lane) or ai.get("decision") != "APPROVE":
-        return
-    if not is_research_data_collection():
-        return
-    ai_direction = ai.get("direction")
-    direction = final_direction or ai_direction
-    if spread is None:
-        spread = int(compute_directional_spread(direction, ai))
-    with state_lock:
-        replay_eval = copy.deepcopy(state.get("last_replay_model_eval") or {})
-    if ai_disagreement_alpha_matches(ai, replay_eval):
-        if is_research_lane_enabled(RESEARCH_LANE_AI_DISAGREEMENT_ALPHA):
-            _spawn_experimental_lane(
-                ctx, ai, edge_score, features,
-                RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
-                "AI_DISAGREE_AI_APPROVE",
-            )
-    if type_b_predictor_matches(ai, direction, spread, ctx, features):
-        if is_research_lane_enabled(RESEARCH_LANE_TYPE_B_PREDICTOR_V1):
-            _spawn_experimental_lane(
-                ctx, ai, edge_score, features,
-                RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-                "TYPE_B_PREDICTOR_MATCH",
-            )
-    if is_research_lane_enabled(RESEARCH_LANE_RECOVERY_MONSTER_V1):
-        _spawn_experimental_lane(
-            ctx, ai, edge_score, features,
-            RESEARCH_LANE_RECOVERY_MONSTER_V1,
-            "RECOVERY_MONSTER_BENCHMARK_ENTRY",
-        )
+    """APPROVE-spawn experimental lanes retired 2026-06-21 — Replay uses spawn_on REJECT."""
+    return
 
 
 def spawn_experimental_disagreement_replay(ctx, ai, edge_score, features, source_lane: str):
@@ -9616,8 +9588,8 @@ def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
 def spawn_shadow_collecting_lanes_from_ai_scan(
     ctx, ai, edge_score, features, source_lane: str, final_direction: str, spread: int,
 ):
-    """Shadow sim for legacy lanes — no orders; outcomes → shadow_lane_outcome.jsonl."""
-    if not is_research_data_collection() or str(ai.get("decision") or "").upper() != "APPROVE":
+    """Shadow sim paused — zero-fill legacy lanes removed from quality roster."""
+    if not PATHWAY_SHADOW_COLLECTING_ENABLED:
         return
     for lane in SHADOW_COLLECTING_LANES:
         if lane == RESEARCH_LANE_SHADOW_RUNNER:
@@ -14584,7 +14556,7 @@ def build_static_pathway_lane_specs() -> dict:
         "is_benchmark": True,
         "is_primary_production": False,
         "badge": "BENCHMARK",
-        "tile_number": 5,
+        "tile_number": len(COMBO_TILE_DISPLAY_ORDER) + 1,
         "entry_mode_label": "Continuous",
         "filter_chips": [
             f"AI ~{shared['ai_scan_cadence_sec']}s",

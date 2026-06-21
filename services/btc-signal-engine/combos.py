@@ -1,9 +1,10 @@
 """
-Combo Pathway Lab v2 — four execution tiles + CONTINUOUS benchmark yardstick.
+Combo Pathway Lab v2 — two chase execution tiles + CONTINUOUS benchmark yardstick.
 
 PRIMARY_PRODUCTION: COMBO_65_SP5_CHASE_3PLUS (live deployable edge).
 COMPARISON_BENCHMARK: CONTINUOUS (Continuous AI Research) — AI_SCAN mirror every ~180s;
   toggle ON = limit orders + 25% chase + Scenario C; OFF = shadow/data only.
+Direct combo lanes retired 2026-06-21 — see PATHWAY_NEXT_PHASE.md / pathway_lane_roster.py.
 Architecture frozen — see PATHWAY_ARCHITECTURE_FREEZE.md (change tiles/filters only).
 """
 from __future__ import annotations
@@ -17,16 +18,12 @@ RESEARCH_LANE_COMBO_604_SP4_DIRECT = "COMBO_604_SP4_DIRECT"
 
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
 )
 
-# Dashboard tile order (Direct before Chase within each AI/spread tier)
+# Dashboard tile order — chase-only live roster
 COMBO_TILE_DISPLAY_ORDER = (
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
 )
 
@@ -83,17 +80,14 @@ COMBO_LANE_SPECS = {
 }
 
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-CONTINUOUS_PROXY_LANES = (
-    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
-    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
-)
+CONTINUOUS_PROXY_LANES = COMBO_EXECUTION_LANES
 PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_COMBO_65_SP5_CHASE
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
 # Single release id — bot, analyzer, and research dashboard stay on one version string.
-RESEARCH_STACK_VERSION = "v9.82-scenario-c-ladder-12-8-frozen-2026-06-20"
+RESEARCH_STACK_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
 RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
@@ -112,6 +106,11 @@ COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.item
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: True for lane in COMBO_EXECUTION_LANES}
+# Retired direct lanes — keep keys so saved toggle maps do not resurrect orders.
+_COMBO_TOGGLE_DEFAULTS.update({
+    RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
+    RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
+})
 
 
 def combo_lane_matches(lane: str, ai: dict, final_direction: str, spread: int = None) -> bool:
