@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Deploy & infra (2 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Raise bot state fetch timeout for slow home /api/state.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
