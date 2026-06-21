@@ -1,5 +1,6 @@
 /**
  * Push admin showcase credentials from Neon to btc-conservative-agent Railway service.
+ * @deprecated Bot runs at home — use: npm run print:home-bot-env
  */
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
@@ -52,6 +53,16 @@ async function gql(token, query, variables = {}) {
   const json = await res.json();
   if (json.errors?.length) throw new Error(json.errors.map((e) => e.message).join('; '));
   return json.data;
+}
+
+if (process.env.HOME_BOT_ONLY === '1' || process.argv.includes('--home-only')) {
+  console.log(`
+Railway bot deploy is deprecated (see docs/HOME_BOT_MIGRATION.md).
+
+  npm run print:home-bot-env
+  npm run wire:home-bot -- https://bot.doxxedcrypto.digital --pause-railway-bot
+`);
+  process.exit(0);
 }
 
 const xSecrets = readDotEnv(join(vault, '.env.x.secrets'));
