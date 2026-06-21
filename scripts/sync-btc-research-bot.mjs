@@ -25,6 +25,7 @@ const EXTRA_SOURCE_FILES = [
   'legacy_pathway_config.py',
   'experimental_pathway_config.py',
   'scenario_c_config.py',
+  'pathway_lane_roster.py',
 ];
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
 

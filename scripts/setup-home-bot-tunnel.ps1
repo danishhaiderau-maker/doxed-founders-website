@@ -82,7 +82,7 @@ $configPath = Join-Path $configDir "config.yml"
 $credGlob = Join-Path $configDir "$TunnelName*.json"
 $credFile = Get-ChildItem -Path $credGlob -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $credFile) {
-  throw "Tunnel credentials not found in $configDir — run: cloudflared tunnel create $TunnelName"
+  throw "Tunnel credentials not found in $configDir - run: cloudflared tunnel create $TunnelName"
 }
 
 @(

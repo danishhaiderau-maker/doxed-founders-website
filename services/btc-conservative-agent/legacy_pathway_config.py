@@ -50,7 +50,7 @@ SHADOW_COLLECTING_ID_PREFIX = {
 
 
 def shadow_collecting_toggle_defaults() -> dict:
-    return {lane: True for lane in SHADOW_COLLECTING_LANES}
+    return {lane: False for lane in SHADOW_COLLECTING_LANES}
 
 
 def is_shadow_collecting_lane(lane: str) -> bool:
