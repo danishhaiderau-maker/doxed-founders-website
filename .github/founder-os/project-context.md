@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-chore(bot): sync v9.83 quality roster from bybit-15m-research-bot
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
