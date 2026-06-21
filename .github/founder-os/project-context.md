@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Raise bot state fetch timeout for slow home /api/state.
 
 ## Last Activity
 
