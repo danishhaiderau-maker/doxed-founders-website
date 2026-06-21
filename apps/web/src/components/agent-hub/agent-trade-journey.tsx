@@ -6,12 +6,16 @@ import type { TradingAgentActivityEntry } from '@/lib/api';
 import { ShareOnXButton } from '@/components/share-on-x-button';
 import { filterActivitySince, liveBookToActivity, mergeDeskActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
 
+type JourneyPhase = 'open' | 'closed' | 'pending' | 'skip';
+
 type JourneyNode = {
   id: string;
   label: string;
   subtitle?: string;
-  type: 'buy' | 'add' | 'reduce' | 'exit' | 'wait' | 'skip';
+  phase: JourneyPhase;
 };
+
+const CLOSE_FLASH_MS = 120_000;
 
 function isJourneyEvent(item: TradingAgentActivityEntry, liveExchangeOnly = false): boolean {
   const t = item.type.toUpperCase();
@@ -47,34 +51,63 @@ function isJourneyEvent(item: TradingAgentActivityEntry, liveExchangeOnly = fals
   );
 }
 
+function classifyJourneyPhase(item: TradingAgentActivityEntry): JourneyPhase {
+  const t = item.type.toUpperCase();
+  const title = item.title.toUpperCase();
+  if (t.includes('EXPIRED') || title.includes('EXPIRED')) return 'skip';
+  if (t.includes('PENDING') || title.includes('LIMIT') || title.includes('WAIT')) return 'pending';
+  if (
+    t.includes('CLOSE') ||
+    t.includes('EXIT') ||
+    t === 'POSITION_CLOSED' ||
+    title.includes('WIN') ||
+    title.includes('LOSS') ||
+    (item.exitPrice != null && !title.includes('OPEN'))
+  ) {
+    return 'closed';
+  }
+  if (t.includes('OPEN') || title.includes('OPEN')) return 'open';
+  return 'pending';
+}
+
+function resolvedPnl(item: TradingAgentActivityEntry, phase: JourneyPhase): number | null {
+  if (item.profitPct != null) return item.profitPct;
+  if (phase === 'open' && item.netPnlUsd != null) return item.netPnlUsd >= 0 ? 1 : -1;
+  if (phase === 'closed' && item.netPnlUsd != null) return item.netPnlUsd >= 0 ? 1 : -1;
+  return null;
+}
+
 function activityToNodes(items: TradingAgentActivityEntry[], liveExchangeOnly = false): JourneyNode[] {
   return items.filter((item) => isJourneyEvent(item, liveExchangeOnly)).slice(0, 12).map((item) => {
-    const t = item.type.toLowerCase();
-    let type: JourneyNode['type'] = 'exit';
-    if (t.includes('expired') || t.includes('skip')) type = 'skip';
-    else if (t.includes('pending') || t.includes('wait')) type = 'wait';
-    else if (t.includes('open') || t.includes('buy') || t.includes('long') || t.includes('short') || t.includes('signal')) {
-      type = 'buy';
-    } else if (t.includes('add')) type = 'add';
-    else if (t.includes('reduce') || t.includes('partial')) type = 'reduce';
-    else if (t.includes('close') || t.includes('exit') || t.includes('position')) type = 'exit';
+    const phase = classifyJourneyPhase(item);
     return {
       id: item.id,
       label: item.title,
       subtitle: item.reason ?? item.outcome ?? undefined,
-      type,
+      phase,
     };
   });
 }
 
-const NODE_COLORS: Record<JourneyNode['type'], string> = {
-  buy: 'border-emerald-500 bg-emerald-950/50 text-emerald-200',
-  add: 'border-blue-500 bg-blue-950/50 text-blue-200',
-  reduce: 'border-amber-500 bg-amber-950/50 text-amber-200',
-  exit: 'border-violet-500 bg-violet-950/50 text-violet-200',
-  wait: 'border-zinc-600 bg-zinc-900/50 text-zinc-300',
-  skip: 'border-zinc-700 bg-zinc-950/50 text-zinc-500',
-};
+function tileClasses(phase: JourneyPhase, item: TradingAgentActivityEntry): string {
+  if (phase === 'open') {
+    return 'border-zinc-600 bg-zinc-900/60 text-zinc-200';
+  }
+  if (phase === 'pending') {
+    return 'border-zinc-600 bg-zinc-900/50 text-zinc-300';
+  }
+  if (phase === 'skip') {
+    return 'border-zinc-700 bg-zinc-950/50 text-zinc-500';
+  }
+  const pnl = resolvedPnl(item, 'closed');
+  const win = pnl == null || pnl >= 0;
+  const closedAt = Date.parse(item.createdAt);
+  const flash = Number.isFinite(closedAt) && Date.now() - closedAt < CLOSE_FLASH_MS;
+  const base = win
+    ? 'border-emerald-500 bg-emerald-950/50 text-emerald-200'
+    : 'border-red-500 bg-red-950/50 text-red-200';
+  return flash ? `${base} animate-pulse ring-2 ${win ? 'ring-emerald-400/50' : 'ring-red-400/50'}` : base;
+}
 
 function PnlBar({ pct }: { pct: number }) {
   const width = Math.min(100, Math.abs(pct) * 8);
@@ -87,6 +120,40 @@ function PnlBar({ pct }: { pct: number }) {
       />
     </div>
   );
+}
+
+function formatJourneyPnl(item: TradingAgentActivityEntry, phase: JourneyPhase): { text: string; tone: 'up' | 'down' | 'muted' } {
+  if (phase === 'open') {
+    if (item.netPnlUsd != null) {
+      return {
+        text: `${formatUsd(item.netPnlUsd, 2)} unrealized`,
+        tone: item.netPnlUsd >= 0 ? 'up' : 'down',
+      };
+    }
+    return { text: 'Open', tone: 'muted' };
+  }
+  if (item.profitPct != null) {
+    const pctText = formatPercent(item.profitPct);
+    const usd =
+      item.netPnlUsd != null ? ` · ${formatUsd(item.netPnlUsd, 2)}` : '';
+    return {
+      text: `${pctText}${usd}`,
+      tone: item.profitPct >= 0 ? 'up' : 'down',
+    };
+  }
+  if (item.netPnlUsd != null) {
+    return {
+      text: formatUsd(item.netPnlUsd, 2),
+      tone: item.netPnlUsd >= 0 ? 'up' : 'down',
+    };
+  }
+  return { text: '—', tone: 'muted' };
+}
+
+function pnlToneClass(tone: 'up' | 'down' | 'muted'): string {
+  if (tone === 'up') return 'text-emerald-300';
+  if (tone === 'down') return 'text-red-300';
+  return 'text-zinc-400';
 }
 
 export function AgentTradeJourney({
@@ -176,7 +243,7 @@ export function AgentTradeJourney({
       </div>
       <p className="mt-1 text-xs text-zinc-500">
         {liveExchangeOnly
-          ? `Real exchange fills & positions · ${executed.length} in view`
+          ? `Real exchange fills & positions · ${executed.length} in view · closed tiles flash green/red`
           : `Executed trades, fills, and relay events · ${executed.length} in view`}
       </p>
 
@@ -195,7 +262,7 @@ export function AgentTradeJourney({
             month: 'short',
             day: 'numeric',
           });
-          const pct = item.profitPct ?? 0;
+          const pnl = formatJourneyPnl(item, node.phase);
           const entry = item.entryPrice;
           const exit = item.exitPrice;
 
@@ -206,7 +273,7 @@ export function AgentTradeJourney({
                 type="button"
                 onClick={() => setSelected(item)}
                 className={`min-w-[160px] shrink-0 rounded-xl border-2 px-4 py-3 text-left transition ${
-                  NODE_COLORS[node.type]
+                  tileClasses(node.phase, item)
                 } ${active ? 'ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
               >
                 <p className="text-[10px] font-bold uppercase leading-tight">{node.label}</p>
@@ -214,14 +281,13 @@ export function AgentTradeJourney({
                 {entry != null && (
                   <p className="mt-1 font-mono text-xs text-zinc-300">
                     ${entry.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                    {exit != null ? ` → $${exit.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : ''}
+                    {exit != null && node.phase === 'closed'
+                      ? ` → $${exit.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                      : ''}
                   </p>
                 )}
-                <p className={`mt-1 text-sm font-bold ${pct >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {formatPercent(pct)}
-                  {item.netPnlUsd != null ? ` · ${formatUsd(item.netPnlUsd, 2)}` : ''}
-                </p>
-                <PnlBar pct={pct} />
+                <p className={`mt-1 text-sm font-bold ${pnlToneClass(pnl.tone)}`}>{pnl.text}</p>
+                {item.profitPct != null && node.phase === 'closed' && <PnlBar pct={item.profitPct} />}
                 {showBalance && item.balanceUsd != null && (
                   <p className="mt-2 text-[10px] text-zinc-400">
                     Balance: {formatUsd(item.balanceUsd, 0)}
@@ -237,7 +303,7 @@ export function AgentTradeJourney({
                 type="button"
                 onClick={() => setSelected(item)}
                 className={`min-w-[120px] rounded-xl border-2 px-4 py-3 text-center text-xs font-bold uppercase transition ${
-                  NODE_COLORS[node.type]
+                  tileClasses(node.phase, item)
                 } ${active ? 'scale-105 ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
               >
                 {node.label}
@@ -257,15 +323,19 @@ export function AgentTradeJourney({
               {activeSelected.exitPrice != null ? ` → Exit $${activeSelected.exitPrice.toLocaleString()}` : ''}
             </p>
           )}
-          {activeSelected.profitPct != null && (
+          {(activeSelected.profitPct != null || activeSelected.netPnlUsd != null) && (
             <>
               <p
-                className={`mt-2 text-lg font-bold ${activeSelected.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                className={`mt-2 text-lg font-bold ${pnlToneClass(
+                  formatJourneyPnl(activeSelected, classifyJourneyPhase(activeSelected)).tone,
+                )}`}
               >
-                P/L: {formatPercent(activeSelected.profitPct)}
-                {activeSelected.netPnlUsd != null ? ` (${formatUsd(activeSelected.netPnlUsd, 2)})` : ''}
+                P/L:{' '}
+                {formatJourneyPnl(activeSelected, classifyJourneyPhase(activeSelected)).text}
               </p>
-              <PnlBar pct={activeSelected.profitPct} />
+              {activeSelected.profitPct != null && (
+                <PnlBar pct={activeSelected.profitPct} />
+              )}
             </>
           )}
           {showBalance && activeSelected.balanceUsd != null && (
