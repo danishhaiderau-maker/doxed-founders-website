@@ -82,10 +82,10 @@ export class BotBridgeService {
 
   /** True when the showcase bot HTTP endpoints respond (not killed on Railway). */
   async isReachable(force = false): Promise<boolean> {
-    const state = await this.fetchState(force, 'relay');
-    if (state) return true;
     const health = await this.fetchHealth();
-    return Boolean(health);
+    if (health) return true;
+    const state = await this.fetchState(force, 'relay');
+    return Boolean(state);
   }
 
   async getLiveDashboard(agentName: string, force = false) {
