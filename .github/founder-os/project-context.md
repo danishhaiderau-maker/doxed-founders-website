@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Sync v9.83 research bot, pathway_lane_roster, and fix START-HOME launcher.
+chore(bot): sync v9.83 quality roster from bybit-15m-research-bot
 
 ## Last Activity
 
