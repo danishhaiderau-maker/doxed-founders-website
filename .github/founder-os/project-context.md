@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Give Railway more time to reach home bot health before marking offline.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
