@@ -156,7 +156,7 @@ export class BotBridgeService {
     const base = this.getBotUrl();
     if (!base) return null;
     try {
-      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(20_000) });
       if (!res.ok) return null;
       return (await res.json()) as Record<string, unknown>;
     } catch {
