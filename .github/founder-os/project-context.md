@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Sync research bot v9.82 refresh for home-hosted showcase.
+Housekeep home bot migration after Railway showcase delete.
 
 ## Last Activity
 
