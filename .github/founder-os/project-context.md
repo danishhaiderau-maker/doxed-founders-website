@@ -12,7 +12,7 @@ Deploy & infra (2 recent commits)
 
 ## Last Commit
 
-Raise bot state fetch timeout for slow home /api/state.
+Give Railway more time to reach home bot health before marking offline.
 
 ## Last Activity
 
