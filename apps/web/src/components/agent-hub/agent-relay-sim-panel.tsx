@@ -62,7 +62,7 @@ export function AgentRelaySimPanel({
   relayFidelity,
   relaySimLiveBook,
   showcaseLiveBook,
-  showcaseActivity,
+  showcaseActivity: _showcaseActivity,
   simActivity,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
