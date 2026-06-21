@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Deploy & infra (2 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Add home bot migration: tunnel scripts, wire API to home, sleep Railway bot.
+Sync research bot v9.82 refresh for home-hosted showcase.
 
 ## Last Activity
 
