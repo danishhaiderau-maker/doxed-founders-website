@@ -27,6 +27,8 @@ export type RelayFidelitySnapshot = {
     avgExitDeltaPct: number | null;
     maxEntryDeltaPct: number | null;
     maxExitDeltaPct: number | null;
+    missingShowcaseEntryCount?: number;
+    missingShowcaseExitCount?: number;
   };
   policy: {
     showcaseMirrorOnly: boolean;
@@ -72,9 +74,18 @@ export function AgentRelayFidelityPanel({
             Relay fidelity
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Showcase vs Bitfinex entry/exit — truth meter for move-by-move copy.
+            Showcase vs {fidelity?.policy?.showcaseMirrorOnly ? 'relay' : 'Bitfinex'} entry/exit — truth
+            meter for move-by-move copy on merged BTC-PERP lots.
           </p>
         </div>
+        {fidelity?.summary &&
+        (fidelity.summary.missingShowcaseEntryCount ?? 0) +
+          (fidelity.summary.missingShowcaseExitCount ?? 0) >
+          0 ? (
+          <span className="rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[9px] font-bold uppercase text-amber-200">
+            Showcase gaps
+          </span>
+        ) : null}
         {fidelity?.policy ? (
           <div className="text-right text-[10px] text-zinc-600">
             <p>Mirror-only: {fidelity.policy.showcaseMirrorOnly ? 'ON' : 'OFF'}</p>
