@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add home bot migration: tunnel scripts, wire API to home, sleep Railway bot.
 
 ## Last Activity
 
