@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
