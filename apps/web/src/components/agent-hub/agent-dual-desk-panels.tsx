@@ -52,7 +52,7 @@ export function AgentDeskView({
   activeDesk,
   mode,
   exchangeLabel,
-  userAgent,
+  userAgent: _userAgent,
   showcaseAgent,
   exchangeLiveBook,
   showcaseLiveBook,
