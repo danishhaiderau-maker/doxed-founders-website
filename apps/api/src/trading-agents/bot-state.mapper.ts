@@ -71,6 +71,7 @@ export type BotApiState = {
     pnl_pct_margin?: number;
     unreal_usd?: number;
     current_price?: number;
+    trade_id?: string;
   }>;
   orders?: Array<{
     side?: string;
@@ -79,6 +80,7 @@ export type BotApiState = {
     qty?: number;
     signal_price?: number;
     age_min?: number;
+    trade_id?: string;
   }>;
   expired_orders?: Array<{
     trade_id?: string;

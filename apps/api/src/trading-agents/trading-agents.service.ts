@@ -1020,7 +1020,7 @@ export class TradingAgentsService implements OnModuleInit {
           participants: recentParticipants.filter((p) =>
             p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
           ),
-          limit: 20,
+          limit: 50,
           sessionStartedAt:
             copyRelaySim.active && copyRelaySim.startedAt
               ? new Date(copyRelaySim.startedAt)

@@ -16643,10 +16643,15 @@ def _relay_trades_map_lite() -> dict:
                 continue
             lite[str(tid)] = {
                 "signal_ref": {
+                    "trade_id": sig.get("trade_id") or tid,
                     "status": sig.get("status"),
+                    "fill_price": sig.get("fill_price"),
+                    "limit_price": sig.get("limit_price"),
+                    "signal_price": sig.get("signal_price"),
                     "exit_reason": sig.get("exit_reason"),
                     "exit_price": sig.get("exit_price"),
                     "closed_ts": sig.get("closed_ts"),
+                    "created_ts_ts": sig.get("created_ts_ts"),
                     "net_pnl_usd": sig.get("net_pnl_usd"),
                 }
             }
