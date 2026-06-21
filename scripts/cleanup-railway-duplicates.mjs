@@ -16,8 +16,14 @@ const vaultSecrets = join(root, '..', 'doxedcryptofounder-secrets', 'vault', '.e
 /** Never delete the real production API service. */
 const PROTECTED = new Set(['doxed-founders-website']);
 
-/** Duplicate / misconfigured services — safe to delete. */
-const DELETE_NAMES = new Set(['@dcf/web', '@dcf/api', 'dcf/web', 'dcf/api']);
+/** Duplicate / retired services — safe to delete. */
+const DELETE_NAMES = new Set([
+  '@dcf/web',
+  '@dcf/api',
+  'dcf/web',
+  'dcf/api',
+  'btc-conservative-agent',
+]);
 
 function readDotEnv(path) {
   const map = {};

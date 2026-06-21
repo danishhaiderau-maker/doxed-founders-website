@@ -13,7 +13,7 @@ if (-not $VaultEnv) {
 }
 
 if (-not (Test-Path $VaultEnv)) {
-  Write-Host "Missing $VaultEnv — run from repo: npm run print:home-bot-env"
+  Write-Host "Missing $VaultEnv - run: npm run print:home-bot-env"
   exit 1
 }
 
@@ -33,5 +33,5 @@ if (-not (Test-Path $agentDir)) {
 
 Set-Location $agentDir
 Write-Host "Starting bot on port $Port from $agentDir ..."
-Write-Host "Dashboard: http://127.0.0.1:$Port"
-python bot.py
+Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
+python btc_conservative_agent.py

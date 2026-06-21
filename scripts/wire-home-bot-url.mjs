@@ -28,7 +28,8 @@ const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags = new Set(process.argv.slice(2).filter((a) => a.startsWith('--')));
 const botUrl = resolveHomeBotPublicUrl(args[0]);
 const skipHealth = flags.has('--skip-health-check');
-const pauseBot = flags.has('--pause-railway-bot') || !flags.has('--keep-railway-bot');
+const pauseBot = flags.has('--pause-railway-bot');
+const deleteBot = flags.has('--delete-railway-bot') || (!flags.has('--keep-railway-bot') && !pauseBot);
 
 async function gql(token, query, variables = {}) {
   const res = await fetch(GQL, {
@@ -155,7 +156,22 @@ if (!token) {
     console.log(`✓ Railway ${RAILWAY_API_SERVICE} → bot URL updated + redeployed`);
   }
 
-  if (pauseBot && botService && env) {
+  if (deleteBot && botService) {
+    for (const [label, query] of [
+      ['serviceDelete', `mutation($id: String!) { serviceDelete(id: $id) }`],
+      ['serviceRemove', `mutation($id: String!) { serviceRemove(id: $id) }`],
+    ]) {
+      try {
+        await gql(token, query, { id: botService.id });
+        console.log(`✓ Railway ${RAILWAY_BOT_SERVICE} → deleted via ${label}`);
+        break;
+      } catch (err) {
+        if (!/Cannot query field|Unknown type|not found/i.test(err.message)) {
+          console.warn(`  ${label}: ${err.message}`);
+        }
+      }
+    }
+  } else if (pauseBot && botService && env) {
     try {
       await gql(
         token,

@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { PrismaClient } from '@prisma/client';
 import { getVaultDir } from './secrets-vault-path.mjs';
+import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
 const neonPath = path.join(getVaultDir(), '.env.neon');
 if (fs.existsSync(neonPath)) {
@@ -19,8 +20,7 @@ if (fs.existsSync(neonPath)) {
   }
 }
 
-const BOT_URL =
-  process.env.TRADING_AGENT_BOT_URL ?? 'https://btc-conservative-agent-production.up.railway.app';
+const BOT_URL = process.env.TRADING_AGENT_BOT_URL?.trim() || resolveHomeBotPublicUrl();
 const prisma = new PrismaClient();
 
 function sessionPnlFromBot(bot) {

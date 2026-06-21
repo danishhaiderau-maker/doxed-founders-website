@@ -67,6 +67,7 @@
     "export:bitfinex-live-trades": "node scripts/export-bitfinex-live-trades.mjs",
     "deploy:web": "vercel deploy --prod --yes",
     "cleanup:railway": "node scripts/cleanup-railway-duplicates.mjs",
+    "verify:railway-bot": "node scripts/verify-railway-bot-service.mjs",
     "setup:admin-security": "node scripts/setup-admin-security.mjs",
     "apply:railway-webauthn": "node scripts/apply-railway-webauthn.mjs",
     "fix:admin-2fa": "node scripts/fix-admin-2fa.mjs",
