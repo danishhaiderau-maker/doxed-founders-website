@@ -50,11 +50,18 @@ Press Ctrl+C to stop.
   Write-Host "Tunnel log: $logFile"
   Write-Host "URL file:   $tunnelUrlFile (auto-updated when URL appears)"
   Write-Host ""
-  cloudflared tunnel --url $localUrl 2>&1 | Tee-Object -FilePath $logFile | ForEach-Object {
-    Write-Host $_
-    if ($_ -match '(https://[a-z0-9-]+\.trycloudflare\.com)') {
-      Set-Content -Path $tunnelUrlFile -Value $matches[1] -NoNewline
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    cloudflared tunnel --url $localUrl 2>&1 | Tee-Object -FilePath $logFile | ForEach-Object {
+      Write-Host $_
+      if ($_ -match '(https://[a-z0-9-]+\.trycloudflare\.com)') {
+        Set-Content -Path $tunnelUrlFile -Value $matches[1] -NoNewline
+      }
     }
+  } finally {
+    $ErrorActionPreference = $prevEap
+    Read-Host "Tunnel stopped — Press Enter to close this window"
   }
   exit 0
 }

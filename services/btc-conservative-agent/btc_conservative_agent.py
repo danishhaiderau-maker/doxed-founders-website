@@ -10,6 +10,8 @@ import os
 import sys
 
 os.environ.setdefault("SHOWCASE_AGENT", "1")
+os.environ.setdefault("HOME_BOT_LOCAL", "1")
+os.environ.setdefault("HOME_RESEARCH_FULL", "1")
 os.environ.setdefault(
     "SHOWCASE_RELAY_WEBHOOK_URL",
     "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
@@ -23,7 +25,7 @@ if _SERVICE_DIR not in sys.path:
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402
 
-register_showcase_ui(signal_engine.app, bot_module=signal_engine)
+register_showcase_ui(signal_engine.app, bot_module=signal_engine, block_warehouse=False)
 
 
 def main() -> None:

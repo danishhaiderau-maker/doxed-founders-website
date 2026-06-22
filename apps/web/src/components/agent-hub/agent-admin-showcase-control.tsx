@@ -34,21 +34,18 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
   const tunnelLive = Boolean(raw.tunnel?.live ?? raw.tunnel?.cloudflaredRunning);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
-  const needsAnalyzerProbe =
-    !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
 
-  const [botProbe, analyzerProbe] = await Promise.all([
-    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/health') : Promise.resolve(botOnline),
-    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/') : Promise.resolve(analyzerOnline),
-  ]);
+  const botProbe = needsBotProbe
+    ? probeLocalHealth('http://127.0.0.1:7800/health')
+    : Promise.resolve(botOnline);
 
   return {
     ...raw,
-    bot: { ...raw.bot, online: botOnline || botProbe, dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+    bot: { ...raw.bot, online: botOnline || (await botProbe), dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
     analyzer: {
       ...raw.analyzer,
-      online: analyzerOnline || analyzerProbe,
-      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001',
+      online: analyzerOnline,
+      dashboard: raw.analyzer?.dashboard ?? 'console window',
     },
     tunnel: {
       ...raw.tunnel,
@@ -69,7 +66,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
     label: '▶ Start everything',
-    hint: 'Bot :7800 + analyzer + Cloudflare tunnel (3 windows)',
+    hint: 'Bot :7800 + analyzer console + Cloudflare tunnel (5 windows)',
     path: '/cmd/start-all',
     tone: 'primary',
   },
@@ -104,6 +101,13 @@ const COMMANDS: HomeCmd[] = [
     hint: 'Push tunnel URL to Neon + Railway (uses saved URL or paste below)',
     path: '/cmd/wire',
     tone: 'primary',
+  },
+  {
+    id: 'wipe-research',
+    label: '🗑 Wipe research CSVs',
+    hint: 'Fresh collection reset on local bot — archive + wipe CSV/JSONL, restart at $500',
+    path: '/cmd/wipe-research',
+    tone: 'danger',
   },
   {
     id: 'stop-bot',
@@ -250,7 +254,7 @@ export function AgentAdminShowcaseControl({
         {(status || launcherOnline) && (
           <>
             <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
-            <StatusChip label="Analyzer :9001" ok={Boolean(status?.analyzer?.online)} />
+            <StatusChip label="Analyzer" ok={Boolean(status?.analyzer?.online)} />
             <StatusChip label="Tunnel" ok={Boolean(status?.tunnel?.live || status?.tunnel?.cloudflaredRunning)} />
             <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
           </>
@@ -314,13 +318,22 @@ export function AgentAdminShowcaseControl({
         >
           Bot dashboard →
         </a>
+        <span className="text-violet-300">Analyzer console — use Start analyzer (logs in PowerShell window)</span>
         <a
-          href="http://127.0.0.1:9001"
+          href="http://127.0.0.1:7800/api/export_csv"
           target="_blank"
           rel="noreferrer"
           className="text-violet-300 hover:underline"
         >
-          Analyzer :9001 →
+          Download all CSV/JSONL (zip) →
+        </a>
+        <a
+          href="http://127.0.0.1:7800/api/export_session_trades.csv"
+          target="_blank"
+          rel="noreferrer"
+          className="text-violet-300 hover:underline"
+        >
+          Session trades CSV →
         </a>
         <button type="button" onClick={() => void refreshStatus()} className="text-zinc-500 hover:text-white">
           Refresh status

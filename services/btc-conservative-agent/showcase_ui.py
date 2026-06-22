@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -169,6 +170,19 @@ SHOWCASE_HTML = """<!DOCTYPE html>
       const s = Math.floor(sec % 60);
       return m + 'm ' + s + 's';
     }
+    function fmtMelbourne(ts) {
+      if (ts == null || ts === '') return '—';
+      var d = typeof ts === 'number' ? new Date(ts > 1e12 ? ts : ts * 1000) : new Date(ts);
+      if (isNaN(d.getTime())) return String(ts);
+      var parts = new Intl.DateTimeFormat('en-AU', {
+        timeZone: 'Australia/Melbourne',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false, timeZoneName: 'short'
+      }).formatToParts(d);
+      var get = function(t) { return (parts.find(function(p) { return p.type === t; }) || {}).value || ''; };
+      return get('year') + '-' + get('month') + '-' + get('day') + ' ' + get('hour') + ':' + get('minute') + ':' + get('second') + ' ' + get('timeZoneName');
+    }
     function esc(s) {
       if (s == null) return '';
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -321,7 +335,7 @@ SHOWCASE_HTML = """<!DOCTYPE html>
       if (!rows.length) return '<span class="muted">No AI calls yet</span>';
       let html = '<table><thead><tr><th>Time</th><th>Dir</th><th>Prob</th><th>Decision</th></tr></thead><tbody>';
       for (const h of rows) {
-        const ts = h.ts ? h.ts.slice(11, 16) : '—';
+        const ts = fmtMelbourne(h.time || h.ts);
         html += '<tr><td>' + ts + '</td><td>' + esc(h.direction) + '</td><td>' +
           (h.win_prob != null ? h.win_prob + '%' : '—') + '</td><td>' + esc(h.decision) + '</td></tr>';
       }
@@ -536,12 +550,28 @@ def perform_showcase_fresh_start(bot_module) -> dict:
     }
 
 
-def register_showcase_ui(app, bot_module=None) -> None:
-    """Keep full bot dashboard; block research warehouse exports only; add sync APIs."""
+def _should_block_research_warehouse(block_warehouse: bool | None) -> bool:
+    """Railway execution mirror blocks exports; home PC runs full research warehouse."""
+    if block_warehouse is not None:
+        return block_warehouse
+    if os.environ.get("HOME_RESEARCH_FULL", "").lower() in ("1", "true", "yes"):
+        return False
+    if os.environ.get("EXECUTION_MIRROR_ONLY", "").lower() in ("1", "true", "yes"):
+        return True
+    # Default: home entry (btc_conservative_agent.py) keeps full warehouse; legacy mirror blocks.
+    return os.environ.get("SHOWCASE_AGENT", "").lower() in ("1", "true", "yes") and not os.environ.get(
+        "HOME_BOT_LOCAL", ""
+    )
 
-    for rule in list(app.url_map.iter_rules()):
-        if rule.rule in WAREHOUSE_BLOCKED_ROUTES:
-            app.view_functions[rule.endpoint] = _blocked_handler
+
+def register_showcase_ui(app, bot_module=None, *, block_warehouse: bool | None = None) -> None:
+    """Keep full bot dashboard; optionally block research warehouse exports; add sync APIs."""
+    block = _should_block_research_warehouse(block_warehouse)
+
+    if block:
+        for rule in list(app.url_map.iter_rules()):
+            if rule.rule in WAREHOUSE_BLOCKED_ROUTES:
+                app.view_functions[rule.endpoint] = _blocked_handler
 
     @app.route("/api/sync_status")
     def api_sync_status():

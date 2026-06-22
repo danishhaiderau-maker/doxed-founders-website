@@ -28,6 +28,7 @@ import {
   resumeMyAgentInstance,
   startCopyRelaySim,
   stopCopyRelaySim,
+  resetCopyRelaySim,
   unfollowTradingAgent,
   type PublicAgentStatus,
   type TradingAgentSummary,
@@ -259,6 +260,22 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     }
   }
 
+  async function handleResetRelaySim() {
+    if (!session?.accessToken) return;
+    if (!window.confirm('Reset relay sim to $500? Clears paper ledger for this sim session.')) return;
+    setRelaySimBusy(true);
+    try {
+      const res = await resetCopyRelaySim(slug, session.accessToken);
+      setCopyRelaySim(res.copyRelaySim);
+      setRelaySimLiveBook(null);
+      await loadLive();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Relay sim refresh failed');
+    } finally {
+      setRelaySimBusy(false);
+    }
+  }
+
   const shareFollowText =
     agent &&
     buildTradingAgentFollowShareText({
@@ -374,6 +391,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           onResumeInstance={handleResumeInstance}
           onStartRelaySim={handleStartRelaySim}
           onStopRelaySim={handleStopRelaySim}
+          onResetRelaySim={handleResetRelaySim}
           relaySimBusy={relaySimBusy}
           onAdminRefresh={load}
           instanceBusy={instanceBusy}

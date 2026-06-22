@@ -26,7 +26,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, jsonify, render_template_string, request, send_file
 import ccxt
 import websocket
 import signal
@@ -11582,9 +11582,12 @@ def fill_order(order):
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
+        fill_ts = time.time()
         master.update({
             "status": "FILLED",
-            "filled_ts": time.time(),
+            "filled_ts": fill_ts,
+            "fill_ts": fill_ts,
+            "entry_ts": pos.get("entry_ts") or fill_ts,
             "fill_price": fill_px,
             "planned_limit_price": order.get("planned_limit_price"),
             "outcome": "OPEN",
@@ -13304,7 +13307,15 @@ def execute_market_order(signal):
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(signal["trade_id"], {}).get("signal_ref")
     if master:
-        master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": fill_px,"outcome": "OPEN"})
+        fill_ts = time.time()
+        master.update({
+            "status": "FILLED",
+            "filled_ts": fill_ts,
+            "fill_ts": fill_ts,
+            "entry_ts": pos.get("entry_ts") or fill_ts,
+            "fill_price": fill_px,
+            "outcome": "OPEN",
+        })
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED {signal['final_direction']} qty={qty} [PIPELINE ENFORCEMENT]")
     pipeline_state_sync()
@@ -13890,8 +13901,18 @@ def close_position(pos: dict, exit_reason: str):
 
     master = trades_map.get(trade_id, {}).get("signal_ref")
     if master:
-        master.update({"status": "CLOSED","exit_reason": exit_reason,"outcome": "WIN" if net_pnl > 0 else "LOSS","closed_ts": time.time()})
-        master["expires_ts"] = time.time() - 1
+        closed_ts = time.time()
+        master.update({
+            "status": "CLOSED",
+            "exit_reason": exit_reason,
+            "outcome": "WIN" if net_pnl > 0 else "LOSS",
+            "closed_ts": closed_ts,
+            "exit_price": price,
+            "fill_price": master.get("fill_price") or entry,
+            "entry_ts": pos.get("entry_ts") or master.get("entry_ts"),
+            "fill_ts": master.get("fill_ts") or master.get("filled_ts") or pos.get("entry_ts"),
+        })
+        master["expires_ts"] = closed_ts - 1
 
     persist_signal_close(trade_id, "CLOSED")
 
@@ -16654,6 +16675,9 @@ def _relay_trades_map_lite() -> dict:
                     "exit_price": sig.get("exit_price"),
                     "closed_ts": sig.get("closed_ts"),
                     "created_ts_ts": sig.get("created_ts_ts"),
+                    "fill_ts": sig.get("fill_ts") or sig.get("filled_ts"),
+                    "filled_ts": sig.get("filled_ts") or sig.get("fill_ts"),
+                    "entry_ts": sig.get("entry_ts") or sig.get("fill_ts") or sig.get("filled_ts"),
                     "net_pnl_usd": sig.get("net_pnl_usd"),
                 }
             }
@@ -17456,11 +17480,50 @@ def export_csv():
             CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
             SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
             EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
+            "trade_lifecycle.jsonl", "execution_funnel.jsonl", "fill_quality.jsonl", "shadow_vs_live_entry.jsonl",
         ]:
             if os.path.exists(file):
                 zip_file.write(file)
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
+
+
+@app.route('/api/export_session_trades.csv')
+def export_session_trades_csv():
+    """Exchange-style round-trip log for current research session (sync / audit)."""
+    session_start = _showcase_trade_session_start()
+    rows = _session_trades_only(list(trades))
+    lines = [
+        "closed_at,trade_id,direction,entry_price,exit_price,net_pnl_usd,pnl_pct_margin,duration_min,exit_reason,research_lane"
+    ]
+    for t in rows:
+        if not isinstance(t, dict):
+            continue
+        ts = t.get("ts") or t.get("closed_ts") or ""
+        if session_start and not _trade_row_in_session(t, session_start):
+            continue
+        lines.append(
+            ",".join(
+                [
+                    str(ts).replace(",", " "),
+                    str(t.get("trade_id") or ""),
+                    str(t.get("final_direction") or t.get("dir") or ""),
+                    str(t.get("entry") or t.get("fill_price") or ""),
+                    str(t.get("exit") or t.get("exit_price") or ""),
+                    str(t.get("net_pnl_usd") or t.get("pnl_usd") or ""),
+                    str(t.get("pnl") or t.get("pnl_pct_margin") or ""),
+                    str(t.get("dur_min") or t.get("duration_min") or ""),
+                    str(t.get("exit_reason") or "").replace(",", " "),
+                    str(t.get("research_lane") or "").replace(",", " "),
+                ]
+            )
+        )
+    payload = "\n".join(lines) + "\n"
+    return Response(
+        payload,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=session_trades.csv"},
+    )
 
 def calc_position_qty(price, leverage, margin_usdt=None):
     try:

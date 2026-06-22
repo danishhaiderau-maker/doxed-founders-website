@@ -1,6 +1,7 @@
 # Wait for .home-tunnel-url then wire to Neon + Railway (background after Start everything).
 param([int]$MaxWaitSec = 180)
 
+$Host.UI.RawUI.WindowTitle = "Doxed Auto-Wire"
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
@@ -22,10 +23,12 @@ while ((Get-Date) -lt $deadline) {
       } finally {
         Pop-Location
       }
+      Read-Host "Press Enter to close auto-wire window"
       exit 0
     }
   }
   Start-Sleep -Seconds 3
 }
 Write-Host "Timed out waiting for tunnel URL in $tunnelUrlFile"
+Read-Host "Press Enter to close auto-wire window"
 exit 1
