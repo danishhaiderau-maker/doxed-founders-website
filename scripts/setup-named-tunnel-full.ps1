@@ -33,9 +33,19 @@ function Ensure-Cert {
   Write-Host "When done, cert.pem is saved to: $configDir"
   Write-Host ""
   New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-  cloudflared tunnel login
+  $loginJob = Start-Job -ScriptBlock { cloudflared tunnel login 2>&1 }
+  $deadline = (Get-Date).AddMinutes(5)
+  Write-Host "Waiting for browser authorization (up to 5 min)..."
+  while ((Get-Date) -lt $deadline) {
+    if (Test-Path $certPath) { break }
+    Start-Sleep -Seconds 2
+  }
+  if (Get-Job $loginJob.Id -ErrorAction SilentlyContinue) {
+    Stop-Job $loginJob -ErrorAction SilentlyContinue
+    Remove-Job $loginJob -Force -ErrorAction SilentlyContinue
+  }
   if (-not (Test-Path $certPath)) {
-    throw "cert.pem not found after login. Re-run: cloudflared tunnel login"
+    throw "cert.pem not found. In the browser: pick zone doxxedcrypto.digital and click Authorize, then re-run npm run setup:named-tunnel"
   }
   Write-Host "OK  Login complete" -ForegroundColor Green
 }
