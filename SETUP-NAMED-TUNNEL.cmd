@@ -2,23 +2,21 @@
 title Setup stable bot tunnel (bot.doxxedcrypto.digital)
 cd /d "%~dp0"
 echo.
-echo === Permanent tunnel setup (one-time) ===
+echo === Permanent tunnel setup ===
+echo Stable URL: https://bot.doxxedcrypto.digital
 echo.
-echo Quick trycloudflare URLs die when the tunnel window closes.
-echo This sets up a STABLE URL: https://bot.doxxedcrypto.digital
+echo If you logged into Cloudflare DASHBOARD only, you still need tunnel login on THIS PC.
+echo A browser window will open for cloudflared tunnel login (one-time).
 echo.
-echo STEP 1 - Run these in an elevated or normal PowerShell if not done yet:
-echo   cloudflared tunnel login
-echo   cloudflared tunnel create doxed-btc-bot
-echo   cloudflared tunnel route dns doxed-btc-bot bot.doxxedcrypto.digital
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup-named-tunnel-full.ps1"
+if errorlevel 1 (
+  echo.
+  echo Setup failed. Common fix: run in PowerShell:
+  echo   cloudflared tunnel login
+  echo Then re-run this file.
+  pause
+  exit /b 1
+)
 echo.
-echo STEP 2 - Install as Windows service (survives reboot):
-echo   npm run install:home-bot-tunnel-service
-echo.
-echo STEP 3 - Wire to site:
-echo   npm run wire:home-bot -- https://bot.doxxedcrypto.digital
-echo.
-set /p RUN="Run service install now? [Y/n] "
-if /i "%RUN%"=="n" goto :eof
-powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-named-tunnel-service.ps1"
+echo Done. Restart launcher and click Start everything if bot is not running.
 pause

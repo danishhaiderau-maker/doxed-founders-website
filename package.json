@@ -105,6 +105,7 @@
     "setup:home-bot-tunnel": "powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1",
     "setup:home-bot-tunnel:named": "powershell -ExecutionPolicy Bypass -File scripts/setup-home-bot-tunnel.ps1",
     "install:home-bot-tunnel-service": "powershell -ExecutionPolicy Bypass -File scripts/install-named-tunnel-service.ps1",
+    "setup:named-tunnel": "powershell -ExecutionPolicy Bypass -File scripts/setup-named-tunnel-full.ps1",
     "watch:home-tunnel": "powershell -ExecutionPolicy Bypass -File scripts/tunnel-watchdog.ps1",
     "start:home-bot": "powershell -ExecutionPolicy Bypass -File scripts/start-home-bot.ps1",
     "start:home": "powershell -ExecutionPolicy Bypass -File scripts/start-home-stack.ps1",
