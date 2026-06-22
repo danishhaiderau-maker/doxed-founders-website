@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Heal relay sim orphan paper positions when ledger is flat.
+Update Bitfinex policy lock after relay sim orphan heal.
 
 ## Last Activity
 
