@@ -42,6 +42,23 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
 }
 
 async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
+  if (raw.ok) {
+    return {
+      ...raw,
+      bot: { ...raw.bot, online: Boolean(raw.bot?.online), dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+      analyzer: {
+        ...raw.analyzer,
+        online: Boolean(raw.analyzer?.online),
+        dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/',
+      },
+      tunnel: {
+        ...raw.tunnel,
+        live: Boolean(raw.tunnel?.live),
+        url: raw.tunnel?.url ?? null,
+      },
+    };
+  }
+
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
   const tunnelLive = Boolean(raw.tunnel?.live);
@@ -82,6 +99,14 @@ type HomeCmd = {
   path: string;
   tone?: 'primary' | 'danger' | 'neutral';
 };
+
+const INSTANT_CMD_TIMEOUT_MS = 15000;
+const SLOW_CMD_TIMEOUT_MS = 120000;
+
+function cmdTimeoutMs(id: string): number {
+  if (id === 'wipe-research') return SLOW_CMD_TIMEOUT_MS;
+  return INSTANT_CMD_TIMEOUT_MS;
+}
 
 const COMMANDS: HomeCmd[] = [
   {
@@ -202,7 +227,7 @@ export function AgentAdminShowcaseControl({
     setMsg(null);
     try {
       const q = id === 'wire' && tunnelUrl.trim() ? `?url=${encodeURIComponent(tunnelUrl.trim())}` : '';
-      const res = await fetch(`${LAUNCHER}${path}${q}`, { signal: AbortSignal.timeout(120000) });
+      const res = await fetch(`${LAUNCHER}${path}${q}`, { signal: AbortSignal.timeout(cmdTimeoutMs(id)) });
       const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string };
       if (!json.ok) {
         setMsg(json.error ?? 'Command failed — run RESTART-LAUNCHER.cmd on this PC');
@@ -211,6 +236,10 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
+        if (id === 'start-all' || id === 'stop-all') {
+          setTimeout(() => void refreshStatus(), 5000);
+          setTimeout(() => void refreshStatus(), 15000);
+        }
         if (id === 'start-all') {
           setTimeout(() => void refreshStatus(), 8000);
           setTimeout(() => void refreshStatus(), 25000);
@@ -319,7 +348,7 @@ export function AgentAdminShowcaseControl({
           <button
             key={cmd.id}
             type="button"
-            disabled={busy !== null}
+            disabled={busy === cmd.id}
             title={cmd.hint}
             onClick={() => void runLocal(cmd.path, cmd.id)}
             className={`rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${

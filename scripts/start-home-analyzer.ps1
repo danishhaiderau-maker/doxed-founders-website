@@ -1,6 +1,6 @@
 # Load home-bot.env and run the research analyzer (30-min loop, or --Once).
 # Embedded Flask research dashboard on :9001 (see research/research_dashboard.py).
-param([switch]$Once)
+param([switch]$Once, [switch]$NoWait)
 
 $Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer" }
 $ErrorActionPreference = "Stop"
@@ -55,7 +55,7 @@ $env:BTC_AGENT_DATA_DIR = $agentDir
 # Avoid duplicate analyzer windows (port 9001 bind race kills the second instance instantly).
 if (Test-PortOpen 9001) {
   Write-Host "Port 9001 already listening — analyzer dashboard is up." -ForegroundColor Yellow
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
   exit 0
 }
 $lockHandle = $null
@@ -63,7 +63,7 @@ try {
   $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
   Write-Host "Another analyzer start is in progress — not starting a duplicate." -ForegroundColor Yellow
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
   exit 0
 }
 $existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
@@ -72,7 +72,7 @@ $existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAc
 if ($existing) {
   Write-Host "Analyzer already running (pid $($existing.ProcessId)) — not starting a duplicate." -ForegroundColor Yellow
   if ($lockHandle) { $lockHandle.Dispose() }
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
   exit 0
 }
 
@@ -107,5 +107,5 @@ try {
   } else {
     Write-Host "Analyzer loop ended." -ForegroundColor Yellow
   }
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
 }

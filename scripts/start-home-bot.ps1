@@ -1,10 +1,11 @@
 # Start BTC bot on home PC using vault/home-bot.env
 param(
   [int]$Port = 7800,
-  [string]$VaultEnv = ""
+  [string]$VaultEnv = "",
+  [switch]$NoWait
 )
 
-$Host.UI.RawUI.WindowTitle = "Doxed Bot :7800"
+$Host.UI.RawUI.WindowTitle = "Doxed Bot :$Port"
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
@@ -41,6 +42,8 @@ if (-not (Test-Path $agentDir)) {
 }
 
 Set-Location $agentDir
+$env:PORT = "$Port"
+$env:DASHBOARD_PORT = "$Port"
 Write-Host "Starting bot on port $Port from $agentDir ..."
 Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
 Write-Host "Exports: /api/export_csv  /api/export_session_trades.csv"
@@ -59,5 +62,5 @@ try {
   } else {
     Write-Host "Bot process ended." -ForegroundColor Yellow
   }
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
 }
