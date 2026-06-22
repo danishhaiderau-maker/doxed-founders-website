@@ -209,8 +209,11 @@ def compute_regime_tags(row: dict) -> dict:
 
 
 def _load_session(root: Path | None = None) -> dict:
-    root = _agent_data_root(root)
-    for rel in ("research_session.json",):
+    root = root or _root()
+    for rel in (
+        "research_session.json",
+        "doxedcryptofounder/services/btc-conservative-agent/research_session.json",
+    ):
         p = root / rel
         if p.is_file():
             try:
@@ -280,19 +283,15 @@ def _resolve_epoch_start(session: dict | None, root: Path | None = None) -> pd.T
         return epoch
 
 
-def _agent_data_root(root: Path | None = None) -> Path:
-    root = root or _root()
-    parent_csv = root.parent / TRADES_CSV
-    if parent_csv.is_file():
-        return root.parent
-    return root
-
-
 def _load_csv_trades(root: Path | None = None) -> pd.DataFrame:
-    root = _agent_data_root(root)
+    root = root or _root()
     path = root / TRADES_CSV
     if not path.is_file():
-        return pd.DataFrame()
+        agent = root / "doxedcryptofounder" / "services" / "btc-conservative-agent" / TRADES_CSV
+        if agent.is_file():
+            path = agent
+        else:
+            return pd.DataFrame()
     return pd.read_csv(path, low_memory=False)
 
 
