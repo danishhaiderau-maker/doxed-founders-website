@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -208,11 +209,8 @@ def compute_regime_tags(row: dict) -> dict:
 
 
 def _load_session(root: Path | None = None) -> dict:
-    root = root or _root()
-    for rel in (
-        "research_session.json",
-        "doxedcryptofounder/services/btc-conservative-agent/research_session.json",
-    ):
+    root = _agent_data_root(root)
+    for rel in ("research_session.json",):
         p = root / rel
         if p.is_file():
             try:
@@ -282,21 +280,37 @@ def _resolve_epoch_start(session: dict | None, root: Path | None = None) -> pd.T
         return epoch
 
 
-def _load_csv_trades(root: Path | None = None) -> pd.DataFrame:
+def _agent_data_root(root: Path | None = None) -> Path:
     root = root or _root()
+    parent_csv = root.parent / TRADES_CSV
+    if parent_csv.is_file():
+        return root.parent
+    return root
+
+
+def _load_csv_trades(root: Path | None = None) -> pd.DataFrame:
+    root = _agent_data_root(root)
     path = root / TRADES_CSV
     if not path.is_file():
-        agent = root / "doxedcryptofounder" / "services" / "btc-conservative-agent" / TRADES_CSV
-        if agent.is_file():
-            path = agent
-        else:
-            return pd.DataFrame()
+        return pd.DataFrame()
     return pd.read_csv(path, low_memory=False)
+
+
+def _disk_ok(root: Path | None = None, min_mb: int = 500) -> bool:
+    """Ensure enough free disk for week collection (CSV + DB + reports)."""
+    try:
+        usage = shutil.disk_usage(root or _root())
+        free_mb = usage.free / (1024 * 1024)
+        return free_mb >= min_mb
+    except Exception:
+        return True
 
 
 def sync_accumulator(session: dict | None = None, root: Path | None = None) -> dict:
     """Ingest new closed trades from CSV into SQLite. Called each analyzer iteration."""
     root = root or _root()
+    if not _disk_ok(root):
+        return {"new": 0, "total": 0, "error": "low_disk_space", "min_free_mb": 500}
     init_db(root)
     session = session or _load_session(root)
     epoch = _resolve_epoch_start(session, root)
