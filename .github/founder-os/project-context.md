@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Scope Agent Hub desks to fresh sessions and fix live-copy stale positions.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
