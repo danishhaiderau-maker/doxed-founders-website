@@ -105,3 +105,4 @@ docs/exports/*.zip
 .home-tunnel-url
 .home-tunnel.log
 .home-wire.log
+.chrome-railway-profile/

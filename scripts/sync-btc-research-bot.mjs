@@ -88,6 +88,16 @@ function patchForProduction(source) {
     /_AGENT_DEBUG_LOG_ALT = r"C:\\Users\\user\\Desktop\\BOT\\debug-43f630\.log"/,
     '_AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug-alt.log")',
   );
+  // Dashboard: Binance fee-stress reference box removed (Bitfinex zero-fee sim only).
+  out = out.replace(
+    /<div id="binanceFeePanel"[\s\S]*?<\/div>\s*\n\s*\n<h3>System Status<\/h3>/,
+    '<h3>System Status</h3>',
+  );
+  out = out.replace(/\n\s*renderBinanceFeeStress\(d\);\n/, '\n');
+  out = out.replace(
+    /\n\s*snapshot\["binance_fee_stress"\] = compute_binance_fee_stress\(trades_copy\)\n/,
+    '\n',
+  );
   return out;
 }
 
