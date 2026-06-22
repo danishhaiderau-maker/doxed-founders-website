@@ -227,7 +227,7 @@ export function AgentPublicProfile({
   slug,
   agent,
   dashboard,
-  activity,
+  activity: _activity,
   allAgents,
   following,
   hired,
