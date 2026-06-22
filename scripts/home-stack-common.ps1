@@ -218,7 +218,8 @@ function Use-NamedTunnel {
   if (-not (Test-Path $flag)) { return $false }
   $configDir = Join-Path $env:USERPROFILE ".cloudflared"
   $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
-  return $null -ne $cred
+  $token = Join-Path $configDir "doxed-btc-bot.token"
+  return ($null -ne $cred) -or (Test-Path $token)
 }
 
 function Start-AnalyzerDashboard {
