@@ -201,4 +201,4 @@ Verify:
   curl https://doxed-founders-website-production.up.railway.app/api/health
   npm run prepare:bitfinex-relay-test
 `);
-writeFileSync(join(root, '.home-bot-mode'), `wiredAt=${new Date().toISOString()}\nurl=${botUrl}\n`, 'utf8');
+writeFileSync(path.join(root, '.home-bot-mode'), `wiredAt=${new Date().toISOString()}\nurl=${botUrl}\n`, 'utf8');

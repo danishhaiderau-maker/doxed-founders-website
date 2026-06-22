@@ -153,12 +153,12 @@ export function AgentAdminShowcaseControl({
       setLauncherOnline(true);
       const normalized = await normalizeHomeStatus(json);
       setStatus(normalized);
-      if (normalized.tunnel?.url && !tunnelUrl) setTunnelUrl(normalized.tunnel.url);
+      if (normalized.tunnel?.url) setTunnelUrl(normalized.tunnel.url);
     } catch {
       setLauncherOnline(false);
       setStatus(null);
     }
-  }, [tunnelUrl]);
+  }, []);
 
   useEffect(() => {
     void refreshStatus();
@@ -172,21 +172,30 @@ export function AgentAdminShowcaseControl({
     try {
       const q = id === 'wire' && tunnelUrl.trim() ? `?url=${encodeURIComponent(tunnelUrl.trim())}` : '';
       const res = await fetch(`${LAUNCHER}${path}${q}`, { signal: AbortSignal.timeout(120000) });
-      const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string; endpoints?: string[] };
-      if (!json.ok || json.endpoints) {
-        setMsg(json.error ?? 'Command failed — close launcher window and re-run START-LAUNCHER.cmd');
+      const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string };
+      if (!json.ok) {
+        setMsg(json.error ?? 'Command failed — run RESTART-LAUNCHER.cmd on this PC');
       } else {
         setMsg(json.message ?? 'Done');
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id.startsWith('start') || id === 'wire') {
+        if (id === 'start-all') {
+          setTimeout(() => void refreshStatus(), 8000);
+          setTimeout(() => void refreshStatus(), 25000);
+          setTimeout(() => onUpdated?.(), 30000);
+          setTimeout(() => onUpdated?.(), 90000);
+        } else if (id.startsWith('start') || id === 'wire') {
           setTimeout(() => onUpdated?.(), 20000);
           setTimeout(() => onUpdated?.(), 60000);
         }
       }
-    } catch {
-      setMsg('Local bridge offline — run START-LAUNCHER.cmd on this PC first.');
+    } catch (err) {
+      const hint =
+        err instanceof Error && /fetch|network|Failed/i.test(err.message)
+          ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd, then refresh this page. Buttons only work on the same PC as the bot.'
+          : 'Local bridge offline — double-click START-LAUNCHER.cmd in the repo folder.';
+      setMsg(hint);
       setLauncherOnline(false);
     } finally {
       setBusy(null);

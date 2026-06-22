@@ -89,7 +89,7 @@ export function resolveShowcaseTradePrices(
   if (!bot || !tradeId) return {};
 
   for (const t of bot.trades ?? []) {
-    if (tradeIdsMatch(t.trade_id, tradeId)) {
+    if (t.trade_id && tradeIdsMatch(t.trade_id, tradeId)) {
       return {
         entry: t.entry ?? undefined,
         exit: t.exit ?? undefined,
@@ -113,7 +113,7 @@ export function resolveShowcaseTradePrices(
   }
 
   for (const t of normalizeBotSessionTrades(bot)) {
-    if (tradeIdsMatch(t.trade_id, tradeId)) {
+    if (t.trade_id && tradeIdsMatch(t.trade_id, tradeId)) {
       return {
         entry: t.entry ?? undefined,
         exit: t.exit ?? undefined,

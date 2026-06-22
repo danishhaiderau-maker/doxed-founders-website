@@ -20,7 +20,12 @@ function Write-Cors {
     [System.Net.HttpListenerRequest]$Request,
     [System.Net.HttpListenerResponse]$Response
   )
-  $allowed = @("https://doxxedcrypto.digital", "http://localhost:3000", "http://127.0.0.1:3000")
+  $allowed = @(
+    "https://doxxedcrypto.digital",
+    "https://www.doxxedcrypto.digital",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+  )
   $origin = $Request.Headers["Origin"]
   if ($origin -and ($allowed -contains $origin)) {
     $Response.Headers.Add("Access-Control-Allow-Origin", $origin)
@@ -29,6 +34,8 @@ function Write-Cors {
   }
   $Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
   $Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
+  # Chrome Private Network Access (HTTPS site → http://127.0.0.1)
+  $Response.Headers.Add("Access-Control-Allow-Private-Network", "true")
 }
 
 function Send-Json {
@@ -57,23 +64,19 @@ function Test-PortOpen([int]$P) {
   }
 }
 
-function Get-HttpJson([string]$Url, [int]$TimeoutSec = 6) {
+function Test-TunnelLive([string]$Url) {
+  if (-not $Url) { return $false }
   try {
-    $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec
-    return @{ ok = $true; status = $r.StatusCode; body = $r.Content }
+    $r = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 8
+    return $r.StatusCode -eq 200
   } catch {
-    return @{ ok = $false; error = $_.Exception.Message }
+    return $false
   }
 }
 
-function Test-ProcessPattern([string]$Pattern) {
-  return @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'cloudflared.exe' OR Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Pattern*" })
-}
-
-function Stop-ListenPort([int]$Port) {
+function Stop-ListenPort([int]$ListenPort) {
   $killed = @()
-  $listen = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  $listen = Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($listen) {
     $procId = [int]$listen.OwningProcess
     if ($procId -gt 0) {
@@ -82,6 +85,189 @@ function Stop-ListenPort([int]$Port) {
     }
   }
   return $killed
+}
+
+function Start-DetachedPs1 {
+  param(
+    [string]$ScriptPath,
+    [string[]]$ExtraArgs = @(),
+    [switch]$NoExit,
+    [string]$WindowTitle = "Doxed Home Stack"
+  )
+  if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  $argList = New-Object System.Collections.Generic.List[string]
+  if ($NoExit) { $argList.Add("-NoExit") }
+  $argList.Add("-NoProfile")
+  $argList.Add("-ExecutionPolicy")
+  $argList.Add("Bypass")
+  $argList.Add("-File")
+  $argList.Add($ScriptPath)
+  foreach ($a in $ExtraArgs) { $argList.Add([string]$a) }
+  Start-Process -FilePath "powershell.exe" `
+    -ArgumentList $argList.ToArray() `
+    -WorkingDirectory $repoRoot `
+    -WindowStyle Normal
+}
+
+function Get-TunnelUrl {
+  if (Test-Path $tunnelUrlFile) {
+    return (Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim()
+  }
+  return $null
+}
+
+function Get-FullStatus {
+  $botPortOpen = Test-PortOpen $BotPort
+  $analyzerPortOpen = Test-PortOpen $AnalyzerPort
+  $tunnelUrl = Get-TunnelUrl
+  $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+  $tunnelLive = $cloudflaredRunning -and (Test-TunnelLive $tunnelUrl)
+  return @{
+    ok = $true
+    launcher = "running"
+    ports = @{
+      bot = $BotPort
+      analyzer = $AnalyzerPort
+      launcher = $Port
+    }
+    bot = @{
+      online = $botPortOpen
+      dashboard = "http://127.0.0.1:$BotPort"
+      lan = "http://10.0.0.102:$BotPort"
+      dataDir = $agentDir
+    }
+    analyzer = @{
+      online = $analyzerPortOpen
+      dashboard = "http://127.0.0.1:$AnalyzerPort"
+      lan = "http://10.0.0.102:$AnalyzerPort"
+      note = "Must run from $agentDir - not Final Bots root"
+    }
+    tunnel = @{
+      url = $tunnelUrl
+      live = $tunnelLive
+      cloudflaredRunning = $cloudflaredRunning
+    }
+  }
+}
+
+function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
+  switch ($Action) {
+    "start-all" {
+      $messages = [System.Collections.Generic.List[string]]::new()
+
+      if (-not (Test-PortOpen $BotPort)) {
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800"
+        $messages.Add("[1/4] Bot window opened on :$BotPort")
+        Start-Sleep -Seconds 4
+      } else {
+        $messages.Add("[1/4] Bot already online on :$BotPort")
+      }
+
+      if (-not (Test-PortOpen $AnalyzerPort)) {
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer :9001"
+        $messages.Add("[2/4] Analyzer window opened on :$AnalyzerPort")
+      } else {
+        $messages.Add("[2/4] Analyzer already online on :$AnalyzerPort")
+      }
+
+      $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+      if (-not $cfRunning) {
+        Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+        $messages.Add("[3/4] Tunnel window opened (watch for trycloudflare URL)")
+      } else {
+        $messages.Add("[3/4] cloudflared already running")
+      }
+
+      Start-DetachedPs1 (Join-Path $scriptDir "home-stack-control-panel.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Stack Control Panel"
+      $messages.Add("[4/4] Control panel opened (live status every 5s)")
+
+      $autoWire = Join-Path $scriptDir "auto-wire-after-tunnel.ps1"
+      Start-Process powershell.exe -ArgumentList @(
+        "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $autoWire
+      ) -WorkingDirectory $repoRoot -WindowStyle Normal
+      $messages.Add("Auto-wire started in background when tunnel URL appears")
+
+      return @{ ok = $true; message = ($messages -join "`n") }
+    }
+    "start-bot" {
+      if (Test-PortOpen $BotPort) {
+        return @{ ok = $true; message = "Bot already listening on :$BotPort" }
+      }
+      Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800"
+      return @{ ok = $true; message = "Bot window opened on :$BotPort" }
+    }
+    "start-analyzer" {
+      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer :9001"
+      return @{
+        ok = $true
+        message = "Analyzer started from $agentDir (reads bot CSVs there)."
+      }
+    }
+    "start-analyzer-once" {
+      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)"
+      return @{ ok = $true; message = "Analyzer single pass started." }
+    }
+    "start-tunnel" {
+      Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+      return @{ ok = $true; message = "Tunnel window opened - URL saves to .home-tunnel-url automatically" }
+    }
+    "wire" {
+      $url = $QueryUrl
+      if (-not $url) { $url = Get-TunnelUrl }
+      if (-not $url) {
+        return @{
+          ok = $false
+          error = "No tunnel URL yet. Click Start everything or Start tunnel first."
+        }
+      }
+      Start-Process powershell.exe -ArgumentList @(
+        "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $scriptDir "wire-home-bot-background.ps1"),
+        "-Url", $url
+      ) -WorkingDirectory $repoRoot -WindowStyle Normal
+      return @{ ok = $true; message = "Wiring $url to Neon + Railway (see window / .home-wire.log)" }
+    }
+    "stop-bot" {
+      $killed = @(Stop-ListenPort $BotPort)
+      return @{
+        ok = $true
+        message = if ($killed.Count) { "Stopped bot on :$BotPort (PID $($killed -join ', '))" } else { "Nothing listening on :$BotPort" }
+      }
+    }
+    "stop-analyzer" {
+      $killed = @(Stop-ListenPort $AnalyzerPort)
+      return @{
+        ok = $true
+        message = if ($killed.Count) { "Stopped analyzer on :$AnalyzerPort (PID $($killed -join ', '))" } else { "Nothing listening on :$AnalyzerPort" }
+      }
+    }
+    "stop-all" {
+      $botKilled = @(Stop-ListenPort $BotPort)
+      $analyzerKilled = @(Stop-ListenPort $AnalyzerPort)
+      $tunnelKilled = @()
+      Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        $tunnelKilled += $_.Id
+      }
+      Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.CommandLine -and (
+            $_.CommandLine -like "*home-stack-control-panel*" -or
+            $_.CommandLine -like "*auto-wire-after-tunnel*"
+          )
+        } | ForEach-Object {
+          Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+      return @{
+        ok = $true
+        message = "Stopped bot:$($botKilled.Count) analyzer:$($analyzerKilled.Count) tunnel:$($tunnelKilled.Count). Bridge :7810 still running."
+        pids = @{ bot = $botKilled; analyzer = $analyzerKilled; tunnel = $tunnelKilled }
+      }
+    }
+    default {
+      return @{ ok = $false; error = "Unknown action: $Action" }
+    }
+  }
 }
 
 function Serve-Request([System.Net.HttpListenerContext]$Context) {
@@ -116,7 +302,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       default {
         @{
           ok = $false
-          error = "Unknown path: $path - close launcher window and re-run START-LAUNCHER.cmd"
+          error = "Unknown path: $path - run RESTART-LAUNCHER.cmd"
         }
       }
     }
@@ -126,134 +312,11 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
   }
 }
 
-function Start-DetachedPs1([string]$ScriptPath, [string[]]$ExtraArgs = @(), [switch]$NoExit) {
-  if (-not (Test-Path $ScriptPath)) { throw "Missing $ScriptPath" }
-  $args = @()
-  if ($NoExit) { $args += "-NoExit" }
-  $args += @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath)
-  $args += $ExtraArgs
-  Start-Process powershell -ArgumentList $args
-}
-
-function Get-FullStatus {
-  $botPortOpen = Test-PortOpen $BotPort
-  $analyzerPortOpen = Test-PortOpen $AnalyzerPort
-  $tunnelUrl = $null
-  if (Test-Path $tunnelUrlFile) {
-    $tunnelUrl = (Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim()
-  }
-  $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  return @{
-    ok = $true
-    launcher = "running"
-    ports = @{
-      bot = $BotPort
-      analyzer = $AnalyzerPort
-      launcher = $Port
-    }
-    bot = @{
-      online = $botPortOpen
-      dashboard = "http://127.0.0.1:$BotPort"
-      lan = "http://10.0.0.102:$BotPort"
-      dataDir = $agentDir
-    }
-    analyzer = @{
-      online = $analyzerPortOpen
-      dashboard = "http://127.0.0.1:$AnalyzerPort"
-      lan = "http://10.0.0.102:$AnalyzerPort"
-      note = "Must run from $agentDir - not Final Bots root"
-    }
-    tunnel = @{
-      url = $tunnelUrl
-      live = $false
-      cloudflaredRunning = $cloudflaredRunning
-    }
-  }
-}
-
-function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
-  switch ($Action) {
-    "start-all" {
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-stack.ps1") @() 
-      return @{ ok = $true; message = "Started bot + analyzer + tunnel (3 windows)." }
-    }
-    "start-bot" {
-      if (Test-PortOpen $BotPort) {
-        return @{ ok = $true; message = "Bot already listening on :$BotPort" }
-      }
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", $BotPort) -NoExit
-      return @{ ok = $true; message = "Bot window opened on :$BotPort" }
-    }
-    "start-analyzer" {
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit
-      return @{
-        ok = $true
-        message = "Analyzer started from $agentDir (reads bot CSVs there)."
-      }
-    }
-    "start-analyzer-once" {
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit
-      return @{ ok = $true; message = "Analyzer single pass started." }
-    }
-    "start-tunnel" {
-      Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", $BotPort) -NoExit
-      return @{ ok = $true; message = "Tunnel window opened - copy trycloudflare URL then Wire." }
-    }
-    "wire" {
-      $url = $QueryUrl
-      if (-not $url -and (Test-Path $tunnelUrlFile)) {
-        $url = (Get-Content $tunnelUrlFile -Raw).Trim()
-      }
-      if (-not $url) {
-        return @{
-          ok = $false
-          error = "No tunnel URL. Paste URL from tunnel window or save to .home-tunnel-url"
-        }
-      }
-      $wireScript = Join-Path $scriptDir "wire-home-bot-background.ps1"
-      Start-Process powershell -ArgumentList @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $wireScript, "-Url", $url
-      ) | Out-Null
-      return @{ ok = $true; message = "Wiring $url to Neon + Railway in background (30-60s)." }
-    }
-    "stop-bot" {
-      $killed = @(Stop-ListenPort $BotPort)
-      return @{
-        ok = $true
-        message = if ($killed.Count) { "Stopped PID(s) on :$BotPort - $($killed -join ', ')" } else { "Nothing listening on :$BotPort" }
-      }
-    }
-    "stop-analyzer" {
-      $killed = @(Stop-ListenPort $AnalyzerPort)
-      return @{
-        ok = $true
-        message = if ($killed.Count) { "Stopped analyzer on :$AnalyzerPort - $($killed -join ', ')" } else { "Nothing listening on :$AnalyzerPort" }
-      }
-    }
-    "stop-all" {
-      $botKilled = @(Stop-ListenPort $BotPort)
-      $analyzerKilled = @(Stop-ListenPort $AnalyzerPort)
-      $tunnelKilled = @()
-      Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        $tunnelKilled += $_.Id
-      }
-      return @{
-        ok = $true
-        message = "Stopped bot:$($botKilled.Count) analyzer:$($analyzerKilled.Count) tunnel:$($tunnelKilled.Count)"
-        pids = @{ bot = $botKilled; analyzer = $analyzerKilled; tunnel = $tunnelKilled }
-      }
-    }
-    default {
-      return @{ ok = $false; error = "Unknown action: $Action" }
-    }
-  }
-}
-
 Write-Host ""
 Write-Host "=== Doxed home command bridge (:$Port) ===" -ForegroundColor Cyan
-Write-Host "Agent Hub admin panel on THIS PC can start bot / analyzer / tunnel."
-Write-Host "Keep this window open. Press Ctrl+C to stop bridge (services keep running)."
+Write-Host "Repo: $repoRoot"
+Write-Host "Agent Hub on THIS PC can start bot / analyzer / tunnel."
+Write-Host "Keep this window open. Ctrl+C stops bridge only."
 Write-Host ""
 
 $listener = New-Object System.Net.HttpListener
