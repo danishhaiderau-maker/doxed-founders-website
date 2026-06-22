@@ -462,7 +462,7 @@ export class TradingAgentsService implements OnModuleInit {
     agent: Prisma.TradingAgentGetPayload<object>,
     extra?: Parameters<typeof serializeAgent>[1],
   ) {
-    if (agent.slug !== 'conservative-btc' || !this.botBridge.isEnabled()) {
+    if (agent.slug !== 'conservative-btc' || !(await this.botBridge.isEnabledAsync())) {
       return serializeAgent(agent, extra);
     }
     const health = await this.botBridge.fetchHealth();
@@ -484,7 +484,7 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   async getBotBridgeStatus() {
-    const enabled = this.botBridge.isEnabled();
+    const enabled = await this.botBridge.isEnabledAsync();
     if (!enabled) {
       return { status: 'offline' as const, label: 'Agent offline' };
     }
@@ -514,8 +514,8 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   async getBotBridgeStatusAdmin() {
-    const enabled = this.botBridge.isEnabled();
-    const url = this.botBridge.getBotUrl();
+    const enabled = await this.botBridge.isEnabledAsync();
+    const url = await this.botBridge.resolveBotUrl();
     const [state, health] = await Promise.all([
       enabled ? this.botBridge.fetchState(true) : Promise.resolve(null),
       enabled ? this.botBridge.fetchHealth() : Promise.resolve(null),

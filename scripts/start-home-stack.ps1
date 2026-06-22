@@ -47,17 +47,17 @@ $analyzerRunner = Join-Path $scriptDir "start-home-analyzer.ps1"
 $tunnelRunner = Join-Path $scriptDir "setup-home-bot-tunnel.ps1"
 
 # 1) Main bot
-Start-Process powershell -ArgumentList @(
+Start-Process powershell.exe -ArgumentList @(
   "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $botRunner, "-Port", $Port
-)
+) -WorkingDirectory $repoRoot -WindowStyle Normal
 Write-Host "[1/3] Bot window opened" -ForegroundColor Green
 Start-Sleep -Seconds 3
 
 # 2) Analyzer
-if (-not $NoAnalyzer) {
-  $analyzerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $analyzerRunner)
-  if ($AnalyzerOnce) { $analyzerArgs += "-Once" }
-  Start-Process powershell -ArgumentList $analyzerArgs
+  if (-not $NoAnalyzer) {
+    $analyzerArgs = @("-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $analyzerRunner)
+    if ($AnalyzerOnce) { $analyzerArgs += "-Once" }
+    Start-Process powershell.exe -ArgumentList $analyzerArgs -WorkingDirectory $repoRoot -WindowStyle Normal
   Write-Host "[2/3] Analyzer window opened" -ForegroundColor Green
 } else {
   Write-Host "[2/3] Analyzer skipped (-NoAnalyzer)" -ForegroundColor Yellow
@@ -65,9 +65,9 @@ if (-not $NoAnalyzer) {
 
 # 3) Tunnel
 if (-not $NoTunnel) {
-  Start-Process powershell -ArgumentList @(
+  Start-Process powershell.exe -ArgumentList @(
     "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $tunnelRunner, "-Quick", "-Port", $Port
-  )
+  ) -WorkingDirectory $repoRoot -WindowStyle Normal
   Write-Host "[3/3] Tunnel window opened" -ForegroundColor Green
 } else {
   Write-Host "[3/3] Tunnel skipped (-NoTunnel)" -ForegroundColor Yellow

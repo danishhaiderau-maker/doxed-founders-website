@@ -7,6 +7,7 @@ import {
   mapBotStateToAgentStats,
   mapBotStateToDashboard,
 } from './bot-state.mapper';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class BotBridgeService {
@@ -14,8 +15,12 @@ export class BotBridgeService {
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
   private cacheMs = 1000;
+  private dbUrlCache: { url: string | null; at: number } | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   getBotUrl(): string | null {
     const url = (
@@ -24,6 +29,30 @@ export class BotBridgeService {
       ''
     ).trim();
     return url ? url.replace(/\/$/, '') : null;
+  }
+
+  /** Home tunnel URL is wired to Neon first; env vars need a Railway restart to catch up. */
+  async resolveBotUrl(): Promise<string | null> {
+    const now = Date.now();
+    if (this.dbUrlCache && now - this.dbUrlCache.at < 15_000) {
+      if (this.dbUrlCache.url) return this.dbUrlCache.url;
+    } else {
+      try {
+        const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+        const db = row?.showcaseBotPublicUrl?.trim();
+        const normalized = db ? db.replace(/\/$/, '') : null;
+        this.dbUrlCache = { url: normalized, at: now };
+        if (normalized) return normalized;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Bot URL DB lookup failed: ${msg}`);
+      }
+    }
+    return this.getBotUrl();
+  }
+
+  async isEnabledAsync(): Promise<boolean> {
+    return Boolean(await this.resolveBotUrl());
   }
 
   isEnabled(): boolean {
@@ -41,7 +70,7 @@ export class BotBridgeService {
   }
 
   async fetchState(force = false, mode: 'full' | 'relay' = 'full'): Promise<BotApiState | null> {
-    const base = this.getBotUrl();
+    const base = await this.resolveBotUrl();
     if (!base) return null;
 
     const now = Date.now();
@@ -89,6 +118,7 @@ export class BotBridgeService {
   }
 
   async getLiveDashboard(agentName: string, force = false) {
+    const botUrl = await this.resolveBotUrl();
     const bot = await this.fetchState(force, 'relay');
     if (!bot) {
       const health = await this.fetchHealth();
@@ -99,7 +129,7 @@ export class BotBridgeService {
         activity: [],
         rawState: {} as BotApiState,
         botConnected: true,
-        botUrl: this.getBotUrl(),
+        botUrl,
         strategyMode: 'RESEARCH',
         executionPaused: Boolean(health.execution_paused),
         executionReason: typeof health.execution_reason === 'string' ? health.execution_reason : null,
@@ -111,7 +141,7 @@ export class BotBridgeService {
       activity: mapBotStateToActivity(bot, agentName),
       rawState: bot,
       botConnected: true,
-      botUrl: this.getBotUrl(),
+      botUrl,
       strategyMode: bot.strategy_mode ?? 'RESEARCH',
       executionPaused: bot.execution_paused ?? false,
       executionReason: bot.execution_reason ?? null,
@@ -125,7 +155,7 @@ export class BotBridgeService {
   }
 
   async proxyBotPost(path: string, body: Record<string, unknown> = {}) {
-    const base = this.getBotUrl();
+    const base = await this.resolveBotUrl();
     if (!base) {
       return { ok: false, error: 'Bot bridge not configured' };
     }
@@ -153,7 +183,7 @@ export class BotBridgeService {
   }
 
   async fetchHealth() {
-    const base = this.getBotUrl();
+    const base = await this.resolveBotUrl();
     if (!base) return null;
     try {
       const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(20_000) });
