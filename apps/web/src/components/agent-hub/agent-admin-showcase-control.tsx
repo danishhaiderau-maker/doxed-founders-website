@@ -200,8 +200,8 @@ export function AgentAdminShowcaseControl({
     } catch (err) {
       const hint =
         err instanceof Error && /fetch|network|Failed/i.test(err.message)
-          ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd, then refresh this page. Buttons only work on the same PC as the bot.'
-          : 'Local bridge offline — double-click START-LAUNCHER.cmd in the repo folder.';
+          ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd on this PC, then hard-refresh this page.'
+          : 'Local bridge offline — double-click RESTART-LAUNCHER.cmd in the repo folder.';
       setMsg(hint);
       setLauncherOnline(false);
     } finally {
