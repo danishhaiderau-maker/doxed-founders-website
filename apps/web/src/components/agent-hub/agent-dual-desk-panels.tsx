@@ -3,8 +3,11 @@
 import Link from 'next/link';
 import type { TradingAgentDashboardState } from '@dcf/utils';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
-import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
+import {
+  AgentTransparencyTables,
+  EMPTY_LIVE_BOOK,
+} from '@/components/agent-hub/agent-transparency-tables';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { AgentRelaySimPanel } from '@/components/agent-hub/agent-relay-sim-panel';
 import type {
@@ -53,7 +56,7 @@ export function AgentDeskView({
   mode,
   exchangeLabel,
   userAgent: _userAgent,
-  showcaseAgent,
+  showcaseAgent: _showcaseAgent,
   exchangeLiveBook,
   showcaseLiveBook,
   relaySimLiveBook,
@@ -104,13 +107,10 @@ export function AgentDeskView({
       <AgentRelaySimPanel
         signedIn={Boolean(signedIn)}
         exchangeLabel={exchangeLabel}
-        showcaseAgent={showcaseAgent}
         copyRelaySim={copyRelaySim}
         copyRelayReconcile={copyRelayReconcile}
         relayFidelity={relayFidelity}
         relaySimLiveBook={relaySimLiveBook}
-        showcaseLiveBook={showcaseLiveBook}
-        showcaseActivity={showcaseActivity}
         simActivity={userActivity}
         copyRelayLimitChain={copyRelayLimitChain}
         tradeLifecycleIntegrity={tradeLifecycleIntegrity}
@@ -128,18 +128,19 @@ export function AgentDeskView({
   }
 
   if (activeDesk === 'showcase' || mode === 'showcase') {
+    const book = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
     return (
       <DeskPanel
         badge="Research local bot"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
         title="Conservative BTC Agent · local bot :7800"
-        subtitle="Home research bot on :7800 — only data from your current session (fresh collection when enabled)."
+        subtitle="Home research bot only — signals, orders, positions, and trades from the admin showcase session. Switch to Bitfinex tabs for your copy book."
       >
-        <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={10} />
+        <AgentTransparencyTables liveBook={book} maxRows={10} />
         <AgentTradeJourney
           activity={showcaseActivity}
-          liveBook={showcaseLiveBook}
+          liveBook={book}
           layout="horizontal"
           windowMinutes={30}
         />
@@ -149,6 +150,7 @@ export function AgentDeskView({
 
   const exchange = exchangeLabel ?? 'Bitfinex';
   const isLive = mode === 'live';
+  const liveBook = exchangeLiveBook ?? EMPTY_LIVE_BOOK;
 
   if (!isLive) {
     const hireHref = slug
@@ -163,7 +165,7 @@ export function AgentDeskView({
         badgeClassName="text-emerald-300"
         borderClassName="border-emerald-500/45"
         title={`Connect ${exchange} to copy trades`}
-        subtitle="Real API relay on your exchange — not a dummy paper session. Same signals, limits, and exits as the admin showcase."
+        subtitle="Your Bitfinex copy book lives here once API keys are connected. Use Research local bot tab to watch the admin :7800 bot — data stays separate."
       >
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-5 text-center">
           <p className="text-sm text-emerald-100/90">
@@ -177,13 +179,14 @@ export function AgentDeskView({
             Connect {exchange} API
           </Link>
           <p className="mt-3 text-[11px] text-zinc-500">
-            Or run relay simulation after connecting — test Option B without real orders.
+            Or use the relay sim tab after connecting — paper book only, no showcase data mixed in.
           </p>
         </div>
-        <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={6} />
         <p className="text-xs text-zinc-500">
-          Below: showcase reference trades (admin bot). Your copy desk fills in once API is connected.
+          Tables below are your copy session book (empty until connected). Admin bot data is on the
+          Research local bot tab only.
         </p>
+        <AgentTransparencyTables liveBook={EMPTY_LIVE_BOOK} maxRows={10} />
       </DeskPanel>
     );
   }
@@ -193,8 +196,8 @@ export function AgentDeskView({
       badge={`${exchange} · live copy`}
       badgeClassName="text-emerald-300"
       borderClassName="border-emerald-500/45"
-      title={`Your ${exchange} account`}
-      subtitle="Real money on your exchange — every open order, position, expired limit, and closed copy trade."
+      title={`Your ${exchange} copy session`}
+      subtitle="Your exchange relay only — open orders, positions, expired limits, and closed copy trades from your Bitfinex account. Not the admin research bot."
     >
       {slug ? (
         <AgentLiveTradeExportButton
@@ -204,20 +207,16 @@ export function AgentDeskView({
           exchangeLabel={exchange}
         />
       ) : null}
-      {exchangeLiveBook ? (
-        <AgentTransparencyTables liveBook={exchangeLiveBook} maxRows={10} />
-      ) : isLive ? (
-        <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
-          Connect {exchange} and start the relay to load live orders and positions from your exchange.
+      {!exchangeLiveBook ? (
+        <p className="rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
+          Waiting for exchange sync — start the relay and ensure Derivatives has USDT. Tables update
+          within seconds once your first mirrored signal fires.
         </p>
-      ) : (
-        <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
-          Waiting for exchange sync — relay tick loads orders and positions within seconds.
-        </p>
-      )}
+      ) : null}
+      <AgentTransparencyTables liveBook={liveBook} maxRows={10} />
       <AgentTradeJourney
         activity={userActivity}
-        liveBook={exchangeLiveBook}
+        liveBook={liveBook}
         layout="horizontal"
         showBalance
         windowMinutes={30}

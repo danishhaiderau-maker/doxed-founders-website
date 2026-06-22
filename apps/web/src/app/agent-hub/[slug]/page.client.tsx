@@ -384,8 +384,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           copyRelayLimitChain={copyRelayLimitChain}
           tradeLifecycleIntegrity={tradeLifecycleIntegrity}
           relayFidelity={relayFidelity}
-          showcaseActivity={showcaseActivity.length > 0 ? showcaseActivity : activity}
-          userActivity={userActivity.length > 0 ? userActivity : activity}
+          showcaseActivity={showcaseActivity}
+          userActivity={userActivity}
           onFollow={toggleFollow}
           followBusy={followBusy}
           onPauseInstance={handlePauseInstance}

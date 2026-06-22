@@ -1,6 +1,6 @@
 'use client';
 
-import { formatMelbourneDateTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
+import { displayMelbourneTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 
 function MiniTable({
   title,
@@ -67,7 +67,7 @@ function fmtPrice(n: number): string {
   return n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 1 }) : n.toFixed(2);
 }
 
-const EMPTY_BOOK: TradingAgentDashboardState['liveBook'] = {
+export const EMPTY_LIVE_BOOK: TradingAgentDashboardState['liveBook'] = {
   activeSignals: [],
   positions: [],
   pendingOrders: [],
@@ -82,11 +82,11 @@ export function AgentTransparencyTables({
   liveBook?: TradingAgentDashboardState['liveBook'];
   maxRows?: number;
 }) {
-  const book = liveBook ?? EMPTY_BOOK;
+  const book = liveBook ?? EMPTY_LIVE_BOOK;
   const cap = Math.max(1, Math.min(maxRows, 20));
 
   const signalRows = book.activeSignals.slice(0, cap).map((s) => [
-    formatMelbourneDateTime(s.time),
+    displayMelbourneTime(s.time),
     s.direction,
     `${s.confidence}%`,
     s.regime,
@@ -121,7 +121,7 @@ export function AgentTransparencyTables({
   ]);
 
   const expiredRows = book.expiredOrders.slice(0, cap).map((o) => [
-    formatMelbourneDateTime(o.time),
+    displayMelbourneTime(o.time),
     o.direction,
     fmtPrice(o.limitPrice),
     String(o.ageMin),
@@ -131,7 +131,7 @@ export function AgentTransparencyTables({
   ]);
 
   const tradeRows = book.trades.slice(0, cap).map((t) => [
-    formatMelbourneDateTime(t.time),
+    displayMelbourneTime(t.time),
     t.tradeId,
     t.direction,
     fmtPrice(t.entry),

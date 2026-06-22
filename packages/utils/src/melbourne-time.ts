@@ -15,8 +15,20 @@ function toDate(input: string | number | Date | null | undefined): Date | null {
   return null;
 }
 
+const PRE_FORMATTED_MELBOURNE =
+  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? (AEST|AEDT|Melbourne)$/;
+
+function isPreFormattedMelbourne(value: string): boolean {
+  return PRE_FORMATTED_MELBOURNE.test(value.trim());
+}
+
 /** `2026-06-22 14:30:45 AEST` (24h, Melbourne). */
 export function formatMelbourneDateTime(input: string | number | Date | null | undefined): string {
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed || trimmed === '-' || trimmed === '—') return '—';
+    if (isPreFormattedMelbourne(trimmed)) return trimmed;
+  }
   const d = toDate(input);
   if (!d) return '—';
   const parts = new Intl.DateTimeFormat('en-AU', {
@@ -48,4 +60,9 @@ export function formatMelbourneWithUtc(input: string | number | Date | null | un
 export function parseTimestampMs(input: string | number | Date | null | undefined): number | null {
   const d = toDate(input);
   return d ? d.getTime() : null;
+}
+
+/** Format once — accepts raw ISO/epoch or pre-formatted Melbourne strings from the bot mapper. */
+export function displayMelbourneTime(input: string | number | Date | null | undefined): string {
+  return formatMelbourneDateTime(input);
 }

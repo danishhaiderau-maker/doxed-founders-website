@@ -927,7 +927,9 @@ export class TradingAgentsService implements OnModuleInit {
 
     let showcaseFlash = null;
     if (slug === 'conservative-btc') {
-      const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState() : null;
+      const bot = (await this.botBridge.isEnabledAsync())
+        ? await this.botBridge.fetchState()
+        : null;
       showcaseFlash = buildShowcaseFlashFromBot(bot, {
         botConnected: Boolean(rest.botConnected),
         executionPaused: Boolean(rest.executionPaused),
@@ -938,7 +940,7 @@ export class TradingAgentsService implements OnModuleInit {
     const listActivityRows = await this.listActivity(slug, 50, true, undefined);
     let showcaseActivity = mergeActivityFeeds(listActivityRows, showcaseActivityFromBook);
 
-    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+    if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       const botForActivity = await this.botBridge.fetchState();
       if (botForActivity) {
         const richFeed = mapBotStateToActivity(botForActivity, agent.name);
@@ -1118,7 +1120,7 @@ export class TradingAgentsService implements OnModuleInit {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
 
-    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+    if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       const live = await this.botBridge.getLiveDashboard(agent.name, false);
       if (live) {
         return {
@@ -1184,7 +1186,7 @@ export class TradingAgentsService implements OnModuleInit {
       }
     }
 
-    if (slug === 'conservative-btc' && this.botBridge.isEnabled()) {
+    if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       const bot = await this.botBridge.fetchState();
       if (bot) {
         const take = Math.min(50, Math.max(1, limit));

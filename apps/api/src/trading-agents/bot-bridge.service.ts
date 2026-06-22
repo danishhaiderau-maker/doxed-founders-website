@@ -121,19 +121,8 @@ export class BotBridgeService {
     const botUrl = await this.resolveBotUrl();
     const bot = await this.fetchState(force, 'relay');
     if (!bot) {
-      const health = await this.fetchHealth();
-      if (!health) return null;
-      return {
-        dashboard: mapBotStateToDashboard({}),
-        stats: mapBotStateToAgentStats({}),
-        activity: [],
-        rawState: {} as BotApiState,
-        botConnected: true,
-        botUrl,
-        strategyMode: 'RESEARCH',
-        executionPaused: Boolean(health.execution_paused),
-        executionReason: typeof health.execution_reason === 'string' ? health.execution_reason : null,
-      };
+      // Health-only is not enough for showcase tables — avoid "connected" with empty liveBook.
+      return null;
     }
     return {
       dashboard: mapBotStateToDashboard(bot),
@@ -185,12 +174,15 @@ export class BotBridgeService {
   async fetchHealth() {
     const base = await this.resolveBotUrl();
     if (!base) return null;
-    try {
-      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(20_000) });
-      if (!res.ok) return null;
-      return (await res.json()) as Record<string, unknown>;
-    } catch {
-      return null;
+    for (const path of ['/api/ping', '/health']) {
+      try {
+        const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(20_000) });
+        if (!res.ok) continue;
+        return (await res.json()) as Record<string, unknown>;
+      } catch {
+        /* try next path */
+      }
     }
+    return null;
   }
 }

@@ -67,6 +67,8 @@ function Test-PortOpen([int]$P) {
 function Test-TunnelLive([string]$Url) {
   if (-not $Url) { return $false }
   try {
+    $r = Invoke-WebRequest -Uri "$Url/api/ping" -UseBasicParsing -TimeoutSec 8
+    if ($r.StatusCode -eq 200) { return $true }
     $r = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 8
     return $r.StatusCode -eq 200
   } catch {
@@ -223,12 +225,7 @@ function Use-NamedTunnel {
 }
 
 function Start-AnalyzerDashboard {
-  if (Test-PortOpen $AnalyzerPort) { return $true }
-  $healthScript = Join-Path $scriptDir "analyzer-health-server.py"
-  if (-not (Test-Path $healthScript)) { return $false }
-  $env:ANALYZER_BIND_HOST = "0.0.0.0"
-  Start-Process python -ArgumentList $healthScript -WindowStyle Hidden -WorkingDirectory $repoRoot | Out-Null
-  Start-Sleep -Seconds 2
+  # Real analyzer embeds Flask research dashboard on :9001 — do not start the legacy health stub.
   return (Test-PortOpen $AnalyzerPort)
 }
 

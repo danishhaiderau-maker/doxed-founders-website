@@ -2,7 +2,6 @@
 
 import {
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
-  formatPercent,
   formatUsd,
   type CopyRelayLimitChainSnapshot,
   type CopyRelayReconcileSnapshot,
@@ -20,7 +19,7 @@ import {
   AgentRelaySyncAlerts,
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
-import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
+import type { TradingAgentActivityEntry } from '@/lib/api';
 import { downloadRelaySimAudit } from '@/lib/api';
 
 const EMPTY_BOOK: TradingAgentDashboardState['liveBook'] = {
@@ -57,13 +56,10 @@ function ReconcileMetric({
 export function AgentRelaySimPanel({
   exchangeLabel,
   signedIn,
-  showcaseAgent,
   copyRelaySim,
   copyRelayReconcile,
   relayFidelity,
   relaySimLiveBook,
-  showcaseLiveBook,
-  showcaseActivity: _showcaseActivity,
   simActivity,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
@@ -79,13 +75,10 @@ export function AgentRelaySimPanel({
 }: {
   signedIn: boolean;
   exchangeLabel?: string | null;
-  showcaseAgent: TradingAgentSummary;
   copyRelaySim?: CopyRelaySimState | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   relayFidelity?: RelayFidelitySnapshot | null;
   relaySimLiveBook?: TradingAgentDashboardState['liveBook'] | null;
-  showcaseLiveBook?: TradingAgentDashboardState['liveBook'] | null;
-  showcaseActivity: TradingAgentActivityEntry[];
   simActivity: TradingAgentActivityEntry[];
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
@@ -106,12 +99,9 @@ export function AgentRelaySimPanel({
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaAlert =
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
-  const showcasePnl = showcaseAgent.sessionPnlUsd ?? sim?.showcasePnlUsd ?? 0;
   const simPnl = sim?.sessionPnlUsd ?? 0;
-  const pnlGap = simPnl - showcasePnl;
   const paperBalance = sim?.ledger?.derivativesUsd ?? 500;
   const simBook = relaySimLiveBook ?? EMPTY_BOOK;
-  const showcaseRef = showcaseLiveBook ?? EMPTY_BOOK;
   const simHasRows =
     simBook.activeSignals.length +
       simBook.positions.length +
@@ -139,8 +129,7 @@ export function AgentRelaySimPanel({
           <h2 className="mt-1 text-lg font-bold text-white">Option B paper relay</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
             Virtual $20 lots on merged BTC-PERP — same relay logic as live copy, no real exchange
-            orders. Compare sim book vs admin showcase below; warnings flag sync drift before you
-            go live.
+            orders. Paper book only on this tab; use Research local bot tab to compare admin signals.
           </p>
         </div>
         {signedIn ? (
@@ -223,19 +212,13 @@ export function AgentRelaySimPanel({
         <AgentRelaySyncAlerts alerts={syncAlerts} />
 
         {!hideSummaryMetrics ? (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <ReconcileMetric label="Showcase session P&amp;L" value={formatUsd(showcasePnl, 2)} />
-            <ReconcileMetric
-              label="Sim relay P&amp;L"
-              value={formatUsd(simPnl, 2)}
-              alert={pnlGap < -20}
-            />
-            <ReconcileMetric
-              label="P&amp;L gap (sim − showcase)"
-              value={formatUsd(pnlGap, 2)}
-              alert={Math.abs(pnlGap) > 25}
-            />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <ReconcileMetric label="Sim session P&amp;L" value={formatUsd(simPnl, 2)} />
             <ReconcileMetric label="Paper derivatives" value={formatUsd(paperBalance, 2)} />
+            <ReconcileMetric
+              label="Sim status"
+              value={active ? 'Running' : 'Stopped'}
+            />
           </div>
         ) : null}
 
@@ -296,8 +279,8 @@ export function AgentRelaySimPanel({
             </p>
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
-              Sim is running but no lots yet — waiting for the next showcase signal. Showcase
-              reference below shows what the admin bot is doing now.
+              Sim is running but no lots yet — waiting for the next mirrored showcase signal. Switch
+              to Research local bot to see what the admin bot is doing now.
             </p>
           ) : null}
           <AgentTransparencyTables liveBook={simBook} maxRows={10} />
@@ -311,21 +294,6 @@ export function AgentRelaySimPanel({
             />
           </div>
         </div>
-
-        {active ? (
-          <div className="rounded-xl border border-violet-500/25 bg-violet-950/10 p-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-violet-300">
-              Showcase reference · home bot ({formatPercent(showcaseAgent.netReturnPct ?? 0)})
-            </p>
-            <p className="mt-1 text-xs text-zinc-500">
-              Admin research signals — compare entry/exit vs sim book above. Relay sim copies these
-              on the next tick when a new intent fires.
-            </p>
-            <div className="mt-3">
-              <AgentTransparencyTables liveBook={showcaseRef} maxRows={6} />
-            </div>
-          </div>
-        ) : null}
       </div>
     </section>
   );

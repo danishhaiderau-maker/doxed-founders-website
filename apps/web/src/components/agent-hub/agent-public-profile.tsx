@@ -17,6 +17,7 @@ import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-sh
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
+import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
@@ -372,19 +373,22 @@ export function AgentPublicProfile({
             balanceUsd: copyRelaySim.ledger?.derivativesUsd ?? 500,
           }
         : deskShowcaseAgent;
-  const showcaseLive = showcaseLiveBook ?? dashboard.liveBook;
   const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
+  const showcaseBook = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
   const showcaseAct = mergeDeskActivity(
-    showcaseActivityProp ?? activity,
-    liveBookToActivity(showcaseLive, 'showcase-ui'),
+    showcaseActivityProp ?? [],
+    liveBookToActivity(showcaseBook, 'showcase-ui'),
   );
   const simAct = liveBookToActivity(relaySimLiveBook, 'relay-sim-ui');
   const userAct = isLiveSession
-    ? filterLiveExchangeActivity(
-        liveBookToActivity(exchangeLiveBook, 'user-ui', 'positions-only'),
+    ? mergeDeskActivity(
+        userActivityProp ?? [],
+        filterLiveExchangeActivity(
+          liveBookToActivity(exchangeLiveBook, 'user-ui', 'positions-only'),
+        ),
       )
     : mergeDeskActivity(
-        userActivityProp ?? activity,
+        userActivityProp ?? [],
         liveBookToActivity(exchangeLiveBook, 'user-ui'),
       );
   const deskActivity =
@@ -409,7 +413,7 @@ export function AgentPublicProfile({
     userAgent: agent,
     showcaseAgent: deskShowcaseAgent,
     exchangeLiveBook,
-    showcaseLiveBook: showcaseLive,
+    showcaseLiveBook: showcaseBook,
     relaySimLiveBook,
     copyRelaySim,
     copyRelayReconcile,
@@ -650,16 +654,18 @@ export function AgentPublicProfile({
                   exchangeLabel={exchangeLabel}
                   liveBook={exchangeLiveBook}
                 />
-              ) : (
+              ) : activeDesk === 'showcase' ? (
                 <PublicReasoningPanel dashboard={dashboard} />
-              )}
+              ) : null}
               {activeDesk !== 'relay-sim' ? (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
                   title={
                     activeDesk === 'live' && isLiveSession
-                        ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
+                      ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
+                      : activeDesk === 'showcase'
+                        ? 'Research local bot feed'
                         : 'Showcase bot feed'
                   }
                 />
@@ -667,10 +673,18 @@ export function AgentPublicProfile({
                   agentReturnPct={
                     activeDesk === 'live' && isLiveSession
                       ? agent.netReturnPct
-                      : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
+                      : activeDesk === 'relay-sim'
+                        ? ((copyRelaySim?.sessionPnlUsd ?? 0) /
+                            (copyRelaySim?.ledger?.startingUsd ?? 500)) *
+                          100
+                        : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
                   }
                   label={
-                    activeDesk === 'live' && isLiveSession ? 'Your session' : deskShowcaseAgent.name
+                    activeDesk === 'live' && isLiveSession
+                      ? 'Your session'
+                      : activeDesk === 'relay-sim'
+                        ? 'Relay sim session'
+                        : 'Research local bot'
                   }
                 />
               </div>
@@ -709,8 +723,12 @@ export function AgentPublicProfile({
                 items={deskActivity}
                 title={
                   activeDesk === 'live' && isLiveSession
-                      ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
-                      : 'Conservative BTC showcase activity'
+                    ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
+                    : activeDesk === 'showcase'
+                      ? 'Research local bot activity'
+                      : activeDesk === 'relay-sim'
+                        ? 'Relay sim activity'
+                        : 'Conservative BTC showcase activity'
                 }
               />
               <AgentDeskView {...deskViewProps} />

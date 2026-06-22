@@ -15347,7 +15347,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Trades</h2>
 <table>
-    <thead><tr><th>Time</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -15398,8 +15398,9 @@ DASHBOARD_JS = """(function () {
   try {
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
+      if (typeof ts === 'string' && /\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}/.test(ts) && ts.includes('Melbourne')) return ts;
       try {
-        const d = new Date(ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z');
+        const d = new Date(typeof ts === 'number' ? (ts > 1e12 ? ts : ts * 1000) : (ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z'));
         if (isNaN(d.getTime())) return ts;
         const parts = new Intl.DateTimeFormat('en-AU', {
           timeZone: 'Australia/Melbourne',
@@ -16381,7 +16382,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
-            <td>${e.time || '-'}</td>
+            <td>${formatMelbourneDateTime(e.time_melbourne || e.time || e.expired_ts || e.created_ts)}</td>
             <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
@@ -16393,7 +16394,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('tradesTable', (d.trades||[]).map(t => `
           <tr>
-            <td>${t.ts || '-'}</td>
+            <td>${formatMelbourneDateTime(t.ts_melbourne || t.ts || t.entry_ts)}</td>
             <td>${t.trade_id || '-'}</td>
             <td>${laneBadge(t.research_lane, t.research_model)}</td>
             <td>${t.final_direction || t.dir || '-'}</td>
@@ -16656,32 +16657,37 @@ def dashboard():
     return render_template_string(page)
 
 
+def _relay_trades_map_lite_unlocked() -> dict:
+    """Slim trades_map for NestJS relay closure sync — caller must hold trade_lock."""
+    lite = {}
+    for tid, entry in trades_map.items():
+        sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+        if not isinstance(sig, dict):
+            continue
+        lite[str(tid)] = {
+            "signal_ref": {
+                "trade_id": sig.get("trade_id") or tid,
+                "status": sig.get("status"),
+                "fill_price": sig.get("fill_price"),
+                "limit_price": sig.get("limit_price"),
+                "signal_price": sig.get("signal_price"),
+                "exit_reason": sig.get("exit_reason"),
+                "exit_price": sig.get("exit_price"),
+                "closed_ts": sig.get("closed_ts"),
+                "created_ts_ts": sig.get("created_ts_ts"),
+                "fill_ts": sig.get("fill_ts") or sig.get("filled_ts"),
+                "filled_ts": sig.get("filled_ts") or sig.get("fill_ts"),
+                "entry_ts": sig.get("entry_ts") or sig.get("fill_ts") or sig.get("filled_ts"),
+                "net_pnl_usd": sig.get("net_pnl_usd"),
+            }
+        }
+    return lite
+
+
 def _relay_trades_map_lite() -> dict:
     """Slim trades_map for NestJS relay closure sync (no full signal dump)."""
-    lite = {}
     with trade_lock:
-        for tid, entry in trades_map.items():
-            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
-            if not isinstance(sig, dict):
-                continue
-            lite[str(tid)] = {
-                "signal_ref": {
-                    "trade_id": sig.get("trade_id") or tid,
-                    "status": sig.get("status"),
-                    "fill_price": sig.get("fill_price"),
-                    "limit_price": sig.get("limit_price"),
-                    "signal_price": sig.get("signal_price"),
-                    "exit_reason": sig.get("exit_reason"),
-                    "exit_price": sig.get("exit_price"),
-                    "closed_ts": sig.get("closed_ts"),
-                    "created_ts_ts": sig.get("created_ts_ts"),
-                    "fill_ts": sig.get("fill_ts") or sig.get("filled_ts"),
-                    "filled_ts": sig.get("filled_ts") or sig.get("fill_ts"),
-                    "entry_ts": sig.get("entry_ts") or sig.get("fill_ts") or sig.get("filled_ts"),
-                    "net_pnl_usd": sig.get("net_pnl_usd"),
-                }
-            }
-    return lite
+        return _relay_trades_map_lite_unlocked()
 
 
 @app.route('/api/relay-state')
@@ -16689,6 +16695,16 @@ def api_relay_state():
     """Fast subset for NestJS relay fidelity + copy sync (skips heavy /api/state work)."""
     try:
         now_ts = time.time()
+        # Lock order must match /api/state: state_lock before trade_lock (avoid deadlock).
+        with state_lock:
+            state_fields = {
+                "strategy_mode": state.get("strategy_mode", "RESEARCH"),
+                "execution_paused": state.get("execution_paused", False),
+                "execution_reason": state.get("execution_reason"),
+                "price": state.get("price"),
+                "account_balance": get_display_balance(),
+                "bot_start_time": bot_start_time,
+            }
         with trade_lock:
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
@@ -16702,21 +16718,14 @@ def api_relay_state():
                 default_strategy="-",
                 default_regime="-",
             )
-            session_trades = _session_trades_only(copy.deepcopy(trades))
-        with state_lock:
-            snapshot = {
-                "strategy_mode": state.get("strategy_mode", "RESEARCH"),
-                "execution_paused": state.get("execution_paused", False),
-                "execution_reason": state.get("execution_reason"),
-                "price": state.get("price"),
-                "account_balance": get_display_balance(),
-                "bot_start_time": bot_start_time,
-                "trade_count_session": len(session_trades),
-            }
+            session_trades = _session_trades_only(list(trades))
+            trades_map_lite = _relay_trades_map_lite_unlocked()
+        snapshot = dict(state_fields)
         snapshot["trades"] = session_trades
-        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["trades_map"] = trades_map_lite
         snapshot["orders"] = pending_orders_copy
         snapshot["positions"] = positions_copy
+        snapshot["trade_count_session"] = len(session_trades)
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
             "count": len(active_list),
@@ -17113,11 +17122,10 @@ def api_state():
 @app.route('/api/status')
 @app.route('/status')
 def health():
-    with state_lock:
-        hb = state.get("last_heartbeat", last_heartbeat)
-        paused = bool(state.get("execution_paused", False))
-        reason = state.get("execution_reason", "")
-        manual = bool(state.get("manual_admin_pause", False))
+    hb = state.get("last_heartbeat", last_heartbeat)
+    paused = bool(state.get("execution_paused", False))
+    reason = state.get("execution_reason", "")
+    manual = bool(state.get("manual_admin_pause", False))
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
