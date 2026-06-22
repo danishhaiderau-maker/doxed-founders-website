@@ -76,15 +76,89 @@ function Test-TunnelLive([string]$Url) {
 
 function Stop-ListenPort([int]$ListenPort) {
   $killed = @()
-  $listen = Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($listen) {
-    $procId = [int]$listen.OwningProcess
-    if ($procId -gt 0) {
-      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-      $killed += $procId
+  Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
+    ForEach-Object {
+      $procId = [int]$_.OwningProcess
+      if ($procId -gt 0 -and $killed -notcontains $procId) {
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        $killed += $procId
+      }
     }
+  return $killed
+}
+
+function Stop-PythonMatching([string]$Pattern) {
+  $killed = @()
+  Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Pattern*" } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+  return $killed
+}
+
+function Stop-Cloudflared {
+  $killed = @()
+  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    $killed += $_.Id
   }
   return $killed
+}
+
+function Close-HomeStackWindows {
+  $closed = @()
+  $windowTitles = @(
+    "Doxed Bot :7800",
+    "Doxed Analyzer",
+    "Doxed Analyzer (once)",
+    "Doxed Cloudflare Tunnel",
+    "Doxed Stack Control Panel",
+    "Doxed Auto-Wire",
+    "Doxed Wire to Site"
+  )
+  foreach ($title in $windowTitles) {
+    & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null
+    $closed += $title
+  }
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.Name -in @("powershell.exe", "cmd.exe") -and $_.CommandLine -and (
+        $_.CommandLine -like "*start-home-bot.ps1*" -or
+        $_.CommandLine -like "*start-home-analyzer.ps1*" -or
+        $_.CommandLine -like "*setup-home-bot-tunnel.ps1*" -or
+        $_.CommandLine -like "*home-stack-control-panel.ps1*" -or
+        $_.CommandLine -like "*auto-wire-after-tunnel.ps1*" -or
+        $_.CommandLine -like "*wire-home-bot-background.ps1*"
+      )
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $closed += "pid:$($_.ProcessId)"
+    }
+  return $closed
+}
+
+function Clear-TunnelUrlFile {
+  if (Test-Path $tunnelUrlFile) {
+    Set-Content -Path $tunnelUrlFile -Value "" -NoNewline
+  }
+}
+
+function Stop-AllHomeStack {
+  $botPort = @(Stop-ListenPort $BotPort)
+  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
+  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
+  $tunnel = @(Stop-Cloudflared)
+  $windows = @(Close-HomeStackWindows)
+  Clear-TunnelUrlFile
+  return @{
+    botPort = $botPort
+    botPy = $botPy
+    analyzerPy = $analyzerPy
+    tunnel = $tunnel
+    windows = $windows
+  }
 }
 
 function Test-AnalyzerRunning {
@@ -138,7 +212,7 @@ function Get-FullStatus {
   $analyzerRunning = Test-AnalyzerRunning
   $tunnelUrl = Get-TunnelUrl
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  $tunnelLive = $cloudflaredRunning -and (Test-TunnelLive $tunnelUrl)
+  $tunnelLive = if ($tunnelUrl) { Test-TunnelLive $tunnelUrl } else { $false }
   return @{
     ok = $true
     launcher = "running"
@@ -187,12 +261,18 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         $messages.Add("[2/4] Analyzer already running")
       }
 
-      $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-      if (-not $cfRunning) {
+      $tunnelUrl = Get-TunnelUrl
+      $tunnelOk = (Test-TunnelLive $tunnelUrl)
+      if (-not $tunnelOk) {
+        if (@(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0) {
+          Stop-Cloudflared | Out-Null
+          Start-Sleep -Seconds 2
+        }
+        Clear-TunnelUrlFile
         Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
         $messages.Add("[3/4] Tunnel window opened (watch for trycloudflare URL)")
       } else {
-        $messages.Add("[3/4] cloudflared already running")
+        $messages.Add("[3/4] Tunnel already live: $tunnelUrl")
       }
 
       Start-DetachedPs1 (Join-Path $scriptDir "home-stack-control-panel.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Stack Control Panel"
@@ -226,8 +306,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
+      Stop-Cloudflared | Out-Null
+      Clear-TunnelUrlFile
+      Start-Sleep -Seconds 1
       Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
-      return @{ ok = $true; message = "Tunnel window opened - URL saves to .home-tunnel-url automatically" }
+      return @{ ok = $true; message = "Fresh tunnel window opened - new URL saves to .home-tunnel-url automatically" }
     }
     "wire" {
       $url = $QueryUrl
@@ -253,40 +336,34 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "stop-bot" {
-      $killed = @(Stop-ListenPort $BotPort)
+      $portKilled = @(Stop-ListenPort $BotPort)
+      $pyKilled = @(Stop-PythonMatching "btc_conservative_agent")
+      Close-HomeStackWindows | Out-Null
       return @{
         ok = $true
-        message = if ($killed.Count) { "Stopped bot on :$BotPort (PID $($killed -join ', '))" } else { "Nothing listening on :$BotPort" }
+        message = "Stopped bot (port:$($portKilled.Count) python:$($pyKilled.Count)). Closed bot console windows."
       }
     }
     "stop-analyzer" {
-      $killed = @(Stop-ListenPort $AnalyzerPort)
+      $pyKilled = @(Stop-PythonMatching "analyzer_research_engine")
+      Close-HomeStackWindows | Out-Null
       return @{
         ok = $true
-        message = if ($killed.Count) { "Stopped analyzer on :$AnalyzerPort (PID $($killed -join ', '))" } else { "Nothing listening on :$AnalyzerPort" }
+        message = "Stopped analyzer (python:$($pyKilled.Count)). Closed analyzer console windows."
       }
     }
     "stop-all" {
-      $botKilled = @(Stop-ListenPort $BotPort)
-      $analyzerKilled = @(Stop-ListenPort $AnalyzerPort)
-      $tunnelKilled = @()
-      Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        $tunnelKilled += $_.Id
-      }
-      Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object {
-          $_.CommandLine -and (
-            $_.CommandLine -like "*home-stack-control-panel*" -or
-            $_.CommandLine -like "*auto-wire-after-tunnel*"
-          )
-        } | ForEach-Object {
-          Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
+      $result = Stop-AllHomeStack
       return @{
         ok = $true
-        message = "Stopped bot:$($botKilled.Count) analyzer:$($analyzerKilled.Count) tunnel:$($tunnelKilled.Count). Bridge :7810 still running."
-        pids = @{ bot = $botKilled; analyzer = $analyzerKilled; tunnel = $tunnelKilled }
+        message = @(
+          "Full local wipe complete (bridge :7810 still running)."
+          "Bot port: $($result.botPort.Count) | bot python: $($result.botPy.Count)"
+          "Analyzer python: $($result.analyzerPy.Count) | tunnel: $($result.tunnel.Count)"
+          "Closed stack windows. Cleared stale .home-tunnel-url."
+          "Click Start everything for a clean run, then Wire to site when URL appears."
+        ) -join "`n"
+        pids = $result
       }
     }
     default {
