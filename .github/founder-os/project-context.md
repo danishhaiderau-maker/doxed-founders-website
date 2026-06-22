@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Open bot, analyzer, and tunnel in visible console windows instead of minimized or hidden.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
