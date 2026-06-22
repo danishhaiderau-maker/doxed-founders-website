@@ -7,6 +7,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
+$healthScript = Join-Path $scriptDir "analyzer-health-server.py"
 
 function Wait-ForKey {
   Write-Host ""
@@ -35,10 +36,21 @@ Get-Content $vaultEnv | ForEach-Object {
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
-Write-Host "Do NOT run analyzer from Final Bots root (stale/missing trades_3factor.csv)."
+Write-Host "Status ping: http://127.0.0.1:9001/health (not a full dashboard — logs print here)"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""
+
+$healthProc = $null
+try {
+  if (Test-Path $healthScript) {
+    $healthProc = Start-Process python -ArgumentList $healthScript -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 800
+    Write-Host "Analyzer status server started on :9001 (PID $($healthProc.Id))"
+  }
+} catch {
+  Write-Host "Warning: could not start :9001 status server: $($_.Exception.Message)" -ForegroundColor Yellow
+}
 
 $pyArgs = @("research\analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
@@ -53,6 +65,9 @@ try {
   Write-Host "Analyzer error: $($_.Exception.Message)" -ForegroundColor Red
   $exitCode = 1
 } finally {
+  if ($healthProc) {
+    Stop-Process -Id $healthProc.Id -Force -ErrorAction SilentlyContinue
+  }
   if ($exitCode -ne 0) {
     Write-Host "Analyzer exited with code $exitCode" -ForegroundColor Yellow
   } elseif ($Once) {

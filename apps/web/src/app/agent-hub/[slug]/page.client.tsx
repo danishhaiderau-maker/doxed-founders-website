@@ -183,9 +183,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   useEffect(() => {
     load();
-    const interval = setInterval(loadLive, 20_000);
+    const pollMs = copyRelaySim?.active ? 10_000 : 20_000;
+    const interval = setInterval(loadLive, pollMs);
     return () => clearInterval(interval);
-  }, [load, loadLive]);
+  }, [load, loadLive, copyRelaySim?.active]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !agent) return;

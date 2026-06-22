@@ -34,18 +34,21 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
   const tunnelLive = Boolean(raw.tunnel?.live);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
+  const needsAnalyzerProbe =
+    !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
 
-  const botProbe = needsBotProbe
-    ? probeLocalHealth('http://127.0.0.1:7800/health')
-    : Promise.resolve(botOnline);
+  const [botProbe, analyzerProbe] = await Promise.all([
+    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/health') : Promise.resolve(botOnline),
+    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/health') : Promise.resolve(analyzerOnline),
+  ]);
 
   return {
     ...raw,
-    bot: { ...raw.bot, online: botOnline || (await botProbe), dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+    bot: { ...raw.bot, online: botOnline || botProbe, dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
     analyzer: {
       ...raw.analyzer,
-      online: analyzerOnline,
-      dashboard: raw.analyzer?.dashboard ?? 'console window',
+      online: analyzerOnline || analyzerProbe,
+      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/health',
     },
     tunnel: {
       ...raw.tunnel,
@@ -318,7 +321,14 @@ export function AgentAdminShowcaseControl({
         >
           Bot dashboard →
         </a>
-        <span className="text-violet-300">Analyzer console — use Start analyzer (logs in PowerShell window)</span>
+        <a
+          href="http://127.0.0.1:9001/health"
+          target="_blank"
+          rel="noreferrer"
+          className="text-violet-300 hover:underline"
+        >
+          Analyzer status :9001 →
+        </a>
         <a
           href="http://127.0.0.1:7800/api/export_csv"
           target="_blank"

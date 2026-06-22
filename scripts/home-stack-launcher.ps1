@@ -149,6 +149,8 @@ function Stop-AllHomeStack {
   $botPort = @(Stop-ListenPort $BotPort)
   $botPy = @(Stop-PythonMatching "btc_conservative_agent")
   $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
+  $analyzerHealth = @(Stop-ListenPort $AnalyzerPort)
+  $analyzerHealthPy = @(Stop-PythonMatching "analyzer-health-server")
   $tunnel = @(Stop-Cloudflared)
   $windows = @(Close-HomeStackWindows)
   Clear-TunnelUrlFile
@@ -156,12 +158,15 @@ function Stop-AllHomeStack {
     botPort = $botPort
     botPy = $botPy
     analyzerPy = $analyzerPy
+    analyzerHealth = $analyzerHealth
+    analyzerHealthPy = $analyzerHealthPy
     tunnel = $tunnel
     windows = $windows
   }
 }
 
 function Test-AnalyzerRunning {
+  if (Test-PortOpen $AnalyzerPort) { return $true }
   $hit = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer_research_engine*" } |
     Select-Object -First 1
@@ -229,9 +234,9 @@ function Get-FullStatus {
     }
     analyzer = @{
       online = $analyzerRunning
-      dashboard = "console window (research loop)"
+      dashboard = "http://127.0.0.1:$AnalyzerPort/health"
       lan = $agentDir
-      note = "Runs from $agentDir - console shows iteration logs every 30 min (not an HTTP server on :9001)"
+      note = "Research loop logs in Doxed Analyzer window · :9001 = status ping only · KPIs on bot :7800/api/state"
     }
     tunnel = @{
       url = $tunnelUrl
