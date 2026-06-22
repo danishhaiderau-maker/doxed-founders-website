@@ -119,11 +119,19 @@ async function ensureDns(tunnelId) {
     console.log(`OK  DNS updated -> ${target}`);
     return;
   }
-  await cf(`/zones/${ZONE_ID}/dns_records`, {
-    method: 'POST',
-    body: { type: 'CNAME', name: DNS_NAME, content: target, proxied: true, ttl: 1 },
-  });
-  console.log(`OK  DNS created: ${HOSTNAME} -> ${target}`);
+  try {
+    await cf(`/zones/${ZONE_ID}/dns_records`, {
+      method: 'POST',
+      body: { type: 'CNAME', name: DNS_NAME, content: target, proxied: true, ttl: 1 },
+    });
+    console.log(`OK  DNS created: ${HOSTNAME} -> ${target}`);
+  } catch (err) {
+    if (String(err.message).includes('already exists')) {
+      console.log(`OK  DNS CNAME already on Cloudflare (${HOSTNAME})`);
+      return;
+    }
+    throw err;
+  }
 }
 
 async function fetchRunToken(tunnelId) {
