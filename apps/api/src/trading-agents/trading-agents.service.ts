@@ -1017,21 +1017,30 @@ export class TradingAgentsService implements OnModuleInit {
           orderBy: { updatedAt: 'desc' },
           take: 80,
         });
-        tradeLifecycleIntegrity = buildTradeLifecycleIntegrity(recentParticipants);
+        const simSessionStart =
+          copyRelaySim?.active && copyRelaySim.startedAt
+            ? new Date(copyRelaySim.startedAt)
+            : null;
+        const lifecycleParticipants = simSessionStart
+          ? recentParticipants.filter(
+              (p) =>
+                p.createdAt >= simSessionStart ||
+                p.updatedAt >= simSessionStart ||
+                p.events.some((e) => e.createdAt >= simSessionStart),
+            )
+          : recentParticipants;
+        tradeLifecycleIntegrity = buildTradeLifecycleIntegrity(lifecycleParticipants);
 
         const botRaw = this.botBridge.isEnabled()
           ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
           : null;
         relayFidelity = buildRelayFidelitySnapshot({
           bot: botRaw,
-          participants: recentParticipants.filter((p) =>
+          participants: lifecycleParticipants.filter((p) =>
             p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
           ),
           limit: 50,
-          sessionStartedAt:
-            copyRelaySim.active && copyRelaySim.startedAt
-              ? new Date(copyRelaySim.startedAt)
-              : null,
+          sessionStartedAt: simSessionStart,
         });
 
         if (copyRelaySim.active) {
@@ -1054,7 +1063,7 @@ export class TradingAgentsService implements OnModuleInit {
       viewScope,
       userInstance,
       showcaseFlash,
-      showcaseAgent: viewScope === 'user' ? showcaseAgent : undefined,
+      showcaseAgent,
       showcaseLiveBook,
       exchangeLiveBook,
       showcaseActivity,

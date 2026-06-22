@@ -95,7 +95,7 @@ export function AgentRelaySimPanel({
   const exchange = exchangeLabel ?? 'Bitfinex';
   const sim = copyRelaySim;
   const active = Boolean(sim?.active);
-  const reconcile = copyRelayReconcile ?? sim?.reconcile ?? null;
+  const reconcile = active ? (sim?.reconcile ?? null) : (copyRelayReconcile ?? sim?.reconcile ?? null);
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaAlert =
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;

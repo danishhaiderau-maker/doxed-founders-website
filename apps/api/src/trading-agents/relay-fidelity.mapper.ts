@@ -71,6 +71,17 @@ function extractShowcaseFromSignalRef(sig: Record<string, unknown>) {
 }
 
 /** Resolve showcase fill/exit prices from bot state — trades_map keys often differ from cycle tradeId. */
+function tradeIdsMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.startsWith(b) || b.startsWith(a)) return true;
+  const na = a.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const nb = b.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  if (na === nb) return true;
+  if (na.length >= 8 && nb.length >= 8 && (na.includes(nb) || nb.includes(na))) return true;
+  return false;
+}
+
 export function resolveShowcaseTradePrices(
   bot: BotApiState | null,
   tradeId: string,
@@ -78,7 +89,7 @@ export function resolveShowcaseTradePrices(
   if (!bot || !tradeId) return {};
 
   for (const t of bot.trades ?? []) {
-    if (t.trade_id === tradeId) {
+    if (tradeIdsMatch(t.trade_id, tradeId)) {
       return {
         entry: t.entry ?? undefined,
         exit: t.exit ?? undefined,
@@ -96,13 +107,13 @@ export function resolveShowcaseTradePrices(
     const sig = entry?.signal_ref as Record<string, unknown> | undefined;
     if (!sig) continue;
     const refId = String(sig.trade_id ?? '');
-    if (refId === tradeId || refId.startsWith(tradeId) || tradeId.startsWith(refId)) {
+    if (tradeIdsMatch(refId, tradeId)) {
       return extractShowcaseFromSignalRef(sig);
     }
   }
 
   for (const t of normalizeBotSessionTrades(bot)) {
-    if (t.trade_id === tradeId) {
+    if (tradeIdsMatch(t.trade_id, tradeId)) {
       return {
         entry: t.entry ?? undefined,
         exit: t.exit ?? undefined,
@@ -121,7 +132,7 @@ export function resolveShowcaseTradePrices(
   for (const sig of bot.signal_info?.signals ?? []) {
     if (!sig || typeof sig !== 'object') continue;
     const refId = String(sig.trade_id ?? '');
-    if (refId !== tradeId && !refId.startsWith(tradeId) && !tradeId.startsWith(refId)) continue;
+    if (refId !== tradeId && !tradeIdsMatch(refId, tradeId)) continue;
     return extractShowcaseFromSignalRef(sig as Record<string, unknown>);
   }
 

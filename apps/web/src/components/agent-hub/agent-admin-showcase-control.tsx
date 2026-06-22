@@ -7,11 +7,55 @@ import { pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
 const LAUNCHER = 'http://127.0.0.1:7810';
 
 type HomeStatus = {
-  bot?: { online?: boolean; dashboard?: string; lan?: string; dataDir?: string };
-  analyzer?: { online?: boolean; dashboard?: string; note?: string };
+  bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
+  analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
   tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean };
   processes?: { botPython?: number; analyzerPython?: number };
 };
+
+function isOnline(section?: { online?: boolean; ok?: boolean } | null): boolean {
+  if (!section) return false;
+  if (typeof section.online === 'boolean') return section.online;
+  return Boolean(section.ok);
+}
+
+async function probeLocalHealth(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
+  const botOnline = isOnline(raw.bot);
+  const analyzerOnline = isOnline(raw.analyzer);
+  const tunnelLive = Boolean(raw.tunnel?.live ?? raw.tunnel?.cloudflaredRunning);
+
+  const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
+  const needsAnalyzerProbe =
+    !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
+
+  const [botProbe, analyzerProbe] = await Promise.all([
+    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/health') : Promise.resolve(botOnline),
+    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/') : Promise.resolve(analyzerOnline),
+  ]);
+
+  return {
+    ...raw,
+    bot: { ...raw.bot, online: botOnline || botProbe, dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+    analyzer: {
+      ...raw.analyzer,
+      online: analyzerOnline || analyzerProbe,
+      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001',
+    },
+    tunnel: {
+      ...raw.tunnel,
+      live: tunnelLive || Boolean(raw.tunnel?.cloudflaredRunning),
+    },
+  };
+}
 
 type HomeCmd = {
   id: string;
@@ -64,8 +108,15 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'stop-bot',
     label: '■ Stop bot',
-    hint: 'Kill process on port 7800',
+    hint: 'Kill process listening on port 7800',
     path: '/cmd/stop-bot',
+    tone: 'danger',
+  },
+  {
+    id: 'stop-all',
+    label: '■ Stop all local',
+    hint: 'Stop bot :7800, analyzer :9001, and cloudflared tunnel',
+    path: '/cmd/stop-all',
     tone: 'danger',
   },
 ];
@@ -92,16 +143,17 @@ export function AgentAdminShowcaseControl({
 
   const refreshStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(4000) });
+      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) {
         setLauncherOnline(false);
         setStatus(null);
         return;
       }
-      const json = (await res.json()) as HomeStatus & { ok?: boolean };
+      const json = (await res.json()) as HomeStatus & { ok?: boolean; endpoints?: string[] };
       setLauncherOnline(true);
-      setStatus(json);
-      if (json.tunnel?.url && !tunnelUrl) setTunnelUrl(json.tunnel.url);
+      const normalized = await normalizeHomeStatus(json);
+      setStatus(normalized);
+      if (normalized.tunnel?.url && !tunnelUrl) setTunnelUrl(normalized.tunnel.url);
     } catch {
       setLauncherOnline(false);
       setStatus(null);
@@ -110,7 +162,7 @@ export function AgentAdminShowcaseControl({
 
   useEffect(() => {
     void refreshStatus();
-    const t = setInterval(() => void refreshStatus(), 15000);
+    const t = setInterval(() => void refreshStatus(), 30000);
     return () => clearInterval(t);
   }, [refreshStatus]);
 
@@ -120,9 +172,9 @@ export function AgentAdminShowcaseControl({
     try {
       const q = id === 'wire' && tunnelUrl.trim() ? `?url=${encodeURIComponent(tunnelUrl.trim())}` : '';
       const res = await fetch(`${LAUNCHER}${path}${q}`, { signal: AbortSignal.timeout(120000) });
-      const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string };
-      if (!json.ok) {
-        setMsg(json.error ?? 'Command failed');
+      const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string; endpoints?: string[] };
+      if (!json.ok || json.endpoints) {
+        setMsg(json.error ?? 'Command failed — close launcher window and re-run START-LAUNCHER.cmd');
       } else {
         setMsg(json.message ?? 'Done');
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
@@ -174,7 +226,9 @@ export function AgentAdminShowcaseControl({
         <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
           Agent Hub
         </a>{' '}
-        on the <strong>same PC</strong> as the bot. Site mirror:{' '}
+        on the <strong>same PC</strong> as the bot.{' '}
+        <span className="text-zinc-500">:7800 = bot dashboard · :7810 = this control bridge only</span>
+        . Site mirror:{' '}
         {botConnected ? (
           <span className="text-emerald-400">online</span>
         ) : (
@@ -184,11 +238,11 @@ export function AgentAdminShowcaseControl({
       </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        {status && (
+        {(status || launcherOnline) && (
           <>
-            <StatusChip label="Bot :7800" ok={Boolean(status.bot?.online)} />
-            <StatusChip label="Analyzer :9001" ok={Boolean(status.analyzer?.online)} />
-            <StatusChip label="Tunnel" ok={Boolean(status.tunnel?.live)} />
+            <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
+            <StatusChip label="Analyzer :9001" ok={Boolean(status?.analyzer?.online)} />
+            <StatusChip label="Tunnel" ok={Boolean(status?.tunnel?.live || status?.tunnel?.cloudflaredRunning)} />
             <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
           </>
         )}

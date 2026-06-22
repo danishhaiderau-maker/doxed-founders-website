@@ -354,6 +354,22 @@ export function AgentPublicProfile({
         : 'text-zinc-400';
   const others = (allAgents ?? []).filter((a) => a.slug !== slug && a.status !== 'PAUSED').slice(0, 4);
   const deskShowcaseAgent = showcaseAgent ?? agent;
+  const heroAgent =
+    activeDesk === 'live' && isLiveSession
+      ? agent
+      : activeDesk === 'relay-sim' && copyRelaySim
+        ? {
+            ...deskShowcaseAgent,
+            sessionPnlUsd: copyRelaySim.sessionPnlUsd ?? 0,
+            equityUsd:
+              (copyRelaySim.ledger?.startingUsd ?? 500) + (copyRelaySim.sessionPnlUsd ?? 0),
+            netReturnPct:
+              ((copyRelaySim.sessionPnlUsd ?? 0) / (copyRelaySim.ledger?.startingUsd ?? 500)) *
+              100,
+            tradeCount: relaySimLiveBook?.trades?.length ?? deskShowcaseAgent.tradeCount,
+            balanceUsd: copyRelaySim.ledger?.derivativesUsd ?? 500,
+          }
+        : deskShowcaseAgent;
   const showcaseLive = showcaseLiveBook ?? dashboard.liveBook;
   const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
   const showcaseAct = mergeDeskActivity(
@@ -483,20 +499,20 @@ export function AgentPublicProfile({
                 <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Status</p>
                 <p className={`mt-1 text-sm font-semibold ${statusColor}`}>{statusLabel}</p>
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <MetricPill label="Win rate" value={`${agent.winRatePct.toFixed(0)}%`} />
+                  <MetricPill label="Win rate" value={`${heroAgent.winRatePct.toFixed(0)}%`} />
                   <MetricPill
                     label="30D return"
-                    value={formatPercent(agent.netReturnPct)}
-                    accent={agent.netReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                    value={formatPercent(heroAgent.netReturnPct)}
+                    accent={heroAgent.netReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
                   />
                   <MetricPill label="Max drawdown" value="6.2%" />
-                  <MetricPill label="Total trades" value={String(agent.tradeCount)} />
-                  <MetricPill label="Followers" value={agent.followerCount.toLocaleString()} />
+                  <MetricPill label="Total trades" value={String(heroAgent.tradeCount)} />
+                  <MetricPill label="Followers" value={heroAgent.followerCount.toLocaleString()} />
                   <MetricPill
                     label="Session P&L"
-                    value={`${(agent.sessionPnlUsd ?? agent.equityUsd - (agent.startingBalance || 500)) >= 0 ? '+' : ''}${formatUsd(agent.sessionPnlUsd ?? agent.equityUsd - (agent.startingBalance || 500), 0)}`}
+                    value={`${(heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500)) >= 0 ? '+' : ''}${formatUsd(heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500), 0)}`}
                     accent={
-                      (agent.sessionPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                      (heroAgent.sessionPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
                     }
                   />
                 </div>
