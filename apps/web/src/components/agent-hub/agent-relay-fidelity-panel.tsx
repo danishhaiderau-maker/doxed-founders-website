@@ -74,7 +74,7 @@ export function AgentRelayFidelityPanel({
             Relay fidelity
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Showcase vs {fidelity?.policy?.showcaseMirrorOnly ? 'relay' : 'Bitfinex'} entry/exit — truth
+            Local bot vs {fidelity?.policy?.showcaseMirrorOnly ? 'relay' : 'Bitfinex'} entry/exit — truth
             meter for move-by-move copy on merged BTC-PERP lots.
           </p>
         </div>
@@ -83,7 +83,7 @@ export function AgentRelayFidelityPanel({
           (fidelity.summary.missingShowcaseExitCount ?? 0) >
           0 ? (
           <span className="rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[9px] font-bold uppercase text-amber-200">
-            Showcase gaps
+            Local bot gaps
           </span>
         ) : null}
         {fidelity?.policy ? (
@@ -128,7 +128,7 @@ export function AgentRelayFidelityPanel({
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           <Metric label="Trades matched" value={String(fidelity.summary.tradeCount)} />
           <Metric
-            label="Showcase gaps"
+            label="Local bot gaps"
             value={`${(fidelity.summary.missingShowcaseEntryCount ?? 0) + (fidelity.summary.missingShowcaseExitCount ?? 0)} missing`}
             accent={
               (fidelity.summary.missingShowcaseEntryCount ?? 0) +
@@ -150,10 +150,10 @@ export function AgentRelayFidelityPanel({
             <thead>
               <tr className="border-b border-zinc-800 text-[10px] uppercase tracking-wider text-zinc-500">
                 <th className="py-2 pr-3">Trade</th>
-                <th className="py-2 pr-3">Showcase entry</th>
+                <th className="py-2 pr-3">Local bot :7800 entry</th>
                 <th className="py-2 pr-3">Relay entry</th>
                 <th className="py-2 pr-3">Entry Δ</th>
-                <th className="py-2 pr-3">Showcase exit</th>
+                <th className="py-2 pr-3">Local bot exit</th>
                 <th className="py-2 pr-3">Relay exit</th>
                 <th className="py-2 pr-3">Exit Δ</th>
                 <th className="py-2">Exit reason</th>

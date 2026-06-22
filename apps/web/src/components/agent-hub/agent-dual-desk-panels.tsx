@@ -125,11 +125,11 @@ export function AgentDeskView({
   if (activeDesk === 'showcase' || mode === 'showcase') {
     return (
       <DeskPanel
-        badge="Research showcase"
+        badge="Research local bot"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
-        title="Conservative BTC Agent · showcase bot"
-        subtitle="Home research bot — signals, limit orders, open positions, expired orders, and closed trades."
+        title="Conservative BTC Agent · local bot :7800"
+        subtitle="Home research bot on :7800 — only data from your current session (fresh collection when enabled)."
       >
         <AgentTransparencyTables liveBook={showcaseLiveBook} maxRows={10} />
         <AgentTradeJourney

@@ -1020,7 +1020,9 @@ export class TradingAgentsService implements OnModuleInit {
         const simSessionStart =
           copyRelaySim?.active && copyRelaySim.startedAt
             ? new Date(copyRelaySim.startedAt)
-            : null;
+            : overlayMeta?.userSessionStartedAt
+              ? new Date(overlayMeta.userSessionStartedAt)
+              : null;
         const lifecycleParticipants = simSessionStart
           ? recentParticipants.filter(
               (p) =>
@@ -1028,20 +1030,27 @@ export class TradingAgentsService implements OnModuleInit {
                 p.updatedAt >= simSessionStart ||
                 p.events.some((e) => e.createdAt >= simSessionStart),
             )
-          : recentParticipants;
-        tradeLifecycleIntegrity = buildTradeLifecycleIntegrity(lifecycleParticipants);
+          : [];
+        tradeLifecycleIntegrity =
+          lifecycleParticipants.length > 0
+            ? buildTradeLifecycleIntegrity(lifecycleParticipants)
+            : null;
 
         const botRaw = this.botBridge.isEnabled()
           ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
           : null;
-        relayFidelity = buildRelayFidelitySnapshot({
-          bot: botRaw,
-          participants: lifecycleParticipants.filter((p) =>
-            p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
-          ),
-          limit: 50,
-          sessionStartedAt: simSessionStart,
-        });
+        const fidelityParticipants = lifecycleParticipants.filter((p) =>
+          p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
+        );
+        relayFidelity =
+          fidelityParticipants.length > 0
+            ? buildRelayFidelitySnapshot({
+                bot: botRaw,
+                participants: fidelityParticipants,
+                limit: 50,
+                sessionStartedAt: simSessionStart,
+              })
+            : null;
 
         if (copyRelaySim.active) {
           const mark =

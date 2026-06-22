@@ -175,8 +175,7 @@ export function buildRelayFidelitySnapshot(input: {
 
   for (const p of input.participants) {
     if (sessionStart > 0 && p.createdAt && p.createdAt.getTime() < sessionStart) {
-      const hasRelayFill = p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT');
-      if (!hasRelayFill) continue;
+      continue;
     }
 
     const filled = p.events.find((e) => e.eventType === 'FILLED');
