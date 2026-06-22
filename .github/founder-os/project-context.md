@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add FINISH-HOME and Name.com API setup helpers.
 
 ## Last Activity
 
