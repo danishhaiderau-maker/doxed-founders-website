@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Open bot, analyzer, and tunnel in visible console windows instead of minimized or hidden.
 
 ## Last Activity
 
-20m ago
+Just now
