@@ -1,4 +1,4 @@
-# Keeps Cloudflare tunnel alive — restarts cloudflared when process dies or public URL stops responding.
+# Keeps Cloudflare tunnel alive - restarts cloudflared when process dies or public URL stops responding.
 # Started automatically by home-stack-launcher "Start everything".
 param(
   [int]$BotPort = 7800,
@@ -21,7 +21,10 @@ function Log([string]$msg) {
 }
 
 function Read-TunnelUrl {
-  if (Test-Path $namedFlag) { return $stableUrl }
+  $namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
+  $configDir = Join-Path $env:USERPROFILE ".cloudflared"
+  $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ((Test-Path $namedFlag) -and $cred) { return $stableUrl }
   if (-not (Test-Path $tunnelUrlFile)) { return $null }
   $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
   if ($null -eq $raw) { return $null }
@@ -33,7 +36,7 @@ function Read-TunnelUrl {
 function Probe([string]$Url, [int]$TimeoutSec = 10) {
   if (-not $Url) { return $false }
   try {
-    $r = Invoke-WebRequest -Uri "$Url/api/ping" -UseBasicParsing -TimeoutSec $TimeoutSec
+    $r = Invoke-WebRequest -Uri ($Url + "/api/ping") -UseBasicParsing -TimeoutSec $TimeoutSec
     return $r.StatusCode -eq 200
   } catch {
     return $false
@@ -42,15 +45,15 @@ function Probe([string]$Url, [int]$TimeoutSec = 10) {
 
 function Invoke-Bridge([string]$Path) {
   try {
-    $r = Invoke-WebRequest -Uri "$BridgeUrl$Path" -UseBasicParsing -TimeoutSec 120
+    $r = Invoke-WebRequest -Uri ($BridgeUrl + $Path) -UseBasicParsing -TimeoutSec 120
     return $r.Content
   } catch {
-    Log "bridge $Path failed: $($_.Exception.Message)"
+    Log ("bridge " + $Path + " failed: " + $_.Exception.Message)
     return $null
   }
 }
 
-Log "watchdog started (interval ${IntervalSec}s, named=$(Test-Path $namedFlag))"
+Log ("watchdog started (interval " + $IntervalSec + "s, named=" + (Test-Path $namedFlag) + ")")
 
 $lastWireUrl = $null
 
@@ -60,18 +63,20 @@ while ($true) {
   $live = Probe $url
 
   if (-not $cfRunning -or -not $live) {
-    Log "tunnel unhealthy cloudflared=$cfRunning live=$live url=$url — restarting"
+    Log ("tunnel unhealthy cloudflared=" + $cfRunning + " live=" + $live + " url=" + $url + " - restarting")
     Invoke-Bridge "/cmd/start-tunnel" | Out-Null
     Start-Sleep -Seconds 20
     $url = Read-TunnelUrl
     $live = Probe $url
-    Log "after restart cloudflared=$(@(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0) live=$live url=$url"
+    $cfAfter = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+    Log ("after restart cloudflared=" + $cfAfter + " live=" + $live + " url=" + $url)
   }
 
   if ($live -and $url -and $url -ne $lastWireUrl) {
     if ($url -match 'trycloudflare\.com' -or (Test-Path $namedFlag)) {
-      Log "wiring $url to Neon + Railway"
-      Invoke-Bridge "/cmd/wire?url=$([uri]::EscapeDataString($url))" | Out-Null
+      Log ("wiring " + $url + " to Neon + Railway")
+      $wirePath = "/cmd/wire?url=" + [uri]::EscapeDataString($url)
+      Invoke-Bridge $wirePath | Out-Null
       $lastWireUrl = $url
     }
   }
