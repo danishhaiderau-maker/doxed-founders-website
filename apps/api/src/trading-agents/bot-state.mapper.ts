@@ -43,6 +43,7 @@ export type BotApiState = {
     reason?: string | null;
     source?: string | null;
   };
+  last_ai_ts?: number;
   debug_state?: {
     last_edge_score?: number;
     edge_progress?: string;
@@ -437,6 +438,51 @@ function pctDist(price: number, level: number | null | undefined): number {
   return Math.abs((level - price) / price) * 100;
 }
 
+function buildLatestAiVerdict(
+  bot: BotApiState,
+  edgeScore: number,
+  requiredEdge: number,
+  marketLabel: string,
+  skipReason: string,
+): NonNullable<TradingAgentDashboardState['latestAiVerdict']> {
+  const ai = bot.last_ai ?? {};
+  const decision = (ai.decision ?? 'NO_TRADE').toString();
+  const direction = (ai.direction ?? ai.final_direction ?? 'NO_TRADE').toString();
+  const reason = (ai.reason ?? skipReason ?? 'Monitoring').toString().trim();
+  const comment = (ai.comment ?? '').toString().trim();
+  const blockReason =
+    bot.debug_state?.last_block_reason?.trim() ||
+    bot.debug_state?.skip_reason?.trim() ||
+    null;
+  return {
+    decision,
+    direction,
+    winProbability: ai.win_prob ?? 0,
+    reason,
+    comment,
+    blockReason,
+    edgeScore: Math.round(Number(edgeScore) * 10) / 10,
+    requiredEdge,
+    marketRegime: marketLabel,
+    updatedAt: bot.last_ai_ts ? new Date(bot.last_ai_ts * 1000).toISOString() : null,
+  };
+}
+
+function composeAiReasoningSummary(
+  verdict: NonNullable<TradingAgentDashboardState['latestAiVerdict']>,
+): string {
+  const parts: string[] = [];
+  parts.push(`Decision: ${verdict.decision} · Direction: ${verdict.direction}`);
+  parts.push(`Win probability: ${verdict.winProbability}% · Edge ${verdict.edgeScore}/${verdict.requiredEdge}`);
+  if (verdict.reason) parts.push(`Reason: ${verdict.reason}`);
+  if (verdict.comment) parts.push(`AI comment: ${verdict.comment}`);
+  if (verdict.blockReason && verdict.blockReason !== verdict.reason) {
+    parts.push(`Pipeline block: ${verdict.blockReason}`);
+  }
+  parts.push(`Market: ${verdict.marketRegime}`);
+  return parts.join('\n\n');
+}
+
 export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardState {
   const price = bot.price ?? 0;
   const sr = bot.support_resistance ?? {};
@@ -480,9 +526,12 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
   const adx = mc.trend_strength?.adx;
 
   const aiReasoning =
-    bot.last_ai?.comment?.slice(0, 500) ??
-    bot.last_ai?.reason?.slice(0, 500) ??
+    bot.last_ai?.comment?.trim() ||
+    bot.last_ai?.reason?.trim() ||
     `Edge ${edgeScore}/${requiredEdge}. ${skipReason !== 'Monitoring' ? skipReason : 'Pipeline active.'}`;
+
+  const latestAiVerdict = buildLatestAiVerdict(bot, edgeScore, requiredEdge, marketLabel, skipReason);
+  const aiReasoningFull = composeAiReasoningSummary(latestAiVerdict);
 
   const conclusion =
     edgeScore < requiredEdge || aiDecision === 'REJECT' || aiDirection === 'NO_TRADE'
@@ -556,7 +605,8 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
         closedAt: t.ts ?? new Date().toISOString(),
       })),
     marketStructure: `${structureNote} · MTF ${mtf}${adx != null ? ` · ADX ${adx}` : ''}`,
-    aiReasoning,
+    aiReasoning: aiReasoningFull || aiReasoning,
+    latestAiVerdict,
     riskStatus: bot.execution_paused ? 'PAUSED' : 'NORMAL',
     fundingStatus: bot.funding?.interpretation ?? bot.funding?.source ?? 'Bitfinex sim',
     dataSource: bot.data_source ?? bot.price_source ?? 'Bybit WS',
@@ -575,27 +625,17 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
 /** Public-safe dashboard — no raw AI prompts, feature snapshots, or pipeline internals. */
 export function mapBotStateToPublicDashboard(bot: BotApiState): TradingAgentDashboardState {
   const dash = mapBotStateToDashboard(bot);
-  const mc = bot.market_context ?? {};
-  const sr = bot.support_resistance ?? {};
-  const bias = mc.market_structure?.structure_bias ?? sr.sr_bias ?? 'neutral';
-  const mtf = mc.multi_tf?.agreement ?? 'mixed';
-  const winProb = bot.last_ai?.win_prob ?? 0;
-  const edge = dash.currentEdge;
-  const req = dash.requiredEdge;
+  const verdict = dash.latestAiVerdict;
 
-  dash.aiReasoning =
-    dash.currentAction === 'PAUSED'
-      ? 'Agent paused by operator. No new trades until resumed.'
-      : dash.currentPosition !== 'NONE'
-        ? `Managing open ${dash.currentPosition} position. Trend bias: ${bias}. Multi-timeframe: ${mtf}.`
-        : edge < req
-          ? `Watching market — edge ${edge}/${req} below threshold. Bias: ${bias}. Waiting for confirmation.`
-          : `Signal under review — ${winProb}% confidence, ${bias} bias, ${mtf} alignment.`;
-
-  dash.currentThinking = {
-    ...dash.currentThinking,
-    conclusion: dash.aiReasoning,
-  };
+  if (dash.currentAction === 'PAUSED') {
+    dash.aiReasoning = 'Agent paused by operator. No new trades until resumed.';
+  } else if (verdict) {
+    dash.aiReasoning = composeAiReasoningSummary(verdict);
+    dash.currentThinking = {
+      ...dash.currentThinking,
+      conclusion: verdict.comment || verdict.reason || dash.currentThinking.conclusion,
+    };
+  }
 
   return dash;
 }

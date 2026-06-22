@@ -467,7 +467,10 @@ export class TradingAgentsService implements OnModuleInit {
     }
     const health = await this.botBridge.fetchHealth();
     const connected = Boolean(
-      health && (health.status === 'alive' || health.status === 'ok'),
+      health &&
+        (health.ok === true ||
+          health.status === 'alive' ||
+          health.status === 'ok'),
     );
     if (!connected) {
       return serializeAgent(agent, { ...extra, botConnected: false });
