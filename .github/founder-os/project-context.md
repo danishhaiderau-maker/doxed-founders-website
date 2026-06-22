@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix tunnel restart timeouts and stale named URL resolution.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
