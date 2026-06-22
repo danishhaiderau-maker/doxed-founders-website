@@ -30,7 +30,7 @@ export function readDotEnv(path) {
 }
 
 /** Public HTTPS URL for home bot (Cloudflare tunnel or custom). */
-export function resolveHomeBotPublicUrl(argvUrl) {
+export function resolveHomeBotPublicUrl(argvUrl, repoRoot) {
   const fromArg = argvUrl?.trim();
   if (fromArg) return fromArg.replace(/\/$/, '');
   const fromEnv = process.env.HOME_BOT_PUBLIC_URL?.trim();
@@ -38,6 +38,12 @@ export function resolveHomeBotPublicUrl(argvUrl) {
   const vaultFile = join(getVaultDir(), '.env.home-bot');
   const fromVault = readDotEnv(vaultFile).HOME_BOT_PUBLIC_URL?.trim();
   if (fromVault) return fromVault.replace(/\/$/, '');
+  const root = repoRoot ?? process.cwd();
+  const tunnelFile = join(root, '.home-tunnel-url');
+  if (existsSync(tunnelFile)) {
+    const fromTunnel = readFileSync(tunnelFile, 'utf8').trim();
+    if (fromTunnel.startsWith('https://')) return fromTunnel.replace(/\/$/, '');
+  }
   return DEFAULT_HOME_BOT_PUBLIC_URL;
 }
 

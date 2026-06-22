@@ -76,7 +76,7 @@ const relayEnv = {
   BITFINEX_COPY_POLICY_VERSION: '2',
 };
 
-const homeBotUrl = resolveHomeBotPublicUrl();
+const homeBotUrl = resolveHomeBotPublicUrl(undefined, root);
 
 const apiVars = {
   DATABASE_URL: dbUrl,

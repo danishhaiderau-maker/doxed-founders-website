@@ -13,7 +13,7 @@ const vault = join(dirname(root), 'doxedcryptofounder-secrets', 'vault');
 import { resolveHomeBotPublicUrl } from './home-bot-config.mjs';
 
 const RAILWAY_API = 'https://doxed-founders-website-production.up.railway.app';
-const BTC_BOT_URL = resolveHomeBotPublicUrl();
+const BTC_BOT_URL = resolveHomeBotPublicUrl(undefined, root);
 const SITE_URL = 'https://doxxedcrypto.digital';
 const RAILWAY_GQL = 'https://backboard.railway.com/graphql/v2';
 
