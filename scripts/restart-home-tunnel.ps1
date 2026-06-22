@@ -25,4 +25,4 @@ if ($useNamed) {
   $argList += (Join-Path $scriptDir "setup-home-bot-tunnel.ps1"), "-Quick", "-Port", "$Port"
 }
 
-Start-Process -FilePath "powershell.exe" -ArgumentList (@("-WindowStyle", "Hidden", "-NoExit") + $argList) -WorkingDirectory $repoRoot -WindowStyle Hidden
+Start-Process -FilePath "powershell.exe" -ArgumentList (@("-NoExit") + $argList) -WorkingDirectory $repoRoot -WindowStyle Normal

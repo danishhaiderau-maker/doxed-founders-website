@@ -90,8 +90,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{
         ok = $true
         message = @(
-          "Start everything queued (no popup windows)."
-          "Bot/analyzer minimized on taskbar; tunnel/watchdog run hidden."
+          "Start everything queued."
+          "Three console windows will open: Bot :7800, Analyzer, Cloudflare tunnel."
+          "Leave them open (do not press Enter in those windows). Watchdog/wire run hidden."
           "Status: Agent Hub panel or .home-start-all.log"
         ) -join "`n"
       }
@@ -129,11 +130,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
-      Start-HiddenPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort")
+      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
       if (Use-NamedTunnel) {
-        return @{ ok = $true; message = "Named tunnel restart queued - stable URL https://bot.doxxedcrypto.digital" }
+        return @{ ok = $true; message = "Named tunnel window opened - keep it open. URL: https://bot.doxxedcrypto.digital" }
       }
-      return @{ ok = $true; message = "Quick tunnel restart queued - watch Doxed Cloudflare Tunnel window for new URL" }
+      return @{ ok = $true; message = "Quick tunnel window opened - watch Doxed Cloudflare Tunnel for the URL" }
     }
     "enable-named-tunnel" {
       Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline

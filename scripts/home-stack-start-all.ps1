@@ -1,4 +1,4 @@
-# Background worker for Start everything (no visible window).
+# Background worker for Start everything (bot/analyzer/tunnel open visible consoles).
 param(
   [int]$BotPort = 7800,
   [int]$AnalyzerPort = 9001
@@ -10,16 +10,16 @@ $ErrorActionPreference = "Continue"
 $messages = [System.Collections.Generic.List[string]]::new()
 
 if (-not (Test-BotRunning)) {
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Minimized
-  $messages.Add("[1/3] Bot started minimized on :$BotPort")
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Normal
+  $messages.Add("[1/3] Bot window opened on :$BotPort")
   Start-Sleep -Seconds 4
 } else {
   $messages.Add("[1/3] Bot already online on :$BotPort")
 }
 
 if (-not (Test-AnalyzerRunning)) {
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Minimized
-  $messages.Add("[2/3] Analyzer started minimized")
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Normal
+  $messages.Add("[2/3] Analyzer window opened")
 } else {
   $messages.Add("[2/3] Analyzer already running")
 }
@@ -31,11 +31,11 @@ if (-not $tunnelOk) {
     Stop-Cloudflared | Out-Null
     Start-Sleep -Seconds 2
   }
-  Start-HiddenPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort")
+  Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
   if (Use-NamedTunnel) {
-    $messages.Add("[3/3] Named tunnel restart (hidden)")
+    $messages.Add("[3/3] Named tunnel window opened - https://bot.doxxedcrypto.digital")
   } else {
-    $messages.Add("[3/3] Quick tunnel restart (hidden) - URL in .home-tunnel-url")
+    $messages.Add("[3/3] Quick tunnel window opened - URL in .home-tunnel-url")
   }
 } else {
   $messages.Add("[3/3] Tunnel already live: $tunnelUrl")
