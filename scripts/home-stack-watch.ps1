@@ -32,10 +32,10 @@ Add-Content -Path $logFile -Value "`n=== watch started $(Get-Date -Format o) for
 
 while ((Get-Date) -lt $deadline) {
   $tunnel = Read-TunnelUrl
-  $bot = Probe "http://127.0.0.1:7800/health"
+  $bot = Probe "http://127.0.0.1:7800/api/ping"
   $bridge = Probe "http://127.0.0.1:7810/health"
   $analyzer = Probe "http://127.0.0.1:9001/api/status"
-  $tunnelLive = if ($tunnel) { Probe "$tunnel/health" 12 } else { $false }
+  $tunnelLive = if ($tunnel) { Probe "$tunnel/api/ping" 12 } else { $false }
   $cf = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   $urlLabel = if ($tunnel) { $tunnel } else { "none" }
   $line = "{0} bot={1} bridge={2} analyzer={3} cloudflared={4} tunnel_live={5} url={6}" -f (

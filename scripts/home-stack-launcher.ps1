@@ -67,13 +67,24 @@ function Test-PortOpen([int]$P) {
 function Test-TunnelLive([string]$Url) {
   if (-not $Url) { return $false }
   try {
-    $r = Invoke-WebRequest -Uri "$Url/api/ping" -UseBasicParsing -TimeoutSec 8
-    if ($r.StatusCode -eq 200) { return $true }
-    $r = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 8
+    $r = Invoke-WebRequest -Uri "$Url/api/ping" -UseBasicParsing -TimeoutSec 4
     return $r.StatusCode -eq 200
   } catch {
     return $false
   }
+}
+
+# Cache tunnel probe so /status does not block the bridge for 8s per poll.
+$script:TunnelLiveCache = @{ url = ""; live = $false; at = [datetime]::MinValue }
+function Test-TunnelLiveCached([string]$Url) {
+  if (-not $Url) { return $false }
+  $now = Get-Date
+  if ($script:TunnelLiveCache.url -eq $Url -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 12) {
+    return $script:TunnelLiveCache.live
+  }
+  $live = Test-TunnelLive $Url
+  $script:TunnelLiveCache = @{ url = $Url; live = $live; at = $now }
+  return $live
 }
 
 function Stop-ListenPort([int]$ListenPort) {
@@ -219,9 +230,15 @@ function Get-TunnelUrl {
 
 function Use-NamedTunnel {
   $flag = Join-Path $repoRoot ".home-use-named-tunnel"
-  if (Test-Path $flag) { return $true }
-  if ($env:HOME_USE_NAMED_TUNNEL -eq "1") { return $true }
-  return $false
+  if (-not (Test-Path $flag)) { return $false }
+  if ($env:HOME_USE_NAMED_TUNNEL -eq "1") {
+    $configDir = Join-Path $env:USERPROFILE ".cloudflared"
+    $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
+    return $null -ne $cred
+  }
+  $configDir = Join-Path $env:USERPROFILE ".cloudflared"
+  $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
+  return $null -ne $cred
 }
 
 function Start-AnalyzerDashboard {
@@ -234,7 +251,7 @@ function Get-FullStatus {
   $analyzerRunning = Test-AnalyzerRunning
   $tunnelUrl = Get-TunnelUrl
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  $tunnelLive = if ($tunnelUrl) { Test-TunnelLive $tunnelUrl } else { $false }
+  $tunnelLive = if ($tunnelUrl) { Test-TunnelLiveCached $tunnelUrl } else { $false }
   return @{
     ok = $true
     launcher = "running"
