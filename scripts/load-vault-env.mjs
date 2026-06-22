@@ -6,6 +6,8 @@ import { getVaultDir } from './secrets-vault-path.mjs';
 export function loadVaultEnv(repoRoot) {
   const candidates = [
     path.join(getVaultDir(), '.env.neon'),
+    path.join(getVaultDir(), '.env.cloudflare'),
+    path.join(getVaultDir(), '.env.namecom'),
     path.join(getVaultDir(), '.env'),
     path.join(repoRoot, '.env'),
   ];
