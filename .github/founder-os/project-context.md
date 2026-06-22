@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
+Scope Agent Hub desks to fresh sessions and fix live-copy stale positions.
 
 ## Last Activity
 
