@@ -1,0 +1,214 @@
+# Shared helpers for home-stack-launcher.ps1 and home-stack-start-all.ps1
+param(
+  [int]$Port = 7810,
+  [int]$BotPort = 7800,
+  [int]$AnalyzerPort = 9001
+)
+
+if (-not $scriptDir) {
+  $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if (-not $repoRoot) {
+  $repoRoot = Split-Path -Parent $scriptDir
+}
+$agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
+$tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
+
+function Test-PortOpen([int]$P) {
+  try {
+    $c = New-Object System.Net.Sockets.TcpClient
+    $async = $c.ConnectAsync("127.0.0.1", $P)
+    if (-not $async.Wait(1500)) { return $false }
+    $c.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Test-TunnelLive([string]$Url) {
+  if (-not $Url) { return $false }
+  try {
+    $r = Invoke-WebRequest -Uri "$Url/api/ping" -UseBasicParsing -TimeoutSec 4
+    return $r.StatusCode -eq 200
+  } catch {
+    return $false
+  }
+}
+
+$script:TunnelLiveCache = @{ url = ""; live = $false; at = [datetime]::MinValue }
+function Test-TunnelLiveCached([string]$Url) {
+  if (-not $Url) { return $false }
+  $now = Get-Date
+  if ($script:TunnelLiveCache.url -eq $Url -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 12) {
+    return $script:TunnelLiveCache.live
+  }
+  $live = Test-TunnelLive $Url
+  $script:TunnelLiveCache = @{ url = $Url; live = $live; at = $now }
+  return $live
+}
+
+function Stop-ListenPort([int]$ListenPort) {
+  $killed = @()
+  try {
+    Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -First 5 |
+      ForEach-Object {
+        $procId = [int]$_.OwningProcess
+        if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
+          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+          $killed += $procId
+        }
+      }
+  } catch { }
+  return $killed
+}
+
+function Stop-PythonMatching([string]$Pattern) {
+  $killed = @()
+  Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Pattern*" } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+  return $killed
+}
+
+function Stop-Cloudflared {
+  $killed = @()
+  Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    $killed += $_.Id
+  }
+  return $killed
+}
+
+function Test-HomeScriptRunning([string]$ScriptName) {
+  $hit = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$ScriptName*" } |
+    Select-Object -First 1
+  return [bool]$hit
+}
+
+function Close-HomeStackWindows {
+  $closed = @()
+  $windowTitles = @(
+    "Doxed Bot :7800",
+    "Doxed Analyzer",
+    "Doxed Analyzer (once)",
+    "Doxed Cloudflare Tunnel",
+    "Doxed Cloudflare Tunnel (stable)",
+    "Doxed Stack Control Panel",
+    "Doxed Auto-Wire",
+    "Doxed Wire to Site",
+    "Doxed Tunnel Watchdog",
+    "Doxed Tunnel Restart",
+    "Doxed Stack Start"
+  )
+  foreach ($title in $windowTitles) {
+    & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null
+    $closed += $title
+  }
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and (
+        $_.CommandLine -like "*start-home-bot.ps1*" -or
+        $_.CommandLine -like "*start-home-analyzer.ps1*" -or
+        $_.CommandLine -like "*setup-home-bot-tunnel.ps1*" -or
+        $_.CommandLine -like "*run-named-bot-tunnel.ps1*" -or
+        $_.CommandLine -like "*restart-home-tunnel.ps1*" -or
+        $_.CommandLine -like "*home-stack-control-panel.ps1*" -or
+        $_.CommandLine -like "*auto-wire-after-tunnel.ps1*" -or
+        $_.CommandLine -like "*wire-home-bot-background.ps1*" -or
+        $_.CommandLine -like "*tunnel-watchdog.ps1*" -or
+        $_.CommandLine -like "*home-stack-start-all.ps1*"
+      )
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $closed += "pid:$($_.ProcessId)"
+    }
+  return $closed
+}
+
+function Clear-TunnelUrlFile {
+  if (Test-Path $tunnelUrlFile) {
+    Set-Content -Path $tunnelUrlFile -Value "" -NoNewline
+  }
+}
+
+function Stop-AllHomeStack {
+  $botPort = @(Stop-ListenPort $BotPort)
+  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
+  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
+  $analyzerHealth = @(Stop-ListenPort $AnalyzerPort)
+  $analyzerHealthPy = @(Stop-PythonMatching "analyzer-health-server")
+  $tunnel = @(Stop-Cloudflared)
+  $windows = @(Close-HomeStackWindows)
+  Clear-TunnelUrlFile
+  return @{
+    botPort = $botPort
+    botPy = $botPy
+    analyzerPy = $analyzerPy
+    analyzerHealth = $analyzerHealth
+    analyzerHealthPy = $analyzerHealthPy
+    tunnel = $tunnel
+    windows = $windows
+  }
+}
+
+function Test-AnalyzerRunning {
+  if (Test-PortOpen $AnalyzerPort) { return $true }
+  $hit = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer_research_engine*" } |
+    Select-Object -First 1
+  return [bool]$hit
+}
+
+function Test-BotRunning {
+  if (Test-PortOpen $BotPort) { return $true }
+  $hit = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*btc_conservative_agent*" } |
+    Select-Object -First 1
+  return [bool]$hit
+}
+
+function Start-DetachedPs1 {
+  param(
+    [string]$ScriptPath,
+    [string[]]$ExtraArgs = @(),
+    [switch]$NoExit,
+    [string]$WindowTitle = "Doxed Home Stack"
+  )
+  if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  $psLine = "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+  foreach ($a in $ExtraArgs) { $psLine += " `"$a`"" }
+  $cmdArgs = @("/c", "start", "`"$WindowTitle`"", "powershell.exe", $psLine)
+  Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WorkingDirectory $repoRoot -WindowStyle Normal
+}
+
+function Get-TunnelUrl {
+  if (Test-Path $tunnelUrlFile) {
+    $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+    if ($null -ne $raw -and "$raw".Trim()) {
+      $t = "$raw".Trim()
+      if ($t -match 'bot\.doxxedcrypto\.digital' -and -not (Use-NamedTunnel)) {
+        return $null
+      }
+      return $t
+    }
+  }
+  return $null
+}
+
+function Use-NamedTunnel {
+  $flag = Join-Path $repoRoot ".home-use-named-tunnel"
+  if (-not (Test-Path $flag)) { return $false }
+  $configDir = Join-Path $env:USERPROFILE ".cloudflared"
+  $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
+  return $null -ne $cred
+}
+
+function Start-AnalyzerDashboard {
+  return (Test-PortOpen $AnalyzerPort)
+}
