@@ -167,20 +167,26 @@ export function AgentAdminShowcaseControl({
   const stopped = executionPaused || !botConnected;
 
   const refreshStatus = useCallback(async () => {
+    let bridgeOk = false;
     try {
-      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(8000) });
+      const healthRes = await fetch(`${LAUNCHER}/health`, { signal: AbortSignal.timeout(3000) });
+      bridgeOk = healthRes.ok;
+    } catch {
+      bridgeOk = false;
+    }
+    setLauncherOnline(bridgeOk);
+
+    try {
+      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(6000) });
       if (!res.ok) {
-        setLauncherOnline(false);
         setStatus(await probeDirectHomeStatus());
         return;
       }
       const json = (await res.json()) as HomeStatus & { ok?: boolean; endpoints?: string[] };
-      setLauncherOnline(true);
       const normalized = await normalizeHomeStatus(json);
       setStatus(normalized);
       if (normalized.tunnel?.url) setTunnelUrl(normalized.tunnel.url);
     } catch {
-      setLauncherOnline(false);
       setStatus(await probeDirectHomeStatus());
     }
   }, []);
@@ -216,12 +222,20 @@ export function AgentAdminShowcaseControl({
         }
       }
     } catch (err) {
-      const hint =
-        err instanceof Error && /fetch|network|Failed/i.test(err.message)
+      let bridgeAlive = false;
+      try {
+        const healthRes = await fetch(`${LAUNCHER}/health`, { signal: AbortSignal.timeout(2500) });
+        bridgeAlive = healthRes.ok;
+      } catch {
+        bridgeAlive = false;
+      }
+      const hint = bridgeAlive
+        ? 'Bridge is up but the command timed out — check Doxed console windows, then click Refresh status.'
+        : err instanceof Error && /fetch|network|Failed/i.test(err.message)
           ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd on this PC, then hard-refresh this page.'
           : 'Local bridge offline — double-click RESTART-LAUNCHER.cmd in the repo folder.';
       setMsg(hint);
-      setLauncherOnline(false);
+      setLauncherOnline(bridgeAlive);
     } finally {
       setBusy(null);
     }
