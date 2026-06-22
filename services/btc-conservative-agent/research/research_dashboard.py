@@ -30,8 +30,8 @@ try:
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_DASHBOARD_VERSION,
     )
-    from pathway_lane_roster import DASHBOARD_PATHWAY_LANES
-    ALL_PATHWAY_LANES = DASHBOARD_PATHWAY_LANES
+    from pathway_lane_roster import ANALYZER_COMPARE_LANES, DASHBOARD_PATHWAY_LANES
+    ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
 except ImportError:
     BENCHMARK_LANE = "CONTINUOUS"
     COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
@@ -45,15 +45,28 @@ except ImportError:
         "COMBO_604_SP4_CHASE_3PLUS",
         "CONTINUOUS",
         "AI_DISAGREEMENT_REPLAY",
+        "COMBO_65_SP5_DIRECT",
+        "COMBO_604_SP4_DIRECT",
+        "RECOVERY_MONSTER_V1",
+        "TYPE_B_PREDICTOR_V1",
+        "AI_DISAGREEMENT_ALPHA",
+        "EXTREME_EDGE",
+        "EDGE_PLUS_STACK",
+        "AI_SCAN",
+        "HIGH_EDGE_RUNNER",
+        "SHADOW_RUNNER",
+        "EDGE_ALPHA_4",
+        "TYPE_B_HUNTER",
+        "SHORT_BEAR_ALPHA",
+        "AI_60_65_ALPHA",
+        "URGENT_CHASE_ALPHA",
+        "CHASE_3PLUS_ALPHA",
     )
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 ROOT = Path(os.path.abspath(os.path.dirname(__file__) or os.getcwd()))
-_parent = ROOT.parent
-if (_parent / "trades_3factor.csv").is_file() and not (ROOT / "trades_3factor.csv").is_file():
-    ROOT = _parent
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "0.0.0.0")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://10.0.0.102:{BIND_PORT}")
@@ -72,6 +85,16 @@ ALL_DATA_REPORTS_DIR = os.path.join(REPORTS_DIR, "all_data")
 ARCHIVE_DIR = "research_session_archives"
 ARCHIVE_INDEX_FILE = "research_session_index.json"
 ZIP_BUNDLE_NAME = "reports_bundle.zip"
+COMPLETE_BUNDLE_NAME = "trading_sessions_complete.zip"
+COMPLETE_BUNDLE_FALLBACKS = (
+    "trading_sessions_complete_v2.zip",
+    "trading_sessions_complete_verified.zip",
+)
+_parent = ROOT.parent
+HISTORY_ROOT = Path(os.getenv(
+    "RESEARCH_HISTORY_ROOT",
+    str(ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT)),
+))
 
 REPORT_NAV = (
     ("summary", "Overview", None),
@@ -79,6 +102,7 @@ REPORT_NAV = (
     ("lanes", "Lanes", "benchmark_vs_lanes_report.json"),
     ("lanes-retire", "Lane Retirement", "lane_retirement_report.json"),
     ("lanes-def", "Lane Definitions", "lane_definition_report.json"),
+    ("regime", "Regime", "regime_leaderboard.json"),
     ("chase", "Chase", "chase_attribution_report.json"),
     ("chase-threshold", "Chase Threshold", "chase_threshold_report.json"),
     ("chase-delay", "Chase Delay", "chase_delay_report.json"),
@@ -308,12 +332,18 @@ def _lane_rows():
     lanes = dict(bench.get("lanes") or {})
     for lane_key, metrics in all_data_bench.items():
         cur = lanes.get(lane_key) or {}
-        cur_fills = int(cur.get("real_fills") or cur.get("fills") or 0)
-        cur_pnl = float(cur.get("net_pnl_real") or cur.get("net_pnl_usd") or 0)
-        alt_fills = int(metrics.get("real_fills") or metrics.get("fills") or 0)
-        alt_pnl = float(metrics.get("net_pnl_real") or metrics.get("net_pnl_usd") or 0)
-        if alt_fills > cur_fills or (alt_pnl and not cur_pnl):
-            lanes[lane_key] = metrics
+        if not cur.get("all_time"):
+            at = metrics.get("all_time") or {}
+            if not at and (metrics.get("real_fills") or metrics.get("net_pnl_real")):
+                at = {
+                    "real_fills": metrics.get("real_fills"),
+                    "net_pnl_real": metrics.get("net_pnl_real"),
+                    "ev_usd": metrics.get("per_approve_ev"),
+                }
+            if at:
+                cur = dict(cur)
+                cur["all_time"] = at
+                lanes[lane_key] = cur
     ledger_file = _read_json("lane_pnl_ledger.json")
     ledger = ledger_file.get("lanes") or {}
     lane_def = _read_report("lane_definition_report.json")
@@ -348,24 +378,42 @@ def _lane_rows():
         m = lanes.get(lane) or {}
         lb = ledger.get(lane) or {}
         ld = lane_def_by_lane.get(lane) or {}
+        all_time = m.get("all_time") or {}
+        if not all_time:
+            ad = all_data_bench.get(lane) or {}
+            all_time = ad.get("all_time") or {}
+            if not all_time and (ad.get("real_fills") or ad.get("net_pnl_real")):
+                all_time = {
+                    "real_fills": ad.get("real_fills"),
+                    "net_pnl_real": ad.get("net_pnl_real"),
+                    "ev_usd": ad.get("per_approve_ev"),
+                }
         fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or ld.get("sample_size") or 0)
         approves = int(m.get("approves") or ld.get("approves") or 0)
         pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or ld.get("pnl_usd") or 0)
         ev = float(m.get("per_approve_ev") or ld.get("ev_per_approve") or 0)
+        at_fills = int(all_time.get("real_fills") or ld.get("all_time_fills") or 0)
+        at_pnl = float(all_time.get("net_pnl_real") or ld.get("all_time_pnl_usd") or 0)
+        at_ev = float(all_time.get("ev_usd") or (at_pnl / at_fills if at_fills else 0))
         pathway_status = status_by_lane.get(lane) or ld.get("pathway_status") or ""
         is_retired = pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK") or lane in (lane_def.get("retired_lanes") or [])
         is_benchmark = lane == benchmark_lane or pathway_status == "BENCHMARK"
-        if fills == 0 and approves == 0 and pnl == 0 and not is_retired and lane != "AI_SCAN" and lane != benchmark_lane:
+        has_any_data = fills or approves or pnl or at_fills or at_pnl
+        if not has_any_data and not is_retired and lane != "AI_SCAN" and lane != benchmark_lane:
             continue
+        compare_pnl = pnl if fills else at_pnl
+        compare_ev = ev if approves else at_ev
         if is_benchmark:
             status = "BENCHMARK"
         elif lane == PRIMARY_PRODUCTION_LANE:
             status = "PRIMARY_PRODUCTION"
+        elif is_retired and at_fills:
+            status = "HISTORICAL"
         elif is_retired:
             status = pathway_status or "DATA_RETIRED"
-        elif ev >= benchmark_ev and pnl > benchmark_pnl and lane != benchmark_lane:
+        elif compare_ev >= benchmark_ev and compare_pnl > benchmark_pnl and lane != benchmark_lane:
             status = "BEATS BENCHMARK"
-        elif pnl < benchmark_pnl or (benchmark_ev and ev < benchmark_ev * 0.85):
+        elif compare_pnl < benchmark_pnl or (benchmark_ev and compare_ev < benchmark_ev * 0.85):
             status = "UNDERPERFORMING"
         else:
             status = "NEUTRAL"
@@ -376,12 +424,15 @@ def _lane_rows():
             "wr": None,
             "pnl": round(pnl, 2),
             "ev": round(ev, 2),
+            "all_time_fills": at_fills,
+            "all_time_pnl": round(at_pnl, 2),
+            "all_time_ev": round(at_ev, 2),
             "status": status,
             "pathway_status": pathway_status or status,
             "verdict": m.get("verdict") or "",
             "retired": is_retired,
         })
-    rows.sort(key=lambda x: (-x["pnl"], x["lane"]))
+    rows.sort(key=lambda x: (-(x["all_time_pnl"] if x["all_time_fills"] else x["pnl"]), x["lane"]))
     return rows, benchmark_pnl
 
 
@@ -905,6 +956,131 @@ def download_archive(session_id):
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"{safe}.zip")
 
 
+@app.route("/download/all-sessions")
+def download_all_sessions():
+    """One ZIP: every session archive + live reports + CSVs + CONTINUOUS timeline."""
+    try:
+        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT, DEFAULT_AGENT_ROOT
+    except ImportError:
+        abort(503, description="build_complete_session_bundle.py not found next to research_dashboard.py")
+    history = HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
+    live = ROOT if (ROOT / "trades_3factor.csv").is_file() or (ROOT / REPORTS_DIR).is_dir() else DEFAULT_AGENT_ROOT
+    out_dir = history / "downloads"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / COMPLETE_BUNDLE_NAME
+    build_bundle(history, live, out_path)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        out_path,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"trading_sessions_complete_{stamp}.zip",
+    )
+
+
+@app.route("/download/complete")
+def download_complete_cached():
+    """Serve pre-built complete bundle if it exists (no rebuild)."""
+    for base in (HISTORY_ROOT, ROOT, ROOT.parent):
+        for name in (COMPLETE_BUNDLE_NAME,) + COMPLETE_BUNDLE_FALLBACKS:
+            candidate = Path(base) / "downloads" / name
+            if candidate.is_file():
+                try:
+                    with zipfile.ZipFile(candidate) as zf:
+                        if zf.testzip() is not None:
+                            continue
+                except zipfile.BadZipFile:
+                    continue
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                return send_file(
+                    candidate,
+                    mimetype="application/zip",
+                    as_attachment=True,
+                    download_name=f"trading_sessions_complete_{stamp}.zip",
+                )
+    return download_all_sessions()
+
+
+@app.route("/download/chatgpt")
+def download_chatgpt_bundle():
+    """ChatGPT-safe bundle: CSV + key reports + manifest (atomic ZIP, verified)."""
+    try:
+        from build_chatgpt_research_bundle import build, OUT_DIR, ZIP_NAME
+    except ImportError:
+        abort(503, description="build_chatgpt_research_bundle.py not found")
+    for base in (HISTORY_ROOT, ROOT, ROOT.parent):
+        candidate = base / "downloads" / ZIP_NAME
+        if candidate.is_file() and candidate.stat().st_size > 10_000:
+            try:
+                with zipfile.ZipFile(candidate) as zf:
+                    if zf.testzip() is None:
+                        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                        return send_file(
+                            candidate,
+                            mimetype="application/zip",
+                            as_attachment=True,
+                            download_name=f"chatgpt_research_bundle_{stamp}.zip",
+                        )
+            except zipfile.BadZipFile:
+                pass
+    out_zip, _ = build()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        out_zip,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"chatgpt_research_bundle_{stamp}.zip",
+    )
+
+
+@app.route("/api/accumulator")
+def api_accumulator():
+    try:
+        from research_trade_accumulator import build_status
+
+        return jsonify(build_status(root=ROOT))
+    except ImportError:
+        abort(503)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/download/accumulator")
+def download_accumulator():
+    """Week-collection DB export: SQLite + accumulated CSV + status JSON."""
+    try:
+        from research_trade_accumulator import (
+            ACCUMULATOR_DIR,
+            DB_NAME,
+            EXPORT_CSV,
+            STATUS_FILE,
+            sync_accumulator,
+        )
+    except ImportError:
+        abort(503)
+    sync_accumulator(root=ROOT)
+    acc_dir = ROOT / ACCUMULATOR_DIR
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in (DB_NAME, EXPORT_CSV, STATUS_FILE):
+            p = acc_dir / name
+            if p.is_file():
+                zf.write(p, arcname=name)
+        zf.writestr(
+            "README.txt",
+            "research_accumulator — v9.83+ week collection (no historical backfill)\n"
+            "Updated each analyzer run (~30 min). Start with research_accumulator_status.json\n",
+        )
+    buf.seek(0)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"research_accumulator_{stamp}.zip",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main UI
 # ---------------------------------------------------------------------------
@@ -983,19 +1159,27 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-lanes">
     <h2>Lane Laboratory</h2>
-    <p class="note">Live combo lanes + retired lanes (retired = data only, no new orders). Green = beats benchmark.</p>
-    <table><thead><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <p class="note">All lanes defined in code — session columns = current bot run; All-time = full CSV history. Green = beats benchmark.</p>
+    <table><thead><tr><th>Lane</th><th>Sess Fills</th><th>All Fills</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
     <p class="note">Automatic KEEP / RETIRE / COLLECT MORE — removes guesswork on pathway lanes.</p>
-    <table><thead><tr><th>Lane</th><th>Trades</th><th>PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
+    <table><thead><tr><th>Lane</th><th>Sess Trades</th><th>All Trades</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
   </section>
   <section id="sec-lanes-def">
     <h2>Lane Definitions</h2>
     <p class="note" id="lanes-def-note">Active roster, entry conditions, and research questions per pathway lane.</p>
     <div class="kpis" id="lanes-def-kpis"></div>
-    <table><thead><tr><th>Lane</th><th>Status</th><th>Fills</th><th>Approves</th><th>PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lanes-def-body"></tbody></table>
+    <table><thead><tr><th>Lane</th><th>Status</th><th>Sess Fills</th><th>All Fills</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lanes-def-body"></tbody></table>
+  </section>
+  <section id="sec-regime">
+    <h2>Regime Leaderboard</h2>
+    <p class="note" id="regime-note">Recommend-only — best lane per weekend/weekday × ADX × spread bucket.</p>
+    <div class="kpis" id="regime-kpis"></div>
+    <table><thead><tr><th>Regime</th><th>Trades</th><th>Best lane</th><th>Best EV</th><th>2nd lane</th><th>OK?</th></tr></thead><tbody id="regime-body"></tbody></table>
+    <h3>Roster policy (recommend only)</h3>
+    <pre id="roster-policy-json">Loading…</pre>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
@@ -1111,8 +1295,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-download">
     <h2>Download Center</h2>
-    <p>One-click bundle: all JSON reports, text summaries, HTML dashboard, analyzer log, manifest.</p>
-    <a class="btn" href="/download/reports" id="dl-zip">⬇ Download Reports ZIP</a>
+    <p><b>Complete history</b> — all session archives, CONTINUOUS timeline, weekend vs weekday breakdown, live reports, CSVs.</p>
+    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP (full rebuild)</a>
+    <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ Complete Bundle (cached)</a>
+    <p style="margin-top:16px"><b>ChatGPT upload</b> — small verified ZIP with trade counts manifest (use this instead of the 38MB archive).</p>
+    <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ ChatGPT Research Bundle</a>
+    <p style="margin-top:16px"><b>Week collection DB</b> — auto-updated every analyzer run (~30 min), v9.83+ trades only.</p>
+    <a class="btn secondary" href="/download/accumulator" id="dl-accumulator">⬇ Accumulator DB + CSV</a>
+    <a class="btn secondary" href="/api/accumulator" target="_blank">View accumulator status JSON</a>
+    <p style="margin-top:16px"><b>Latest snapshot only</b> — current analyzer run reports.</p>
+    <a class="btn" href="/download/reports" id="dl-zip">⬇ Latest Reports ZIP</a>
     <a class="btn secondary" href="/api/manifest" target="_blank">View report_manifest.json</a>
     <pre id="bundle-list"></pre>
   </section>
@@ -1211,8 +1403,10 @@ async function loadLanes() {
     else if (row.status === 'UNDERPERFORMING') cls = 'red';
     else if (row.status === 'BEATS BENCHMARK' || row.status === 'PRIMARY_PRODUCTION') cls = 'green';
     const role = row.retired ? (row.pathway_status || 'DATA_RETIRED') : row.status;
-    return `<tr class="${cls}"><td>${row.lane}</td><td>${row.trades}</td><td>${row.approves}</td><td>$${fmtUsd(row.pnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${role}</td></tr>`;
-  }).join('') || '<tr><td colspan="6">Run analyzer: python analyzer_research_engine_v62.py -once</td></tr>';
+    const atF = row.all_time_fills || 0;
+    const atP = row.all_time_pnl || 0;
+    return `<tr class="${cls}"><td>${row.lane}</td><td>${row.trades}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev)}</td><td>${role}</td></tr>`;
+  }).join('') || '<tr><td colspan="7">Run analyzer: python analyzer_research_engine_v62.py -once</td></tr>';
 }
 
 async function loadChase() {
@@ -1346,8 +1540,10 @@ async function loadLaneDefs() {
   document.getElementById('lanes-def-body').innerHTML = (d.lanes||[]).map(row => {
     const st = row.pathway_status || '';
     const cls = st.includes('RETIRED') ? 'red' : (st.includes('BENCHMARK') ? 'green' : '');
-    return `<tr class="${cls}"><td>${row.lane||''}</td><td>${st}</td><td>${row.sample_size ?? 0}</td><td>${row.approves ?? 0}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td>${row.role||''}</td></tr>`;
-  }).join('') || '<tr><td colspan="7">No lane definitions.</td></tr>';
+    const atF = row.all_time_fills ?? 0;
+    const atP = row.all_time_pnl_usd ?? 0;
+    return `<tr class="${cls}"><td>${row.lane||''}</td><td>${st}</td><td>${row.sample_size ?? 0}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td>${row.role||''}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">No lane definitions.</td></tr>';
 }
 
 async function loadExitCombos() {
@@ -1479,8 +1675,39 @@ async function loadRetirement() {
   const d = await r.json();
   document.getElementById('retire-body').innerHTML = (d.lanes||[]).map(row => {
     const cls = row.recommendation === 'RETIRE' ? 'red' : (row.recommendation.startsWith('KEEP') ? 'green' : 'amber');
-    return `<tr><td>${row.lane}</td><td>${row.trades}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td class="${cls}">${row.recommendation}</td><td>${row.reason||''}</td></tr>`;
+    const atF = row.all_time_fills ?? 0;
+    const atP = row.all_time_pnl_usd ?? 0;
+    return `<tr><td>${row.lane}</td><td>${row.trades}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td class="${cls}">${row.recommendation}</td><td>${row.reason||''}</td></tr>`;
   }).join('');
+}
+
+async function loadRegime() {
+  const [rr, rp] = await Promise.all([
+    fetch('/api/report/regime_leaderboard.json'),
+    fetch('/api/report/roster_policy.json'),
+  ]);
+  const d = rr.ok ? await rr.json() : {};
+  const pol = rp.ok ? await rp.json() : {};
+  document.getElementById('regime-note').textContent = d.usage_note || document.getElementById('regime-note').textContent;
+  document.getElementById('regime-kpis').innerHTML = [
+    ['Total trades tagged', d.total_trades ?? 'n/a'],
+    ['Regime cells', (d.regimes||[]).length],
+    ['Min trades/cell', d.min_trades_per_cell ?? 3],
+    ['Policy action', pol.action || 'n/a'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('regime-body').innerHTML = (d.regimes||[]).map(r => {
+    const ok = r.conclusion_allowed ? 'yes' : 'no';
+    const cls = r.conclusion_allowed ? 'green' : 'amber';
+    return `<tr><td>${r.regime}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>$${fmtUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
+  }).join('');
+  document.getElementById('roster-policy-json').textContent = JSON.stringify(pol, null, 2);
+  if (pol.collection_progress) {
+    const cp = pol.collection_progress;
+    document.getElementById('regime-kpis').innerHTML += [
+      ['Collection progress', cp.progress_pct + '%'],
+      ['Target trades', cp.target_trades],
+    ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  }
 }
 
 async function loadFeatures() {
@@ -1549,6 +1776,7 @@ async function refreshAll() {
   await loadLanes();
   await loadRetirement();
   await loadLaneDefs();
+  await loadRegime();
   await loadChase();
   await loadChaseThreshold();
   await loadChaseDelay();
@@ -1597,9 +1825,8 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--standalone" in sys.argv or os.getenv("RESEARCH_DASHBOARD_STANDALONE") == "1":
+    print("Research dashboard is embedded in analyzer_research_engine_v62.py")
+    print("Run:  python analyzer_research_engine_v62.py")
+    print("Or:   .\\start_stack.ps1")
+    if "--standalone" in sys.argv:
         main()
-    else:
-        print("Research dashboard is embedded in analyzer_research_engine_v62.py")
-        print("Run:  python research\\analyzer_research_engine_v62.py")
-        print("Or:   python research\\research_dashboard.py --standalone")

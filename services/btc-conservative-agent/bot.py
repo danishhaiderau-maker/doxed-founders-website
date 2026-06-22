@@ -26,7 +26,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any
-from flask import Flask, Response, jsonify, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template_string, request, send_file
 import ccxt
 import websocket
 import signal
@@ -10157,11 +10157,9 @@ def _trade_row_in_session(trade: dict, session_start: float) -> bool:
 
 def _showcase_trade_session_start() -> float:
     """Epoch for trade filtering: full CSV history unless fresh-collection mode is on."""
-    with state_lock:
-        fcm = bool(state.get("fresh_collection_mode", False))
-    if not fcm:
+    if not state.get("fresh_collection_mode", False):
         return 0.0
-    return _research_data_start_ts()
+    return float(bot_start_time or 0.0)
 
 def _recompute_research_balance_from_trades():
     """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
@@ -11582,12 +11580,9 @@ def fill_order(order):
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
-        fill_ts = time.time()
         master.update({
             "status": "FILLED",
-            "filled_ts": fill_ts,
-            "fill_ts": fill_ts,
-            "entry_ts": pos.get("entry_ts") or fill_ts,
+            "filled_ts": time.time(),
             "fill_price": fill_px,
             "planned_limit_price": order.get("planned_limit_price"),
             "outcome": "OPEN",
@@ -13307,15 +13302,7 @@ def execute_market_order(signal):
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(signal["trade_id"], {}).get("signal_ref")
     if master:
-        fill_ts = time.time()
-        master.update({
-            "status": "FILLED",
-            "filled_ts": fill_ts,
-            "fill_ts": fill_ts,
-            "entry_ts": pos.get("entry_ts") or fill_ts,
-            "fill_price": fill_px,
-            "outcome": "OPEN",
-        })
+        master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": fill_px,"outcome": "OPEN"})
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED {signal['final_direction']} qty={qty} [PIPELINE ENFORCEMENT]")
     pipeline_state_sync()
@@ -13901,18 +13888,8 @@ def close_position(pos: dict, exit_reason: str):
 
     master = trades_map.get(trade_id, {}).get("signal_ref")
     if master:
-        closed_ts = time.time()
-        master.update({
-            "status": "CLOSED",
-            "exit_reason": exit_reason,
-            "outcome": "WIN" if net_pnl > 0 else "LOSS",
-            "closed_ts": closed_ts,
-            "exit_price": price,
-            "fill_price": master.get("fill_price") or entry,
-            "entry_ts": pos.get("entry_ts") or master.get("entry_ts"),
-            "fill_ts": master.get("fill_ts") or master.get("filled_ts") or pos.get("entry_ts"),
-        })
-        master["expires_ts"] = closed_ts - 1
+        master.update({"status": "CLOSED","exit_reason": exit_reason,"outcome": "WIN" if net_pnl > 0 else "LOSS","closed_ts": time.time()})
+        master["expires_ts"] = time.time() - 1
 
     persist_signal_close(trade_id, "CLOSED")
 
@@ -15347,7 +15324,7 @@ HTML = """<!DOCTYPE html>
 
 <h2>Trades</h2>
 <table>
-    <thead><tr><th>Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
+    <thead><tr><th>Time</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -15398,9 +15375,8 @@ DASHBOARD_JS = """(function () {
   try {
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
-      if (typeof ts === 'string' && /\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}/.test(ts) && ts.includes('Melbourne')) return ts;
       try {
-        const d = new Date(typeof ts === 'number' ? (ts > 1e12 ? ts : ts * 1000) : (ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z'));
+        const d = new Date(ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z');
         if (isNaN(d.getTime())) return ts;
         const parts = new Intl.DateTimeFormat('en-AU', {
           timeZone: 'Australia/Melbourne',
@@ -16382,7 +16358,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
-            <td>${formatMelbourneDateTime(e.time_melbourne || e.time || e.expired_ts || e.created_ts)}</td>
+            <td>${e.time || '-'}</td>
             <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
@@ -16394,7 +16370,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('tradesTable', (d.trades||[]).map(t => `
           <tr>
-            <td>${formatMelbourneDateTime(t.ts_melbourne || t.ts || t.entry_ts)}</td>
+            <td>${t.ts || '-'}</td>
             <td>${t.trade_id || '-'}</td>
             <td>${laneBadge(t.research_lane, t.research_model)}</td>
             <td>${t.final_direction || t.dir || '-'}</td>
@@ -16657,84 +16633,24 @@ def dashboard():
     return render_template_string(page)
 
 
-def _relay_trades_map_lite_unlocked() -> dict:
-    """Slim trades_map for NestJS relay closure sync — caller must hold trade_lock."""
-    lite = {}
-    for tid, entry in trades_map.items():
-        sig = entry.get("signal_ref") if isinstance(entry, dict) else None
-        if not isinstance(sig, dict):
-            continue
-        lite[str(tid)] = {
-            "signal_ref": {
-                "trade_id": sig.get("trade_id") or tid,
-                "status": sig.get("status"),
-                "fill_price": sig.get("fill_price"),
-                "limit_price": sig.get("limit_price"),
-                "signal_price": sig.get("signal_price"),
-                "exit_reason": sig.get("exit_reason"),
-                "exit_price": sig.get("exit_price"),
-                "closed_ts": sig.get("closed_ts"),
-                "created_ts_ts": sig.get("created_ts_ts"),
-                "fill_ts": sig.get("fill_ts") or sig.get("filled_ts"),
-                "filled_ts": sig.get("filled_ts") or sig.get("fill_ts"),
-                "entry_ts": sig.get("entry_ts") or sig.get("fill_ts") or sig.get("filled_ts"),
-                "net_pnl_usd": sig.get("net_pnl_usd"),
-            }
-        }
-    return lite
-
-
 def _relay_trades_map_lite() -> dict:
     """Slim trades_map for NestJS relay closure sync (no full signal dump)."""
+    lite = {}
     with trade_lock:
-        return _relay_trades_map_lite_unlocked()
-
-
-@app.route('/api/relay-state')
-def api_relay_state():
-    """Fast subset for NestJS relay fidelity + copy sync (skips heavy /api/state work)."""
-    try:
-        now_ts = time.time()
-        # Lock order must match /api/state: state_lock before trade_lock (avoid deadlock).
-        with state_lock:
-            state_fields = {
-                "strategy_mode": state.get("strategy_mode", "RESEARCH"),
-                "execution_paused": state.get("execution_paused", False),
-                "execution_reason": state.get("execution_reason"),
-                "price": state.get("price"),
-                "account_balance": get_display_balance(),
-                "bot_start_time": bot_start_time,
+        for tid, entry in trades_map.items():
+            sig = entry.get("signal_ref") if isinstance(entry, dict) else None
+            if not isinstance(sig, dict):
+                continue
+            lite[str(tid)] = {
+                "signal_ref": {
+                    "status": sig.get("status"),
+                    "exit_reason": sig.get("exit_reason"),
+                    "exit_price": sig.get("exit_price"),
+                    "closed_ts": sig.get("closed_ts"),
+                    "net_pnl_usd": sig.get("net_pnl_usd"),
+                }
             }
-        with trade_lock:
-            for pos in open_positions:
-                if pos.get("status") == "OPEN":
-                    accrue_position_funding(pos, now_ts)
-            positions_copy = copy.deepcopy(open_positions)
-            pending_orders_copy = copy.deepcopy(pending_orders)
-            active_list, _ = _collect_dashboard_active_signals(
-                pending_orders_copy,
-                positions_copy,
-                trades_map,
-                default_strategy="-",
-                default_regime="-",
-            )
-            session_trades = _session_trades_only(list(trades))
-            trades_map_lite = _relay_trades_map_lite_unlocked()
-        snapshot = dict(state_fields)
-        snapshot["trades"] = session_trades
-        snapshot["trades_map"] = trades_map_lite
-        snapshot["orders"] = pending_orders_copy
-        snapshot["positions"] = positions_copy
-        snapshot["trade_count_session"] = len(session_trades)
-        snapshot["signal_info"] = {
-            "active": len(active_list) > 0,
-            "count": len(active_list),
-            "signals": active_list,
-        }
-        return jsonify(snapshot), 200
-    except Exception as e:
-        logger.error(f"/api/relay-state error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    return lite
 
 
 def _enrich_orders_for_relay(snapshot: dict) -> None:
@@ -16900,22 +16816,6 @@ def api_state():
         session_start = _showcase_trade_session_start()
         if session_start:
             trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
-            positions_copy = [
-                p
-                for p in positions_copy
-                if float(p.get("entry_ts") or p.get("created_ts") or 0) >= session_start - 1.0
-            ]
-            pending_orders_copy = [
-                o
-                for o in pending_orders_copy
-                if float(o.get("created_ts") or 0) >= session_start - 1.0
-            ]
-            expired_orders_copy = [
-                e
-                for e in expired_orders_copy
-                if isinstance(e, dict)
-                and float(e.get("created_ts") or e.get("expired_ts") or 0) >= session_start - 1.0
-            ]
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, 50)
         snapshot["ai_history"] = ai_history_copy
@@ -17034,12 +16934,6 @@ def api_state():
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
-        _rs_meta = _load_research_session_meta()
-        _fcs = _rs_meta.get("fresh_collection_start_time")
-        snapshot["fresh_collection_start_time"] = (
-            float(_fcs) if _fcs is not None and snapshot["fresh_collection_mode"] else None
-        )
-        snapshot["last_fresh_reset_ts"] = snapshot.get("last_fresh_reset_ts") or snapshot["fresh_collection_start_time"]
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
@@ -17122,10 +17016,11 @@ def api_state():
 @app.route('/api/status')
 @app.route('/status')
 def health():
-    hb = state.get("last_heartbeat", last_heartbeat)
-    paused = bool(state.get("execution_paused", False))
-    reason = state.get("execution_reason", "")
-    manual = bool(state.get("manual_admin_pause", False))
+    with state_lock:
+        hb = state.get("last_heartbeat", last_heartbeat)
+        paused = bool(state.get("execution_paused", False))
+        reason = state.get("execution_reason", "")
+        manual = bool(state.get("manual_admin_pause", False))
     status = "paused" if paused else "alive"
     return jsonify({
         "status": status,
@@ -17488,50 +17383,11 @@ def export_csv():
             CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
             SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
             EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
-            "trade_lifecycle.jsonl", "execution_funnel.jsonl", "fill_quality.jsonl", "shadow_vs_live_entry.jsonl",
         ]:
             if os.path.exists(file):
                 zip_file.write(file)
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
-
-
-@app.route('/api/export_session_trades.csv')
-def export_session_trades_csv():
-    """Exchange-style round-trip log for current research session (sync / audit)."""
-    session_start = _showcase_trade_session_start()
-    rows = _session_trades_only(list(trades))
-    lines = [
-        "closed_at,trade_id,direction,entry_price,exit_price,net_pnl_usd,pnl_pct_margin,duration_min,exit_reason,research_lane"
-    ]
-    for t in rows:
-        if not isinstance(t, dict):
-            continue
-        ts = t.get("ts") or t.get("closed_ts") or ""
-        if session_start and not _trade_row_in_session(t, session_start):
-            continue
-        lines.append(
-            ",".join(
-                [
-                    str(ts).replace(",", " "),
-                    str(t.get("trade_id") or ""),
-                    str(t.get("final_direction") or t.get("dir") or ""),
-                    str(t.get("entry") or t.get("fill_price") or ""),
-                    str(t.get("exit") or t.get("exit_price") or ""),
-                    str(t.get("net_pnl_usd") or t.get("pnl_usd") or ""),
-                    str(t.get("pnl") or t.get("pnl_pct_margin") or ""),
-                    str(t.get("dur_min") or t.get("duration_min") or ""),
-                    str(t.get("exit_reason") or "").replace(",", " "),
-                    str(t.get("research_lane") or "").replace(",", " "),
-                ]
-            )
-        )
-    payload = "\n".join(lines) + "\n"
-    return Response(
-        payload,
-        mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=session_trades.csv"},
-    )
 
 def calc_position_qty(price, leverage, margin_usdt=None):
     try:

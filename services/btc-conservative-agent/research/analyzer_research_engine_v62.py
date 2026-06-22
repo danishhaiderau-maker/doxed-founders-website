@@ -92,6 +92,8 @@ CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
+REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
+ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 REPORTS_HISTORY_DIR = os.path.join("reports", "history")
@@ -308,7 +310,7 @@ try:
         RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
     )
     ACTIVE_PATHWAY_LANES = tuple(COMBO_EXECUTION_LANES) + tuple(EXPERIMENTAL_EXECUTION_LANES)
-    from pathway_lane_roster import RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
+    from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
 except ImportError:
     EXPECTED_BOT_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
@@ -343,6 +345,30 @@ except ImportError:
         "AI_DISAGREEMENT_REPLAY",
     )
     _COMBO_LANE_LABELS = {}
+    ANALYZER_COMPARE_LANES = ACTIVE_PATHWAY_LANES + (
+        "CONTINUOUS",
+        "COMBO_65_SP5_DIRECT",
+        "COMBO_604_SP4_DIRECT",
+        "RECOVERY_MONSTER_V1",
+        "TYPE_B_PREDICTOR_V1",
+        "AI_DISAGREEMENT_ALPHA",
+        "EXTREME_EDGE",
+        "EDGE_PLUS_STACK",
+        "AI_SCAN",
+        "HIGH_EDGE_RUNNER",
+        "SHADOW_RUNNER",
+        "EDGE_ALPHA_4",
+        "TYPE_B_HUNTER",
+        "SHORT_BEAR_ALPHA",
+        "AI_60_65_ALPHA",
+        "URGENT_CHASE_ALPHA",
+        "CHASE_3PLUS_ALPHA",
+    )
+    RETIRED_PATHWAY_LANES = frozenset({
+        "EXTREME_EDGE", "EDGE_PLUS_STACK",
+        "COMBO_65_SP5_DIRECT", "COMBO_604_SP4_DIRECT",
+        "RECOVERY_MONSTER_V1", "TYPE_B_PREDICTOR_V1", "AI_DISAGREEMENT_ALPHA",
+    })
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
 BOT_VERSION = EXPECTED_BOT_VERSION
@@ -476,28 +502,9 @@ PATHWAY_LANE_STATUS = {
     "AI_60_65_ALPHA": "DATA_RETIRED",
     "URGENT_CHASE_ALPHA": "DATA_RETIRED",
     "CHASE_3PLUS_ALPHA": "DATA_RETIRED",
+    "AI_SCAN": "ACTIVE",
 }
-try:
-    from pathway_lane_roster import RETIRED_PATHWAY_LANES
-except ImportError:
-    RETIRED_PATHWAY_LANES = frozenset({
-        "EXTREME_EDGE", "EDGE_PLUS_STACK",
-        "COMBO_65_SP5_DIRECT", "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1", "TYPE_B_PREDICTOR_V1", "AI_DISAGREEMENT_ALPHA",
-    })
-BENCHMARK_LANES = ACTIVE_PATHWAY_LANES + (
-    "CONTINUOUS",
-    "HIGH_EDGE_RUNNER",
-    "EXTREME_EDGE",
-    "EDGE_PLUS_STACK",
-    "SHADOW_RUNNER",
-    "EDGE_ALPHA_4",
-    "TYPE_B_HUNTER",
-    "SHORT_BEAR_ALPHA",
-    "AI_60_65_ALPHA",
-    "URGENT_CHASE_ALPHA",
-    "CHASE_3PLUS_ALPHA",
-)
+BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
 ANALYZER_JSON_REPORT_FILES = (
@@ -547,6 +554,8 @@ ANALYZER_JSON_REPORT_FILES = (
     CHASE_THRESHOLD_REPORT_FILE,
     CHASE_DELAY_REPORT_FILE,
     EXIT_COMBINATIONS_REPORT_FILE,
+    REGIME_LEADERBOARD_REPORT_FILE,
+    ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
@@ -6919,6 +6928,7 @@ def run(interval_min=30, session_only=True):
         session = load_research_session()
         print_data_provenance_banner(session)
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
+        all_trades_unfiltered = trades.copy()
         dataset_counts = {
             "csv_trades": len(trades),
             "csv_blocked": len(blocked),
@@ -6953,7 +6963,10 @@ def run(interval_min=30, session_only=True):
             signal_outcome_analysis(signal_master)
             fill_distance_report()
             shadow_report = shadow_fill_outcome_matrix(trades, session=session, blocked=blocked)
-            benchmark_report = benchmark_vs_lanes_report(trades, session=session, blocked=blocked, shadow_report=shadow_report)
+            benchmark_report = benchmark_vs_lanes_report(
+                trades, session=session, blocked=blocked, shadow_report=shadow_report,
+                all_trades=all_trades_unfiltered,
+            )
             lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
             ai_funnel_report(trades=trades, session=session)
             pre_test_analytics_reports(
@@ -7062,7 +7075,10 @@ def run(interval_min=30, session_only=True):
 
         fill_distance_report()
         shadow_report = shadow_fill_outcome_matrix(trades, session=session, blocked=blocked)
-        benchmark_report = benchmark_vs_lanes_report(trades, session=session, blocked=blocked, shadow_report=shadow_report)
+        benchmark_report = benchmark_vs_lanes_report(
+            trades, session=session, blocked=blocked, shadow_report=shadow_report,
+            all_trades=all_trades_unfiltered,
+        )
         lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
         ai_funnel_report(trades=trades, session=session)
         pre_test_analytics_reports(
@@ -7476,6 +7492,52 @@ def _empty_lane_benchmark_metrics():
     }
 
 
+def _lane_fills_pnl_from_trades(trade_df, lane: str) -> tuple[int, float]:
+    """Real fills and booked PnL for one research_lane from a trades frame."""
+    if trade_df is None or trade_df.empty or not lane:
+        return 0, 0.0
+    if "research_lane" not in trade_df.columns:
+        return 0, 0.0
+    sub = trade_df[trade_df["research_lane"].astype(str).str.upper() == str(lane).upper()]
+    if sub.empty:
+        return 0, 0.0
+    if "trade_id" in sub.columns:
+        sub = sub.drop_duplicates(subset=["trade_id"], keep="last")
+    fills = len(sub)
+    pnl = round(float(pd.to_numeric(sub.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2)
+    return fills, pnl
+
+
+def _all_time_lane_metrics(all_trades, lane: str) -> dict:
+    """Full CSV history stats — shown when session has no activity on a paused lane."""
+    fills, pnl = _lane_fills_pnl_from_trades(all_trades, lane)
+    ev = round(pnl / fills, 2) if fills else 0.0
+    return {
+        "real_fills": fills,
+        "net_pnl_real": pnl,
+        "ev_usd": ev,
+    }
+
+
+def _ordered_lane_catalog(lanes_with_approves, trade_df=None) -> list:
+    """Every lane in ANALYZER_COMPARE_LANES plus any lane seen in data."""
+    lanes_from_trades = set()
+    if trade_df is not None and not trade_df.empty and "research_lane" in trade_df.columns:
+        lanes_from_trades = {
+            str(x).strip()
+            for x in trade_df["research_lane"].dropna().unique()
+            if str(x).strip() and str(x).strip() not in ("EXEC_5M", "UNKNOWN", "nan")
+        }
+    catalog = []
+    seen = set()
+    for ln in list(BENCHMARK_LANES) + sorted(lanes_with_approves or []) + sorted(lanes_from_trades):
+        if not ln or ln in seen or ln == "EXEC_5M":
+            continue
+        seen.add(ln)
+        catalog.append(ln)
+    return catalog
+
+
 def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
     if lane == BENCHMARK_LANE:
         return "benchmark baseline"
@@ -7495,7 +7557,7 @@ def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
     return "mixed vs benchmark"
 
 
-def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_report=None):
+def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_report=None, all_trades=None):
     """Compare research lanes vs CONTINUOUS benchmark within the same session."""
     if session is None:
         session = load_research_session()
@@ -7568,8 +7630,8 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
     lane_metrics = {}
     lanes_with_approves = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
-    lanes_ordered = [ln for ln in BENCHMARK_LANES if ln in lanes_with_approves]
-    lanes_ordered.extend(sorted(ln for ln in lanes_with_approves if ln not in lanes_ordered))
+    all_trade_df = all_trades if all_trades is not None else trade_df
+    lanes_ordered = _ordered_lane_catalog(lanes_with_approves, all_trade_df)
 
     for lane in lanes_ordered:
         if lane == "EXEC_5M":
@@ -7642,6 +7704,8 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "costly_blocks_usd": costly_blocks_usd,
             "good_blocks_saved_usd": good_blocks_saved_usd,
         }
+        if all_trade_df is not None:
+            lane_metrics[lane]["all_time"] = _all_time_lane_metrics(all_trade_df, lane)
 
     _inject_continuous_benchmark_lane(lane_metrics, lanes_ordered)
 
@@ -12309,10 +12373,13 @@ def lane_definition_report(trades=None, session=None, benchmark_report=None):
     for lane_key in BENCHMARK_LANES:
         spec = static.get(lane_key) or {}
         metrics = lanes_metrics.get(lane_key) or {}
+        all_time = metrics.get("all_time") or {}
         fills = int(metrics.get("real_fills") or metrics.get("fills") or 0)
         approves = int(metrics.get("approves") or 0)
         pnl = float(metrics.get("net_pnl_real") or metrics.get("net_pnl_usd") or 0)
         ev = float(metrics.get("per_approve_ev") or 0)
+        at_fills = int(all_time.get("real_fills") or 0)
+        at_pnl = float(all_time.get("net_pnl_real") or 0)
         rows.append({
             "lane": lane_key,
             "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
@@ -12325,6 +12392,8 @@ def lane_definition_report(trades=None, session=None, benchmark_report=None):
             "approves": approves,
             "pnl_usd": round(pnl, 2),
             "ev_per_approve": round(ev, 2),
+            "all_time_fills": at_fills,
+            "all_time_pnl_usd": round(at_pnl, 2),
             "role": spec.get("role"),
             "research_question": spec.get("research_question"),
         })
@@ -13245,10 +13314,16 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
             continue
         pathway_status = _pathway_lane_status(lane_key)
         m = lanes.get(lane_key) or {}
+        all_time = m.get("all_time") or {}
         fills = int(m.get("real_fills") or m.get("fills") or 0)
         approves = int(m.get("approves") or 0)
         pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or 0)
         ev = float(m.get("per_approve_ev") or 0)
+        at_fills = int(all_time.get("real_fills") or 0)
+        at_pnl = float(all_time.get("net_pnl_real") or 0)
+        hist_note = ""
+        if at_fills and (fills != at_fills or abs(pnl - at_pnl) > 0.01):
+            hist_note = f" · all-time: {at_fills} fills ${at_pnl:+.2f}"
         if pathway_status == "RETIRED":
             recommendations.append({
                 "lane": lane_key,
@@ -13258,8 +13333,10 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
                 "ev_per_approve": round(ev, 2),
                 "benchmark_ev": round(bench_ev, 2),
                 "pathway_status": pathway_status,
+                "all_time_fills": at_fills,
+                "all_time_pnl_usd": round(at_pnl, 2),
                 "recommendation": "RETIRED",
-                "reason": "Frozen — no active research budget; historical analytics only",
+                "reason": f"Paused — no new orders{hist_note}" if at_fills else "Frozen — no active research budget; historical analytics only",
             })
             continue
         if pathway_status == PATHWAY_STATUS_SHADOW_COLLECTING:
@@ -13271,11 +13348,41 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
                 "ev_per_approve": round(ev, 2),
                 "benchmark_ev": round(bench_ev, 2),
                 "pathway_status": pathway_status,
+                "all_time_fills": at_fills,
+                "all_time_pnl_usd": round(at_pnl, 2),
                 "recommendation": "COLLECTING",
-                "reason": "Shadow-only off-dashboard lane — simulated PnL, no live orders",
+                "reason": f"Shadow-only off-dashboard lane — simulated PnL, no live orders{hist_note}",
             })
             continue
-        if fills == 0 and approves == 0:
+        if fills == 0 and approves == 0 and at_fills == 0:
+            recommendations.append({
+                "lane": lane_key,
+                "trades": 0,
+                "approves": 0,
+                "pnl_usd": 0.0,
+                "ev_per_approve": 0.0,
+                "benchmark_ev": round(bench_ev, 2),
+                "pathway_status": pathway_status,
+                "all_time_fills": 0,
+                "all_time_pnl_usd": 0.0,
+                "recommendation": "NO_DATA",
+                "reason": "No session or historical fills in CSV for this lane",
+            })
+            continue
+        if fills == 0 and approves == 0 and at_fills > 0:
+            recommendations.append({
+                "lane": lane_key,
+                "trades": 0,
+                "approves": 0,
+                "pnl_usd": 0.0,
+                "ev_per_approve": 0.0,
+                "benchmark_ev": round(bench_ev, 2),
+                "pathway_status": pathway_status,
+                "all_time_fills": at_fills,
+                "all_time_pnl_usd": round(at_pnl, 2),
+                "recommendation": "HISTORICAL_ONLY",
+                "reason": f"No session activity — all-time: {at_fills} fills ${at_pnl:+.2f}",
+            })
             continue
         if pathway_status == "PROBATION":
             rec = "PROBATION"
@@ -13312,8 +13419,10 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
             "ev_per_approve": round(ev, 2),
             "benchmark_ev": round(bench_ev, 2),
             "pathway_status": pathway_status,
+            "all_time_fills": at_fills,
+            "all_time_pnl_usd": round(at_pnl, 2),
             "recommendation": rec,
-            "reason": reason,
+            "reason": reason + hist_note if hist_note and hist_note not in reason else reason,
         })
 
     cont_fills = int(bench.get("real_fills") or bench.get("fills") or 0)
@@ -13353,6 +13462,225 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
         print(f"  ✅ Wrote {LANE_RETIREMENT_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {LANE_RETIREMENT_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def _adx_bucket_val(v) -> str:
+    try:
+        from research_trade_accumulator import _adx_bucket as _ab
+        return _ab(v)
+    except ImportError:
+        pass
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    if x < 18:
+        return "adx_low"
+    if x < 30:
+        return "adx_mid"
+    return "adx_high"
+
+
+def _trades_for_regime_analysis(trades=None, session=None):
+    """Prefer fresh accumulator DB (v9.83+ epoch) over session CSV slice."""
+    try:
+        from research_trade_accumulator import load_accumulated_trades_df
+
+        acc = load_accumulated_trades_df()
+        if acc is not None and not acc.empty:
+            return acc
+    except Exception:
+        pass
+    return trades
+
+
+def _regime_tags_from_row(row) -> dict:
+    try:
+        from research_trade_accumulator import compute_regime_tags
+
+        if hasattr(row, "to_dict"):
+            row = row.to_dict()
+        return compute_regime_tags(row or {})
+    except ImportError:
+        pass
+    ts = row.get("close_ts") or row.get("ts") or row.get("entry_ts") or ""
+    weekend = "unknown"
+    try:
+        dt = pd.Timestamp(ts)
+        if pd.notna(dt):
+            weekend = "weekend" if dt.dayofweek >= 5 else "weekday"
+    except Exception:
+        pass
+    adx = _adx_bucket_val(row.get("adx_at_entry") or row.get("adx"))
+    spread = str(row.get("directional_spread_bucket") or "unk")
+    key = f"{weekend}|{adx}|spread_{spread}"
+    return {"regime_key": key, "day_type": weekend, "adx": adx, "spread_bucket": spread}
+
+
+def _regime_key_from_row(row) -> str:
+    return _regime_tags_from_row(row).get("regime_key", "unknown")
+
+
+def regime_leaderboard_report(trades=None, session=None, min_trades=3):
+    """Regime × lane leaderboard — which lane wins in which environment (Phase 1, no auto-switch)."""
+    if session is None:
+        session = load_research_session()
+    trades = _trades_for_regime_analysis(trades=trades, session=session)
+    scope = _shadow_scope_label(session)
+    print(f"\n=== REGIME LEADERBOARD — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
+    if trades is None or trades.empty:
+        payload = {
+            "schema": "regime_leaderboard_v1",
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "cells": [],
+            "regimes": [],
+            "note": "No trades — collect data with 4 live tiles",
+        }
+        with open(REGIME_LEADERBOARD_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
+
+    work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
+    if "research_lane" not in work.columns:
+        work["research_lane"] = "UNKNOWN"
+    tag_rows = work.apply(_regime_tags_from_row, axis=1)
+    work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
+    for dim in ("day_type", "session", "adx", "volatility", "funding", "liquidity"):
+        work[dim] = tag_rows.apply(lambda t, d=dim: t.get(d))
+
+    cells = []
+    by_regime_lane = {}
+    for (regime, lane), sub in work.groupby(["regime_key", work["research_lane"].astype(str).str.upper()]):
+        stats = _combo_stats_from_df(sub)
+        if stats["trades"] < 1:
+            continue
+        cell = {"regime": regime, "lane": lane, **stats}
+        cells.append(cell)
+        by_regime_lane.setdefault(regime, []).append(cell)
+
+    regimes = []
+    for regime, lane_rows in sorted(by_regime_lane.items()):
+        eligible = [r for r in lane_rows if r["trades"] >= min_trades]
+        ranked = sorted(eligible or lane_rows, key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
+        best = ranked[0] if ranked else None
+        second = ranked[1] if len(ranked) > 1 else None
+        regimes.append({
+            "regime": regime,
+            "total_trades": sum(r["trades"] for r in lane_rows),
+            "lanes_observed": len(lane_rows),
+            "best_lane": best["lane"] if best else None,
+            "best_ev_usd": best["ev_usd"] if best else None,
+            "best_pnl_usd": best["pnl_usd"] if best else None,
+            "second_lane": second["lane"] if second else None,
+            "conclusion_allowed": bool(best and best["trades"] >= min_trades),
+            "lanes": sorted(lane_rows, key=lambda x: -x["ev_usd"]),
+        })
+        if best:
+            print(
+                f"  {regime}: best={best['lane']} EV=${best['ev_usd']:+.2f} "
+                f"n={best['trades']} {PIPELINE_ENFORCEMENT_TAG}"
+            )
+
+    payload = {
+        "schema": "regime_leaderboard_v2",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "session_scope": scope,
+        "data_source": "research_accumulator_db" if len(work) else "session_csv",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "min_trades_per_cell": min_trades,
+        "target_trades_for_roster": 200,
+        "total_trades": len(work),
+        "regime_dimensions": ["day_type", "session", "adx", "volatility", "funding", "liquidity"],
+        "cells": cells,
+        "regimes": regimes,
+        "usage_note": "Recommend-only — do not auto-switch lanes until ≥20 trades per regime cell (~200 total tagged)",
+    }
+    try:
+        with open(REGIME_LEADERBOARD_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  ✅ Wrote {REGIME_LEADERBOARD_REPORT_FILE} ({len(regimes)} regimes) {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as e:
+        print(f"  ⚠️ Could not write {REGIME_LEADERBOARD_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def roster_policy_report(trades=None, session=None, regime_payload=None, benchmark_report=None):
+    """Recommend lane weights from regime leaderboard — human approval required before bot applies."""
+    if session is None:
+        session = load_research_session()
+    trades = _trades_for_regime_analysis(trades=trades, session=session)
+    if regime_payload is None:
+        regime_payload = _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {}
+    regimes = regime_payload.get("regimes") or []
+    min_n = int(regime_payload.get("min_trades_per_cell") or 3)
+
+    # Detect current regime from latest trade timestamp
+    current_regime = "unknown"
+    if trades is not None and not trades.empty:
+        sort_cols = [c for c in ("close_ts", "ts") if c in trades.columns]
+        last = trades.sort_values(by=sort_cols[0] if sort_cols else trades.columns[0], ascending=False).iloc[0]
+        current_regime = _regime_key_from_row(last)
+
+    match = next((r for r in regimes if r.get("regime") == current_regime and r.get("conclusion_allowed")), None)
+    if not match and regimes:
+        match = max(
+            (r for r in regimes if r.get("conclusion_allowed")),
+            key=lambda r: r.get("total_trades") or 0,
+            default=None,
+        )
+
+    weights = {ln: 0.25 for ln in BENCHMARK_LANES if ln in ACTIVE_PATHWAY_LANES or ln == BENCHMARK_LANE}
+    weights[BENCHMARK_LANE] = 0.5
+    action = "COLLECT_ONLY"
+    reason = "Insufficient regime sample — keep all tiles collecting"
+    confidence = "LOW"
+
+    if match and match.get("best_lane"):
+        best = match["best_lane"]
+        for k in list(weights.keys()):
+            weights[k] = 0.1
+        weights[best] = 0.7
+        if match.get("second_lane") in weights:
+            weights[match["second_lane"]] = 0.2
+        weights[BENCHMARK_LANE] = 0.0 if best != BENCHMARK_LANE else 0.5
+        action = "RECOMMEND_WEIGHTS"
+        reason = (
+            f"Regime {match['regime']}: favor {best} "
+            f"(EV ${match.get('best_ev_usd'):+.2f}, n={next((c['trades'] for c in match.get('lanes') or [] if c.get('lane')==best), 0)})"
+        )
+        confidence = "MODERATE" if (match.get("total_trades") or 0) >= min_n * 2 else "LOW"
+
+    total_tagged = int(regime_payload.get("total_trades") or 0)
+    target = int(regime_payload.get("target_trades_for_roster") or 200)
+    progress_pct = round(100.0 * min(total_tagged, target) / target, 1) if target else 0.0
+
+    payload = {
+        "schema": "roster_policy_v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "current_regime": current_regime,
+        "action": action,
+        "confidence": confidence,
+        "reason": reason,
+        "tile_weights": weights,
+        "auto_apply": False,
+        "requires_human_approval": True,
+        "collection_progress": {
+            "accumulated_trades": total_tagged,
+            "target_trades": target,
+            "progress_pct": progress_pct,
+            "ready_for_roster_decision": total_tagged >= target,
+        },
+        "phase": "COLLECT" if total_tagged < target else "RECOMMEND_REVIEW",
+    }
+    try:
+        with open(ROSTER_POLICY_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  ✅ Wrote {ROSTER_POLICY_FILE} action={action} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as e:
+        print(f"  ⚠️ Could not write {ROSTER_POLICY_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
 
 
@@ -14015,6 +14343,8 @@ def pre_test_analytics_reports(
         print(f"  ⚠️ Pathway validation skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     lane_definition_report(trades=trades, session=session, benchmark_report=benchmark_report)
     lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
+    regime_payload = regime_leaderboard_report(trades=trades, session=session)
+    roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
     confidence_band_cross_report(trades=trades, session=session, benchmark_report=benchmark_report)
     edge_validation_report(trades=trades, session=session)
@@ -15390,28 +15720,32 @@ def write_analysis_dashboard_html(payload):
 
 
 def generate_all_data_companion_reports(dataset_counts=None, session_trade_count=0):
-    """When SESSION has 0 trades but CSV has history, write reports/all_data/ for dashboard."""
+    """Always write reports/all_data/ from full CSV — dashboard uses this for paused/retired lanes."""
     dataset_counts = dataset_counts or {}
     csv_n = int(dataset_counts.get("csv_trades") or 0)
-    if session_trade_count > 0 or csv_n <= 0:
+    if csv_n <= 0:
         return
     sub = ALL_DATA_REPORTS_SUBDIR
     os.makedirs(sub, exist_ok=True)
     print(
-        f"\n=== ALL-DATA COMPANION — SESSION empty ({csv_n} CSV rows pre-session) "
+        f"\n=== ALL-DATA COMPANION — full CSV ({csv_n} rows; session fills={session_trade_count}) "
         f"→ {sub}/ {PIPELINE_ENFORCEMENT_TAG} ==="
     )
     _set_analyzer_report_subdir(sub)
     try:
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
-        all_session = load_research_session()
-        shadow_report = shadow_fill_outcome_matrix(trades, session=all_session, blocked=blocked)
-        benchmark_vs_lanes_report(trades, session=all_session, blocked=blocked, shadow_report=shadow_report)
-        chase_payload = chase_attribution_report(trades=trades, session=all_session)
-        chase_effectiveness_report(trades=trades, session=all_session, chase_payload=chase_payload)
-        chase_threshold_report(trades=trades, session=all_session)
-        top_combinations_report(trades=trades, session=all_session)
-        exit_combinations_report(trades=trades, session=all_session)
+        no_filter_session = {}
+        shadow_report = shadow_fill_outcome_matrix(trades, session=no_filter_session, blocked=blocked)
+        benchmark_report = benchmark_vs_lanes_report(
+            trades, session=no_filter_session, blocked=blocked, shadow_report=shadow_report, all_trades=trades,
+        )
+        chase_payload = chase_attribution_report(trades=trades, session=no_filter_session)
+        chase_effectiveness_report(trades=trades, session=no_filter_session, chase_payload=chase_payload)
+        chase_threshold_report(trades=trades, session=no_filter_session)
+        top_combinations_report(trades=trades, session=no_filter_session)
+        exit_combinations_report(trades=trades, session=no_filter_session)
+        lane_definition_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
+        lane_retirement_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
         print(f"  ✅ ALL-DATA companion reports → {sub}/ {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as exc:
         print(f"  ⚠️ ALL-DATA companion failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -15459,6 +15793,16 @@ def finalize_analyzer_outputs(
     except Exception:
         pass
     write_report_manifest(payload)
+    try:
+        from research_trade_accumulator import sync_accumulator_from_analyzer_run
+
+        acc = sync_accumulator_from_analyzer_run(session=session, trades=trades)
+        print(
+            f"  ✅ Trade accumulator: +{acc.get('new', 0)} new → {acc.get('total', 0)} total "
+            f"(epoch {str(acc.get('epoch', ''))[:19]}) {PIPELINE_ENFORCEMENT_TAG}"
+        )
+    except Exception as exc:
+        print(f"  ⚠️ Trade accumulator sync failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     if str(data_scope).lower() == "session":
         stc = 0
         if trades is not None and not trades.empty:
@@ -15484,14 +15828,9 @@ def finalize_analyzer_outputs(
 
 if __name__ == "__main__":
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _data_dir = os.path.dirname(_script_dir)
-    if os.path.isfile(os.path.join(_data_dir, TRADES_FILE)):
-        _work_dir = _data_dir
-    else:
-        _work_dir = _script_dir
-    if os.path.abspath(os.getcwd()) != _work_dir:
-        print(f"  ℹ️ Switching cwd → {_work_dir}")
-        os.chdir(_work_dir)
+    if os.path.abspath(os.getcwd()) != _script_dir:
+        print(f"  ℹ️ Switching cwd → {_script_dir}")
+        os.chdir(_script_dir)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()

@@ -56,3 +56,20 @@ ROSTER_NOTES = (
     "Retired: Direct combos, Recovery Monster, Type-B strict, AI-disagreement alpha, edge stacks. "
     "Shadow collecting paused."
 )
+
+# Every lane still defined in code — analyzer compares all of these (session + full CSV).
+# Remove a lane from this tuple only when deleting it from the bot scripts.
+ANALYZER_COMPARE_LANES = (
+    RESEARCH_LANE_COMBO_65_SP5_CHASE,
+    RESEARCH_LANE_COMBO_604_SP4_CHASE,
+    COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
+    RESEARCH_LANE_COMBO_65_SP5_DIRECT,
+    RESEARCH_LANE_COMBO_604_SP4_DIRECT,
+    RESEARCH_LANE_RECOVERY_MONSTER_V1,
+    RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
+    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA,
+    RESEARCH_LANE_EXTREME_EDGE,
+    RESEARCH_LANE_EDGE_PLUS_STACK,
+    RESEARCH_LANE_AI_SCAN,
+) + tuple(SHADOW_COLLECTING_LANES)
