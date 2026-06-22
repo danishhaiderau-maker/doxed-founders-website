@@ -30,6 +30,7 @@ function Read-TunnelUrl {
   if ($null -eq $raw) { return $null }
   $t = "$raw".Trim()
   if (-not $t) { return $null }
+  if ($t -match 'bot\.doxxedcrypto\.digital' -and -not $cred) { return $null }
   return $t
 }
 
