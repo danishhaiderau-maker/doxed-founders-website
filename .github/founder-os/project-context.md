@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Remove Binance fee-stress panel from bot dashboard and persist on research sync.
 
 ## Last Activity
 
