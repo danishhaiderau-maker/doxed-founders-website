@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix bot bridge health detection and improve Agent Hub reasoning UX.
+Fix command center status dots and visible Start everything windows.
 
 ## Last Activity
 
