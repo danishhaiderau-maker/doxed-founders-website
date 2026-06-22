@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix relay sim UI clutter, add analyzer :9001 status, faster sim polling
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
