@@ -48,7 +48,7 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
     analyzer: {
       ...raw.analyzer,
       online: analyzerOnline || analyzerProbe,
-      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/health',
+      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/',
     },
     tunnel: {
       ...raw.tunnel,
@@ -213,6 +213,25 @@ export function AgentAdminShowcaseControl({
     setExecBusy(true);
     setMsg(null);
     try {
+      if (status?.bot?.online) {
+        const path = stopped ? '/cmd/resume-trading' : '/cmd/pause-trading';
+        const localRes = await fetch(`${LAUNCHER}${path}`, { signal: AbortSignal.timeout(30000) });
+        const localJson = (await localRes.json()) as { ok?: boolean; message?: string; error?: string };
+        if (localJson.ok) {
+          setMsg(
+            localJson.message ??
+              (stopped ? 'Local bot resumed (site mirror not required).' : 'Local bot paused.'),
+          );
+          onUpdated?.();
+          setTimeout(() => onUpdated?.(), 5000);
+          return;
+        }
+        if (localJson.error) {
+          setMsg(localJson.error);
+          return;
+        }
+      }
+
       const res = stopped ? await resumeTradingAgent(token) : await pauseTradingAgent(token);
       const message =
         typeof res.message === 'string'
@@ -322,12 +341,12 @@ export function AgentAdminShowcaseControl({
           Bot dashboard →
         </a>
         <a
-          href="http://127.0.0.1:9001/health"
+          href="http://127.0.0.1:9001/"
           target="_blank"
           rel="noreferrer"
           className="text-violet-300 hover:underline"
         >
-          Analyzer status :9001 →
+          Analyzer dashboard :9001 →
         </a>
         <a
           href="http://127.0.0.1:7800/api/export_csv"

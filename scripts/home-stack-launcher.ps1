@@ -207,9 +207,24 @@ function Start-DetachedPs1 {
 
 function Get-TunnelUrl {
   if (Test-Path $tunnelUrlFile) {
-    return (Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim()
+    $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+    if ($null -ne $raw -and "$raw".Trim()) {
+      return "$raw".Trim()
+    }
   }
   return $null
+}
+
+function Start-AnalyzerDashboard {
+  if (Test-PortOpen $AnalyzerPort) {
+    $killed = @(Stop-ListenPort $AnalyzerPort)
+    if ($killed.Count -gt 0) { Start-Sleep -Milliseconds 400 }
+  }
+  $healthScript = Join-Path $scriptDir "analyzer-health-server.py"
+  if (-not (Test-Path $healthScript)) { return $false }
+  Start-Process python -ArgumentList $healthScript -WindowStyle Hidden -WorkingDirectory $repoRoot | Out-Null
+  Start-Sleep -Milliseconds 900
+  return (Test-PortOpen $AnalyzerPort)
 }
 
 function Get-FullStatus {
@@ -234,9 +249,9 @@ function Get-FullStatus {
     }
     analyzer = @{
       online = $analyzerRunning
-      dashboard = "http://127.0.0.1:$AnalyzerPort/health"
+      dashboard = "http://127.0.0.1:$AnalyzerPort/"
       lan = $agentDir
-      note = "Research loop logs in Doxed Analyzer window · :9001 = status ping only · KPIs on bot :7800/api/state"
+      note = "Research loop logs in Doxed Analyzer window · :9001 = live KPI dashboard · bot KPIs also on :7800/api/state"
     }
     tunnel = @{
       url = $tunnelUrl
@@ -264,6 +279,10 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         $messages.Add("[2/4] Analyzer console opened (30-min research loop)")
       } else {
         $messages.Add("[2/4] Analyzer already running")
+      }
+
+      if (Start-AnalyzerDashboard) {
+        $messages.Add("[2b] Analyzer dashboard started on http://127.0.0.1:$AnalyzerPort/")
       }
 
       $tunnelUrl = Get-TunnelUrl
@@ -297,14 +316,28 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Bot window opened on :$BotPort" }
     }
     "start-analyzer" {
-      if (Test-AnalyzerRunning) {
-        return @{ ok = $true; message = "Analyzer already running (python research loop)." }
+      $started = $false
+      if (-not (Test-AnalyzerRunning)) {
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer"
+        $started = $true
       }
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer"
-      return @{
-        ok = $true
-        message = "Analyzer console opened from $agentDir (reads bot CSVs there)."
+      if (Start-AnalyzerDashboard) {
+        return @{
+          ok = $true
+          message = if ($started) {
+            "Analyzer console + :9001 dashboard started."
+          } else {
+            "Analyzer loop already running — started :9001 dashboard."
+          }
+        }
       }
+      if ($started) {
+        return @{
+          ok = $true
+          message = "Analyzer console opened from $agentDir (reads bot CSVs there)."
+        }
+      }
+      return @{ ok = $true; message = "Analyzer already running (python research loop)." }
     }
     "start-analyzer-once" {
       Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)"
@@ -328,6 +361,28 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
       Start-DetachedPs1 (Join-Path $scriptDir "wire-home-bot-background.ps1") @("-Url", $url) -WindowTitle "Doxed Wire to Site"
       return @{ ok = $true; message = "Wiring $url to Neon + Railway (see wire window / .home-wire.log)" }
+    }
+    "resume-trading" {
+      if (-not (Test-PortOpen $BotPort)) {
+        return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
+      }
+      try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/resume" -Method POST -UseBasicParsing -TimeoutSec 30
+        return @{ ok = $true; message = "Local bot execution resumed (works even when site mirror is offline).`n$($resp.Content)" }
+      } catch {
+        return @{ ok = $false; error = "Resume failed: $($_.Exception.Message)" }
+      }
+    }
+    "pause-trading" {
+      if (-not (Test-PortOpen $BotPort)) {
+        return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
+      }
+      try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/pause" -Method POST -UseBasicParsing -TimeoutSec 30
+        return @{ ok = $true; message = "Local bot execution paused.`n$($resp.Content)" }
+      } catch {
+        return @{ ok = $false; error = "Pause failed: $($_.Exception.Message)" }
+      }
     }
     "wipe-research" {
       if (-not (Test-PortOpen $BotPort)) {
@@ -404,6 +459,8 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       "^/cmd/start-tunnel$" { Invoke-HomeCommand "start-tunnel" $tunnelParam }
       "^/cmd/wire$" { Invoke-HomeCommand "wire" $tunnelParam }
       "^/cmd/wipe-research$" { Invoke-HomeCommand "wipe-research" $tunnelParam }
+      "^/cmd/resume-trading$" { Invoke-HomeCommand "resume-trading" $tunnelParam }
+      "^/cmd/pause-trading$" { Invoke-HomeCommand "pause-trading" $tunnelParam }
       "^/cmd/stop-bot$" { Invoke-HomeCommand "stop-bot" $tunnelParam }
       "^/cmd/stop-analyzer$" { Invoke-HomeCommand "stop-analyzer" $tunnelParam }
       "^/cmd/stop-all$" { Invoke-HomeCommand "stop-all" $tunnelParam }
