@@ -1,4 +1,4 @@
-# Background worker for Start everything (opened by bridge so :7810 returns instantly).
+# Background worker for Start everything (no visible window).
 param(
   [int]$BotPort = 7800,
   [int]$AnalyzerPort = 9001
@@ -10,22 +10,18 @@ $ErrorActionPreference = "Continue"
 $messages = [System.Collections.Generic.List[string]]::new()
 
 if (-not (Test-BotRunning)) {
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800"
-  $messages.Add("[1/4] Bot window opened on :$BotPort")
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Minimized
+  $messages.Add("[1/3] Bot started minimized on :$BotPort")
   Start-Sleep -Seconds 4
 } else {
-  $messages.Add("[1/4] Bot already online on :$BotPort")
+  $messages.Add("[1/3] Bot already online on :$BotPort")
 }
 
 if (-not (Test-AnalyzerRunning)) {
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer"
-  $messages.Add("[2/4] Analyzer console opened")
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Minimized
+  $messages.Add("[2/3] Analyzer started minimized")
 } else {
-  $messages.Add("[2/4] Analyzer already running")
-}
-
-if (Start-AnalyzerDashboard) {
-  $messages.Add("[2b] Analyzer dashboard on http://127.0.0.1:$AnalyzerPort/")
+  $messages.Add("[2/3] Analyzer already running")
 }
 
 $tunnelUrl = Get-TunnelUrl
@@ -35,30 +31,26 @@ if (-not $tunnelOk) {
     Stop-Cloudflared | Out-Null
     Start-Sleep -Seconds 2
   }
-  Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -WindowTitle "Doxed Tunnel Restart"
+  Start-HiddenPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort")
   if (Use-NamedTunnel) {
-    $messages.Add("[3/4] Named tunnel restart queued (bot.doxxedcrypto.digital)")
+    $messages.Add("[3/3] Named tunnel restart (hidden)")
   } else {
-    $messages.Add("[3/4] Quick tunnel restart queued (watch Doxed Cloudflare Tunnel window)")
+    $messages.Add("[3/3] Quick tunnel restart (hidden) - URL in .home-tunnel-url")
   }
 } else {
-  $messages.Add("[3/4] Tunnel already live: $tunnelUrl")
+  $messages.Add("[3/3] Tunnel already live: $tunnelUrl")
 }
 
-Start-DetachedPs1 (Join-Path $scriptDir "home-stack-control-panel.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Stack Control Panel"
-$messages.Add("[4/4] Control panel opened")
-
 if (-not (Test-HomeScriptRunning "auto-wire-after-tunnel.ps1")) {
-  Start-DetachedPs1 (Join-Path $scriptDir "auto-wire-after-tunnel.ps1") @() -WindowTitle "Doxed Auto-Wire"
-  $messages.Add("Auto-wire started")
+  Start-HiddenPs1 (Join-Path $scriptDir "auto-wire-after-tunnel.ps1") @("-Quiet")
+  $messages.Add("Auto-wire (hidden)")
 }
 
 if (-not (Test-HomeScriptRunning "tunnel-watchdog.ps1")) {
-  Start-DetachedPs1 (Join-Path $scriptDir "tunnel-watchdog.ps1") @("-BotPort", "$BotPort") -WindowTitle "Doxed Tunnel Watchdog"
-  $messages.Add("Tunnel watchdog started")
+  Start-HiddenPs1 (Join-Path $scriptDir "tunnel-watchdog.ps1") @("-BotPort", "$BotPort")
+  $messages.Add("Watchdog (hidden)")
 }
 
 $log = Join-Path $repoRoot ".home-start-all.log"
 $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), ($messages -join " | ")
 Add-Content -Path $log -Value $line
-Write-Host $line

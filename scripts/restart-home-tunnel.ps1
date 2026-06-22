@@ -14,21 +14,14 @@ $useNamed = (Test-Path $namedFlag) -and $null -ne $cred
 Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
+$argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File")
 if ($useNamed) {
   Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
-  Start-Process -FilePath "cmd.exe" -ArgumentList @(
-    "/c", "start", "`"Doxed Cloudflare Tunnel (stable)`"", "powershell.exe",
-    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
-    "-File", (Join-Path $scriptDir "run-named-bot-tunnel.ps1"),
-    "-Port", "$Port"
-  ) -WorkingDirectory $repoRoot -WindowStyle Normal
+  $argList += (Join-Path $scriptDir "run-named-bot-tunnel.ps1"), "-Port", "$Port"
 } else {
   if (Test-Path $tunnelUrlFile) { Remove-Item $tunnelUrlFile -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Seconds 1
-  Start-Process -FilePath "cmd.exe" -ArgumentList @(
-    "/c", "start", "`"Doxed Cloudflare Tunnel`"", "powershell.exe",
-    "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass",
-    "-File", (Join-Path $scriptDir "setup-home-bot-tunnel.ps1"),
-    "-Quick", "-Port", "$Port"
-  ) -WorkingDirectory $repoRoot -WindowStyle Normal
+  $argList += (Join-Path $scriptDir "setup-home-bot-tunnel.ps1"), "-Quick", "-Port", "$Port"
 }
+
+Start-Process -FilePath "powershell.exe" -ArgumentList (@("-WindowStyle", "Hidden", "-NoExit") + $argList) -WorkingDirectory $repoRoot -WindowStyle Hidden

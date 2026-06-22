@@ -3,18 +3,18 @@ param(
   [string]$Url
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-Write-Host "Wiring $Url to Neon + Railway..."
+$logFile = Join-Path $repoRoot ".home-wire.log"
+$line = "{0} Wiring {1} to Neon + Railway..." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Url
+Add-Content -Path $logFile -Value $line
 Push-Location $repoRoot
 try {
-  & npm.cmd run wire:home-bot -- $Url 2>&1 | Tee-Object -FilePath (Join-Path $repoRoot ".home-wire.log")
-  Write-Host "Done. Log: $repoRoot\.home-wire.log"
+  & npm.cmd run wire:home-bot -- $Url 2>&1 | Tee-Object -FilePath $logFile -Append
+  Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Done."
 } catch {
-  Write-Host "Wire failed: $_"
+  Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Wire failed: $_"
 } finally {
   Pop-Location
 }
-Write-Host "Press Enter to close."
-Read-Host | Out-Null

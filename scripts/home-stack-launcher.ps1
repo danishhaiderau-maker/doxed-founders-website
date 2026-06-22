@@ -86,13 +86,13 @@ function Get-FullStatus {
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all" {
-      Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -WindowTitle "Doxed Stack Start"
+      Start-HiddenPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort")
       return @{
         ok = $true
         message = @(
-          "Start everything queued (bridge stays responsive)."
-          "Windows open in ~10s - refresh status in 30s."
-          "Log: .home-start-all.log"
+          "Start everything queued (no popup windows)."
+          "Bot/analyzer minimized on taskbar; tunnel/watchdog run hidden."
+          "Status: Agent Hub panel or .home-start-all.log"
         ) -join "`n"
       }
     }
@@ -129,7 +129,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
-      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -WindowTitle "Doxed Tunnel Restart"
+      Start-HiddenPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort")
       if (Use-NamedTunnel) {
         return @{ ok = $true; message = "Named tunnel restart queued - stable URL https://bot.doxxedcrypto.digital" }
       }
@@ -149,7 +149,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       if (-not $url) {
         return @{ ok = $false; error = "No tunnel URL yet. Click Start everything or Start tunnel first." }
       }
-      Start-DetachedPs1 (Join-Path $scriptDir "wire-home-bot-background.ps1") @("-Url", $url) -WindowTitle "Doxed Wire to Site"
+      Start-HiddenPs1 (Join-Path $scriptDir "wire-home-bot-background.ps1") @("-Url", $url)
       return @{ ok = $true; message = "Wiring $url to Neon + Railway (see wire window / .home-wire.log)" }
     }
     "resume-trading" {

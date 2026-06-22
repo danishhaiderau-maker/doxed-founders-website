@@ -173,18 +173,30 @@ function Test-BotRunning {
   return [bool]$hit
 }
 
+function Start-HiddenPs1 {
+  param(
+    [string]$ScriptPath,
+    [string[]]$ExtraArgs = @()
+  )
+  if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  $args = @("-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
+  Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $repoRoot -WindowStyle Hidden
+}
+
 function Start-DetachedPs1 {
   param(
     [string]$ScriptPath,
     [string[]]$ExtraArgs = @(),
     [switch]$NoExit,
-    [string]$WindowTitle = "Doxed Home Stack"
+    [string]$WindowTitle = "Doxed Home Stack",
+    [ValidateSet("Minimized", "Normal")]
+    [string]$Show = "Minimized"
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
-  $psLine = "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-  foreach ($a in $ExtraArgs) { $psLine += " `"$a`"" }
-  $cmdArgs = @("/c", "start", "`"$WindowTitle`"", "powershell.exe", $psLine)
-  Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WorkingDirectory $repoRoot -WindowStyle Normal
+  $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
+  if ($NoExit) { $argList = @("-NoExit") + $argList }
+  $winStyle = if ($Show -eq "Minimized") { "Minimized" } else { "Normal" }
+  Start-Process -FilePath "powershell.exe" -ArgumentList $argList -WorkingDirectory $repoRoot -WindowStyle $winStyle
 }
 
 function Get-TunnelUrl {
