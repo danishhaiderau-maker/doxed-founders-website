@@ -198,13 +198,15 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     "stop-bot" {
       $portKilled = @(Stop-ListenPort $BotPort)
       $pyKilled = @(Stop-PythonMatching "btc_conservative_agent")
-      Close-HomeStackWindows | Out-Null
+      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7800" 2>$null | Out-Null
       return @{ ok = $true; message = "Stopped bot (port:$($portKilled.Count) python:$($pyKilled.Count))." }
     }
     "stop-analyzer" {
       $pyKilled = @(Stop-PythonMatching "analyzer_research_engine")
-      Close-HomeStackWindows | Out-Null
-      return @{ ok = $true; message = "Stopped analyzer (python:$($pyKilled.Count))." }
+      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer" 2>$null | Out-Null
+      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer (once)" 2>$null | Out-Null
+      $portKilled = @(Stop-ListenPort $AnalyzerPort)
+      return @{ ok = $true; message = "Stopped analyzer (python:$($pyKilled.Count) port:$($portKilled.Count))." }
     }
     "stop-all" {
       $result = Stop-AllHomeStack

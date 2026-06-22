@@ -277,6 +277,28 @@ SETUP_LOG_FILE = "setup_log_3factor.csv"
 CANDLES_FILE = "candles_3factor.csv"
 SIGNAL_PERSIST_FILE = "signal_persist.log"
 NEAR_EDGE_FILE = "near_edge.log"
+
+
+def _bot_data_root() -> str:
+    """Bot CSV/JSONL live in agent root; analyzer cwd is research/."""
+    explicit = os.getenv("BTC_AGENT_DATA_DIR", "").strip()
+    if explicit and os.path.isdir(explicit):
+        return explicit
+    here = os.path.abspath(os.path.dirname(__file__) or os.getcwd())
+    parent = os.path.dirname(here)
+    if os.path.isfile(os.path.join(parent, TRADES_FILE)):
+        return parent
+    return here
+
+
+def _resolve_data_path(filepath: str) -> str:
+    if os.path.isabs(filepath) or os.path.dirname(filepath):
+        return filepath
+    root = _bot_data_root()
+    candidate = os.path.join(root, filepath)
+    if os.path.exists(candidate):
+        return candidate
+    return filepath
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
 # Single source: combo_pathway_config (bot + dashboard import the same contract).
@@ -1066,6 +1088,7 @@ def safe_float(x):
         return np.nan
 
 def robust_read_csv(filepath, name="file"):
+    filepath = _resolve_data_path(filepath)
     if not os.path.exists(filepath):
         print(f"⚠️ {name} not found - pipeline stage incomplete {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()

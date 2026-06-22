@@ -12,7 +12,7 @@ $messages = [System.Collections.Generic.List[string]]::new()
 if (-not (Test-BotRunning)) {
   Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Normal
   $messages.Add("[1/3] Bot window opened on :$BotPort")
-  Start-Sleep -Seconds 4
+  Start-Sleep -Seconds 8
 } else {
   $messages.Add("[1/3] Bot already online on :$BotPort")
 }
@@ -20,14 +20,25 @@ if (-not (Test-BotRunning)) {
 if (-not (Test-AnalyzerRunning)) {
   Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Normal
   $messages.Add("[2/3] Analyzer window opened")
+  Start-Sleep -Seconds 8
 } else {
   $messages.Add("[2/3] Analyzer already running")
 }
 
 $tunnelUrl = Get-TunnelUrl
-$tunnelOk = Test-TunnelLiveCached $tunnelUrl
-if (-not $tunnelOk) {
-  if (@(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0) {
+$cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+# Named tunnel: never kill a running cloudflared on start-all (watchdog handles recovery).
+# Killing cloudflared here caused public URL flapping and bot "online then offline" on Agent Hub.
+if ($cfRunning -and (Use-NamedTunnel)) {
+  if (-not $tunnelUrl) {
+    Set-Content -Path (Join-Path $repoRoot ".home-tunnel-url") -Value "https://bot.doxxedcrypto.digital" -NoNewline
+    $tunnelUrl = "https://bot.doxxedcrypto.digital"
+  }
+  $messages.Add("[3/3] Named tunnel already running - $tunnelUrl")
+} elseif ($cfRunning -and (Test-TunnelLiveCached $tunnelUrl)) {
+  $messages.Add("[3/3] Tunnel already live: $tunnelUrl")
+} else {
+  if ($cfRunning) {
     Stop-Cloudflared | Out-Null
     Start-Sleep -Seconds 2
   }
@@ -37,8 +48,6 @@ if (-not $tunnelOk) {
   } else {
     $messages.Add("[3/3] Quick tunnel window opened - URL in .home-tunnel-url")
   }
-} else {
-  $messages.Add("[3/3] Tunnel already live: $tunnelUrl")
 }
 
 if (-not (Test-HomeScriptRunning "auto-wire-after-tunnel.ps1")) {

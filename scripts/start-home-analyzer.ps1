@@ -8,6 +8,19 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
+$lockFile = Join-Path $repoRoot ".home-analyzer-start.lock"
+
+function Test-PortOpen([int]$P) {
+  try {
+    $c = New-Object System.Net.Sockets.TcpClient
+    $async = $c.ConnectAsync("127.0.0.1", $P)
+    if (-not $async.Wait(1200)) { return $false }
+    $c.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
 
 function Wait-ForKey {
   Write-Host ""
@@ -37,6 +50,31 @@ Get-Content $vaultEnv | ForEach-Object {
 $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
 $env:RESEARCH_DASHBOARD_PORT = "9001"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:9001/"
+$env:BTC_AGENT_DATA_DIR = $agentDir
+
+# Avoid duplicate analyzer windows (port 9001 bind race kills the second instance instantly).
+if (Test-PortOpen 9001) {
+  Write-Host "Port 9001 already listening — analyzer dashboard is up." -ForegroundColor Yellow
+  Wait-ForKey
+  exit 0
+}
+$lockHandle = $null
+try {
+  $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+} catch {
+  Write-Host "Another analyzer start is in progress — not starting a duplicate." -ForegroundColor Yellow
+  Wait-ForKey
+  exit 0
+}
+$existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer_research_engine*" } |
+  Select-Object -First 1
+if ($existing) {
+  Write-Host "Analyzer already running (pid $($existing.ProcessId)) — not starting a duplicate." -ForegroundColor Yellow
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Wait-ForKey
+  exit 0
+}
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
@@ -58,6 +96,10 @@ try {
   Write-Host "Analyzer error: $($_.Exception.Message)" -ForegroundColor Red
   $exitCode = 1
 } finally {
+  if ($lockHandle) {
+    try { $lockHandle.Dispose() } catch { }
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  }
   if ($exitCode -ne 0) {
     Write-Host "Analyzer exited with code $exitCode" -ForegroundColor Yellow
   } elseif ($Once) {
