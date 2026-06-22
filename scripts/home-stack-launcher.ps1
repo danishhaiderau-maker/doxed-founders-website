@@ -50,11 +50,20 @@ function Send-Json {
 }
 
 function Get-FullStatus {
-  $botPortOpen = Test-BotRunning
-  $analyzerRunning = Test-AnalyzerRunning
+  # Port-only checks — WMI + outbound HTTP probes block the single listener thread and freeze buttons.
+  $botPortOpen = Test-PortOpen $BotPort
+  $analyzerRunning = Test-PortOpen $AnalyzerPort
   $tunnelUrl = Get-TunnelUrl
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  $tunnelLive = if ($tunnelUrl) { Test-TunnelLiveCached $tunnelUrl } else { $false }
+  $tunnelLive = $false
+  if ($tunnelUrl) {
+    $now = Get-Date
+    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 45) {
+      $tunnelLive = $script:TunnelLiveCache.live
+    } elseif ($cloudflaredRunning -and $botPortOpen) {
+      $tunnelLive = $true
+    }
+  }
   return @{
     ok = $true
     launcher = "running"
