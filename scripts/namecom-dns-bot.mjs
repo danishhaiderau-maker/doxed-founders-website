@@ -26,6 +26,7 @@ import {
 
 const switchNs = process.argv.includes('--switch-cloudflare-ns');
 const openBrowser = !process.argv.includes('--no-browser');
+const quick = process.argv.includes('--quick');
 const DOMAIN = CF_DOMAIN;
 const BOT_HOST = 'bot';
 const APEX_IP = '76.76.21.21';
@@ -183,6 +184,23 @@ async function main() {
     await namecom('/core/v1/hello', { user, token });
     console.log('OK  Name.com API authenticated');
 
+    const domains = await namecom('/core/v1/domains', { user, token });
+    const list = domains.domains || domains || [];
+    const owns = list.some((d) => (d.domainName || d.name || d).toString().toLowerCase() === DOMAIN);
+    if (!owns) {
+      throw new Error(`Account "${user}" has no domains in Name.com API (list empty).
+
+doxxedcrypto.digital uses Name.com nameservers but is NOT in this account.
+Log into the Name.com account that purchased the domain (check your domain purchase email),
+or manage DNS wherever you originally bought it (often Namecheap → Domain List → Manage → Advanced DNS).
+
+Manual CNAME to add:
+  Host: bot
+  Type: CNAME
+  Answer: ${target}
+  TTL: 300`);
+    }
+
     if (switchNs) {
       await mirrorApexOnCloudflare();
       await switchNameservers(user, token);
@@ -190,11 +208,15 @@ async function main() {
       await ensureBotCname(user, token, target);
     }
   } catch (err) {
-    console.warn(`\nName.com API: ${err.message}`);
+    console.warn(`\nName.com: ${err.message}`);
     openNamecomDnsPage(target);
+    if (quick) {
+      process.exitCode = 2;
+      return;
+    }
     const live = await waitForDns();
     if (!live) {
-      console.warn('DNS not live yet — add the CNAME at Name.com, then re-run npm run finish:home-dns');
+      console.warn('DNS not live yet — add the CNAME in the correct registrar account.');
       process.exitCode = 2;
       return;
     }

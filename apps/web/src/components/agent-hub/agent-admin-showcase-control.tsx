@@ -242,7 +242,7 @@ export function AgentAdminShowcaseControl({
       setMsg(message ?? (res.ok ? 'Execution updated' : 'Failed — is home bot online?'));
       if (res.ok) {
         onUpdated?.();
-        setTimeout(() => onUpdated?.(), 15000);
+          setTimeout(() => onUpdated?.(), 15000);
       }
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Pause/resume failed');

@@ -109,6 +109,7 @@
     "setup:named-tunnel:api": "node scripts/setup-named-tunnel-api.mjs",
     "finish:home-dns": "node scripts/railway-domain-dns-bot.mjs",
     "finish:railway-dns": "node scripts/railway-domain-dns-bot.mjs",
+    "apply:bot-dns": "node scripts/apply-bot-dns-auto.mjs",
     "finish:home-production": "node scripts/finish-home-production.mjs",
     "watch:home-tunnel": "powershell -ExecutionPolicy Bypass -File scripts/tunnel-watchdog.ps1",
     "start:home-bot": "powershell -ExecutionPolicy Bypass -File scripts/start-home-bot.ps1",
