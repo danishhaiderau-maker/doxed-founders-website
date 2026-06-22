@@ -69,7 +69,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
     label: '▶ Start everything',
-    hint: 'Bot :7800 + analyzer console + Cloudflare tunnel (5 windows)',
+    hint: 'Bot :7800 + analyzer + tunnel (minimized/hidden - check Agent Hub status)',
     path: '/cmd/start-all',
     tone: 'primary',
   },
