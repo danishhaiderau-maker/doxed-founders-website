@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Enable home bot exports, relay sim controls, and visible launcher windows
+Fix setup-home-bot-tunnel.ps1 em-dash parse error blocking quick tunnel.
 
 ## Last Activity
 
