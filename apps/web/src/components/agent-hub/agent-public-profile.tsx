@@ -378,10 +378,7 @@ export function AgentPublicProfile({
     showcaseActivityProp ?? activity,
     liveBookToActivity(showcaseLive, 'showcase-ui'),
   );
-  const simAct = mergeDeskActivity(
-    userActivityProp ?? activity,
-    liveBookToActivity(relaySimLiveBook, 'relay-sim-ui'),
-  );
+  const simAct = liveBookToActivity(relaySimLiveBook, 'relay-sim-ui');
   const userAct = isLiveSession
     ? filterLiveExchangeActivity(
         liveBookToActivity(exchangeLiveBook, 'user-ui', 'positions-only'),
@@ -647,7 +644,7 @@ export function AgentPublicProfile({
                   mode="live"
                 />
               ) : null}
-              {activeDesk === 'live' && isLiveSession ? (
+              {activeDesk === 'relay-sim' ? null : activeDesk === 'live' && isLiveSession ? (
                 <LiveRelayReasoningPanel
                   agent={agent}
                   exchangeLabel={exchangeLabel}
@@ -656,13 +653,12 @@ export function AgentPublicProfile({
               ) : (
                 <PublicReasoningPanel dashboard={dashboard} />
               )}
+              {activeDesk !== 'relay-sim' ? (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
                   title={
-                    activeDesk === 'relay-sim'
-                      ? 'Relay sim feed'
-                      : activeDesk === 'live' && isLiveSession
+                    activeDesk === 'live' && isLiveSession
                         ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
                         : 'Showcase bot feed'
                   }
@@ -678,6 +674,7 @@ export function AgentPublicProfile({
                   }
                 />
               </div>
+              ) : null}
             </div>
           )}
           {tab === 'Performance' && (
@@ -696,6 +693,7 @@ export function AgentPublicProfile({
             <AgentDeskView {...deskViewProps} />
           )}
           {tab === 'Reasoning' &&
+            activeDesk !== 'relay-sim' &&
             (activeDesk === 'live' && isLiveSession ? (
               <LiveRelayReasoningPanel
                 agent={agent}
@@ -705,20 +703,21 @@ export function AgentPublicProfile({
             ) : (
               <PublicReasoningPanel dashboard={dashboard} />
             ))}
-          {tab === 'Activity' && (
+          {tab === 'Activity' && activeDesk !== 'relay-sim' && (
             <div className="space-y-6">
               <AgentActivityFeed
                 items={deskActivity}
                 title={
-                  activeDesk === 'relay-sim'
-                    ? 'Relay sim activity'
-                    : activeDesk === 'live' && isLiveSession
+                  activeDesk === 'live' && isLiveSession
                       ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
                       : 'Conservative BTC showcase activity'
                 }
               />
               <AgentDeskView {...deskViewProps} />
             </div>
+          )}
+          {tab === 'Activity' && activeDesk === 'relay-sim' && (
+            <AgentDeskView {...deskViewProps} />
           )}
           {tab === 'Followers' && (
             <p className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-6 text-sm text-zinc-400">
