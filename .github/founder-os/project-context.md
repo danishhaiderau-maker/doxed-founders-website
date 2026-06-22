@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-Fix named tunnel detection when only API token file is present.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
-Just now
+20m ago
