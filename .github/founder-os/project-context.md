@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix unused activity prop breaking Vercel build.
+Fix TypeScript desk narrowing in Agent Hub profile.
 
 ## Last Activity
 
