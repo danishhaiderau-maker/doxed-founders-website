@@ -86,8 +86,8 @@ async function main() {
     console.warn('No CLOUDFLARE_API_TOKEN — skipping tunnel API (using saved token if present)');
   }
 
-  console.log('\n--- 2/7 Name.com bot DNS ---');
-  runSoft('node scripts/namecom-dns-bot.mjs');
+  console.log('\n--- 2/7 Railway domain DNS (bot CNAME) ---');
+  runSoft('node scripts/railway-domain-dns-bot.mjs --no-browser');
 
   console.log('\n--- 3/7 Start cloudflared ---');
   ensureCloudflaredRunning();
