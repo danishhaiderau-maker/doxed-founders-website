@@ -297,7 +297,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         if (Use-NamedTunnel) {
           $stable = "https://bot.doxxedcrypto.digital"
           Set-Content -Path $tunnelUrlFile -Value $stable -NoNewline
-          Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+          Start-DetachedPs1 (Join-Path $scriptDir "run-named-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel (stable)"
           $messages.Add("[3/4] Named tunnel window opened ($stable)")
         } else {
           Clear-TunnelUrlFile
@@ -314,6 +314,10 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       $autoWire = Join-Path $scriptDir "auto-wire-after-tunnel.ps1"
       Start-DetachedPs1 $autoWire @() -WindowTitle "Doxed Auto-Wire"
       $messages.Add("Auto-wire window opened - wires tunnel URL to Neon + Railway when ready")
+
+      $watchdog = Join-Path $scriptDir "tunnel-watchdog.ps1"
+      Start-DetachedPs1 $watchdog @("-BotPort", "$BotPort") -WindowTitle "Doxed Tunnel Watchdog"
+      $messages.Add("Tunnel watchdog started - auto-restarts cloudflared if URL goes dead")
 
       return @{ ok = $true; message = ($messages -join "`n") }
     }
@@ -356,7 +360,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Stop-Cloudflared | Out-Null
       if (Use-NamedTunnel) {
         Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
-        Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+        Start-DetachedPs1 (Join-Path $scriptDir "run-named-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel (stable)"
         return @{ ok = $true; message = "Named tunnel window opened - stable URL https://bot.doxxedcrypto.digital" }
       }
       Clear-TunnelUrlFile
@@ -369,7 +373,19 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
       return @{
         ok = $true
-        message = "Named tunnel mode ON. Next Start everything uses bot.doxxedcrypto.digital (one-time: cloudflared tunnel login + create tunnel)."
+        message = @"
+Named tunnel mode ON. Stable URL https://bot.doxxedcrypto.digital
+
+One-time setup (if not done):
+  cloudflared tunnel login
+  cloudflared tunnel create doxed-btc-bot
+  cloudflared tunnel route dns doxed-btc-bot bot.doxxedcrypto.digital
+
+Permanent (Windows service, survives reboot):
+  npm run install:home-bot-tunnel-service
+
+Then: Start everything + npm run wire:home-bot -- https://bot.doxxedcrypto.digital
+"@
       }
     }
     "wire" {
