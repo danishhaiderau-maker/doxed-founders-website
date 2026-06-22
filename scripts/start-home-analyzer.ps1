@@ -44,6 +44,7 @@ Write-Host ""
 $healthProc = $null
 try {
   if (Test-Path $healthScript) {
+    $env:ANALYZER_BIND_HOST = "0.0.0.0"
     $healthProc = Start-Process python -ArgumentList $healthScript -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 800
     Write-Host "Analyzer status server started on :9001 (PID $($healthProc.Id))"
