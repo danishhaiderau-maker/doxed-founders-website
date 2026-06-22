@@ -673,18 +673,14 @@ export function AgentPublicProfile({
                   agentReturnPct={
                     activeDesk === 'live' && isLiveSession
                       ? agent.netReturnPct
-                      : activeDesk === 'relay-sim'
-                        ? ((copyRelaySim?.sessionPnlUsd ?? 0) /
-                            (copyRelaySim?.ledger?.startingUsd ?? 500)) *
-                          100
-                        : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
+                      : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
                   }
                   label={
                     activeDesk === 'live' && isLiveSession
                       ? 'Your session'
-                      : activeDesk === 'relay-sim'
-                        ? 'Relay sim session'
-                        : 'Research local bot'
+                      : activeDesk === 'showcase'
+                        ? 'Research local bot'
+                        : 'Showcase bot'
                   }
                 />
               </div>
@@ -726,9 +722,7 @@ export function AgentPublicProfile({
                     ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
                     : activeDesk === 'showcase'
                       ? 'Research local bot activity'
-                      : activeDesk === 'relay-sim'
-                        ? 'Relay sim activity'
-                        : 'Conservative BTC showcase activity'
+                      : 'Conservative BTC showcase activity'
                 }
               />
               <AgentDeskView {...deskViewProps} />
