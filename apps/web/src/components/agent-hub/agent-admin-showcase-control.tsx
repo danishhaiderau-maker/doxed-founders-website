@@ -28,6 +28,19 @@ async function probeLocalHealth(url: string): Promise<boolean> {
   }
 }
 
+async function probeDirectHomeStatus(): Promise<HomeStatus> {
+  const [botOk, analyzerOk, tunnelOk] = await Promise.all([
+    probeLocalHealth('http://127.0.0.1:7800/api/ping'),
+    probeLocalHealth('http://127.0.0.1:9001/api/status'),
+    probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping'),
+  ]);
+  return {
+    bot: { online: botOk, dashboard: 'http://127.0.0.1:7800' },
+    analyzer: { online: analyzerOk, dashboard: 'http://127.0.0.1:9001/' },
+    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null },
+  };
+}
+
 async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
@@ -36,10 +49,14 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
   const needsAnalyzerProbe =
     !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
+  const needsTunnelProbe = !tunnelLive && raw.tunnel?.live === undefined;
 
-  const [botProbe, analyzerProbe] = await Promise.all([
-    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/health') : Promise.resolve(botOnline),
+  const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
+    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/api/ping') : Promise.resolve(botOnline),
     needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/api/status') : Promise.resolve(analyzerOnline),
+    needsTunnelProbe
+      ? probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping')
+      : Promise.resolve(tunnelLive),
   ]);
 
   return {
@@ -52,7 +69,8 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
     },
     tunnel: {
       ...raw.tunnel,
-      live: tunnelLive,
+      live: tunnelLive || tunnelProbe,
+      url: raw.tunnel?.url ?? (tunnelLive || tunnelProbe ? 'https://bot.doxxedcrypto.digital' : null),
     },
   };
 }
@@ -69,7 +87,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
     label: '▶ Start everything',
-    hint: 'Bot :7800 + analyzer + tunnel (minimized/hidden - check Agent Hub status)',
+    hint: 'Bot :7800 + analyzer + tunnel (visible console windows)',
     path: '/cmd/start-all',
     tone: 'primary',
   },
@@ -153,7 +171,7 @@ export function AgentAdminShowcaseControl({
       const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) {
         setLauncherOnline(false);
-        setStatus(null);
+        setStatus(await probeDirectHomeStatus());
         return;
       }
       const json = (await res.json()) as HomeStatus & { ok?: boolean; endpoints?: string[] };
@@ -163,7 +181,7 @@ export function AgentAdminShowcaseControl({
       if (normalized.tunnel?.url) setTunnelUrl(normalized.tunnel.url);
     } catch {
       setLauncherOnline(false);
-      setStatus(null);
+      setStatus(await probeDirectHomeStatus());
     }
   }, []);
 
@@ -273,14 +291,10 @@ export function AgentAdminShowcaseControl({
       </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        {(status || launcherOnline) && (
-          <>
-            <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
-            <StatusChip label="Analyzer" ok={Boolean(status?.analyzer?.online)} />
-            <StatusChip label="Tunnel" ok={Boolean(status?.tunnel?.live)} />
-            <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
-          </>
-        )}
+        <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
+        <StatusChip label="Analyzer :9001" ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip label="Tunnel (public bot)" ok={Boolean(status?.tunnel?.live)} />
+        <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
       </div>
 
       <p className="mt-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
@@ -390,11 +404,20 @@ export function AgentAdminShowcaseControl({
 function StatusChip({ label, ok }: { label: string; ok: boolean }) {
   return (
     <div
-      className={`rounded-lg border px-2 py-1.5 text-[11px] ${
+      className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
         ok ? 'border-emerald-500/40 text-emerald-300' : 'border-zinc-700 text-zinc-500'
       }`}
     >
-      {label}: {ok ? 'online' : 'offline'}
+      <span
+        className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${
+          ok ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-zinc-600'
+        }`}
+        title={ok ? 'online' : 'offline'}
+        aria-hidden
+      />
+      <span>
+        {label}: <strong>{ok ? 'online' : 'offline'}</strong>
+      </span>
     </div>
   );
 }

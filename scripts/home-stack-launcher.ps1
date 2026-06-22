@@ -86,14 +86,14 @@ function Get-FullStatus {
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all" {
-      Start-HiddenPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort")
+      Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
       return @{
         ok = $true
         message = @(
           "Start everything queued."
           "Three console windows will open: Bot :7800, Analyzer, Cloudflare tunnel."
           "Leave them open (do not press Enter in those windows). Watchdog/wire run hidden."
-          "Status: Agent Hub panel or .home-start-all.log"
+          "Status: green dots above or .home-start-all.log"
         ) -join "`n"
       }
     }
@@ -101,13 +101,13 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       if (Test-BotRunning) {
         return @{ ok = $true; message = "Bot already listening on :$BotPort" }
       }
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800"
+      Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Normal
       return @{ ok = $true; message = "Bot window opened on :$BotPort" }
     }
     "start-analyzer" {
       $started = $false
       if (-not (Test-AnalyzerRunning)) {
-        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer"
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Normal
         $started = $true
       }
       if (Start-AnalyzerDashboard) {
@@ -126,7 +126,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer already running (python research loop)." }
     }
     "start-analyzer-once" {
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)"
+      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)" -Show Normal
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
