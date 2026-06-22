@@ -222,7 +222,11 @@ function Get-TunnelUrl {
   if (Test-Path $tunnelUrlFile) {
     $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
     if ($null -ne $raw -and "$raw".Trim()) {
-      return "$raw".Trim()
+      $t = "$raw".Trim()
+      if ($t -match 'bot\.doxxedcrypto\.digital' -and -not (Use-NamedTunnel)) {
+        return $null
+      }
+      return $t
     }
   }
   return $null
@@ -374,16 +378,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
-      Stop-Cloudflared | Out-Null
+      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -WindowTitle "Doxed Tunnel Restart"
       if (Use-NamedTunnel) {
-        Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
-        Start-DetachedPs1 (Join-Path $scriptDir "run-named-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel (stable)"
-        return @{ ok = $true; message = "Named tunnel window opened - stable URL https://bot.doxxedcrypto.digital" }
+        return @{ ok = $true; message = "Named tunnel restart queued - stable URL https://bot.doxxedcrypto.digital" }
       }
-      Clear-TunnelUrlFile
-      Start-Sleep -Seconds 1
-      Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
-      return @{ ok = $true; message = "Fresh quick tunnel window opened - new URL saves to .home-tunnel-url automatically" }
+      return @{ ok = $true; message = "Quick tunnel restart queued - watch Doxed Cloudflare Tunnel window for new URL" }
     }
     "enable-named-tunnel" {
       Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline
