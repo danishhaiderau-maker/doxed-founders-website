@@ -703,6 +703,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (delta > MIN_QTY_BTC) {
       const pendingCount = summary.pending;
       if (pendingCount === 0 && summary.open === 0) {
+        if (simActive && position) {
+          try {
+            await this.activeTrading.submitMarketClose(creds, {
+              symbol: position.symbol,
+              positionDirection: position.direction,
+              qty: exchangeQty,
+            });
+            this.logger.warn(
+              `Sim orphan exchange heal ${instance.userId}: flattened ${exchangeQty.toFixed(5)} BTC paper position (ledger empty)`,
+            );
+            await this.persistSimTickState(agentId, instance);
+            await this.prisma.tradingAgentInstance.update({
+              where: { id: instance.id },
+              data: { lastError: null },
+            });
+            return;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.logger.error(`Sim orphan flatten failed ${instance.userId}: ${msg}`);
+          }
+        }
         await this.prisma.tradingAgentInstance.update({
           where: { id: instance.id },
           data: {
