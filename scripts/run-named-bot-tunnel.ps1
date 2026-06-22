@@ -22,6 +22,24 @@ function Ensure-Cloudflared {
 
 Ensure-Cloudflared
 
+$tokenFile = Join-Path $configDir "$TunnelName.token"
+if (Test-Path $tokenFile) {
+  Set-Content -Path $tunnelUrlFile -Value $stableUrl -NoNewline
+  Write-Host "Stable tunnel (API token mode): $stableUrl -> $localUrl"
+  Write-Host "Keep this window open. Ctrl+C stops tunnel only."
+  Write-Host ""
+  $token = (Get-Content $tokenFile -Raw).Trim()
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    cloudflared tunnel run --token $token
+  } finally {
+    $ErrorActionPreference = $prevEap
+    Read-Host "Tunnel stopped - Press Enter to close this window"
+  }
+  exit $LASTEXITCODE
+}
+
 $credFile = Get-ChildItem -Path (Join-Path $configDir "$TunnelName*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $credFile) {
   Write-Host "Named tunnel not set up yet (one-time):" -ForegroundColor Yellow
