@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-Fix TypeScript desk narrowing in Agent Hub profile.
+Add named tunnel service install and tunnel watchdog for stable home bot mirror.
 
 ## Last Activity
 
-Just now
+20m ago
