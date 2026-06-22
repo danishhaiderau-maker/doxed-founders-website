@@ -216,14 +216,11 @@ function Get-TunnelUrl {
 }
 
 function Start-AnalyzerDashboard {
-  if (Test-PortOpen $AnalyzerPort) {
-    $killed = @(Stop-ListenPort $AnalyzerPort)
-    if ($killed.Count -gt 0) { Start-Sleep -Milliseconds 400 }
-  }
+  if (Test-PortOpen $AnalyzerPort) { return $true }
   $healthScript = Join-Path $scriptDir "analyzer-health-server.py"
   if (-not (Test-Path $healthScript)) { return $false }
   Start-Process python -ArgumentList $healthScript -WindowStyle Hidden -WorkingDirectory $repoRoot | Out-Null
-  Start-Sleep -Milliseconds 900
+  Start-Sleep -Seconds 2
   return (Test-PortOpen $AnalyzerPort)
 }
 
