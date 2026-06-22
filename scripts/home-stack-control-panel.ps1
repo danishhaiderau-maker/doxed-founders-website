@@ -26,7 +26,11 @@ while ($true) {
   $bot = Test-PortOpen $BotPort
   $analyzer = Test-PortOpen $AnalyzerPort
   $cf = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-  $url = if (Test-Path $tunnelUrlFile) { (Get-Content $tunnelUrlFile -Raw).Trim() } else { "" }
+  $url = ""
+  if (Test-Path $tunnelUrlFile) {
+    $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+    if ($null -ne $raw -and "$raw".Trim()) { $url = "$raw".Trim() }
+  }
   Write-Host ("  Bot :{0}      {1}" -f $BotPort, $(if ($bot) { "ONLINE" } else { "offline" }))
   Write-Host ("  Analyzer :{0} {1}" -f $AnalyzerPort, $(if ($analyzer) { "ONLINE" } else { "offline" }))
   Write-Host ("  Tunnel          {0}" -f $(if ($cf) { "ONLINE" } else { "offline" }))
@@ -34,6 +38,7 @@ while ($true) {
   Write-Host ""
   Write-Host "  Bridge (Agent Hub buttons): http://127.0.0.1:7810"
   Write-Host "  Bot dashboard:            http://127.0.0.1:$BotPort"
+  Write-Host "  Analyzer dashboard:       http://127.0.0.1:$AnalyzerPort/  (LAN: http://10.0.0.102:$AnalyzerPort/)"
   Write-Host ""
   Write-Host "Keep this window open. Close bot/tunnel windows to stop services." -ForegroundColor Yellow
   Write-Host "Press Ctrl+C to close this panel only (services keep running)."

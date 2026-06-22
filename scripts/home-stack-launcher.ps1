@@ -215,10 +215,18 @@ function Get-TunnelUrl {
   return $null
 }
 
+function Use-NamedTunnel {
+  $flag = Join-Path $repoRoot ".home-use-named-tunnel"
+  if (Test-Path $flag) { return $true }
+  if ($env:HOME_USE_NAMED_TUNNEL -eq "1") { return $true }
+  return $false
+}
+
 function Start-AnalyzerDashboard {
   if (Test-PortOpen $AnalyzerPort) { return $true }
   $healthScript = Join-Path $scriptDir "analyzer-health-server.py"
   if (-not (Test-Path $healthScript)) { return $false }
+  $env:ANALYZER_BIND_HOST = "0.0.0.0"
   Start-Process python -ArgumentList $healthScript -WindowStyle Hidden -WorkingDirectory $repoRoot | Out-Null
   Start-Sleep -Seconds 2
   return (Test-PortOpen $AnalyzerPort)
@@ -247,8 +255,8 @@ function Get-FullStatus {
     analyzer = @{
       online = $analyzerRunning
       dashboard = "http://127.0.0.1:$AnalyzerPort/"
-      lan = $agentDir
-      note = "Research loop logs in Doxed Analyzer window · :9001 = live KPI dashboard · bot KPIs also on :7800/api/state"
+      lan = "http://10.0.0.102:$AnalyzerPort/"
+      note = "Research loop logs in Doxed Analyzer window - :9001 dashboard on LAN + localhost - bot KPIs on :7800/api/state"
     }
     tunnel = @{
       url = $tunnelUrl
@@ -289,9 +297,16 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           Stop-Cloudflared | Out-Null
           Start-Sleep -Seconds 2
         }
-        Clear-TunnelUrlFile
-        Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
-        $messages.Add("[3/4] Tunnel window opened (watch for trycloudflare URL)")
+        if (Use-NamedTunnel) {
+          $stable = "https://bot.doxxedcrypto.digital"
+          Set-Content -Path $tunnelUrlFile -Value $stable -NoNewline
+          Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+          $messages.Add("[3/4] Named tunnel window opened ($stable)")
+        } else {
+          Clear-TunnelUrlFile
+          Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+          $messages.Add("[3/4] Tunnel window opened (watch for trycloudflare URL)")
+        }
       } else {
         $messages.Add("[3/4] Tunnel already live: $tunnelUrl")
       }
@@ -342,10 +357,23 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     }
     "start-tunnel" {
       Stop-Cloudflared | Out-Null
+      if (Use-NamedTunnel) {
+        Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
+        Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
+        return @{ ok = $true; message = "Named tunnel window opened - stable URL https://bot.doxxedcrypto.digital" }
+      }
       Clear-TunnelUrlFile
       Start-Sleep -Seconds 1
       Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel"
-      return @{ ok = $true; message = "Fresh tunnel window opened - new URL saves to .home-tunnel-url automatically" }
+      return @{ ok = $true; message = "Fresh quick tunnel window opened - new URL saves to .home-tunnel-url automatically" }
+    }
+    "enable-named-tunnel" {
+      Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline
+      Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
+      return @{
+        ok = $true
+        message = "Named tunnel mode ON. Next Start everything uses bot.doxxedcrypto.digital (one-time: cloudflared tunnel login + create tunnel)."
+      }
     }
     "wire" {
       $url = $QueryUrl
@@ -454,6 +482,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       "^/cmd/start-analyzer$" { Invoke-HomeCommand "start-analyzer" $tunnelParam }
       "^/cmd/start-analyzer-once$" { Invoke-HomeCommand "start-analyzer-once" $tunnelParam }
       "^/cmd/start-tunnel$" { Invoke-HomeCommand "start-tunnel" $tunnelParam }
+      "^/cmd/enable-named-tunnel$" { Invoke-HomeCommand "enable-named-tunnel" $tunnelParam }
       "^/cmd/wire$" { Invoke-HomeCommand "wire" $tunnelParam }
       "^/cmd/wipe-research$" { Invoke-HomeCommand "wipe-research" $tunnelParam }
       "^/cmd/resume-trading$" { Invoke-HomeCommand "resume-trading" $tunnelParam }

@@ -104,6 +104,13 @@ if (-not $credFile) {
   throw "Tunnel credentials not found in $configDir - run: cloudflared tunnel create $TunnelName"
 }
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
+$tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
+$stableUrl = "https://$Hostname"
+Set-Content -Path $tunnelUrlFile -Value $stableUrl -NoNewline
+Write-Host "Saved stable URL to $tunnelUrlFile : $stableUrl"
+
 @(
   "tunnel: $TunnelName"
   "credentials-file: $($credFile.FullName)"

@@ -14,7 +14,7 @@ export class BotBridgeService {
   private readonly logger = new Logger(BotBridgeService.name);
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
-  private cacheMs = 1000;
+  private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 1000);
   private dbUrlCache: { url: string | null; at: number } | null = null;
 
   constructor(

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = int(os.environ.get("ANALYZER_HEALTH_PORT", "9001"))
+BIND_HOST = os.environ.get("ANALYZER_BIND_HOST", "0.0.0.0")
 BOT_DASHBOARD = os.environ.get("HOME_BOT_DASHBOARD", "http://127.0.0.1:7800").rstrip("/")
 AGENT_DIR = Path(os.environ.get("BTC_AGENT_DIR", "")).resolve() if os.environ.get("BTC_AGENT_DIR") else None
 if AGENT_DIR is None or not AGENT_DIR.is_dir():
@@ -260,9 +261,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     threading.Thread(target=_refresh_loop, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = ThreadingHTTPServer((BIND_HOST, PORT), Handler)
+    lan = f"http://10.0.0.102:{PORT}/" if BIND_HOST in ("0.0.0.0", "::") else f"http://127.0.0.1:{PORT}/"
     print(
-        f"Analyzer dashboard http://127.0.0.1:{PORT}/  (health: /health, data dir: {AGENT_DIR})",
+        f"Analyzer dashboard http://127.0.0.1:{PORT}/  LAN: {lan}  (health: /health, data dir: {AGENT_DIR})",
         flush=True,
     )
     try:
