@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Enable home bot exports, relay sim controls, and visible launcher windows
 
 ## Last Activity
 
