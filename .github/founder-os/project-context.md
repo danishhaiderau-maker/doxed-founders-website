@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix bot bridge health detection and improve Agent Hub reasoning UX.
 
 ## Last Activity
 
