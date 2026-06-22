@@ -327,7 +327,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           message = if ($started) {
             "Analyzer console + :9001 dashboard started."
           } else {
-            "Analyzer loop already running — started :9001 dashboard."
+            "Analyzer loop already running - started :9001 dashboard."
           }
         }
       }
