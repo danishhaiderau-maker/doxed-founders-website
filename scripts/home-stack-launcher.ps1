@@ -157,7 +157,7 @@ function Get-FullStatus {
       online = $analyzerRunning
       dashboard = "console window (research loop)"
       lan = $agentDir
-      note = "Runs from $agentDir — console shows iteration logs every 30 min (not an HTTP server on :9001)"
+      note = "Runs from $agentDir - console shows iteration logs every 30 min (not an HTTP server on :9001)"
     }
     tunnel = @{
       url = $tunnelUrl
@@ -200,7 +200,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
 
       $autoWire = Join-Path $scriptDir "auto-wire-after-tunnel.ps1"
       Start-DetachedPs1 $autoWire @() -WindowTitle "Doxed Auto-Wire"
-      $messages.Add("Auto-wire window opened — wires tunnel URL to Neon + Railway when ready")
+      $messages.Add("Auto-wire window opened - wires tunnel URL to Neon + Railway when ready")
 
       return @{ ok = $true; message = ($messages -join "`n") }
     }
@@ -243,7 +243,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     }
     "wipe-research" {
       if (-not (Test-PortOpen $BotPort)) {
-        return @{ ok = $false; error = "Bot not running on :$BotPort — start bot first" }
+        return @{ ok = $false; error = "Bot not running on :$BotPort - start bot first" }
       }
       try {
         $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/reset" -Method POST -UseBasicParsing -TimeoutSec 180
