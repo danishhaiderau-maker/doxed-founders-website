@@ -390,6 +390,11 @@ def _lane_rows():
                 }
         fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or ld.get("sample_size") or 0)
         approves = int(m.get("approves") or ld.get("approves") or 0)
+        shadow_filled = int(m.get("shadow_filled") or 0)
+        shadow_pnl = float(m.get("net_pnl_shadow_blocked") or 0)
+        shadow_fill_pct = float(m.get("shadow_fill_pct") or 0)
+        costly_blocks = float(m.get("costly_blocks_usd") or 0)
+        good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
         pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or ld.get("pnl_usd") or 0)
         ev = float(m.get("per_approve_ev") or ld.get("ev_per_approve") or 0)
         at_fills = int(all_time.get("real_fills") or ld.get("all_time_fills") or 0)
@@ -397,9 +402,15 @@ def _lane_rows():
         at_ev = float(all_time.get("ev_usd") or (at_pnl / at_fills if at_fills else 0))
         pathway_status = status_by_lane.get(lane) or ld.get("pathway_status") or ""
         is_retired = pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK") or lane in (lane_def.get("retired_lanes") or [])
+        is_shadow = pathway_status == "SHADOW_COLLECTING"
         is_benchmark = lane == benchmark_lane or pathway_status == "BENCHMARK"
-        has_any_data = fills or approves or pnl or at_fills or at_pnl
-        if not has_any_data and not is_retired and lane != "AI_SCAN" and lane != benchmark_lane:
+        has_any_data = (
+            fills or approves or pnl or at_fills or at_pnl
+            or shadow_filled or abs(shadow_pnl) > 0.01
+        )
+        if lane in ALL_PATHWAY_LANES:
+            pass  # always show full catalog
+        elif not has_any_data and lane != "AI_SCAN" and lane != benchmark_lane:
             continue
         compare_pnl = pnl if fills else at_pnl
         compare_ev = ev if approves else at_ev
@@ -409,6 +420,8 @@ def _lane_rows():
             status = "PRIMARY_PRODUCTION"
         elif is_retired and at_fills:
             status = "HISTORICAL"
+        elif is_shadow:
+            status = "SHADOW_COLLECTING"
         elif is_retired:
             status = pathway_status or "DATA_RETIRED"
         elif compare_ev >= benchmark_ev and compare_pnl > benchmark_pnl and lane != benchmark_lane:
@@ -421,6 +434,11 @@ def _lane_rows():
             "lane": lane,
             "trades": fills,
             "approves": approves,
+            "shadow_filled": shadow_filled,
+            "shadow_fill_pct": round(shadow_fill_pct, 1),
+            "shadow_pnl": round(shadow_pnl, 2),
+            "costly_blocks_usd": round(costly_blocks, 2),
+            "good_blocks_saved_usd": round(good_blocks_saved, 2),
             "wr": None,
             "pnl": round(pnl, 2),
             "ev": round(ev, 2),
@@ -1159,8 +1177,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-lanes">
     <h2>Lane Laboratory</h2>
-    <p class="note">All lanes defined in code — session columns = current bot run; All-time = full CSV history. Green = beats benchmark.</p>
-    <table><thead><tr><th>Lane</th><th>Sess Fills</th><th>All Fills</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <p class="note">All lanes in code — real fills from live tiles; shadow cols = virtual sim (blocked counterfactual + shadow-collecting lanes). Green = beats benchmark on comparable PnL/EV.</p>
+    <table><thead><tr><th>Lane</th><th>Appr</th><th>Sess Fills</th><th>Shadow</th><th>Sess PnL</th><th>Shadow PnL</th><th>EV/appr</th><th>All Fills</th><th>All PnL</th><th>Role</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-lanes-retire">
     <h2>Lane Retirement Engine</h2>
@@ -1399,14 +1417,17 @@ async function loadLanes() {
   const d = await r.json();
   document.getElementById('lane-body').innerHTML = (d.lanes||[]).map(row => {
     let cls = '';
-    if (row.retired || (row.pathway_status || '').includes('RETIRED')) cls = 'amber';
+    if (row.pathway_status === 'SHADOW_COLLECTING') cls = 'amber';
+    else if (row.retired || (row.pathway_status || '').includes('RETIRED')) cls = 'amber';
     else if (row.status === 'UNDERPERFORMING') cls = 'red';
     else if (row.status === 'BEATS BENCHMARK' || row.status === 'PRIMARY_PRODUCTION') cls = 'green';
-    const role = row.retired ? (row.pathway_status || 'DATA_RETIRED') : row.status;
+    const role = row.pathway_status || (row.retired ? 'RETIRED' : row.status);
     const atF = row.all_time_fills || 0;
     const atP = row.all_time_pnl || 0;
-    return `<tr class="${cls}"><td>${row.lane}</td><td>${row.trades}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev)}</td><td>${role}</td></tr>`;
-  }).join('') || '<tr><td colspan="7">Run analyzer: python analyzer_research_engine_v62.py -once</td></tr>';
+    const sh = row.shadow_filled || 0;
+    const shPnl = row.shadow_pnl || 0;
+    return `<tr class="${cls}"><td>${row.lane}</td><td>${row.approves ?? 0}</td><td>${row.trades}</td><td>${sh}${row.shadow_fill_pct ? ' ('+row.shadow_fill_pct+'%)' : ''}</td><td>$${fmtUsd(row.pnl)}</td><td class="${shPnl>=0?'green':'red'}">$${fmtUsd(shPnl)}</td><td>$${fmtUsd(row.ev)}</td><td>${atF || '—'}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>${role}</td></tr>`;
+  }).join('') || '<tr><td colspan="10">Run analyzer: python analyzer_research_engine_v62.py</td></tr>';
 }
 
 async function loadChase() {

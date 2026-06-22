@@ -53,7 +53,6 @@ import shutil
 import sys
 import traceback
 import re
-from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -110,70 +109,9 @@ ALL_DATA_SESSION_SCOPE = {"data_scope": "all", "fresh_collection_mode": False}
 
 
 def analyzer_report_path(filename: str) -> str:
-    work = os.environ.get("RESEARCH_WORK_DIR")
-    if work and not os.path.isabs(filename):
-        filename = os.path.join(work, filename)
     if _ANALYZER_REPORT_SUBDIR:
         return os.path.join(_ANALYZER_REPORT_SUBDIR, filename)
     return filename
-
-
-def configure_analyzer_workdirs():
-    """When script lives in research/, read bot CSVs from parent agent folder."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if os.path.basename(script_dir).lower() != "research":
-        if os.path.abspath(os.getcwd()) != script_dir:
-            print(f"  ℹ️ Switching cwd → {script_dir}")
-            os.chdir(script_dir)
-        return script_dir, script_dir
-
-    agent_root = os.path.dirname(script_dir)
-    os.chdir(agent_root)
-    os.environ["RESEARCH_WORK_DIR"] = script_dir
-    print(f"  ℹ️ Data root (CSV/JSONL): {agent_root}")
-    print(f"  ℹ️ Research outputs:   {script_dir}")
-
-    data_inputs = {
-        TRADES_FILE,
-        BLOCKED_FILE,
-        DECISIONS_FILE,
-        AI_TRANCHE_FILE,
-        PIPELINE_EVENTS_FILE,
-        AI_ERRORS_FILE,
-        SETUP_LOG_FILE,
-        CANDLES_FILE,
-        SIGNAL_PERSIST_FILE,
-        NEAR_EDGE_FILE,
-        REVERSAL_STUDY_FILE,
-        AI_REASON_RESEARCH_FILE,
-        AI_CONFIDENCE_CALIBRATION_FILE,
-        TRADE_LIFECYCLE_FILE,
-        EXECUTION_FUNNEL_FILE,
-        LANE_OPPORTUNITY_CAPTURE_FILE,
-        EXPIRED_ORDERS_FILE,
-        FILL_QUALITY_JSONL_FILE,
-        SHADOW_VS_LIVE_ENTRY_FILE,
-        RESEARCH_SESSION_FILE,
-        SIGNAL_REPLAY_FILE,
-        TRADE_OUTCOME_FILE,
-        SHADOW_OUTCOME_FILE,
-        SIGNAL_SNAPSHOT_FILE,
-        COUNTERFACTUAL_FILE,
-    }
-    g = globals()
-    for name, val in list(g.items()):
-        if not isinstance(val, str) or val in data_inputs or os.path.isabs(val):
-            continue
-        if name in ("REPORTS_DIR", "REPORTS_HISTORY_DIR", "ALL_DATA_REPORTS_SUBDIR") or (
-            name.endswith("_FILE")
-            and (
-                val.endswith((".json", ".txt", ".html", ".log"))
-                or val == "reports"
-                or val.startswith("reports/")
-            )
-        ):
-            g[name] = os.path.join(script_dir, val)
-    return agent_root, script_dir
 
 
 def _set_analyzer_report_subdir(subdir: str | None):
@@ -554,16 +492,16 @@ PATHWAY_LANE_STATUS = {
     "RECOVERY_MONSTER_V1": "RETIRED",
     "AI_DISAGREEMENT_ALPHA": "RETIRED",
     "AI_DISAGREEMENT_REPLAY": "ACTIVE",
-    "HIGH_EDGE_RUNNER": "DATA_RETIRED",
+    "HIGH_EDGE_RUNNER": "SHADOW_COLLECTING",
     "EXTREME_EDGE": "RETIRED",
     "EDGE_PLUS_STACK": "RETIRED",
-    "SHADOW_RUNNER": "DATA_RETIRED",
-    "EDGE_ALPHA_4": "DATA_RETIRED",
-    "TYPE_B_HUNTER": "DATA_RETIRED",
-    "SHORT_BEAR_ALPHA": "DATA_RETIRED",
-    "AI_60_65_ALPHA": "DATA_RETIRED",
-    "URGENT_CHASE_ALPHA": "DATA_RETIRED",
-    "CHASE_3PLUS_ALPHA": "DATA_RETIRED",
+    "SHADOW_RUNNER": "SHADOW_COLLECTING",
+    "EDGE_ALPHA_4": "SHADOW_COLLECTING",
+    "TYPE_B_HUNTER": "SHADOW_COLLECTING",
+    "SHORT_BEAR_ALPHA": "SHADOW_COLLECTING",
+    "AI_60_65_ALPHA": "SHADOW_COLLECTING",
+    "URGENT_CHASE_ALPHA": "SHADOW_COLLECTING",
+    "CHASE_3PLUS_ALPHA": "SHADOW_COLLECTING",
     "AI_SCAN": "ACTIVE",
 }
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
@@ -15858,11 +15796,7 @@ def finalize_analyzer_outputs(
     try:
         from research_trade_accumulator import sync_accumulator_from_analyzer_run
 
-        acc = sync_accumulator_from_analyzer_run(
-            session=session,
-            trades=trades,
-            root=Path(os.environ.get("RESEARCH_WORK_DIR", os.getcwd())),
-        )
+        acc = sync_accumulator_from_analyzer_run(session=session, trades=trades)
         print(
             f"  ✅ Trade accumulator: +{acc.get('new', 0)} new → {acc.get('total', 0)} total "
             f"(epoch {str(acc.get('epoch', ''))[:19]}) {PIPELINE_ENFORCEMENT_TAG}"
@@ -15893,7 +15827,10 @@ def finalize_analyzer_outputs(
 
 
 if __name__ == "__main__":
-    configure_analyzer_workdirs()
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.abspath(os.getcwd()) != _script_dir:
+        print(f"  ℹ️ Switching cwd → {_script_dir}")
+        os.chdir(_script_dir)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()
