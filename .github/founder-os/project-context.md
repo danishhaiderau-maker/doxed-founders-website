@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Remove accidental pycache from research folder.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
