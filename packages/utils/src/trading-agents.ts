@@ -106,6 +106,19 @@ export type TradingAgentDashboardState = {
   }>;
   marketStructure: string;
   aiReasoning: string;
+  /** Most recent AI pipeline output — decision, comment, and block reason. */
+  latestAiVerdict?: {
+    decision: string;
+    direction: string;
+    winProbability: number;
+    reason: string;
+    comment: string;
+    blockReason: string | null;
+    edgeScore: number;
+    requiredEdge: number;
+    marketRegime: string;
+    updatedAt: string | null;
+  };
   riskStatus: string;
   fundingStatus: string;
   dataSource: string;

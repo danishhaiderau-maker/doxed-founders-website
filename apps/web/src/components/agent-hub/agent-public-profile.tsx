@@ -5,6 +5,7 @@ import { useState } from 'react';
 import {
   formatPercent,
   formatUsd,
+  buildTradingAgentActionShareText,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
   type CopyRelayLimitChainSnapshot,
@@ -24,6 +25,7 @@ import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
+import { ShareOnXButton } from '@/components/share-on-x-button';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
 import type {
   PublicAgentStatus,
@@ -46,22 +48,83 @@ function MetricPill({ label, value, accent }: { label: string; value: string; ac
   );
 }
 
-function PublicReasoningPanel({ dashboard }: { dashboard: TradingAgentDashboardState }) {
+function PublicReasoningPanel({
+  dashboard,
+  agentName,
+  slug,
+}: {
+  dashboard: TradingAgentDashboardState;
+  agentName: string;
+  slug: string;
+}) {
+  const verdict = dashboard.latestAiVerdict;
   const t = dashboard.currentThinking;
   const reasoning =
     dashboard.aiReasoning?.trim() ||
+    verdict?.comment?.trim() ||
+    verdict?.reason?.trim() ||
     t.conclusion?.trim() ||
     dashboard.noTradeReason?.trim() ||
     null;
   const bias =
     dashboard.regime && dashboard.regime !== 'RANGE'
       ? dashboard.regime
-      : t.market || 'Assessing';
+      : verdict?.marketRegime || t.market || 'Assessing';
+  const shareText = buildTradingAgentActionShareText({
+    agentName,
+    action: verdict
+      ? `${verdict.decision} ${verdict.direction}`.trim()
+      : dashboard.aiDecision,
+    reason: verdict?.reason ?? dashboard.noTradeReason,
+    edgeScore: verdict?.edgeScore ?? dashboard.currentEdge,
+    edgeRequired: verdict?.requiredEdge ?? dashboard.requiredEdge,
+    marketRegime: bias,
+    hubUrl: `https://doxxedcrypto.digital/agent-hub/${slug}`,
+  });
+
   return (
     <section className="rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-950/30 to-zinc-950/50 p-6">
-      <h2 className="text-sm font-bold uppercase tracking-widest text-violet-300">Latest reasoning</h2>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-violet-300">Latest reasoning</h2>
+        <ShareOnXButton text={shareText} label="Share to X" className="shrink-0" />
+      </div>
+      {verdict?.updatedAt && (
+        <p className="mt-2 text-[10px] uppercase tracking-widest text-zinc-500">
+          Updated {new Date(verdict.updatedAt).toLocaleString()}
+        </p>
+      )}
       {reasoning ? (
-        <p className="mt-4 text-sm italic leading-relaxed text-zinc-200">&ldquo;{reasoning}&rdquo;</p>
+        <div className="mt-4 space-y-3 text-sm leading-relaxed text-zinc-200">
+          {verdict ? (
+            <>
+              <p>
+                <span className="font-semibold text-violet-200">Verdict:</span>{' '}
+                {verdict.decision} · {verdict.direction} · {verdict.winProbability}% confidence
+              </p>
+              {verdict.reason && (
+                <p>
+                  <span className="font-semibold text-violet-200">Reason:</span> {verdict.reason}
+                </p>
+              )}
+              {verdict.comment && (
+                <p className="whitespace-pre-wrap rounded-xl border border-zinc-800/80 bg-black/30 p-4 text-zinc-100">
+                  <span className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                    AI output
+                  </span>
+                  {verdict.comment}
+                </p>
+              )}
+              {verdict.blockReason && verdict.blockReason !== verdict.reason && (
+                <p className="text-zinc-400">
+                  <span className="font-semibold text-amber-200/90">Pipeline block:</span>{' '}
+                  {verdict.blockReason}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="italic">&ldquo;{reasoning}&rdquo;</p>
+          )}
+        </div>
       ) : (
         <p className="mt-4 text-sm text-zinc-500">Waiting for the bot&apos;s next market assessment…</p>
       )}
@@ -70,13 +133,13 @@ function PublicReasoningPanel({ dashboard }: { dashboard: TradingAgentDashboardS
           Bias: {bias}
         </span>
         <span className="rounded-full border border-violet-500/40 bg-violet-950/40 px-3 py-1 text-violet-200">
-          Confidence: {dashboard.aiWinProbability || 0}%
+          Confidence: {verdict?.winProbability ?? dashboard.aiWinProbability ?? 0}%
         </span>
         <span className="rounded-full border border-zinc-600 px-3 py-1 text-zinc-400">
           Decision: {dashboard.aiDecision}
         </span>
         <span className="rounded-full border border-zinc-600 px-3 py-1 text-zinc-400">
-          Edge {dashboard.currentEdge}/{dashboard.requiredEdge}
+          Edge {verdict?.edgeScore ?? dashboard.currentEdge}/{verdict?.requiredEdge ?? dashboard.requiredEdge}
         </span>
       </div>
       {dashboard.transparency?.reason && (
@@ -373,6 +436,20 @@ export function AgentPublicProfile({
             balanceUsd: copyRelaySim.ledger?.derivativesUsd ?? 500,
           }
         : deskShowcaseAgent;
+  const heroShareText = buildTradingAgentActionShareText({
+    agentName: heroAgent.name,
+    action: dashboard.latestAiVerdict
+      ? `${dashboard.latestAiVerdict.decision} ${dashboard.latestAiVerdict.direction}`.trim()
+      : dashboard.aiDecision,
+    reason:
+      dashboard.latestAiVerdict?.reason ??
+      dashboard.noTradeReason ??
+      dashboard.currentThinking.conclusion,
+    edgeScore: dashboard.latestAiVerdict?.edgeScore ?? dashboard.currentEdge,
+    edgeRequired: dashboard.latestAiVerdict?.requiredEdge ?? dashboard.requiredEdge,
+    marketRegime: dashboard.latestAiVerdict?.marketRegime ?? dashboard.currentThinking.market,
+    hubUrl: `https://doxxedcrypto.digital/agent-hub/${slug}`,
+  });
   const dualDeskMode = isLiveSession ? 'live' : isCopySession ? 'copy' : 'showcase';
   const showcaseBook = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
   const showcaseAct = mergeDeskActivity(
@@ -520,6 +597,9 @@ export function AgentPublicProfile({
                     }
                   />
                 </div>
+                <div className="mt-3">
+                  <ShareOnXButton text={heroShareText} label="Share to X" className="w-full justify-center" />
+                </div>
               </div>
             </div>
 
@@ -655,18 +735,16 @@ export function AgentPublicProfile({
                   liveBook={exchangeLiveBook}
                 />
               ) : activeDesk === 'showcase' ? (
-                <PublicReasoningPanel dashboard={dashboard} />
+                <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
               ) : null}
-              {activeDesk !== 'relay-sim' ? (
+              {activeDesk !== 'relay-sim' && !(activeDesk === 'showcase') ? (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
                   title={
                     activeDesk === 'live' && isLiveSession
                       ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
-                      : activeDesk === 'showcase'
-                        ? 'Research local bot feed'
-                        : 'Showcase bot feed'
+                      : 'Showcase bot feed'
                   }
                 />
                 <AgentPerformanceChart
@@ -678,12 +756,15 @@ export function AgentPublicProfile({
                   label={
                     activeDesk === 'live' && isLiveSession
                       ? 'Your session'
-                      : activeDesk === 'showcase'
-                        ? 'Research local bot'
-                        : 'Showcase bot'
+                      : 'Showcase bot'
                   }
                 />
               </div>
+              ) : activeDesk === 'showcase' ? (
+                <AgentPerformanceChart
+                  agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
+                  label="Research local bot"
+                />
               ) : null}
             </div>
           )}
@@ -711,7 +792,7 @@ export function AgentPublicProfile({
                 liveBook={exchangeLiveBook}
               />
             ) : (
-              <PublicReasoningPanel dashboard={dashboard} />
+              <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
             ))}
           {tab === 'Activity' && activeDesk !== 'relay-sim' && (
             <div className="space-y-6">

@@ -293,6 +293,11 @@ export function AgentTradeJourney({
                     Balance: {formatUsd(item.balanceUsd, 0)}
                   </p>
                 )}
+                {item.shareText && (
+                  <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                    <ShareOnXButton text={item.shareText} label="𝕏" className="text-[10px] px-2 py-1" />
+                  </div>
+                )}
               </button>
             );
           }
@@ -312,6 +317,12 @@ export function AgentTradeJourney({
           );
         })}
       </div>
+
+      {activeSelected && isHorizontal && activeSelected.shareText && (
+        <div className="mt-6 flex justify-end">
+          <ShareOnXButton text={activeSelected.shareText} label="Share to X" />
+        </div>
+      )}
 
       {activeSelected && !isHorizontal && (
         <div className="mt-8 rounded-xl border border-zinc-700/80 bg-black/30 p-5">
