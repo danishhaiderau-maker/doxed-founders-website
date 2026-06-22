@@ -31,7 +31,7 @@ async function probeLocalHealth(url: string): Promise<boolean> {
 async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
-  const tunnelLive = Boolean(raw.tunnel?.live ?? raw.tunnel?.cloudflaredRunning);
+  const tunnelLive = Boolean(raw.tunnel?.live);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
 
@@ -49,7 +49,7 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
     },
     tunnel: {
       ...raw.tunnel,
-      live: tunnelLive || Boolean(raw.tunnel?.cloudflaredRunning),
+      live: tunnelLive,
     },
   };
 }
@@ -119,7 +119,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'stop-all',
     label: '■ Stop all local',
-    hint: 'Stop bot :7800, analyzer :9001, and cloudflared tunnel',
+    hint: 'Kill bot, analyzer, tunnel, close all Doxed console windows, clear tunnel URL',
     path: '/cmd/stop-all',
     tone: 'danger',
   },
@@ -255,7 +255,7 @@ export function AgentAdminShowcaseControl({
           <>
             <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
             <StatusChip label="Analyzer" ok={Boolean(status?.analyzer?.online)} />
-            <StatusChip label="Tunnel" ok={Boolean(status?.tunnel?.live || status?.tunnel?.cloudflaredRunning)} />
+            <StatusChip label="Tunnel" ok={Boolean(status?.tunnel?.live)} />
             <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
           </>
         )}
