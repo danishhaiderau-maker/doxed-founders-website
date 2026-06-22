@@ -10157,9 +10157,11 @@ def _trade_row_in_session(trade: dict, session_start: float) -> bool:
 
 def _showcase_trade_session_start() -> float:
     """Epoch for trade filtering: full CSV history unless fresh-collection mode is on."""
-    if not state.get("fresh_collection_mode", False):
+    with state_lock:
+        fcm = bool(state.get("fresh_collection_mode", False))
+    if not fcm:
         return 0.0
-    return float(bot_start_time or 0.0)
+    return _research_data_start_ts()
 
 def _recompute_research_balance_from_trades():
     """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
@@ -16865,6 +16867,22 @@ def api_state():
         session_start = _showcase_trade_session_start()
         if session_start:
             trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
+            positions_copy = [
+                p
+                for p in positions_copy
+                if float(p.get("entry_ts") or p.get("created_ts") or 0) >= session_start - 1.0
+            ]
+            pending_orders_copy = [
+                o
+                for o in pending_orders_copy
+                if float(o.get("created_ts") or 0) >= session_start - 1.0
+            ]
+            expired_orders_copy = [
+                e
+                for e in expired_orders_copy
+                if isinstance(e, dict)
+                and float(e.get("created_ts") or e.get("expired_ts") or 0) >= session_start - 1.0
+            ]
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         ai_history_copy = _session_ai_history(ai_history_copy, 50)
         snapshot["ai_history"] = ai_history_copy
@@ -16983,6 +17001,12 @@ def api_state():
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        _rs_meta = _load_research_session_meta()
+        _fcs = _rs_meta.get("fresh_collection_start_time")
+        snapshot["fresh_collection_start_time"] = (
+            float(_fcs) if _fcs is not None and snapshot["fresh_collection_mode"] else None
+        )
+        snapshot["last_fresh_reset_ts"] = snapshot.get("last_fresh_reset_ts") or snapshot["fresh_collection_start_time"]
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})

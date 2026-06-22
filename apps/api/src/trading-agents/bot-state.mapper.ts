@@ -6,6 +6,7 @@ export type BotApiState = {
   account_balance?: number;
   equity?: number;
   fresh_collection_mode?: boolean;
+  fresh_collection_start_time?: number | null;
   bot_start_time?: number;
   last_fresh_reset_ts?: number;
   trade_count_session?: number;
@@ -172,6 +173,39 @@ export type BotApiState = {
 const STARTING_BALANCE = 500;
 const LIVE_BOOK_MAX = 5;
 
+/** Session anchor for showcase/local bot rows — respects fresh-collection reset. */
+export function resolveBotSessionStart(bot: BotApiState): number {
+  if (bot.fresh_collection_mode) {
+    const fresh =
+      bot.fresh_collection_start_time ??
+      bot.last_fresh_reset_ts ??
+      null;
+    if (fresh != null && Number.isFinite(Number(fresh)) && Number(fresh) > 0) {
+      return Number(fresh);
+    }
+  }
+  return bot.bot_start_time ?? 0;
+}
+
+function rowTimestampSec(row: Record<string, unknown>): number {
+  let ts =
+    Number(row.created_ts_ts ?? row.entry_ts ?? row.expired_ts ?? row.created_ts ?? 0) ||
+    (typeof row.ts === 'string'
+      ? Date.parse(row.ts) / 1000
+      : typeof row.ts === 'number'
+        ? row.ts > 1e12
+          ? row.ts / 1000
+          : row.ts
+        : 0);
+  return ts;
+}
+
+function inBotSession(row: Record<string, unknown>, sessionStart: number): boolean {
+  if (sessionStart <= 0) return true;
+  const ts = rowTimestampSec(row);
+  return ts <= 0 || ts >= sessionStart - 1;
+}
+
 function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
   return rows.slice(-max).reverse();
 }
@@ -190,8 +224,11 @@ function formatBotTime(ts: string | number | undefined): string {
 }
 
 function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
+  const sessionStart = resolveBotSessionStart(bot);
   const activeSignals = takeLatest(
-    (bot.signal_info?.signals ?? []).map((s) => ({
+    (bot.signal_info?.signals ?? [])
+      .filter((s) => inBotSession(s as Record<string, unknown>, sessionStart))
+      .map((s) => ({
       time:
         typeof s.created_ts === 'string' && s.created_ts.includes('T')
           ? s.created_ts.slice(0, 19)
@@ -211,7 +248,9 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
   );
 
   const positions = takeLatest(
-    (bot.positions ?? []).map((p, i) => ({
+    (bot.positions ?? [])
+      .filter((p) => inBotSession(p as Record<string, unknown>, sessionStart))
+      .map((p, i) => ({
       leg: String(p.leg ?? (i === 0 ? 'Main' : `Leg ${i + 1}`)),
       side: String(p.dir ?? p.side ?? 'LONG').toUpperCase(),
       qty: Number(p.qty ?? 0),
@@ -224,7 +263,9 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
   );
 
   const pendingOrders = takeLatest(
-    (bot.orders ?? []).map((o) => ({
+    (bot.orders ?? [])
+      .filter((o) => inBotSession(o as Record<string, unknown>, sessionStart))
+      .map((o) => ({
       ageMin: Math.round(Number(o.age_min ?? 0)),
       side: String(o.side ?? '—').toUpperCase(),
       status: String(o.status ?? 'PENDING').toUpperCase(),
@@ -235,7 +276,9 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
   );
 
   const expiredOrders = takeLatest(
-    (bot.expired_orders ?? []).map((o) => ({
+    (bot.expired_orders ?? [])
+      .filter((o) => inBotSession(o as Record<string, unknown>, sessionStart))
+      .map((o) => ({
       time: formatBotTime(o.expired_ts ?? o.created_ts),
       direction: String(o.dir ?? '—').toUpperCase(),
       limitPrice: Number(o.limit_price ?? 0),
@@ -293,7 +336,7 @@ function parseTradeTimestamp(trade: Record<string, unknown>, sessionStart: numbe
 
 /** Bot /api/state may drop closed rows from `trades` while keeping them in trades_map. */
 export function normalizeBotSessionTrades(bot: BotApiState): BotTradeRow[] {
-  const sessionStart = bot.bot_start_time ?? 0;
+  const sessionStart = resolveBotSessionStart(bot);
   const listed = (bot.trades ?? []).filter((t) => {
     if (!t || typeof t !== 'object') return false;
     return parseTradeTimestamp(t as Record<string, unknown>, sessionStart) > 0 || sessionStart <= 0;

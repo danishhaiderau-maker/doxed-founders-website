@@ -77,8 +77,10 @@ export function mapSubscriberExchangeLiveBook(input: {
 }): TradingAgentDashboardState['liveBook'] {
   const mark = input.markPrice ?? 0;
   const positions: TradingAgentDashboardState['liveBook']['positions'] = [];
+  const exchangeHasPosition =
+    input.position != null && Math.abs(Number(input.position.amount ?? 0)) > 1e-8;
 
-  if (input.position) {
+  if (exchangeHasPosition && input.position) {
     const p = input.position;
     positions.push({
       leg: 'Bitfinex',
@@ -143,6 +145,8 @@ export function mapSubscriberExchangeLiveBook(input: {
       const entry = Number(row.fillPrice ?? limitPrice);
       const legQty = qty > 0 ? qty : 0;
       if (legQty <= 0) continue;
+      // Stale relay ledger: OPEN virtual lots with no exchange position are not real fills.
+      if (!exchangeHasPosition) continue;
       const side = direction === 'LONG' || direction === 'SHORT' ? direction : 'LONG';
       const current = mark > 0 ? mark : entry;
       positions.push({

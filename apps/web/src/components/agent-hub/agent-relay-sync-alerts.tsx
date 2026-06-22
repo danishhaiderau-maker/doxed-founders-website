@@ -32,9 +32,9 @@ export function buildRelaySyncAlerts(input: {
     if (needsShowcase) {
       alerts.push({
         level: 'error',
-        title: 'Showcase bot offline',
+        title: 'Local bot offline',
         detail:
-          'Home research bot is not reachable — relay cannot mirror new signals. Run START-HOME.cmd (or use Admin command center), then Wire to site.',
+          'Home research bot (:7800) is not reachable — relay cannot mirror new signals. Use RESTART-LAUNCHER.cmd, click Start everything, then Wire to site.',
       });
     }
   }
@@ -75,8 +75,8 @@ export function buildRelaySyncAlerts(input: {
     if (missingEntry > 0 || missingExit > 0) {
       alerts.push({
         level: 'warn',
-        title: 'Showcase price gaps in fidelity',
-        detail: `${missingEntry} trades missing showcase entry · ${missingExit} missing showcase exit. Usually means the home bot trade history is stale or trade IDs do not match — check bot is wired and /api/state includes trades_map.`,
+        title: 'Local bot price gaps in fidelity',
+        detail: `${missingEntry} trades missing local bot :7800 entry · ${missingExit} missing local bot exit. Usually means the home bot is offline, not wired, or trade IDs do not match — check tunnel + /api/state trades_map.`,
       });
     }
     if (
