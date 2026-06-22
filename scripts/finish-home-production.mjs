@@ -40,11 +40,11 @@ function ensureCloudflaredRunning() {
     [
       '-NoProfile',
       '-Command',
-      `Start-Process -WindowStyle Minimized cloudflared -ArgumentList 'tunnel','run','--token','${token.replace(/'/g, "''")}'`,
+      `Start-Process cloudflared -ArgumentList 'tunnel','run','--token','${token.replace(/'/g, "''")}'`,
     ],
     { stdio: 'inherit' },
   );
-  console.log('OK  cloudflared started (minimized)');
+  console.log('OK  cloudflared started');
 }
 
 async function waitBotLocal() {

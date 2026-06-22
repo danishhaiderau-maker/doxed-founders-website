@@ -25,12 +25,14 @@ function Read-TunnelUrl {
   $configDir = Join-Path $env:USERPROFILE ".cloudflared"
   $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
   if ((Test-Path $namedFlag) -and $cred) { return $stableUrl }
+  $token = Join-Path $configDir "doxed-btc-bot.token"
+  if ((Test-Path $namedFlag) -and (Test-Path $token)) { return $stableUrl }
   if (-not (Test-Path $tunnelUrlFile)) { return $null }
   $raw = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
   if ($null -eq $raw) { return $null }
   $t = "$raw".Trim()
   if (-not $t) { return $null }
-  if ($t -match 'bot\.doxxedcrypto\.digital' -and -not $cred) { return $null }
+  if ($t -match 'bot\.doxxedcrypto\.digital' -and -not (Test-Path $token) -and -not $cred) { return $null }
   return $t
 }
 

@@ -190,7 +190,7 @@ function Start-DetachedPs1 {
     [switch]$NoExit,
     [string]$WindowTitle = "Doxed Home Stack",
     [ValidateSet("Minimized", "Normal")]
-    [string]$Show = "Minimized"
+    [string]$Show = "Normal"
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
   $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
