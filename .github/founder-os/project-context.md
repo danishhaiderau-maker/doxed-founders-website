@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Update Bitfinex policy lock after relay sim orphan heal.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
