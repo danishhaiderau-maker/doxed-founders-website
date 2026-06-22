@@ -61,7 +61,7 @@ Press Ctrl+C to stop.
     }
   } finally {
     $ErrorActionPreference = $prevEap
-    Read-Host "Tunnel stopped — Press Enter to close this window"
+    Read-Host "Tunnel stopped - Press Enter to close this window"
   }
   exit 0
 }
