@@ -9,7 +9,8 @@ $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
 $namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
 $configDir = Join-Path $env:USERPROFILE ".cloudflared"
 $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
-$useNamed = (Test-Path $namedFlag) -and $null -ne $cred
+$token = Join-Path $configDir "doxed-btc-bot.token"
+$useNamed = (Test-Path $namedFlag) -and (($null -ne $cred) -or (Test-Path $token))
 
 Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
