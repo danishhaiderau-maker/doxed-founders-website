@@ -14,7 +14,7 @@ export class BotBridgeService {
   private readonly logger = new Logger(BotBridgeService.name);
   private lastFetchAt = 0;
   private cached: BotApiState | null = null;
-  private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 1000);
+  private cacheMs = Number(process.env.BOT_BRIDGE_CACHE_MS ?? 5000);
   private dbUrlCache: { url: string | null; at: number } | null = null;
 
   constructor(
@@ -84,7 +84,7 @@ export class BotBridgeService {
         : ['/api/state', '/api/relay-state'];
 
     for (const path of paths) {
-      const timeoutMs = path.includes('relay-state') ? 20_000 : 45_000;
+      const timeoutMs = path.includes('relay-state') ? 8_000 : 12_000;
       try {
         const res = await fetch(`${base}${path}`, {
           signal: AbortSignal.timeout(timeoutMs),
@@ -176,7 +176,7 @@ export class BotBridgeService {
     if (!base) return null;
     for (const path of ['/api/ping', '/health']) {
       try {
-        const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(20_000) });
+        const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(8_000) });
         if (!res.ok) continue;
         return (await res.json()) as Record<string, unknown>;
       } catch {

@@ -67,6 +67,8 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 ROOT = Path(os.path.abspath(os.path.dirname(__file__) or os.getcwd()))
+_parent = ROOT.parent
+DATA_ROOT = Path(os.getenv("BTC_AGENT_DATA_DIR", str(_parent if (_parent / "trades_3factor.csv").is_file() else ROOT)))
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "0.0.0.0")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://10.0.0.102:{BIND_PORT}")
@@ -151,7 +153,7 @@ def _summary_stale_meta(compact: dict) -> dict:
     bot_start = session.get("fresh_collection_start_time") if session.get("fresh_collection_mode") else session.get("bot_start_time")
     data_scope = str(compact.get("data_scope") or "all").lower()
     scope_label = compact.get("session_scope") or "ALL-DATA"
-    trades_csv = ROOT / "trades_3factor.csv"
+    trades_csv = DATA_ROOT / "trades_3factor.csv"
     trades_rows = 0
     if trades_csv.is_file():
         try:

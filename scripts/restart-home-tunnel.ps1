@@ -12,6 +12,13 @@ $cred = Get-ChildItem -Path (Join-Path $configDir "doxed-btc-bot*.json") -ErrorA
 $token = Join-Path $configDir "doxed-btc-bot.token"
 $useNamed = (Test-Path $namedFlag) -and (($null -ne $cred) -or (Test-Path $token))
 
+# Skip restart if named tunnel connector is already up (avoids restart storms).
+if ($useNamed -and (Get-Process cloudflared -ErrorAction SilentlyContinue)) {
+  Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
+  Write-Host "Named cloudflared already running — leaving it connected."
+  exit 0
+}
+
 Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
