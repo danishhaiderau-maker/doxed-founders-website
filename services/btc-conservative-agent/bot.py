@@ -15255,12 +15255,6 @@ HTML = """<!DOCTYPE html>
 <p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (Melbourne):</strong> <span id="fundingNextSettle">-</span></p>
 <p><strong>Funding meaning:</strong> <span id="fundingMeaning">-</span> · <strong>Open-interest:</strong> <span id="fundingOpenInterest">-</span></p>
 
-<div id="binanceFeePanel" style="margin:16px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <strong style="color:#fbbf24;">Binance USDT-M Fee Stress (reference)</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 8px 0;">VIP0 taker 0.05% per side (entry+exit) on notional = margin × leverage. Bitfinex sim uses zero fees — this box shows if lanes would still be green on Binance.</p>
-  <div id="binanceFeeContent" style="font-size:0.88em;color:#c9d1d9;">Loading…</div>
-</div>
-
 <h3>System Status</h3>
 <p id="why"></p>
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
@@ -16419,7 +16413,6 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         renderPathwayLab(d);
         renderPathwayArchive(d);
-        renderBinanceFeeStress(d);
         renderPathwayScorecard(d);
         safeText('wsLatency', d.diag?.ws_latency_ms ?? '-');
         safeText('engineLoop', d.diag?.engine_loop_ms ?? '-');
@@ -16894,7 +16887,6 @@ def api_state():
             orders.append(oc)
         snapshot["orders"] = orders
         snapshot["trades"] = trades_copy
-        snapshot["binance_fee_stress"] = compute_binance_fee_stress(trades_copy)
         snapshot["expired_orders"] = expired_orders_copy
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_verdict"] = f"AI reviewer {'ON' if snapshot['ai_enabled'] else 'OFF'} | Threshold {snapshot.get('ai_threshold','WAITING')}%"
