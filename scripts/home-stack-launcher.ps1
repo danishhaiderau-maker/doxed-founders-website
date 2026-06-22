@@ -10,7 +10,8 @@ param(
 
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $scriptDir "home-stack-common.ps1")
+. (Join-Path $scriptDir "home-stack-common.ps1") -Port $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
+. (Join-Path $scriptDir "home-stack-health.ps1")
 $prefix = "http://127.0.0.1:$Port/"
 
 function Write-Cors {
@@ -92,6 +93,14 @@ function Get-FullStatus {
   }
 }
 
+function Invoke-HomeCommandBackground([string]$Action) {
+  Start-HiddenPs1 (Join-Path $scriptDir "home-stack-cmd-worker.ps1") @(
+    "-Action", $Action,
+    "-BotPort", "$BotPort",
+    "-AnalyzerPort", "$AnalyzerPort"
+  )
+}
+
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all" {
@@ -101,45 +110,31 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         message = @(
           "Start everything queued."
           "Three console windows will open: Bot :7800, Analyzer, Cloudflare tunnel."
-          "Leave them open (do not press Enter in those windows). Watchdog/wire run hidden."
-          "Status: green dots above or .home-start-all.log"
+          "Leave them open (do not press Enter in those windows). Supervisor runs hidden for 24/7 recovery."
+          "Status: green dots above, .home-start-all.log, .home-stack-supervisor.log"
         ) -join "`n"
       }
     }
     "start-bot" {
-      if (Test-BotRunning) {
-        return @{ ok = $true; message = "Bot already listening on :$BotPort" }
+      Invoke-HomeCommandBackground "start-bot"
+      return @{
+        ok = $true
+        message = "Bot start queued - Doxed Bot :7800 window opens in a few seconds (hung processes are cleared first)."
       }
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Bot :7800" -Show Normal
-      return @{ ok = $true; message = "Bot window opened on :$BotPort" }
     }
     "start-analyzer" {
-      $started = $false
-      if (-not (Test-AnalyzerRunning)) {
-        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @() -NoExit -WindowTitle "Doxed Analyzer" -Show Normal
-        $started = $true
+      Invoke-HomeCommandBackground "start-analyzer"
+      return @{
+        ok = $true
+        message = "Analyzer start queued - console + :9001 dashboard when ready."
       }
-      if (Start-AnalyzerDashboard) {
-        return @{
-          ok = $true
-          message = if ($started) {
-            "Analyzer console + :9001 dashboard started."
-          } else {
-            "Analyzer loop already running - started :9001 dashboard."
-          }
-        }
-      }
-      if ($started) {
-        return @{ ok = $true; message = "Analyzer console opened from $agentDir (reads bot CSVs there)." }
-      }
-      return @{ ok = $true; message = "Analyzer already running (python research loop)." }
     }
     "start-analyzer-once" {
       Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)" -Show Normal
       return @{ ok = $true; message = "Analyzer single pass started." }
     }
     "start-tunnel" {
-      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
+      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
       if (Use-NamedTunnel) {
         return @{ ok = $true; message = "Named tunnel window opened - keep it open. URL: https://bot.doxxedcrypto.digital" }
       }
@@ -166,59 +161,39 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       if (-not (Test-PortOpen $BotPort)) {
         return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
       }
-      try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/resume" -Method POST -UseBasicParsing -TimeoutSec 30
-        return @{ ok = $true; message = "Local bot execution resumed.`n$($resp.Content)" }
-      } catch {
-        return @{ ok = $false; error = "Resume failed: $($_.Exception.Message)" }
-      }
+      Invoke-HomeCommandBackground "resume-trading"
+      return @{ ok = $true; message = "Resume trading queued." }
     }
     "pause-trading" {
       if (-not (Test-PortOpen $BotPort)) {
         return @{ ok = $false; error = "Bot not running on :$BotPort - click Start bot first" }
       }
-      try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/pause" -Method POST -UseBasicParsing -TimeoutSec 30
-        return @{ ok = $true; message = "Local bot execution paused.`n$($resp.Content)" }
-      } catch {
-        return @{ ok = $false; error = "Pause failed: $($_.Exception.Message)" }
-      }
+      Invoke-HomeCommandBackground "pause-trading"
+      return @{ ok = $true; message = "Pause trading queued." }
     }
     "wipe-research" {
       if (-not (Test-PortOpen $BotPort)) {
         return @{ ok = $false; error = "Bot not running on :$BotPort - start bot first" }
       }
-      try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/reset" -Method POST -UseBasicParsing -TimeoutSec 180
-        return @{ ok = $true; message = "Fresh collection wipe + `$500 reset sent to bot.`n$($resp.Content)" }
-      } catch {
-        return @{ ok = $false; error = "Wipe failed: $($_.Exception.Message)" }
-      }
+      Invoke-HomeCommandBackground "wipe-research"
+      return @{ ok = $true; message = "Fresh collection wipe queued (runs in background, up to 3 min)." }
     }
     "stop-bot" {
-      $portKilled = @(Stop-ListenPort $BotPort)
-      $pyKilled = @(Stop-PythonMatching "btc_conservative_agent")
-      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7800" 2>$null | Out-Null
-      return @{ ok = $true; message = "Stopped bot (port:$($portKilled.Count) python:$($pyKilled.Count))." }
+      Invoke-HomeCommandBackground "stop-bot"
+      return @{ ok = $true; message = "Stop bot queued (background)." }
     }
     "stop-analyzer" {
-      $pyKilled = @(Stop-PythonMatching "analyzer_research_engine")
-      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer" 2>$null | Out-Null
-      & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Analyzer (once)" 2>$null | Out-Null
-      $portKilled = @(Stop-ListenPort $AnalyzerPort)
-      return @{ ok = $true; message = "Stopped analyzer (python:$($pyKilled.Count) port:$($portKilled.Count))." }
+      Invoke-HomeCommandBackground "stop-analyzer"
+      return @{ ok = $true; message = "Stop analyzer queued (background)." }
     }
     "stop-all" {
-      $result = Stop-AllHomeStack
+      Invoke-HomeCommandBackground "stop-all"
       return @{
         ok = $true
         message = @(
-          "Full local wipe complete (bridge :7810 still running)."
-          "Bot port: $($result.botPort.Count) | bot python: $($result.botPy.Count)"
-          "Analyzer python: $($result.analyzerPy.Count) | tunnel: $($result.tunnel.Count)"
-          "Cleared .home-tunnel-url. Click Start everything for a clean run."
+          "Full local wipe queued (bridge :7810 still running)."
+          "Cleared .home-tunnel-url when complete. Click Start everything for a clean run."
         ) -join "`n"
-        pids = $result
       }
     }
     default {

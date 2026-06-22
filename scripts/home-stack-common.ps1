@@ -48,20 +48,27 @@ function Test-TunnelLiveCached([string]$Url) {
   return $live
 }
 
-function Stop-ListenPort([int]$ListenPort) {
+function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
   try {
-    Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
-      Select-Object -First 5 |
-      ForEach-Object {
-        $procId = [int]$_.OwningProcess
+    $pattern = ":$ListenPort\s"
+    netstat -ano | Select-String $pattern | ForEach-Object {
+      $line = "$_".Trim()
+      if ($line -notmatch 'LISTENING') { return }
+      if ($line -match '\s(\d+)\s*$') {
+        $procId = [int]$matches[1]
         if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
           Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           $killed += $procId
         }
       }
+    }
   } catch { }
   return $killed
+}
+
+function Stop-ListenPort([int]$ListenPort) {
+  return @(Stop-ListenPortFast $ListenPort)
 }
 
 function Stop-PythonMatching([string]$Pattern) {
@@ -137,14 +144,37 @@ function Clear-TunnelUrlFile {
   }
 }
 
-function Stop-AllHomeStack {
-  $botPort = @(Stop-ListenPort $BotPort)
+function Close-HomeStackWindowTitles {
+  $closed = @()
+  $windowTitles = @(
+    "Doxed Bot :7800",
+    "Doxed Analyzer",
+    "Doxed Analyzer (once)",
+    "Doxed Cloudflare Tunnel",
+    "Doxed Cloudflare Tunnel (stable)",
+    "Doxed Stack Control Panel",
+    "Doxed Auto-Wire",
+    "Doxed Wire to Site",
+    "Doxed Tunnel Watchdog",
+    "Doxed Tunnel Restart",
+    "Doxed Stack Start",
+    "Doxed Start Everything"
+  )
+  foreach ($title in $windowTitles) {
+    & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null
+    $closed += $title
+  }
+  return $closed
+}
+
+function Stop-AllHomeStackFast {
+  $botPort = @(Stop-ListenPortFast $BotPort)
   $botPy = @(Stop-PythonMatching "btc_conservative_agent")
   $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
-  $analyzerHealth = @(Stop-ListenPort $AnalyzerPort)
+  $analyzerHealth = @(Stop-ListenPortFast $AnalyzerPort)
   $analyzerHealthPy = @(Stop-PythonMatching "analyzer-health-server")
   $tunnel = @(Stop-Cloudflared)
-  $windows = @(Close-HomeStackWindows)
+  $windows = @(Close-HomeStackWindowTitles)
   Clear-TunnelUrlFile
   return @{
     botPort = $botPort
@@ -155,6 +185,31 @@ function Stop-AllHomeStack {
     tunnel = $tunnel
     windows = $windows
   }
+}
+
+function Stop-AllHomeStack {
+  $result = Stop-AllHomeStackFast
+  $scriptHits = @()
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and (
+        $_.CommandLine -like "*start-home-bot.ps1*" -or
+        $_.CommandLine -like "*start-home-analyzer.ps1*" -or
+        $_.CommandLine -like "*setup-home-bot-tunnel.ps1*" -or
+        $_.CommandLine -like "*run-named-bot-tunnel.ps1*" -or
+        $_.CommandLine -like "*restart-home-tunnel.ps1*" -or
+        $_.CommandLine -like "*home-stack-control-panel.ps1*" -or
+        $_.CommandLine -like "*auto-wire-after-tunnel.ps1*" -or
+        $_.CommandLine -like "*wire-home-bot-background.ps1*" -or
+        $_.CommandLine -like "*tunnel-watchdog.ps1*" -or
+        $_.CommandLine -like "*home-stack-start-all.ps1*"
+      )
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $scriptHits += "pid:$($_.ProcessId)"
+    }
+  $result.scriptProcesses = $scriptHits
+  return $result
 }
 
 function Test-AnalyzerRunning {
@@ -224,4 +279,42 @@ function Use-NamedTunnel {
 
 function Start-AnalyzerDashboard {
   return (Test-PortOpen $AnalyzerPort)
+}
+
+function Start-CloudflaredNamedHidden {
+  param([int]$Port = 7800)
+  $configDir = Join-Path $env:USERPROFILE ".cloudflared"
+  $tunnelName = "doxed-btc-bot"
+  $tokenFile = Join-Path $configDir "$tunnelName.token"
+  $logDir = Join-Path $repoRoot "logs"
+  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+  $outLog = Join-Path $logDir "cloudflared-named.log"
+  $errLog = Join-Path $logDir "cloudflared-named.err.log"
+
+  if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
+    throw "cloudflared not installed"
+  }
+
+  $args = @()
+  if (Test-Path $tokenFile) {
+    $token = (Get-Content $tokenFile -Raw).Trim()
+    $args = @("tunnel", "run", "--token", $token)
+  } else {
+    $cred = Get-ChildItem -Path (Join-Path $configDir "$tunnelName*.json") -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cred) { throw "Named tunnel not configured" }
+    $configPath = Join-Path $configDir "config.yml"
+    @(
+      "tunnel: $tunnelName"
+      "credentials-file: $($cred.FullName)"
+      "ingress:"
+      "  - hostname: bot.doxxedcrypto.digital"
+      "    service: http://127.0.0.1:$Port"
+      "  - service: http_status:404"
+    ) | Set-Content -Path $configPath -Encoding UTF8
+    $args = @("tunnel", "run", $tunnelName)
+  }
+
+  Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
+  Start-Process -FilePath "cloudflared" -ArgumentList $args -WindowStyle Hidden `
+    -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WorkingDirectory $repoRoot
 }

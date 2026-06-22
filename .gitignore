@@ -92,7 +92,7 @@ scripts/win1.ps1
 scripts/win2.ps1
 scripts/_test.py
 scripts/_*.mjs
-scripts/run_sim.py
+services/btc-conservative-agent/local-collection-data/
 
 # Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
 # Audit export (code-only): ../doxedcryptofounder-audit/
@@ -102,6 +102,8 @@ docs/exports/*.zip
 
 # Home bot runtime markers (local only)
 .home-bot-mode
+.local-collection-mode
+.local-collection-analyzer.lock
 .home-tunnel-url
 .home-tunnel.log
 .home-wire.log
