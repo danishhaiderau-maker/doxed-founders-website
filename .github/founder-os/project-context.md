@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix analyzer cwd so it reads bot CSVs from agent root, not research/.
 
 ## Last Activity
 
