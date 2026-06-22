@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Wait up to 5 minutes for cloudflared tunnel login authorization.
 
 ## Last Activity
 
