@@ -36,7 +36,7 @@ Get-Content $vaultEnv | ForEach-Object {
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
-Write-Host "Status ping: http://127.0.0.1:9001/health (not a full dashboard — logs print here)"
+Write-Host "Status ping: http://127.0.0.1:9001/ (research KPI dashboard)"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""

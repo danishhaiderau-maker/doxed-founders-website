@@ -9,7 +9,7 @@
  *   npm run wire:home-bot -- --pause-railway-bot
  */
 import { PrismaClient } from '@prisma/client';
-import { writeFileSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync } from 'fs';
 import { loadVaultEnv } from './load-vault-env.mjs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -202,3 +202,15 @@ Verify:
   npm run prepare:bitfinex-relay-test
 `);
 writeFileSync(path.join(root, '.home-bot-mode'), `wiredAt=${new Date().toISOString()}\nurl=${botUrl}\n`, 'utf8');
+try {
+  const homeBotEnv = path.join(getVaultDir(), '.env.home-bot');
+  const prev = existsSync(homeBotEnv) ? readFileSync(homeBotEnv, 'utf8') : '';
+  const lines = prev
+    .split('\n')
+    .filter((line) => line.trim() && !line.trim().startsWith('HOME_BOT_PUBLIC_URL='));
+  lines.push(`HOME_BOT_PUBLIC_URL=${botUrl}`);
+  writeFileSync(homeBotEnv, `${lines.join('\n').trim()}\n`, 'utf8');
+  console.log(`✓ vault .env.home-bot HOME_BOT_PUBLIC_URL = ${botUrl}`);
+} catch (err) {
+  console.warn(`Could not update vault .env.home-bot: ${err instanceof Error ? err.message : err}`);
+}
