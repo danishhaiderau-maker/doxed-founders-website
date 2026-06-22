@@ -17,6 +17,7 @@ import {
   computeSignalSuccessFeeUsd,
   SIGNAL_LEGAL_DISCLAIMER,
   resolveSignalCyclePollMs,
+  pickCanonicalTradeId,
   type SignalCycleEventType,
 } from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
@@ -40,6 +41,8 @@ import {
   extractBotApproveSnapshot,
 } from './signal-envelope.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
+import { normalizeBotSessionTrades } from './bot-state.mapper';
+import { resolveShowcaseTradeDetails, tradeIdsMatch } from './relay-fidelity.mapper';
 
 const DDOLLAR_PER_USD = 100;
 const SIGNAL_POLL_MS = resolveSignalCyclePollMs();
@@ -177,17 +180,34 @@ export class SignalCyclesService implements OnModuleInit {
     if (lao.trade_id === this.lastSeenTradeId) return false;
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
+    const showcaseMatch = resolveShowcaseTradeDetails(bot, lao.trade_id);
+    const canonicalTradeId = pickCanonicalTradeId(
+      lao.trade_id,
+      showcaseMatch?.matchedTradeId ?? lao.trade_id,
+    );
+
     const existing = await this.prisma.signalCycle.findUnique({
-      where: { agentId_tradeId: { agentId: agent.id, tradeId: lao.trade_id } },
+      where: { agentId_tradeId: { agentId: agent.id, tradeId: canonicalTradeId } },
     });
     if (existing) {
       this.lastSeenTradeId = lao.trade_id;
       return false;
     }
 
+    const recentCycles = await this.prisma.signalCycle.findMany({
+      where: { agentId: agent.id },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+      select: { tradeId: true },
+    });
+    if (recentCycles.some((c) => tradeIdsMatch(c.tradeId, canonicalTradeId))) {
+      this.lastSeenTradeId = lao.trade_id;
+      return false;
+    }
+
     const cycleId = `cyc_${randomBytes(8).toString('hex')}`;
     const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
-    const envelope = buildIntentEnvelope(cycleId, lao.trade_id, bot, { maxMarginUsd });
+    const envelope = buildIntentEnvelope(cycleId, canonicalTradeId, bot, { maxMarginUsd });
     if (!envelope) return false;
 
     const ttlSec = envelope.entry.ttl_sec;
@@ -195,7 +215,7 @@ export class SignalCyclesService implements OnModuleInit {
       data: {
         id: cycleId,
         agentId: agent.id,
-        tradeId: lao.trade_id,
+        tradeId: canonicalTradeId,
         status: SignalCycleStatus.INTENT,
         botVersion: bot.bot_version ?? null,
         intentEnvelope: envelope as unknown as Prisma.InputJsonValue,
@@ -204,7 +224,7 @@ export class SignalCyclesService implements OnModuleInit {
       },
     });
     this.lastSeenTradeId = lao.trade_id;
-    this.logger.log(`Signal cycle INTENT ${cycleId} trade=${lao.trade_id}`);
+    this.logger.log(`Signal cycle INTENT ${cycleId} trade=${canonicalTradeId} (bot lao=${lao.trade_id})`);
     return true;
   }
 
@@ -241,13 +261,27 @@ export class SignalCyclesService implements OnModuleInit {
     const bot = await this.botBridge.fetchStateForExecution(force);
     if (!bot) return;
 
-    const trades = bot.trades ?? [];
+    const trades = normalizeBotSessionTrades(bot);
     const tradesMap = bot.trades_map ?? {};
     for (const cycle of openCycles) {
-      const trade = trades.find((t) => t.trade_id === cycle.tradeId);
-      const mapEntry = tradesMap[cycle.tradeId] as
+      let trade = trades.find((t) => t.trade_id && tradeIdsMatch(t.trade_id, cycle.tradeId));
+      let mapEntry = tradesMap[cycle.tradeId] as
         | { signal_ref?: Record<string, unknown> }
         | undefined;
+      if (!mapEntry) {
+        for (const [mapKey, entry] of Object.entries(tradesMap)) {
+          const sig = (entry as { signal_ref?: Record<string, unknown> })?.signal_ref;
+          const refId = String(sig?.trade_id ?? mapKey);
+          if (tradeIdsMatch(refId, cycle.tradeId) || tradeIdsMatch(mapKey, cycle.tradeId)) {
+            mapEntry = entry as { signal_ref?: Record<string, unknown> };
+            if (!trade) {
+              trade = trades.find((t) => t.trade_id && tradeIdsMatch(t.trade_id, refId));
+            }
+            break;
+          }
+        }
+      }
+      const showcaseDetails = resolveShowcaseTradeDetails(bot, cycle.tradeId);
       const sigRef = mapEntry?.signal_ref;
       const mapClosed =
         sigRef &&
@@ -259,11 +293,13 @@ export class SignalCyclesService implements OnModuleInit {
         const netPnl =
           trade?.net_pnl_usd ??
           (typeof sigRef?.net_pnl_usd === 'number' ? Number(sigRef.net_pnl_usd) : trade?.pnl);
+        const canonicalTradeId = showcaseDetails?.matchedTradeId ?? cycle.tradeId;
         await this.prisma.signalCycle.update({
           where: { id: cycle.id },
           data: {
             status: SignalCycleStatus.CLOSED,
             closedAt: new Date(),
+            tradeId: canonicalTradeId !== cycle.tradeId ? canonicalTradeId : undefined,
             showcasePnlUsd: netPnl ?? undefined,
             showcaseExitReason:
               trade?.exit_reason ??

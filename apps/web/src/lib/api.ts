@@ -3635,6 +3635,30 @@ export async function downloadLiveTradeExport(
   return { blob, filename };
 }
 
+export async function downloadRelaySimAudit(
+  slug: string,
+  token: string,
+): Promise<{ blob: Blob; filename: string }> {
+  let res: Response;
+  try {
+    res = await fetch(relaySimAuditExportUrl(slug), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    const target = describeApiTarget();
+    throw new Error(`Cannot reach API at ${target}. Refresh and try again.`);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(parseApiError(body, res.status));
+  }
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const match = cd.match(/filename="?([^"]+)"?/);
+  const filename = match?.[1] ?? `${slug}-relay-sim-audit.csv`;
+  const blob = await res.blob();
+  return { blob, filename };
+}
+
 export function followTradingAgent(agentId: string, token: string) {
   return apiFetch<{ following: boolean }>(`/trading-agents/${agentId}/follow`, { method: 'POST' }, token);
 }
@@ -3914,6 +3938,18 @@ export function stopCopyRelaySim(slug: string, token: string) {
     { method: 'POST' },
     token,
   );
+}
+
+export function resetCopyRelaySim(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; copyRelaySim: import('@dcf/utils').CopyRelaySimState }>(
+    `/trading-agents/${slug}/relay-sim/reset`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function relaySimAuditExportUrl(slug: string, format: 'csv' = 'csv') {
+  return apiUrl(`/trading-agents/${slug}/relay-sim/export?format=${format}`);
 }
 
 export function fetchCopyRelaySimStatus(slug: string, token: string) {

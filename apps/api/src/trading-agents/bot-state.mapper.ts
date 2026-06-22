@@ -1,4 +1,5 @@
 import type { TradingAgentDashboardState } from '@dcf/utils';
+import { formatMelbourneDateTime } from '@dcf/utils';
 
 /** Shape returned by the Python bot GET /api/state (subset we use). */
 export type BotApiState = {
@@ -211,16 +212,7 @@ function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
 }
 
 function formatBotTime(ts: string | number | undefined): string {
-  if (ts == null || ts === '') return '—';
-  if (typeof ts === 'number') {
-    const ms = ts > 1e12 ? ts : ts * 1000;
-    return new Date(ms).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  }
-  const parsed = Date.parse(ts);
-  if (!Number.isNaN(parsed)) {
-    return new Date(parsed).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  }
-  return String(ts).slice(11, 16) || String(ts);
+  return formatMelbourneDateTime(ts);
 }
 
 function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
@@ -229,10 +221,11 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
     (bot.signal_info?.signals ?? [])
       .filter((s) => inBotSession(s as Record<string, unknown>, sessionStart))
       .map((s) => ({
-      time:
+      time: formatMelbourneDateTime(
         typeof s.created_ts === 'string' && s.created_ts.includes('T')
-          ? s.created_ts.slice(0, 19)
-          : formatBotTime(s.created_ts),
+          ? s.created_ts
+          : s.created_ts,
+      ),
       direction: String(s.dir ?? '—').toUpperCase(),
       confidence: Math.round(Number(s.conf ?? 0)),
       regime: String(s.regime_birth ?? s.regime ?? '—'),

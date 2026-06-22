@@ -1,8 +1,16 @@
 import type { BotApiState } from './bot-state.mapper';
 import { normalizeBotSessionTrades } from './bot-state.mapper';
+import {
+  classifyTradeIdMatch,
+  pickCanonicalTradeId,
+  tradeIdsMatch,
+  type TradeIdMatchKind,
+} from '@dcf/utils';
 
 export type RelayFidelityRow = {
   tradeId: string;
+  localBotTradeId: string | null;
+  matchKind: TradeIdMatchKind;
   cycleId: string;
   direction: string | null;
   showcaseEntry: number | null;
@@ -15,7 +23,19 @@ export type RelayFidelityRow = {
   exitDeltaPct: number | null;
   showcaseExitReason: string | null;
   relayExitReason: string | null;
+  localBotEntryAt: string | null;
+  localBotExitAt: string | null;
+  relayEntryAt: string | null;
+  relayExitAt: string | null;
+  entryLagSec: number | null;
+  exitLagSec: number | null;
   closedAt: string | null;
+};
+
+export type RelayFidelityOrphan = {
+  tradeId: string;
+  kind: 'relay_without_showcase' | 'showcase_without_relay';
+  detail: string;
 };
 
 export type RelayFidelitySnapshot = {
@@ -28,6 +48,15 @@ export type RelayFidelitySnapshot = {
     maxExitDeltaPct: number | null;
     missingShowcaseEntryCount: number;
     missingShowcaseExitCount: number;
+    avgEntryLagSec: number | null;
+    avgExitLagSec: number | null;
+    unmatchedRelayCount: number;
+    unmatchedShowcaseCount: number;
+  };
+  audit: {
+    orphans: RelayFidelityOrphan[];
+    relayTradeIds: string[];
+    matchedShowcaseTradeIds: string[];
   };
   policy: {
     showcaseMirrorOnly: boolean;
@@ -35,6 +64,17 @@ export type RelayFidelitySnapshot = {
     executionPollMs: number;
     signalPollMs: number;
   };
+};
+
+export type ShowcaseTradeDetails = {
+  matchedTradeId: string;
+  matchKind: TradeIdMatchKind;
+  mapKey?: string;
+  entry?: number;
+  exit?: number;
+  exitReason?: string;
+  entryAt?: string;
+  exitAt?: string;
 };
 
 function pctDelta(showcase: number | null, relay: number | null): number | null {
@@ -47,7 +87,21 @@ function usdDelta(showcase: number | null, relay: number | null, qty: number | n
   return (relay - showcase) * qty;
 }
 
-function extractShowcaseFromSignalRef(sig: Record<string, unknown>) {
+function tsFromUnknown(v: unknown): string | undefined {
+  if (v == null || v === '') return undefined;
+  if (typeof v === 'number') {
+    const ms = v > 1e12 ? v : v * 1000;
+    return new Date(ms).toISOString();
+  }
+  if (typeof v === 'string') {
+    const parsed = Date.parse(v);
+    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+    return v.includes('T') ? v : undefined;
+  }
+  return undefined;
+}
+
+function extractShowcaseFromSignalRef(sig: Record<string, unknown>): Omit<ShowcaseTradeDetails, 'matchedTradeId' | 'matchKind'> {
   const exitCtx = sig.exit_context as Record<string, unknown> | undefined;
   const entry =
     typeof sig.fill_price === 'number'
@@ -63,86 +117,161 @@ function extractShowcaseFromSignalRef(sig: Record<string, unknown>) {
       : exitCtx?.exit_price != null
         ? Number(exitCtx.exit_price)
         : undefined;
+  const entryAt =
+    tsFromUnknown(sig.fill_ts) ??
+    tsFromUnknown(sig.filled_ts) ??
+    tsFromUnknown(sig.entry_ts) ??
+    tsFromUnknown(sig.created_ts_ts) ??
+    tsFromUnknown(sig.created_ts);
+  const exitAt =
+    tsFromUnknown(sig.closed_ts) ??
+    tsFromUnknown(exitCtx?.closed_ts) ??
+    tsFromUnknown(exitCtx?.exit_ts);
   return {
     entry,
     exit,
     exitReason: typeof sig.exit_reason === 'string' ? sig.exit_reason : undefined,
+    entryAt,
+    exitAt,
   };
 }
 
-/** Resolve showcase fill/exit prices from bot state — trades_map keys often differ from cycle tradeId. */
-function tradeIdsMatch(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (a.startsWith(b) || b.startsWith(a)) return true;
-  const na = a.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-  const nb = b.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-  if (na === nb) return true;
-  if (na.length >= 8 && nb.length >= 8 && (na.includes(nb) || nb.includes(na))) return true;
-  return false;
+function lagSec(
+  localIso: string | null | undefined,
+  relayIso: string | null | undefined,
+): number | null {
+  if (!localIso || !relayIso) return null;
+  const a = Date.parse(localIso);
+  const b = Date.parse(relayIso);
+  if (Number.isNaN(a) || Number.isNaN(b)) return null;
+  return Math.round((b - a) / 1000);
 }
 
-export function resolveShowcaseTradePrices(
+/** Resolve showcase fill/exit + timestamps — trades_map keys often differ from cycle tradeId. */
+export function resolveShowcaseTradeDetails(
   bot: BotApiState | null,
   tradeId: string,
-): { entry?: number; exit?: number; exitReason?: string } {
-  if (!bot || !tradeId) return {};
+): ShowcaseTradeDetails | null {
+  if (!bot || !tradeId) return null;
+
+  let best: ShowcaseTradeDetails | null = null;
+  let bestRank = -1;
+
+  const consider = (candidateId: string, details: Omit<ShowcaseTradeDetails, 'matchedTradeId' | 'matchKind'>, mapKey?: string) => {
+    const kind = classifyTradeIdMatch(tradeId, candidateId);
+    if (kind === 'none') return;
+    const rank = kind === 'exact' ? 4 : kind === 'normalized' ? 3 : kind === 'prefix' ? 2 : 1;
+    const score = [details.entry, details.exit, details.entryAt, details.exitAt].filter((v) => v != null).length;
+    const bestScore = best
+      ? [best.entry, best.exit, best.entryAt, best.exitAt].filter((v) => v != null).length
+      : -1;
+    if (rank < bestRank || (rank === bestRank && score <= bestScore)) return;
+    bestRank = rank;
+    best = {
+      matchedTradeId: pickCanonicalTradeId(tradeId, candidateId),
+      matchKind: kind,
+      mapKey,
+      entry: details.entry ?? best?.entry,
+      exit: details.exit ?? best?.exit,
+      exitReason: details.exitReason ?? best?.exitReason,
+      entryAt: details.entryAt ?? best?.entryAt,
+      exitAt: details.exitAt ?? best?.exitAt,
+    };
+  };
 
   for (const t of bot.trades ?? []) {
-    if (t.trade_id && tradeIdsMatch(t.trade_id, tradeId)) {
-      return {
-        entry: t.entry ?? undefined,
-        exit: t.exit ?? undefined,
-        exitReason: t.exit_reason ?? undefined,
-      };
-    }
+    if (!t.trade_id) continue;
+    consider(t.trade_id, {
+      entry: t.entry ?? undefined,
+      exit: t.exit ?? undefined,
+      exitReason: t.exit_reason ?? undefined,
+      entryAt:
+        tsFromUnknown((t as Record<string, unknown>).entry_ts) ??
+        tsFromUnknown((t as Record<string, unknown>).fill_ts) ??
+        tsFromUnknown(t.ts),
+      exitAt: tsFromUnknown(t.ts),
+    });
+  }
+
+  for (const t of normalizeBotSessionTrades(bot)) {
+    if (!t.trade_id) continue;
+    consider(t.trade_id, {
+      entry: t.entry ?? undefined,
+      exit: t.exit ?? undefined,
+      exitReason: t.exit_reason ?? undefined,
+      entryAt:
+        tsFromUnknown((t as Record<string, unknown>).entry_ts) ??
+        tsFromUnknown((t as Record<string, unknown>).fill_ts) ??
+        tsFromUnknown(t.ts),
+      exitAt: tsFromUnknown(t.ts),
+    });
   }
 
   const direct = bot.trades_map?.[tradeId];
   if (direct?.signal_ref && typeof direct.signal_ref === 'object') {
-    return extractShowcaseFromSignalRef(direct.signal_ref as Record<string, unknown>);
+    const sig = direct.signal_ref as Record<string, unknown>;
+    consider(String(sig.trade_id ?? tradeId), extractShowcaseFromSignalRef(sig), tradeId);
   }
 
-  for (const entry of Object.values(bot.trades_map ?? {})) {
+  for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
     const sig = entry?.signal_ref as Record<string, unknown> | undefined;
     if (!sig) continue;
-    const refId = String(sig.trade_id ?? '');
-    if (tradeIdsMatch(refId, tradeId)) {
-      return extractShowcaseFromSignalRef(sig);
-    }
-  }
-
-  for (const t of normalizeBotSessionTrades(bot)) {
-    if (t.trade_id && tradeIdsMatch(t.trade_id, tradeId)) {
-      return {
-        entry: t.entry ?? undefined,
-        exit: t.exit ?? undefined,
-        exitReason: t.exit_reason ?? undefined,
-      };
+    const refId = String(sig.trade_id ?? mapKey);
+    consider(refId, extractShowcaseFromSignalRef(sig), mapKey);
+    if (tradeIdsMatch(mapKey, tradeId)) {
+      consider(refId, extractShowcaseFromSignalRef(sig), mapKey);
     }
   }
 
   for (const o of bot.orders ?? []) {
-    if (o.trade_id === tradeId) {
-      const px = o.limit_price ?? o.signal_price;
-      if (typeof px === 'number') return { entry: px };
+    if (!o.trade_id || !tradeIdsMatch(o.trade_id, tradeId)) continue;
+    const px = o.limit_price ?? o.signal_price;
+    if (typeof px === 'number') {
+      consider(o.trade_id, { entry: px });
     }
   }
 
   for (const sig of bot.signal_info?.signals ?? []) {
     if (!sig || typeof sig !== 'object') continue;
     const refId = String(sig.trade_id ?? '');
-    if (refId !== tradeId && !tradeIdsMatch(refId, tradeId)) continue;
-    return extractShowcaseFromSignalRef(sig as Record<string, unknown>);
+    if (!refId || !tradeIdsMatch(refId, tradeId)) continue;
+    consider(refId, extractShowcaseFromSignalRef(sig as Record<string, unknown>));
   }
 
   for (const pos of bot.positions ?? []) {
-    if (pos.trade_id === tradeId && typeof pos.entry === 'number') {
-      return { entry: pos.entry };
+    if (!pos.trade_id || !tradeIdsMatch(pos.trade_id, tradeId)) continue;
+    if (typeof pos.entry === 'number') {
+      consider(pos.trade_id, { entry: pos.entry });
     }
   }
 
-  return {};
+  return best;
+}
+
+/** @deprecated use resolveShowcaseTradeDetails */
+export function resolveShowcaseTradePrices(
+  bot: BotApiState | null,
+  tradeId: string,
+): { entry?: number; exit?: number; exitReason?: string } {
+  const d = resolveShowcaseTradeDetails(bot, tradeId);
+  if (!d) return {};
+  return { entry: d.entry, exit: d.exit, exitReason: d.exitReason };
+}
+
+function collectShowcaseSessionTradeIds(bot: BotApiState | null): string[] {
+  if (!bot) return [];
+  const ids = new Set<string>();
+  for (const t of normalizeBotSessionTrades(bot)) {
+    if (t.trade_id) ids.add(String(t.trade_id));
+  }
+  for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
+    const sig = entry?.signal_ref as Record<string, unknown> | undefined;
+    if (!sig) continue;
+    if (String(sig.status ?? '') === 'CLOSED' || sig.exit_price != null || sig.closed_ts != null) {
+      ids.add(String(sig.trade_id ?? mapKey));
+    }
+  }
+  return [...ids];
 }
 
 export function buildRelayFidelitySnapshot(input: {
@@ -172,6 +301,7 @@ export function buildRelayFidelitySnapshot(input: {
   const sessionStart = input.sessionStartedAt?.getTime() ?? 0;
 
   const rows: RelayFidelityRow[] = [];
+  const relayTradeIds: string[] = [];
 
   for (const p of input.participants) {
     if (sessionStart > 0 && p.createdAt && p.createdAt.getTime() < sessionStart) {
@@ -181,6 +311,8 @@ export function buildRelayFidelitySnapshot(input: {
     const filled = p.events.find((e) => e.eventType === 'FILLED');
     const exit = p.events.find((e) => e.eventType === 'EXIT');
     if (!filled && !exit) continue;
+
+    relayTradeIds.push(p.cycle.tradeId);
 
     const fillPayload =
       filled?.payload && typeof filled.payload === 'object'
@@ -205,12 +337,16 @@ export function buildRelayFidelitySnapshot(input: {
           : null;
     const qty = typeof fillPayload.qty === 'number' ? fillPayload.qty : null;
 
-    const showcase = resolveShowcaseTradePrices(input.bot, p.cycle.tradeId);
-    const showcaseEntry = showcase.entry ?? null;
-    const showcaseExit = showcase.exit ?? null;
+    const showcase = resolveShowcaseTradeDetails(input.bot, p.cycle.tradeId);
+    const showcaseEntry = showcase?.entry ?? null;
+    const showcaseExit = showcase?.exit ?? null;
+    const relayEntryAt = filled?.createdAt.toISOString() ?? null;
+    const relayExitAt = exit?.createdAt.toISOString() ?? null;
 
     rows.push({
       tradeId: p.cycle.tradeId,
+      localBotTradeId: showcase?.matchedTradeId ?? null,
+      matchKind: showcase?.matchKind ?? 'none',
       cycleId: p.cycle.id,
       direction:
         typeof fillPayload.direction === 'string'
@@ -224,9 +360,15 @@ export function buildRelayFidelitySnapshot(input: {
       bitfinexExit,
       exitDeltaUsd: usdDelta(showcaseExit, bitfinexExit, qty),
       exitDeltaPct: pctDelta(showcaseExit, bitfinexExit),
-      showcaseExitReason: p.cycle.showcaseExitReason ?? showcase.exitReason ?? null,
+      showcaseExitReason: p.cycle.showcaseExitReason ?? showcase?.exitReason ?? null,
       relayExitReason:
         typeof exitPayload.exit_reason === 'string' ? exitPayload.exit_reason : null,
+      localBotEntryAt: showcase?.entryAt ?? null,
+      localBotExitAt: showcase?.exitAt ?? null,
+      relayEntryAt,
+      relayExitAt,
+      entryLagSec: lagSec(showcase?.entryAt, relayEntryAt),
+      exitLagSec: lagSec(showcase?.exitAt, relayExitAt),
       closedAt: (p.cycle.closedAt ?? p.updatedAt).toISOString(),
     });
   }
@@ -240,9 +382,42 @@ export function buildRelayFidelitySnapshot(input: {
   const exitDeltas = trimmed
     .map((r) => r.exitDeltaPct)
     .filter((v): v is number => v != null && Number.isFinite(v));
+  const entryLags = trimmed
+    .map((r) => r.entryLagSec)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const exitLags = trimmed
+    .map((r) => r.exitLagSec)
+    .filter((v): v is number => v != null && Number.isFinite(v));
 
   const avg = (xs: number[]) =>
     xs.length ? xs.reduce((s, v) => s + v, 0) / xs.length : null;
+
+  const matchedShowcaseTradeIds = trimmed
+    .map((r) => r.localBotTradeId)
+    .filter((v): v is string => Boolean(v));
+
+  const orphans: RelayFidelityOrphan[] = [];
+  for (const row of trimmed) {
+    if (row.bitfinexEntry != null && row.showcaseEntry == null) {
+      orphans.push({
+        tradeId: row.tradeId,
+        kind: 'relay_without_showcase',
+        detail: `Relay filled but no local bot :7800 entry matched (match=${row.matchKind})`,
+      });
+    }
+  }
+
+  const showcaseIds = collectShowcaseSessionTradeIds(input.bot);
+  for (const sid of showcaseIds) {
+    const hasRelay = relayTradeIds.some((rid) => tradeIdsMatch(rid, sid));
+    if (!hasRelay) {
+      orphans.push({
+        tradeId: sid,
+        kind: 'showcase_without_relay',
+        detail: 'Local bot closed trade with no relay participant in this session',
+      });
+    }
+  }
 
   return {
     rows: trimmed,
@@ -260,6 +435,15 @@ export function buildRelayFidelitySnapshot(input: {
         .length,
       missingShowcaseExitCount: trimmed.filter((r) => r.showcaseExit == null && r.bitfinexExit != null)
         .length,
+      avgEntryLagSec: avg(entryLags) != null ? Number(avg(entryLags)!.toFixed(1)) : null,
+      avgExitLagSec: avg(exitLags) != null ? Number(avg(exitLags)!.toFixed(1)) : null,
+      unmatchedRelayCount: trimmed.filter((r) => r.matchKind === 'none').length,
+      unmatchedShowcaseCount: orphans.filter((o) => o.kind === 'showcase_without_relay').length,
+    },
+    audit: {
+      orphans: orphans.slice(0, 20),
+      relayTradeIds,
+      matchedShowcaseTradeIds,
     },
     policy: {
       showcaseMirrorOnly: process.env.SUBSCRIBER_SHOWCASE_MIRROR_ONLY !== 'false',
@@ -269,3 +453,6 @@ export function buildRelayFidelitySnapshot(input: {
     },
   };
 }
+
+// Re-export for API consumers that import from mapper
+export { tradeIdsMatch };

@@ -1,6 +1,6 @@
 'use client';
 
-import { formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
+import { formatMelbourneDateTime, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
 
 function MiniTable({
   title,
@@ -86,7 +86,7 @@ export function AgentTransparencyTables({
   const cap = Math.max(1, Math.min(maxRows, 20));
 
   const signalRows = book.activeSignals.slice(0, cap).map((s) => [
-    s.time,
+    formatMelbourneDateTime(s.time),
     s.direction,
     `${s.confidence}%`,
     s.regime,
@@ -121,7 +121,7 @@ export function AgentTransparencyTables({
   ]);
 
   const expiredRows = book.expiredOrders.slice(0, cap).map((o) => [
-    o.time,
+    formatMelbourneDateTime(o.time),
     o.direction,
     fmtPrice(o.limitPrice),
     String(o.ageMin),
@@ -131,8 +131,8 @@ export function AgentTransparencyTables({
   ]);
 
   const tradeRows = book.trades.slice(0, cap).map((t) => [
-    t.time,
-    t.tradeId.slice(0, 8),
+    formatMelbourneDateTime(t.time),
+    t.tradeId,
     t.direction,
     fmtPrice(t.entry),
     fmtPrice(t.exit),
@@ -188,10 +188,10 @@ export function AgentTransparencyTables({
       />
       <MiniTable
         title="Trades"
-        subtitle="Closed session trades — newest first"
+        subtitle="Closed session trades — Melbourne 24h · full trade ID matches relay fidelity"
         headers={[
-          'Time',
-          'ID',
+          'Time (Melbourne)',
+          'Trade ID',
           'Dir (final)',
           'Entry',
           'Exit',

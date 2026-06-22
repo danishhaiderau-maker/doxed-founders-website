@@ -65,13 +65,13 @@ export function AgentDeskMetricsBar({
     const showcasePnl = showcaseAgent.sessionPnlUsd ?? sim?.showcasePnlUsd ?? 0;
     const startingUsd = sim?.ledger?.startingUsd ?? 500;
     const simPnl = sim?.sessionPnlUsd ?? 0;
-    const paperBalance = sim?.ledger?.derivativesUsd ?? startingUsd;
+    const cashWallet = Math.max(0, sim?.ledger?.derivativesUsd ?? startingUsd);
     const paperEquity = startingUsd + simPnl;
     title = `${exchange} relay simulation`;
     borderClass = 'border-sky-500/30 from-sky-950/20';
     badgeClass = 'text-sky-300';
     cells = [
-      { label: 'Paper balance', value: formatUsd(paperBalance, 2), hint: 'Sim derivatives wallet' },
+      { label: 'Paper balance', value: formatUsd(cashWallet, 2), hint: 'Sim cash after fills' },
       { label: 'Sim equity', value: formatUsd(paperEquity, 2), hint: '$500 start + session P&L' },
       {
         label: 'Sim session P&L',

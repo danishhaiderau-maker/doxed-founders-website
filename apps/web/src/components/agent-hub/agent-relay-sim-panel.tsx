@@ -21,6 +21,7 @@ import {
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
+import { downloadRelaySimAudit } from '@/lib/api';
 
 const EMPTY_BOOK: TradingAgentDashboardState['liveBook'] = {
   activeSignals: [],
@@ -69,6 +70,9 @@ export function AgentRelaySimPanel({
   botConnected,
   onStart,
   onStop,
+  onReset,
+  slug,
+  accessToken,
   busy,
   instanceStatus,
   hideSummaryMetrics,
@@ -88,6 +92,9 @@ export function AgentRelaySimPanel({
   botConnected?: boolean;
   onStart?: () => void;
   onStop?: () => void;
+  onReset?: () => void;
+  slug?: string;
+  accessToken?: string | null;
   busy?: boolean;
   instanceStatus?: string | null;
   hideSummaryMetrics?: boolean;
@@ -139,14 +146,24 @@ export function AgentRelaySimPanel({
         {signedIn ? (
           <div className="flex flex-wrap gap-2">
             {active ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onStop}
-                className="rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
-              >
-                {busy ? 'Stopping…' : 'Stop relay sim'}
-              </button>
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onReset}
+                  className="rounded-lg border border-amber-500/50 bg-amber-950/40 px-4 py-2 text-sm font-semibold text-amber-200 disabled:opacity-50"
+                >
+                  {busy ? '…' : '↻ Refresh sim ($500)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onStop}
+                  className="rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
+                >
+                  {busy ? 'Stopping…' : 'Stop relay sim'}
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -157,6 +174,28 @@ export function AgentRelaySimPanel({
                 {busy ? 'Starting…' : 'Start relay sim'}
               </button>
             )}
+            {slug && accessToken ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  try {
+                    const { blob, filename } = await downloadRelaySimAudit(slug, accessToken);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (e) {
+                    alert(e instanceof Error ? e.message : 'Export failed');
+                  }
+                }}
+                className="rounded-lg border border-zinc-600 px-4 py-2 text-sm font-semibold text-zinc-200 disabled:opacity-50"
+              >
+                Download sync audit CSV
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>

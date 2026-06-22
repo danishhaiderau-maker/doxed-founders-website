@@ -117,6 +117,23 @@ export class TradingAgentsController {
     return this.relaySim.stopRelaySim(user.id, slug);
   }
 
+  @Post(':slug/relay-sim/reset')
+  resetRelaySim(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.relaySim.resetRelaySim(user.id, slug);
+  }
+
+  @Get(':slug/relay-sim/export')
+  async exportRelaySim(
+    @CurrentUser() user: AuthUser,
+    @Param('slug') slug: string,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    const csv = await this.relaySim.exportRelaySimAuditCsv(user.id, slug);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${slug}-relay-sim-audit.csv"`);
+    res.send(csv);
+  }
+
   @Get(':slug/relay-sim/status')
   relaySimStatus(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.relaySim.getRelaySimStatus(user.id, slug);

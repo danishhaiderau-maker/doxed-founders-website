@@ -1,9 +1,11 @@
 'use client';
 
-import { formatUsd, type CopyRelayReconcileSnapshot } from '@dcf/utils';
+import { formatMelbourneDateTime, formatUsd, type CopyRelayReconcileSnapshot } from '@dcf/utils';
 
 export type RelayFidelityRow = {
   tradeId: string;
+  localBotTradeId: string | null;
+  matchKind: string;
   cycleId: string;
   direction: string | null;
   showcaseEntry: number | null;
@@ -16,7 +18,19 @@ export type RelayFidelityRow = {
   exitDeltaPct: number | null;
   showcaseExitReason: string | null;
   relayExitReason: string | null;
+  localBotEntryAt: string | null;
+  localBotExitAt: string | null;
+  relayEntryAt: string | null;
+  relayExitAt: string | null;
+  entryLagSec: number | null;
+  exitLagSec: number | null;
   closedAt: string | null;
+};
+
+export type RelayFidelityOrphan = {
+  tradeId: string;
+  kind: 'relay_without_showcase' | 'showcase_without_relay';
+  detail: string;
 };
 
 export type RelayFidelitySnapshot = {
@@ -29,6 +43,15 @@ export type RelayFidelitySnapshot = {
     maxExitDeltaPct: number | null;
     missingShowcaseEntryCount?: number;
     missingShowcaseExitCount?: number;
+    avgEntryLagSec?: number | null;
+    avgExitLagSec?: number | null;
+    unmatchedRelayCount?: number;
+    unmatchedShowcaseCount?: number;
+  };
+  audit?: {
+    orphans: RelayFidelityOrphan[];
+    relayTradeIds: string[];
+    matchedShowcaseTradeIds: string[];
   };
   policy: {
     showcaseMirrorOnly: boolean;
@@ -54,6 +77,18 @@ function fmtPct(v: number | null) {
   return `${v >= 0 ? '+' : ''}${v.toFixed(3)}%`;
 }
 
+function fmtLag(sec: number | null) {
+  if (sec == null || !Number.isFinite(sec)) return '—';
+  if (Math.abs(sec) < 60) return `${sec >= 0 ? '+' : ''}${sec}s`;
+  const m = Math.floor(Math.abs(sec) / 60);
+  const s = Math.abs(sec) % 60;
+  return `${sec >= 0 ? '+' : '-'}${m}m ${s}s`;
+}
+
+function fmtMelb(iso: string | null) {
+  return iso ? formatMelbourneDateTime(iso) : '—';
+}
+
 export function AgentRelayFidelityPanel({
   fidelity,
   reconcile,
@@ -65,6 +100,7 @@ export function AgentRelayFidelityPanel({
 
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaAlert = reconcile?.alert ?? Math.abs(delta) > 0.001;
+  const latestRows = fidelity?.rows?.slice(0, 3) ?? [];
 
   return (
     <section className="rounded-xl border border-violet-500/30 bg-violet-950/10 p-4">
@@ -74,8 +110,8 @@ export function AgentRelayFidelityPanel({
             Relay fidelity
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Local bot vs {fidelity?.policy?.showcaseMirrorOnly ? 'relay' : 'Bitfinex'} entry/exit — truth
-            meter for move-by-move copy on merged BTC-PERP lots.
+            Same trade ID on local bot :7800 and Bitfinex relay — entry/exit prices, Melbourne
+            times, and lag seconds for copy fidelity.
           </p>
         </div>
         {fidelity?.summary &&
@@ -125,7 +161,7 @@ export function AgentRelayFidelityPanel({
       ) : null}
 
       {fidelity?.summary ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Trades matched" value={String(fidelity.summary.tradeCount)} />
           <Metric
             label="Local bot gaps"
@@ -138,49 +174,100 @@ export function AgentRelayFidelityPanel({
                 : 'text-emerald-400'
             }
           />
+          <Metric
+            label="Avg entry lag"
+            value={fmtLag(fidelity.summary.avgEntryLagSec ?? null)}
+            accent={
+              fidelity.summary.avgEntryLagSec != null && Math.abs(fidelity.summary.avgEntryLagSec) > 30
+                ? 'text-amber-300'
+                : 'text-emerald-400'
+            }
+          />
+          <Metric
+            label="ID orphans"
+            value={String(
+              (fidelity.summary.unmatchedRelayCount ?? 0) +
+                (fidelity.summary.unmatchedShowcaseCount ?? 0),
+            )}
+            accent={
+              (fidelity.summary.unmatchedRelayCount ?? 0) +
+                (fidelity.summary.unmatchedShowcaseCount ?? 0) >
+              0
+                ? 'text-amber-300'
+                : 'text-emerald-400'
+            }
+          />
         </div>
       ) : null}
 
-      {fidelity?.rows?.length ? (
+      {fidelity?.audit?.orphans?.length ? (
+        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-950/10 px-3 py-2 text-[11px] text-amber-100/90">
+          <p className="font-semibold uppercase tracking-wider text-amber-200">Trade ID audit</p>
+          <ul className="mt-1 space-y-1">
+            {fidelity.audit.orphans.slice(0, 5).map((o) => (
+              <li key={`${o.kind}-${o.tradeId}`}>
+                <span className="font-mono text-[10px]">{o.tradeId}</span> — {o.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {latestRows.length ? (
         <div className="mt-4 overflow-x-auto">
           <p className="mb-2 text-[10px] text-zinc-600">
-            Latest {Math.min(4, fidelity.rows.length)} trades — full history in export
+            Last {latestRows.length} trades (Melbourne 24h) — trade ID must match local bot :7800
           </p>
-          <table className="w-full min-w-[720px] text-left text-xs">
+          <table className="w-full min-w-[960px] text-left text-xs">
             <thead>
               <tr className="border-b border-zinc-800 text-[10px] uppercase tracking-wider text-zinc-500">
-                <th className="py-2 pr-3">Trade</th>
-                <th className="py-2 pr-3">Local bot :7800 entry</th>
+                <th className="py-2 pr-3">Trade ID</th>
+                <th className="py-2 pr-3">Local bot entry</th>
+                <th className="py-2 pr-3">Local entry time</th>
                 <th className="py-2 pr-3">Relay entry</th>
-                <th className="py-2 pr-3">Entry Δ</th>
+                <th className="py-2 pr-3">Relay entry time</th>
+                <th className="py-2 pr-3">Entry Δ / lag</th>
                 <th className="py-2 pr-3">Local bot exit</th>
+                <th className="py-2 pr-3">Local exit time</th>
                 <th className="py-2 pr-3">Relay exit</th>
-                <th className="py-2 pr-3">Exit Δ</th>
-                <th className="py-2">Exit reason</th>
+                <th className="py-2 pr-3">Exit Δ / lag</th>
               </tr>
             </thead>
             <tbody>
-              {fidelity.rows.slice(-4).map((row) => (
+              {latestRows.map((row) => (
                 <tr key={row.cycleId} className="border-b border-zinc-900/80 text-zinc-300">
                   <td className="py-2 pr-3 font-mono text-[10px]">
-                    {row.tradeId.slice(0, 12)}
-                    {row.direction ? ` · ${row.direction}` : ''}
+                    <div title={row.tradeId}>{row.localBotTradeId ?? row.tradeId}</div>
+                    {row.localBotTradeId && row.localBotTradeId !== row.tradeId ? (
+                      <div className="text-[9px] text-amber-400">relay: {row.tradeId.slice(0, 14)}…</div>
+                    ) : null}
+                    {row.matchKind !== 'exact' && row.matchKind !== 'none' ? (
+                      <div className="text-[9px] text-zinc-500">match: {row.matchKind}</div>
+                    ) : null}
+                    {row.direction ? (
+                      <div className="text-[9px] text-zinc-500">{row.direction}</div>
+                    ) : null}
                   </td>
                   <td className="py-2 pr-3">{fmtPrice(row.showcaseEntry)}</td>
+                  <td className="py-2 pr-3 text-[10px]">{fmtMelb(row.localBotEntryAt)}</td>
                   <td className="py-2 pr-3">{fmtPrice(row.bitfinexEntry)}</td>
+                  <td className="py-2 pr-3 text-[10px]">{fmtMelb(row.relayEntryAt)}</td>
                   <td className={`py-2 pr-3 ${deltaClass(row.entryDeltaPct)}`}>
                     {fmtPct(row.entryDeltaPct)}
+                    <div className="text-[10px] text-zinc-500">{fmtLag(row.entryLagSec)}</div>
                   </td>
                   <td className="py-2 pr-3">{fmtPrice(row.showcaseExit)}</td>
+                  <td className="py-2 pr-3 text-[10px]">{fmtMelb(row.localBotExitAt)}</td>
                   <td className="py-2 pr-3">{fmtPrice(row.bitfinexExit)}</td>
                   <td className={`py-2 pr-3 ${deltaClass(row.exitDeltaPct)}`}>
                     {fmtPct(row.exitDeltaPct)}
-                  </td>
-                  <td className="py-2 text-[10px] text-zinc-500">
-                    {row.showcaseExitReason ?? '—'}
-                    {row.relayExitReason && row.relayExitReason !== row.showcaseExitReason
-                      ? ` → ${row.relayExitReason}`
-                      : ''}
+                    <div className="text-[10px] text-zinc-500">{fmtLag(row.exitLagSec)}</div>
+                    <div className="text-[10px] text-zinc-600">
+                      {row.showcaseExitReason ?? '—'}
+                      {row.relayExitReason && row.relayExitReason !== row.showcaseExitReason
+                        ? ` → ${row.relayExitReason}`
+                        : ''}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -188,7 +275,10 @@ export function AgentRelayFidelityPanel({
           </table>
         </div>
       ) : (
-        <p className="mt-4 text-xs text-zinc-600">No closed relay trades yet — fidelity fills after first mirrored round-trip.</p>
+        <p className="mt-4 text-xs text-zinc-600">
+          No closed relay trades yet — fidelity fills after first mirrored round-trip with matching
+          trade ID.
+        </p>
       )}
     </section>
   );

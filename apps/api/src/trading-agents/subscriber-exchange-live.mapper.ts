@@ -1,5 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import type { TradingAgentDashboardState } from '@dcf/utils';
+import { formatMelbourneDateTime } from '@dcf/utils';
 import type {
   BitfinexActiveOrder,
   BitfinexPositionDetail,
@@ -56,7 +57,7 @@ const ACTIVE_CYCLE_STATUSES = new Set<SignalCycleStatus>([
 ]);
 
 function fmtTime(d: Date): string {
-  return d.toISOString().slice(0, 19).replace('T', ' ');
+  return formatMelbourneDateTime(d);
 }
 
 function parseIntent(raw: unknown): IntentEnvelope {

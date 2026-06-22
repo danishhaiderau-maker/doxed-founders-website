@@ -71,6 +71,7 @@ export function AgentDeskView({
   instanceStatus,
   onStartRelaySim,
   onStopRelaySim,
+  onResetRelaySim,
   relaySimBusy,
 }: {
   activeDesk: AgentDeskId;
@@ -95,6 +96,7 @@ export function AgentDeskView({
   instanceStatus?: string | null;
   onStartRelaySim?: () => void;
   onStopRelaySim?: () => void;
+  onResetRelaySim?: () => void;
   relaySimBusy?: boolean;
 }) {
   if (activeDesk === 'relay-sim') {
@@ -115,6 +117,9 @@ export function AgentDeskView({
         botConnected={botConnected}
         onStart={onStartRelaySim}
         onStop={onStopRelaySim}
+        onReset={onResetRelaySim}
+        slug={slug}
+        accessToken={accessToken}
         busy={relaySimBusy}
         instanceStatus={instanceStatus}
         hideSummaryMetrics
@@ -242,6 +247,7 @@ export function AgentDualDeskPanels(props: {
   instanceStatus?: string | null;
   onStartRelaySim?: () => void;
   onStopRelaySim?: () => void;
+  onResetRelaySim?: () => void;
   relaySimBusy?: boolean;
 }) {
   const desk: AgentDeskId =

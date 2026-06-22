@@ -261,6 +261,7 @@ export function AgentPublicProfile({
   onResumeInstance,
   onStartRelaySim,
   onStopRelaySim,
+  onResetRelaySim,
   relaySimBusy,
   onAdminRefresh,
   instanceBusy,
@@ -304,6 +305,7 @@ export function AgentPublicProfile({
   onResumeInstance?: () => void;
   onStartRelaySim?: () => void;
   onStopRelaySim?: () => void;
+  onResetRelaySim?: () => void;
   relaySimBusy?: boolean;
   onAdminRefresh?: () => void;
   instanceBusy?: boolean;
@@ -426,6 +428,7 @@ export function AgentPublicProfile({
     instanceStatus,
     onStartRelaySim,
     onStopRelaySim,
+    onResetRelaySim,
     relaySimBusy,
   } as const;
 
