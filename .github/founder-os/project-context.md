@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-Add named tunnel service install and tunnel watchdog for stable home bot mirror.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
-20m ago
+Just now
