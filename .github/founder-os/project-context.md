@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Remove Binance fee-stress panel from bot dashboard and persist on research sync.
+Fix named tunnel detection when only API token file is present.
 
 ## Last Activity
 
