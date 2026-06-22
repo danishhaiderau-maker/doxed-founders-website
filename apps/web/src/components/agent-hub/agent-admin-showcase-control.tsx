@@ -39,7 +39,7 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
 
   const [botProbe, analyzerProbe] = await Promise.all([
     needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/health') : Promise.resolve(botOnline),
-    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/health') : Promise.resolve(analyzerOnline),
+    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/api/status') : Promise.resolve(analyzerOnline),
   ]);
 
   return {

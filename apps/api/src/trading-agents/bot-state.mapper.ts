@@ -211,8 +211,41 @@ function takeLatest<T>(rows: T[], max = LIVE_BOOK_MAX): T[] {
   return rows.slice(-max).reverse();
 }
 
-function formatBotTime(ts: string | number | undefined): string {
-  return formatMelbourneDateTime(ts);
+function isMelbourneDisplayString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim() !== '' &&
+    value !== '-' &&
+    value !== '—' &&
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(value) &&
+    (value.includes('Melbourne') || value.includes('AEST') || value.includes('AEDT'))
+  );
+}
+
+function formatBotTime(ts: string | number | undefined | null): string {
+  if (isMelbourneDisplayString(ts)) return ts;
+  return formatMelbourneDateTime(ts ?? undefined);
+}
+
+function resolveTradeTimeInput(trade: Record<string, unknown>): string | number | undefined {
+  const pre = trade.close_ts_melbourne ?? trade.ts_melbourne ?? trade.melbourne_time;
+  if (isMelbourneDisplayString(pre)) return pre;
+  return (
+    (trade.ts as string | number | undefined) ??
+    (trade.close_ts as string | number | undefined) ??
+    (trade.entry_ts as string | number | undefined) ??
+    (trade.created_ts_ts as string | number | undefined) ??
+    (trade.time as string | number | undefined)
+  );
+}
+
+function resolveSignalTimeInput(signal: Record<string, unknown>): string | number | undefined {
+  const pre = signal.created_ts_melbourne ?? signal.time;
+  if (isMelbourneDisplayString(pre)) return pre;
+  const created = signal.created_ts;
+  if (typeof created === 'string' && created.includes('T')) return created;
+  if (created != null && created !== '') return created as string | number;
+  return signal.created_ts_ts as string | number | undefined;
 }
 
 function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
@@ -221,11 +254,7 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
     (bot.signal_info?.signals ?? [])
       .filter((s) => inBotSession(s as Record<string, unknown>, sessionStart))
       .map((s) => ({
-      time: formatMelbourneDateTime(
-        typeof s.created_ts === 'string' && s.created_ts.includes('T')
-          ? s.created_ts
-          : s.created_ts,
-      ),
+      time: formatBotTime(resolveSignalTimeInput(s as Record<string, unknown>)),
       direction: String(s.dir ?? '—').toUpperCase(),
       confidence: Math.round(Number(s.conf ?? 0)),
       regime: String(s.regime_birth ?? s.regime ?? '—'),
@@ -286,7 +315,7 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
     normalizeBotSessionTrades(bot).map((t) => {
       const row = t as Record<string, unknown>;
       return {
-        time: formatBotTime(t.ts),
+        time: formatBotTime(resolveTradeTimeInput(row)),
         tradeId: String(t.trade_id ?? '—'),
         direction: String(t.final_direction ?? t.dir ?? '—').toUpperCase(),
         entry: Number(t.entry ?? 0),

@@ -44,7 +44,7 @@ async function gql(token, query, variables = {}) {
 }
 
 async function checkHealth(url) {
-  for (const path of ['/health', '/api/state']) {
+  for (const path of ['/api/ping', '/health', '/api/state']) {
     try {
       const res = await fetch(`${url}${path}`, {
         signal: AbortSignal.timeout(12000),

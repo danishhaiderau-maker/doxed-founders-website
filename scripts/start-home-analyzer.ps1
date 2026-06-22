@@ -1,4 +1,5 @@
 # Load home-bot.env and run the research analyzer (30-min loop, or --Once).
+# Embedded Flask research dashboard on :9001 (see research/research_dashboard.py).
 param([switch]$Once)
 
 $Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer" }
@@ -7,7 +8,6 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
-$healthScript = Join-Path $scriptDir "analyzer-health-server.py"
 
 function Wait-ForKey {
   Write-Host ""
@@ -34,24 +34,16 @@ Get-Content $vaultEnv | ForEach-Object {
   }
 }
 
+$env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
+$env:RESEARCH_DASHBOARD_PORT = "9001"
+$env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:9001/"
+
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
-Write-Host "Status ping: http://127.0.0.1:9001/ (research KPI dashboard)"
+Write-Host "Research dashboard (Flask): http://127.0.0.1:9001/  LAN: http://10.0.0.102:9001/"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""
-
-$healthProc = $null
-try {
-  if (Test-Path $healthScript) {
-    $env:ANALYZER_BIND_HOST = "0.0.0.0"
-    $healthProc = Start-Process python -ArgumentList $healthScript -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 800
-    Write-Host "Analyzer status server started on :9001 (PID $($healthProc.Id))"
-  }
-} catch {
-  Write-Host "Warning: could not start :9001 status server: $($_.Exception.Message)" -ForegroundColor Yellow
-}
 
 $pyArgs = @("research\analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
@@ -66,9 +58,6 @@ try {
   Write-Host "Analyzer error: $($_.Exception.Message)" -ForegroundColor Red
   $exitCode = 1
 } finally {
-  if ($healthProc) {
-    Stop-Process -Id $healthProc.Id -Force -ErrorAction SilentlyContinue
-  }
   if ($exitCode -ne 0) {
     Write-Host "Analyzer exited with code $exitCode" -ForegroundColor Yellow
   } elseif ($Once) {

@@ -34,7 +34,7 @@ while ((Get-Date) -lt $deadline) {
   $tunnel = Read-TunnelUrl
   $bot = Probe "http://127.0.0.1:7800/health"
   $bridge = Probe "http://127.0.0.1:7810/health"
-  $analyzer = Probe "http://127.0.0.1:9001/health"
+  $analyzer = Probe "http://127.0.0.1:9001/api/status"
   $tunnelLive = if ($tunnel) { Probe "$tunnel/health" 12 } else { $false }
   $cf = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   $urlLabel = if ($tunnel) { $tunnel } else { "none" }

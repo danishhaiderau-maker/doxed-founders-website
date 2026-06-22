@@ -296,7 +296,7 @@ export function CopyTradeHub({
           )}
           <p className="text-[11px] text-sky-100/70">
             {simActive
-              ? 'Compare sim P&L above vs showcase reference — reconcile before going live.'
+              ? 'Paper book only on this tab — compare against Research local bot tab before going live.'
               : 'Safe paper test using the same execution path as live copy.'}
           </p>
         </div>
