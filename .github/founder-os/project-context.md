@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix setup-home-bot-tunnel.ps1 em-dash parse error blocking quick tunnel.
+Fix relay sim UI clutter, add analyzer :9001 status, faster sim polling
 
 ## Last Activity
 
