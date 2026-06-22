@@ -27,12 +27,16 @@ export function buildRelaySyncAlerts(input: {
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
 
   if (input.botConnected === false) {
-    alerts.push({
-      level: 'error',
-      title: 'Showcase bot offline',
-      detail:
-        'Home research bot is not reachable — relay cannot mirror new signals. Run START-HOME.cmd and wire the tunnel URL.',
-    });
+    const needsShowcase =
+      input.mode === 'live' || (input.mode === 'sim' && Boolean(input.copyRelaySim?.active));
+    if (needsShowcase) {
+      alerts.push({
+        level: 'error',
+        title: 'Showcase bot offline',
+        detail:
+          'Home research bot is not reachable — relay cannot mirror new signals. Run START-HOME.cmd (or use Admin command center), then Wire to site.',
+      });
+    }
   }
 
   if (deltaBad) {

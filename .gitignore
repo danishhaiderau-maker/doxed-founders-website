@@ -100,3 +100,8 @@ scripts/run_sim.py
 # Large audit zips (regenerate locally)
 docs/exports/*.zip
 
+# Home bot runtime markers (local only)
+.home-bot-mode
+.home-tunnel-url
+.home-tunnel.log
+.home-wire.log

@@ -135,7 +135,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setShowcaseLiveBook(dashR.value.showcaseLiveBook ?? dashR.value.dashboard.liveBook);
         setExchangeLiveBook(dashR.value.exchangeLiveBook ?? null);
         setShowcaseActivity(dashR.value.showcaseActivity ?? []);
-        setUserActivity(dashR.value.userActivity ?? dashR.value.showcaseActivity ?? []);
+        setUserActivity(dashR.value.userActivity ?? []);
         setCopyRelaySim(dashR.value.copyRelaySim ?? null);
         setRelaySimLiveBook(dashR.value.relaySimLiveBook ?? null);
         setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
@@ -153,7 +153,6 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setActivity(actR.value);
         if (dashR.status !== 'fulfilled') {
           setShowcaseActivity(actR.value);
-          setUserActivity(actR.value);
         }
       }
       if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);

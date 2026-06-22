@@ -125,43 +125,42 @@ export function AgentRelayFidelityPanel({
       ) : null}
 
       {fidelity?.summary ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-4">
-          <Metric label="Trades" value={String(fidelity.summary.tradeCount)} />
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <Metric label="Trades matched" value={String(fidelity.summary.tradeCount)} />
           <Metric
-            label="Avg entry Δ"
-            value={fmtPct(fidelity.summary.avgEntryDeltaPct)}
-            accent={deltaClass(fidelity.summary.avgEntryDeltaPct)}
-          />
-          <Metric
-            label="Avg exit Δ"
-            value={fmtPct(fidelity.summary.avgExitDeltaPct)}
-            accent={deltaClass(fidelity.summary.avgExitDeltaPct)}
-          />
-          <Metric
-            label="Max entry Δ"
-            value={fmtPct(fidelity.summary.maxEntryDeltaPct)}
-            accent={deltaClass(fidelity.summary.maxEntryDeltaPct)}
+            label="Showcase gaps"
+            value={`${(fidelity.summary.missingShowcaseEntryCount ?? 0) + (fidelity.summary.missingShowcaseExitCount ?? 0)} missing`}
+            accent={
+              (fidelity.summary.missingShowcaseEntryCount ?? 0) +
+                (fidelity.summary.missingShowcaseExitCount ?? 0) >
+              0
+                ? 'text-amber-300'
+                : 'text-emerald-400'
+            }
           />
         </div>
       ) : null}
 
       {fidelity?.rows?.length ? (
         <div className="mt-4 overflow-x-auto">
+          <p className="mb-2 text-[10px] text-zinc-600">
+            Latest {Math.min(4, fidelity.rows.length)} trades — full history in export
+          </p>
           <table className="w-full min-w-[720px] text-left text-xs">
             <thead>
               <tr className="border-b border-zinc-800 text-[10px] uppercase tracking-wider text-zinc-500">
                 <th className="py-2 pr-3">Trade</th>
                 <th className="py-2 pr-3">Showcase entry</th>
-                <th className="py-2 pr-3">Bitfinex entry</th>
+                <th className="py-2 pr-3">Relay entry</th>
                 <th className="py-2 pr-3">Entry Δ</th>
                 <th className="py-2 pr-3">Showcase exit</th>
-                <th className="py-2 pr-3">Bitfinex exit</th>
+                <th className="py-2 pr-3">Relay exit</th>
                 <th className="py-2 pr-3">Exit Δ</th>
                 <th className="py-2">Exit reason</th>
               </tr>
             </thead>
             <tbody>
-              {fidelity.rows.map((row) => (
+              {fidelity.rows.slice(-4).map((row) => (
                 <tr key={row.cycleId} className="border-b border-zinc-900/80 text-zinc-300">
                   <td className="py-2 pr-3 font-mono text-[10px]">
                     {row.tradeId.slice(0, 12)}

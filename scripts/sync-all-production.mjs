@@ -3,6 +3,7 @@
  * Secrets read from ../doxedcryptofounder-secrets/vault (never commit).
  */
 import { execSync, spawnSync } from 'child_process';
+import { existsSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -31,7 +32,13 @@ console.log('--- 1/6 Neon schema ---');
 run('npm run db:push:neon');
 
 console.log('--- 2/6 Railway bot URL + API bridge ---');
-run('npm run ensure:btc-bot-url');
+const homeBotMode =
+  process.env.HOME_BOT_MODE === '1' || existsSync(join(root, '.home-bot-mode'));
+if (homeBotMode) {
+  console.log('Home bot mode — skipping Railway btc-conservative-agent provision (use wire:home-bot).');
+} else {
+  run('npm run ensure:btc-bot-url');
+}
 
 console.log('--- 3/6 Railway services (API + btc bot) ---');
 run('node scripts/sync-railway-services.mjs');

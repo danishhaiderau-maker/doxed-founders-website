@@ -9,6 +9,7 @@
  *   npm run wire:home-bot -- --pause-railway-bot
  */
 import { PrismaClient } from '@prisma/client';
+import { writeFileSync } from 'fs';
 import { loadVaultEnv } from './load-vault-env.mjs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -200,3 +201,4 @@ Verify:
   curl https://doxed-founders-website-production.up.railway.app/api/health
   npm run prepare:bitfinex-relay-test
 `);
+writeFileSync(join(root, '.home-bot-mode'), `wiredAt=${new Date().toISOString()}\nurl=${botUrl}\n`, 'utf8');

@@ -71,6 +71,61 @@ function Test-ProcessPattern([string]$Pattern) {
     Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Pattern*" })
 }
 
+function Stop-ListenPort([int]$Port) {
+  $killed = @()
+  $listen = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($listen) {
+    $procId = [int]$listen.OwningProcess
+    if ($procId -gt 0) {
+      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      $killed += $procId
+    }
+  }
+  return $killed
+}
+
+function Serve-Request([System.Net.HttpListenerContext]$Context) {
+  $request = $Context.Request
+  $response = $Context.Response
+  Write-Cors $request $response
+
+  if ($request.HttpMethod -eq "OPTIONS") {
+    $response.StatusCode = 204
+    $response.Close()
+    return
+  }
+
+  $path = ($request.Url.AbsolutePath.TrimEnd("/"))
+  if (-not $path) { $path = "/" }
+  $tunnelParam = $request.QueryString["url"]
+
+  try {
+    $payload = switch -Regex ($path) {
+      "^/status$" { Get-FullStatus }
+      "^/health$" { @{ ok = $true; launcher = "running" } }
+      "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
+      "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
+      "^/cmd/start-bot$" { Invoke-HomeCommand "start-bot" $tunnelParam }
+      "^/cmd/start-analyzer$" { Invoke-HomeCommand "start-analyzer" $tunnelParam }
+      "^/cmd/start-analyzer-once$" { Invoke-HomeCommand "start-analyzer-once" $tunnelParam }
+      "^/cmd/start-tunnel$" { Invoke-HomeCommand "start-tunnel" $tunnelParam }
+      "^/cmd/wire$" { Invoke-HomeCommand "wire" $tunnelParam }
+      "^/cmd/stop-bot$" { Invoke-HomeCommand "stop-bot" $tunnelParam }
+      "^/cmd/stop-analyzer$" { Invoke-HomeCommand "stop-analyzer" $tunnelParam }
+      "^/cmd/stop-all$" { Invoke-HomeCommand "stop-all" $tunnelParam }
+      default {
+        @{
+          ok = $false
+          error = "Unknown path: $path - close launcher window and re-run START-LAUNCHER.cmd"
+        }
+      }
+    }
+    Send-Json -Response $response -Payload $payload
+  } catch {
+    Send-Json -Response $response -Payload @{ ok = $false; error = $_.Exception.Message } -Status 500
+  }
+}
+
 function Start-DetachedPs1([string]$ScriptPath, [string[]]$ExtraArgs = @(), [switch]$NoExit) {
   if (-not (Test-Path $ScriptPath)) { throw "Missing $ScriptPath" }
   $args = @()
@@ -81,17 +136,13 @@ function Start-DetachedPs1([string]$ScriptPath, [string[]]$ExtraArgs = @(), [swi
 }
 
 function Get-FullStatus {
-  $botHealth = Get-HttpJson "http://127.0.0.1:$BotPort/health"
-  $analyzerHealth = Get-HttpJson "http://127.0.0.1:$AnalyzerPort/" 4
+  $botPortOpen = Test-PortOpen $BotPort
+  $analyzerPortOpen = Test-PortOpen $AnalyzerPort
   $tunnelUrl = $null
   if (Test-Path $tunnelUrlFile) {
     $tunnelUrl = (Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue).Trim()
   }
-  $tunnelLive = $false
-  if ($tunnelUrl) {
-    $th = Get-HttpJson "$tunnelUrl/health" 12
-    $tunnelLive = [bool]$th.ok
-  }
+  $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   return @{
     ok = $true
     launcher = "running"
@@ -101,26 +152,21 @@ function Get-FullStatus {
       launcher = $Port
     }
     bot = @{
-      online = [bool]$botHealth.ok
-      health = $botHealth
+      online = $botPortOpen
       dashboard = "http://127.0.0.1:$BotPort"
       lan = "http://10.0.0.102:$BotPort"
       dataDir = $agentDir
     }
     analyzer = @{
-      online = [bool]$analyzerHealth.ok
+      online = $analyzerPortOpen
       dashboard = "http://127.0.0.1:$AnalyzerPort"
       lan = "http://10.0.0.102:$AnalyzerPort"
-      note = "Must run from $agentDir — not Final Bots root"
+      note = "Must run from $agentDir - not Final Bots root"
     }
     tunnel = @{
       url = $tunnelUrl
-      live = $tunnelLive
-      cloudflaredRunning = (Test-ProcessPattern "cloudflared tunnel").Count -gt 0
-    }
-    processes = @{
-      botPython = (Test-ProcessPattern "btc_conservative_agent").Count
-      analyzerPython = (Test-ProcessPattern "analyzer_research_engine").Count
+      live = $false
+      cloudflaredRunning = $cloudflaredRunning
     }
   }
 }
@@ -151,7 +197,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     }
     "start-tunnel" {
       Start-DetachedPs1 (Join-Path $scriptDir "setup-home-bot-tunnel.ps1") @("-Quick", "-Port", $BotPort) -NoExit
-      return @{ ok = $true; message = "Tunnel window opened — copy trycloudflare URL then Wire." }
+      return @{ ok = $true; message = "Tunnel window opened - copy trycloudflare URL then Wire." }
     }
     "wire" {
       $url = $QueryUrl
@@ -164,24 +210,38 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           error = "No tunnel URL. Paste URL from tunnel window or save to .home-tunnel-url"
         }
       }
-      Push-Location $repoRoot
-      $out = & npm.cmd run wire:home-bot -- $url --skip-health-check --keep-railway-bot 2>&1 | Out-String
-      Pop-Location
-      return @{ ok = $true; message = "Wired Neon + Railway to $url"; log = $out }
+      $wireScript = Join-Path $scriptDir "wire-home-bot-background.ps1"
+      Start-Process powershell -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $wireScript, "-Url", $url
+      ) | Out-Null
+      return @{ ok = $true; message = "Wiring $url to Neon + Railway in background (30-60s)." }
     }
     "stop-bot" {
-      $killed = @()
-      Get-NetTCPConnection -LocalPort $BotPort -ErrorAction SilentlyContinue |
-        ForEach-Object {
-          $pid = $_.OwningProcess
-          if ($pid -gt 0) {
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-            $killed += $pid
-          }
-        }
+      $killed = @(Stop-ListenPort $BotPort)
       return @{
         ok = $true
-        message = if ($killed.Count) { "Stopped process(es) on :$BotPort" } else { "Nothing listening on :$BotPort" }
+        message = if ($killed.Count) { "Stopped PID(s) on :$BotPort - $($killed -join ', ')" } else { "Nothing listening on :$BotPort" }
+      }
+    }
+    "stop-analyzer" {
+      $killed = @(Stop-ListenPort $AnalyzerPort)
+      return @{
+        ok = $true
+        message = if ($killed.Count) { "Stopped analyzer on :$AnalyzerPort - $($killed -join ', ')" } else { "Nothing listening on :$AnalyzerPort" }
+      }
+    }
+    "stop-all" {
+      $botKilled = @(Stop-ListenPort $BotPort)
+      $analyzerKilled = @(Stop-ListenPort $AnalyzerPort)
+      $tunnelKilled = @()
+      Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        $tunnelKilled += $_.Id
+      }
+      return @{
+        ok = $true
+        message = "Stopped bot:$($botKilled.Count) analyzer:$($analyzerKilled.Count) tunnel:$($tunnelKilled.Count)"
+        pids = @{ bot = $botKilled; analyzer = $analyzerKilled; tunnel = $tunnelKilled }
       }
     }
     default {
@@ -202,49 +262,7 @@ $listener.Start()
 
 try {
   while ($listener.IsListening) {
-    $context = $listener.GetContext()
-    $request = $context.Request
-    $response = $context.Response
-    Write-Cors $request $response
-
-    if ($request.HttpMethod -eq "OPTIONS") {
-      $response.StatusCode = 204
-      $response.Close()
-      continue
-    }
-
-    $path = ($request.Url.AbsolutePath.TrimEnd("/"))
-    if (-not $path) { $path = "/" }
-    $tunnelParam = $request.QueryString["url"]
-
-    $payload = switch -Regex ($path) {
-      "^/status$" { Get-FullStatus }
-      "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
-      "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
-      "^/cmd/start-bot$" { Invoke-HomeCommand "start-bot" $tunnelParam }
-      "^/cmd/start-analyzer$" { Invoke-HomeCommand "start-analyzer" $tunnelParam }
-      "^/cmd/start-analyzer-once$" { Invoke-HomeCommand "start-analyzer-once" $tunnelParam }
-      "^/cmd/start-tunnel$" { Invoke-HomeCommand "start-tunnel" $tunnelParam }
-      "^/cmd/wire$" { Invoke-HomeCommand "wire" $tunnelParam }
-      "^/cmd/stop-bot$" { Invoke-HomeCommand "stop-bot" $tunnelParam }
-      default {
-        @{
-          ok = $true
-          endpoints = @(
-            "/status",
-            "/cmd/start-all",
-            "/cmd/start-bot",
-            "/cmd/start-analyzer",
-            "/cmd/start-analyzer-once",
-            "/cmd/start-tunnel",
-            "/cmd/wire?url=https://....trycloudflare.com",
-            "/cmd/stop-bot"
-          )
-        }
-      }
-    }
-
-    Send-Json -Response $response -Payload $payload
+    Serve-Request $listener.GetContext()
   }
 } finally {
   $listener.Stop()
