@@ -49,6 +49,19 @@ Write-Host "=== Doxed Start Everything ===" -ForegroundColor Green
 Write-Host "Global showcase bot :$BotPort | analyzer :$AnalyzerPort | bridge :7810"
 Write-Host ""
 
+$exclude = @($PID)
+try {
+  $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
+  if ($parent -gt 0) { $exclude += $parent }
+} catch { }
+Get-Process cmd, powershell -ErrorAction SilentlyContinue | Where-Object {
+  if ($exclude -contains $_.Id) { return $false }
+  $t = $_.MainWindowTitle
+  return ($t -like "Doxed Start Everything*" -or $t -like "Doxed Stop Everything*")
+} | ForEach-Object {
+  Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+}
+
 $messages = [System.Collections.Generic.List[string]]::new()
 $stableUrl = "https://bot.doxxedcrypto.digital"
 
