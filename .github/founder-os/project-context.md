@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix flashing terminals: visible consoles, integrated bridge restart, command center UI.
+Promote local v10.3 bot/analyzer to global stack; fix CMD console flash.
 
 ## Last Activity
 
