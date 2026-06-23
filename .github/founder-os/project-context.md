@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Ignore home analyzer lock files from Vercel deploy bundle.
 
 ## Last Activity
 
