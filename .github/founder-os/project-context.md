@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Enforce dynamic chase buckets and align Bitfinex relay with showcase defer.
+Make dashboard chase and AI bands the sole execution gate and sync relay to :7002.
 
 ## Last Activity
 
