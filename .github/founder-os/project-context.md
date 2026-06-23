@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Make dashboard chase and AI bands the sole execution gate and sync relay to :7002.
+Fix global bot startup crash from stale bybit_bot import in pathway validation.
 
 ## Last Activity
 
