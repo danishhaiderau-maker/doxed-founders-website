@@ -62,5 +62,5 @@ try {
   } else {
     Write-Host "Bot process ended." -ForegroundColor Yellow
   }
-  if (-not $NoWait) { Wait-ForKey }
+  Wait-ForKey
 }

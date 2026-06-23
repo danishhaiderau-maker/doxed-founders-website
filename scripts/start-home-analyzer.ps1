@@ -52,7 +52,7 @@ try {
   $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
   Write-Host "Another analyzer start is in progress - not starting a duplicate." -ForegroundColor Yellow
-  if (-not $NoWait) { Wait-ForKey }
+  Wait-ForKey
   exit 0
 }
 
@@ -75,7 +75,7 @@ if (Test-PortOpen $AnalyzerPort) {
     if ($r.StatusCode -eq 200) {
       Write-Host "Analyzer dashboard healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
       if ($lockHandle) { $lockHandle.Dispose() }
-      if (-not $NoWait) { Wait-ForKey }
+      Wait-ForKey
       exit 0
     }
   } catch {
@@ -117,5 +117,5 @@ try {
   } else {
     Write-Host "Analyzer loop ended." -ForegroundColor Yellow
   }
-  if (-not $NoWait) { Wait-ForKey }
+  Wait-ForKey
 }

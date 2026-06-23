@@ -139,8 +139,15 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
     label: '▶ Start everything',
-    hint: 'Bot :7002 + analyzer :9500 + Cloudflare tunnel (doxxedcrypto.digital + Bitfinex relay)',
+    hint: 'Reload bridge + open bot :7002, analyzer :9500, tunnel (all visible consoles stay open)',
     path: '/cmd/start-all-global',
+    tone: 'primary',
+  },
+  {
+    id: 'restart-bridge',
+    label: '↻ Restart bridge',
+    hint: 'Reload RESTART-LAUNCHER logic — opens Doxed Home Bridge :7810 (required for buttons)',
+    path: '/cmd/restart-bridge',
     tone: 'primary',
   },
   {
@@ -267,7 +274,7 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id === 'start-all' || id === 'stop-all-global') {
+        if (id === 'start-all' || id === 'restart-bridge' || id === 'stop-all-global') {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
           setTimeout(() => void refreshStatus(), 45000);
@@ -360,11 +367,32 @@ export function AgentAdminShowcaseControl({
 
       {launcherOnline === false && (
         <p className="mt-2 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-          Bridge :7810 is offline — buttons will not work. Double-click{' '}
-          <code className="text-red-100">RECOVER-GLOBAL-STACK.cmd</code> or{' '}
+          Bridge :7810 is offline — click <strong>Restart bridge</strong> below, or double-click{' '}
           <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then hard-refresh this page.
         </p>
       )}
+
+      <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
+        <p className="font-semibold text-zinc-200">Startup order (this PC)</p>
+        <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-zinc-400">
+          <li>
+            <strong className="text-zinc-300">Start everything</strong> — reloads bridge, then opens bot, analyzer,
+            and tunnel (four windows stay open).
+          </li>
+          <li>
+            Or manually: <strong className="text-zinc-300">Restart bridge</strong> first, then start bot / analyzer /
+            tunnel individually.
+          </li>
+          <li>Wait 30–60s, click <strong className="text-zinc-300">Refresh status</strong> — all dots should turn green.</li>
+          <li>
+            Optional: <strong className="text-zinc-300">Wire to site</strong> after tunnel is live (Neon + Railway).
+          </li>
+        </ol>
+        <p className="mt-2 text-[10px] text-zinc-500">
+          Do not press Enter in bot/analyzer/tunnel windows unless you want to stop them. Bridge window must stay open
+          for these buttons to work.
+        </p>
+      </div>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
@@ -449,9 +477,8 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <p className="mt-2 text-[10px] text-zinc-600">
-        Step 0: run <code className="text-zinc-400">RECOVER-GLOBAL-STACK.cmd</code> or{' '}
-        <code className="text-zinc-400">RESTART-LAUNCHER.cmd</code> once per session. Named Cloudflare
-        tunnel (free plan) — not trycloudflare quick tunnels.
+        Named Cloudflare tunnel (free plan) → bot.doxxedcrypto.digital. Use <strong>Start everything</strong> for the
+        full stack; use <strong>Restart bridge</strong> if buttons stop responding.
       </p>
 
       {status?.analyzer?.note && (

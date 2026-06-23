@@ -66,20 +66,20 @@ function Get-TunnelPublicUrl {
 }
 
 function Restart-BotComponent {
-  Log "RECOVER bot - stop + start on :$BotPort (minimized window)"
+  Log "RECOVER bot - stop + start on :$BotPort (visible window)"
   Stop-PythonMatching "btc_conservative_agent" | Out-Null
   Stop-ListenPortFast $BotPort | Out-Null
   Start-Sleep -Seconds 3
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort", "-NoWait") -NoExit -WindowTitle "Doxed Bot :$BotPort" -Show Minimized
+  Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
 }
 
 function Restart-AnalyzerComponent {
-  Log "RECOVER analyzer - stop + start on :$AnalyzerPort (minimized window)"
+  Log "RECOVER analyzer - stop + start on :$AnalyzerPort (visible window)"
   Stop-PythonMatching "analyzer_research_engine" | Out-Null
   Stop-ListenPortFast $AnalyzerPort | Out-Null
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -NoExit -WindowTitle "Doxed Analyzer :$AnalyzerPort" -Show Minimized
+  Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
 }
 
 function Restart-TunnelComponent {
@@ -92,10 +92,10 @@ function Restart-TunnelComponent {
       Start-CloudflaredNamedHidden -Port $BotPort
     } catch {
       Log ("RECOVER tunnel hidden start failed: " + $_.Exception.Message + " - opening visible tunnel window")
-      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
+      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
     }
   } else {
-    Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
+    Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
   }
 }
 
@@ -104,7 +104,7 @@ function Restart-BridgeComponent {
   & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Home Bridge :$BridgePort" 2>$null | Out-Null
   Stop-ListenPortFast $BridgePort | Out-Null
   Start-Sleep -Seconds 2
-  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-launcher.ps1") @() -NoExit -WindowTitle "Doxed Home Bridge :$BridgePort" -Show Minimized
+  Start-VisibleConsole (Join-Path $scriptDir "home-stack-launcher.ps1") @() -Title "Doxed Home Bridge :$BridgePort"
 }
 
 function Invoke-Recovery {

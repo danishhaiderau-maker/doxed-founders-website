@@ -71,7 +71,7 @@ while ((Get-Date) -lt $portDeadline) {
 
 $launcher = Join-Path $scriptDir "home-stack-launcher.ps1"
 Remove-Item (Join-Path $repoRoot ".home-bridge.err.log") -Force -ErrorAction SilentlyContinue
-Start-DetachedPs1 $launcher @() -NoExit -WindowTitle "Doxed Home Bridge :$Port" -Show Normal
+Start-VisibleConsole $launcher @() -Title "Doxed Home Bridge :$Port"
 
 $deadline = (Get-Date).AddSeconds(35)
 while ((Get-Date) -lt $deadline) {

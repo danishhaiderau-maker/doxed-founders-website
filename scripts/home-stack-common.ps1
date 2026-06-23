@@ -310,6 +310,26 @@ function Start-HiddenPs1 {
     -RedirectStandardError $errLog
 }
 
+function Start-VisibleConsole {
+  param(
+    [string]$ScriptPath,
+    [string[]]$ExtraArgs = @(),
+    [string]$Title = "Doxed Home Stack"
+  )
+  if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  $scriptEsc = ($ScriptPath -replace '"', '""')
+  $psLine = "powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File `"$scriptEsc`""
+  foreach ($a in $ExtraArgs) {
+    if ($null -eq $a -or "$a" -eq "") { continue }
+    $aEsc = ("$a" -replace '"', '""')
+    if ($aEsc -match '\s') { $psLine += " `"$aEsc`"" } else { $psLine += " $aEsc" }
+  }
+  $titleEsc = ($Title -replace '"', '')
+  # cmd /k keeps the window open even if PowerShell exits unexpectedly.
+  Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "title $titleEsc & $psLine") `
+    -WorkingDirectory $repoRoot -WindowStyle Normal
+}
+
 function Start-DetachedPs1 {
   param(
     [string]$ScriptPath,
@@ -320,10 +340,13 @@ function Start-DetachedPs1 {
     [string]$Show = "Normal"
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  if ($Show -eq "Normal") {
+    Start-VisibleConsole -ScriptPath $ScriptPath -ExtraArgs $ExtraArgs -Title $WindowTitle
+    return
+  }
   $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
   if ($NoExit) { $argList = @("-NoExit") + $argList }
-  $winStyle = if ($Show -eq "Minimized") { "Minimized" } else { "Normal" }
-  Start-Process -FilePath "powershell.exe" -ArgumentList $argList -WorkingDirectory $repoRoot -WindowStyle $winStyle
+  Start-Process -FilePath "powershell.exe" -ArgumentList $argList -WorkingDirectory $repoRoot -WindowStyle Minimized
 }
 
 function Get-TunnelUrl {
