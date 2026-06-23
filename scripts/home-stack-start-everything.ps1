@@ -52,29 +52,26 @@ Write-Host ""
 $messages = [System.Collections.Generic.List[string]]::new()
 $stableUrl = "https://bot.doxxedcrypto.digital"
 
-# Step 0 — reload bridge so Agent Hub buttons use latest scripts.
+# Step 0 — reload bridge only if unhealthy (avoid killing a working bridge mid-start).
 if (-not $SkipBridgeRestart) {
-  Write-Step "[0/4] Reloading command bridge (:7810) with latest scripts..."
-  $bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
-  $proc = Start-Process -FilePath "powershell.exe" -ArgumentList @(
-    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $bridgeScript, "-Force", "-Quiet"
-  ) -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -Wait
-  if ($proc.ExitCode -ne 0) {
-    Write-Host "Bridge reload failed — opening visible bridge window..." -ForegroundColor Red
-    Start-VisibleConsole $bridgeScript @("-Force") -Title "Doxed Home Bridge :7810"
-    Start-Sleep -Seconds 8
-  }
-  $deadline = (Get-Date).AddSeconds(40)
-  while ((Get-Date) -lt $deadline) {
-    if (Test-BridgeHealthyQuick) { break }
-    Start-Sleep -Seconds 2
-  }
   if (Test-BridgeHealthyQuick) {
-    Write-Step "[0/4] Bridge OK on :7810"
-    $messages.Add("[0/4] Bridge reloaded")
+    Write-Step "[0/4] Bridge already OK on :7810 (skipping reload)"
+    $messages.Add("[0/4] Bridge already OK")
   } else {
-    Write-Host "Bridge still not healthy — check Doxed Home Bridge :7810 window." -ForegroundColor Red
-    $messages.Add("[0/4] Bridge reload FAILED — see Doxed Home Bridge window")
+    Write-Step "[0/4] Bridge offline - opening bridge window..."
+    Start-VisibleConsole (Join-Path $scriptDir "ensure-home-bridge.ps1") @("-Force") -Title "Doxed Home Bridge :7810"
+    $deadline = (Get-Date).AddSeconds(40)
+    while ((Get-Date) -lt $deadline) {
+      if (Test-BridgeHealthyQuick) { break }
+      Start-Sleep -Seconds 2
+    }
+    if (Test-BridgeHealthyQuick) {
+      Write-Step "[0/4] Bridge OK on :7810"
+      $messages.Add("[0/4] Bridge started")
+    } else {
+      Write-Host "Bridge still not healthy - check Doxed Home Bridge :7810 window." -ForegroundColor Red
+      $messages.Add("[0/4] Bridge start FAILED")
+    }
   }
 } else {
   Write-Step "[0/4] Skipped bridge reload"

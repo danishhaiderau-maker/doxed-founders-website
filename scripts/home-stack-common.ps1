@@ -305,9 +305,16 @@ function Start-HiddenPs1 {
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
   $errLog = Join-Path $repoRoot ".home-cmd-worker.err.log"
-  $args = @("-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
-  Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $repoRoot -WindowStyle Hidden `
-    -RedirectStandardError $errLog
+  $scriptEsc = ($ScriptPath -replace '"', '""')
+  $psLine = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$scriptEsc`""
+  foreach ($a in $ExtraArgs) {
+    if ($null -eq $a -or "$a" -eq "") { continue }
+    $aEsc = ("$a" -replace '"', '""')
+    if ($aEsc -match '\s') { $psLine += " `"$aEsc`"" } else { $psLine += " $aEsc" }
+  }
+  # Quoted command line required when repo path contains spaces (Final Bots).
+  Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $psLine) `
+    -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardError $errLog
 }
 
 function Start-VisibleConsole {
