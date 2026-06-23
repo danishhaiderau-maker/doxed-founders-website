@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Remember relay sim desk tab after refresh and clarify ledger reset.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
