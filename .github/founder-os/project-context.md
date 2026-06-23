@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix analyzer script parse error from unicode dashes.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
