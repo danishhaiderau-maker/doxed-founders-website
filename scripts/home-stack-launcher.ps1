@@ -114,7 +114,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all" {
       if ($stackMode.Mode -eq "local-collection") {
-        Start-HiddenPs1 (Join-Path $scriptDir "home-stack-start-collection.ps1") @(
+        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", (Join-Path $scriptDir "start-local-collection.ps1")
+        ) -WorkingDirectory $repoRoot -WindowStyle Normal
+        Start-HiddenPs1 (Join-Path $scriptDir "home-stack-supervisor-local.ps1") @(
           "-BotPort", "$BotPort",
           "-AnalyzerPort", "$AnalyzerPort"
         )
