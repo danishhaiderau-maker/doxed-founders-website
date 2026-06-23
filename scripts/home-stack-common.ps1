@@ -304,8 +304,10 @@ function Start-HiddenPs1 {
     [string[]]$ExtraArgs = @()
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
+  $errLog = Join-Path $repoRoot ".home-cmd-worker.err.log"
   $args = @("-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ExtraArgs
-  Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $repoRoot -WindowStyle Hidden
+  Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $repoRoot -WindowStyle Hidden `
+    -RedirectStandardError $errLog
 }
 
 function Start-DetachedPs1 {

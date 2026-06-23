@@ -49,6 +49,7 @@ from combo_pathway_config import (
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
+    RESEARCH_STACK_FEATURES,
     EXPECTED_EXCHANGE,
     PRIMARY_PRODUCTION_LANE,
     PRIMARY_PRODUCTION_ROLE,
@@ -3471,6 +3472,10 @@ FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
 _last_book_refresh_ts = 0.0
+_bbo_refresh_lock = threading.Lock()
+_book_refresh_lock = threading.Lock()
+_bitfinex_http_session = requests.Session()
+_bitfinex_http_session.headers.update({"User-Agent": "btc-research-bot/1.0"})
 bitfinex_public = None
 bitfinex_private = None
 
@@ -3484,7 +3489,7 @@ def _http_get_with_retry(url: str, params=None, timeout: float = 30, label: str 
     last_err = None
     for attempt in range(max_attempts):
         try:
-            resp = requests.get(url, params=params, timeout=timeout)
+            resp = _bitfinex_http_session.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
                 wait = min(2 ** attempt, 30)
                 logger.warning(f"[{label}] HTTP 429 rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
@@ -3600,23 +3605,27 @@ def refresh_bbo_state(force: bool = False):
     now = time.time()
     if not force and (now - _last_bbo_refresh_ts) < BBO_REFRESH_SEC:
         return
-    try:
-        t = fetch_bitfinex_ticker_rest()
-        with state_lock:
-            state["bid"] = t["bid"]
-            state["ask"] = t["ask"]
-            state["spread_usd"] = t["spread_usd"]
-            state["spread_pct"] = t["spread_pct"]
-            state["bbo_ts"] = now
-            state["last_trade_price"] = t["last"]
-            ws_age = now - float(state.get("ws_last_tick") or 0)
-            if not state.get("price") or ws_age > STALE_HARD_SEC:
-                state["price"] = t["last"]
-                state["price_ts"] = now
-                state["price_source"] = "REST_BBO"
-        _last_bbo_refresh_ts = now
-    except Exception as e:
-        logger.debug(f"[BBO] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+    with _bbo_refresh_lock:
+        now = time.time()
+        if not force and (now - _last_bbo_refresh_ts) < BBO_REFRESH_SEC:
+            return
+        try:
+            t = fetch_bitfinex_ticker_rest()
+            with state_lock:
+                state["bid"] = t["bid"]
+                state["ask"] = t["ask"]
+                state["spread_usd"] = t["spread_usd"]
+                state["spread_pct"] = t["spread_pct"]
+                state["bbo_ts"] = now
+                state["last_trade_price"] = t["last"]
+                ws_age = now - float(state.get("ws_last_tick") or 0)
+                if not state.get("price") or ws_age > STALE_HARD_SEC:
+                    state["price"] = t["last"]
+                    state["price_ts"] = now
+                    state["price_source"] = "REST_BBO"
+            _last_bbo_refresh_ts = now
+        except Exception as e:
+            logger.debug(f"[BBO] refresh failed: {e} [PIPELINE ENFORCEMENT]")
 
 
 def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = "P0") -> dict:
@@ -3648,18 +3657,22 @@ def refresh_order_book_state(force: bool = False):
     now = time.time()
     if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
         return
-    try:
-        book = fetch_bitfinex_book_rest()
-        with state_lock:
-            state["order_book"] = book
-            state["book_ts"] = now
-            bids = book.get("bids") or []
-            asks = book.get("asks") or []
-            state["bid_size_btc"] = round(float(bids[0][2]), 6) if bids else None
-            state["ask_size_btc"] = round(float(asks[0][2]), 6) if asks else None
-        _last_book_refresh_ts = now
-    except Exception as e:
-        logger.debug(f"[BOOK] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+    with _book_refresh_lock:
+        now = time.time()
+        if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+            return
+        try:
+            book = fetch_bitfinex_book_rest()
+            with state_lock:
+                state["order_book"] = book
+                state["book_ts"] = now
+                bids = book.get("bids") or []
+                asks = book.get("asks") or []
+                state["bid_size_btc"] = round(float(bids[0][2]), 6) if bids else None
+                state["ask_size_btc"] = round(float(asks[0][2]), 6) if asks else None
+            _last_book_refresh_ts = now
+        except Exception as e:
+            logger.debug(f"[BOOK] refresh failed: {e} [PIPELINE ENFORCEMENT]")
 
 
 def simulate_market_fill(side: str, qty_btc: float) -> dict:
@@ -5031,18 +5044,17 @@ RESEARCH_AI_THRESHOLD_DEFAULT = 50
 LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard override is not clamped to this
 AI_THRESHOLD_MIN = 0
 AI_THRESHOLD_MAX = 100
-AI_EXECUTION_BANDS = (
-    {"id": "40-45", "label": "40–45", "min": 40, "max": 45},
-    {"id": "45-50", "label": "45–50", "min": 45, "max": 50},
-    {"id": "50-55", "label": "50–55", "min": 50, "max": 55},
-    {"id": "55-60", "label": "55–60", "min": 55, "max": 60},
-    {"id": "60-66", "label": "60–66", "min": 60, "max": 66},
-    {"id": "65+", "label": "65+", "min": 65, "max": None},
+AI_EXECUTION_BAND_DEFS = (
+    ("40-45", 40, 45),
+    ("45-50", 45, 50),
+    ("50-55", 50, 55),
+    ("55-60", 55, 60),
+    ("60-66", 60, 67),
+    ("65+", 65, 101),
 )
-AI_EXECUTION_BAND_IDS = tuple(b["id"] for b in AI_EXECUTION_BANDS)
-AI_EXECUTION_BANDS_DEFAULT = list(AI_EXECUTION_BAND_IDS)
-CHASE_EXECUTION_BUCKETS = ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases")
-CHASE_EXECUTION_BUCKETS_DEFAULT = list(CHASE_EXECUTION_BUCKETS)
+CHASE_EXECUTION_BUCKET_ORDER = ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases")
+CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
+CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 3.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
@@ -5296,6 +5308,7 @@ state = {
     "strategy_mode": "RESEARCH",
     "allow_compression": True,
     "live_armed": False,
+    "bitfinex_live_enabled": False,
     "early_fail_enabled": True,
     "ai_enabled": True,
     "invert_signal": False,
@@ -5304,8 +5317,8 @@ state = {
     "leverage": DEFAULT_RESEARCH_LEVERAGE,
     "max_active_signals": MAX_CONCURRENT_POSITIONS_DEFAULT,
     "ai_threshold": 50,
-    "ai_execution_bands_enabled": None,
-    "chase_buckets_enabled": None,
+    "ai_execution_bands": None,
+    "chase_execution_buckets": None,
     "consecutive_losses": 0,
     "loss_pause_until": 0.0,
     "edge_threshold": 3.0,
@@ -5788,8 +5801,9 @@ def evaluate_profitability_entry_gates(
             return is_profit_gates_lane(research_lane), reason
         return True, reason
     prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
-    if not ai_win_prob_in_enabled_bands(prob):
-        reason = f"PROFIT_GATE_AI_BAND_{_ai_bands_verdict_label().replace(' ', '_')}"
+    ai_min = round(float(get_ai_threshold()), 1)
+    if prob < ai_min:
+        reason = f"PROFIT_GATE_AI_LT_{ai_min}"
         if is_research_data_collection():
             return is_profit_gates_lane(research_lane), reason
         return True, reason
@@ -5910,55 +5924,6 @@ def get_limit_chase_step_pct() -> float:
     return max(0.05, min(1.0, _limit_chase_config_value(
         "limit_chase_step_pct", "LIMIT_CHASE_STEP_PCT", LIMIT_CHASE_STEP_PCT_DEFAULT, float
     )))
-
-
-def _chase_count_bucket_id(chase_count) -> str:
-    try:
-        n = int(chase_count or 0)
-    except (TypeError, ValueError):
-        n = 0
-    if n <= 0:
-        return "0_chases"
-    if n == 1:
-        return "1_chase"
-    if n == 2:
-        return "2_chases"
-    if n <= 5:
-        return "3-5_chases"
-    return "6+_chases"
-
-
-def get_chase_buckets_enabled() -> list:
-    with state_lock:
-        raw = state.get("chase_buckets_enabled")
-        if raw is None:
-            return list(CHASE_EXECUTION_BUCKETS_DEFAULT)
-        validated = [b for b in raw if b in CHASE_EXECUTION_BUCKETS]
-        return validated or list(CHASE_EXECUTION_BUCKETS_DEFAULT)
-
-
-def set_chase_buckets_enabled(buckets: list) -> bool:
-    validated = [b for b in (buckets or []) if b in CHASE_EXECUTION_BUCKETS]
-    if not validated:
-        return False
-    with state_lock:
-        state["chase_buckets_enabled"] = validated
-        save_persistent_config()
-        logger.info(f"[SET] Chase buckets enabled={validated} [PIPELINE ENFORCEMENT]")
-    return True
-
-
-def chase_bucket_allowed(chase_count) -> bool:
-    bucket = _chase_count_bucket_id(chase_count)
-    return bucket in set(get_chase_buckets_enabled())
-
-
-def chase_bucket_allowed_for_next_chase(current_count) -> bool:
-    try:
-        n = int(current_count or 0)
-    except (TypeError, ValueError):
-        n = 0
-    return chase_bucket_allowed(n + 1)
 
 
 URGENT_CHASE_VELOCITY_MED = float(os.getenv("URGENT_CHASE_VEL_MED", "0.00003"))
@@ -6204,9 +6169,6 @@ def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: floa
         direction, virtual_limit, market_price, original, step_pct=get_limit_chase_step_pct(),
     )
     if reason != "LIMIT_CHASE" or abs(new_limit - virtual_limit) < 0.01:
-        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
-    next_count = int(signal.get("chase_3plus_virtual_chase_count") or 0) + 1
-    if not chase_bucket_allowed(next_count):
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     signal["chase_3plus_virtual_limit"] = new_limit
     signal["limit_price"] = new_limit
@@ -9035,6 +8997,18 @@ def _append_ai_history_row(ai_result: dict) -> None:
         hist_limit = 50 if _sole_ai_research_mode() else 5
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
+    _relay_mirror(
+        "AI_DECISION",
+        {
+            "trade_id": ai_result.get("trade_id"),
+            "decision": ai_result.get("decision"),
+            "win_prob": ai_result.get("win_prob"),
+            "direction": ai_result.get("direction"),
+            "final_direction": ai_result.get("direction"),
+            "comment": ai_result.get("comment"),
+        },
+        source_ts=time.time(),
+    )
 
 def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
     """Align top AI card + debug panel after every DeepSeek evaluation (approve or reject)."""
@@ -10004,121 +9978,200 @@ def is_research_data_collection() -> bool:
 def _clamp_ai_threshold(value: float) -> float:
     return max(AI_THRESHOLD_MIN, min(AI_THRESHOLD_MAX, float(value)))
 
-
-def _ai_band_overlaps_threshold(band: dict, threshold: float) -> bool:
-    thr = float(threshold or 0)
-    if band["max"] is None:
-        return band["min"] <= AI_THRESHOLD_MAX
-    return float(band["max"]) > thr and float(band["min"]) < AI_THRESHOLD_MAX
-
-
-def _bands_from_legacy_threshold(threshold: float) -> list:
-    thr = _clamp_ai_threshold(threshold)
-    picked = [b["id"] for b in AI_EXECUTION_BANDS if _ai_band_overlaps_threshold(b, thr)]
-    return picked or list(AI_EXECUTION_BANDS_DEFAULT)
-
-
-def _min_enabled_band_floor(enabled_ids) -> float:
-    mins = [float(b["min"]) for b in AI_EXECUTION_BANDS if b["id"] in enabled_ids]
-    if not mins:
-        return float(RESEARCH_AI_THRESHOLD_DEFAULT)
-    return min(mins)
-
-
-def _ai_bands_verdict_label(enabled_ids=None) -> str:
-    enabled = enabled_ids if enabled_ids is not None else get_ai_execution_bands_enabled()
-    if not enabled:
-        return "none (all blocked)"
-    if len(enabled) == len(AI_EXECUTION_BAND_IDS):
-        return "all bands"
-    return ", ".join(enabled)
-
-
-def ai_win_prob_in_enabled_bands(prob) -> bool:
-    try:
-        p = float(prob or 0)
-    except (TypeError, ValueError):
-        return False
-    enabled = set(get_ai_execution_bands_enabled())
-    if not enabled:
-        return False
-    for band in AI_EXECUTION_BANDS:
-        if band["id"] not in enabled:
-            continue
-        if p >= float(band["min"]):
-            if band["max"] is None or p < float(band["max"]):
-                return True
-    return False
-
-
-def _resolve_ai_execution_bands_enabled_from_state() -> list:
-    raw = state.get("ai_execution_bands_enabled")
-    if raw is None:
-        legacy = state.get("ai_threshold")
-        if legacy is not None:
-            return _bands_from_legacy_threshold(float(legacy))
-        return list(AI_EXECUTION_BANDS_DEFAULT)
-    validated = [b for b in raw if b in AI_EXECUTION_BAND_IDS]
-    return validated or list(AI_EXECUTION_BANDS_DEFAULT)
-
-
-def get_ai_execution_bands_enabled() -> list:
-    with state_lock:
-        return _resolve_ai_execution_bands_enabled_from_state()
-
-
-def set_ai_execution_bands(bands: list) -> bool:
-    validated = [b for b in (bands or []) if b in AI_EXECUTION_BAND_IDS]
-    if not validated:
-        return False
-    with state_lock:
-        state["ai_execution_bands_enabled"] = validated
-        state["ai_threshold"] = _min_enabled_band_floor(validated)
-        state["_threshold_locked"] = True
-        state["last_ai_ts"] = 0
-        state["last_ai_signal_key"] = None
-        state["last_ai_confidence"] = 0
-        state["ai_verdict"] = (
-            f"AI reviewer {'ON' if state['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(validated)}"
-        )
-        save_persistent_config()
-        logger.info(
-            f"[SET] AI execution bands={validated} floor={state['ai_threshold']} [PIPELINE ENFORCEMENT]"
-        )
-    return True
-
-
 def get_ai_threshold():
-    """Legacy floor display — minimum lower bound of enabled AI win % bands."""
     with state_lock:
-        floor = _min_enabled_band_floor(_resolve_ai_execution_bands_enabled_from_state())
+        t = state.get("ai_threshold")
         research = state.get("strategy_mode") == "RESEARCH"
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
+        raw = default if t is None else float(t)
         if research or state.get("_threshold_locked"):
-            return _clamp_ai_threshold(floor)
-        return _clamp_ai_threshold(max(floor, LIVE_AI_THRESHOLD_FLOOR))
-
+            return _clamp_ai_threshold(raw)
+        return _clamp_ai_threshold(max(raw, LIVE_AI_THRESHOLD_FLOOR))
 
 def set_ai_threshold(value):
-    """Legacy single-threshold API — maps to all bands overlapping the floor."""
     with state_lock:
         research = state.get("strategy_mode") == "RESEARCH"
         default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
         raw = float(value) if value is not None else default
-        thr = _clamp_ai_threshold(raw)
-        bands = _bands_from_legacy_threshold(thr)
-        state["ai_execution_bands_enabled"] = bands
-        state["ai_threshold"] = _min_enabled_band_floor(bands)
+        state["ai_threshold"] = _clamp_ai_threshold(raw)
         state["_threshold_locked"] = True
         state["last_ai_ts"] = 0
         state["last_ai_signal_key"] = None
         state["last_ai_confidence"] = 0
-        state["ai_verdict"] = (
-            f"AI reviewer {'ON' if state['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(bands)}"
-        )
+        state["ai_verdict"] = _ai_execution_verdict_text()
         save_persistent_config()
-        logger.info(
-            f"[SET] AI threshold {thr} -> bands={bands} [PIPELINE ENFORCEMENT]"
-        )
+        logger.info(f"[SET] AI threshold locked to {state['ai_threshold']} [PIPELINE ENFORCEMENT]")
+
+
+def _ai_bands_from_legacy_threshold(threshold: float) -> dict:
+    """Map old single min-threshold to band checkboxes (bands with any prob >= threshold)."""
+    try:
+        thr = float(threshold)
+    except (TypeError, ValueError):
+        thr = RESEARCH_AI_THRESHOLD_DEFAULT
+    out = {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
+    for band_id, lo, hi in AI_EXECUTION_BAND_DEFS:
+        if band_id == "65+":
+            out[band_id] = thr <= 65
+        elif band_id == "60-66":
+            out[band_id] = thr <= 66
+        else:
+            out[band_id] = hi > thr
+    return out
+
+
+def _default_chase_execution_buckets() -> dict:
+    return {k: True for k in CHASE_EXECUTION_BUCKET_ORDER}
+
+
+def _normalize_ai_execution_bands(raw) -> dict:
+    base = {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
+    if isinstance(raw, dict):
+        for band_id in base:
+            if band_id in raw:
+                base[band_id] = bool(raw[band_id])
+    if not any(base.values()):
+        return _ai_bands_from_legacy_threshold(get_ai_threshold())
+    return base
+
+
+def get_ai_execution_bands() -> dict:
+    with state_lock:
+        raw = state.get("ai_execution_bands")
+    if raw is None:
+        return _ai_bands_from_legacy_threshold(get_ai_threshold())
+    return _normalize_ai_execution_bands(raw)
+
+
+def set_ai_execution_bands(bands: dict):
+    normalized = _normalize_ai_execution_bands(bands or {})
+    with state_lock:
+        state["ai_execution_bands"] = normalized
+        enabled = [k for k, v in normalized.items() if v]
+        state["ai_verdict"] = _ai_execution_verdict_text()
+        save_persistent_config()
+    logger.info(f"[SET] AI execution bands={enabled} [PIPELINE ENFORCEMENT]")
+
+
+def _ai_prob_in_band(prob: float, band_id: str, lo: float, hi: float) -> bool:
+    if band_id == "65+":
+        return prob >= 65
+    if band_id == "60-66":
+        return 60 <= prob <= 66
+    return lo <= prob < hi
+
+
+def ai_win_prob_in_execution_bands(prob) -> bool:
+    try:
+        p = float(prob or 0)
+    except (TypeError, ValueError):
+        return False
+    bands = get_ai_execution_bands()
+    if not any(bands.values()):
+        return p >= get_ai_threshold()
+    for band_id, lo, hi in AI_EXECUTION_BAND_DEFS:
+        if bands.get(band_id) and _ai_prob_in_band(p, band_id, lo, hi):
+            return True
+    return False
+
+
+def _ai_execution_verdict_text() -> str:
+    bands = get_ai_execution_bands()
+    enabled = [k for k, v in bands.items() if v]
+    if enabled:
+        return f"AI reviewer {'ON' if state.get('ai_enabled') else 'OFF'} | Bands {', '.join(enabled)}"
+    return f"AI reviewer {'ON' if state.get('ai_enabled') else 'OFF'} | Threshold {state.get('ai_threshold', 'WAITING')}"
+
+
+def chase_count_bucket(chase_count) -> str:
+    try:
+        n = int(chase_count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return "0_chases"
+    if n == 1:
+        return "1_chase"
+    if n == 2:
+        return "2_chases"
+    if n <= 5:
+        return "3-5_chases"
+    return "6+_chases"
+
+
+def get_chase_execution_buckets() -> dict:
+    with state_lock:
+        raw = state.get("chase_execution_buckets")
+    if not isinstance(raw, dict):
+        return _default_chase_execution_buckets()
+    out = _default_chase_execution_buckets()
+    for k in out:
+        if k in raw:
+            out[k] = bool(raw[k])
+    return out
+
+
+def set_chase_execution_buckets(buckets: dict):
+    out = _default_chase_execution_buckets()
+    if isinstance(buckets, dict):
+        for k in out:
+            if k in buckets:
+                out[k] = bool(buckets[k])
+    with state_lock:
+        state["chase_execution_buckets"] = out
+        save_persistent_config()
+    enabled = [k for k, v in out.items() if v]
+    logger.info(f"[SET] Chase execution buckets={enabled} [PIPELINE ENFORCEMENT]")
+
+
+def chase_bucket_allowed(chase_count) -> bool:
+    bucket = chase_count_bucket(chase_count)
+    buckets = get_chase_execution_buckets()
+    if not any(buckets.values()):
+        return True
+    return bool(buckets.get(bucket, False))
+
+
+def _load_chase_analytics_snapshot() -> dict:
+    buckets = []
+    raw = {}
+    generated_at = None
+    path = CHASE_EFFECTIVENESS_REPORT_FILE
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw = data.get("buckets") or {}
+            generated_at = data.get("generated_at")
+        except Exception:
+            pass
+    for key in CHASE_EXECUTION_BUCKET_ORDER:
+        b = raw.get(key) if isinstance(raw, dict) else None
+        if isinstance(b, dict):
+            buckets.append({"bucket": key, **b})
+        else:
+            buckets.append({"bucket": key, "trades": 0, "win_rate_pct": 0, "sum_pnl_usd": 0, "ev_usd": 0})
+    assisted = saved = ttl_expired = total_fills = None
+    attr_path = CHASE_ATTRIBUTION_REPORT_FILE
+    if os.path.isfile(attr_path):
+        try:
+            with open(attr_path, "r", encoding="utf-8") as f:
+                attr = json.load(f)
+            totals = attr.get("totals") or attr.get("overnight_watch") or {}
+            assisted = totals.get("chase_assisted_fills")
+            saved = totals.get("saved_fills_heuristic") or totals.get("saved_fills")
+            ttl_expired = totals.get("ttl_expired")
+            total_fills = totals.get("total_fills") or attr.get("overnight_watch", {}).get("total_fills")
+        except Exception:
+            pass
+    return {
+        "buckets": buckets,
+        "assisted": assisted,
+        "assisted_total": total_fills,
+        "saved": saved,
+        "ttl_expired": ttl_expired,
+        "generated_at": generated_at,
+    }
 
 def set_edge_threshold(value):
     value = round(float(value), 1)
@@ -10986,6 +11039,24 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
         f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
     )
+    _relay_mirror(
+        "ORDER_PLACED",
+        {
+            "trade_id": signal.get("trade_id"),
+            "direction": signal.get("final_direction"),
+            "signal_dir": signal.get("final_direction"),
+            "side": order.get("side"),
+            "qty": order.get("qty"),
+            "limit_price": limit_price,
+            "signal_price": signal_price,
+            "entry_mode": entry_mode,
+            "research_lane": signal.get("research_lane"),
+            "conf": signal.get("ai_win_prob"),
+            "ai_win_prob": signal.get("ai_win_prob"),
+        },
+        source_ts=float(signal.get("order_created_ts") or time.time()),
+    )
+    _maybe_bitfinex_limit_entry(order, signal)
     defer_instant_fill = False
     research_instant = is_research_data_collection() and RESEARCH_INSTANT_FILL
     features = signal.get("features") or state.get("feature_snapshot") or {}
@@ -11404,8 +11475,6 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
     closed_pct = 1.0 - (cur_gap / orig_gap)
     if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
         return False
-    if not chase_bucket_allowed_for_next_chase(order.get("limit_chase_count")):
-        return False
     return True
 
 
@@ -11458,6 +11527,12 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = int(order.get("limit_chase_count") or 0) + 1
+    if not chase_bucket_allowed(chase_count):
+        logger.info(
+            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
     order["last_chase_ts"] = now
@@ -11498,6 +11573,12 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = int(order.get("limit_chase_count") or 0) + 1
+    if not chase_bucket_allowed(chase_count):
+        logger.info(
+            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
     order["last_chase_ts"] = now
@@ -11553,6 +11634,12 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     age_min = round((now - created) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = int(order.get("limit_chase_count") or 0) + 1
+    if not chase_bucket_allowed(chase_count):
+        logger.info(
+            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
     order["last_chase_ts"] = now
@@ -11685,6 +11772,12 @@ def process_pending_orders():
                 continue
             if not _pending_limit_touched(order, price):
                 continue
+            if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
+                logger.debug(
+                    f"[CHASE GATE] fill blocked bucket={chase_count_bucket(order.get('limit_chase_count') or 0)} "
+                    f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
+                )
+                continue
             if order.pop("await_confirm", None):
                 logger.debug(
                     f"[SIM] limit touched - filling despite prior await_confirm "
@@ -11748,6 +11841,18 @@ def fill_order(order):
         })
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
+    _relay_mirror(
+        "FILLED",
+        {
+            "trade_id": order.get("trade_id"),
+            "direction": order.get("signal_dir"),
+            "qty": order.get("qty"),
+            "fill_price": fill_px,
+            "entry": fill_px,
+            "research_lane": (signal or {}).get("research_lane"),
+        },
+        source_ts=time.time(),
+    )
     pipeline_state_sync()
 
 def process_positions():
@@ -12680,7 +12785,7 @@ def process_signal(event: dict):
                 f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
             )
 
-            if not ai_win_prob_in_enabled_bands(ai.get("win_prob", 0)):
+            if not ai_win_prob_in_execution_bands(ai.get("win_prob", 0)):
                 if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
                 else:
@@ -12769,18 +12874,6 @@ def process_signal(event: dict):
                         state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
                         state["debug_state"]["skip_reason"] = exec_reason
                     update_debug_state_always("EXECUTION_BLOCK", {"edge": edge_score})
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
-            if not chase_bucket_allowed(0):
-                if not _post_ai_gate_blocks(sole, research_lane):
-                    _research_log_would_block(signal, ai, "CHASE_BUCKET_BLOCKED", edge_score)
-                else:
-                    exit_pipeline(signal, ai, "CHASE_BUCKET_BLOCKED")
-                    with state_lock:
-                        state["debug_state"]["last_block_reason"] = "CHASE_BUCKET_BLOCKED"
-                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                        state["debug_state"]["skip_reason"] = "CHASE_BUCKET_BLOCKED"
-                    update_debug_state_always("CHASE_BUCKET_BLOCKED", {"edge": edge_score})
                     state["last_pipeline_stage"] = "IDLE"
                     return
             full_pipeline_trace("[PIPELINE]", "EXECUTION_ALLOWED", trade_id)
@@ -13476,6 +13569,19 @@ def execute_market_order(signal):
         master.update({"status": "FILLED","filled_ts": time.time(),"fill_price": fill_px,"outcome": "OPEN"})
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED {signal['final_direction']} qty={qty} [PIPELINE ENFORCEMENT]")
+    _maybe_bitfinex_market_entry(signal, qty)
+    _relay_mirror(
+        "FILLED",
+        {
+            "trade_id": signal.get("trade_id"),
+            "direction": signal.get("final_direction"),
+            "qty": qty,
+            "fill_price": fill_px,
+            "entry": fill_px,
+            "research_lane": signal.get("research_lane"),
+        },
+        source_ts=time.time(),
+    )
     pipeline_state_sync()
 
 def create_limit_order(signal):
@@ -13521,6 +13627,22 @@ def create_limit_order(signal):
     signal["order_placed"] = True
     with trade_lock:
         lane_register_pending_order(order)
+    _maybe_bitfinex_limit_entry(order, signal)
+    _relay_mirror(
+        "ORDER_PLACED",
+        {
+            "trade_id": signal.get("trade_id"),
+            "direction": signal.get("final_direction"),
+            "signal_dir": signal.get("final_direction"),
+            "side": order.get("side"),
+            "qty": order.get("qty"),
+            "limit_price": limit_price,
+            "signal_price": signal.get("signal_price"),
+            "entry_mode": entry_mode,
+            "research_lane": signal.get("research_lane"),
+        },
+        source_ts=float(signal.get("order_created_ts") or time.time()),
+    )
     logger.info(
         f"[ORDER CREATED] trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
         f"limit_price={fmt(limit_price)} entry_mode={entry_mode} pullback={pullback_pct*100}% "
@@ -13558,6 +13680,7 @@ def _expired_already_recorded(trade_id: str) -> bool:
 
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
+    _maybe_bitfinex_cancel(source)
     tid = source.get("trade_id")
     if _expired_already_recorded(tid):
         return None
@@ -13620,6 +13743,11 @@ def _record_expired_order(source: dict, reason: str):
         expired_orders.append(row)
         if len(expired_orders) > MAX_EXPIRED_ORDERS:
             expired_orders.pop(0)
+    _relay_mirror(
+        "EXPIRED",
+        {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
+        source_ts=float(now),
+    )
     log_expired_order(row)
     fq_row = {
         "schema": "fill_quality_v1",
@@ -14045,6 +14173,20 @@ def close_position(pos: dict, exit_reason: str):
         logger.error(f"[CSV ERROR] {e}")
     apply_trade_pnl(trade_row)
     _record_research_trade_close(net_pnl, exit_reason)
+    _relay_mirror(
+        "CLOSED",
+        {
+            "trade_id": trade_id,
+            "exit_price": price,
+            "exit": price,
+            "exit_reason": exit_reason,
+            "net_pnl_usd": net_pnl,
+            "outcome": "WIN" if net_pnl > 0 else "LOSS",
+            "direction": pos.get("dir"),
+        },
+        source_ts=time.time(),
+    )
+    _maybe_bitfinex_close(pos, exit_reason)
 
     with state_lock:
         a = state.setdefault("analytics", {})
@@ -14243,6 +14385,9 @@ bitfinex_private = ccxt.bitfinex({
     "apiKey": api_key,
     "secret": api_secret,
     "enableRateLimit": True,
+    "options": {
+        "adjustForTimeDifference": True,
+    },
 })
 tick_prices = deque(maxlen=300)
 price_seq = 0
@@ -15291,6 +15436,15 @@ HTML = """<!DOCTYPE html>
 <body>
 
 <h1>3-Factor Research Bot — Bitfinex <span style="color:#3fb950;font-size:0.55em;vertical-align:middle;">__BOT_VERSION__</span></h1>
+<div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
+  <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Research stack build</div>
+  <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
+  <div style="font-size:0.85rem;color:#8b949e;">Local relay desk · lag telemetry · analyzer watchdog — <a href="/desk" style="color:#a371f7;font-weight:600;">Open /desk →</a> · Analyzer <a href="http://127.0.0.1:9001/" style="color:#58a6ff;">:9001</a></div>
+</div>
+<p style="margin:8px 0;padding:10px 14px;background:#1f1630;border:1px solid #6e40c955;border-radius:8px;">
+  <strong style="color:#a371f7;">Local relay testing</strong> — mirror this bot into paper Bitfinex relay sim before live copy.
+  <span style="color:#8b949e;font-size:0.85em;"> (LOCAL ONLY — not synced to Doxed Founder)</span>
+</p>
 <p style="color:#8b949e;margin-top:0;">Bot build: <strong id="botVersionBanner">__BOT_VERSION__</strong> · Exchange: <strong>Bitfinex</strong> perp · Symbol: <span id="marketSymbol">tBTCF0:USTF0</span> · Research / sim mode · <a href="__DASHBOARD_URL__" style="color:#58a6ff;">__DASHBOARD_URL__</a></p>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
   Server: checking…
@@ -15304,6 +15458,7 @@ HTML = """<!DOCTYPE html>
 <div id="dashboardToggles" style="margin:12px 0;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;">
     <strong style="color:#58a6ff;">Quick toggles</strong>
     <button onclick="toggleLive()">LIVE ARM: <span id="liveArmBtn">OFF</span></button>
+    <button id="bitfinexLiveDashBtn" onclick="toggleBitfinexLive()" style="border-color:#f8514966;color:#f85149;font-weight:700;">Bitfinex LIVE: <span id="bitfinexLiveDashLabel">OFF</span></button>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
@@ -15341,31 +15496,22 @@ HTML = """<!DOCTYPE html>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
-<div id="aiWinBandsPanel" style="margin:10px 0;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-  <strong style="color:#e6edf3;">AI win % bands allowed to place limits</strong>
-  <p style="color:#8b949e;font-size:0.82em;margin:6px 0 8px 0;">Hard execution gate — only APPROVE signals whose AI win % (not edge score) falls in a checked band may submit limit orders.</p>
-  <div id="aiWinBandsChecks" style="display:flex;flex-wrap:wrap;gap:8px 18px;">
-    <label class="exec-band-check"><input type="checkbox" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
-    <label class="exec-band-check"><input type="checkbox" data-band="45-50" onchange="updateAiBands()"> 45–50</label>
-    <label class="exec-band-check"><input type="checkbox" data-band="50-55" onchange="updateAiBands()"> 50–55</label>
-    <label class="exec-band-check"><input type="checkbox" data-band="55-60" onchange="updateAiBands()"> 55–60</label>
-    <label class="exec-band-check"><input type="checkbox" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
-    <label class="exec-band-check"><input type="checkbox" data-band="65+" onchange="updateAiBands()"> 65+</label>
-  </div>
-  <p id="aiBandsSummary" style="color:#58a6ff;font-size:0.82em;margin:8px 0 0 0;">Active: —</p>
+<label>AI win % bands to execute (hard-wired gate — tick any combination):</label>
+<div id="aiBandControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;">
+  <label><input type="checkbox" class="ai-band-cb" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
+  <label><input type="checkbox" class="ai-band-cb" data-band="45-50" onchange="updateAiBands()"> 45–50</label>
+  <label><input type="checkbox" class="ai-band-cb" data-band="50-55" onchange="updateAiBands()"> 50–55</label>
+  <label><input type="checkbox" class="ai-band-cb" data-band="55-60" onchange="updateAiBands()"> 55–60</label>
+  <label><input type="checkbox" class="ai-band-cb" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
+  <label><input type="checkbox" class="ai-band-cb" data-band="65+" onchange="updateAiBands()"> 65+</label>
 </div>
-<div id="chaseBucketsPanel" style="margin:10px 0;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-  <strong style="color:#e6edf3;">Chase depth buckets allowed</strong>
-  <p style="color:#8b949e;font-size:0.82em;margin:6px 0 8px 0;">Multi-select — controls limit placement (0 chases) and whether each chase step may run. Uncheck buckets you want to skip based on Chase Analytics EV.</p>
-  <div id="chaseBucketsChecks" style="display:flex;flex-wrap:wrap;gap:8px 18px;">
-    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="0_chases" onchange="updateChaseBuckets()"> 0 chases</label>
-    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="1_chase" onchange="updateChaseBuckets()"> 1 chase</label>
-    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="2_chases" onchange="updateChaseBuckets()"> 2 chases</label>
-    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="3-5_chases" onchange="updateChaseBuckets()"> 3–5 chases</label>
-    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="6+_chases" onchange="updateChaseBuckets()"> 6+ chases</label>
-  </div>
-  <p id="chaseBucketsSummary" style="color:#58a6ff;font-size:0.82em;margin:8px 0 0 0;">Active: —</p>
-</div>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a checked band may submit a limit order. Legacy min field hidden — bands are the execution gate.</p>
+<input id="aiThreshold" type="hidden" value="50">
+<h3>Chase Analytics — execution buckets</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 6px 0;">Tick buckets allowed to chase/fill. Unchecked = chase stops and fills blocked for that chase count.</p>
+<div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
+<div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
+<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
   <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
 </p>
@@ -15411,7 +15557,7 @@ HTML = """<!DOCTYPE html>
 </div>
 </div>
 <p style="display:none;color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
-<p id="executionGateHint" style="display:none;margin:8px 0;color:#8b949e;">—</p>
+<p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
 </div>
 
 <div id="dataBanner">
@@ -15440,9 +15586,7 @@ HTML = """<!DOCTYPE html>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
-<p><strong>AI Threshold:</strong> <span id="aiThresholdDisplay">-</span></p>
-<p><strong>AI execution bands:</strong> <span id="aiBandsDisplay">-</span></p>
-<p><strong>Chase buckets allowed:</strong> <span id="chaseBucketsDisplay">-</span></p>
+<p><strong>AI execution bands:</strong> <span id="aiThresholdDisplay">-</span></p>
 <p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">DEPRECATED — analytics only</span></p>
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
@@ -15642,62 +15786,75 @@ DASHBOARD_JS = """(function () {
       await post('/api/set_threshold', {value: parseFloat(value)});
       refresh();
     }
-    function collectCheckedBands() {
-      return Array.from(document.querySelectorAll('#aiWinBandsChecks input[data-band]:checked'))
-        .map(el => el.getAttribute('data-band'));
-    }
-    function collectCheckedChaseBuckets() {
-      return Array.from(document.querySelectorAll('#chaseBucketsChecks input[data-chase-bucket]:checked'))
-        .map(el => el.getAttribute('data-chase-bucket'));
-    }
-    function syncAiBandChecks(enabledBands) {
-      const set = new Set(enabledBands || []);
-      document.querySelectorAll('#aiWinBandsChecks input[data-band]').forEach(el => {
-        el.checked = set.has(el.getAttribute('data-band'));
+    function readAiBandSelections() {
+      const out = {};
+      document.querySelectorAll('.ai-band-cb').forEach(cb => {
+        out[cb.dataset.band] = cb.checked;
       });
-      const summary = document.getElementById('aiBandsSummary');
-      if (summary) {
-        summary.textContent = set.size
-          ? ('Active: ' + Array.from(set).join(', '))
-          : 'Active: none — all limit orders blocked';
-      }
+      return out;
     }
-    function syncChaseBucketChecks(enabledBuckets) {
-      const set = new Set(enabledBuckets || []);
-      document.querySelectorAll('#chaseBucketsChecks input[data-chase-bucket]').forEach(el => {
-        el.checked = set.has(el.getAttribute('data-chase-bucket'));
+    function syncAiBandControls(bands) {
+      if (!bands || typeof bands !== 'object') return;
+      document.querySelectorAll('.ai-band-cb').forEach(cb => {
+        const key = cb.dataset.band;
+        if (key in bands) cb.checked = !!bands[key];
       });
-      const summary = document.getElementById('chaseBucketsSummary');
-      if (summary) {
-        summary.textContent = set.size
-          ? ('Active: ' + Array.from(set).join(', '))
-          : 'Active: none — no limit orders or chases';
-      }
     }
     async function updateAiBands() {
-      const bands = collectCheckedBands();
-      if (!bands.length) {
-        alert('Select at least one AI win % band — otherwise no limits will execute.');
-        syncAiBandChecks(window.__lastAiBands || []);
-        return;
-      }
-      await post('/api/set_ai_bands', {bands});
+      await post('/api/set_ai_bands', {bands: readAiBandSelections()});
       refresh();
     }
+    function readChaseBucketSelections() {
+      const out = {};
+      document.querySelectorAll('.chase-bucket-cb').forEach(cb => {
+        out[cb.dataset.bucket] = cb.checked;
+      });
+      return out;
+    }
+    function ensureChaseBucketControls() {
+      const host = document.getElementById('chaseBucketControls');
+      if (!host || host.dataset.ready === '1') return;
+      const order = ['0_chases','1_chase','2_chases','3-5_chases','6+_chases'];
+      const labels = {'0_chases':'0 chases','1_chase':'1 chase','2_chases':'2 chases','3-5_chases':'3–5 chases','6+_chases':'6+ chases'};
+      host.innerHTML = order.map(k =>
+        `<label><input type="checkbox" class="chase-bucket-cb" data-bucket="${k}" onchange="updateChaseBuckets()"> ${labels[k] || k}</label>`
+      ).join('');
+      host.dataset.ready = '1';
+    }
+    function syncChaseBucketControls(buckets) {
+      ensureChaseBucketControls();
+      if (!buckets || typeof buckets !== 'object') return;
+      document.querySelectorAll('.chase-bucket-cb').forEach(cb => {
+        const key = cb.dataset.bucket;
+        if (key in buckets) cb.checked = !!buckets[key];
+      });
+    }
     async function updateChaseBuckets() {
-      const buckets = collectCheckedChaseBuckets();
-      if (!buckets.length) {
-        alert('Select at least one chase bucket — 0 chases is required for any new limit order.');
-        syncChaseBucketChecks(window.__lastChaseBuckets || []);
-        return;
-      }
-      if (!buckets.includes('0_chases')) {
-        alert('0 chases must stay enabled to place new limit orders.');
-        syncChaseBucketChecks(window.__lastChaseBuckets || []);
-        return;
-      }
-      await post('/api/set_chase_buckets', {buckets});
+      await post('/api/set_chase_buckets', {buckets: readChaseBucketSelections()});
       refresh();
+    }
+    function renderChaseAnalyticsPanel(ch) {
+      ensureChaseBucketControls();
+      const kpis = document.getElementById('chaseKpis');
+      if (kpis) {
+        const assisted = ch.assisted != null ? ch.assisted : '—';
+        const total = ch.assisted_total != null ? ch.assisted_total : '—';
+        kpis.innerHTML =
+          `<span><strong>Assisted</strong> ${assisted}/${total}</span>` +
+          `<span><strong>Saved</strong> ${ch.saved != null ? ch.saved : '—'}</span>` +
+          `<span><strong>TTL expired</strong> ${ch.ttl_expired != null ? ch.ttl_expired : '—'}</span>`;
+      }
+      const body = document.getElementById('chaseBucketStats');
+      if (body) {
+        const rows = ch.buckets || [];
+        body.innerHTML = rows.map(b => `<tr>
+          <td>${b.bucket || '—'}</td>
+          <td>${b.trades != null ? b.trades : '—'}</td>
+          <td>${b.win_rate_pct != null ? b.win_rate_pct : '—'}</td>
+          <td>${b.sum_pnl_usd != null ? b.sum_pnl_usd : '—'}</td>
+          <td>${b.ev_usd != null ? b.ev_usd : '—'}</td>
+        </tr>`).join('') || '<tr><td colspan="5">No chase stats yet</td></tr>';
+      }
     }
     function normalizeEdgeOptionValue(value) {
       const n = parseFloat(value);
@@ -15773,6 +15930,14 @@ DASHBOARD_JS = """(function () {
     async function toggleLive() {
       const cur = document.getElementById('liveArmBtn').innerText.includes('OFF');
       await post('/api/live_arm', {armed: cur});
+      refresh();
+    }
+    async function toggleBitfinexLive() {
+      const btn = document.getElementById('bitfinexLiveDashLabel');
+      const turningOn = btn && btn.innerText.includes('OFF');
+      if (turningOn && !confirm('Enable REAL Bitfinex orders? Research sim continues in parallel. Confirm API keys and margin.')) return;
+      const res = await post('/api/bitfinex_live', {enabled: turningOn});
+      if (res && res.error) alert(res.error);
       refresh();
     }
     async function toggleEarlyFail() {
@@ -15902,32 +16067,6 @@ DASHBOARD_JS = """(function () {
           + ' · EV/appr <strong>$' + Number(ev).toFixed(2) + '</strong></div>'
           + '</div>';
       }).join('') || '<span style="color:#6e7681;">No retired lane data yet.</span>';
-    }
-    function renderBinanceFeeStress(d) {
-      const el = document.getElementById('binanceFeeContent');
-      if (!el) return;
-      const b = d.binance_fee_stress || {};
-      const lanes = b.lanes || {};
-      const keys = Object.keys(lanes);
-      if (!keys.length) {
-        el.innerHTML = '<span style="color:#8b949e;">No session trades yet</span>';
-        return;
-      }
-      let html = '<div style="color:#8b949e;margin-bottom:8px;">'
-        + (b.fee_model || 'Binance reference') + ' · notional $' + (b.notional_usd || '-')
-        + ' · ~$' + (b.fee_per_round_trip_usd || '-') + '/round-trip</div>';
-      html += keys.map(function (k) {
-        const L = lanes[k];
-        const net = L.net_after_fees_usd != null ? L.net_after_fees_usd : 0;
-        const col = net >= 0 ? '#3fb950' : '#f85149';
-        const tag = L.profitable ? 'PROFITABLE' : 'NOT PROFITABLE';
-        return '<div style="margin:6px 0;padding:8px;border-left:3px solid ' + col + ';">'
-          + '<strong>' + (L.label || k) + '</strong> · ' + tag
-          + '<br>n=' + (L.trades || 0) + ' · gross $' + (L.gross_pnl_usd || 0).toFixed(2)
-          + ' · est fees $' + (L.est_fees_usd || 0).toFixed(2)
-          + ' · <span style="color:' + col + ';font-weight:600;">net $' + net.toFixed(2) + '</span></div>';
-      }).join('');
-      el.innerHTML = html;
     }
     function renderPathwayLab(d) {
       const specsPayload = d.pathway_lane_specs || {};
@@ -16331,9 +16470,12 @@ DASHBOARD_JS = """(function () {
         safeText('aiDirRaw', d.last_ai?.direction || '-');
         safeText('finalDir', d.last_ai?.final_direction || '-');
         safeText('inverted', d.last_ai?.inverted ? 'YES' : 'NO');
-        safeText('aiThresholdDisplay', d.ai_threshold != null ? (d.ai_threshold + '% floor') : 'WAITING');
-        safeText('aiBandsDisplay', (d.ai_execution_bands_enabled || []).join(', ') || 'none');
-        safeText('chaseBucketsDisplay', (d.chase_buckets_enabled || []).join(', ') || 'none');
+        const enabledBands = d.ai_execution_bands
+          ? Object.keys(d.ai_execution_bands).filter(k => d.ai_execution_bands[k])
+          : [];
+        safeText('aiThresholdDisplay', enabledBands.length
+          ? enabledBands.join(', ')
+          : (d.ai_threshold != null ? d.ai_threshold + '% min' : 'WAITING'));
         const edgeBase = d.edge_threshold != null ? normalizeEdgeOptionValue(d.edge_threshold) : '2.0';
         const edgeMax = d.edge_threshold_max;
         const edgeEff = d.debug_state?.edge_components?.effective_threshold;
@@ -16363,34 +16505,38 @@ DASHBOARD_JS = """(function () {
         const gate = document.getElementById('executionGateHint');
         if (gate) {
           const prob = d.last_ai?.win_prob;
-          const bands = d.ai_execution_bands_enabled || [];
+          const bands = d.ai_execution_bands || {};
+          const enabledBands = Object.keys(bands).filter(k => bands[k]);
           const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
-          const bandOk = prob != null && bands.some(b => {
-            const p = Number(prob);
-            if (b === '40-45') return p >= 40 && p < 45;
-            if (b === '45-50') return p >= 45 && p < 50;
-            if (b === '50-55') return p >= 50 && p < 55;
-            if (b === '55-60') return p >= 55 && p < 60;
-            if (b === '60-66') return p >= 60 && p < 66;
-            if (b === '65+') return p >= 65;
-            return false;
-          });
           const modeLine = '<span style="color:#10b981">Independent lanes</span> — CONTINUOUS benchmark ~'
             + (d.ai_cooldown_sec || 180) + 's AI · 7 spawn/shadow lanes on CONTINUOUS APPROVE';
+          const bandLabel = enabledBands.length
+            ? enabledBands.join(', ')
+            : (d.ai_threshold != null ? '≥ ' + d.ai_threshold + '%' : '—');
           if (dec === 'APPROVE') {
             if (lao.status === 'EXECUTED') {
               gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
             } else if (lao.status === 'BLOCKED') {
               gate.innerHTML = `<span class="red">Last APPROVE ${prob}% → BLOCKED: ${lao.reason || '?'} (eff=${lao.effective_threshold ?? '-'}, edge=${lao.edge_at_approve ?? '-'})</span>`;
-            } else if (prob != null && bands.length) {
-              gate.innerHTML = bandOk
-                ? `<span class="green">Last APPROVE: AI ${prob}% in enabled band → passing execution gates…</span>`
-                : `<span class="red">Last APPROVE: AI ${prob}% outside enabled bands → blocked (BELOW_THRESHOLD)</span>`;
+            } else if (prob != null) {
+              const ok = enabledBands.length
+                ? enabledBands.some(b => {
+                    const p = parseFloat(prob);
+                    if (b === '65+') return p >= 65;
+                    if (b === '60-66') return p >= 60 && p <= 66;
+                    const parts = b.split('-');
+                    if (parts.length !== 2) return false;
+                    return p >= parseFloat(parts[0]) && p < parseFloat(parts[1]);
+                  })
+                : (d.ai_threshold != null && prob >= d.ai_threshold);
+              gate.innerHTML = ok
+                ? `<span class="green">Last APPROVE: AI ${prob}% in bands [${bandLabel}] → passing execution gates…</span>`
+                : `<span class="red">Last APPROVE: AI ${prob}% not in bands [${bandLabel}] → blocked (BELOW_THRESHOLD)</span>`;
             }
           } else if (!aiCalled) {
             gate.innerHTML = modeLine + '<br><span style="color:#8b949e">DeepSeek not called this cycle — ' + (dai.note || skipBlk.skip || 'waiting for edge ≥ threshold') + '</span>';
           } else {
-            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">AI bands: ' + (bands.length ? bands.join(', ') : 'none') + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">AI bands: ' + bandLabel + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
           }
         }
         safeText('aiReason', d.last_ai?.reason || d.ai_reason || '-');
@@ -16402,7 +16548,14 @@ DASHBOARD_JS = """(function () {
           if (d.reasons && d.reasons.length) whyHtml += (d.reasons||[]).map(r=>`<li>${r}</li>`).join('');
           why.innerHTML = whyHtml || 'No rejection reason this candle';
         }
-        safeText('liveArmBtn', `LIVE ARM: ${d.live_armed ? 'ON' : 'OFF'}`);
+        safeText('liveArmBtn', `${d.live_armed ? 'ON' : 'OFF'}`);
+        const bxLive = document.getElementById('bitfinexLiveDashLabel');
+        const bxBtn = document.getElementById('bitfinexLiveDashBtn');
+        if (bxLive) bxLive.innerText = d.bitfinex_live_enabled ? 'ON' : 'OFF';
+        if (bxBtn) {
+          bxBtn.style.backgroundColor = d.bitfinex_live_enabled ? '#7f1d1d' : '';
+          bxBtn.style.color = d.bitfinex_live_enabled ? '#fecaca' : '#f85149';
+        }
         const earlyBtn = document.getElementById('earlyFailBtn');
         if (earlyBtn) {
           earlyBtn.innerText = `Early Fail ${d.early_fail_enabled ? 'ON' : 'OFF'}`;
@@ -16533,14 +16686,16 @@ DASHBOARD_JS = """(function () {
             mcp.value = d.max_active_signals;
           }
         }
-        if (Array.isArray(d.ai_execution_bands_enabled)) {
-          window.__lastAiBands = d.ai_execution_bands_enabled;
-          syncAiBandChecks(d.ai_execution_bands_enabled);
+        if (d.ai_execution_bands) {
+          syncAiBandControls(d.ai_execution_bands);
+        } else if (d.ai_threshold != null && d.ai_threshold !== '') {
+          const aiThresh = document.getElementById('aiThreshold');
+          if (aiThresh) aiThresh.value = d.ai_threshold;
         }
-        if (Array.isArray(d.chase_buckets_enabled)) {
-          window.__lastChaseBuckets = d.chase_buckets_enabled;
-          syncChaseBucketChecks(d.chase_buckets_enabled);
+        if (d.chase_execution_buckets) {
+          syncChaseBucketControls(d.chase_execution_buckets);
         }
+        renderChaseAnalyticsPanel(d.chase_analytics || {});
         if (d.edge_range_preset) {
           syncEdgeRangePreset(d.edge_range_preset);
         }
@@ -16851,6 +17006,7 @@ DASHBOARD_JS = """(function () {
     });
     window.refresh = refresh;
     window.toggleLive = toggleLive;
+    window.toggleBitfinexLive = toggleBitfinexLive;
     window.toggleEarlyFail = toggleEarlyFail;
     window.toggleInvert = toggleInvert;
     window.toggleDebug = toggleDebug;
@@ -16861,8 +17017,6 @@ DASHBOARD_JS = """(function () {
     window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
-    window.updateAiBands = updateAiBands;
-    window.updateChaseBuckets = updateChaseBuckets;
     window.updateEdge = updateEdge;
   } catch (e) {
     console.error("DASHBOARD BOOT FAILURE", e);
@@ -16895,6 +17049,187 @@ def dashboard():
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
     )
     return render_template_string(page)
+
+
+def _relay_mirror(event: str, payload: dict, source_ts: float | None = None) -> None:
+    """Forward source-bot lifecycle events to local Bitfinex relay sim (Final Bots only)."""
+    try:
+        from local_bitfinex_relay import safe_mirror
+
+        safe_mirror(event, payload or {}, source_ts=source_ts)
+    except Exception:
+        pass
+
+
+def _bitfinex_live_active() -> bool:
+    try:
+        import bitfinex_live_executor as bx
+
+        with state_lock:
+            return bx.is_enabled(state)
+    except Exception:
+        return False
+
+
+def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
+    if not _bitfinex_live_active() or not _private_api_keys_ok():
+        return
+    try:
+        import bitfinex_live_executor as bx
+
+        oid = bx.submit_limit_entry(
+            bitfinex_private,
+            _exchange_call_with_retry,
+            SYMBOL_CCXT,
+            order.get("signal_dir") or signal.get("final_direction"),
+            float(order.get("qty") or 0),
+            float(order.get("limit_price") or 0),
+            int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE),
+            str(order.get("trade_id") or ""),
+        )
+        if oid:
+            order["bitfinex_order_id"] = oid
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] limit hook failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _maybe_bitfinex_market_entry(signal: dict, qty: float) -> None:
+    if not _bitfinex_live_active() or not _private_api_keys_ok():
+        return
+    try:
+        import bitfinex_live_executor as bx
+
+        bx.submit_market_entry(
+            bitfinex_private,
+            _exchange_call_with_retry,
+            SYMBOL_CCXT,
+            signal.get("final_direction"),
+            float(qty),
+            int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE),
+            str(signal.get("trade_id") or ""),
+        )
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] market entry hook failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _maybe_bitfinex_close(pos: dict, exit_reason: str) -> None:
+    if not _bitfinex_live_active() or not _private_api_keys_ok():
+        return
+    try:
+        import bitfinex_live_executor as bx
+
+        bx.submit_market_close(
+            bitfinex_private,
+            _exchange_call_with_retry,
+            SYMBOL_CCXT,
+            pos.get("dir"),
+            float(pos.get("qty") or 0),
+            int(pos.get("leverage") or state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE),
+            str(pos.get("trade_id") or ""),
+            exit_reason=exit_reason,
+        )
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] close hook failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _maybe_bitfinex_cancel(source: dict) -> None:
+    oid = source.get("bitfinex_order_id")
+    if not oid or not _bitfinex_live_active() or not _private_api_keys_ok():
+        return
+    try:
+        import bitfinex_live_executor as bx
+
+        bx.cancel_exchange_order(
+            bitfinex_private,
+            _exchange_call_with_retry,
+            str(oid),
+            SYMBOL_CCXT,
+            str(source.get("trade_id") or ""),
+        )
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] cancel hook failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _desk_extra_payload() -> dict:
+    try:
+        import bitfinex_live_executor as bx
+
+        with state_lock:
+            return {"bitfinex_live": bx.live_status(state, _private_api_keys_ok())}
+    except Exception:
+        return {"bitfinex_live": {"enabled": False, "keys_ok": False, "ready": False}}
+
+
+def _desk_source_snapshot() -> dict:
+    """Lightweight book snapshot for local relay desk (avoids full /api/state cost)."""
+    try:
+        now_ts = time.time()
+        with state_lock:
+            snap = {
+                "price": state.get("price"),
+                "equity": state.get("equity"),
+                "account_balance": state.get("account_balance"),
+                "regime": state.get("regime"),
+            }
+        with trade_lock:
+            positions_copy = copy.deepcopy(open_positions)
+            pending_copy = copy.deepcopy(pending_orders)
+            expired_copy = copy.deepcopy(expired_orders[-20:])
+            ai_hist = copy.deepcopy(state.get("ai_history") or [])[:20]
+            closed_copy = copy.deepcopy(trades[-20:])
+            active_list, _ = _collect_dashboard_active_signals(
+                pending_copy,
+                positions_copy,
+                trades_map,
+                default_strategy=state.get("strategy", "-"),
+                default_regime=state.get("regime", "-"),
+            )
+        orders = []
+        tick_px = snap.get("price")
+        for o in pending_copy:
+            age = (now_ts - o.get("created_ts", now_ts)) / 60 if o.get("created_ts") else 0
+            oc = copy.deepcopy(o)
+            oc["age_min"] = age
+            if tick_px and tick_px > 0:
+                oc["signal_price"] = oc.get("signal_price") or tick_px
+            orders.append(oc)
+        pos_out = []
+        for pos in positions_copy:
+            if pos.get("status") != "OPEN":
+                continue
+            pc = copy.deepcopy(pos)
+            mark = get_executable_mark_price(pos, fallback=snap.get("price"))
+            pc["current_price"] = mark
+            pc["side"] = "LONG" if pc.get("dir") == "LONG" else "SHORT"
+            pos_out.append(pc)
+        snap["positions"] = pos_out
+        snap["orders"] = orders
+        snap["pending_orders"] = orders
+        snap["expired_orders"] = expired_copy
+        snap["ai_history"] = ai_hist
+        snap["closed_trades"] = [
+            {
+                "trade_id": t.get("trade_id"),
+                "dir": t.get("dir") or t.get("final_direction"),
+                "entry": t.get("entry"),
+                "exit": t.get("exit"),
+                "exit_reason": t.get("exit_reason"),
+                "net_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net") or t.get("pnl_usd"),
+                "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net") or t.get("pnl_usd"),
+            }
+            for t in reversed(closed_copy)
+        ]
+        pending_by_tid = {o.get("trade_id"): o for o in orders if o.get("trade_id")}
+        for sig in active_list:
+            tid = sig.get("trade_id")
+            if tid and not sig.get("fill_price"):
+                po = pending_by_tid.get(tid) or {}
+                sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
+        snap["signal_info"] = {"signals": active_list}
+        snap["active_signals"] = active_list
+        return snap
+    except Exception:
+        return {}
 
 
 def _relay_trades_map_lite() -> dict:
@@ -17045,6 +17380,22 @@ def api_ping():
     }), 200
 
 
+@app.route('/api/build')
+def api_build():
+    """Single source of truth for which code build is running (cache-bust dashboards)."""
+    return jsonify({
+        "stack_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "bot_pid": os.getpid(),
+        "cwd": os.getcwd(),
+        "dashboard_url": dashboard_public_url(),
+        "relay_desk_url": f"{dashboard_public_url().rstrip('/')}/desk",
+        "analyzer_url": os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"),
+        "features": RESEARCH_STACK_FEATURES,
+        "server_ts": utc_iso(),
+    }), 200
+
+
 @app.route('/api/state')
 def api_state():
     t0 = time.perf_counter()
@@ -17070,6 +17421,12 @@ def api_state():
                 default_strategy=snapshot.get("strategy", "-"),
                 default_regime=snapshot.get("regime", "-"),
             )
+            pending_by_tid = {o.get("trade_id"): o for o in pending_orders_copy if o.get("trade_id")}
+            for sig in active_list:
+                tid = sig.get("trade_id")
+                if tid and not sig.get("fill_price"):
+                    po = pending_by_tid.get(tid) or {}
+                    sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
             lane_position_counts = {
                 ln: {
                     "open": len(lane_open_positions.get(ln, [])),
@@ -17160,7 +17517,10 @@ def api_state():
         snapshot["trades"] = trades_copy
         snapshot["expired_orders"] = expired_orders_copy
         snapshot["ai_history"] = ai_history_copy
-        snapshot["ai_verdict"] = f"AI reviewer {'ON' if snapshot['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(snapshot.get('ai_execution_bands_enabled'))}"
+        snapshot["ai_verdict"] = _ai_execution_verdict_text()
+        snapshot["ai_execution_bands"] = get_ai_execution_bands()
+        snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
+        snapshot["chase_analytics"] = _load_chase_analytics_snapshot()
         snapshot.setdefault("regime", "UNKNOWN")
         snapshot.setdefault("strategy", "SR")
         snapshot.setdefault("direction", "FLAT")
@@ -17206,11 +17566,6 @@ def api_state():
         snapshot["edge_range_preset"] = state.get("edge_range_preset", DEFAULT_EDGE_RANGE_PRESET)
         snapshot["edge_threshold_display"] = _edge_range_label()
         snapshot["effective_threshold"] = get_effective_edge_threshold()
-        snapshot["ai_execution_bands_enabled"] = get_ai_execution_bands_enabled()
-        snapshot["ai_execution_band_options"] = list(AI_EXECUTION_BAND_IDS)
-        snapshot["ai_bands_display"] = _ai_bands_verdict_label()
-        snapshot["chase_buckets_enabled"] = get_chase_buckets_enabled()
-        snapshot["chase_bucket_options"] = list(CHASE_EXECUTION_BUCKETS)
         snapshot["research_data_collection"] = is_research_data_collection()
         snapshot["edge_options"] = EDGE_OPTIONS
         snapshot["edge_range_presets"] = EDGE_RANGE_PRESETS
@@ -17487,6 +17842,30 @@ def live_arm():
         save_persistent_config()
     return jsonify({"live_armed": state["live_armed"]})
 
+
+@app.route('/api/bitfinex_live', methods=['POST'])
+def api_bitfinex_live():
+    data = request.get_json() or {}
+    enabled = bool(data.get("enabled", False))
+    if enabled and not _private_api_keys_ok():
+        return jsonify({"error": "BITFINEX_API_KEY / BITFINEX_API_SECRET missing or invalid"}), 400
+    with state_lock:
+        state["bitfinex_live_enabled"] = enabled
+        save_persistent_config()
+    import bitfinex_live_executor as bx
+
+    logger.warning(
+        f"[BITFINEX LIVE] dashboard toggle -> {'ON' if enabled else 'OFF'} "
+        f"keys_ok={_private_api_keys_ok()} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify(
+        {
+            "bitfinex_live_enabled": state["bitfinex_live_enabled"],
+            "keys_ok": _private_api_keys_ok(),
+            **bx.live_status(state, _private_api_keys_ok()),
+        }
+    )
+
 @app.route('/api/set_leverage', methods=['POST'])
 def set_leverage():
     data = request.get_json() or {}
@@ -17531,41 +17910,28 @@ def set_threshold():
     if val < AI_THRESHOLD_MIN or val > AI_THRESHOLD_MAX:
         return jsonify({"status": "error", "msg": f"threshold must be {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}"}), 400
     set_ai_threshold(val)
-    return jsonify({
-        "status": "ok",
-        "ai_threshold": get_ai_threshold(),
-        "ai_execution_bands_enabled": get_ai_execution_bands_enabled(),
-    })
+    set_ai_execution_bands(_ai_bands_from_legacy_threshold(val))
+    return jsonify({"status": "ok", "ai_threshold": get_ai_threshold(), "ai_execution_bands": get_ai_execution_bands()})
+
 
 @app.route('/api/set_ai_bands', methods=['POST'])
-def api_set_ai_bands():
+def set_ai_bands():
     data = request.get_json() or {}
     bands = data.get("bands")
-    if not isinstance(bands, list) or not bands:
-        return jsonify({"status": "error", "msg": "bands must be a non-empty list"}), 400
-    if not set_ai_execution_bands(bands):
-        return jsonify({"status": "error", "msg": "invalid bands"}), 400
-    return jsonify({
-        "status": "ok",
-        "ai_execution_bands_enabled": get_ai_execution_bands_enabled(),
-        "ai_threshold": get_ai_threshold(),
-        "ai_bands_display": _ai_bands_verdict_label(),
-    })
+    if not isinstance(bands, dict):
+        return jsonify({"status": "error", "msg": "bands object required"}), 400
+    set_ai_execution_bands(bands)
+    return jsonify({"status": "ok", "ai_execution_bands": get_ai_execution_bands()})
+
 
 @app.route('/api/set_chase_buckets', methods=['POST'])
-def api_set_chase_buckets():
+def set_chase_buckets():
     data = request.get_json() or {}
     buckets = data.get("buckets")
-    if not isinstance(buckets, list) or not buckets:
-        return jsonify({"status": "error", "msg": "buckets must be a non-empty list"}), 400
-    if "0_chases" not in buckets:
-        return jsonify({"status": "error", "msg": "0_chases must remain enabled to place limits"}), 400
-    if not set_chase_buckets_enabled(buckets):
-        return jsonify({"status": "error", "msg": "invalid buckets"}), 400
-    return jsonify({
-        "status": "ok",
-        "chase_buckets_enabled": get_chase_buckets_enabled(),
-    })
+    if not isinstance(buckets, dict):
+        return jsonify({"status": "error", "msg": "buckets object required"}), 400
+    set_chase_execution_buckets(buckets)
+    return jsonify({"status": "ok", "chase_execution_buckets": get_chase_execution_buckets()})
 
 @app.route('/api/set_edge_threshold', methods=['POST'])
 def api_set_edge_threshold():
@@ -19460,9 +19826,9 @@ def rebuild_state_from_snapshots():
 def _persistent_config_keys():
     keys = [
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
-        "invert_signal", "debug_enabled", "live_armed",
+        "invert_signal", "debug_enabled", "live_armed", "bitfinex_live_enabled", "account_balance",
         "min_confidence",
-        "force_ai_every_signal", "ai_threshold", "ai_execution_bands_enabled", "chase_buckets_enabled",
+        "force_ai_every_signal", "ai_threshold", "ai_execution_bands", "chase_execution_buckets",
         "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode",
         "profit_gates_lane_enabled",
@@ -19574,16 +19940,21 @@ def load_persistent_config():
                 state["ai_threshold"] = RESEARCH_AI_THRESHOLD_DEFAULT
             elif not state.get("_threshold_locked"):
                 state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
-            if state.get("ai_execution_bands_enabled") is None and state.get("ai_threshold") is not None:
-                state["ai_execution_bands_enabled"] = _bands_from_legacy_threshold(state["ai_threshold"])
-            elif state.get("ai_execution_bands_enabled") is None:
-                state["ai_execution_bands_enabled"] = list(AI_EXECUTION_BANDS_DEFAULT)
-            if state.get("chase_buckets_enabled") is None:
-                state["chase_buckets_enabled"] = list(CHASE_EXECUTION_BUCKETS_DEFAULT)
-        logger.info(
-            "Loaded persistent config from config.json - ai bands="
-            f"{get_ai_execution_bands_enabled()} chase={get_chase_buckets_enabled()}"
-        )
+            if state.get("ai_execution_bands") is None:
+                state["ai_execution_bands"] = _ai_bands_from_legacy_threshold(state.get("ai_threshold", RESEARCH_AI_THRESHOLD_DEFAULT))
+            else:
+                state["ai_execution_bands"] = _normalize_ai_execution_bands(state.get("ai_execution_bands"))
+            if state.get("chase_execution_buckets") is None:
+                state["chase_execution_buckets"] = _default_chase_execution_buckets()
+            else:
+                raw_chase = state.get("chase_execution_buckets")
+                out = _default_chase_execution_buckets()
+                if isinstance(raw_chase, dict):
+                    for k in out:
+                        if k in raw_chase:
+                            out[k] = bool(raw_chase[k])
+                state["chase_execution_buckets"] = out
+        logger.info("Loaded persistent config from config.json - ai_threshold restored")
 
 def save_persistent_config():
     config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
@@ -19749,17 +20120,13 @@ def startup_hard_fix_ai_threshold():
         research = state.get("strategy_mode") == "RESEARCH"
         if "ai_threshold" in state:
             state["ai_threshold"] = _clamp_ai_threshold(state["ai_threshold"])
-        else:
-            default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
-            state["ai_threshold"] = default
-        if state.get("ai_execution_bands_enabled") is None:
-            state["ai_execution_bands_enabled"] = _bands_from_legacy_threshold(state["ai_threshold"])
-        if state.get("chase_buckets_enabled") is None:
-            state["chase_buckets_enabled"] = list(CHASE_EXECUTION_BUCKETS_DEFAULT)
+            return
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
+        state["ai_threshold"] = default
         save_persistent_config()
         logger.info(
-            f"[INIT] AI bands={state.get('ai_execution_bands_enabled')} "
-            f"floor={state.get('ai_threshold')} chase={state.get('chase_buckets_enabled')} "
+            f"[INIT] AI threshold default {default} "
+            f"({'research flexible 0-100' if research else 'live suggested floor'}) "
             f"[PIPELINE ENFORCEMENT]"
         )
 
@@ -20142,6 +20509,12 @@ def main():
     write_static_pathway_lane_specs()
     assert_exchange_venue_ready()
     try:
+        import bitfinex_live_executor as bx
+
+        bx.configure(SYMBOL_CCXT)
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] executor init: {exc} [PIPELINE ENFORCEMENT]")
+    try:
         from pathway_lab_validation import run_startup_pathway_validation
         with state_lock:
             live_armed = bool(state.get("live_armed", False))
@@ -20176,6 +20549,18 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
+    try:
+        from local_relay_dashboard import register_local_relay_desk
+
+        register_local_relay_desk(app, _desk_source_snapshot, _desk_extra_payload)
+        logger.info(
+            f"[LOCAL RELAY] Research desk at {dashboard_public_url().rstrip('/')}/desk "
+            f"(local-only Bitfinex relay sim) [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        logger.warning(f"[LOCAL RELAY] desk unavailable: {exc} [PIPELINE ENFORCEMENT]")
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "

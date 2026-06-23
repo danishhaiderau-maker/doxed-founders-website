@@ -86,8 +86,10 @@ BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
-# Single release id — bot, analyzer, and research dashboard stay on one version string.
-RESEARCH_STACK_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
+# Single release id — bot, analyzer, research dashboard, and local relay desk.
+# Bump this string on every deploy; all UIs read it from here (not hardcoded elsewhere).
+RESEARCH_STACK_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
+RESEARCH_STACK_FEATURES = "AI win% band gate · Chase bucket gate · Desk net/fill fix · Relay desk · Bitfinex LIVE"
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
 RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
