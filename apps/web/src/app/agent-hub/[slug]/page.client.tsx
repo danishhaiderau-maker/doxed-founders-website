@@ -20,7 +20,6 @@ import { useShareOrigin } from '@/components/share-on-x-button';
 import {
   fetchPublicAgentStatus,
   fetchTradingAgent,
-  fetchTradingAgentActivity,
   fetchTradingAgentDashboard,
   fetchTradingAgents,
   followTradingAgent,
