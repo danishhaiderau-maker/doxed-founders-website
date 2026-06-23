@@ -568,11 +568,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     tradeId: string,
   ): number | null {
     if (!bot) return null;
-    const order = (bot.orders ?? []).find(
-      (o) => o.trade_id === tradeId && (o.status === 'PENDING' || o.status === 'ORDERED'),
-    );
+    const order = this.showcasePendingOrder(bot, tradeId);
     if (order?.limit_price && order.limit_price > 0) return order.limit_price;
     return null;
+  }
+
+  private showcasePendingOrder(
+    bot: import('./bot-state.mapper').BotApiState | null,
+    tradeId: string,
+  ) {
+    return (bot?.orders ?? []).find(
+      (o) => o.trade_id === tradeId && (o.status === 'PENDING' || o.status === 'ORDERED'),
+    );
+  }
+
+  private showcaseSignalForTrade(
+    bot: import('./bot-state.mapper').BotApiState | null,
+    tradeId: string,
+  ) {
+    return (bot?.signal_info?.signals ?? []).find(
+      (s) => String(s.trade_id ?? '') === tradeId,
+    );
   }
 
   /**
@@ -584,13 +600,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     tradeId: string | undefined,
   ): { ready: boolean; reason?: string } {
     if (!tradeId || !bot) return { ready: true };
-    const pending = (bot.orders ?? []).find(
-      (o) => o.trade_id === tradeId && (o.status === 'PENDING' || o.status === 'ORDERED'),
-    );
+    const pending = this.showcasePendingOrder(bot, tradeId);
     if (pending?.limit_price && pending.limit_price > 0) return { ready: true };
-    const sig = (bot.signal_info?.signals ?? []).find(
-      (s) => String(s.trade_id ?? '') === tradeId,
-    );
+    const sig = this.showcaseSignalForTrade(bot, tradeId);
     const st = String(sig?.status ?? '').toUpperCase();
     if (
       st === 'AWAITING_DASHBOARD_CHASE' ||
@@ -606,6 +618,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       };
     }
     return { ready: true };
+  }
+
+  /** Showcase cancelled or blocked entry — relay must drop its resting limit too. */
+  private showcaseEntryAbandoned(
+    bot: import('./bot-state.mapper').BotApiState | null,
+    tradeId: string,
+  ): { abandoned: boolean; reason?: string } {
+    if (!bot || !tradeId) return { abandoned: false };
+
+    const pending = this.showcasePendingOrder(bot, tradeId);
+    if (pending?.limit_price && pending.limit_price > 0) return { abandoned: false };
+
+    const expired = (bot.expired_orders ?? []).find((e) => e.trade_id === tradeId);
+    if (expired) {
+      return { abandoned: true, reason: expired.reason ?? 'SHOWCASE_EXPIRED' };
+    }
+
+    const sig = this.showcaseSignalForTrade(bot, tradeId);
+    if (!sig) return { abandoned: false };
+
+    const st = String(sig.status ?? '').toUpperCase();
+    if (
+      st === 'AWAITING_DASHBOARD_CHASE' ||
+      st === 'AWAITING_CHASE_3PLUS' ||
+      st === 'AWAITING_MICRO' ||
+      st === 'AWAITING_5M' ||
+      st === 'AWAITING_MIN_AGE'
+    ) {
+      return { abandoned: false };
+    }
+
+    const outcome = String(sig.outcome ?? sig.exit_reason ?? '').toUpperCase();
+    const terminal =
+      st === 'EXPIRED' ||
+      st === 'BLOCKED' ||
+      /CHASE_BUCKET|EXPIRED|BLOCKED|TTL/.test(outcome);
+    if (terminal) {
+      return { abandoned: true, reason: sig.exit_reason ?? sig.outcome ?? st };
+    }
+
+    return { abandoned: false };
   }
 
   private async buildVirtualLotSummary(
@@ -1178,6 +1231,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     await this.cancelAbsurdPendingOrders(creds, userId);
+
+    if (this.botBridge.isEnabled() && cycle.tradeId) {
+      const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
+      const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
+      if (abandon.abandoned) {
+        try {
+          await this.activeTrading.cancelOrder(creds, orderId);
+        } catch {
+          /* may already be gone */
+        }
+        this.logger.log(
+          `Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}) — cancelled relay limit`,
+        );
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+          venue: 'bitfinex',
+          pnl_usd: 0,
+          source: 'hire',
+          event: 'SHOWCASE_ABANDONED',
+          reason: abandon.reason,
+        });
+        return;
+      }
+    }
 
     if (cycle.expiresAt && cycle.expiresAt < new Date()) {
       try {

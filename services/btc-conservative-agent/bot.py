@@ -10055,17 +10055,23 @@ def _ai_bands_from_legacy_threshold(threshold: float) -> dict:
 
 
 def _default_chase_execution_buckets() -> dict:
-    return {k: True for k in CHASE_EXECUTION_BUCKET_ORDER}
+    """All OFF until admin ticks buckets on the dashboard — no implicit immediate placement."""
+    return {k: False for k in CHASE_EXECUTION_BUCKET_ORDER}
+
+
+def _default_ai_execution_bands() -> dict:
+    """All OFF until admin ticks AI bands on the dashboard."""
+    return {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
 
 
 def _normalize_ai_execution_bands(raw, *, allow_empty: bool = False) -> dict:
-    base = {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
+    base = _default_ai_execution_bands()
     if isinstance(raw, dict):
         for band_id in base:
             if band_id in raw:
                 base[band_id] = bool(raw[band_id])
     if not any(base.values()) and not allow_empty:
-        return _ai_bands_from_legacy_threshold(get_ai_threshold())
+        return _default_ai_execution_bands()
     return base
 
 
@@ -10073,7 +10079,7 @@ def get_ai_execution_bands() -> dict:
     with state_lock:
         raw = state.get("ai_execution_bands")
     if raw is None:
-        return _ai_bands_from_legacy_threshold(get_ai_threshold())
+        return _default_ai_execution_bands()
     return _normalize_ai_execution_bands(raw, allow_empty=True)
 
 
@@ -10183,6 +10189,14 @@ def min_enabled_chase_count() -> Optional[int]:
     if not any(get_chase_execution_buckets().values()):
         return None
     for n in range(0, 20):
+        if chase_bucket_allowed(n):
+            return n
+    return None
+
+
+def _next_enabled_chase_after(chase_n: int) -> Optional[int]:
+    """Next chase tick with an enabled bucket, or None if no later bucket is allowed."""
+    for n in range(int(chase_n or 0) + 1, 20):
         if chase_bucket_allowed(n):
             return n
     return None
@@ -10311,25 +10325,54 @@ def _signal_ai_win_prob(signal: dict, ai: dict = None) -> float:
 
 
 def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOCKED") -> None:
+    """Pull limit off book when chase tick hits an unchecked bucket; remember signal for next enabled bucket."""
     tid = order.get("trade_id")
     if not tid:
         return
     meta = trades_map.get(tid, {})
     signal = meta.get("signal_ref") or {}
-    if isinstance(signal, dict):
-        signal.update({
-            "status": "EXPIRED",
-            "outcome": reason,
-            "exit_reason": reason,
-            "order_placed": False,
-        })
-        _record_expired_order(signal, reason)
+    chase_n = int(order.get("limit_chase_count") or 0)
     with trade_lock:
         if order in pending_orders:
             lane_unregister_pending_order(order)
+    if not isinstance(signal, dict):
+        logger.info(
+            f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
+            f"chase_count={chase_n} reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return
+    now = time.time()
+    expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+    next_enabled = _next_enabled_chase_after(chase_n)
+    can_resume = (
+        next_enabled is not None
+        and (not expires_ts or now < expires_ts)
+        and any(get_chase_execution_buckets().values())
+    )
+    if can_resume:
+        signal["order_placed"] = False
+        signal["limit_chase_count"] = chase_n
+        signal["dashboard_virtual_chase_count"] = max(_signal_virtual_chase_count(signal), chase_n)
+        signal["status"] = SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE
+        signal["awaiting_dashboard_chase_since"] = now
+        signal["outcome"] = "PENDING"
+        signal["exit_reason"] = None
+        logger.info(
+            f"[DASHBOARD GATE] pulled limit trade_id={tid} chase_count={chase_n} "
+            f"reason={reason} — virtual wait for chase>={next_enabled} [PIPELINE ENFORCEMENT]"
+        )
+        pipeline_state_sync()
+        return
+    signal.update({
+        "status": "EXPIRED",
+        "outcome": reason,
+        "exit_reason": reason,
+        "order_placed": False,
+    })
+    _record_expired_order(signal, reason)
     logger.info(
         f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
-        f"chase_count={order.get('limit_chase_count') or 0} reason={reason} [PIPELINE ENFORCEMENT]"
+        f"chase_count={chase_n} reason={reason} [PIPELINE ENFORCEMENT]"
     )
 
 
@@ -15530,7 +15573,30 @@ SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 _sim_processed_trade_ids: set = set()
 POLICY_FILE = "policy.json"
-CONFIG_FILE = "config.json"
+def get_config_file() -> str:
+    """Port-scoped dashboard config so :7002 showcase and :7800 lab do not overwrite each other."""
+    explicit = (os.getenv("BOT_CONFIG_FILE") or "").strip()
+    if explicit:
+        return explicit
+    return f"config-{DASHBOARD_PORT}.json"
+
+
+def _resolve_config_file_for_load() -> str:
+    """Prefer port-scoped file; migrate legacy config.json once if needed."""
+    scoped = get_config_file()
+    legacy = "config.json"
+    if os.path.exists(scoped):
+        return scoped
+    if scoped != legacy and os.path.exists(legacy):
+        try:
+            shutil.copy2(legacy, scoped)
+            logger.info(f"[CONFIG] Migrated {legacy} -> {scoped} for port {DASHBOARD_PORT}")
+            return scoped
+        except OSError as e:
+            logger.warning(f"[CONFIG] Could not migrate {legacy} -> {scoped}: {e}")
+    if os.path.exists(legacy):
+        return legacy
+    return scoped
 write_counter = 0
 bot_start_time = 0.0
 last_engine_run = 0.0
@@ -15726,7 +15792,7 @@ HTML = """<!DOCTYPE html>
 
 <div id="tradingParamsPanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, and edge gates — saved to config.json</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, pullback, capacity, edge gates, AI bands, and chase buckets — saved per port to config-PORT.json + browser backup</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
 <label>Pullback %:</label>
 <select id="pullbackThresh">
@@ -15753,11 +15819,11 @@ HTML = """<!DOCTYPE html>
   <label><input type="checkbox" class="ai-band-cb" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
   <label><input type="checkbox" class="ai-band-cb" data-band="65+" onchange="updateAiBands()"> 65+</label>
 </div>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a checked band may submit a limit order. Unchecked = hard block (all lanes). Settings persist across restarts.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a <strong>checked</strong> band may submit a limit. Unchecked band = hard block (all lanes). Settings persist across restarts.</p>
 <input id="aiThreshold" type="hidden" value="50">
 <p id="aiBandGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <h3>Chase Analytics — execution buckets</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 6px 0;">Virtual defer: APPROVE is remembered; limit hits the book only when virtual chase count reaches a ticked bucket (e.g. only <strong>3–5 chases</strong> ticked → wait until count ≥ 3). Unchecked bucket = never submit/chase/fill at that count.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard is the only control — checked = ON for that tick/band, unchecked = OFF. No hidden defaults: 0 chases only places when its box is ticked; 40–45% only executes when that AI band is ticked.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
@@ -15983,7 +16049,7 @@ DASHBOARD_JS = """(function () {
       const el = document.getElementById(id);
       if (el) el.innerHTML = html ?? "";
     }
-    const DASH_PREFS_KEY = 'bitfinex_research_dashboard_prefs_v1';
+    const DASH_PREFS_KEY = 'bitfinex_research_dashboard_prefs_v2_' + __DASHBOARD_PORT__;
     function loadDashPrefs() {
       try { return JSON.parse(localStorage.getItem(DASH_PREFS_KEY) || '{}'); } catch (e) { return {}; }
     }
@@ -15991,6 +16057,24 @@ DASHBOARD_JS = """(function () {
       const p = Object.assign(loadDashPrefs(), partial || {});
       try { localStorage.setItem(DASH_PREFS_KEY, JSON.stringify(p)); } catch (e) {}
       return p;
+    }
+    function restoreExecutionGatePrefsFromBrowser() {
+      const prefs = loadDashPrefs();
+      if (prefs.chase_execution_buckets) {
+        ensureChaseBucketControls();
+        syncChaseBucketControls(prefs.chase_execution_buckets);
+        renderChaseBucketGateStatus(prefs.chase_execution_buckets);
+      }
+      if (prefs.ai_execution_bands) {
+        syncAiBandControls(prefs.ai_execution_bands);
+        renderAiBandGateStatus(prefs.ai_execution_bands);
+      }
+    }
+    function persistExecutionGatePrefs(chase, bands) {
+      const patch = {};
+      if (chase && typeof chase === 'object') patch.chase_execution_buckets = chase;
+      if (bands && typeof bands === 'object') patch.ai_execution_bands = bands;
+      if (Object.keys(patch).length) saveDashPrefs(patch);
     }
     let laneToggleInFlight = false;
     let freshCollectionInFlight = false;
@@ -16101,6 +16185,7 @@ DASHBOARD_JS = """(function () {
         if (body.ai_execution_bands) {
           syncAiBandControls(body.ai_execution_bands);
           renderAiBandGateStatus(body.ai_execution_bands);
+          persistExecutionGatePrefs(null, body.ai_execution_bands);
         }
       }
     }
@@ -16137,6 +16222,7 @@ DASHBOARD_JS = """(function () {
         if (body.chase_execution_buckets) {
           syncChaseBucketControls(body.chase_execution_buckets);
           renderChaseBucketGateStatus(body.chase_execution_buckets);
+          persistExecutionGatePrefs(body.chase_execution_buckets, null);
         }
       }
     }
@@ -16998,6 +17084,7 @@ DASHBOARD_JS = """(function () {
           if (d.ai_execution_bands) {
             syncAiBandControls(d.ai_execution_bands);
             renderAiBandGateStatus(d.ai_execution_bands);
+            persistExecutionGatePrefs(null, d.ai_execution_bands);
           } else if (d.ai_threshold != null && d.ai_threshold !== '') {
             const aiThresh = document.getElementById('aiThreshold');
             if (aiThresh) aiThresh.value = d.ai_threshold;
@@ -17005,6 +17092,7 @@ DASHBOARD_JS = """(function () {
           if (d.chase_execution_buckets) {
             syncChaseBucketControls(d.chase_execution_buckets);
             renderChaseBucketGateStatus(d.chase_execution_buckets);
+            persistExecutionGatePrefs(d.chase_execution_buckets, null);
           }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
@@ -17301,6 +17389,7 @@ DASHBOARD_JS = """(function () {
         }
       }
       const dashPrefs = loadDashPrefs();
+      restoreExecutionGatePrefsFromBrowser();
       const autoToggle = document.getElementById('autoRefreshToggle');
       if (autoToggle) {
         autoToggle.checked = dashPrefs.autoRefresh === true;
@@ -17701,6 +17790,66 @@ def api_ping():
         "bot_version": EXECUTION_FIX_VERSION,
         "server_ts": utc_iso(),
     }), 200
+
+
+@app.route('/api/relay-state')
+def api_relay_state():
+    """Fast subset for Railway relay / Agent Hub — no heavy research KPIs."""
+    try:
+        now_ts = time.time()
+        with state_lock:
+            price = state.get("price")
+            snapshot = {
+                "price": price,
+                "bot_version": EXECUTION_FIX_VERSION,
+                "bot_start_time": bot_start_time,
+                "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
+                "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
+                "execution_paused": bool(state.get("execution_paused", False)),
+                "execution_reason": state.get("execution_reason"),
+                "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
+                "strategy_mode": state.get("strategy_mode"),
+                "dashboard_port": DASHBOARD_PORT,
+            }
+        with trade_lock:
+            pending_orders_copy = copy.deepcopy(pending_orders)
+            positions_copy = copy.deepcopy(open_positions)
+            active_list, _exposure = _collect_dashboard_active_signals(
+                pending_orders_copy,
+                positions_copy,
+                trades_map,
+                default_strategy=snapshot.get("strategy", "-"),
+                default_regime=state.get("regime", "-"),
+            )
+            orders = []
+            tick_px = snapshot.get("price")
+            for o in pending_orders_copy:
+                oc = copy.deepcopy(o)
+                oc["age_min"] = (now_ts - o["created_ts"]) / 60 if o.get("created_ts") else 0
+                if tick_px and tick_px > 0:
+                    oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
+                orders.append(oc)
+            expired_orders_copy = copy.deepcopy(expired_orders)
+        snapshot["orders"] = orders
+        snapshot["positions"] = positions_copy
+        snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
+        snapshot["signal_info"] = {
+            "active": len(active_list) > 0,
+            "count": len(active_list),
+            "signals": active_list,
+        }
+        snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
+        snapshot["ai_execution_bands"] = get_ai_execution_bands()
+        snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
+        _enrich_orders_for_relay(snapshot)
+        snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["server_ts"] = utc_iso()
+        resp = jsonify(snapshot)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return resp
+    except Exception as e:
+        logger.error(f"/api/relay-state error: {e}")
+        return jsonify({"api_state_error": str(e)[:500], "bot_version": EXECUTION_FIX_VERSION}), 500
 
 
 @app.route('/api/build')
@@ -20227,9 +20376,10 @@ def _session_trades_only(trades_list):
     return kept
 
 def load_persistent_config():
-    if os.path.exists(CONFIG_FILE):
+    config_path = _resolve_config_file_for_load()
+    if os.path.exists(config_path):
         allowed_keys = _persistent_config_keys()
-        with open(CONFIG_FILE, 'r') as f:
+        with open(config_path, 'r') as f:
             config = json.load(f)
             with state_lock:
                 for key in allowed_keys:
@@ -20265,7 +20415,7 @@ def load_persistent_config():
             elif not state.get("_threshold_locked"):
                 state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
             if state.get("ai_execution_bands") is None:
-                state["ai_execution_bands"] = _ai_bands_from_legacy_threshold(state.get("ai_threshold", RESEARCH_AI_THRESHOLD_DEFAULT))
+                state["ai_execution_bands"] = _default_ai_execution_bands()
             else:
                 state["ai_execution_bands"] = _normalize_ai_execution_bands(state.get("ai_execution_bands"), allow_empty=True)
             if state.get("chase_execution_buckets") is None:
@@ -20278,17 +20428,18 @@ def load_persistent_config():
                         if k in raw_chase:
                             out[k] = bool(raw_chase[k])
                 state["chase_execution_buckets"] = out
-        logger.info("Loaded persistent config from config.json - ai_threshold restored")
+        logger.info(f"Loaded persistent config from {config_path} - ai_threshold restored")
 
 def save_persistent_config():
+    config_path = get_config_file()
     config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
     if _atomic_file_replace(
-        CONFIG_FILE,
+        config_path,
         lambda f: json.dump(config, f),
         config_file_lock,
         "CONFIG",
     ):
-        logger.debug("Saved persistent config")
+        logger.debug(f"Saved persistent config -> {config_path}")
 
 def rotate_log(file):
     try:

@@ -34,21 +34,27 @@ export class BotBridgeService {
   /** Home tunnel URL is wired to Neon first; env vars need a Railway restart to catch up. */
   async resolveBotUrl(): Promise<string | null> {
     const now = Date.now();
-    if (this.dbUrlCache && now - this.dbUrlCache.at < 15_000) {
-      if (this.dbUrlCache.url) return this.dbUrlCache.url;
-    } else {
-      try {
-        const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
-        const db = row?.showcaseBotPublicUrl?.trim();
-        const normalized = db ? db.replace(/\/$/, '') : null;
-        this.dbUrlCache = { url: normalized, at: now };
-        if (normalized) return normalized;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.warn(`Bot URL DB lookup failed: ${msg}`);
-      }
+    if (this.dbUrlCache && now - this.dbUrlCache.at < 15_000 && this.dbUrlCache.url) {
+      return this.dbUrlCache.url;
     }
-    return this.getBotUrl();
+    try {
+      const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+      const db = row?.showcaseBotPublicUrl?.trim();
+      const normalized = db ? db.replace(/\/$/, '') : null;
+      this.dbUrlCache = { url: normalized, at: now };
+      if (normalized) return normalized;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Bot URL DB lookup failed: ${msg}`);
+    }
+    const envUrl = this.getBotUrl();
+    if (envUrl && /127\.0\.0\.1|:7800\b|localhost/i.test(envUrl)) {
+      this.logger.warn(
+        `Ignoring local env bot URL (${envUrl}) — wire showcase to https://bot.doxxedcrypto.digital`,
+      );
+      return null;
+    }
+    return envUrl;
   }
 
   async isEnabledAsync(): Promise<boolean> {
@@ -87,11 +93,14 @@ export class BotBridgeService {
         : ['/api/state', '/api/relay-state'];
 
     for (const path of paths) {
-      const timeoutMs = path.includes('relay-state') ? 8_000 : 12_000;
+      const timeoutMs = path.includes('relay-state') ? 20_000 : 30_000;
       try {
         const res = await fetch(`${base}${path}`, {
           signal: AbortSignal.timeout(timeoutMs),
-          headers: { Accept: 'application/json' },
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'doxxedcrypto-relay/1.0',
+          },
         });
         if (!res.ok) {
           this.logger.warn(`Bot ${path} HTTP ${res.status}`);
@@ -179,7 +188,10 @@ export class BotBridgeService {
     if (!base) return null;
     for (const path of ['/api/ping', '/health']) {
       try {
-        const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(8_000) });
+        const res = await fetch(`${base}${path}`, {
+          signal: AbortSignal.timeout(20_000),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+        });
         if (!res.ok) continue;
         return (await res.json()) as Record<string, unknown>;
       } catch {

@@ -194,7 +194,7 @@ export class AdminControlService {
         killed: false,
         message: paused
           ? 'Home bot paused — execution stopped until you resume.'
-          : 'Pause failed — is the home bot running on :7800?',
+          : 'Pause failed — is the global showcase bot running on :7002?',
       };
     }
 
@@ -245,7 +245,7 @@ export class AdminControlService {
         resumed,
         message: resumed
           ? 'Home bot execution resumed.'
-          : 'Resume failed — check bot dashboard on :7800.',
+          : 'Resume failed — check showcase bot dashboard on :7002.',
       };
     }
 

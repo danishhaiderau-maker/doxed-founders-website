@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertBotSyncAllowed } from './lib/bot-sync-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -134,6 +135,11 @@ function applyProductionPatches() {
 
 async function main() {
   const checkOnly = process.argv.includes('--check-only');
+  assertBotSyncAllowed({
+    root: ROOT,
+    syncKind: 'sync-btc-research-bot.mjs (GitHub research repo → monorepo)',
+    checkOnly,
+  });
   console.log(`Fetching ${REPO}/${SOURCE_FILE}`);
   const raw = await fetchResearchBot();
   if (!raw.includes('Flask') || raw.length < 50_000) {

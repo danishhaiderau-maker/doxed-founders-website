@@ -1,11 +1,16 @@
 name: Sync BTC research bot
 
+# DISABLED: global showcase bot is maintained in-repo (see config/bot-architecture.lock.json).
+# Blunt pull from bybit-15m-research-bot overwrites divergent architecture.
+# Re-enable only if allowBluntSync is set true AND user confirms.
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
-  repository_dispatch:
-    types: [research-bot-updated]
+    inputs:
+      force_sync:
+        description: 'Type FORCE to override architecture lock (human only)'
+        required: true
+        default: ''
 
 permissions:
   contents: write
@@ -16,6 +21,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Architecture lock check
+        id: lock
+        run: |
+          node -e "
+          const fs = require('fs');
+          const lock = JSON.parse(fs.readFileSync('config/bot-architecture.lock.json','utf8'));
+          if (lock.allowBluntSync === true) {
+            console.log('allow=true');
+            process.exit(0);
+          }
+          const force = process.env.FORCE_INPUT === 'FORCE';
+          if (!force) {
+            console.error('::error::Blunt research-bot sync blocked by config/bot-architecture.lock.json');
+            console.error('Global showcase (:7002) and research repo bybit_bot.py are different architectures.');
+            console.error('Edit services/btc-conservative-agent/ in this repo instead.');
+            console.error('To override: workflow_dispatch with force_sync=FORCE');
+            process.exit(1);
+          }
+          console.log('force override');
+          "
+        env:
+          FORCE_INPUT: ${{ github.event.inputs.force_sync }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -23,8 +51,9 @@ jobs:
       - name: Pull bybit_bot.py from research repo
         env:
           GITHUB_TOKEN: ${{ secrets.RESEARCH_BOT_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          BOT_SYNC_FORCE: '1'
         run: |
-          node scripts/sync-btc-research-bot.mjs || {
+          node scripts/sync-btc-research-bot.mjs --force || {
             code=$?
             if [ "$code" = "1" ]; then
               echo "::warning::Research bot sync failed (404 = private repo). Add RESEARCH_BOT_SYNC_TOKEN secret with a PAT that can read bybit-15m-research-bot."
@@ -41,5 +70,5 @@ jobs:
             exit 0
           fi
           git add services/btc-conservative-agent/bot.py services/btc-conservative-agent/combo_pathway_config.py services/btc-signal-engine/
-          git commit -m "chore(bot): sync signal engine from bybit-15m-research-bot"
+          git commit -m "chore(bot): sync signal engine from bybit-15m-research-bot [FORCE]"
           git push

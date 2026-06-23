@@ -1,26 +1,29 @@
 ---
-description: Bitfinex showcase — full research bot replica on Railway (no Architecture B trimming)
-globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs
+description: Global showcase bot — edit in monorepo; no blunt sync from local lab or research repo
+globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs,scripts/sync-*-btc*.mjs
 alwaysApply: false
 ---
 
-# Bitfinex showcase — full research replica
+# Global showcase bot (canonical in-repo)
 
-## Goal
+## Source of truth
 
-Railway showcase runs the **same behavior** as synced `bybit_bot.py`: CSV/JSONL, replay buffers, exports, full dashboard.
+Edit **`services/btc-conservative-agent/`** directly in this monorepo.
 
-**Do not** re-add Architecture B write gates or `SHOWCASE_EXECUTION_ONLY` trimming — it does not reduce Railway cost (RAM/CPU limits do).
+Do **not** blunt-sync from:
+- `C:/Users/user/Desktop/Final Bots/bybit_bot.py` (local lab `:7800`)
+- `bybit-15m-research-bot` GitHub repo
 
-## Keep (Bitfinex-specific only)
+See `config/bot-architecture.lock.json` and `.cursor/rules/no-blunt-bot-sync.mdc`.
 
-- `scripts/patch-btc-bot-production.mjs`: pause/resume, health, credentials guard, showcase balance/history, pathway markers, **relay webhooks** (`_push_showcase_relay_event`)
-- `btc_conservative_agent.py`: relay webhook URL + `register_showcase_ui()` (sync APIs only)
-- `showcase_ui.py`: `/api/sync_status`, `/api/fresh_start` — **do not** block export/reset routes
-- NestJS copy execution unchanged
+## Runtime
+
+- Home showcase: `:7002` → `https://bot.doxxedcrypto.digital`
+- `scripts/patch-btc-bot-production.mjs`: pause/resume, health, credentials guard, relay webhooks
+- `showcase_ui.py`: sync status / fresh start APIs only
 
 ## Rule of thumb
 
-Signal + research behavior = **identical** to research bot.
+Platform wiring (relay, Admin credentials, tunnel) = monorepo additions.
 
-Platform-only additions = relay wake, Admin credentials, sync status API.
+Signal + execution behavior = edited here, committed here — not mirrored from legacy bots.

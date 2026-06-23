@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "effectiveFrom": "2026-06-23",
+  "allowBluntSync": false,
+  "summary": "Global showcase bot and local lab / external research bot are different architectures. Edit the monorepo in place; do not blunt-sync overwrites.",
+  "canonicalSource": {
+    "directory": "services/btc-conservative-agent/",
+    "entrypoint": "bot.py",
+    "runtime": "home PC showcase on :7002",
+    "publicUrl": "https://bot.doxxedcrypto.digital"
+  },
+  "deprecatedBluntSyncSources": [
+    {
+      "id": "local-lab",
+      "label": "Desktop Final Bots lab",
+      "path": "C:/Users/user/Desktop/Final Bots/bybit_bot.py",
+      "port": 7800,
+      "script": "scripts/sync-local-btc-bot.mjs"
+    },
+    {
+      "id": "research-github",
+      "label": "bybit-15m-research-bot GitHub repo",
+      "repo": "danishhaiderau-maker/bybit-15m-research-bot",
+      "file": "bybit_bot.py",
+      "script": "scripts/sync-btc-research-bot.mjs",
+      "workflow": ".github/workflows/sync-btc-research-bot.yml"
+    }
+  ],
+  "safeOpsWithoutBotCodeSync": [
+    "npm run sync:production",
+    "npm run sync:all",
+    "npm run wire:home-bot",
+    "RECOVER-GLOBAL-STACK.cmd",
+    "RESTART-LAUNCHER.cmd",
+    "scripts/start-home-bot.ps1"
+  ],
+  "forceOverride": {
+    "envVar": "BOT_SYNC_FORCE",
+    "cliFlag": "--force",
+    "note": "Human-only escape hatch. Agents must ask the user before using this."
+  },
+  "agentInstruction": "STOP before any blunt bot sync. The local lab (:7800 / Final Bots/bybit_bot.py) and the global showcase (:7002 / services/btc-conservative-agent/) follow different architectures. Do NOT run sync-local-btc-bot, sync-btc-research-bot, or npm run sync:btc-research-bot unless the user explicitly confirms with BOT_SYNC_FORCE after you call out the danger. Edit services/btc-conservative-agent/ directly instead."
+}
