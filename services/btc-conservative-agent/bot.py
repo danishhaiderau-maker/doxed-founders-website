@@ -25,7 +25,7 @@ import subprocess
 import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file
 import ccxt
 import websocket
@@ -2108,6 +2108,7 @@ def suspend_lane_trading(lane: str, reason: str = "LANE_TOGGLE_OFF") -> dict:
                 SIGNAL_STATUS_AWAITING_5M,
                 SIGNAL_STATUS_AWAITING_MIN_AGE,
                 SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+                SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
                 "ORDERED",
                 "ACTIVE",
                 "PENDING",
@@ -2240,7 +2241,7 @@ def get_active_signal_count(lane: str = None):
             if not isinstance(sig, dict) or is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE):
                 continue
             sig_lane = sig.get("research_lane")
             if lane and sig_lane != lane:
@@ -2268,7 +2269,7 @@ def get_active_signal_count(lane: str = None):
         exposure += [{"trade_id": s.get("trade_id"), "kind": "awaiting", "status": s.get("status"), "lane": s.get("research_lane")} for s in awaiting]
         stale_map = len([
             s for s in trades_map.values()
-            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS)
+            if (s.get("signal_ref") or {}).get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE)
             and (s.get("signal_ref") or {}).get("trade_id") not in {e.get("trade_id") for e in exposure}
         ])
     _agent_dbg("H1", "get_active_signal_count", "counted", {"active": active, "lane": lane, "pending_pending_status": pending_count, "pending_list_len": list_len, "open_positions": open_count, "stale_map_orphans": stale_map, "exposure": exposure})
@@ -5270,6 +5271,11 @@ SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
 SIGNAL_STATUS_AWAITING_5M = "AWAITING_5M"
 SIGNAL_STATUS_AWAITING_MIN_AGE = "AWAITING_MIN_AGE"
 SIGNAL_STATUS_AWAITING_CHASE_3PLUS = "AWAITING_CHASE_3PLUS"
+SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE = "AWAITING_DASHBOARD_CHASE"
+VIRTUAL_CHASE_AWAITING_STATUSES = frozenset({
+    SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+    SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
+})
 # CHASE_3PLUS_ALPHA — observe virtual chase persistence before first limit submit.
 CHASE_3PLUS_VIRTUAL_MIN = int(os.getenv("CHASE_3PLUS_VIRTUAL_MIN", "3"))
 CHASE_3PLUS_MAX_WAIT_SEC = int(os.getenv("CHASE_3PLUS_MAX_WAIT_SEC", "180"))
@@ -5801,9 +5807,8 @@ def evaluate_profitability_entry_gates(
             return is_profit_gates_lane(research_lane), reason
         return True, reason
     prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
-    ai_min = round(float(get_ai_threshold()), 1)
-    if prob < ai_min:
-        reason = f"PROFIT_GATE_AI_LT_{ai_min}"
+    if dashboard_ai_band_blocks(prob):
+        reason = "PROFIT_GATE_AI_BAND"
         if is_research_data_collection():
             return is_profit_gates_lane(research_lane), reason
         return True, reason
@@ -6192,24 +6197,40 @@ def _chase_3plus_activation_reason(signal: dict, market_price: float) -> str:
 
 
 def _defer_signal_chase_3plus(signal: dict) -> bool:
+    return _defer_dashboard_virtual_chase(signal)
+
+
+def _defer_dashboard_virtual_chase(signal: dict) -> bool:
+    """Remember APPROVE; tick virtual chase until dashboard bucket allows limit submit."""
     price = float(state.get("price") or signal.get("signal_price") or 0)
-    _init_chase_3plus_virtual_state(signal, price)
-    signal["status"] = SIGNAL_STATUS_AWAITING_CHASE_3PLUS
-    signal["awaiting_chase_3plus_since"] = time.time()
+    if price <= 0:
+        return False
+    if signal.get("status") not in VIRTUAL_CHASE_AWAITING_STATUSES:
+        _init_chase_3plus_virtual_state(signal, price)
+        signal["dashboard_virtual_chase_count"] = 0
+        signal["dashboard_virtual_started_ts"] = time.time()
+        signal["dashboard_virtual_limit"] = signal.get("chase_3plus_virtual_limit")
+    signal["status"] = SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE
+    signal["awaiting_dashboard_chase_since"] = time.time()
     signal["order_placed"] = False
+    mn = min_enabled_chase_count()
     logger.info(
-        f"[CHASE_3PLUS] observe trade_id={signal.get('trade_id')} "
-        f"signal_price={fmt(signal.get('chase_3plus_signal_price'))} "
-        f"virtual_limit={fmt(signal.get('chase_3plus_virtual_limit'))} "
-        f"need_virtual>={CHASE_3PLUS_VIRTUAL_MIN} or age>={CHASE_3PLUS_MAX_WAIT_SEC}s "
-        f"or dist>={CHASE_3PLUS_DISTANCE_PCT * 100:.2f}% [PIPELINE ENFORCEMENT]"
+        f"[DASHBOARD GATE] virtual defer trade_id={signal.get('trade_id')} "
+        f"lane={signal.get('research_lane')} need_chase_count>={mn} "
+        f"enabled={get_chase_execution_buckets()} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
     return True
 
 
-def process_awaiting_chase_3plus_entries():
-    """Promote CHASE_3PLUS_ALPHA signals once virtual persistence threshold is met."""
+def _tick_dashboard_virtual_chase(signal: dict, market_price: float, now: float) -> int:
+    count = _tick_chase_3plus_virtual_chase(signal, market_price, now)
+    signal["dashboard_virtual_chase_count"] = count
+    return count
+
+
+def process_awaiting_dashboard_virtual_chase_entries():
+    """Global virtual defer — submit limit only when dashboard chase bucket allows."""
     price = state.get("price")
     if price is None or price <= 0:
         return
@@ -6220,7 +6241,7 @@ def process_awaiting_chase_3plus_entries():
             (entry.get("signal_ref") or {})
             for entry in trades_map.values()
             if isinstance(entry.get("signal_ref"), dict)
-            and entry["signal_ref"].get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS
+            and entry["signal_ref"].get("status") in VIRTUAL_CHASE_AWAITING_STATUSES
             and not is_terminal_signal(entry["signal_ref"])
         ]
     for signal in awaiting:
@@ -6228,6 +6249,18 @@ def process_awaiting_chase_3plus_entries():
         if not tid:
             continue
         if not lane_orders_allowed(signal.get("research_lane")):
+            continue
+        meta = trades_map.get(tid, {})
+        ai = meta.get("ai") or signal.get("ai") or {}
+        allowed, reason, _defer = evaluate_dashboard_execution_gate(signal, ai, stage="promote")
+        if reason in ("AI_BAND_BLOCKED", "AI_REVIEWER_OFF", "LANE_DISABLED", "CHASE_BUCKETS_ALL_OFF", "LEVERAGE_OUT_OF_RANGE"):
+            signal["status"] = "BLOCKED"
+            signal["outcome"] = reason
+            signal["exit_reason"] = reason
+            logger.info(
+                f"[DASHBOARD GATE] blocked while waiting trade_id={tid} reason={reason} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
             continue
         expires_ts = signal.get("expires_ts") or (signal.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
         if expires_ts and now > expires_ts:
@@ -6239,30 +6272,31 @@ def process_awaiting_chase_3plus_entries():
             _record_expired_order(signal, "SIGNAL_TTL_EXPIRED")
             _funnel_signal_expired(signal, "SIGNAL_EXPIRED")
             logger.info(
-                f"[CHASE_3PLUS] expired without activation trade_id={tid} "
-                f"virtual_chase={signal.get('chase_3plus_virtual_chase_count')} "
-                f"[PIPELINE ENFORCEMENT]"
+                f"[DASHBOARD GATE] virtual defer expired trade_id={tid} "
+                f"virtual_chase={_signal_virtual_chase_count(signal)} [PIPELINE ENFORCEMENT]"
             )
             continue
-        _tick_chase_3plus_virtual_chase(signal, market, now)
-        reason = _chase_3plus_activation_reason(signal, market)
-        if not reason:
+        _tick_dashboard_virtual_chase(signal, market, now)
+        vcount = _signal_virtual_chase_count(signal)
+        if not dashboard_virtual_chase_submit_ready(signal):
             continue
         if not ensure_signal_capacity():
             continue
-        vcount = int(signal.get("chase_3plus_virtual_chase_count") or 0)
-        dist_pct = round(_chase_3plus_signal_distance_pct(signal, market) * 100, 4)
-        age_sec = round(_signal_age_sec(signal), 1)
-        signal["chase_3plus_activation_reason"] = reason
-        signal["chase_3plus_virtual_chase_at_activation"] = vcount
-        signal["chase_3plus_signal_distance_pct_at_activation"] = dist_pct
-        signal["chase_3plus_signal_age_at_activation"] = age_sec
+        allowed, reason, _ = evaluate_dashboard_execution_gate(signal, ai, stage="submit")
+        if not allowed:
+            continue
         logger.info(
-            f"[CHASE_3PLUS] activate trade_id={tid} reason={reason} "
-            f"virtual_chase={vcount} age_sec={age_sec} dist_pct={dist_pct} "
+            f"[DASHBOARD GATE] virtual chase ready trade_id={tid} "
+            f"virtual_chase={vcount} bucket={chase_count_bucket(vcount)} "
             f"submitting limit [PIPELINE ENFORCEMENT]"
         )
-        _promote_signal_to_limit_order(signal)
+        signal["dashboard_chase_activation_count"] = vcount
+        _promote_signal_to_limit_order(signal, skip_virtual_defer=True)
+
+
+def process_awaiting_chase_3plus_entries():
+    """Legacy alias — dashboard virtual defer is the global path."""
+    process_awaiting_dashboard_virtual_chase_entries()
 
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
@@ -6953,7 +6987,7 @@ def reconcile_stale_signals():
             if sig.get("outcome") != "OPEN":
                 sig["outcome"] = "OPEN"
                 fixed += 1
-            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
+            if sig.get("status") in ("ORDERED", "ACTIVE", "PENDING", SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE):
                 sig["status"] = "FILLED"
                 fixed += 1
         for s in trades_map.values():
@@ -6995,7 +7029,7 @@ def reconcile_stale_signals():
                     if _remove_pending_for_trade(tid, sig["outcome"]):
                         orphans_removed += 1
                 continue
-            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS) and ttl_expired:
+            elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
@@ -7037,7 +7071,7 @@ def sync_signal_info_registry():
                 awaiting_5m_ids.add(tid)
             if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(sig):
                 awaiting_min_age_ids.add(tid)
-            if tid and sig.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS and not is_terminal_signal(sig):
+            if tid and sig.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES and not is_terminal_signal(sig):
                 awaiting_chase_3plus_ids.add(tid)
     live_ids = pending_ids | open_ids | awaiting_micro_ids | awaiting_5m_ids | awaiting_min_age_ids | awaiting_chase_3plus_ids
     live_signals = []
@@ -10024,13 +10058,13 @@ def _default_chase_execution_buckets() -> dict:
     return {k: True for k in CHASE_EXECUTION_BUCKET_ORDER}
 
 
-def _normalize_ai_execution_bands(raw) -> dict:
+def _normalize_ai_execution_bands(raw, *, allow_empty: bool = False) -> dict:
     base = {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
     if isinstance(raw, dict):
         for band_id in base:
             if band_id in raw:
                 base[band_id] = bool(raw[band_id])
-    if not any(base.values()):
+    if not any(base.values()) and not allow_empty:
         return _ai_bands_from_legacy_threshold(get_ai_threshold())
     return base
 
@@ -10040,11 +10074,11 @@ def get_ai_execution_bands() -> dict:
         raw = state.get("ai_execution_bands")
     if raw is None:
         return _ai_bands_from_legacy_threshold(get_ai_threshold())
-    return _normalize_ai_execution_bands(raw)
+    return _normalize_ai_execution_bands(raw, allow_empty=True)
 
 
 def set_ai_execution_bands(bands: dict):
-    normalized = _normalize_ai_execution_bands(bands or {})
+    normalized = _normalize_ai_execution_bands(bands or {}, allow_empty=True)
     with state_lock:
         state["ai_execution_bands"] = normalized
         enabled = [k for k, v in normalized.items() if v]
@@ -10068,11 +10102,16 @@ def ai_win_prob_in_execution_bands(prob) -> bool:
         return False
     bands = get_ai_execution_bands()
     if not any(bands.values()):
-        return p >= get_ai_threshold()
+        return False
     for band_id, lo, hi in AI_EXECUTION_BAND_DEFS:
         if bands.get(band_id) and _ai_prob_in_band(p, band_id, lo, hi):
             return True
     return False
+
+
+def dashboard_ai_band_blocks(prob) -> bool:
+    """Hard dashboard gate — always enforced regardless of research log-only lanes."""
+    return not ai_win_prob_in_execution_bands(prob)
 
 
 def _ai_execution_verdict_text() -> str:
@@ -10128,8 +10167,178 @@ def chase_bucket_allowed(chase_count) -> bool:
     bucket = chase_count_bucket(chase_count)
     buckets = get_chase_execution_buckets()
     if not any(buckets.values()):
-        return True
+        return False
     return bool(buckets.get(bucket, False))
+
+
+def dashboard_chase_bucket_blocks(chase_count) -> bool:
+    """Hard dashboard gate — blocks limit submit, chase steps, and fills for this chase count."""
+    return not chase_bucket_allowed(chase_count)
+
+
+def min_enabled_chase_count() -> Optional[int]:
+    """Lowest limit_chase_count / virtual count allowed to submit a limit."""
+    if not any(get_chase_execution_buckets().values()):
+        return None
+    for n in range(0, 20):
+        if chase_bucket_allowed(n):
+            return n
+    return None
+
+
+def dashboard_virtual_defer_required() -> bool:
+    mn = min_enabled_chase_count()
+    return mn is not None and mn > 0
+
+
+def _signal_virtual_chase_count(signal: dict) -> int:
+    if not isinstance(signal, dict):
+        return 0
+    return int(
+        signal.get("dashboard_virtual_chase_count")
+        or signal.get("chase_3plus_virtual_chase_count")
+        or 0
+    )
+
+
+def dashboard_virtual_chase_submit_ready(signal: dict) -> bool:
+    """True when virtual chase count is in an enabled bucket and >= minimum enabled count."""
+    vcount = _signal_virtual_chase_count(signal)
+    if not chase_bucket_allowed(vcount):
+        return False
+    mn = min_enabled_chase_count()
+    if mn is None:
+        return False
+    return vcount >= mn
+
+
+def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict:
+    """Snapshot of dashboard execution gates for API / logging."""
+    bands = get_ai_execution_bands()
+    chase = get_chase_execution_buckets()
+    mn = min_enabled_chase_count()
+    with state_lock:
+        lev = int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE)
+        max_sig = get_effective_max_active_signals()
+        ai_on = bool(state.get("ai_enabled", True))
+        pull = float(state.get("pullback_threshold") or 0)
+        bfx = bool(state.get("bitfinex_live_enabled"))
+    vcount = _signal_virtual_chase_count(signal or {})
+    return {
+        "hard_wired": True,
+        "ai_reviewer_enabled": ai_on,
+        "ai_bands_enabled": [k for k, v in bands.items() if v],
+        "chase_buckets_enabled": [k for k, v in chase.items() if v],
+        "min_chase_count_to_submit": mn,
+        "virtual_defer_active": dashboard_virtual_defer_required(),
+        "virtual_chase_count": vcount,
+        "virtual_submit_ready": dashboard_virtual_chase_submit_ready(signal or {"dashboard_virtual_chase_count": vcount}),
+        "max_concurrent_signals": max_sig,
+        "leverage": lev,
+        "pullback_threshold": pull,
+        "bitfinex_live_enabled": bfx,
+    }
+
+
+def evaluate_dashboard_execution_gate(
+    signal: dict,
+    ai: dict = None,
+    *,
+    stage: str = "promote",
+) -> tuple:
+    """
+    Ultimate dashboard execution control — overrides lane programming for limit submit.
+    Returns (allowed, reason, defer_virtual_chase).
+    """
+    ai = ai or {}
+    if not isinstance(signal, dict):
+        return False, "INVALID_SIGNAL", False
+    lane = signal.get("research_lane")
+
+    with state_lock:
+        ai_on = bool(state.get("ai_enabled", True))
+        lev = int(state.get("leverage") or 0)
+
+    if not ai_on:
+        return False, "AI_REVIEWER_OFF", False
+
+    if not lane_orders_allowed(lane):
+        return False, "LANE_DISABLED", False
+
+    win_prob = _signal_ai_win_prob(signal, ai)
+    if dashboard_ai_band_blocks(win_prob):
+        return False, "AI_BAND_BLOCKED", False
+
+    if not ensure_signal_capacity():
+        return False, "MAX_ACTIVE_SIGNALS", False
+
+    if lev < 1 or lev > MAX_RESEARCH_LEVERAGE:
+        return False, "LEVERAGE_OUT_OF_RANGE", False
+
+    if not any(get_chase_execution_buckets().values()):
+        return False, "CHASE_BUCKETS_ALL_OFF", False
+
+    if stage == "submit":
+        if not dashboard_virtual_chase_submit_ready(signal):
+            return False, "CHASE_BUCKET_NOT_READY", False
+        return True, "OK", False
+
+    # promote: enter virtual defer or proceed to micro/5m/limit path
+    if not dashboard_virtual_chase_submit_ready(signal):
+        st = signal.get("status")
+        if st in VIRTUAL_CHASE_AWAITING_STATUSES:
+            return False, "CHASE_BUCKET_WAIT", False
+        return False, "CHASE_BUCKET_DEFER", True
+
+    return True, "OK", False
+
+
+def _signal_ai_win_prob(signal: dict, ai: dict = None) -> float:
+    ai = ai or {}
+    if not isinstance(ai, dict):
+        ai = {}
+    try:
+        return float(
+            signal.get("ai_win_prob")
+            or ai.get("win_prob")
+            or (signal.get("ai") or {}).get("win_prob")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOCKED") -> None:
+    tid = order.get("trade_id")
+    if not tid:
+        return
+    meta = trades_map.get(tid, {})
+    signal = meta.get("signal_ref") or {}
+    if isinstance(signal, dict):
+        signal.update({
+            "status": "EXPIRED",
+            "outcome": reason,
+            "exit_reason": reason,
+            "order_placed": False,
+        })
+        _record_expired_order(signal, reason)
+    with trade_lock:
+        if order in pending_orders:
+            lane_unregister_pending_order(order)
+    logger.info(
+        f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
+        f"chase_count={order.get('limit_chase_count') or 0} reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+
+
+def enforce_dashboard_chase_gates_on_pending() -> None:
+    """Drop or block pending orders sitting in a disabled chase bucket."""
+    with trade_lock:
+        pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
+    for order in pending:
+        chase_n = int(order.get("limit_chase_count") or 0)
+        if dashboard_chase_bucket_blocks(chase_n):
+            _cancel_pending_for_chase_gate(order)
 
 
 def _load_chase_analytics_snapshot() -> dict:
@@ -10959,6 +11168,21 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     """Create a pending limit order after micro structure is confirmed."""
     smart_meta = smart_meta or {}
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    meta = trades_map.get(signal.get("trade_id"), {})
+    ai = meta.get("ai") or signal.get("ai") or {}
+    allowed, reason, defer = evaluate_dashboard_execution_gate(signal, ai, stage="submit")
+    if defer:
+        return _defer_dashboard_virtual_chase(signal)
+    if not allowed:
+        logger.info(
+            f"[DASHBOARD GATE] limit blocked trade_id={signal.get('trade_id')} "
+            f"reason={reason} virtual_chase={_signal_virtual_chase_count(signal)} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = reason
+        signal["exit_reason"] = reason
+        return False
     if not lane_orders_allowed(lane):
         logger.info(
             f"[SIM] BLOCK limit lane={lane} toggle OFF trade_id={signal.get('trade_id')} "
@@ -10996,7 +11220,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "fee_type": "MAKER",
         "micro_structure_confirmed": True,
         "original_limit_price": limit_price,
-        "limit_chase_count": 0,
+        "limit_chase_count": _signal_virtual_chase_count(signal),
         "last_chase_ts": None,
     }
     features = signal.get("features") or {}
@@ -11014,7 +11238,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
     signal["original_limit_price"] = limit_price
-    signal["limit_chase_count"] = 0
+    signal["limit_chase_count"] = _signal_virtual_chase_count(signal)
     signal["last_chase_ts"] = None
     if smart_meta.get("immediate_chase") or fills_first_continuous_enabled(signal):
         signal["immediate_chase"] = True
@@ -11230,11 +11454,26 @@ def process_awaiting_5m_entries():
         _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
 
 
-def _promote_signal_to_limit_order(signal: dict) -> bool:
+def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = False) -> bool:
     """Resolve limit at submit time (smart submit), then place or defer to micro/5m."""
     price = state.get("price")
     if not price or price <= 0:
         return False
+    meta = trades_map.get(signal.get("trade_id"), {})
+    ai = meta.get("ai") or signal.get("ai") or {}
+    if not skip_virtual_defer:
+        allowed, reason, defer = evaluate_dashboard_execution_gate(signal, ai, stage="promote")
+        if defer:
+            return _defer_dashboard_virtual_chase(signal)
+        if not allowed:
+            signal["status"] = "BLOCKED"
+            signal["outcome"] = reason
+            signal["exit_reason"] = reason
+            logger.info(
+                f"[DASHBOARD GATE] promote blocked trade_id={signal.get('trade_id')} "
+                f"reason={reason} [PIPELINE ENFORCEMENT]"
+            )
+            return False
     if fills_first_continuous_enabled(signal):
         signal["await_micro_confirm"] = False
         signal["await_5m_confirm"] = False
@@ -11326,19 +11565,25 @@ def process_awaiting_min_age_entries():
 
 def execute_simulated_order(signal):
     lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
-    if not lane_orders_allowed(lane):
+    meta = trades_map.get(signal.get("trade_id"), {})
+    ai = meta.get("ai") or signal.get("ai") or {}
+    allowed, reason, defer = evaluate_dashboard_execution_gate(signal, ai, stage="promote")
+    if defer:
+        return _defer_dashboard_virtual_chase(signal)
+    if not allowed:
         logger.info(
-            f"[SIM] BLOCK lane={lane} toggle OFF trade_id={signal.get('trade_id')} "
-            f"[PIPELINE ENFORCEMENT]"
+            f"[DASHBOARD GATE] BLOCK lane={lane} trade_id={signal.get('trade_id')} "
+            f"reason={reason} [PIPELINE ENFORCEMENT]"
         )
-        log_lane_opportunity_event(
-            lane, "LANE_DISABLED", signal.get("trade_id"),
-            signal.get("final_direction"), signal.get("ai_win_prob"),
-            signal.get("edge_score_at_entry"), block_reason="PATHWAY_LAB_TOGGLE_OFF",
-        )
+        if reason == "LANE_DISABLED":
+            log_lane_opportunity_event(
+                lane, "LANE_DISABLED", signal.get("trade_id"),
+                signal.get("final_direction"), signal.get("ai_win_prob"),
+                signal.get("edge_score_at_entry"), block_reason="PATHWAY_LAB_TOGGLE_OFF",
+            )
         signal["status"] = "BLOCKED"
-        signal["outcome"] = "LANE_DISABLED"
-        signal["exit_reason"] = "LANE_DISABLED"
+        signal["outcome"] = reason
+        signal["exit_reason"] = reason
         return False
     _refresh_order_and_signal_ttl()
     logger.info(
@@ -11350,11 +11595,8 @@ def execute_simulated_order(signal):
     price = state.get("price")
     if not price or price <= 0:
         return False
-    if is_chase_3plus_alpha_lane(signal):
-        if signal.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS:
-            return True
-        if not signal.get("chase_3plus_activation_reason"):
-            return _defer_signal_chase_3plus(signal)
+    if signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES:
+        return True
     if _should_defer_min_signal_age(signal):
         return _defer_signal_min_age(signal)
     return _promote_signal_to_limit_order(signal)
@@ -11668,6 +11910,7 @@ def process_limit_chase(price: float):
     """Gradually move unfilled sim limits toward market after patient wait."""
     if not limit_chase_enabled() or price is None or price <= 0:
         return
+    enforce_dashboard_chase_gates_on_pending()
     now = time.time()
     chased = 0
     with trade_lock:
@@ -11700,7 +11943,7 @@ def _update_awaiting_signal_price_extremes(price: float):
             if not isinstance(sig, dict) or is_terminal_signal(sig):
                 continue
             st = sig.get("status")
-            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS):
+            if st not in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE):
                 continue
             if not (sig.get("limit_price") or sig.get("planned_limit_price")):
                 continue
@@ -12785,18 +13028,15 @@ def process_signal(event: dict):
                 f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
             )
 
-            if not ai_win_prob_in_execution_bands(ai.get("win_prob", 0)):
-                if not _post_ai_gate_blocks(sole, research_lane):
-                    _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
-                else:
-                    exit_pipeline(signal, ai, "BELOW_THRESHOLD")
-                    with state_lock:
-                        state["debug_state"]["last_block_reason"] = "BELOW_THRESHOLD"
-                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                        state["debug_state"]["skip_reason"] = "BELOW_THRESHOLD"
-                    update_debug_state_always("BELOW_THRESHOLD", {"edge": edge_score})
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
+            if dashboard_ai_band_blocks(ai.get("win_prob", 0)):
+                exit_pipeline(signal, ai, "BELOW_THRESHOLD")
+                with state_lock:
+                    state["debug_state"]["last_block_reason"] = "BELOW_THRESHOLD"
+                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                    state["debug_state"]["skip_reason"] = "BELOW_THRESHOLD"
+                update_debug_state_always("BELOW_THRESHOLD", {"edge": edge_score})
+                state["last_pipeline_stage"] = "IDLE"
+                return
 
             if is_clustered_entry(final_direction, price, research_lane):
                 if not _post_ai_gate_blocks(sole, research_lane) or _research_execute_log_only(research_lane):
@@ -12932,8 +13172,8 @@ def process_signal(event: dict):
                 final_status = SIGNAL_STATUS_AWAITING_MICRO
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE:
                 final_status = SIGNAL_STATUS_AWAITING_MIN_AGE
-            elif signal.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS:
-                final_status = SIGNAL_STATUS_AWAITING_CHASE_3PLUS
+            elif signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES:
+                final_status = signal.get("status")
             else:
                 final_status = "ORDERED"
             finalize_signal(signal, ai, final_status)
@@ -15496,6 +15736,9 @@ HTML = """<!DOCTYPE html>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
+<h3>Ultimate execution control</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim + Bitfinex LIVE). Lane/AI decisions are still logged for analyzer.</p>
+<div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
 <label>AI win % bands to execute (hard-wired gate — tick any combination):</label>
 <div id="aiBandControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;">
   <label><input type="checkbox" class="ai-band-cb" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
@@ -15505,10 +15748,12 @@ HTML = """<!DOCTYPE html>
   <label><input type="checkbox" class="ai-band-cb" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
   <label><input type="checkbox" class="ai-band-cb" data-band="65+" onchange="updateAiBands()"> 65+</label>
 </div>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a checked band may submit a limit order. Legacy min field hidden — bands are the execution gate.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Only APPROVE signals whose AI win % falls in a checked band may submit a limit order. Unchecked = hard block (all lanes). Settings persist across restarts.</p>
 <input id="aiThreshold" type="hidden" value="50">
+<p id="aiBandGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <h3>Chase Analytics — execution buckets</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 6px 0;">Tick buckets allowed to chase/fill. Unchecked = chase stops and fills blocked for that chase count.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 6px 0;">Virtual defer: APPROVE is remembered; limit hits the book only when virtual chase count reaches a ticked bucket (e.g. only <strong>3–5 chases</strong> ticked → wait until count ≥ 3). Unchecked bucket = never submit/chase/fill at that count.</p>
+<p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
@@ -15772,15 +16017,58 @@ DASHBOARD_JS = """(function () {
       const short = labels[lane] || m;
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
+    let executionControlsBusyUntil = 0;
+    function markExecutionControlsBusy(ms=2500) {
+      executionControlsBusyUntil = Date.now() + ms;
+    }
+    function executionControlsBusy() {
+      return Date.now() < executionControlsBusyUntil;
+    }
+    function renderUltimateGatePanel(gates) {
+      const el = document.getElementById('ultimateGatePanel');
+      if (!el || !gates) return;
+      const bands = (gates.ai_bands_enabled || []).join(', ') || 'none';
+      const chase = (gates.chase_buckets_enabled || []).join(', ') || 'none';
+      el.innerHTML =
+        '<div><strong>AI reviewer:</strong> ' + (gates.ai_reviewer_enabled ? 'ON' : 'OFF') + '</div>' +
+        '<div><strong>AI bands:</strong> ' + bands + '</div>' +
+        '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
+        '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
+        '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + ' · <strong>Pullback:</strong> ' + (gates.pullback_threshold != null ? (gates.pullback_threshold * 100).toFixed(2) + '%' : '—') + '</div>' +
+        '<div><strong>Bitfinex LIVE:</strong> ' + (gates.bitfinex_live_enabled ? 'ARMED' : 'OFF') + ' (local sim still runs when relay on)</div>';
+    }
+    function renderAiBandGateStatus(bands) {
+      const el = document.getElementById('aiBandGateStatus');
+      if (!el || !bands) return;
+      const on = Object.keys(bands).filter(k => bands[k]);
+      el.innerHTML = on.length
+        ? `<strong>Active AI bands:</strong> ${on.join(', ')}`
+        : '<strong style="color:#ef4444">All AI bands OFF — no limit orders will execute</strong>';
+    }
+    function renderChaseBucketGateStatus(buckets) {
+      const el = document.getElementById('chaseBucketGateStatus');
+      if (!el || !buckets) return;
+      const on = Object.keys(buckets).filter(k => buckets[k]);
+      el.innerHTML = on.length
+        ? `<strong>Allowed chase buckets:</strong> ${on.join(', ')}`
+        : '<strong style="color:#ef4444">All chase buckets OFF — no limits / chases / fills</strong>';
+    }
     async function post(url, obj={}) {
       try {
         const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(obj)});
         if (!res.ok) {
-          const err = await res.json();
-          if (err.error) alert("Toggle blocked: " + err.error);
+          let msg = res.statusText;
+          try {
+            const err = await res.json();
+            if (err.error || err.msg) msg = err.error || err.msg;
+          } catch (_) {}
+          alert('Save failed: ' + msg);
         }
         return res;
-      } catch(e){}
+      } catch (e) {
+        alert('Save failed: ' + (e && e.message ? e.message : 'network error'));
+        return null;
+      }
     }
     async function updateThreshold(value) {
       await post('/api/set_threshold', {value: parseFloat(value)});
@@ -15801,8 +16089,15 @@ DASHBOARD_JS = """(function () {
       });
     }
     async function updateAiBands() {
-      await post('/api/set_ai_bands', {bands: readAiBandSelections()});
-      refresh();
+      markExecutionControlsBusy();
+      const res = await post('/api/set_ai_bands', {bands: readAiBandSelections()});
+      if (res && res.ok) {
+        const body = await res.json();
+        if (body.ai_execution_bands) {
+          syncAiBandControls(body.ai_execution_bands);
+          renderAiBandGateStatus(body.ai_execution_bands);
+        }
+      }
     }
     function readChaseBucketSelections() {
       const out = {};
@@ -15830,8 +16125,15 @@ DASHBOARD_JS = """(function () {
       });
     }
     async function updateChaseBuckets() {
-      await post('/api/set_chase_buckets', {buckets: readChaseBucketSelections()});
-      refresh();
+      markExecutionControlsBusy();
+      const res = await post('/api/set_chase_buckets', {buckets: readChaseBucketSelections()});
+      if (res && res.ok) {
+        const body = await res.json();
+        if (body.chase_execution_buckets) {
+          syncChaseBucketControls(body.chase_execution_buckets);
+          renderChaseBucketGateStatus(body.chase_execution_buckets);
+        }
+      }
     }
     function renderChaseAnalyticsPanel(ch) {
       ensureChaseBucketControls();
@@ -16686,14 +16988,19 @@ DASHBOARD_JS = """(function () {
             mcp.value = d.max_active_signals;
           }
         }
-        if (d.ai_execution_bands) {
-          syncAiBandControls(d.ai_execution_bands);
-        } else if (d.ai_threshold != null && d.ai_threshold !== '') {
-          const aiThresh = document.getElementById('aiThreshold');
-          if (aiThresh) aiThresh.value = d.ai_threshold;
-        }
-        if (d.chase_execution_buckets) {
-          syncChaseBucketControls(d.chase_execution_buckets);
+        renderUltimateGatePanel(d.dashboard_execution_gates || {});
+        if (!executionControlsBusy()) {
+          if (d.ai_execution_bands) {
+            syncAiBandControls(d.ai_execution_bands);
+            renderAiBandGateStatus(d.ai_execution_bands);
+          } else if (d.ai_threshold != null && d.ai_threshold !== '') {
+            const aiThresh = document.getElementById('aiThreshold');
+            if (aiThresh) aiThresh.value = d.ai_threshold;
+          }
+          if (d.chase_execution_buckets) {
+            syncChaseBucketControls(d.chase_execution_buckets);
+            renderChaseBucketGateStatus(d.chase_execution_buckets);
+          }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
         if (d.edge_range_preset) {
@@ -16724,7 +17031,7 @@ DASHBOARD_JS = """(function () {
           capWarn.style.display = msgs.length ? 'block' : 'none';
           capWarn.innerText = msgs.join(' ');
         }
-        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS")).map(s => `
+        safeHTML('signalsTable', (d.signal_info?.signals || []).filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE" || s.status === "AWAITING_CHASE_3PLUS" || s.status === "AWAITING_DASHBOARD_CHASE")).map(s => `
           <tr>
             <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts || s.time)}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -16737,7 +17044,7 @@ DASHBOARD_JS = """(function () {
             <td>${s.pull_req != null ? s.pull_req.toFixed(2) : '-' }%</td>
             <td>${s.signal_price !== undefined ? s.signal_price.toFixed(2) : '-'}</td>
             <td>${s.max_pull != null ? s.max_pull.toFixed(2) : '-' }%</td>
-            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_MIN_AGE' ? 'AWAITING MIN AGE (' + (s.age_min != null ? s.age_min.toFixed(1) : '?') + 'm)' : s.status === 'AWAITING_CHASE_3PLUS' ? 'CHASE 3+ OBSERVE (v=' + (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0) + ')' : (s.outcome || '-')}</td>
+            <td>${s.status === 'AWAITING_MICRO' ? 'AWAITING MICRO (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_5M' ? 'AWAITING 5M (' + (s.limit_price != null ? s.limit_price.toFixed(2) : '?') + ')' : s.status === 'AWAITING_MIN_AGE' ? 'AWAITING MIN AGE (' + (s.age_min != null ? s.age_min.toFixed(1) : '?') + 'm)' : (s.status === 'AWAITING_CHASE_3PLUS' || s.status === 'AWAITING_DASHBOARD_CHASE') ? 'VIRTUAL CHASE (v=' + (s.dashboard_virtual_chase_count != null ? s.dashboard_virtual_chase_count : (s.chase_3plus_virtual_chase_count != null ? s.chase_3plus_virtual_chase_count : 0)) + ')' : (s.outcome || '-')}</td>
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
@@ -17074,6 +17381,15 @@ def _bitfinex_live_active() -> bool:
 def _maybe_bitfinex_limit_entry(order: dict, signal: dict) -> None:
     if not _bitfinex_live_active() or not _private_api_keys_ok():
         return
+    meta = trades_map.get((signal or {}).get("trade_id") or (order or {}).get("trade_id"), {})
+    ai = meta.get("ai") or (signal or {}).get("ai") or {}
+    allowed, reason, _ = evaluate_dashboard_execution_gate(signal or {}, ai, stage="submit")
+    if not allowed:
+        logger.warning(
+            f"[BITFINEX LIVE] limit blocked by dashboard gate reason={reason} "
+            f"trade_id={(signal or order or {}).get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
+        return
     try:
         import bitfinex_live_executor as bx
 
@@ -17293,7 +17609,7 @@ def _collect_dashboard_active_signals(
             awaiting_5m_ids.add(tid)
         if tid and s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE and not is_terminal_signal(s):
             awaiting_min_age_ids.add(tid)
-        if tid and s.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS and not is_terminal_signal(s):
+        if tid and s.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES and not is_terminal_signal(s):
             awaiting_chase_3plus_ids.add(tid)
         if (
             tid
@@ -17360,7 +17676,9 @@ def _collect_dashboard_active_signals(
             "awaiting_micro": s.get("status") == SIGNAL_STATUS_AWAITING_MICRO,
             "awaiting_5m": s.get("status") == SIGNAL_STATUS_AWAITING_5M,
             "awaiting_min_age": s.get("status") == SIGNAL_STATUS_AWAITING_MIN_AGE,
-            "awaiting_chase_3plus": s.get("status") == SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+            "awaiting_chase_3plus": s.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES,
+            "awaiting_dashboard_chase": s.get("status") == SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
+            "dashboard_virtual_chase_count": s.get("dashboard_virtual_chase_count") or s.get("chase_3plus_virtual_chase_count"),
             "chase_3plus_virtual_chase_count": s.get("chase_3plus_virtual_chase_count"),
             "chase_3plus_activation_reason": s.get("chase_3plus_activation_reason"),
             "entry_path": s.get("entry_path"),
@@ -17520,6 +17838,7 @@ def api_state():
         snapshot["ai_verdict"] = _ai_execution_verdict_text()
         snapshot["ai_execution_bands"] = get_ai_execution_bands()
         snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
+        snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         snapshot["chase_analytics"] = _load_chase_analytics_snapshot()
         snapshot.setdefault("regime", "UNKNOWN")
         snapshot.setdefault("strategy", "SR")
@@ -19943,7 +20262,7 @@ def load_persistent_config():
             if state.get("ai_execution_bands") is None:
                 state["ai_execution_bands"] = _ai_bands_from_legacy_threshold(state.get("ai_threshold", RESEARCH_AI_THRESHOLD_DEFAULT))
             else:
-                state["ai_execution_bands"] = _normalize_ai_execution_bands(state.get("ai_execution_bands"))
+                state["ai_execution_bands"] = _normalize_ai_execution_bands(state.get("ai_execution_bands"), allow_empty=True)
             if state.get("chase_execution_buckets") is None:
                 state["chase_execution_buckets"] = _default_chase_execution_buckets()
             else:

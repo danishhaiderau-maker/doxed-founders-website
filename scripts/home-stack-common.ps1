@@ -443,16 +443,31 @@ function Start-VisibleConsole {
     [string]$Title = "Doxed Home Stack"
   )
   if (-not (Test-Path $ScriptPath)) { throw "Missing script: $ScriptPath" }
-  $scriptEsc = ($ScriptPath -replace '"', '""')
-  $psLine = "powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -File `"$scriptEsc`""
+  $launcherDir = Join-Path $repoRoot "logs\launchers"
+  if (-not (Test-Path $launcherDir)) {
+    New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+  }
+  $argLine = ""
   foreach ($a in $ExtraArgs) {
     if ($null -eq $a -or "$a" -eq "") { continue }
-    $aEsc = ("$a" -replace '"', '""')
-    if ($aEsc -match '\s') { $psLine += " `"$aEsc`"" } else { $psLine += " $aEsc" }
+    if ("$a" -match '\s') { $argLine += " `"$a`"" } else { $argLine += " $a" }
   }
-  $titleEsc = ($Title -replace '"', '')
-  # cmd /k keeps the window open even if PowerShell exits unexpectedly.
-  Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "title $titleEsc & $psLine") `
+  $launcher = Join-Path $launcherDir ("run-" + [guid]::NewGuid().ToString("n") + ".cmd")
+  $titleSafe = ($Title -replace '"', '')
+  $scriptSafe = $ScriptPath
+  $repoSafe = $repoRoot
+  @(
+    "@echo off",
+    "title `"$titleSafe`"",
+    "cd /d `"$repoSafe`"",
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptSafe`"$argLine",
+    "if errorlevel 1 echo [ERROR] Script exited with code %errorlevel%",
+    "echo.",
+    "echo --- Press any key to close this window ---",
+    "pause >nul"
+  ) | Set-Content -Path $launcher -Encoding ASCII
+  # Pure cmd.exe window — avoids cmd parsing bugs with :7002 in title and keeps window open.
+  Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "`"$launcher`"") `
     -WorkingDirectory $repoRoot -WindowStyle Normal
 }
 
