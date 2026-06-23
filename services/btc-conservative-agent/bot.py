@@ -5031,6 +5031,18 @@ RESEARCH_AI_THRESHOLD_DEFAULT = 50
 LIVE_AI_THRESHOLD_FLOOR = 70  # suggested live default only — dashboard override is not clamped to this
 AI_THRESHOLD_MIN = 0
 AI_THRESHOLD_MAX = 100
+AI_EXECUTION_BANDS = (
+    {"id": "40-45", "label": "40–45", "min": 40, "max": 45},
+    {"id": "45-50", "label": "45–50", "min": 45, "max": 50},
+    {"id": "50-55", "label": "50–55", "min": 50, "max": 55},
+    {"id": "55-60", "label": "55–60", "min": 55, "max": 60},
+    {"id": "60-66", "label": "60–66", "min": 60, "max": 66},
+    {"id": "65+", "label": "65+", "min": 65, "max": None},
+)
+AI_EXECUTION_BAND_IDS = tuple(b["id"] for b in AI_EXECUTION_BANDS)
+AI_EXECUTION_BANDS_DEFAULT = list(AI_EXECUTION_BAND_IDS)
+CHASE_EXECUTION_BUCKETS = ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases")
+CHASE_EXECUTION_BUCKETS_DEFAULT = list(CHASE_EXECUTION_BUCKETS)
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 3.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
@@ -5292,6 +5304,8 @@ state = {
     "leverage": DEFAULT_RESEARCH_LEVERAGE,
     "max_active_signals": MAX_CONCURRENT_POSITIONS_DEFAULT,
     "ai_threshold": 50,
+    "ai_execution_bands_enabled": None,
+    "chase_buckets_enabled": None,
     "consecutive_losses": 0,
     "loss_pause_until": 0.0,
     "edge_threshold": 3.0,
@@ -5774,9 +5788,8 @@ def evaluate_profitability_entry_gates(
             return is_profit_gates_lane(research_lane), reason
         return True, reason
     prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
-    ai_min = round(float(get_ai_threshold()), 1)
-    if prob < ai_min:
-        reason = f"PROFIT_GATE_AI_LT_{ai_min}"
+    if not ai_win_prob_in_enabled_bands(prob):
+        reason = f"PROFIT_GATE_AI_BAND_{_ai_bands_verdict_label().replace(' ', '_')}"
         if is_research_data_collection():
             return is_profit_gates_lane(research_lane), reason
         return True, reason
@@ -5897,6 +5910,55 @@ def get_limit_chase_step_pct() -> float:
     return max(0.05, min(1.0, _limit_chase_config_value(
         "limit_chase_step_pct", "LIMIT_CHASE_STEP_PCT", LIMIT_CHASE_STEP_PCT_DEFAULT, float
     )))
+
+
+def _chase_count_bucket_id(chase_count) -> str:
+    try:
+        n = int(chase_count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return "0_chases"
+    if n == 1:
+        return "1_chase"
+    if n == 2:
+        return "2_chases"
+    if n <= 5:
+        return "3-5_chases"
+    return "6+_chases"
+
+
+def get_chase_buckets_enabled() -> list:
+    with state_lock:
+        raw = state.get("chase_buckets_enabled")
+        if raw is None:
+            return list(CHASE_EXECUTION_BUCKETS_DEFAULT)
+        validated = [b for b in raw if b in CHASE_EXECUTION_BUCKETS]
+        return validated or list(CHASE_EXECUTION_BUCKETS_DEFAULT)
+
+
+def set_chase_buckets_enabled(buckets: list) -> bool:
+    validated = [b for b in (buckets or []) if b in CHASE_EXECUTION_BUCKETS]
+    if not validated:
+        return False
+    with state_lock:
+        state["chase_buckets_enabled"] = validated
+        save_persistent_config()
+        logger.info(f"[SET] Chase buckets enabled={validated} [PIPELINE ENFORCEMENT]")
+    return True
+
+
+def chase_bucket_allowed(chase_count) -> bool:
+    bucket = _chase_count_bucket_id(chase_count)
+    return bucket in set(get_chase_buckets_enabled())
+
+
+def chase_bucket_allowed_for_next_chase(current_count) -> bool:
+    try:
+        n = int(current_count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return chase_bucket_allowed(n + 1)
 
 
 URGENT_CHASE_VELOCITY_MED = float(os.getenv("URGENT_CHASE_VEL_MED", "0.00003"))
@@ -6142,6 +6204,9 @@ def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: floa
         direction, virtual_limit, market_price, original, step_pct=get_limit_chase_step_pct(),
     )
     if reason != "LIMIT_CHASE" or abs(new_limit - virtual_limit) < 0.01:
+        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    next_count = int(signal.get("chase_3plus_virtual_chase_count") or 0) + 1
+    if not chase_bucket_allowed(next_count):
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     signal["chase_3plus_virtual_limit"] = new_limit
     signal["limit_price"] = new_limit
@@ -9939,29 +10004,121 @@ def is_research_data_collection() -> bool:
 def _clamp_ai_threshold(value: float) -> float:
     return max(AI_THRESHOLD_MIN, min(AI_THRESHOLD_MAX, float(value)))
 
-def get_ai_threshold():
-    with state_lock:
-        t = state.get("ai_threshold")
-        research = state.get("strategy_mode") == "RESEARCH"
-        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
-        raw = default if t is None else float(t)
-        if research or state.get("_threshold_locked"):
-            return _clamp_ai_threshold(raw)
-        return _clamp_ai_threshold(max(raw, LIVE_AI_THRESHOLD_FLOOR))
 
-def set_ai_threshold(value):
+def _ai_band_overlaps_threshold(band: dict, threshold: float) -> bool:
+    thr = float(threshold or 0)
+    if band["max"] is None:
+        return band["min"] <= AI_THRESHOLD_MAX
+    return float(band["max"]) > thr and float(band["min"]) < AI_THRESHOLD_MAX
+
+
+def _bands_from_legacy_threshold(threshold: float) -> list:
+    thr = _clamp_ai_threshold(threshold)
+    picked = [b["id"] for b in AI_EXECUTION_BANDS if _ai_band_overlaps_threshold(b, thr)]
+    return picked or list(AI_EXECUTION_BANDS_DEFAULT)
+
+
+def _min_enabled_band_floor(enabled_ids) -> float:
+    mins = [float(b["min"]) for b in AI_EXECUTION_BANDS if b["id"] in enabled_ids]
+    if not mins:
+        return float(RESEARCH_AI_THRESHOLD_DEFAULT)
+    return min(mins)
+
+
+def _ai_bands_verdict_label(enabled_ids=None) -> str:
+    enabled = enabled_ids if enabled_ids is not None else get_ai_execution_bands_enabled()
+    if not enabled:
+        return "none (all blocked)"
+    if len(enabled) == len(AI_EXECUTION_BAND_IDS):
+        return "all bands"
+    return ", ".join(enabled)
+
+
+def ai_win_prob_in_enabled_bands(prob) -> bool:
+    try:
+        p = float(prob or 0)
+    except (TypeError, ValueError):
+        return False
+    enabled = set(get_ai_execution_bands_enabled())
+    if not enabled:
+        return False
+    for band in AI_EXECUTION_BANDS:
+        if band["id"] not in enabled:
+            continue
+        if p >= float(band["min"]):
+            if band["max"] is None or p < float(band["max"]):
+                return True
+    return False
+
+
+def _resolve_ai_execution_bands_enabled_from_state() -> list:
+    raw = state.get("ai_execution_bands_enabled")
+    if raw is None:
+        legacy = state.get("ai_threshold")
+        if legacy is not None:
+            return _bands_from_legacy_threshold(float(legacy))
+        return list(AI_EXECUTION_BANDS_DEFAULT)
+    validated = [b for b in raw if b in AI_EXECUTION_BAND_IDS]
+    return validated or list(AI_EXECUTION_BANDS_DEFAULT)
+
+
+def get_ai_execution_bands_enabled() -> list:
     with state_lock:
-        research = state.get("strategy_mode") == "RESEARCH"
-        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
-        raw = float(value) if value is not None else default
-        state["ai_threshold"] = _clamp_ai_threshold(raw)
+        return _resolve_ai_execution_bands_enabled_from_state()
+
+
+def set_ai_execution_bands(bands: list) -> bool:
+    validated = [b for b in (bands or []) if b in AI_EXECUTION_BAND_IDS]
+    if not validated:
+        return False
+    with state_lock:
+        state["ai_execution_bands_enabled"] = validated
+        state["ai_threshold"] = _min_enabled_band_floor(validated)
         state["_threshold_locked"] = True
         state["last_ai_ts"] = 0
         state["last_ai_signal_key"] = None
         state["last_ai_confidence"] = 0
-        state["ai_verdict"] = f"AI reviewer {'ON' if state['ai_enabled'] else 'OFF'} | Threshold {state['ai_threshold']}"
+        state["ai_verdict"] = (
+            f"AI reviewer {'ON' if state['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(validated)}"
+        )
         save_persistent_config()
-        logger.info(f"[SET] AI threshold locked to {state['ai_threshold']} [PIPELINE ENFORCEMENT]")
+        logger.info(
+            f"[SET] AI execution bands={validated} floor={state['ai_threshold']} [PIPELINE ENFORCEMENT]"
+        )
+    return True
+
+
+def get_ai_threshold():
+    """Legacy floor display — minimum lower bound of enabled AI win % bands."""
+    with state_lock:
+        floor = _min_enabled_band_floor(_resolve_ai_execution_bands_enabled_from_state())
+        research = state.get("strategy_mode") == "RESEARCH"
+        if research or state.get("_threshold_locked"):
+            return _clamp_ai_threshold(floor)
+        return _clamp_ai_threshold(max(floor, LIVE_AI_THRESHOLD_FLOOR))
+
+
+def set_ai_threshold(value):
+    """Legacy single-threshold API — maps to all bands overlapping the floor."""
+    with state_lock:
+        research = state.get("strategy_mode") == "RESEARCH"
+        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
+        raw = float(value) if value is not None else default
+        thr = _clamp_ai_threshold(raw)
+        bands = _bands_from_legacy_threshold(thr)
+        state["ai_execution_bands_enabled"] = bands
+        state["ai_threshold"] = _min_enabled_band_floor(bands)
+        state["_threshold_locked"] = True
+        state["last_ai_ts"] = 0
+        state["last_ai_signal_key"] = None
+        state["last_ai_confidence"] = 0
+        state["ai_verdict"] = (
+            f"AI reviewer {'ON' if state['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(bands)}"
+        )
+        save_persistent_config()
+        logger.info(
+            f"[SET] AI threshold {thr} -> bands={bands} [PIPELINE ENFORCEMENT]"
+        )
 
 def set_edge_threshold(value):
     value = round(float(value), 1)
@@ -11247,6 +11404,8 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
     closed_pct = 1.0 - (cur_gap / orig_gap)
     if closed_pct >= LIMIT_CHASE_MAX_GAP_CLOSE_PCT:
         return False
+    if not chase_bucket_allowed_for_next_chase(order.get("limit_chase_count")):
+        return False
     return True
 
 
@@ -12521,7 +12680,7 @@ def process_signal(event: dict):
                 f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
             )
 
-            if ai.get("win_prob", 0) < get_ai_threshold():
+            if not ai_win_prob_in_enabled_bands(ai.get("win_prob", 0)):
                 if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "BELOW_THRESHOLD", edge_score)
                 else:
@@ -12610,6 +12769,18 @@ def process_signal(event: dict):
                         state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
                         state["debug_state"]["skip_reason"] = exec_reason
                     update_debug_state_always("EXECUTION_BLOCK", {"edge": edge_score})
+                    state["last_pipeline_stage"] = "IDLE"
+                    return
+            if not chase_bucket_allowed(0):
+                if not _post_ai_gate_blocks(sole, research_lane):
+                    _research_log_would_block(signal, ai, "CHASE_BUCKET_BLOCKED", edge_score)
+                else:
+                    exit_pipeline(signal, ai, "CHASE_BUCKET_BLOCKED")
+                    with state_lock:
+                        state["debug_state"]["last_block_reason"] = "CHASE_BUCKET_BLOCKED"
+                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
+                        state["debug_state"]["skip_reason"] = "CHASE_BUCKET_BLOCKED"
+                    update_debug_state_always("CHASE_BUCKET_BLOCKED", {"edge": edge_score})
                     state["last_pipeline_stage"] = "IDLE"
                     return
             full_pipeline_trace("[PIPELINE]", "EXECUTION_ALLOWED", trade_id)
@@ -15170,7 +15341,31 @@ HTML = """<!DOCTYPE html>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="3">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
-<label>Min AI win % to execute (not the AI’s score):</label><input id="aiThreshold" type="number" min="0" max="100" value="68" onchange="updateThreshold(this.value)"><br>
+<div id="aiWinBandsPanel" style="margin:10px 0;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
+  <strong style="color:#e6edf3;">AI win % bands allowed to place limits</strong>
+  <p style="color:#8b949e;font-size:0.82em;margin:6px 0 8px 0;">Hard execution gate — only APPROVE signals whose AI win % (not edge score) falls in a checked band may submit limit orders.</p>
+  <div id="aiWinBandsChecks" style="display:flex;flex-wrap:wrap;gap:8px 18px;">
+    <label class="exec-band-check"><input type="checkbox" data-band="40-45" onchange="updateAiBands()"> 40–45</label>
+    <label class="exec-band-check"><input type="checkbox" data-band="45-50" onchange="updateAiBands()"> 45–50</label>
+    <label class="exec-band-check"><input type="checkbox" data-band="50-55" onchange="updateAiBands()"> 50–55</label>
+    <label class="exec-band-check"><input type="checkbox" data-band="55-60" onchange="updateAiBands()"> 55–60</label>
+    <label class="exec-band-check"><input type="checkbox" data-band="60-66" onchange="updateAiBands()"> 60–66</label>
+    <label class="exec-band-check"><input type="checkbox" data-band="65+" onchange="updateAiBands()"> 65+</label>
+  </div>
+  <p id="aiBandsSummary" style="color:#58a6ff;font-size:0.82em;margin:8px 0 0 0;">Active: —</p>
+</div>
+<div id="chaseBucketsPanel" style="margin:10px 0;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
+  <strong style="color:#e6edf3;">Chase depth buckets allowed</strong>
+  <p style="color:#8b949e;font-size:0.82em;margin:6px 0 8px 0;">Multi-select — controls limit placement (0 chases) and whether each chase step may run. Uncheck buckets you want to skip based on Chase Analytics EV.</p>
+  <div id="chaseBucketsChecks" style="display:flex;flex-wrap:wrap;gap:8px 18px;">
+    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="0_chases" onchange="updateChaseBuckets()"> 0 chases</label>
+    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="1_chase" onchange="updateChaseBuckets()"> 1 chase</label>
+    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="2_chases" onchange="updateChaseBuckets()"> 2 chases</label>
+    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="3-5_chases" onchange="updateChaseBuckets()"> 3–5 chases</label>
+    <label class="exec-band-check"><input type="checkbox" data-chase-bucket="6+_chases" onchange="updateChaseBuckets()"> 6+ chases</label>
+  </div>
+  <p id="chaseBucketsSummary" style="color:#58a6ff;font-size:0.82em;margin:8px 0 0 0;">Active: —</p>
+</div>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
   <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
 </p>
@@ -15245,7 +15440,9 @@ HTML = """<!DOCTYPE html>
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
-<p><strong>AI Threshold:</strong> <span id="aiThresholdDisplay">-</span>%</p>
+<p><strong>AI Threshold:</strong> <span id="aiThresholdDisplay">-</span></p>
+<p><strong>AI execution bands:</strong> <span id="aiBandsDisplay">-</span></p>
+<p><strong>Chase buckets allowed:</strong> <span id="chaseBucketsDisplay">-</span></p>
 <p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">DEPRECATED — analytics only</span></p>
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
@@ -15443,6 +15640,63 @@ DASHBOARD_JS = """(function () {
     }
     async function updateThreshold(value) {
       await post('/api/set_threshold', {value: parseFloat(value)});
+      refresh();
+    }
+    function collectCheckedBands() {
+      return Array.from(document.querySelectorAll('#aiWinBandsChecks input[data-band]:checked'))
+        .map(el => el.getAttribute('data-band'));
+    }
+    function collectCheckedChaseBuckets() {
+      return Array.from(document.querySelectorAll('#chaseBucketsChecks input[data-chase-bucket]:checked'))
+        .map(el => el.getAttribute('data-chase-bucket'));
+    }
+    function syncAiBandChecks(enabledBands) {
+      const set = new Set(enabledBands || []);
+      document.querySelectorAll('#aiWinBandsChecks input[data-band]').forEach(el => {
+        el.checked = set.has(el.getAttribute('data-band'));
+      });
+      const summary = document.getElementById('aiBandsSummary');
+      if (summary) {
+        summary.textContent = set.size
+          ? ('Active: ' + Array.from(set).join(', '))
+          : 'Active: none — all limit orders blocked';
+      }
+    }
+    function syncChaseBucketChecks(enabledBuckets) {
+      const set = new Set(enabledBuckets || []);
+      document.querySelectorAll('#chaseBucketsChecks input[data-chase-bucket]').forEach(el => {
+        el.checked = set.has(el.getAttribute('data-chase-bucket'));
+      });
+      const summary = document.getElementById('chaseBucketsSummary');
+      if (summary) {
+        summary.textContent = set.size
+          ? ('Active: ' + Array.from(set).join(', '))
+          : 'Active: none — no limit orders or chases';
+      }
+    }
+    async function updateAiBands() {
+      const bands = collectCheckedBands();
+      if (!bands.length) {
+        alert('Select at least one AI win % band — otherwise no limits will execute.');
+        syncAiBandChecks(window.__lastAiBands || []);
+        return;
+      }
+      await post('/api/set_ai_bands', {bands});
+      refresh();
+    }
+    async function updateChaseBuckets() {
+      const buckets = collectCheckedChaseBuckets();
+      if (!buckets.length) {
+        alert('Select at least one chase bucket — 0 chases is required for any new limit order.');
+        syncChaseBucketChecks(window.__lastChaseBuckets || []);
+        return;
+      }
+      if (!buckets.includes('0_chases')) {
+        alert('0 chases must stay enabled to place new limit orders.');
+        syncChaseBucketChecks(window.__lastChaseBuckets || []);
+        return;
+      }
+      await post('/api/set_chase_buckets', {buckets});
       refresh();
     }
     function normalizeEdgeOptionValue(value) {
@@ -16077,7 +16331,9 @@ DASHBOARD_JS = """(function () {
         safeText('aiDirRaw', d.last_ai?.direction || '-');
         safeText('finalDir', d.last_ai?.final_direction || '-');
         safeText('inverted', d.last_ai?.inverted ? 'YES' : 'NO');
-        safeText('aiThresholdDisplay', d.ai_threshold != null ? d.ai_threshold : 'WAITING');
+        safeText('aiThresholdDisplay', d.ai_threshold != null ? (d.ai_threshold + '% floor') : 'WAITING');
+        safeText('aiBandsDisplay', (d.ai_execution_bands_enabled || []).join(', ') || 'none');
+        safeText('chaseBucketsDisplay', (d.chase_buckets_enabled || []).join(', ') || 'none');
         const edgeBase = d.edge_threshold != null ? normalizeEdgeOptionValue(d.edge_threshold) : '2.0';
         const edgeMax = d.edge_threshold_max;
         const edgeEff = d.debug_state?.edge_components?.effective_threshold;
@@ -16107,8 +16363,18 @@ DASHBOARD_JS = """(function () {
         const gate = document.getElementById('executionGateHint');
         if (gate) {
           const prob = d.last_ai?.win_prob;
-          const thr = d.ai_threshold;
+          const bands = d.ai_execution_bands_enabled || [];
           const dec = aiCalled ? (dai.status || d.last_ai?.decision) : null;
+          const bandOk = prob != null && bands.some(b => {
+            const p = Number(prob);
+            if (b === '40-45') return p >= 40 && p < 45;
+            if (b === '45-50') return p >= 45 && p < 50;
+            if (b === '50-55') return p >= 50 && p < 55;
+            if (b === '55-60') return p >= 55 && p < 60;
+            if (b === '60-66') return p >= 60 && p < 66;
+            if (b === '65+') return p >= 65;
+            return false;
+          });
           const modeLine = '<span style="color:#10b981">Independent lanes</span> — CONTINUOUS benchmark ~'
             + (d.ai_cooldown_sec || 180) + 's AI · 7 spawn/shadow lanes on CONTINUOUS APPROVE';
           if (dec === 'APPROVE') {
@@ -16116,16 +16382,15 @@ DASHBOARD_JS = """(function () {
               gate.innerHTML = `<span class="green">Last APPROVE ${prob}% → EXECUTED</span>`;
             } else if (lao.status === 'BLOCKED') {
               gate.innerHTML = `<span class="red">Last APPROVE ${prob}% → BLOCKED: ${lao.reason || '?'} (eff=${lao.effective_threshold ?? '-'}, edge=${lao.edge_at_approve ?? '-'})</span>`;
-            } else if (prob != null && thr != null) {
-              const ok = prob >= thr;
-              gate.innerHTML = ok
-                ? `<span class="green">Last APPROVE: AI ${prob}% ≥ min ${thr}% → passing execution gates…</span>`
-                : `<span class="red">Last APPROVE: AI ${prob}% &lt; min ${thr}% → blocked (BELOW_THRESHOLD)</span>`;
+            } else if (prob != null && bands.length) {
+              gate.innerHTML = bandOk
+                ? `<span class="green">Last APPROVE: AI ${prob}% in enabled band → passing execution gates…</span>`
+                : `<span class="red">Last APPROVE: AI ${prob}% outside enabled bands → blocked (BELOW_THRESHOLD)</span>`;
             }
           } else if (!aiCalled) {
             gate.innerHTML = modeLine + '<br><span style="color:#8b949e">DeepSeek not called this cycle — ' + (dai.note || skipBlk.skip || 'waiting for edge ≥ threshold') + '</span>';
           } else {
-            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">Min win % to execute: ' + (thr != null ? thr : '-') + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
+            gate.innerHTML = modeLine + '<br><span style="color:#8b949e">AI bands: ' + (bands.length ? bands.join(', ') : 'none') + ' | Last AI: ' + (dec || '-') + ' ' + (prob != null ? prob + '%' : '') + '</span>';
           }
         }
         safeText('aiReason', d.last_ai?.reason || d.ai_reason || '-');
@@ -16268,9 +16533,13 @@ DASHBOARD_JS = """(function () {
             mcp.value = d.max_active_signals;
           }
         }
-        if (d.ai_threshold != null && d.ai_threshold !== '') {
-          const aiThresh = document.getElementById('aiThreshold');
-          if (aiThresh) aiThresh.value = d.ai_threshold;
+        if (Array.isArray(d.ai_execution_bands_enabled)) {
+          window.__lastAiBands = d.ai_execution_bands_enabled;
+          syncAiBandChecks(d.ai_execution_bands_enabled);
+        }
+        if (Array.isArray(d.chase_buckets_enabled)) {
+          window.__lastChaseBuckets = d.chase_buckets_enabled;
+          syncChaseBucketChecks(d.chase_buckets_enabled);
         }
         if (d.edge_range_preset) {
           syncEdgeRangePreset(d.edge_range_preset);
@@ -16592,6 +16861,8 @@ DASHBOARD_JS = """(function () {
     window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
+    window.updateAiBands = updateAiBands;
+    window.updateChaseBuckets = updateChaseBuckets;
     window.updateEdge = updateEdge;
   } catch (e) {
     console.error("DASHBOARD BOOT FAILURE", e);
@@ -16889,7 +17160,7 @@ def api_state():
         snapshot["trades"] = trades_copy
         snapshot["expired_orders"] = expired_orders_copy
         snapshot["ai_history"] = ai_history_copy
-        snapshot["ai_verdict"] = f"AI reviewer {'ON' if snapshot['ai_enabled'] else 'OFF'} | Threshold {snapshot.get('ai_threshold','WAITING')}%"
+        snapshot["ai_verdict"] = f"AI reviewer {'ON' if snapshot['ai_enabled'] else 'OFF'} | Bands {_ai_bands_verdict_label(snapshot.get('ai_execution_bands_enabled'))}"
         snapshot.setdefault("regime", "UNKNOWN")
         snapshot.setdefault("strategy", "SR")
         snapshot.setdefault("direction", "FLAT")
@@ -16935,6 +17206,11 @@ def api_state():
         snapshot["edge_range_preset"] = state.get("edge_range_preset", DEFAULT_EDGE_RANGE_PRESET)
         snapshot["edge_threshold_display"] = _edge_range_label()
         snapshot["effective_threshold"] = get_effective_edge_threshold()
+        snapshot["ai_execution_bands_enabled"] = get_ai_execution_bands_enabled()
+        snapshot["ai_execution_band_options"] = list(AI_EXECUTION_BAND_IDS)
+        snapshot["ai_bands_display"] = _ai_bands_verdict_label()
+        snapshot["chase_buckets_enabled"] = get_chase_buckets_enabled()
+        snapshot["chase_bucket_options"] = list(CHASE_EXECUTION_BUCKETS)
         snapshot["research_data_collection"] = is_research_data_collection()
         snapshot["edge_options"] = EDGE_OPTIONS
         snapshot["edge_range_presets"] = EDGE_RANGE_PRESETS
@@ -17255,7 +17531,41 @@ def set_threshold():
     if val < AI_THRESHOLD_MIN or val > AI_THRESHOLD_MAX:
         return jsonify({"status": "error", "msg": f"threshold must be {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}"}), 400
     set_ai_threshold(val)
-    return jsonify({"status": "ok", "ai_threshold": get_ai_threshold()})
+    return jsonify({
+        "status": "ok",
+        "ai_threshold": get_ai_threshold(),
+        "ai_execution_bands_enabled": get_ai_execution_bands_enabled(),
+    })
+
+@app.route('/api/set_ai_bands', methods=['POST'])
+def api_set_ai_bands():
+    data = request.get_json() or {}
+    bands = data.get("bands")
+    if not isinstance(bands, list) or not bands:
+        return jsonify({"status": "error", "msg": "bands must be a non-empty list"}), 400
+    if not set_ai_execution_bands(bands):
+        return jsonify({"status": "error", "msg": "invalid bands"}), 400
+    return jsonify({
+        "status": "ok",
+        "ai_execution_bands_enabled": get_ai_execution_bands_enabled(),
+        "ai_threshold": get_ai_threshold(),
+        "ai_bands_display": _ai_bands_verdict_label(),
+    })
+
+@app.route('/api/set_chase_buckets', methods=['POST'])
+def api_set_chase_buckets():
+    data = request.get_json() or {}
+    buckets = data.get("buckets")
+    if not isinstance(buckets, list) or not buckets:
+        return jsonify({"status": "error", "msg": "buckets must be a non-empty list"}), 400
+    if "0_chases" not in buckets:
+        return jsonify({"status": "error", "msg": "0_chases must remain enabled to place limits"}), 400
+    if not set_chase_buckets_enabled(buckets):
+        return jsonify({"status": "error", "msg": "invalid buckets"}), 400
+    return jsonify({
+        "status": "ok",
+        "chase_buckets_enabled": get_chase_buckets_enabled(),
+    })
 
 @app.route('/api/set_edge_threshold', methods=['POST'])
 def api_set_edge_threshold():
@@ -19152,7 +19462,8 @@ def _persistent_config_keys():
         "pullback_threshold", "leverage", "max_active_signals", "ai_enabled", "early_fail_enabled",
         "invert_signal", "debug_enabled", "live_armed",
         "min_confidence",
-        "force_ai_every_signal", "ai_threshold", "edge_threshold", "edge_threshold_max",
+        "force_ai_every_signal", "ai_threshold", "ai_execution_bands_enabled", "chase_buckets_enabled",
+        "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode",
         "profit_gates_lane_enabled",
         "profit_gates_enforced",
@@ -19263,7 +19574,16 @@ def load_persistent_config():
                 state["ai_threshold"] = RESEARCH_AI_THRESHOLD_DEFAULT
             elif not state.get("_threshold_locked"):
                 state["ai_threshold"] = LIVE_AI_THRESHOLD_FLOOR
-        logger.info("Loaded persistent config from config.json - ai_threshold restored")
+            if state.get("ai_execution_bands_enabled") is None and state.get("ai_threshold") is not None:
+                state["ai_execution_bands_enabled"] = _bands_from_legacy_threshold(state["ai_threshold"])
+            elif state.get("ai_execution_bands_enabled") is None:
+                state["ai_execution_bands_enabled"] = list(AI_EXECUTION_BANDS_DEFAULT)
+            if state.get("chase_buckets_enabled") is None:
+                state["chase_buckets_enabled"] = list(CHASE_EXECUTION_BUCKETS_DEFAULT)
+        logger.info(
+            "Loaded persistent config from config.json - ai bands="
+            f"{get_ai_execution_bands_enabled()} chase={get_chase_buckets_enabled()}"
+        )
 
 def save_persistent_config():
     config = {k: state[k] for k in _persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]}
@@ -19429,13 +19749,17 @@ def startup_hard_fix_ai_threshold():
         research = state.get("strategy_mode") == "RESEARCH"
         if "ai_threshold" in state:
             state["ai_threshold"] = _clamp_ai_threshold(state["ai_threshold"])
-            return
-        default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
-        state["ai_threshold"] = default
+        else:
+            default = RESEARCH_AI_THRESHOLD_DEFAULT if research else LIVE_AI_THRESHOLD_FLOOR
+            state["ai_threshold"] = default
+        if state.get("ai_execution_bands_enabled") is None:
+            state["ai_execution_bands_enabled"] = _bands_from_legacy_threshold(state["ai_threshold"])
+        if state.get("chase_buckets_enabled") is None:
+            state["chase_buckets_enabled"] = list(CHASE_EXECUTION_BUCKETS_DEFAULT)
         save_persistent_config()
         logger.info(
-            f"[INIT] AI threshold default {default} "
-            f"({'research flexible 0-100' if research else 'live suggested floor'}) "
+            f"[INIT] AI bands={state.get('ai_execution_bands_enabled')} "
+            f"floor={state.get('ai_threshold')} chase={state.get('chase_buckets_enabled')} "
             f"[PIPELINE ENFORCEMENT]"
         )
 

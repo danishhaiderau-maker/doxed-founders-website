@@ -1,7 +1,7 @@
 # Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-local", "wipe-research", "pause-trading", "resume-trading")]
+  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "wipe-research", "pause-trading", "resume-trading")]
   [string]$Action,
   [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9500,
@@ -76,6 +76,13 @@ switch ($Action) {
   }
   "stop-all-local" {
     Stop-LocalLabFast | Out-Null
+  }
+  "start-all-global" {
+    Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
+    Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @(
+      "-BotPort", "$BotPort",
+      "-AnalyzerPort", "$AnalyzerPort"
+    ) -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
   }
   "start-all-local" {
     $labScript = Join-Path $scriptDir "home-stack-local-lab.ps1"
