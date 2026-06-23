@@ -22,7 +22,7 @@ try {
   $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
   if ($parent -gt 0) { $exclude += $parent }
 } catch { }
-$stale = Close-ShowcaseStackConsoles -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort -KeepBridge -ExcludeProcessIds $exclude
+$stale = Close-StaleOrchestratorConsoles -ExcludeProcessIds $exclude
 if ($stale.Count -gt 0) {
   Write-Host "Closed $($stale.Count) stale console(s) from prior session." -ForegroundColor DarkYellow
 }

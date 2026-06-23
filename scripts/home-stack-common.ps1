@@ -115,6 +115,48 @@ function Stop-HomeStackSupervisor {
   return $killed
 }
 
+function Stop-ProcessTree {
+  param([int]$ProcessId)
+  if ($ProcessId -le 0) { return }
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ParentProcessId -eq $ProcessId } |
+    ForEach-Object { Stop-ProcessTree $_.ProcessId }
+  Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Close-WindowsByTitlePrefix {
+  param(
+    [string[]]$Prefixes,
+    [int[]]$ExcludeProcessIds = @()
+  )
+  $closed = @()
+  $exclude = @{}
+  foreach ($id in $ExcludeProcessIds) {
+    if ($id -gt 0) { $exclude[$id] = $true }
+  }
+  Get-Process cmd, powershell, pwsh -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($exclude.ContainsKey($_.Id)) { return }
+    $t = $_.MainWindowTitle
+    if (-not $t) { return }
+    foreach ($prefix in $Prefixes) {
+      if ($t -like "$prefix*") {
+        Stop-ProcessTree $_.Id
+        $closed += "title:$t"
+        return
+      }
+    }
+  }
+  return $closed
+}
+
+function Close-StaleOrchestratorConsoles {
+  param([int[]]$ExcludeProcessIds = @())
+  return @(Close-WindowsByTitlePrefix @(
+    "Doxed Start Everything",
+    "Doxed Stop Everything"
+  ) -ExcludeProcessIds $ExcludeProcessIds)
+}
+
 function Close-ShowcaseStackConsoles {
   param(
     [int]$GlobalBotPort = 7002,
@@ -148,7 +190,7 @@ function Close-ShowcaseStackConsoles {
     if (-not $t) { return }
     foreach ($prefix in $titlePrefixes) {
       if ($t -like "$prefix*") {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        Stop-ProcessTree $_.Id
         $closed += "title:$t"
         return
       }
@@ -175,7 +217,7 @@ function Close-ShowcaseStackConsoles {
       }
       return $false
     } | ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Stop-ProcessTree $_.ProcessId
       $closed += "pid:$($_.ProcessId)"
     }
 

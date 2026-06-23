@@ -101,7 +101,7 @@ function Restart-TunnelComponent {
 
 function Restart-BridgeComponent {
   Log "RECOVER bridge - restart launcher on :$BridgePort"
-  & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Home Bridge :$BridgePort" 2>$null | Out-Null
+  Close-WindowsByTitlePrefix @("Doxed Home Bridge :$BridgePort", "TEST Bridge") | Out-Null
   Stop-ListenPortFast $BridgePort | Out-Null
   Start-Sleep -Seconds 2
   Start-VisibleConsole (Join-Path $scriptDir "home-stack-launcher.ps1") @() -Title "Doxed Home Bridge :$BridgePort"
