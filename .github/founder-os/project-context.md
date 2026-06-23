@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Promote local v10.3 bot/analyzer to global stack; fix CMD console flash.
+Speed up Agent Hub and wire relay sim to global :7002 showcase bot.
 
 ## Last Activity
 
