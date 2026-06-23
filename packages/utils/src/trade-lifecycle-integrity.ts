@@ -39,10 +39,19 @@ type ParticipantLike = {
 
 export function assessParticipantLifecycle(p: ParticipantLike): string[] {
   const types = new Set(p.events.map((e) => e.eventType));
+
+  // Showcase abandoned / TTL before fill — relay cancels its limit; valid terminal path.
+  if (p.status === 'EXPIRED' || types.has('EXPIRED')) {
+    return ['ORDER_PLACED'].filter((stage) => !types.has(stage));
+  }
+
+  // Resting limit on book — in flight until fill or expire; not a lifecycle gap yet.
+  if (p.status === 'PENDING_ENTRY') {
+    return ['ORDER_PLACED'].filter((stage) => !types.has(stage));
+  }
+
   const required =
-    p.status === 'OPEN' || p.status === 'PENDING_ENTRY'
-      ? LIFECYCLE_OPEN_REQUIRED
-      : LIFECYCLE_CLOSED_REQUIRED;
+    p.status === 'OPEN' ? LIFECYCLE_OPEN_REQUIRED : LIFECYCLE_CLOSED_REQUIRED;
   return required.filter((stage) => !types.has(stage));
 }
 

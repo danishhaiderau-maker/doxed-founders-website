@@ -59,12 +59,15 @@ export function buildRelaySyncAlerts(input: {
   const lifecycle = input.tradeLifecycleIntegrity;
   if (lifecycle && lifecycle.sampleSize > 0 && lifecycle.integrityPct < 100) {
     const gap = lifecycle.recentGaps[0];
+    const expiredGap = gap?.status === 'EXPIRED';
     alerts.push({
       level: 'warn',
       title: `Lifecycle gaps (${lifecycle.integrityPct}% complete)`,
-      detail: gap
-        ? `${lifecycle.completeCount}/${lifecycle.sampleSize} trades have full ORDER→FILLED→EXIT. Example: ${gap.tradeId} missing ${gap.missingStages.join(', ')}.`
-        : `${lifecycle.completeCount}/${lifecycle.sampleSize} relay trades missing lifecycle stages.`,
+      detail: expiredGap
+        ? `${lifecycle.completeCount}/${lifecycle.sampleSize} trades have full round-trip lifecycle. Some expired before fill (ORDER→EXPIRED) — normal when showcase chase buckets defer or TTL expires.`
+        : gap
+          ? `${lifecycle.completeCount}/${lifecycle.sampleSize} trades have full ORDER→FILLED→EXIT. Example: ${gap.tradeId} missing ${gap.missingStages.join(', ')}.`
+          : `${lifecycle.completeCount}/${lifecycle.sampleSize} relay trades missing lifecycle stages.`,
     });
   }
 
