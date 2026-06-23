@@ -68,22 +68,22 @@ $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
 $env:BTC_AGENT_DATA_DIR = $agentDir
 
+. (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort
+. (Join-Path $scriptDir "home-stack-health.ps1")
+
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
-  try {
-    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -UseBasicParsing -TimeoutSec 3
-    if ($r.StatusCode -eq 200) {
-      Write-Host "Analyzer dashboard healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
-      if ($lockHandle) { $lockHandle.Dispose() }
-      Wait-ForKey
-      exit 0
-    }
-  } catch {
-    Write-Host "Port $AnalyzerPort open but /api/status failed - clearing stale listener..." -ForegroundColor Yellow
-    . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort
-    Stop-ListenPortFast $AnalyzerPort | Out-Null
-    Start-Sleep -Seconds 2
+  if (Test-AnalyzerHealthy) {
+    Write-Host "Analyzer healthy on :$AnalyzerPort (manifest + sync OK) - not starting a duplicate." -ForegroundColor Yellow
+    if ($lockHandle) { $lockHandle.Dispose() }
+    Wait-ForKey
+    exit 0
   }
+  Write-Host "Port $AnalyzerPort has stale dashboard-only listener - clearing and starting full analyzer..." -ForegroundColor Yellow
+  Stop-PythonMatching "research_dashboard" | Out-Null
+  Stop-PythonMatching "analyzer_research_engine" | Out-Null
+  Stop-ListenPortFast $AnalyzerPort | Out-Null
+  Start-Sleep -Seconds 2
 }
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
