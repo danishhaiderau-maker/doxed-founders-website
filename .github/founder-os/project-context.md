@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Speed up Agent Hub and wire relay sim to global :7002 showcase bot.
+Enforce dynamic chase buckets and align Bitfinex relay with showcase defer.
 
 ## Last Activity
 
