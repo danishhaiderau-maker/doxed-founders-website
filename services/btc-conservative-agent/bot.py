@@ -16071,10 +16071,53 @@ DASHBOARD_JS = """(function () {
       }
     }
     function persistExecutionGatePrefs(chase, bands) {
-      const patch = {};
+      const patch = { execution_gates_saved_at: Date.now() };
       if (chase && typeof chase === 'object') patch.chase_execution_buckets = chase;
       if (bands && typeof bands === 'object') patch.ai_execution_bands = bands;
-      if (Object.keys(patch).length) saveDashPrefs(patch);
+      if (Object.keys(patch).length > 1) saveDashPrefs(patch);
+    }
+    function executionGatePrefsEqual(a, b) {
+      if (!a || !b) return false;
+      try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; }
+    }
+    async function reconcileRecentExecutionGatesFromBrowser() {
+      const prefs = loadDashPrefs();
+      const savedAt = prefs.execution_gates_saved_at;
+      if (!savedAt || (Date.now() - savedAt) > 30000) return;
+      markExecutionControlsBusy(12000);
+      executionControlSaveCount += 1;
+      try {
+        if (prefs.ai_execution_bands) {
+          await post('/api/set_ai_bands', {bands: prefs.ai_execution_bands});
+        }
+        if (prefs.chase_execution_buckets) {
+          await post('/api/set_chase_buckets', {buckets: prefs.chase_execution_buckets});
+        }
+      } finally {
+        executionControlSaveCount -= 1;
+      }
+    }
+    function flushExecutionGatesOnUnload() {
+      const prefs = loadDashPrefs();
+      const headers = {'Content-Type': 'application/json'};
+      try {
+        if (prefs.ai_execution_bands) {
+          const body = JSON.stringify({bands: prefs.ai_execution_bands});
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/set_ai_bands', new Blob([body], {type: 'application/json'}));
+          } else {
+            fetch('/api/set_ai_bands', {method: 'POST', headers, body, keepalive: true});
+          }
+        }
+        if (prefs.chase_execution_buckets) {
+          const body = JSON.stringify({buckets: prefs.chase_execution_buckets});
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/set_chase_buckets', new Blob([body], {type: 'application/json'}));
+          } else {
+            fetch('/api/set_chase_buckets', {method: 'POST', headers, body, keepalive: true});
+          }
+        }
+      } catch (e) {}
     }
     let laneToggleInFlight = false;
     let freshCollectionInFlight = false;
@@ -16107,11 +16150,12 @@ DASHBOARD_JS = """(function () {
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     let executionControlsBusyUntil = 0;
-    function markExecutionControlsBusy(ms=2500) {
+    let executionControlSaveCount = 0;
+    function markExecutionControlsBusy(ms=10000) {
       executionControlsBusyUntil = Date.now() + ms;
     }
     function executionControlsBusy() {
-      return Date.now() < executionControlsBusyUntil;
+      return Date.now() < executionControlsBusyUntil || executionControlSaveCount > 0;
     }
     function renderUltimateGatePanel(gates) {
       const el = document.getElementById('ultimateGatePanel');
@@ -16178,15 +16222,23 @@ DASHBOARD_JS = """(function () {
       });
     }
     async function updateAiBands() {
+      const bands = readAiBandSelections();
+      persistExecutionGatePrefs(null, bands);
+      renderAiBandGateStatus(bands);
       markExecutionControlsBusy();
-      const res = await post('/api/set_ai_bands', {bands: readAiBandSelections()});
-      if (res && res.ok) {
-        const body = await res.json();
-        if (body.ai_execution_bands) {
-          syncAiBandControls(body.ai_execution_bands);
-          renderAiBandGateStatus(body.ai_execution_bands);
-          persistExecutionGatePrefs(null, body.ai_execution_bands);
+      executionControlSaveCount += 1;
+      try {
+        const res = await post('/api/set_ai_bands', {bands});
+        if (res && res.ok) {
+          const body = await res.json();
+          if (body.ai_execution_bands) {
+            syncAiBandControls(body.ai_execution_bands);
+            renderAiBandGateStatus(body.ai_execution_bands);
+            persistExecutionGatePrefs(null, body.ai_execution_bands);
+          }
         }
+      } finally {
+        executionControlSaveCount -= 1;
       }
     }
     function readChaseBucketSelections() {
@@ -16215,15 +16267,23 @@ DASHBOARD_JS = """(function () {
       });
     }
     async function updateChaseBuckets() {
+      const buckets = readChaseBucketSelections();
+      persistExecutionGatePrefs(buckets, null);
+      renderChaseBucketGateStatus(buckets);
       markExecutionControlsBusy();
-      const res = await post('/api/set_chase_buckets', {buckets: readChaseBucketSelections()});
-      if (res && res.ok) {
-        const body = await res.json();
-        if (body.chase_execution_buckets) {
-          syncChaseBucketControls(body.chase_execution_buckets);
-          renderChaseBucketGateStatus(body.chase_execution_buckets);
-          persistExecutionGatePrefs(body.chase_execution_buckets, null);
+      executionControlSaveCount += 1;
+      try {
+        const res = await post('/api/set_chase_buckets', {buckets});
+        if (res && res.ok) {
+          const body = await res.json();
+          if (body.chase_execution_buckets) {
+            syncChaseBucketControls(body.chase_execution_buckets);
+            renderChaseBucketGateStatus(body.chase_execution_buckets);
+            persistExecutionGatePrefs(body.chase_execution_buckets, null);
+          }
         }
+      } finally {
+        executionControlSaveCount -= 1;
       }
     }
     function renderChaseAnalyticsPanel(ch) {
@@ -17081,18 +17141,34 @@ DASHBOARD_JS = """(function () {
         }
         renderUltimateGatePanel(d.dashboard_execution_gates || {});
         if (!executionControlsBusy()) {
+          const prefs = loadDashPrefs();
+          const recentLocal = prefs.execution_gates_saved_at && (Date.now() - prefs.execution_gates_saved_at) < 30000;
           if (d.ai_execution_bands) {
-            syncAiBandControls(d.ai_execution_bands);
-            renderAiBandGateStatus(d.ai_execution_bands);
-            persistExecutionGatePrefs(null, d.ai_execution_bands);
+            const useServerBands = !recentLocal || !prefs.ai_execution_bands
+              || executionGatePrefsEqual(prefs.ai_execution_bands, d.ai_execution_bands);
+            if (useServerBands) {
+              syncAiBandControls(d.ai_execution_bands);
+              renderAiBandGateStatus(d.ai_execution_bands);
+              persistExecutionGatePrefs(null, d.ai_execution_bands);
+            } else {
+              syncAiBandControls(prefs.ai_execution_bands);
+              renderAiBandGateStatus(prefs.ai_execution_bands);
+            }
           } else if (d.ai_threshold != null && d.ai_threshold !== '') {
             const aiThresh = document.getElementById('aiThreshold');
             if (aiThresh) aiThresh.value = d.ai_threshold;
           }
           if (d.chase_execution_buckets) {
-            syncChaseBucketControls(d.chase_execution_buckets);
-            renderChaseBucketGateStatus(d.chase_execution_buckets);
-            persistExecutionGatePrefs(d.chase_execution_buckets, null);
+            const useServerChase = !recentLocal || !prefs.chase_execution_buckets
+              || executionGatePrefsEqual(prefs.chase_execution_buckets, d.chase_execution_buckets);
+            if (useServerChase) {
+              syncChaseBucketControls(d.chase_execution_buckets);
+              renderChaseBucketGateStatus(d.chase_execution_buckets);
+              persistExecutionGatePrefs(d.chase_execution_buckets, null);
+            } else {
+              syncChaseBucketControls(prefs.chase_execution_buckets);
+              renderChaseBucketGateStatus(prefs.chase_execution_buckets);
+            }
           }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
@@ -17390,6 +17466,8 @@ DASHBOARD_JS = """(function () {
       }
       const dashPrefs = loadDashPrefs();
       restoreExecutionGatePrefsFromBrowser();
+      window.addEventListener('beforeunload', flushExecutionGatesOnUnload);
+      window.addEventListener('pagehide', flushExecutionGatesOnUnload);
       const autoToggle = document.getElementById('autoRefreshToggle');
       if (autoToggle) {
         autoToggle.checked = dashPrefs.autoRefresh === true;
@@ -17403,7 +17481,7 @@ DASHBOARD_JS = """(function () {
       if (savedPathTab && typeof showPathwayTab === 'function') {
         showPathwayTab(savedPathTab);
       }
-      refresh();
+      reconcileRecentExecutionGatesFromBrowser().finally(function () { refresh(); });
     });
     window.refresh = refresh;
     window.toggleLive = toggleLive;
@@ -18383,7 +18461,7 @@ def set_threshold():
     if val < AI_THRESHOLD_MIN or val > AI_THRESHOLD_MAX:
         return jsonify({"status": "error", "msg": f"threshold must be {AI_THRESHOLD_MIN}–{AI_THRESHOLD_MAX}"}), 400
     set_ai_threshold(val)
-    set_ai_execution_bands(_ai_bands_from_legacy_threshold(val))
+    # AI win % bands are independent dashboard toggles — never overwrite from legacy threshold.
     return jsonify({"status": "ok", "ai_threshold": get_ai_threshold(), "ai_execution_bands": get_ai_execution_bands()})
 
 
