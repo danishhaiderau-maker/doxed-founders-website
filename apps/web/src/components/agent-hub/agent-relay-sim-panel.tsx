@@ -142,7 +142,7 @@ export function AgentRelaySimPanel({
                   onClick={onReset}
                   className="rounded-lg border border-amber-500/50 bg-amber-950/40 px-4 py-2 text-sm font-semibold text-amber-200 disabled:opacity-50"
                 >
-                  {busy ? '…' : '↻ Refresh sim ($500)'}
+                  {busy ? '…' : 'Reset ledger ($500)'}
                 </button>
                 <button
                   type="button"
@@ -280,7 +280,7 @@ export function AgentRelaySimPanel({
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
               Sim is running but no lots yet — waiting for the next mirrored showcase signal from :7002.
-              Check the Showcase desk tab for live admin bot activity.
+              Reset ledger ($500) clears the paper book; it does not sync from the showcase bot.
             </p>
           ) : null}
           <AgentTransparencyTables liveBook={simBook} maxRows={10} />
