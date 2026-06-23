@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix Start Everything command center and sync local lab v10.2 to global showcase.
+Fix flashing terminals: visible consoles, integrated bridge restart, command center UI.
 
 ## Last Activity
 
