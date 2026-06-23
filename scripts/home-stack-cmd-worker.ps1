@@ -29,11 +29,9 @@ switch ($Action) {
     }
     if (-not (Test-BotHealthy)) {
       if ($isLocal) {
-        $script = Join-Path $scriptDir "start-local-collection-bot.ps1"
-        cmd /c start "$botTitle" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$script" -NoWait
+        Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-bot.ps1") @("-NoWait") -NoExit -WindowTitle $botTitle -Show Normal
       } else {
-        $script = Join-Path $scriptDir "start-home-bot.ps1"
-        cmd /c start "$botTitle" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$script" -Port $BotPort -NoWait
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort", "-NoWait") -NoExit -WindowTitle $botTitle -Show Normal
       }
     }
   }
@@ -46,8 +44,7 @@ switch ($Action) {
     }
     if (-not (Test-AnalyzerHealthy)) {
       if ($isLocal) {
-        $script = Join-Path $scriptDir "start-local-collection-analyzer.ps1"
-        cmd /c start "$analyzerTitle" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$script" -NoWait
+        Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       } else {
         Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       }

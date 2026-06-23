@@ -37,8 +37,7 @@ function Restart-BotLocal {
   Stop-PythonMatching "btc_conservative_agent" | Out-Null
   Stop-PythonMatching "bot.py" | Out-Null
   Start-Sleep -Seconds 2
-  $botScript = Join-Path $scriptDir "start-local-collection-bot.ps1"
-  cmd /c start "Local Collection Bot :$BotPort" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$botScript" -NoWait
+  Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-bot.ps1") @("-NoWait") -NoExit -WindowTitle "Local Collection Bot :$BotPort" -Show Normal
 }
 
 function Restart-AnalyzerLocal {
@@ -47,8 +46,7 @@ function Restart-AnalyzerLocal {
   Stop-ListenPortFast $AnalyzerPort | Out-Null
   Remove-Item (Join-Path $repoRoot ".local-collection-analyzer.lock") -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
-  $analyzerScript = Join-Path $scriptDir "start-local-collection-analyzer.ps1"
-  cmd /c start "Local Collection Analyzer :$AnalyzerPort" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$analyzerScript" -NoWait
+  Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle "Local Collection Analyzer :$AnalyzerPort" -Show Normal
 }
 
 function Restart-BridgeLocal {
@@ -57,7 +55,7 @@ function Restart-BridgeLocal {
     Where-Object { $_.CommandLine -and $_.CommandLine -like "*home-stack-launcher.ps1*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Seconds 2
-  cmd /c start "Doxed Home Bridge :7810" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$scriptDir\home-stack-launcher.ps1"
+  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-launcher.ps1") @() -NoExit -WindowTitle "Doxed Home Bridge :7810" -Show Minimized
 }
 
 if (-not (Test-SupervisorLock)) {
