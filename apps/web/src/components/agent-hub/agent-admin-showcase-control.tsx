@@ -5,13 +5,26 @@ import { useCallback, useEffect, useState } from 'react';
 import { pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
+const DEFAULT_BOT_PORT = 7002;
+const DEFAULT_ANALYZER_PORT = 9500;
 
 type HomeStatus = {
+  mode?: string;
+  stackLabel?: string;
+  ports?: { bot?: number; analyzer?: number; launcher?: number };
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
-  tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean };
+  tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
   processes?: { botPython?: number; analyzerPython?: number };
 };
+
+function botPortFrom(status: HomeStatus | null): number {
+  return status?.ports?.bot ?? DEFAULT_BOT_PORT;
+}
+
+function analyzerPortFrom(status: HomeStatus | null): number {
+  return status?.ports?.analyzer ?? DEFAULT_ANALYZER_PORT;
+}
 
 function isOnline(section?: { online?: boolean; ok?: boolean } | null): boolean {
   if (!section) return false;
@@ -29,32 +42,42 @@ async function probeLocalHealth(url: string): Promise<boolean> {
 }
 
 async function probeDirectHomeStatus(): Promise<HomeStatus> {
+  const botPort = DEFAULT_BOT_PORT;
+  const analyzerPort = DEFAULT_ANALYZER_PORT;
   const [botOk, analyzerOk, tunnelOk] = await Promise.all([
-    probeLocalHealth('http://127.0.0.1:7800/api/ping'),
-    probeLocalHealth('http://127.0.0.1:9001/api/status'),
+    probeLocalHealth(`http://127.0.0.1:${botPort}/api/ping`),
+    probeLocalHealth(`http://127.0.0.1:${analyzerPort}/api/status`),
     probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping'),
   ]);
   return {
-    bot: { online: botOk, dashboard: 'http://127.0.0.1:7800' },
-    analyzer: { online: analyzerOk, dashboard: 'http://127.0.0.1:9001/' },
-    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null },
+    mode: 'local-collection',
+    ports: { bot: botPort, analyzer: analyzerPort, launcher: 7810 },
+    bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
+    analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
+    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null, enabled: false },
   };
 }
 
 async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
+  const botPort = raw.ports?.bot ?? DEFAULT_BOT_PORT;
+  const analyzerPort = raw.ports?.analyzer ?? DEFAULT_ANALYZER_PORT;
+  const botDash = raw.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
+  const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
+
   if (raw.ok) {
     return {
       ...raw,
-      bot: { ...raw.bot, online: Boolean(raw.bot?.online), dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+      bot: { ...raw.bot, online: Boolean(raw.bot?.online), dashboard: botDash },
       analyzer: {
         ...raw.analyzer,
         online: Boolean(raw.analyzer?.online),
-        dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/',
+        dashboard: analyzerDash,
       },
       tunnel: {
         ...raw.tunnel,
         live: Boolean(raw.tunnel?.live),
         url: raw.tunnel?.url ?? null,
+        enabled: raw.tunnel?.enabled ?? raw.mode !== 'local-collection',
       },
     };
   }
@@ -69,8 +92,8 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
   const needsTunnelProbe = !tunnelLive && raw.tunnel?.live === undefined;
 
   const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
-    needsBotProbe ? probeLocalHealth('http://127.0.0.1:7800/api/ping') : Promise.resolve(botOnline),
-    needsAnalyzerProbe ? probeLocalHealth('http://127.0.0.1:9001/api/status') : Promise.resolve(analyzerOnline),
+    needsBotProbe ? probeLocalHealth(`${botDash}/api/ping`) : Promise.resolve(botOnline),
+    needsAnalyzerProbe ? probeLocalHealth(`${analyzerDash}api/status`) : Promise.resolve(analyzerOnline),
     needsTunnelProbe
       ? probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping')
       : Promise.resolve(tunnelLive),
@@ -78,16 +101,17 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
 
   return {
     ...raw,
-    bot: { ...raw.bot, online: botOnline || botProbe, dashboard: raw.bot?.dashboard ?? 'http://127.0.0.1:7800' },
+    bot: { ...raw.bot, online: botOnline || botProbe, dashboard: botDash },
     analyzer: {
       ...raw.analyzer,
       online: analyzerOnline || analyzerProbe,
-      dashboard: raw.analyzer?.dashboard ?? 'http://127.0.0.1:9001/',
+      dashboard: analyzerDash,
     },
     tunnel: {
       ...raw.tunnel,
       live: tunnelLive || tunnelProbe,
       url: raw.tunnel?.url ?? (tunnelLive || tunnelProbe ? 'https://bot.doxxedcrypto.digital' : null),
+      enabled: raw.tunnel?.enabled ?? raw.mode !== 'local-collection',
     },
   };
 }
@@ -112,21 +136,21 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
     label: '▶ Start everything',
-    hint: 'Bot :7800 + analyzer + tunnel (visible console windows)',
+    hint: 'Local collection: bot :7002 + analyzer :9500 (visible consoles, 24/7 supervisor)',
     path: '/cmd/start-all',
     tone: 'primary',
   },
   {
     id: 'start-bot',
     label: '▶ Start bot only',
-    hint: 'btc_conservative_agent.py on :7800 with home-bot.env',
+    hint: 'btc_conservative_agent on :7002 (local-collection-data folder)',
     path: '/cmd/start-bot',
     tone: 'primary',
   },
   {
     id: 'start-analyzer',
     label: '▶ Start analyzer',
-    hint: 'From services/btc-conservative-agent (correct CSV folder)',
+    hint: 'Research loop + dashboard on :9500',
     path: '/cmd/start-analyzer',
   },
   {
@@ -158,7 +182,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'stop-bot',
     label: '■ Stop bot',
-    hint: 'Kill process listening on port 7800',
+    hint: 'Kill process listening on active bot port (7002 local / 7800 production)',
     path: '/cmd/stop-bot',
     tone: 'danger',
   },
@@ -190,6 +214,11 @@ export function AgentAdminShowcaseControl({
   const [tunnelUrl, setTunnelUrl] = useState('');
 
   const stopped = executionPaused || !botConnected;
+  const botPort = botPortFrom(status);
+  const analyzerPort = analyzerPortFrom(status);
+  const botDash = status?.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
+  const analyzerDash = status?.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
+  const isLocalCollection = status?.mode !== 'production';
 
   const refreshStatus = useCallback(async () => {
     let bridgeOk = false;
@@ -323,7 +352,10 @@ export function AgentAdminShowcaseControl({
           Agent Hub
         </a>{' '}
         on the <strong>same PC</strong> as the bot.{' '}
-        <span className="text-zinc-500">:7800 = bot dashboard · :7810 = this control bridge only</span>
+        <span className="text-zinc-500">
+          :{botPort} = bot · :{analyzerPort} = analyzer · :7810 = bridge
+          {isLocalCollection ? ' · local collection mode' : ' · production mirror'}
+        </span>
         . Site mirror:{' '}
         {botConnected ? (
           <span className="text-emerald-400">online</span>
@@ -333,10 +365,18 @@ export function AgentAdminShowcaseControl({
         .
       </p>
 
+      {status?.stackLabel && (
+        <p className="mt-1 text-[10px] text-emerald-400/90">{status.stackLabel}</p>
+      )}
+
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <StatusChip label="Bot :7800" ok={Boolean(status?.bot?.online)} />
-        <StatusChip label="Analyzer :9001" ok={Boolean(status?.analyzer?.online)} />
-        <StatusChip label="Tunnel (public bot)" ok={Boolean(status?.tunnel?.live)} />
+        <StatusChip label={`Bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
+        <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip
+          label="Tunnel (public bot)"
+          ok={Boolean(status?.tunnel?.live)}
+          hidden={status?.tunnel?.enabled === false}
+        />
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
       </div>
 
@@ -389,24 +429,14 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
-        <a
-          href="http://127.0.0.1:7800"
-          target="_blank"
-          rel="noreferrer"
-          className="text-violet-300 hover:underline"
-        >
-          Bot dashboard →
+        <a href={botDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Bot dashboard :{botPort} →
+        </a>
+        <a href={analyzerDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Analyzer dashboard :{analyzerPort} →
         </a>
         <a
-          href="http://127.0.0.1:9001/"
-          target="_blank"
-          rel="noreferrer"
-          className="text-violet-300 hover:underline"
-        >
-          Analyzer dashboard :9001 →
-        </a>
-        <a
-          href="http://127.0.0.1:7800/api/export_csv"
+          href={`${botDash}/api/export_csv`}
           target="_blank"
           rel="noreferrer"
           className="text-violet-300 hover:underline"
@@ -414,7 +444,7 @@ export function AgentAdminShowcaseControl({
           Download all CSV/JSONL (zip) →
         </a>
         <a
-          href="http://127.0.0.1:7800/api/export_session_trades.csv"
+          href={`${botDash}/api/export_session_trades.csv`}
           target="_blank"
           rel="noreferrer"
           className="text-violet-300 hover:underline"
@@ -444,7 +474,8 @@ export function AgentAdminShowcaseControl({
   );
 }
 
-function StatusChip({ label, ok }: { label: string; ok: boolean }) {
+function StatusChip({ label, ok, hidden }: { label: string; ok: boolean; hidden?: boolean }) {
+  if (hidden) return null;
   return (
     <div
       className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${

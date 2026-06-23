@@ -158,7 +158,10 @@ function Close-HomeStackWindowTitles {
     "Doxed Tunnel Watchdog",
     "Doxed Tunnel Restart",
     "Doxed Stack Start",
-    "Doxed Start Everything"
+    "Doxed Start Everything",
+    "Local Collection Bot :7002",
+    "Local Collection Analyzer :9500",
+    "Local Collection Analyzer (once)"
   )
   foreach ($title in $windowTitles) {
     & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null

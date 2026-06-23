@@ -117,6 +117,7 @@
     "start:local-collection": "powershell -ExecutionPolicy Bypass -File scripts/start-local-collection.ps1",
     "start:local-collection:bot": "powershell -ExecutionPolicy Bypass -File scripts/start-local-collection-bot.ps1",
     "start:local-collection:analyzer": "powershell -ExecutionPolicy Bypass -File scripts/start-local-collection-analyzer.ps1",
+    "measure:shadow-latency": "powershell -ExecutionPolicy Bypass -File scripts/measure-shadow-latency.ps1",
     "start:home": "powershell -ExecutionPolicy Bypass -File scripts/start-home-stack.ps1",
     "start:home-launcher": "powershell -ExecutionPolicy Bypass -File scripts/home-stack-launcher.ps1",
     "setup:x-api": "powershell -ExecutionPolicy Bypass -File scripts/setup-x-api.ps1",
