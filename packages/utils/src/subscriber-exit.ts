@@ -1,9 +1,13 @@
-/** Mirrors live showcase bot TRAIL_LADDER_SCENARIO_C (v1.1.21). */
+/** Mirrors live showcase bot TRAIL_LADDER_SCENARIO_C (scenario_c_config.py — frozen 2026-06-20). */
 export const SUBSCRIBER_TRAIL_LADDER: ReadonlyArray<readonly [number, number]> = [
   [12, 8],
   [15, 10],
   [25, 18],
   [40, 28],
+  [60, 45],
+  [80, 60],
+  [100, 75],
+  [150, 120],
 ];
 
 export const SUBSCRIBER_PEAK_NEVER_LOSER_MIN_PEAK = 40;

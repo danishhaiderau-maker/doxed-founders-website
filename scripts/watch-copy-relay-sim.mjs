@@ -211,6 +211,10 @@ async function snapshot() {
     log('No active relay sim instances (hire Bitfinex + start sim from Agent Hub)');
   }
 
+  if (!bot || typeof bot !== 'object' || bot.price == null) {
+    log('ALERT showcase bot unreachable from home — relay sim cannot mirror new signals');
+  }
+
   log(`  bot price=${bot.price ?? '?'} paused=${bot.execution_paused ?? '?'}`);
 }
 
