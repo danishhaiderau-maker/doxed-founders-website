@@ -19,8 +19,8 @@ echo.
 echo.
 echo Leave these windows OPEN on this PC:
 echo   - Doxed Home Bridge :7810
-echo   - Doxed Bot :7800
-echo   - Doxed Analyzer
+echo   - Doxed Bot :7002
+echo   - Doxed Analyzer :9500
 echo   - Doxed Cloudflare Tunnel  (or hidden cloudflared in logs/)
 echo.
 echo Supervisor log: .home-stack-supervisor.log

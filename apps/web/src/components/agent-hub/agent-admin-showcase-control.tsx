@@ -11,8 +11,16 @@ const DEFAULT_ANALYZER_PORT = 9500;
 type HomeStatus = {
   mode?: string;
   stackLabel?: string;
-  ports?: { bot?: number; analyzer?: number; launcher?: number };
+  ports?: { bot?: number; analyzer?: number; launcher?: number; localBot?: number; localAnalyzer?: number };
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
+  localLab?: {
+    online?: boolean;
+    botOnline?: boolean;
+    analyzerOnline?: boolean;
+    botDashboard?: string;
+    analyzerDashboard?: string;
+    note?: string;
+  };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
   tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
   processes?: { botPython?: number; analyzerPython?: number };
@@ -50,11 +58,11 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
     probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping'),
   ]);
   return {
-    mode: 'local-collection',
+    mode: 'production',
     ports: { bot: botPort, analyzer: analyzerPort, launcher: 7810 },
     bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
     analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
-    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null, enabled: false },
+    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null, enabled: true },
   };
 }
 
@@ -135,15 +143,22 @@ function cmdTimeoutMs(id: string): number {
 const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
-    label: '▶ Start everything',
-    hint: 'Local collection: bot :7002 + analyzer :9500 (visible consoles, 24/7 supervisor)',
+    label: '▶ Start all global',
+    hint: 'Global showcase: :7002 bot + :9500 analyzer + tunnel (doxxedcrypto + Bitfinex relay)',
     path: '/cmd/start-all',
+    tone: 'primary',
+  },
+  {
+    id: 'start-all-local',
+    label: '▶ Start all local',
+    hint: 'Local lab only: :7800 bot + :9001 analyzer (Final Bots folder, source of truth)',
+    path: '/cmd/start-all-local',
     tone: 'primary',
   },
   {
     id: 'start-bot',
     label: '▶ Start bot only',
-    hint: 'btc_conservative_agent on :7002 (local-collection-data folder)',
+    hint: 'btc_conservative_agent on :7002 (main showcase data + relay webhook)',
     path: '/cmd/start-bot',
     tone: 'primary',
   },
@@ -162,7 +177,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-tunnel',
     label: '▶ Start tunnel',
-    hint: 'Quick trycloudflare URL → wire to Agent Hub',
+    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002 (required for site mirror + Bitfinex relay)',
     path: '/cmd/start-tunnel',
   },
   {
@@ -182,15 +197,22 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'stop-bot',
     label: '■ Stop bot',
-    hint: 'Kill process listening on active bot port (7002 local / 7800 production)',
+    hint: 'Kill process on active bot port (:7002 showcase)',
     path: '/cmd/stop-bot',
     tone: 'danger',
   },
   {
-    id: 'stop-all',
+    id: 'stop-all-global',
+    label: '■ Stop all global',
+    hint: 'Stop :7002/:9500 + tunnel only — local lab :7800/:9001 keeps running',
+    path: '/cmd/stop-all-global',
+    tone: 'danger',
+  },
+  {
+    id: 'stop-all-local',
     label: '■ Stop all local',
-    hint: 'Kill bot, analyzer, tunnel, close all Doxed console windows, clear tunnel URL',
-    path: '/cmd/stop-all',
+    hint: 'Stop :7800/:9001 lab only — global showcase untouched',
+    path: '/cmd/stop-all-local',
     tone: 'danger',
   },
 ];
@@ -265,7 +287,7 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id === 'start-all' || id === 'stop-all') {
+        if (id === 'start-all' || id === 'start-all-local' || id === 'stop-all-global' || id === 'stop-all-local') {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
         }
@@ -353,8 +375,8 @@ export function AgentAdminShowcaseControl({
         </a>{' '}
         on the <strong>same PC</strong> as the bot.{' '}
         <span className="text-zinc-500">
-          :{botPort} = bot · :{analyzerPort} = analyzer · :7810 = bridge
-          {isLocalCollection ? ' · local collection mode' : ' · production mirror'}
+          Global :{botPort}/:{analyzerPort} · Local lab :7800/:9001 · Bridge :7810
+          {isLocalCollection ? ' · local collection mode' : ' · global showcase'}
         </span>
         . Site mirror:{' '}
         {botConnected ? (
@@ -370,8 +392,10 @@ export function AgentAdminShowcaseControl({
       )}
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <StatusChip label={`Bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
-        <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip label={`Global bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
+        <StatusChip label={`Global analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip label="Local lab :7800" ok={Boolean(status?.localLab?.botOnline)} />
+        <StatusChip label="Local analyzer :9001" ok={Boolean(status?.localLab?.analyzerOnline)} />
         <StatusChip
           label="Tunnel (public bot)"
           ok={Boolean(status?.tunnel?.live)}
@@ -430,10 +454,16 @@ export function AgentAdminShowcaseControl({
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <a href={botDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Bot dashboard :{botPort} →
+          Global bot :{botPort} →
+        </a>
+        <a href="http://127.0.0.1:7800" target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Local lab :7800 →
+        </a>
+        <a href="http://127.0.0.1:9001/" target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Local analyzer :9001 →
         </a>
         <a href={analyzerDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Analyzer dashboard :{analyzerPort} →
+          Global analyzer :{analyzerPort} →
         </a>
         <a
           href={`${botDash}/api/export_csv`}

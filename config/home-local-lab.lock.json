@@ -1,0 +1,12 @@
+{
+  "frozen": true,
+  "purpose": "Local research lab (source of truth) — Final Bots folder, no tunnel",
+  "mode": "local-lab",
+  "botPort": 7800,
+  "analyzerPort": 9001,
+  "labRootRelative": "..",
+  "botEntry": "15minu_bot.py",
+  "analyzerEntry": "analyzer_research_engine_v62.py",
+  "disableTunnel": true,
+  "disableRelayWebhook": true
+}

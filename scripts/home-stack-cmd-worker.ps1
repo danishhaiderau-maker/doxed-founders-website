@@ -1,12 +1,12 @@
 # Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "start-bot", "start-analyzer", "wipe-research", "pause-trading", "resume-trading")]
+  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-local", "wipe-research", "pause-trading", "resume-trading")]
   [string]$Action,
   [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9500,
   [ValidateSet("production", "local-collection")]
-  [string]$StackMode = "local-collection"
+  [string]$StackMode = "production"
 )
 
 $ErrorActionPreference = "Continue"
@@ -46,7 +46,7 @@ switch ($Action) {
       if ($isLocal) {
         Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       } else {
-        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       }
     }
   }
@@ -69,7 +69,19 @@ switch ($Action) {
     Remove-Item (Join-Path $repoRoot ".local-collection-analyzer.lock") -Force -ErrorAction SilentlyContinue
   }
   "stop-all" {
-    Stop-AllHomeStackFast | Out-Null
+    Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
+  }
+  "stop-all-global" {
+    Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
+  }
+  "stop-all-local" {
+    Stop-LocalLabFast | Out-Null
+  }
+  "start-all-local" {
+    $labScript = Join-Path $scriptDir "home-stack-local-lab.ps1"
+    Start-Process -FilePath "powershell.exe" -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $labScript, "-Action", "start"
+    ) -WorkingDirectory $repoRoot -WindowStyle Normal
   }
   "wipe-research" {
     if (Test-PortOpen $BotPort) {

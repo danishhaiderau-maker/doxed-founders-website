@@ -1,0 +1,10 @@
+{
+  "frozen": true,
+  "purpose": "Doxxedcrypto global showcase on home PC (Agent Hub + Bitfinex relay)",
+  "mode": "production",
+  "botPort": 7002,
+  "analyzerPort": 9500,
+  "dataDirRelative": "services/btc-conservative-agent",
+  "disableRelayWebhook": false,
+  "disableTunnel": false
+}

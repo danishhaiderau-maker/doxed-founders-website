@@ -1,8 +1,16 @@
 # Load home-bot.env and run the research analyzer (30-min loop, or --Once).
 # Embedded Flask research dashboard on :9001 (see research/research_dashboard.py).
-param([switch]$Once, [switch]$NoWait)
+param([switch]$Once, [switch]$NoWait, [int]$Port = 0)
 
-$Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer" }
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "home-stack-mode.ps1") -ErrorAction SilentlyContinue 2>$null
+if ($Port -le 0) {
+  $mode = Get-HomeStackMode
+  $Port = $mode.AnalyzerPort
+}
+$AnalyzerPort = $Port
+
+$Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer :$AnalyzerPort" }
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
@@ -43,7 +51,7 @@ $lockHandle = $null
 try {
   $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
-  Write-Host "Another analyzer start is in progress — not starting a duplicate." -ForegroundColor Yellow
+  Write-Host "Another analyzer start is in progress - not starting a duplicate." -ForegroundColor Yellow
   if (-not $NoWait) { Wait-ForKey }
   exit 0
 }
@@ -56,32 +64,23 @@ Get-Content $vaultEnv | ForEach-Object {
 }
 
 $env:RESEARCH_DASHBOARD_BIND_HOST = "0.0.0.0"
-$env:RESEARCH_DASHBOARD_PORT = "9001"
-$env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:9001/"
+$env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
+$env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
 $env:BTC_AGENT_DATA_DIR = $agentDir
 
-# Avoid duplicate analyzer windows — require healthy HTTP or running python loop, not port alone.
-$existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer_research_engine*" } |
-  Select-Object -First 1
-if ($existing) {
-  Write-Host "Analyzer already running (pid $($existing.ProcessId)) — not starting a duplicate." -ForegroundColor Yellow
-  if ($lockHandle) { $lockHandle.Dispose() }
-  if (-not $NoWait) { Wait-ForKey }
-  exit 0
-}
-if (Test-PortOpen 9001) {
+# Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
+if (Test-PortOpen $AnalyzerPort) {
   try {
-    $r = Invoke-WebRequest -Uri "http://127.0.0.1:9001/api/status" -UseBasicParsing -TimeoutSec 3
+    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -UseBasicParsing -TimeoutSec 3
     if ($r.StatusCode -eq 200) {
-      Write-Host "Analyzer dashboard healthy on :9001 — not starting a duplicate." -ForegroundColor Yellow
+      Write-Host "Analyzer dashboard healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
       if ($lockHandle) { $lockHandle.Dispose() }
       if (-not $NoWait) { Wait-ForKey }
       exit 0
     }
   } catch {
-    Write-Host "Port 9001 open but /api/status failed — clearing stale listener..." -ForegroundColor Yellow
-    netstat -ano | Select-String ":9001\s" | ForEach-Object {
+    Write-Host "Port $AnalyzerPort open but /api/status failed - clearing stale listener..." -ForegroundColor Yellow
+    netstat -ano | Select-String ":$AnalyzerPort\s" | ForEach-Object {
       if ("$_" -match '\s(\d+)\s*$') {
         Stop-Process -Id ([int]$matches[1]) -Force -ErrorAction SilentlyContinue
       }
@@ -92,7 +91,7 @@ if (Test-PortOpen 9001) {
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $agentDir"
-Write-Host "Research dashboard (Flask): http://127.0.0.1:9001/  LAN: http://10.0.0.102:9001/"
+Write-Host "Research dashboard (Flask): http://127.0.0.1:$AnalyzerPort/  LAN: http://10.0.0.102:$AnalyzerPort/"
 Write-Host ""
 Write-Host "Mode: $(if ($Once) { 'single pass (--once)' } else { 'continuous loop (every 30 min)' })"
 Write-Host ""

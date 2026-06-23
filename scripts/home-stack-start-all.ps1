@@ -32,7 +32,7 @@ if (-not (Test-AnalyzerHealthy)) {
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
   }
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle "Doxed Analyzer" -Show Normal
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -NoExit -WindowTitle "Doxed Analyzer :$AnalyzerPort" -Show Normal
   $messages.Add("[2/3] Analyzer window opened")
   Start-Sleep -Seconds 10
 } else {
