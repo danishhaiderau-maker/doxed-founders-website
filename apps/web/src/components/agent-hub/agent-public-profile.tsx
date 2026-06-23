@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   formatPercent,
   formatUsd,
@@ -28,6 +28,15 @@ import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
 import { AgentActivityFeed } from '@/components/agent-hub/live-mission-control';
 import { ShareOnXButton } from '@/components/share-on-x-button';
 import { mergeDeskActivity, liveBookToActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
+
+const deskStorageKey = (slug: string) => `agent-hub-desk-${slug}`;
+
+function readStoredDesk(slug: string): AgentDeskId | null {
+  if (typeof window === 'undefined') return null;
+  const raw = localStorage.getItem(deskStorageKey(slug));
+  if (raw === 'showcase' || raw === 'live' || raw === 'relay-sim') return raw;
+  return null;
+}
 import type {
   PublicAgentStatus,
   TradingAgentActivityEntry,
@@ -384,7 +393,22 @@ export function AgentPublicProfile({
   const isLiveSession = hired && instanceMode === 'live';
   const relaySimActive = Boolean(copyRelaySim?.active);
   const relaySimDeskAvailable = isLiveSession && exchangeProvider === 'bitfinex';
-  const [activeDesk, setActiveDesk] = useState<AgentDeskId>('live');
+  const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() => readStoredDesk(slug) ?? 'live');
+
+  useEffect(() => {
+    localStorage.setItem(deskStorageKey(slug), activeDesk);
+  }, [activeDesk, slug]);
+
+  // Sim state persists in Neon — restore the relay-sim desk after refresh when sim is still active.
+  useEffect(() => {
+    if (!relaySimDeskAvailable) return;
+    const stored = readStoredDesk(slug);
+    if (relaySimActive) {
+      setActiveDesk('relay-sim');
+    } else if (stored) {
+      setActiveDesk(stored);
+    }
+  }, [slug, relaySimActive, relaySimDeskAvailable]);
   const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
   const heroBadge = isLiveSession
