@@ -80,11 +80,8 @@ if (Test-PortOpen $AnalyzerPort) {
     }
   } catch {
     Write-Host "Port $AnalyzerPort open but /api/status failed - clearing stale listener..." -ForegroundColor Yellow
-    netstat -ano | Select-String ":$AnalyzerPort\s" | ForEach-Object {
-      if ("$_" -match '\s(\d+)\s*$') {
-        Stop-Process -Id ([int]$matches[1]) -Force -ErrorAction SilentlyContinue
-      }
-    }
+    . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort
+    Stop-ListenPortFast $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 2
   }
 }

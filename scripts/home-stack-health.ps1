@@ -30,9 +30,12 @@ function Test-BridgeHealthy {
 }
 
 function Test-TunnelPublicHealthy {
-  param([string]$Url)
+  param(
+    [string]$Url,
+    [int]$TimeoutSec = 5
+  )
   if (-not $Url) { return $false }
-  return (Test-HttpOk "$Url/api/ping" 10)
+  return (Test-HttpOk "$Url/api/ping" $TimeoutSec)
 }
 
 function Test-BotHung {

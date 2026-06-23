@@ -622,22 +622,48 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
   };
 }
 
-/** Public-safe dashboard — no raw AI prompts, feature snapshots, or pipeline internals. */
+/** Public-safe dashboard — execution only. No AI, regime, edge, or signal pipeline data. */
 export function mapBotStateToPublicDashboard(bot: BotApiState): TradingAgentDashboardState {
   const dash = mapBotStateToDashboard(bot);
-  const verdict = dash.latestAiVerdict;
+  const book = dash.liveBook;
 
-  if (dash.currentAction === 'PAUSED') {
-    dash.aiReasoning = 'Agent paused by operator. No new trades until resumed.';
-  } else if (verdict) {
-    dash.aiReasoning = composeAiReasoningSummary(verdict);
-    dash.currentThinking = {
-      ...dash.currentThinking,
-      conclusion: verdict.comment || verdict.reason || dash.currentThinking.conclusion,
-    };
-  }
-
-  return dash;
+  return {
+    ...dash,
+    regime: '',
+    support: 0,
+    resistance: 0,
+    distanceToResistancePct: 0,
+    distanceToSupportPct: 0,
+    aiDecision: dash.currentAction,
+    aiWinProbability: 0,
+    currentEdge: 0,
+    requiredEdge: 0,
+    noTradeReason: '',
+    currentThinking: {
+      market: '',
+      support: 0,
+      resistance: 0,
+      distanceToResistancePct: 0,
+      distanceToSupportPct: 0,
+      conclusion: '',
+    },
+    transparency: {
+      currentEdge: 0,
+      requiredEdge: 0,
+      currentState: dash.currentAction,
+      reason: '',
+    },
+    marketStructure: '',
+    aiReasoning: '',
+    latestAiVerdict: undefined,
+    liveBook: {
+      activeSignals: [],
+      expiredOrders: [],
+      positions: book.positions,
+      pendingOrders: book.pendingOrders,
+      trades: book.trades.map((t) => ({ ...t, aiBand: '' })),
+    },
+  };
 }
 
 export function sanitizeActivityForPublic(
@@ -647,12 +673,18 @@ export function sanitizeActivityForPublic(
     if (item.type.startsWith('AI_')) {
       return {
         ...item,
-        reason: item.outcome
-          ? `Market assessment: ${item.outcome}. Edge ${item.edgeScore ?? '—'}/${item.edgeRequired ?? '—'}.`
-          : 'Market conditions did not meet entry criteria.',
+        reason: 'Market conditions did not meet entry criteria.',
+        edgeScore: null,
+        edgeRequired: null,
+        marketRegime: null,
       };
     }
-    return item;
+    return {
+      ...item,
+      edgeScore: null,
+      edgeRequired: null,
+      marketRegime: null,
+    };
   });
 }
 

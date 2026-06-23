@@ -78,9 +78,12 @@ export const EMPTY_LIVE_BOOK: TradingAgentDashboardState['liveBook'] = {
 export function AgentTransparencyTables({
   liveBook,
   maxRows = 5,
+  executionOnly = false,
 }: {
   liveBook?: TradingAgentDashboardState['liveBook'];
   maxRows?: number;
+  /** Public showcase — positions, orders, trades only (no signals / AI columns). */
+  executionOnly?: boolean;
 }) {
   const book = liveBook ?? EMPTY_LIVE_BOOK;
   const cap = Math.max(1, Math.min(maxRows, 20));
@@ -139,11 +142,44 @@ export function AgentTransparencyTables({
     String(t.durationMin),
     `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%`,
     formatUsd(t.netUsd),
-    formatUsd(t.grossUsd),
-    formatUsd(t.tradeFeesUsd),
-    formatUsd(t.fundingUsd),
-    t.aiBand,
+    ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd), t.aiBand]),
   ]);
+
+  if (executionOnly) {
+    return (
+      <div className="space-y-4">
+        <MiniTable
+          title="Open positions"
+          headers={['Leg', 'Side', 'Qty', 'Entry', 'Current', 'SL', 'TP', 'PnL']}
+          rows={positionRows}
+          emptyMessage="No open positions."
+        />
+        <MiniTable
+          title="Pending orders"
+          subtitle="Limit orders waiting for fill"
+          headers={['Age min', 'Side', 'Status', 'Qty', 'Limit price', 'Signal price']}
+          rows={pendingRows}
+          emptyMessage="No pending limit orders."
+        />
+        <MiniTable
+          title="Closed trades"
+          subtitle="Session history — execution results only"
+          headers={[
+            'Time (Melbourne)',
+            'Trade ID',
+            'Direction',
+            'Entry',
+            'Exit',
+            'Duration min',
+            'PnL %',
+            'Net USD',
+          ]}
+          rows={tradeRows}
+          emptyMessage="No closed trades this session."
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

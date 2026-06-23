@@ -1,5 +1,5 @@
 param(
-  [int]$Port = 7800,
+  [int]$Port = 0,
   [switch]$Force,
   [switch]$Hidden
 )
@@ -7,6 +7,10 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+if ($Port -le 0) {
+  . (Join-Path $scriptDir "home-stack-mode.ps1")
+  $Port = (Get-HomeStackMode).BotPort
+}
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
 $namedFlag = Join-Path $repoRoot ".home-use-named-tunnel"
 $configDir = Join-Path $env:USERPROFILE ".cloudflared"

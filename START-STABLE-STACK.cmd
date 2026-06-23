@@ -13,8 +13,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Starting stack via bridge...
-curl.exe -sS -m 8 http://127.0.0.1:7810/cmd/start-all
+echo Starting global stack via bridge...
+curl.exe -sS -m 8 http://127.0.0.1:7810/cmd/start-all-global
 echo.
 echo.
 echo Leave these windows OPEN on this PC:

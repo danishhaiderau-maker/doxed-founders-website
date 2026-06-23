@@ -17,6 +17,7 @@ import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hu
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
+import { AgentExecutionChart } from '@/components/agent-hub/agent-execution-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
@@ -33,9 +34,10 @@ import type {
   TradingAgentSummary,
 } from '@/lib/api';
 
-const TABS = ['Overview', 'Performance', 'Trade Journey', 'Reasoning', 'Activity', 'Followers'] as const;
-const HIGHLIGHT_TABS = ['Performance', 'Trade Journey', 'Reasoning', 'Activity'] as const;
-type Tab = (typeof TABS)[number];
+const PUBLIC_TABS = ['Overview', 'Live Trade', 'Trade Journey', 'Activity', 'Followers'] as const;
+const ADMIN_EXTRA_TABS = ['Reasoning'] as const;
+const HIGHLIGHT_TABS = ['Live Trade', 'Trade Journey', 'Activity'] as const;
+type Tab = (typeof PUBLIC_TABS)[number] | (typeof ADMIN_EXTRA_TABS)[number];
 
 const STRATEGY_TAGS = ['BTC Markets', 'Low Risk', 'Trend Following', 'Long Bias'];
 
@@ -376,6 +378,8 @@ export function AgentPublicProfile({
   rentalExpiresAt?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
+  const tabs = isAdmin ? ([...PUBLIC_TABS, ...ADMIN_EXTRA_TABS] as Tab[]) : ([...PUBLIC_TABS] as Tab[]);
+  const showExecutionPublic = slug === 'conservative-btc' && !isAdmin;
   const isCopySession = hired && instanceMode === 'copy';
   const isLiveSession = hired && instanceMode === 'live';
   const relaySimActive = Boolean(copyRelaySim?.active);
@@ -508,6 +512,7 @@ export function AgentPublicProfile({
     onStopRelaySim,
     onResetRelaySim,
     relaySimBusy,
+    executionOnly: showExecutionPublic,
   } as const;
 
   return (
@@ -651,7 +656,7 @@ export function AgentPublicProfile({
 
           <div className="sticky top-0 z-20 -mx-4 border-b border-zinc-800 bg-[#050508]/95 px-4 backdrop-blur-md sm:-mx-6 sm:px-6">
             <div className="flex gap-1 overflow-x-auto">
-              {TABS.map((t) => (
+              {tabs.map((t) => (
                 <button
                   key={t}
                   type="button"
@@ -687,6 +692,16 @@ export function AgentPublicProfile({
               ))}
             </div>
           </div>
+
+          {tab === 'Overview' && showExecutionPublic && (
+            <div className="mt-6">
+              <AgentExecutionChart
+                dashboard={dashboard}
+                agent={deskShowcaseAgent}
+                liveBook={showcaseBook}
+              />
+            </div>
+          )}
 
           {tab === 'Overview' && (
             <div className="mt-6">
@@ -735,7 +750,15 @@ export function AgentPublicProfile({
                   liveBook={exchangeLiveBook}
                 />
               ) : activeDesk === 'showcase' ? (
-                <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
+                showExecutionPublic ? (
+                  <AgentExecutionChart
+                    dashboard={dashboard}
+                    agent={deskShowcaseAgent}
+                    liveBook={showcaseBook}
+                  />
+                ) : (
+                  <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
+                )
               ) : null}
               {activeDesk !== 'relay-sim' && !(activeDesk === 'showcase') ? (
               <div className="grid gap-6 lg:grid-cols-2">
@@ -761,14 +784,37 @@ export function AgentPublicProfile({
                 />
               </div>
               ) : activeDesk === 'showcase' ? (
-                <AgentPerformanceChart
-                  agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
-                  label="Research local bot"
-                />
+                showExecutionPublic ? (
+                  <AgentExecutionChart
+                    dashboard={dashboard}
+                    agent={deskShowcaseAgent}
+                    liveBook={showcaseBook}
+                  />
+                ) : (
+                  <AgentPerformanceChart
+                    agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
+                    label="Showcase bot"
+                  />
+                )
               ) : null}
             </div>
           )}
-          {tab === 'Performance' && (
+          {tab === 'Live Trade' && (
+            <AgentExecutionChart
+              dashboard={dashboard}
+              agent={
+                activeDesk === 'live' && isLiveSession
+                  ? agent
+                  : (deskShowcaseAgent ?? agent)
+              }
+              liveBook={
+                activeDesk === 'live' && isLiveSession
+                  ? (exchangeLiveBook ?? showcaseBook)
+                  : showcaseBook
+              }
+            />
+          )}
+          {tab === 'Performance' && isAdmin && (
             <AgentPerformanceChart
               agentReturnPct={
                 activeDesk === 'live' && isLiveSession
@@ -784,6 +830,7 @@ export function AgentPublicProfile({
             <AgentDeskView {...deskViewProps} />
           )}
           {tab === 'Reasoning' &&
+            isAdmin &&
             activeDesk !== 'relay-sim' &&
             (activeDesk === 'live' && isLiveSession ? (
               <LiveRelayReasoningPanel

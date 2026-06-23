@@ -946,8 +946,10 @@ export class TradingAgentsService implements OnModuleInit {
     if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
       const botForActivity = await this.botBridge.fetchState();
       if (botForActivity) {
-        const richFeed = mapBotStateToActivity(botForActivity, agent.name);
-        showcaseActivity = mergeActivityFeeds(richFeed, showcaseActivity);
+        const executedOnly = filterActivityToExecutedTrades(
+          mapBotStateToExecutedTradesActivity(botForActivity, agent.name),
+        );
+        showcaseActivity = mergeActivityFeeds(executedOnly, showcaseActivity);
       }
     }
 
