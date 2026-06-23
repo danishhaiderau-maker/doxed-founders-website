@@ -170,24 +170,51 @@ function Close-HomeStackWindowTitles {
   return $closed
 }
 
-function Stop-AllHomeStackFast {
-  $botPort = @(Stop-ListenPortFast $BotPort)
-  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
-  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
-  $analyzerHealth = @(Stop-ListenPortFast $AnalyzerPort)
-  $analyzerHealthPy = @(Stop-PythonMatching "analyzer-health-server")
+function Stop-GlobalStackFast {
+  param(
+    [int]$GlobalBotPort = 7002,
+    [int]$GlobalAnalyzerPort = 9500
+  )
+  $botPort = @(Stop-ListenPortFast $GlobalBotPort)
+  $analyzerPort = @(Stop-ListenPortFast $GlobalAnalyzerPort)
   $tunnel = @(Stop-Cloudflared)
-  $windows = @(Close-HomeStackWindowTitles)
+  $titles = @(
+    "Doxed Bot :$GlobalBotPort",
+    "Doxed Analyzer :$GlobalAnalyzerPort",
+    "Doxed Analyzer (once)",
+    "Doxed Cloudflare Tunnel",
+    "Doxed Cloudflare Tunnel (stable)",
+    "Doxed Start Everything",
+    "Doxed Stack Start"
+  )
+  foreach ($title in $titles) {
+    & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null
+  }
   Clear-TunnelUrlFile
   return @{
     botPort = $botPort
-    botPy = $botPy
-    analyzerPy = $analyzerPy
-    analyzerHealth = $analyzerHealth
-    analyzerHealthPy = $analyzerHealthPy
+    analyzerPort = $analyzerPort
     tunnel = $tunnel
-    windows = $windows
   }
+}
+
+function Stop-LocalLabFast {
+  $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $repoRoot = Split-Path -Parent $scriptDir
+  $stopScript = Join-Path (Split-Path -Parent $repoRoot) "stop_stack.ps1"
+  if (Test-Path $stopScript) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript 2>$null | Out-Null
+  } else {
+    Stop-ListenPortFast 7800 | Out-Null
+    Stop-ListenPortFast 9001 | Out-Null
+    Stop-PythonMatching "15minu_bot.py" | Out-Null
+  }
+  return @{ stopped = $true; ports = @(7800, 9001) }
+}
+
+function Stop-AllHomeStackFast {
+  # Legacy: stop global showcase ports only (does not touch local lab :7800/:9001).
+  return Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort
 }
 
 function Stop-AllHomeStack {
