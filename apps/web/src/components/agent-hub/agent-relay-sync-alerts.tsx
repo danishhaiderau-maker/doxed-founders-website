@@ -32,9 +32,9 @@ export function buildRelaySyncAlerts(input: {
     if (needsShowcase) {
       alerts.push({
         level: 'error',
-        title: 'Local bot offline',
+        title: 'Showcase bot offline',
         detail:
-          'Global showcase bot (:7002) is not reachable — relay cannot mirror new signals. Use RESTART-LAUNCHER.cmd, click Start everything, then Wire to site.',
+          'Global showcase bot (:7002 via tunnel) is not reachable from the site API — relay cannot mirror new signals. On Home Command Center: confirm tunnel is online, then click Wire to site.',
       });
     }
   }

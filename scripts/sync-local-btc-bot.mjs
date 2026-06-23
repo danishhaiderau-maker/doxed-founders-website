@@ -14,9 +14,11 @@ import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { assertBotSyncAllowed } from './lib/bot-sync-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+assertBotSyncAllowed({ root: ROOT, syncKind: 'sync-local-btc-bot.mjs (Final Bots → monorepo)' });
 const AGENT = join(ROOT, 'services/btc-conservative-agent');
 const TARGET = join(AGENT, 'bot.py');
 const LOCAL_DIR = process.env.LOCAL_BOT_DIR ?? 'C:/Users/user/Desktop/Final Bots';
@@ -25,13 +27,16 @@ const LOCAL = process.env.LOCAL_BOT ?? join(LOCAL_DIR, 'bybit_bot.py');
 const force =
   process.argv.includes('--force') ||
   process.env.SYNC_LOCAL_BOT_FORCE === '1' ||
-  process.env.SYNC_LOCAL_BOT_FORCE === 'true';
+  process.env.SYNC_LOCAL_BOT_FORCE === 'true' ||
+  process.env.BOT_SYNC_FORCE === '1' ||
+  process.env.BOT_SYNC_FORCE === 'true';
 
 if (!force) {
   console.error(
     'Refusing blunt local→global sync. Global showcase bot is maintained separately from local lab (:7800).',
   );
-  console.error('To promote intentional changes: node scripts/sync-local-btc-bot.mjs --force');
+  console.error('See config/bot-architecture.lock.json and .cursor/rules/no-blunt-bot-sync.mdc');
+  console.error('Human override: BOT_SYNC_FORCE=1 node scripts/sync-local-btc-bot.mjs --force');
   process.exit(1);
 }
 

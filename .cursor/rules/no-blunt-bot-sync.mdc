@@ -1,0 +1,35 @@
+---
+description: Block blunt bot sync — local lab vs global showcase are different architectures
+alwaysApply: true
+---
+
+# Do NOT blunt-sync trading bot code
+
+Read `config/bot-architecture.lock.json` before any bot sync or deploy that touches `bot.py`.
+
+## Two different bots
+
+| | Local lab (legacy) | Global showcase (canonical) |
+|--|-------------------|----------------------------|
+| Source | `C:/Users/user/Desktop/Final Bots/bybit_bot.py` | `services/btc-conservative-agent/bot.py` |
+| Port | `:7800` | `:7002` |
+| Public | none | `https://bot.doxxedcrypto.digital` |
+
+They **diverged architecturally**. Blunt sync overwrites monorepo fixes (e.g. `pathway_lab_validation.py` imports).
+
+## STOP — call out the user
+
+If you are told to sync, mirror, or pull `bybit_bot.py` into this repo:
+
+1. **Do not run** `sync-local-btc-bot.mjs`, `sync-btc-research-bot.mjs`, or `npm run sync:btc-research-bot`
+2. **Tell the user** blunt sync is blocked and dangerous for this architecture
+3. **Edit in place** under `services/btc-conservative-agent/` instead
+4. Only use `BOT_SYNC_FORCE=1` / `--force` if the user **explicitly** confirms after your warning
+
+## Safe (not bot code sync)
+
+- `npm run sync:production` / `sync:all` — Vercel/Railway/Neon infra
+- `npm run wire:home-bot` — point cloud at home tunnel URL
+- `RECOVER-GLOBAL-STACK.cmd`, `start-home-bot.ps1` — run bot from repo checkout
+
+Scripts enforce the lock and exit with the same message if invoked without force.

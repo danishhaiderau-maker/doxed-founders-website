@@ -491,12 +491,21 @@ export class TradingAgentsService implements OnModuleInit {
 
   async getBotBridgeStatus() {
     const enabled = await this.botBridge.isEnabledAsync();
+    const botUrl = await this.botBridge.resolveBotUrl();
     if (!enabled) {
-      return { status: 'offline' as const, label: 'Agent offline' };
+      return {
+        status: 'offline' as const,
+        label: 'Agent offline (bot URL not wired)',
+        botUrl,
+      };
     }
     const reachable = await this.botBridge.isReachable(true);
     if (!reachable) {
-      return { status: 'offline' as const, label: 'Showcase bot offline (stopped on Railway)' };
+      return {
+        status: 'offline' as const,
+        label: `Showcase bot unreachable${botUrl ? ` at ${botUrl}` : ''} — click Wire to site on Home Command Center`,
+        botUrl,
+      };
     }
     const state = await this.botBridge.fetchState(true);
     let status: 'online' | 'offline' | 'updating' = 'offline';
@@ -515,7 +524,8 @@ export class TradingAgentsService implements OnModuleInit {
           ? 'Agent online'
           : status === 'updating'
             ? 'Agent updating'
-            : 'Showcase bot offline (stopped on Railway)',
+            : 'Showcase bot offline',
+      botUrl,
     };
   }
 

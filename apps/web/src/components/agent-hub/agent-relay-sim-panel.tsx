@@ -129,7 +129,7 @@ export function AgentRelaySimPanel({
           <h2 className="mt-1 text-lg font-bold text-white">Option B paper relay</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
             Virtual $20 lots on merged BTC-PERP — same relay logic as live copy, no real exchange
-            orders. Paper book only on this tab; use Research local bot tab to compare admin signals.
+            orders. Paper book only on this tab; showcase signals come from global bot :7002 (not local lab :7800).
           </p>
         </div>
         {signedIn ? (
@@ -279,8 +279,8 @@ export function AgentRelaySimPanel({
             </p>
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
-              Sim is running but no lots yet — waiting for the next mirrored showcase signal. Switch
-              to Research local bot to see what the admin bot is doing now.
+              Sim is running but no lots yet — waiting for the next mirrored showcase signal from :7002.
+              Check the Showcase desk tab for live admin bot activity.
             </p>
           ) : null}
           <AgentTransparencyTables liveBook={simBook} maxRows={10} />
