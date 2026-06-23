@@ -330,9 +330,9 @@ try:
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
 except ImportError:
-    EXPECTED_BOT_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
+    EXPECTED_BOT_VERSION = "v10.3-dashboard-ultimate-gate-2026-06-23"
     EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.2-ai-chase-bands-desk-2026-06-23"
+    ANALYZER_SYNC_ID = "v10.3-dashboard-ultimate-gate-2026-06-23"
     RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
     SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
     TRAIL_LADDER_SCENARIO_C = [
