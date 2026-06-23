@@ -30,11 +30,13 @@ import { CopyRelaySimService } from './copy-relay-sim.service';
 import { ShowcaseSessionSyncService } from './showcase-session-sync.service';
 import {
   mapBotStateToPublicDashboard,
+  mapBotStateToAgentStats,
   sanitizeActivityForPublic,
   filterActivityToExecutedTrades,
   mapBotStateToExecutedTradesActivity,
   mapBotStateToActivity,
   type BotActivityEntry,
+  type BotApiState,
 } from './bot-state.mapper';
 import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
 import {
@@ -258,6 +260,7 @@ export class TradingAgentsService implements OnModuleInit {
   async onModuleInit() {
     await this.ensureSeed().catch(() => undefined);
     await this.syncConservativeBtcAgentRecord().catch(() => undefined);
+    await this.botBridge.resolveBotUrl().catch(() => null);
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 
@@ -271,8 +274,8 @@ export class TradingAgentsService implements OnModuleInit {
       },
     });
     await this.syncShowcaseMetricsFromBot().catch(() => undefined);
-    if (this.botBridge.isEnabled()) {
-      const bot = await this.botBridge.fetchState(true);
+    if (await this.botBridge.isEnabledAsync()) {
+      const bot = await this.botBridge.fetchState(true, 'relay');
       if (bot) {
         await this.showcaseSessionSync.syncFromBotState(bot).catch(() => undefined);
       }
@@ -628,7 +631,8 @@ export class TradingAgentsService implements OnModuleInit {
       ? await this.resolveUserInstanceOverlay(agent.id, userId)
       : null;
 
-    return this.enrichWithBotLive(agent, {
+    // Live stats come from /dashboard poll — avoid blocking profile paint on home-bot round-trips.
+    return serializeAgent(agent, {
       following,
       hired,
       exchangeProvider,
@@ -864,10 +868,30 @@ export class TradingAgentsService implements OnModuleInit {
 
   /** Public showcase dashboard — user instance overlays their own $500 session when signed in. */
   async getPublicDashboard(slug: string, userId?: string, _role?: string) {
-    const payload = await this.getDashboard(slug, { publicSafe: true });
-    const { rawBotState: _raw, ...rest } = payload as typeof payload & {
-      rawBotState?: unknown;
-    };
+    const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agentRow) throw new NotFoundException('Agent not found');
+
+    let sharedBot: BotApiState | null = null;
+    if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
+      sharedBot = await this.botBridge.fetchState(true, 'relay');
+    }
+
+    const rest =
+      sharedBot && slug === 'conservative-btc'
+        ? {
+            agent: serializeAgent(agentRow, {
+              liveStats: mapBotStateToAgentStats(sharedBot),
+              botConnected: true,
+            }),
+            dashboard: mapBotStateToPublicDashboard(sharedBot),
+            updatedAt: new Date().toISOString(),
+            botConnected: true,
+            botSource: 'LIVE' as const,
+            strategyMode: sharedBot.strategy_mode ?? 'RESEARCH',
+            executionPaused: sharedBot.execution_paused ?? false,
+            executionReason: sharedBot.execution_reason ?? null,
+          }
+        : await this.getDashboard(slug, { publicSafe: true });
 
     let userInstance: UserInstanceStats | null = null;
     let viewScope: 'showcase' | 'user' = 'showcase';
@@ -930,27 +954,22 @@ export class TradingAgentsService implements OnModuleInit {
 
     let showcaseFlash = null;
     if (slug === 'conservative-btc') {
-      const bot = (await this.botBridge.isEnabledAsync())
-        ? await this.botBridge.fetchState()
-        : null;
-      showcaseFlash = buildShowcaseFlashFromBot(bot, {
+      showcaseFlash = buildShowcaseFlashFromBot(sharedBot, {
         botConnected: Boolean(rest.botConnected),
         executionPaused: Boolean(rest.executionPaused),
       });
     }
 
     const showcaseActivityFromBook = mapLiveBookToActivity(showcaseLiveBook, 'showcase');
-    const listActivityRows = await this.listActivity(slug, 50, true, undefined);
-    let showcaseActivity = mergeActivityFeeds(listActivityRows, showcaseActivityFromBook);
-
-    if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
-      const botForActivity = await this.botBridge.fetchState();
-      if (botForActivity) {
-        const executedOnly = filterActivityToExecutedTrades(
-          mapBotStateToExecutedTradesActivity(botForActivity, agent.name),
-        );
-        showcaseActivity = mergeActivityFeeds(executedOnly, showcaseActivity);
-      }
+    let showcaseActivity = showcaseActivityFromBook;
+    if (sharedBot) {
+      const executedOnly = filterActivityToExecutedTrades(
+        mapBotStateToExecutedTradesActivity(sharedBot, agent.name),
+      );
+      showcaseActivity = mergeActivityFeeds(executedOnly, showcaseActivity);
+    } else {
+      const listActivityRows = await this.listActivity(slug, 50, true, undefined);
+      showcaseActivity = mergeActivityFeeds(listActivityRows, showcaseActivity);
     }
 
     let userActivity = showcaseActivity;
@@ -1043,9 +1062,11 @@ export class TradingAgentsService implements OnModuleInit {
             ? buildTradeLifecycleIntegrity(lifecycleParticipants)
             : null;
 
-        const botRaw = this.botBridge.isEnabled()
-          ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
-          : null;
+        const botRaw =
+          sharedBot ??
+          ((await this.botBridge.isEnabledAsync())
+            ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
+            : null);
         const fidelityParticipants = lifecycleParticipants.filter((p) =>
           p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
         );
@@ -1177,7 +1198,13 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
-  async listActivity(slug: string, limit = 30, publicSafe = false, userId?: string) {
+  async listActivity(
+    slug: string,
+    limit = 30,
+    publicSafe = false,
+    userId?: string,
+    preloadedBot?: BotApiState | null,
+  ) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
 
@@ -1192,7 +1219,7 @@ export class TradingAgentsService implements OnModuleInit {
     }
 
     if (slug === 'conservative-btc' && (await this.botBridge.isEnabledAsync())) {
-      const bot = await this.botBridge.fetchState();
+      const bot = preloadedBot ?? (await this.botBridge.fetchState(false, 'relay'));
       if (bot) {
         const take = Math.min(50, Math.max(1, limit));
         const source = publicSafe

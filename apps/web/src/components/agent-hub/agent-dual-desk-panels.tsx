@@ -171,7 +171,7 @@ export function AgentDeskView({
         badgeClassName="text-emerald-300"
         borderClassName="border-emerald-500/45"
         title={`Connect ${exchange} to copy trades`}
-        subtitle="Your Bitfinex copy book lives here once API keys are connected. Use Research local bot tab to watch the admin :7800 bot — data stays separate."
+        subtitle="Your Bitfinex copy book lives here once API keys are connected. Use Global showcase bot tab to watch the admin :7002 bot — data stays separate."
       >
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-5 text-center">
           <p className="text-sm text-emerald-100/90">

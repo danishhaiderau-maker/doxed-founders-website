@@ -56,7 +56,9 @@ export class CopyRelaySimService {
     sim.startedAt = new Date().toISOString();
     sim.ledger = emptyCopyRelaySimState(COPY_RELAY_SIM_DEFAULT_BALANCE_USD).ledger;
 
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
+    const bot = (await this.botBridge.isEnabledAsync())
+      ? await this.botBridge.fetchState(true, 'relay').catch(() => null)
+      : null;
     if (bot && typeof bot === 'object') {
       const stats = mapBotStateToAgentStats(bot as BotApiState);
       sim.showcasePnlUsd = stats.sessionPnlUsd;
@@ -133,7 +135,9 @@ export class CopyRelaySimService {
       showcaseTradeCount: 0,
     };
 
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
+    const bot = (await this.botBridge.isEnabledAsync())
+      ? await this.botBridge.fetchState(true, 'relay').catch(() => null)
+      : null;
     if (bot && typeof bot === 'object') {
       const stats = mapBotStateToAgentStats(bot as BotApiState);
       sim.showcasePnlUsd = stats.sessionPnlUsd;
@@ -189,7 +193,9 @@ export class CopyRelaySimService {
       return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchStateForExecution(true).catch(() => null) : null;
+    const bot = (await this.botBridge.isEnabledAsync())
+      ? await this.botBridge.fetchStateForExecution(true).catch(() => null)
+      : null;
 
     const lines = [
       'closed_at_melbourne,trade_id,local_bot_trade_id,match_kind,status,direction,local_bot_entry,relay_entry,entry_lag_sec,local_bot_exit,relay_exit,exit_lag_sec,local_bot_entry_at_melbourne,local_bot_exit_at_melbourne,relay_entry_at_melbourne,relay_exit_at_melbourne,relay_pnl_usd,relay_pnl_pct,exit_reason,created_at_melbourne',
@@ -364,7 +370,9 @@ export class CopyRelaySimService {
     const mark = await this.bitfinex.getMarkPrice().catch(() => 0);
     const ledger = client?.getLedger() ?? sim.ledger;
     const sessionPnlUsd = client ? client.sessionPnlUsd(mark) : sim.sessionPnlUsd;
-    const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchState().catch(() => null) : null;
+    const bot = (await this.botBridge.isEnabledAsync())
+      ? await this.botBridge.fetchState(true, 'relay').catch(() => null)
+      : null;
     const showcasePnlUsd =
       bot && typeof bot === 'object'
         ? mapBotStateToAgentStats(bot as BotApiState).sessionPnlUsd

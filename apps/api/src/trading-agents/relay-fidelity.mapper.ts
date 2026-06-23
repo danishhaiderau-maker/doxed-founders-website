@@ -402,7 +402,7 @@ export function buildRelayFidelitySnapshot(input: {
       orphans.push({
         tradeId: row.tradeId,
         kind: 'relay_without_showcase',
-        detail: `Relay filled but no local bot :7800 entry matched (match=${row.matchKind})`,
+        detail: `Relay filled but no global showcase bot :7002 entry matched (match=${row.matchKind})`,
       });
     }
   }
