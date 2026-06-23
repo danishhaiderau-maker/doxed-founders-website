@@ -129,6 +129,13 @@ function Invoke-StartAllGlobal {
   ) -Title "Doxed Start Everything"
 }
 
+function Invoke-StopAllGlobal {
+  Start-VisibleConsole (Join-Path $scriptDir "home-stack-stop-everything.ps1") @(
+    "-BotPort", "$BotPort",
+    "-AnalyzerPort", "$AnalyzerPort"
+  ) -Title "Doxed Stop Everything"
+}
+
 function Invoke-RestartBridge {
   Start-VisibleConsole (Join-Path $scriptDir "ensure-home-bridge.ps1") @("-Force") -Title "Doxed Home Bridge :7810"
 }
@@ -271,20 +278,21 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Stop analyzer queued (background)." }
     }
     "stop-all" {
-      Invoke-HomeCommandBackground "stop-all-global"
+      Invoke-StopAllGlobal
       return @{
         ok = $true
         message = @(
-          "Global showcase stop queued (:$BotPort bot, :$AnalyzerPort analyzer, tunnel)."
-          "Local lab :7800/:9001 is NOT stopped - use Stop all local for that."
+          "Stop everything window opened."
+          "Stopping :$BotPort bot, :$AnalyzerPort analyzer, tunnel."
+          "Bridge :7810 stays running. Local lab :7800/:9001 untouched."
         ) -join "`n"
       }
     }
     "stop-all-global" {
-      Invoke-HomeCommandBackground "stop-all-global"
+      Invoke-StopAllGlobal
       return @{
         ok = $true
-        message = "Global showcase stop queued (:$BotPort + :$AnalyzerPort + tunnel). Local lab untouched."
+        message = "Stop everything window opened (:$BotPort + :$AnalyzerPort + tunnel). Bridge stays running."
       }
     }
     "stop-all-local" {
