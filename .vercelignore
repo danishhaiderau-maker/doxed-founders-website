@@ -15,5 +15,7 @@ prisma/*.db
 prisma/*.db-journal
 docker/data/
 .home-stack-supervisor.lock
+.home-analyzer-start.lock
+.home-*.lock
 .home-*.log
 logs/
