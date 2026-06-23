@@ -48,7 +48,7 @@ if (-not (Test-Path $agentDir)) {
   exit 1
 }
 
-# Stale lock from a crashed start blocks Agent Hub — clear when nothing is listening.
+# Stale lock from a crashed start blocks Agent Hub - clear when nothing is listening.
 if (-not (Test-PortOpen $AnalyzerPort)) {
   Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
@@ -57,7 +57,7 @@ $lockHandle = $null
 try {
   $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
-  Write-Host "Stale analyzer lock — clearing and retrying..." -ForegroundColor Yellow
+  Write-Host "Stale analyzer lock - clearing and retrying..." -ForegroundColor Yellow
   Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   try {
     $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
