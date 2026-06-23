@@ -35,7 +35,7 @@ import type {
 } from '@/lib/api';
 
 const PUBLIC_TABS = ['Overview', 'Live Trade', 'Trade Journey', 'Activity', 'Followers'] as const;
-const ADMIN_EXTRA_TABS = ['Reasoning'] as const;
+const ADMIN_EXTRA_TABS = ['Performance', 'Reasoning'] as const;
 const HIGHLIGHT_TABS = ['Live Trade', 'Trade Journey', 'Activity'] as const;
 type Tab = (typeof PUBLIC_TABS)[number] | (typeof ADMIN_EXTRA_TABS)[number];
 
