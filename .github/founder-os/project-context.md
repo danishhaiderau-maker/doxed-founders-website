@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix PowerShell parse error from em dash in analyzer start script.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
