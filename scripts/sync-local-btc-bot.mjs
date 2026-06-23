@@ -1,5 +1,14 @@
 #!/usr/bin/env node
-/** Copy local Final Bots lab → global showcase agent dir (bot.py + pathway + analyzer). */
+/**
+ * OPTIONAL: copy local Final Bots lab → global showcase agent dir.
+ *
+ * Global showcase (:7002) and local lab (:7800) are architecturally diverging.
+ * Do NOT run this routinely — only with explicit --force when you intend to promote
+ * specific files from the local lab.
+ *
+ *   node scripts/sync-local-btc-bot.mjs --force
+ *   SYNC_LOCAL_BOT_FORCE=1 node scripts/sync-local-btc-bot.mjs --force
+ */
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -12,6 +21,19 @@ const AGENT = join(ROOT, 'services/btc-conservative-agent');
 const TARGET = join(AGENT, 'bot.py');
 const LOCAL_DIR = process.env.LOCAL_BOT_DIR ?? 'C:/Users/user/Desktop/Final Bots';
 const LOCAL = process.env.LOCAL_BOT ?? join(LOCAL_DIR, 'bybit_bot.py');
+
+const force =
+  process.argv.includes('--force') ||
+  process.env.SYNC_LOCAL_BOT_FORCE === '1' ||
+  process.env.SYNC_LOCAL_BOT_FORCE === 'true';
+
+if (!force) {
+  console.error(
+    'Refusing blunt local→global sync. Global showcase bot is maintained separately from local lab (:7800).',
+  );
+  console.error('To promote intentional changes: node scripts/sync-local-btc-bot.mjs --force');
+  process.exit(1);
+}
 
 const LOCAL_MIRROR_FILES = [
   ['combo_pathway_config.py', join(AGENT, 'combo_pathway_config.py')],

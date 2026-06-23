@@ -575,6 +575,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     return null;
   }
 
+  /**
+   * Bitfinex relay must not place before global showcase has a resting limit —
+   * mirrors virtual defer / chase-bucket gating on :7002.
+   */
+  private showcaseCopyEntryReady(
+    bot: import('./bot-state.mapper').BotApiState | null,
+    tradeId: string | undefined,
+  ): { ready: boolean; reason?: string } {
+    if (!tradeId || !bot) return { ready: true };
+    const pending = (bot.orders ?? []).find(
+      (o) => o.trade_id === tradeId && (o.status === 'PENDING' || o.status === 'ORDERED'),
+    );
+    if (pending?.limit_price && pending.limit_price > 0) return { ready: true };
+    const sig = (bot.signal_info?.signals ?? []).find(
+      (s) => String(s.trade_id ?? '') === tradeId,
+    );
+    const st = String(sig?.status ?? '').toUpperCase();
+    if (
+      st === 'AWAITING_DASHBOARD_CHASE' ||
+      st === 'AWAITING_CHASE_3PLUS' ||
+      st === 'AWAITING_MICRO' ||
+      st === 'AWAITING_5M' ||
+      st === 'AWAITING_MIN_AGE'
+    ) {
+      return {
+        ready: false,
+        reason:
+          'Showcase bot has not placed a limit yet (virtual defer / chase bucket) — relay waiting.',
+      };
+    }
+    return { ready: true };
+  }
+
   private async buildVirtualLotSummary(
     participants: Array<{ id: string; status: SignalCycleStatus }>,
   ): Promise<VirtualLotSummary> {
@@ -1014,8 +1047,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return false;
       }
 
-      if (tradeId && this.botBridge.isEnabled()) {
+      if (tradeId && (await this.botBridge.isEnabledAsync())) {
         const botState = await this.botBridge.fetchStateForExecution(true).catch(() => null);
+        const defer = this.showcaseCopyEntryReady(botState, tradeId);
+        if (!defer.ready) {
+          await this.prisma.tradingAgentInstance.update({
+            where: { id: instance.id },
+            data: { lastError: defer.reason ?? 'Waiting for showcase limit.' },
+          });
+          return false;
+        }
         const botLimit = this.resolveBotLimitPrice(botState, tradeId);
         if (botLimit != null && botLimit > 0) {
           const anchored = sanitizeLimitPrice(mark, botLimit, intent.direction);
