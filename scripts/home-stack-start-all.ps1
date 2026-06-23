@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$Host.UI.RawUI.WindowTitle = "Doxed Start Everything"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode

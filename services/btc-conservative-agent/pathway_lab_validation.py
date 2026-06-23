@@ -330,17 +330,12 @@ def run_ai_scan_role_validation() -> dict:
     """
     spawn_src = ""
     exp_spawn_src = ""
-    bot_mod = None
-    for mod_name in ("bot", "bybit_bot"):
-        try:
-            bot_mod = __import__(mod_name)
-            spawn_src = inspect.getsource(bot_mod.spawn_combo_lanes_from_ai_scan)
-            exp_spawn_src = inspect.getsource(bot_mod.spawn_experimental_lanes_from_ai_scan)
-            break
-        except Exception:
-            continue
-    if not bot_mod:
-        spawn_src = "import_error:bot and bybit_bot unavailable"
+    try:
+        import bybit_bot as bot
+        spawn_src = inspect.getsource(bot.spawn_combo_lanes_from_ai_scan)
+        exp_spawn_src = inspect.getsource(bot.spawn_experimental_lanes_from_ai_scan)
+    except Exception as exc:
+        spawn_src = f"import_error:{exc}"
         exp_spawn_src = spawn_src
 
     checks = [

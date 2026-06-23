@@ -121,6 +121,14 @@ function Invoke-HomeCommandBackground([string]$Action) {
   )
 }
 
+function Invoke-StartAllGlobal {
+  Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
+  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @(
+    "-BotPort", "$BotPort",
+    "-AnalyzerPort", "$AnalyzerPort"
+  ) -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
+}
+
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all-local" {
@@ -131,7 +139,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-all-global" {
-      Invoke-HomeCommandBackground "start-all-global"
+      Invoke-StartAllGlobal
       return @{
         ok = $true
         message = @(
@@ -162,7 +170,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           ) -join "`n"
         }
       }
-      Invoke-HomeCommandBackground "start-all-global"
+      Invoke-StartAllGlobal
       return @{
         ok = $true
         message = @(

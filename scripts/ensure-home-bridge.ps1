@@ -1,7 +1,8 @@
 # Kill stale bridge listeners and start a single home-stack-launcher on :7810.
 param(
   [int]$Port = 7810,
-  [switch]$Quiet
+  [switch]$Quiet,
+  [switch]$Force
 )
 
 $ErrorActionPreference = "Continue"
@@ -28,9 +29,13 @@ function Test-BridgeHealthy {
   }
 }
 
-if (Test-BridgeHealthy) {
+if (Test-BridgeHealthy -and -not $Force) {
   Log "Bridge already healthy on :$Port"
   exit 0
+}
+
+if ($Force -and (Test-BridgeHealthy)) {
+  Log "Force restart requested - recycling bridge on :$Port"
 }
 
 Log "Stopping stale bridge + supervisor (fast path, no WMI)..."
