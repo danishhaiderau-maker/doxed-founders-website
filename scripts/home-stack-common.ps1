@@ -81,30 +81,105 @@ function Test-TunnelLiveCached([string]$Url) {
 function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
   try {
-    $pattern = ":$ListenPort\s"
-    $job = Start-Job -ScriptBlock {
-      param($Pat)
-      netstat -ano | Select-String $Pat
-    } -ArgumentList $pattern
-    if (-not (Wait-Job $job -Timeout 5)) {
-      Stop-Job $job -Force | Out-Null
-      Remove-Job $job -Force | Out-Null
-      return $killed
-    }
-    Receive-Job $job | ForEach-Object {
-      $line = "$_".Trim()
-      if ($line -notmatch 'LISTENING') { return }
-      if ($line -match '\s(\d+)\s*$') {
-        $procId = [int]$matches[1]
+    Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique |
+      ForEach-Object {
+        $procId = [int]$_
         if ($procId -gt 0 -and $procId -ne 4 -and $killed -notcontains $procId) {
           Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           $killed += $procId
         }
       }
-    }
-    Remove-Job $job -Force | Out-Null
   } catch { }
   return $killed
+}
+
+function Stop-HomeStackSupervisor {
+  $killed = @()
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and (
+        $_.CommandLine -like "*home-stack-supervisor.ps1*" -or
+        $_.CommandLine -like "*auto-wire-after-tunnel.ps1*"
+      )
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+  Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.pid") -Force -ErrorAction SilentlyContinue
+  try {
+    if (Test-Path (Join-Path $repoRoot ".home-stack-supervisor.lock")) {
+      Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
+    }
+  } catch { }
+  return $killed
+}
+
+function Close-ShowcaseStackConsoles {
+  param(
+    [int]$GlobalBotPort = 7002,
+    [int]$GlobalAnalyzerPort = 9500,
+    [switch]$KeepBridge,
+    [int[]]$ExcludeProcessIds = @()
+  )
+  $closed = @()
+  $exclude = @{}
+  foreach ($id in $ExcludeProcessIds) {
+    if ($id -gt 0) { $exclude[$id] = $true }
+  }
+
+  $titlePrefixes = @(
+    "Doxed Bot :$GlobalBotPort",
+    "Doxed Analyzer :$GlobalAnalyzerPort",
+    "Doxed Analyzer (once)",
+    "Doxed Cloudflare Tunnel",
+    "Doxed Start Everything",
+    "Doxed Stack Start",
+    "Doxed Stop Everything"
+  )
+  if (-not $KeepBridge) {
+    $titlePrefixes += "Doxed Home Bridge"
+    $titlePrefixes += "TEST Bridge"
+  }
+
+  Get-Process cmd, powershell, pwsh -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($exclude.ContainsKey($_.Id)) { return }
+    $t = $_.MainWindowTitle
+    if (-not $t) { return }
+    foreach ($prefix in $titlePrefixes) {
+      if ($t -like "$prefix*") {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        $closed += "title:$t"
+        return
+      }
+    }
+  }
+
+  $scriptNeedles = @(
+    "start-home-bot.ps1",
+    "start-home-analyzer.ps1",
+    "restart-home-tunnel.ps1",
+    "home-stack-start-everything.ps1",
+    "home-stack-start-all.ps1"
+  )
+  if (-not $KeepBridge) {
+    $scriptNeedles += @("ensure-home-bridge.ps1", "home-stack-launcher.ps1")
+  }
+
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      if ($exclude.ContainsKey($_.ProcessId)) { return $false }
+      if (-not $_.CommandLine) { return $false }
+      foreach ($needle in $scriptNeedles) {
+        if ($_.CommandLine -like "*$needle*") { return $true }
+      }
+      return $false
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $closed += "pid:$($_.ProcessId)"
+    }
+
+  return $closed
 }
 
 function Stop-ListenPort([int]$ListenPort) {
@@ -213,28 +288,30 @@ function Close-HomeStackWindowTitles {
 function Stop-GlobalStackFast {
   param(
     [int]$GlobalBotPort = 7002,
-    [int]$GlobalAnalyzerPort = 9500
+    [int]$GlobalAnalyzerPort = 9500,
+    [int[]]$ExcludeProcessIds = @()
   )
+  # Stop supervisor first so it cannot restart bot/analyzer/tunnel during shutdown.
+  $supervisor = @(Stop-HomeStackSupervisor)
+  $tunnel = @(Stop-Cloudflared)
+  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
+  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
   $botPort = @(Stop-ListenPortFast $GlobalBotPort)
   $analyzerPort = @(Stop-ListenPortFast $GlobalAnalyzerPort)
-  $tunnel = @(Stop-Cloudflared)
-  $titles = @(
-    "Doxed Bot :$GlobalBotPort",
-    "Doxed Analyzer :$GlobalAnalyzerPort",
-    "Doxed Analyzer (once)",
-    "Doxed Cloudflare Tunnel",
-    "Doxed Cloudflare Tunnel (stable)",
-    "Doxed Start Everything",
-    "Doxed Stack Start"
-  )
-  foreach ($title in $titles) {
-    & taskkill.exe /F /FI "WINDOWTITLE eq $title" 2>$null | Out-Null
-  }
+  Start-Sleep -Seconds 1
+  $botPort += @(Stop-ListenPortFast $GlobalBotPort)
+  $analyzerPort += @(Stop-ListenPortFast $GlobalAnalyzerPort)
+  $consoles = @(Close-ShowcaseStackConsoles -GlobalBotPort $GlobalBotPort -GlobalAnalyzerPort $GlobalAnalyzerPort -KeepBridge -ExcludeProcessIds $ExcludeProcessIds)
+  Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   Clear-TunnelUrlFile
   return @{
-    botPort = $botPort
-    analyzerPort = $analyzerPort
+    botPort = @($botPort | Select-Object -Unique)
+    analyzerPort = @($analyzerPort | Select-Object -Unique)
     tunnel = $tunnel
+    supervisor = $supervisor
+    pythonBot = $botPy
+    pythonAnalyzer = $analyzerPy
+    consoles = $consoles
   }
 }
 
