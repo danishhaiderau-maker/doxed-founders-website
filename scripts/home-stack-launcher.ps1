@@ -123,10 +123,14 @@ function Invoke-HomeCommandBackground([string]$Action) {
 
 function Invoke-StartAllGlobal {
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @(
+  Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
     "-BotPort", "$BotPort",
     "-AnalyzerPort", "$AnalyzerPort"
-  ) -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
+  ) -Title "Doxed Start Everything"
+}
+
+function Invoke-RestartBridge {
+  Start-VisibleConsole (Join-Path $scriptDir "ensure-home-bridge.ps1") @("-Force") -Title "Doxed Home Bridge :7810"
 }
 
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
@@ -143,9 +147,9 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{
         ok = $true
         message = @(
-          "Global start queued."
-          "Bot :$BotPort + Analyzer :$AnalyzerPort + tunnel (windows opening)."
-          "Refresh status in 30-60 seconds."
+          "Start everything launched (visible consoles)."
+          "Step 0: bridge reload  |  Step 1: bot :$BotPort  |  Step 2: analyzer :$AnalyzerPort  |  Step 3: tunnel"
+          "Four windows should stay open. Refresh status in 30-60 seconds."
         ) -join "`n"
       }
     }
@@ -174,36 +178,47 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{
         ok = $true
         message = @(
-          "Global start queued."
-          "Bot :$BotPort + Analyzer :$AnalyzerPort + tunnel (windows opening)."
+          "Start everything launched (visible consoles)."
+          "Bridge reload + bot :$BotPort + analyzer :$AnalyzerPort + tunnel."
           "Refresh status in 30-60 seconds."
         ) -join "`n"
       }
     }
-    "start-bot" {
-      Invoke-HomeCommandBackground "start-bot"
+    "restart-bridge" {
+      Invoke-RestartBridge
       return @{
         ok = $true
-        message = "Bot start queued - window opens on :$BotPort in a few seconds."
+        message = @(
+          "Bridge restart window opened (Doxed Home Bridge :7810)."
+          "Keep it open - Agent Hub buttons need it."
+          "Hard-refresh Agent Hub after bridge shows OK."
+        ) -join "`n"
+      }
+    }
+    "start-bot" {
+      Start-VisibleConsole (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort") -Title "Doxed Bot :$BotPort"
+      return @{
+        ok = $true
+        message = "Bot console opened on :$BotPort - keep the window open."
       }
     }
     "start-analyzer" {
-      Invoke-HomeCommandBackground "start-analyzer"
+      Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
       return @{
         ok = $true
-        message = "Analyzer start queued - console + :$AnalyzerPort dashboard when ready."
+        message = "Analyzer console opened on :$AnalyzerPort - keep the window open."
       }
     }
     "start-analyzer-once" {
       if ($stackMode.Mode -eq "local-collection") {
-        Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Local Collection Analyzer (once)" -Show Normal
+        Start-VisibleConsole (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-Once") -Title "Local Collection Analyzer (once)"
       } else {
-        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-Once") -NoExit -WindowTitle "Doxed Analyzer (once)" -Show Normal
+        Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-Once") -Title "Doxed Analyzer (once)"
       }
       return @{ ok = $true; message = "Analyzer single pass started on :$AnalyzerPort." }
     }
     "start-tunnel" {
-      Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
+      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
       if (Use-NamedTunnel) {
         return @{ ok = $true; message = "Named tunnel window opened - keep it open. URL: https://bot.doxxedcrypto.digital" }
       }
@@ -307,6 +322,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       "^/health$" { @{ ok = $true; launcher = "running" } }
       "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
       "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
+      "^/cmd/restart-bridge$" { Invoke-HomeCommand "restart-bridge" $tunnelParam }
       "^/cmd/start-all-global$" { Invoke-HomeCommand "start-all-global" $tunnelParam }
       "^/cmd/start-all-local$" { Invoke-HomeCommand "start-all-local" $tunnelParam }
       "^/cmd/start-bot$" { Invoke-HomeCommand "start-bot" $tunnelParam }
