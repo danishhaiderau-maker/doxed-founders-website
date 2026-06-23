@@ -52,12 +52,12 @@ if (Test-PortOpen $AnalyzerPort) {
   try {
     $r = Invoke-WebRequest -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -UseBasicParsing -TimeoutSec 3
     if ($r.StatusCode -eq 200) {
-      Write-Host "Analyzer dashboard healthy on :$AnalyzerPort — not starting a duplicate." -ForegroundColor Yellow
+      Write-Host "Analyzer dashboard healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
       if (-not $NoWait) { Wait-ForKey }
       exit 0
     }
   } catch {
-    Write-Host "Port $AnalyzerPort open but unhealthy — clearing stale listener..." -ForegroundColor Yellow
+    Write-Host "Port $AnalyzerPort open but unhealthy - clearing stale listener..." -ForegroundColor Yellow
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 2
   }
