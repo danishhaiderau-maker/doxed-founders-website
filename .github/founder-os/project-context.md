@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix dashboard toggle handlers and analyzer lock; support hidden bot start.
 
 ## Last Activity
 
