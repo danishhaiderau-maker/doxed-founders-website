@@ -47,13 +47,25 @@ if (-not (Test-Path $agentDir)) {
   Wait-ForKey
   exit 1
 }
+
+# Stale lock from a crashed start blocks Agent Hub — clear when nothing is listening.
+if (-not (Test-PortOpen $AnalyzerPort)) {
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+}
+
 $lockHandle = $null
 try {
   $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
-  Write-Host "Another analyzer start is in progress - not starting a duplicate." -ForegroundColor Yellow
-  Wait-ForKey
-  exit 0
+  Write-Host "Stale analyzer lock — clearing and retrying..." -ForegroundColor Yellow
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  try {
+    $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+  } catch {
+    Write-Host "Another analyzer start is in progress - not starting a duplicate." -ForegroundColor Yellow
+    if (-not $NoWait) { Wait-ForKey }
+    exit 0
+  }
 }
 
 Set-Location $agentDir
@@ -76,7 +88,8 @@ if (Test-PortOpen $AnalyzerPort) {
   if (Test-AnalyzerHealthy) {
     Write-Host "Analyzer healthy on :$AnalyzerPort (manifest + sync OK) - not starting a duplicate." -ForegroundColor Yellow
     if ($lockHandle) { $lockHandle.Dispose() }
-    Wait-ForKey
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+    if (-not $NoWait) { Wait-ForKey }
     exit 0
   }
   Write-Host "Port $AnalyzerPort has stale dashboard-only listener - clearing and starting full analyzer..." -ForegroundColor Yellow
@@ -95,6 +108,17 @@ Write-Host ""
 
 $pyArgs = @("research\analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
+
+if ($NoWait) {
+  Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
+  if ($lockHandle) {
+    try { $lockHandle.Dispose() } catch { }
+    $lockHandle = $null
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  }
+  Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Normal
+  exit 0
+}
 
 $exitCode = 0
 try {

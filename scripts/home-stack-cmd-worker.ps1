@@ -36,6 +36,7 @@ switch ($Action) {
     }
   }
   "start-analyzer" {
+    Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     if (Test-AnalyzerHung) {
       Stop-PythonMatching "analyzer_research_engine" | Out-Null
       & taskkill.exe /F /FI "WINDOWTITLE eq $analyzerTitle" 2>$null | Out-Null
