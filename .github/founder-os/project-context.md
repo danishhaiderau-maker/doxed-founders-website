@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix dashboard toggle handlers and analyzer lock; support hidden bot start.
+Fix PowerShell parse error from em dash in analyzer start script.
 
 ## Last Activity
 
