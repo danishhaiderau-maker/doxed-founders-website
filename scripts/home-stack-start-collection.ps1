@@ -43,8 +43,7 @@ function Start-LocalBotWindow {
     Start-Sleep -Seconds 2
   }
   if (-not (Test-BotHealthy)) {
-    $botScript = Join-Path $scriptDir "start-local-collection-bot.ps1"
-    cmd /c start "Local Collection Bot :$BotPort" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$botScript" -NoWait
+    Start-DetachedPs1 $botScript @("-NoWait") -NoExit -WindowTitle "Local Collection Bot :$BotPort" -Show Normal
     $messages.Add("[1/2] Bot window opened on :$BotPort")
     Start-Sleep -Seconds 18
   } else {
@@ -62,7 +61,7 @@ function Start-LocalAnalyzerWindow {
   }
   if (-not (Test-AnalyzerHealthy)) {
     $analyzerScript = Join-Path $scriptDir "start-local-collection-analyzer.ps1"
-    cmd /c start "Local Collection Analyzer :$AnalyzerPort" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$analyzerScript" -NoWait
+    Start-DetachedPs1 $analyzerScript @("-NoWait") -NoExit -WindowTitle "Local Collection Analyzer :$AnalyzerPort" -Show Normal
     $messages.Add("[2/2] Analyzer window opened on :$AnalyzerPort")
     Start-Sleep -Seconds 20
   } else {

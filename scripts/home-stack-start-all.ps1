@@ -18,7 +18,7 @@ if (-not (Test-BotHealthy)) {
     Start-Sleep -Seconds 2
   }
   $botScript = Join-Path $scriptDir "start-home-bot.ps1"
-  cmd /c start "Doxed Bot :$BotPort" powershell -NoExit -NoProfile -ExecutionPolicy Bypass -File "$botScript" -Port $BotPort -NoWait
+  Start-DetachedPs1 $botScript @("-Port", "$BotPort", "-NoWait") -NoExit -WindowTitle "Doxed Bot :$BotPort" -Show Normal
   $messages.Add("[1/3] Bot window opened on :$BotPort")
   Start-Sleep -Seconds 10
 } else {
