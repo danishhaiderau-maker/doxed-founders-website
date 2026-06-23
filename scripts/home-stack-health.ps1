@@ -22,7 +22,23 @@ function Test-BotHealthy {
 
 function Test-AnalyzerHealthy {
   if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
-  return (Test-HttpOk "http://127.0.0.1:$AnalyzerPort/api/status")
+  try {
+    $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 5
+    if (-not $s.ok) { return $false }
+    if ($s.generated_at) { return $true }
+    if ($s.analyzer_sync_match -eq $true) { return $true }
+    $manifestMtime = $null
+    if ($s.last_files -and $s.last_files.manifest) {
+      $manifestMtime = $s.last_files.manifest
+    }
+    if ($manifestMtime) { return $true }
+    # Stale dashboard-only listener at agent root (no manifest, wrong cwd).
+    $cwd = [string]$s.cwd
+    if ($cwd -and $cwd -notmatch '[\\/]research$') { return $false }
+    return $false
+  } catch {
+    return $false
+  }
 }
 
 function Test-BridgeHealthy {
