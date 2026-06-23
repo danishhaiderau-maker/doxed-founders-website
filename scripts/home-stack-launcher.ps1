@@ -210,10 +210,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       }
     }
     "start-analyzer" {
-      Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort") -Title "Doxed Analyzer :$AnalyzerPort"
+      Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
+      Start-VisibleConsole (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -Title "Doxed Analyzer :$AnalyzerPort"
       return @{
         ok = $true
-        message = "Analyzer console opened on :$AnalyzerPort - keep the window open."
+        message = "Analyzer start queued on :$AnalyzerPort - refresh status in 15-30 seconds."
       }
     }
     "start-analyzer-once" {

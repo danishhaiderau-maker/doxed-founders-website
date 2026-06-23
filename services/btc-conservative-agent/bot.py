@@ -17497,6 +17497,14 @@ DASHBOARD_JS = """(function () {
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
     window.updateEdge = updateEdge;
+    window.updateAiBands = updateAiBands;
+    window.updateChaseBuckets = updateChaseBuckets;
+    document.addEventListener('change', function (ev) {
+      const t = ev.target;
+      if (!t || !t.classList) return;
+      if (t.classList.contains('ai-band-cb')) updateAiBands();
+      if (t.classList.contains('chase-bucket-cb')) updateChaseBuckets();
+    });
   } catch (e) {
     console.error("DASHBOARD BOOT FAILURE", e);
     var bootSb = document.getElementById('serverBanner');

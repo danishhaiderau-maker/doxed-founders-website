@@ -49,6 +49,12 @@ Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
 Write-Host "Exports: /api/export_csv  /api/export_session_trades.csv"
 Write-Host ""
 
+if ($NoWait) {
+  Write-Host "Starting bot detached on port $Port ..."
+  Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden
+  exit 0
+}
+
 $exitCode = 0
 try {
   python btc_conservative_agent.py
