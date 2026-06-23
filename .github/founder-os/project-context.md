@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix admin Performance tab type for Vercel build
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
