@@ -39,6 +39,14 @@ if (-not (Test-Path $agentDir)) {
   Wait-ForKey
   exit 1
 }
+$lockHandle = $null
+try {
+  $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+} catch {
+  Write-Host "Another analyzer start is in progress — not starting a duplicate." -ForegroundColor Yellow
+  if (-not $NoWait) { Wait-ForKey }
+  exit 0
+}
 
 Set-Location $agentDir
 Get-Content $vaultEnv | ForEach-Object {
@@ -52,20 +60,7 @@ $env:RESEARCH_DASHBOARD_PORT = "9001"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:9001/"
 $env:BTC_AGENT_DATA_DIR = $agentDir
 
-# Avoid duplicate analyzer windows (port 9001 bind race kills the second instance instantly).
-if (Test-PortOpen 9001) {
-  Write-Host "Port 9001 already listening — analyzer dashboard is up." -ForegroundColor Yellow
-  if (-not $NoWait) { Wait-ForKey }
-  exit 0
-}
-$lockHandle = $null
-try {
-  $lockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-} catch {
-  Write-Host "Another analyzer start is in progress — not starting a duplicate." -ForegroundColor Yellow
-  if (-not $NoWait) { Wait-ForKey }
-  exit 0
-}
+# Avoid duplicate analyzer windows — require healthy HTTP or running python loop, not port alone.
 $existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine -like "*analyzer_research_engine*" } |
   Select-Object -First 1
@@ -74,6 +69,25 @@ if ($existing) {
   if ($lockHandle) { $lockHandle.Dispose() }
   if (-not $NoWait) { Wait-ForKey }
   exit 0
+}
+if (Test-PortOpen 9001) {
+  try {
+    $r = Invoke-WebRequest -Uri "http://127.0.0.1:9001/api/status" -UseBasicParsing -TimeoutSec 3
+    if ($r.StatusCode -eq 200) {
+      Write-Host "Analyzer dashboard healthy on :9001 — not starting a duplicate." -ForegroundColor Yellow
+      if ($lockHandle) { $lockHandle.Dispose() }
+      if (-not $NoWait) { Wait-ForKey }
+      exit 0
+    }
+  } catch {
+    Write-Host "Port 9001 open but /api/status failed — clearing stale listener..." -ForegroundColor Yellow
+    netstat -ano | Select-String ":9001\s" | ForEach-Object {
+      if ("$_" -match '\s(\d+)\s*$') {
+        Stop-Process -Id ([int]$matches[1]) -Force -ErrorAction SilentlyContinue
+      }
+    }
+    Start-Sleep -Seconds 2
+  }
 }
 
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"

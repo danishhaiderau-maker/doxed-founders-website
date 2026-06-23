@@ -4,12 +4,16 @@
 
 param(
   [int]$Port = 7810,
-  [int]$BotPort = 7800,
-  [int]$AnalyzerPort = 9001
+  [int]$BotPort = 0,
+  [int]$AnalyzerPort = 0
 )
 
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "home-stack-mode.ps1")
+$stackMode = Get-HomeStackMode
+if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
+if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-common.ps1") -Port $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 $prefix = "http://127.0.0.1:$Port/"
@@ -68,6 +72,8 @@ function Get-FullStatus {
   return @{
     ok = $true
     launcher = "running"
+    mode = $stackMode.Mode
+    stackLabel = $stackMode.Label
     ports = @{
       bot = $BotPort
       analyzer = $AnalyzerPort
@@ -77,41 +83,59 @@ function Get-FullStatus {
       online = $botPortOpen
       dashboard = "http://127.0.0.1:$BotPort"
       lan = "http://10.0.0.102:$BotPort"
-      dataDir = $agentDir
+      dataDir = if ($stackMode.Mode -eq "local-collection") { $stackMode.DataDir } else { $agentDir }
     }
     analyzer = @{
       online = $analyzerRunning
       dashboard = "http://127.0.0.1:$AnalyzerPort/"
       lan = "http://10.0.0.102:$AnalyzerPort/"
-      note = "Research loop logs in Doxed Analyzer window - :9001 dashboard on LAN + localhost - bot KPIs on :7800/api/state"
+      note = "Local collection :$BotPort bot + :$AnalyzerPort analyzer (frozen). Production mirror uses :7800 + tunnel separately."
     }
     tunnel = @{
       url = $tunnelUrl
       live = $tunnelLive
       cloudflaredRunning = $cloudflaredRunning
+      enabled = $stackMode.TunnelEnabled
     }
   }
 }
 
 function Invoke-HomeCommandBackground([string]$Action) {
+  $modeArg = if ($stackMode.Mode -eq "local-collection") { "local-collection" } else { "production" }
   Start-HiddenPs1 (Join-Path $scriptDir "home-stack-cmd-worker.ps1") @(
     "-Action", $Action,
     "-BotPort", "$BotPort",
-    "-AnalyzerPort", "$AnalyzerPort"
+    "-AnalyzerPort", "$AnalyzerPort",
+    "-StackMode", $modeArg
   )
 }
 
 function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
   switch ($Action) {
     "start-all" {
+      if ($stackMode.Mode -eq "local-collection") {
+        Start-HiddenPs1 (Join-Path $scriptDir "home-stack-start-collection.ps1") @(
+          "-BotPort", "$BotPort",
+          "-AnalyzerPort", "$AnalyzerPort"
+        )
+        return @{
+          ok = $true
+          message = @(
+            "Local collection start queued."
+            "Bot :$BotPort + Analyzer :$AnalyzerPort (visible console windows)."
+            "Data: $($stackMode.DataDir)"
+            "No tunnel - isolated from doxxedcrypto production stack."
+            "Supervisor runs hidden for 24/7 recovery (.home-stack-supervisor.log)."
+          ) -join "`n"
+        }
+      }
       Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
       return @{
         ok = $true
         message = @(
-          "Start everything queued."
-          "Three console windows will open: Bot :7800, Analyzer, Cloudflare tunnel."
-          "Leave them open (do not press Enter in those windows). Supervisor runs hidden for 24/7 recovery."
-          "Status: green dots above, .home-start-all.log, .home-stack-supervisor.log"
+          "Production start queued."
+          "Bot :7800 + Analyzer :9001 + Cloudflare tunnel."
+          "Leave console windows open. Supervisor runs hidden for 24/7 recovery."
         ) -join "`n"
       }
     }
@@ -119,19 +143,23 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Invoke-HomeCommandBackground "start-bot"
       return @{
         ok = $true
-        message = "Bot start queued - Doxed Bot :7800 window opens in a few seconds (hung processes are cleared first)."
+        message = "Bot start queued - window opens on :$BotPort in a few seconds."
       }
     }
     "start-analyzer" {
       Invoke-HomeCommandBackground "start-analyzer"
       return @{
         ok = $true
-        message = "Analyzer start queued - console + :9001 dashboard when ready."
+        message = "Analyzer start queued - console + :$AnalyzerPort dashboard when ready."
       }
     }
     "start-analyzer-once" {
-      Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)" -Show Normal
-      return @{ ok = $true; message = "Analyzer single pass started." }
+      if ($stackMode.Mode -eq "local-collection") {
+        Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Local Collection Analyzer (once)" -Show Normal
+      } else {
+        Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Once") -NoExit -WindowTitle "Doxed Analyzer (once)" -Show Normal
+      }
+      return @{ ok = $true; message = "Analyzer single pass started on :$AnalyzerPort." }
     }
     "start-tunnel" {
       Start-DetachedPs1 (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -NoExit -WindowTitle "Doxed Cloudflare Tunnel" -Show Normal
