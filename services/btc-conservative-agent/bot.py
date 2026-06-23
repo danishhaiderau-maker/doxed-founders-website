@@ -10161,6 +10161,8 @@ def set_chase_execution_buckets(buckets: dict):
         save_persistent_config()
     enabled = [k for k, v in out.items() if v]
     logger.info(f"[SET] Chase execution buckets={enabled} [PIPELINE ENFORCEMENT]")
+    enforce_dashboard_chase_gates_on_pending()
+    pipeline_state_sync()
 
 
 def chase_bucket_allowed(chase_count) -> bool:
@@ -11772,8 +11774,9 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     if not chase_bucket_allowed(chase_count):
         logger.info(
             f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
         )
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
@@ -11818,8 +11821,9 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     if not chase_bucket_allowed(chase_count):
         logger.info(
             f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
         )
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
@@ -11879,8 +11883,9 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     if not chase_bucket_allowed(chase_count):
         logger.info(
             f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={chase_count} [PIPELINE ENFORCEMENT]"
+            f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
         )
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
     order["limit_price"] = new_limit
     order["limit_chase_count"] = chase_count
@@ -16050,7 +16055,7 @@ DASHBOARD_JS = """(function () {
       if (!el || !buckets) return;
       const on = Object.keys(buckets).filter(k => buckets[k]);
       el.innerHTML = on.length
-        ? `<strong>Allowed chase buckets:</strong> ${on.join(', ')}`
+        ? `<strong>Allowed chase buckets:</strong> ${on.join(', ')} · checked = may place/chase at that tick count; unchecked = virtual wait or cancel`
         : '<strong style="color:#ef4444">All chase buckets OFF — no limits / chases / fills</strong>';
     }
     async function post(url, obj={}) {

@@ -159,6 +159,10 @@ export class BitfinexSimTradingClient {
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
+    // Bitfinex BTC-PERP: same-direction limits collapse to one working order on the book.
+    this.ledger.orders = this.ledger.orders.filter(
+      (o) => !(o.orderType === 'LIMIT' && o.direction === input.direction),
+    );
     const id = this.ledger.nextOrderId++;
     const amount = orderAmount(input.direction, input.qty);
     const order: CopyRelaySimOrder = {
