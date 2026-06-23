@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix global bot startup crash from stale bybit_bot import in pathway validation.
+Remember relay sim desk tab after refresh and clarify ledger reset.
 
 ## Last Activity
 
