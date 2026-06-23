@@ -192,7 +192,7 @@ async function main() {
   }
 
   console.log('\nDeploying Vercel production...');
-  run('vercel deploy --prod --yes');
+  run('vercel deploy --prod --yes --archive=tgz');
 
   const railwayToken =
     xSecrets.RAILWAY_TOKEN?.trim() ||
