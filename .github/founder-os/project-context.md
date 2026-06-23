@@ -12,8 +12,8 @@ Define your next milestone
 
 ## Last Commit
 
-Ship pathway_lab_validation with agent service and fix analyzer home-stack imports.
+Fix analyzer script parse error from unicode dashes.
 
 ## Last Activity
 
-49m ago
+Just now
