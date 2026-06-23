@@ -17,13 +17,43 @@ $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
 function Test-PortOpen([int]$P) {
   try {
     $c = New-Object System.Net.Sockets.TcpClient
-    $async = $c.ConnectAsync("127.0.0.1", $P)
-    if (-not $async.Wait(1500)) { return $false }
+    $iar = $c.BeginConnect("127.0.0.1", $P, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne(400)) {
+      $c.Close()
+      return $false
+    }
+    $c.EndConnect($iar)
     $c.Close()
     return $true
   } catch {
     return $false
   }
+}
+
+function Test-MultiPortOpen([int[]]$Ports, [int]$TimeoutMs = 400) {
+  $pending = @{}
+  foreach ($p in $Ports) {
+    try {
+      $c = New-Object System.Net.Sockets.TcpClient
+      $iar = $c.BeginConnect("127.0.0.1", $p, $null, $null)
+      $pending[$p] = @{ Client = $c; Ar = $iar }
+    } catch { }
+  }
+  Start-Sleep -Milliseconds $TimeoutMs
+  $out = @{}
+  foreach ($p in $Ports) {
+    $out[$p] = $false
+    if (-not $pending.ContainsKey($p)) { continue }
+    $entry = $pending[$p]
+    if ($entry.Ar.IsCompleted) {
+      try {
+        $entry.Client.EndConnect($entry.Ar)
+        $out[$p] = $true
+      } catch { }
+    }
+    $entry.Client.Close()
+  }
+  return $out
 }
 
 function Test-TunnelLive([string]$Url) {
@@ -52,7 +82,16 @@ function Stop-ListenPortFast([int]$ListenPort) {
   $killed = @()
   try {
     $pattern = ":$ListenPort\s"
-    netstat -ano | Select-String $pattern | ForEach-Object {
+    $job = Start-Job -ScriptBlock {
+      param($Pat)
+      netstat -ano | Select-String $Pat
+    } -ArgumentList $pattern
+    if (-not (Wait-Job $job -Timeout 5)) {
+      Stop-Job $job -Force | Out-Null
+      Remove-Job $job -Force | Out-Null
+      return $killed
+    }
+    Receive-Job $job | ForEach-Object {
       $line = "$_".Trim()
       if ($line -notmatch 'LISTENING') { return }
       if ($line -match '\s(\d+)\s*$') {
@@ -63,6 +102,7 @@ function Stop-ListenPortFast([int]$ListenPort) {
         }
       }
     }
+    Remove-Job $job -Force | Out-Null
   } catch { }
   return $killed
 }

@@ -1,11 +1,16 @@
 # Background worker for Start everything (bot/analyzer/tunnel open visible consoles).
 param(
-  [int]$BotPort = 7800,
-  [int]$AnalyzerPort = 9001
+  [int]$BotPort = 0,
+  [int]$AnalyzerPort = 0
 )
 
 $ErrorActionPreference = "Continue"
-. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "home-stack-mode.ps1")
+$stackMode = Get-HomeStackMode
+if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
+if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 $messages = [System.Collections.Generic.List[string]]::new()

@@ -55,59 +55,48 @@ function Send-Json {
 }
 
 function Get-FullStatus {
-  # Port-only checks — WMI + outbound HTTP probes block the single listener thread and freeze buttons.
-  $botPortOpen = Test-PortOpen $BotPort
-  $analyzerRunning = Test-PortOpen $AnalyzerPort
-  $localBotOpen = Test-PortOpen 7800
-  $localAnalyzerOpen = Test-PortOpen 9001
+  # Port-only checks — keep this under ~500ms so the listener thread never freezes buttons.
+  $now = Get-Date
+  if ($script:StatusCache.payload -and ($now - $script:StatusCache.at).TotalSeconds -lt 4) {
+    return $script:StatusCache.payload
+  }
+
+  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 400
+  $botPortOpen = [bool]$portMap[$BotPort]
+  $analyzerRunning = [bool]$portMap[$AnalyzerPort]
   $tunnelUrl = Get-TunnelUrl
+  if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   $tunnelLive = $false
   if ($tunnelUrl) {
-    $now = Get-Date
-    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 45) {
+    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 60) {
       $tunnelLive = $script:TunnelLiveCache.live
     } elseif ($cloudflaredRunning -and $botPortOpen) {
-      $tunnelLive = $true
+      $tunnelLive = Test-TunnelPublicHealthy $tunnelUrl
+      $script:TunnelLiveCache = @{ url = $tunnelUrl; live = $tunnelLive; at = $now }
     }
   }
-  $labRoot = Split-Path -Parent $repoRoot
-  return @{
+  $payload = @{
     ok = $true
     launcher = "running"
-    mode = $stackMode.Mode
-    stackLabel = $stackMode.Label
+    mode = "production"
+    stackLabel = "Doxxedcrypto global showcase :$BotPort / :$AnalyzerPort"
     ports = @{
       bot = $BotPort
       analyzer = $AnalyzerPort
       launcher = $Port
-      localBot = 7800
-      localAnalyzer = 9001
     }
     bot = @{
       online = $botPortOpen
       dashboard = "http://127.0.0.1:$BotPort"
       lan = "http://10.0.0.102:$BotPort"
-      dataDir = if ($stackMode.Mode -eq "local-collection") { $stackMode.DataDir } else { $agentDir }
-    }
-    localLab = @{
-      online = ($localBotOpen -and $localAnalyzerOpen)
-      botOnline = $localBotOpen
-      analyzerOnline = $localAnalyzerOpen
-      botDashboard = "http://127.0.0.1:7800"
-      analyzerDashboard = "http://127.0.0.1:9001/"
-      labRoot = $labRoot
-      note = "Source-of-truth research lab (Final Bots) - independent from global :$BotPort showcase."
+      dataDir = $agentDir
     }
     analyzer = @{
       online = $analyzerRunning
       dashboard = "http://127.0.0.1:$AnalyzerPort/"
       lan = "http://10.0.0.102:$AnalyzerPort/"
-      note = if ($stackMode.Mode -eq "local-collection") {
-        "Isolated collection on :$AnalyzerPort - no tunnel or relay."
-      } else {
-        "Global showcase :$BotPort + analyzer :$AnalyzerPort. Site mirror + relay need tunnel (bot.doxxedcrypto.digital)."
-      }
+      note = "Showcase stack for doxxedcrypto.digital - bot :$BotPort feeds site + Bitfinex relay via tunnel."
     }
     tunnel = @{
       url = $tunnelUrl
@@ -116,7 +105,11 @@ function Get-FullStatus {
       enabled = $stackMode.TunnelEnabled
     }
   }
+  $script:StatusCache = @{ at = $now; payload = $payload }
+  return $payload
 }
+
+$script:StatusCache = @{ at = [datetime]::MinValue; payload = $null }
 
 function Invoke-HomeCommandBackground([string]$Action) {
   $modeArg = if ($stackMode.Mode -eq "local-collection") { "local-collection" } else { "production" }
@@ -135,6 +128,17 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{
         ok = $true
         message = "Local lab start queued (:7800 bot + :9001 analyzer in Final Bots folder)."
+      }
+    }
+    "start-all-global" {
+      Invoke-HomeCommandBackground "start-all-global"
+      return @{
+        ok = $true
+        message = @(
+          "Global start queued."
+          "Bot :$BotPort + Analyzer :$AnalyzerPort + tunnel (windows opening)."
+          "Refresh status in 30-60 seconds."
+        ) -join "`n"
       }
     }
     "start-all" {
@@ -158,14 +162,13 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
           ) -join "`n"
         }
       }
-      Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort") -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
+      Invoke-HomeCommandBackground "start-all-global"
       return @{
         ok = $true
         message = @(
-          "Production start queued."
-          "Bot :$BotPort + Analyzer :$AnalyzerPort + Cloudflare tunnel."
-          "Site mirror + Bitfinex relay need tunnel live (bot.doxxedcrypto.digital)."
-          "Leave console windows open. Supervisor runs hidden for 24/7 recovery."
+          "Global start queued."
+          "Bot :$BotPort + Analyzer :$AnalyzerPort + tunnel (windows opening)."
+          "Refresh status in 30-60 seconds."
         ) -join "`n"
       }
     }
@@ -296,6 +299,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       "^/health$" { @{ ok = $true; launcher = "running" } }
       "^/start$" { Invoke-HomeCommand "start-all" $tunnelParam }
       "^/cmd/start-all$" { Invoke-HomeCommand "start-all" $tunnelParam }
+      "^/cmd/start-all-global$" { Invoke-HomeCommand "start-all-global" $tunnelParam }
       "^/cmd/start-all-local$" { Invoke-HomeCommand "start-all-local" $tunnelParam }
       "^/cmd/start-bot$" { Invoke-HomeCommand "start-bot" $tunnelParam }
       "^/cmd/start-analyzer$" { Invoke-HomeCommand "start-analyzer" $tunnelParam }
@@ -321,15 +325,27 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
   }
 }
 
+$Host.UI.RawUI.WindowTitle = "Doxed Home Bridge :$Port"
 Write-Host ""
 Write-Host "=== Doxed home command bridge (:$Port) ===" -ForegroundColor Cyan
 Write-Host "Repo: $repoRoot"
+Write-Host "Stack: $($stackMode.Label)"
 Write-Host "Agent Hub buttons need this window open on the same PC."
 Write-Host ""
 
+$bridgeErrLog = Join-Path $repoRoot ".home-bridge.err.log"
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($prefix)
-$listener.Start()
+try {
+  $listener.Start()
+} catch {
+  $msg = $_.Exception.Message
+  Set-Content -Path $bridgeErrLog -Value $msg -Encoding UTF8
+  Write-Host "Bridge failed to bind :$Port - $msg" -ForegroundColor Red
+  Write-Host "Run RESTART-LAUNCHER.cmd as admin if http.sys URL reservation conflict."
+  Read-Host "Press Enter to close"
+  exit 1
+}
 
 try {
   while ($listener.IsListening) {

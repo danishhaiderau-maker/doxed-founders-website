@@ -66,20 +66,20 @@ function Get-TunnelPublicUrl {
 }
 
 function Restart-BotComponent {
-  Log "RECOVER bot - stop + start (minimized window)"
+  Log "RECOVER bot - stop + start on :$BotPort (minimized window)"
   Stop-PythonMatching "btc_conservative_agent" | Out-Null
   Stop-ListenPortFast $BotPort | Out-Null
   Start-Sleep -Seconds 3
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-NoWait") -NoExit -WindowTitle "Doxed Bot :7800" -Show Minimized
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-bot.ps1") @("-Port", "$BotPort", "-NoWait") -NoExit -WindowTitle "Doxed Bot :$BotPort" -Show Minimized
 }
 
 function Restart-AnalyzerComponent {
-  Log "RECOVER analyzer - stop + start (minimized window)"
+  Log "RECOVER analyzer - stop + start on :$AnalyzerPort (minimized window)"
   Stop-PythonMatching "analyzer_research_engine" | Out-Null
   Stop-ListenPortFast $AnalyzerPort | Out-Null
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
-  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle "Doxed Analyzer" -Show Minimized
+  Start-DetachedPs1 (Join-Path $scriptDir "start-home-analyzer.ps1") @("-Port", "$AnalyzerPort", "-NoWait") -NoExit -WindowTitle "Doxed Analyzer :$AnalyzerPort" -Show Minimized
 }
 
 function Restart-TunnelComponent {
@@ -100,13 +100,11 @@ function Restart-TunnelComponent {
 }
 
 function Restart-BridgeComponent {
-  Log "RECOVER bridge - restart launcher on :7810"
-  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*home-stack-launcher.ps1*" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Log "RECOVER bridge - restart launcher on :$BridgePort"
+  & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Home Bridge :$BridgePort" 2>$null | Out-Null
   Stop-ListenPortFast $BridgePort | Out-Null
   Start-Sleep -Seconds 2
-  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-launcher.ps1") @() -NoExit -WindowTitle "Doxed Home Bridge :7810" -Show Minimized
+  Start-DetachedPs1 (Join-Path $scriptDir "home-stack-launcher.ps1") @() -NoExit -WindowTitle "Doxed Home Bridge :$BridgePort" -Show Minimized
 }
 
 function Invoke-Recovery {
@@ -131,8 +129,9 @@ if (-not (Test-SupervisorLock)) {
   exit 0
 }
 
+Set-Content -Path (Join-Path $repoRoot ".home-stack-supervisor.pid") -Value $PID -NoNewline
 Prevent-Sleep
-Log "supervisor started interval=${IntervalSec}s threshold=$FailThreshold named=$(Test-Path $namedFlag)"
+Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Test-Path $namedFlag)"
 
 $fail = @{
   bot = 0; analyzer = 0; tunnel = 0; bridge = 0

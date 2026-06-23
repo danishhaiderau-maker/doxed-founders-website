@@ -76,6 +76,7 @@ export function AgentDeskView({
   onStopRelaySim,
   onResetRelaySim,
   relaySimBusy,
+  executionOnly = false,
 }: {
   activeDesk: AgentDeskId;
   mode: 'live' | 'copy' | 'showcase';
@@ -101,6 +102,7 @@ export function AgentDeskView({
   onStopRelaySim?: () => void;
   onResetRelaySim?: () => void;
   relaySimBusy?: boolean;
+  executionOnly?: boolean;
 }) {
   if (activeDesk === 'relay-sim') {
     return (
@@ -131,13 +133,17 @@ export function AgentDeskView({
     const book = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
     return (
       <DeskPanel
-        badge="Research local bot"
+        badge="Global showcase"
         badgeClassName="text-violet-300"
         borderClassName="border-violet-500/35"
-        title="Conservative BTC Agent · local bot :7800"
-        subtitle="Home research bot only — signals, orders, positions, and trades from the admin showcase session. Switch to Bitfinex tabs for your copy book."
+        title="Conservative BTC Agent · doxxedcrypto.digital"
+        subtitle={
+          executionOnly
+            ? 'Public execution book — positions, orders, and closed trades from the :7002 showcase bot.'
+            : 'Admin view — full pipeline tables from the global showcase bot on :7002.'
+        }
       >
-        <AgentTransparencyTables liveBook={book} maxRows={10} />
+        <AgentTransparencyTables liveBook={book} maxRows={10} executionOnly={executionOnly} />
         <AgentTradeJourney
           activity={showcaseActivity}
           liveBook={book}

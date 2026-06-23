@@ -7,23 +7,15 @@ import { pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
 const DEFAULT_ANALYZER_PORT = 9500;
+const PUBLIC_BOT_URL = 'https://bot.doxxedcrypto.digital';
 
 type HomeStatus = {
   mode?: string;
   stackLabel?: string;
-  ports?: { bot?: number; analyzer?: number; launcher?: number; localBot?: number; localAnalyzer?: number };
+  ports?: { bot?: number; analyzer?: number; launcher?: number };
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
-  localLab?: {
-    online?: boolean;
-    botOnline?: boolean;
-    analyzerOnline?: boolean;
-    botDashboard?: string;
-    analyzerDashboard?: string;
-    note?: string;
-  };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
   tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
-  processes?: { botPython?: number; analyzerPython?: number };
 };
 
 function botPortFrom(status: HomeStatus | null): number {
@@ -55,24 +47,29 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
   const [botOk, analyzerOk, tunnelOk] = await Promise.all([
     probeLocalHealth(`http://127.0.0.1:${botPort}/api/ping`),
     probeLocalHealth(`http://127.0.0.1:${analyzerPort}/api/status`),
-    probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping'),
+    probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`),
   ]);
   return {
     mode: 'production',
     ports: { bot: botPort, analyzer: analyzerPort, launcher: 7810 },
     bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
     analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
-    tunnel: { live: tunnelOk, url: tunnelOk ? 'https://bot.doxxedcrypto.digital' : null, enabled: true },
+    tunnel: { live: tunnelOk, url: PUBLIC_BOT_URL, enabled: true, cloudflaredRunning: tunnelOk },
   };
 }
 
-async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?: string[] }): Promise<HomeStatus> {
+async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<HomeStatus> {
   const botPort = raw.ports?.bot ?? DEFAULT_BOT_PORT;
   const analyzerPort = raw.ports?.analyzer ?? DEFAULT_ANALYZER_PORT;
   const botDash = raw.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
   const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
   if (raw.ok) {
+    const [tunnelProbe] = await Promise.all([
+      raw.tunnel?.live === undefined || raw.tunnel?.live === false
+        ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`)
+        : Promise.resolve(Boolean(raw.tunnel?.live)),
+    ]);
     return {
       ...raw,
       bot: { ...raw.bot, online: Boolean(raw.bot?.online), dashboard: botDash },
@@ -83,9 +80,9 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
       },
       tunnel: {
         ...raw.tunnel,
-        live: Boolean(raw.tunnel?.live),
-        url: raw.tunnel?.url ?? null,
-        enabled: raw.tunnel?.enabled ?? raw.mode !== 'local-collection',
+        live: Boolean(raw.tunnel?.live) || tunnelProbe,
+        url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
+        enabled: raw.tunnel?.enabled ?? true,
       },
     };
   }
@@ -102,9 +99,7 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
   const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
     needsBotProbe ? probeLocalHealth(`${botDash}/api/ping`) : Promise.resolve(botOnline),
     needsAnalyzerProbe ? probeLocalHealth(`${analyzerDash}api/status`) : Promise.resolve(analyzerOnline),
-    needsTunnelProbe
-      ? probeLocalHealth('https://bot.doxxedcrypto.digital/api/ping')
-      : Promise.resolve(tunnelLive),
+    needsTunnelProbe ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`) : Promise.resolve(tunnelLive),
   ]);
 
   return {
@@ -118,8 +113,8 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean; endpoints?:
     tunnel: {
       ...raw.tunnel,
       live: tunnelLive || tunnelProbe,
-      url: raw.tunnel?.url ?? (tunnelLive || tunnelProbe ? 'https://bot.doxxedcrypto.digital' : null),
-      enabled: raw.tunnel?.enabled ?? raw.mode !== 'local-collection',
+      url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
+      enabled: raw.tunnel?.enabled ?? true,
     },
   };
 }
@@ -143,22 +138,15 @@ function cmdTimeoutMs(id: string): number {
 const COMMANDS: HomeCmd[] = [
   {
     id: 'start-all',
-    label: '▶ Start all global',
-    hint: 'Global showcase: :7002 bot + :9500 analyzer + tunnel (doxxedcrypto + Bitfinex relay)',
-    path: '/cmd/start-all',
-    tone: 'primary',
-  },
-  {
-    id: 'start-all-local',
-    label: '▶ Start all local',
-    hint: 'Local lab only: :7800 bot + :9001 analyzer (Final Bots folder, source of truth)',
-    path: '/cmd/start-all-local',
+    label: '▶ Start everything',
+    hint: 'Bot :7002 + analyzer :9500 + Cloudflare tunnel (doxxedcrypto.digital + Bitfinex relay)',
+    path: '/cmd/start-all-global',
     tone: 'primary',
   },
   {
     id: 'start-bot',
-    label: '▶ Start bot only',
-    hint: 'btc_conservative_agent on :7002 (main showcase data + relay webhook)',
+    label: '▶ Start bot',
+    hint: 'Conservative BTC agent on :7002 (signals + relay webhook for site subscribers)',
     path: '/cmd/start-bot',
     tone: 'primary',
   },
@@ -177,42 +165,35 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-tunnel',
     label: '▶ Start tunnel',
-    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002 (required for site mirror + Bitfinex relay)',
+    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002 (site API + Bitfinex copy)',
     path: '/cmd/start-tunnel',
   },
   {
     id: 'wire',
     label: '☁ Wire to site',
-    hint: 'Push tunnel URL to Neon + Railway (uses saved URL or paste below)',
+    hint: 'Push tunnel URL to Neon + Railway so doxxedcrypto.digital can reach home bot',
     path: '/cmd/wire',
     tone: 'primary',
   },
   {
     id: 'wipe-research',
     label: '🗑 Wipe research CSVs',
-    hint: 'Fresh collection reset on local bot — archive + wipe CSV/JSONL, restart at $500',
+    hint: 'Fresh collection reset — archive + wipe CSV/JSONL, restart at $500',
     path: '/cmd/wipe-research',
     tone: 'danger',
   },
   {
     id: 'stop-bot',
     label: '■ Stop bot',
-    hint: 'Kill process on active bot port (:7002 showcase)',
+    hint: 'Stop showcase bot on :7002',
     path: '/cmd/stop-bot',
     tone: 'danger',
   },
   {
     id: 'stop-all-global',
-    label: '■ Stop all global',
-    hint: 'Stop :7002/:9500 + tunnel only — local lab :7800/:9001 keeps running',
+    label: '■ Stop everything',
+    hint: 'Stop :7002 bot, :9500 analyzer, and tunnel',
     path: '/cmd/stop-all-global',
-    tone: 'danger',
-  },
-  {
-    id: 'stop-all-local',
-    label: '■ Stop all local',
-    hint: 'Stop :7800/:9001 lab only — global showcase untouched',
-    path: '/cmd/stop-all-local',
     tone: 'danger',
   },
 ];
@@ -233,14 +214,13 @@ export function AgentAdminShowcaseControl({
   const [msg, setMsg] = useState<string | null>(null);
   const [launcherOnline, setLauncherOnline] = useState<boolean | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
-  const [tunnelUrl, setTunnelUrl] = useState('');
+  const [tunnelUrl, setTunnelUrl] = useState(PUBLIC_BOT_URL);
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
   const analyzerPort = analyzerPortFrom(status);
   const botDash = status?.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
   const analyzerDash = status?.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
-  const isLocalCollection = status?.mode !== 'production';
 
   const refreshStatus = useCallback(async () => {
     let bridgeOk = false;
@@ -258,7 +238,7 @@ export function AgentAdminShowcaseControl({
         setStatus(await probeDirectHomeStatus());
         return;
       }
-      const json = (await res.json()) as HomeStatus & { ok?: boolean; endpoints?: string[] };
+      const json = (await res.json()) as HomeStatus & { ok?: boolean };
       const normalized = await normalizeHomeStatus(json);
       setStatus(normalized);
       if (normalized.tunnel?.url) setTunnelUrl(normalized.tunnel.url);
@@ -287,16 +267,12 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id === 'start-all' || id === 'start-all-local' || id === 'stop-all-global' || id === 'stop-all-local') {
+        if (id === 'start-all' || id === 'stop-all-global') {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
+          setTimeout(() => void refreshStatus(), 45000);
         }
-        if (id === 'start-all') {
-          setTimeout(() => void refreshStatus(), 8000);
-          setTimeout(() => void refreshStatus(), 25000);
-          setTimeout(() => onUpdated?.(), 30000);
-          setTimeout(() => onUpdated?.(), 90000);
-        } else if (id.startsWith('start') || id === 'wire') {
+        if (id.startsWith('start') || id === 'wire') {
           setTimeout(() => onUpdated?.(), 20000);
           setTimeout(() => onUpdated?.(), 60000);
         }
@@ -313,7 +289,7 @@ export function AgentAdminShowcaseControl({
         ? 'Bridge is up but the command timed out — check Doxed console windows, then click Refresh status.'
         : err instanceof Error && /fetch|network|Failed/i.test(err.message)
           ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd on this PC, then hard-refresh this page.'
-          : 'Local bridge offline — double-click RESTART-LAUNCHER.cmd in the repo folder.';
+          : 'Bridge offline — double-click RESTART-LAUNCHER.cmd or RECOVER-GLOBAL-STACK.cmd in the repo folder.';
       setMsg(hint);
       setLauncherOnline(bridgeAlive);
     } finally {
@@ -330,10 +306,7 @@ export function AgentAdminShowcaseControl({
         const localRes = await fetch(`${LAUNCHER}${path}`, { signal: AbortSignal.timeout(30000) });
         const localJson = (await localRes.json()) as { ok?: boolean; message?: string; error?: string };
         if (localJson.ok) {
-          setMsg(
-            localJson.message ??
-              (stopped ? 'Local bot resumed (site mirror not required).' : 'Local bot paused.'),
-          );
+          setMsg(localJson.message ?? (stopped ? 'Bot resumed locally.' : 'Bot paused locally.'));
           onUpdated?.();
           setTimeout(() => onUpdated?.(), 5000);
           return;
@@ -354,7 +327,7 @@ export function AgentAdminShowcaseControl({
       setMsg(message ?? (res.ok ? 'Execution updated' : 'Failed — is home bot online?'));
       if (res.ok) {
         onUpdated?.();
-          setTimeout(() => onUpdated?.(), 15000);
+        setTimeout(() => onUpdated?.(), 15000);
       }
     } catch (err) {
       setMsg(err instanceof Error ? err.message : 'Pause/resume failed');
@@ -369,16 +342,14 @@ export function AgentAdminShowcaseControl({
         Home PC command center
       </p>
       <p className="mt-1 text-xs text-zinc-400">
-        Controls your <strong>local</strong> showcase bot (not old Railway). Works when you open{' '}
+        Runs the <strong>doxxedcrypto.digital</strong> showcase stack on this PC: conservative BTC signals
+        at <strong>:{botPort}</strong>, research at <strong>:{analyzerPort}</strong>, bridge at{' '}
+        <strong>:7810</strong>. The public site and Bitfinex relay reach your bot through the Cloudflare
+        tunnel. Open{' '}
         <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
           Agent Hub
         </a>{' '}
-        on the <strong>same PC</strong> as the bot.{' '}
-        <span className="text-zinc-500">
-          Global :{botPort}/:{analyzerPort} · Local lab :7800/:9001 · Bridge :7810
-          {isLocalCollection ? ' · local collection mode' : ' · global showcase'}
-        </span>
-        . Site mirror:{' '}
+        on this same machine to use these controls. Site mirror:{' '}
         {botConnected ? (
           <span className="text-emerald-400">online</span>
         ) : (
@@ -387,25 +358,24 @@ export function AgentAdminShowcaseControl({
         .
       </p>
 
-      {status?.stackLabel && (
-        <p className="mt-1 text-[10px] text-emerald-400/90">{status.stackLabel}</p>
+      {launcherOnline === false && (
+        <p className="mt-2 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+          Bridge :7810 is offline — buttons will not work. Double-click{' '}
+          <code className="text-red-100">RECOVER-GLOBAL-STACK.cmd</code> or{' '}
+          <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then hard-refresh this page.
+        </p>
       )}
 
-      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <StatusChip label={`Global bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
-        <StatusChip label={`Global analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
-        <StatusChip label="Local lab :7800" ok={Boolean(status?.localLab?.botOnline)} />
-        <StatusChip label="Local analyzer :9001" ok={Boolean(status?.localLab?.analyzerOnline)} />
-        <StatusChip
-          label="Tunnel (public bot)"
-          ok={Boolean(status?.tunnel?.live)}
-          hidden={status?.tunnel?.enabled === false}
-        />
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
+        <StatusChip label={`Showcase bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
+        <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />
+        <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
       </div>
 
       <p className="mt-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-        Local commands (this PC)
+        Showcase controls (this PC)
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         {COMMANDS.map((cmd) => (
@@ -434,7 +404,7 @@ export function AgentAdminShowcaseControl({
           <input
             value={tunnelUrl}
             onChange={(e) => setTunnelUrl(e.target.value)}
-            placeholder="https://….trycloudflare.com"
+            placeholder={PUBLIC_BOT_URL}
             className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200"
           />
         </label>
@@ -454,16 +424,13 @@ export function AgentAdminShowcaseControl({
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <a href={botDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Global bot :{botPort} →
-        </a>
-        <a href="http://127.0.0.1:7800" target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Local lab :7800 →
-        </a>
-        <a href="http://127.0.0.1:9001/" target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Local analyzer :9001 →
+          Bot dashboard :{botPort} →
         </a>
         <a href={analyzerDash} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
-          Global analyzer :{analyzerPort} →
+          Analyzer :{analyzerPort} →
+        </a>
+        <a href={PUBLIC_BOT_URL} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
+          Public bot URL →
         </a>
         <a
           href={`${botDash}/api/export_csv`}
@@ -471,15 +438,7 @@ export function AgentAdminShowcaseControl({
           rel="noreferrer"
           className="text-violet-300 hover:underline"
         >
-          Download all CSV/JSONL (zip) →
-        </a>
-        <a
-          href={`${botDash}/api/export_session_trades.csv`}
-          target="_blank"
-          rel="noreferrer"
-          className="text-violet-300 hover:underline"
-        >
-          Session trades CSV →
+          Download CSV/JSONL (zip) →
         </a>
         <button type="button" onClick={() => void refreshStatus()} className="text-zinc-500 hover:text-white">
           Refresh status
@@ -490,9 +449,9 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <p className="mt-2 text-[10px] text-zinc-600">
-        Step 0 (once per session): double-click{' '}
-        <code className="text-zinc-400">START-LAUNCHER.cmd</code> in the repo folder. Then use buttons
-        above — no CMD copy-paste.
+        Step 0: run <code className="text-zinc-400">RECOVER-GLOBAL-STACK.cmd</code> or{' '}
+        <code className="text-zinc-400">RESTART-LAUNCHER.cmd</code> once per session. Named Cloudflare
+        tunnel (free plan) — not trycloudflare quick tunnels.
       </p>
 
       {status?.analyzer?.note && (
@@ -504,24 +463,37 @@ export function AgentAdminShowcaseControl({
   );
 }
 
-function StatusChip({ label, ok, hidden }: { label: string; ok: boolean; hidden?: boolean }) {
+function StatusChip({
+  label,
+  ok,
+  hidden,
+  sub,
+}: {
+  label: string;
+  ok: boolean;
+  hidden?: boolean;
+  sub?: string;
+}) {
   if (hidden) return null;
   return (
     <div
-      className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
+      className={`flex flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-[11px] ${
         ok ? 'border-emerald-500/40 text-emerald-300' : 'border-zinc-700 text-zinc-500'
       }`}
     >
-      <span
-        className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${
-          ok ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-zinc-600'
-        }`}
-        title={ok ? 'online' : 'offline'}
-        aria-hidden
-      />
-      <span>
-        {label}: <strong>{ok ? 'online' : 'offline'}</strong>
-      </span>
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${
+            ok ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-zinc-600'
+          }`}
+          title={ok ? 'online' : 'offline'}
+          aria-hidden
+        />
+        <span>
+          {label}: <strong>{ok ? 'online' : 'offline'}</strong>
+        </span>
+      </div>
+      {sub && <span className="truncate pl-4 text-[9px] text-zinc-600">{sub}</span>}
     </div>
   );
 }
