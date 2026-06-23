@@ -34,6 +34,7 @@ $env:BTC_AGENT_DATA_DIR = $LocalCollection.DataDir
 $env:LOCAL_COLLECTION_MODE = "1"
 $env:HOME_BOT_LOCAL = "1"
 $env:HOME_RESEARCH_FULL = "1"
+$env:STRICT_PATHWAY_VALIDATION = "0"
 if ($LocalCollection.DisableRelay) {
   $env:SHOWCASE_RELAY_WEBHOOK_URL = ""
 }
