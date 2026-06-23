@@ -49,7 +49,7 @@ if (Test-Path $supervisorPidFile) {
   Remove-Item $supervisorPidFile -Force -ErrorAction SilentlyContinue
 }
 Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
-& taskkill.exe /F /FI "WINDOWTITLE eq Doxed Home Bridge :$Port" 2>$null | Out-Null
+Close-WindowsByTitlePrefix @("Doxed Home Bridge :$Port", "TEST Bridge") | Out-Null
 Stop-ListenPortFast $Port | Out-Null
 Start-Sleep -Seconds 3
 

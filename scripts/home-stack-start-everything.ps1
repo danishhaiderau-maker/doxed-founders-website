@@ -59,7 +59,7 @@ Get-Process cmd, powershell -ErrorAction SilentlyContinue | Where-Object {
   $t = $_.MainWindowTitle
   return ($t -like "Doxed Start Everything*" -or $t -like "Doxed Stop Everything*")
 } | ForEach-Object {
-  Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+  Stop-ProcessTree $_.Id
 }
 
 $messages = [System.Collections.Generic.List[string]]::new()
