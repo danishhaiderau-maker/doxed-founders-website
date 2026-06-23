@@ -110,7 +110,7 @@ export function AgentRelayFidelityPanel({
             Relay fidelity
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Same trade ID on local bot :7800 and Bitfinex relay — entry/exit prices, Melbourne
+            Same trade ID on global showcase bot :7002 and Bitfinex relay — entry/exit prices, Melbourne
             times, and lag seconds for copy fidelity.
           </p>
         </div>
@@ -216,7 +216,7 @@ export function AgentRelayFidelityPanel({
       {latestRows.length ? (
         <div className="mt-4 overflow-x-auto">
           <p className="mb-2 text-[10px] text-zinc-600">
-            Last {latestRows.length} trades (Melbourne 24h) — trade ID must match local bot :7800
+            Last {latestRows.length} trades (Melbourne 24h) — trade ID must match global showcase bot :7002
           </p>
           <table className="w-full min-w-[960px] text-left text-xs">
             <thead>

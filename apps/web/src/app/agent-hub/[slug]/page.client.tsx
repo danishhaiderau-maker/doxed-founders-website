@@ -115,14 +115,12 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setLiveLoading(true);
     try {
       const results = await Promise.allSettled([
-        withTimeout(fetchTradingAgentDashboard(slug, token), 10000, 'Dashboard'),
-        fetchTradingAgentActivity(slug, 50, token),
+        withTimeout(fetchTradingAgentDashboard(slug, token), 15000, 'Dashboard'),
         fetchPublicAgentStatus(),
       ]);
 
       const dashR = results[0];
-      const actR = results[1];
-      const statusR = results[2];
+      const statusR = results[1];
 
       if (dashR.status === 'fulfilled') {
         setAgent(dashR.value.agent);
@@ -137,6 +135,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setExchangeLiveBook(dashR.value.exchangeLiveBook ?? null);
         setShowcaseActivity(dashR.value.showcaseActivity ?? []);
         setUserActivity(dashR.value.userActivity ?? []);
+        setActivity(dashR.value.showcaseActivity ?? []);
         setCopyRelaySim(dashR.value.copyRelaySim ?? null);
         setRelaySimLiveBook(dashR.value.relaySimLiveBook ?? null);
         setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
@@ -150,12 +149,6 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setError('Live bot slow — showing cached stats. Refresh in a moment.');
       }
 
-      if (actR.status === 'fulfilled') {
-        setActivity(actR.value);
-        if (dashR.status !== 'fulfilled') {
-          setShowcaseActivity(actR.value);
-        }
-      }
       if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load live data');

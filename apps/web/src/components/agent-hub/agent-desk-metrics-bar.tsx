@@ -41,7 +41,7 @@ export function AgentDeskMetricsBar({
     const equity = showcaseAgent.equityUsd ?? runway;
     const sessionPnl = showcaseAgent.sessionPnlUsd ?? equity - runway;
     const dailyPnl = showcaseAgent.dailyPnlUsd ?? sessionPnl;
-    title = 'Research local bot · :7800';
+    title = 'Global showcase bot · :7002';
     borderClass = 'border-violet-500/30 from-violet-950/20';
     badgeClass = 'text-violet-300';
     cells = [
@@ -80,7 +80,7 @@ export function AgentDeskMetricsBar({
         hint: sim?.active ? 'Simulation running' : 'Start sim to track',
       },
       {
-        label: 'Local bot P&L (ref)',
+        label: 'Showcase P&L (ref)',
         value: `${showcasePnl >= 0 ? '+' : ''}${formatUsd(showcasePnl, 2)}`,
         accent: pnlColor(showcasePnl),
         hint: 'Compare drift vs admin bot',
@@ -116,8 +116,8 @@ export function AgentDeskMetricsBar({
     borderClass = 'border-zinc-800 from-zinc-950/40';
     badgeClass = 'text-emerald-300';
     cells = [
-      { label: 'Local bot equity', value: formatUsd(showcaseAgent.equityUsd ?? 500, 0), hint: 'Home bot :7800 reference' },
-      { label: 'Local bot P&L', value: formatUsd(showcaseAgent.sessionPnlUsd ?? 0, 2), hint: 'Current research session' },
+      { label: 'Showcase equity', value: formatUsd(showcaseAgent.equityUsd ?? 500, 0), hint: 'Global bot :7002 reference' },
+      { label: 'Showcase P&L', value: formatUsd(showcaseAgent.sessionPnlUsd ?? 0, 2), hint: 'Current global session' },
       { label: 'Your copy', value: '—', hint: 'Connect API to start' },
       { label: 'Return', value: '—', hint: 'Live relay after hire' },
     ];

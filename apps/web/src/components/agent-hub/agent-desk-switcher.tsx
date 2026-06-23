@@ -25,7 +25,7 @@ export function AgentDeskSwitcher({
   const tabs: { id: AgentDeskId; label: string; short: string; color: string }[] = [
     { id: 'live', label: `${exchange} live copy`, short: 'Live', color: 'emerald' },
     { id: 'relay-sim', label: `${exchange} relay sim`, short: 'Sim', color: 'sky' },
-    { id: 'showcase', label: 'Research local bot', short: 'Local', color: 'violet' },
+    { id: 'showcase', label: 'Global showcase bot', short: 'Showcase', color: 'violet' },
   ];
 
   return (

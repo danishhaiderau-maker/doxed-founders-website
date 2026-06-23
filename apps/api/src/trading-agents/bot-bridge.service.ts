@@ -56,7 +56,10 @@ export class BotBridgeService {
   }
 
   isEnabled(): boolean {
-    return Boolean(this.getBotUrl());
+    if (this.getBotUrl()) return true;
+    // Sync callers (relay tick) — use last Neon-resolved URL from resolveBotUrl().
+    if (this.dbUrlCache?.url) return true;
+    return false;
   }
 
   invalidateCache() {
