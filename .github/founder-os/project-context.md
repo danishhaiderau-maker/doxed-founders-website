@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix Start Everything command center and sync local lab v10.2 to global showcase.
 
 ## Last Activity
 
