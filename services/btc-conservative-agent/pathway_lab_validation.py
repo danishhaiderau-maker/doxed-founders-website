@@ -331,7 +331,7 @@ def run_ai_scan_role_validation() -> dict:
     spawn_src = ""
     exp_spawn_src = ""
     try:
-        import bybit_bot as bot
+        import bot
         spawn_src = inspect.getsource(bot.spawn_combo_lanes_from_ai_scan)
         exp_spawn_src = inspect.getsource(bot.spawn_experimental_lanes_from_ai_scan)
     except Exception as exc:
