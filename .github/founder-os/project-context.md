@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Bump v10.7: fresh-scope reports, dashboard stale fix, relay orphan audit.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
