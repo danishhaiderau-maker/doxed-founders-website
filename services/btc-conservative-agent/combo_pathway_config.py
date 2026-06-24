@@ -86,8 +86,8 @@ BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
-# Single release id — bot, analyzer, research dashboard, and local relay desk.
-# Bump this string on every deploy; all UIs read it from here (not hardcoded elsewhere).
+# Release label for bot + analyzer sync only (same repo folder).
+# NOT auto-copied to cloud deploy, local lab (:7800), or Agent Hub — confirm with owner before cross-stack bumps.
 RESEARCH_STACK_VERSION = "v10.6-melbourne-unified-2026-06-24"
 RESEARCH_STACK_FEATURES = (
     "Regime intelligence · Conditional edges · Fill delay · Melbourne time · ChatGPT download fix · Relay ID sync"

@@ -5106,6 +5106,11 @@ DASHBOARD_BIND_HOST = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 EDGE_RESEARCH_TELEMETRY_ONLY = True  # v95: edge is logged/routed in research; not a sole decision gate
 DASHBOARD_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "127.0.0.1")
 
+AGENT_HUB_PUBLIC_URL = os.getenv(
+    "AGENT_HUB_PUBLIC_URL",
+    "https://doxxedcrypto.digital/agent-hub/conservative-btc",
+).strip()
+
 def dashboard_public_url() -> str:
     custom = (os.getenv("DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
@@ -15814,11 +15819,11 @@ HTML = """<!DOCTYPE html>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
   <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Research stack build</div>
   <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
-  <div style="font-size:0.85rem;color:#8b949e;">Local relay desk · lag telemetry · analyzer watchdog — <a href="/desk" style="color:#a371f7;font-weight:600;">Open /desk →</a> · Analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">research</a></div>
+  <div style="font-size:0.85rem;color:#8b949e;">Research analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">:9500 reports</a> · Public desk <a href="__AGENT_HUB_URL__" style="color:#a371f7;font-weight:600;">Agent Hub →</a> (doxxedcrypto.digital)</div>
 </div>
 <p style="margin:8px 0;padding:10px 14px;background:#1f1630;border:1px solid #6e40c955;border-radius:8px;">
-  <strong style="color:#a371f7;">Local relay testing</strong> — mirror this bot into paper Bitfinex relay sim before live copy.
-  <span style="color:#8b949e;font-size:0.85em;"> (LOCAL ONLY — not synced to Doxed Founder)</span>
+  <strong style="color:#a371f7;">Showcase + relay</strong> — live book and Bitfinex relay sim run on
+  <a href="__AGENT_HUB_URL__" style="color:#58a6ff;">doxxedcrypto.digital Agent Hub</a>, not this local Flask page.
 </p>
 <p style="color:#8b949e;margin-top:0;">Bot build: <strong id="botVersionBanner">__BOT_VERSION__</strong> · Exchange: <strong>Bitfinex</strong> perp · Symbol: <span id="marketSymbol">tBTCF0:USTF0</span> · Research / sim mode · <a href="__DASHBOARD_URL__" style="color:#58a6ff;">__DASHBOARD_URL__</a></p>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
@@ -17603,6 +17608,7 @@ def dashboard():
     page = (
         HTML.replace("__DASHBOARD_URL__", dashboard_public_url())
         .replace("__ANALYZER_URL__", research_dashboard_public_url())
+        .replace("__AGENT_HUB_URL__", AGENT_HUB_PUBLIC_URL)
         .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
     )
@@ -17715,88 +17721,6 @@ def _maybe_bitfinex_cancel(source: dict) -> None:
         )
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] cancel hook failed: {exc} [PIPELINE ENFORCEMENT]")
-
-
-def _desk_extra_payload() -> dict:
-    try:
-        import bitfinex_live_executor as bx
-
-        with state_lock:
-            return {"bitfinex_live": bx.live_status(state, _private_api_keys_ok())}
-    except Exception:
-        return {"bitfinex_live": {"enabled": False, "keys_ok": False, "ready": False}}
-
-
-def _desk_source_snapshot() -> dict:
-    """Lightweight book snapshot for local relay desk (avoids full /api/state cost)."""
-    try:
-        now_ts = time.time()
-        with state_lock:
-            snap = {
-                "price": state.get("price"),
-                "equity": state.get("equity"),
-                "account_balance": state.get("account_balance"),
-                "regime": state.get("regime"),
-            }
-        with trade_lock:
-            positions_copy = copy.deepcopy(open_positions)
-            pending_copy = copy.deepcopy(pending_orders)
-            expired_copy = copy.deepcopy(expired_orders[-20:])
-            ai_hist = copy.deepcopy(state.get("ai_history") or [])[:20]
-            closed_copy = copy.deepcopy(trades[-20:])
-            active_list, _ = _collect_dashboard_active_signals(
-                pending_copy,
-                positions_copy,
-                trades_map,
-                default_strategy=state.get("strategy", "-"),
-                default_regime=state.get("regime", "-"),
-            )
-        orders = []
-        tick_px = snap.get("price")
-        for o in pending_copy:
-            age = (now_ts - o.get("created_ts", now_ts)) / 60 if o.get("created_ts") else 0
-            oc = copy.deepcopy(o)
-            oc["age_min"] = age
-            if tick_px and tick_px > 0:
-                oc["signal_price"] = oc.get("signal_price") or tick_px
-            orders.append(oc)
-        pos_out = []
-        for pos in positions_copy:
-            if pos.get("status") != "OPEN":
-                continue
-            pc = copy.deepcopy(pos)
-            mark = get_executable_mark_price(pos, fallback=snap.get("price"))
-            pc["current_price"] = mark
-            pc["side"] = "LONG" if pc.get("dir") == "LONG" else "SHORT"
-            pos_out.append(pc)
-        snap["positions"] = pos_out
-        snap["orders"] = orders
-        snap["pending_orders"] = orders
-        snap["expired_orders"] = expired_copy
-        snap["ai_history"] = ai_hist
-        snap["closed_trades"] = [
-            {
-                "trade_id": t.get("trade_id"),
-                "dir": t.get("dir") or t.get("final_direction"),
-                "entry": t.get("entry"),
-                "exit": t.get("exit"),
-                "exit_reason": t.get("exit_reason"),
-                "net_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net") or t.get("pnl_usd"),
-                "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net") or t.get("pnl_usd"),
-            }
-            for t in reversed(closed_copy)
-        ]
-        pending_by_tid = {o.get("trade_id"): o for o in orders if o.get("trade_id")}
-        for sig in active_list:
-            tid = sig.get("trade_id")
-            if tid and not sig.get("fill_price"):
-                po = pending_by_tid.get(tid) or {}
-                sig["fill_price"] = po.get("fill_price") or po.get("limit_price") or sig.get("limit_price")
-        snap["signal_info"] = {"signals": active_list}
-        snap["active_signals"] = active_list
-        return snap
-    except Exception:
-        return {}
 
 
 def _relay_signal_ref_lite(sig: dict) -> dict:
@@ -18060,7 +17984,7 @@ def api_build():
         "bot_pid": os.getpid(),
         "cwd": os.getcwd(),
         "dashboard_url": dashboard_public_url(),
-        "relay_desk_url": f"{dashboard_public_url().rstrip('/')}/desk",
+        "agent_hub_url": AGENT_HUB_PUBLIC_URL,
         "analyzer_url": research_dashboard_public_url(),
         "features": RESEARCH_STACK_FEATURES,
         "server_ts": utc_iso(),
@@ -21223,16 +21147,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    try:
-        from local_relay_dashboard import register_local_relay_desk
-
-        register_local_relay_desk(app, _desk_source_snapshot, _desk_extra_payload)
-        logger.info(
-            f"[LOCAL RELAY] Research desk at {dashboard_public_url().rstrip('/')}/desk "
-            f"(local-only Bitfinex relay sim) [PIPELINE ENFORCEMENT]"
-        )
-    except Exception as exc:
-        logger.warning(f"[LOCAL RELAY] desk unavailable: {exc} [PIPELINE ENFORCEMENT]")
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
     fetch_ohlcv()

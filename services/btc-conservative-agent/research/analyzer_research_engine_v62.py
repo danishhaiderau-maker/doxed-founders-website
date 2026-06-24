@@ -54,6 +54,13 @@ import sys
 import traceback
 import re
 
+# Agent root must be on sys.path before combo_pathway_config import (script lives in research/).
+_ANALYZER_DIR = os.path.dirname(os.path.abspath(__file__))
+_AGENT_ROOT = os.path.dirname(_ANALYZER_DIR)
+for _boot_path in (_AGENT_ROOT, _ANALYZER_DIR):
+    if _boot_path and _boot_path not in sys.path:
+        sys.path.insert(0, _boot_path)
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -169,15 +176,16 @@ ANALYZER_LOOP_INTERVAL_MINUTES = max(1, int(os.getenv("ANALYZER_INTERVAL_MINUTES
 
 
 def resolve_analyzer_session_scope() -> tuple:
-    """Always analyze the current session — from last fresh collection wipe onward."""
+    """Session-only when fresh_collection wipe is active; else full CSV (ALL-TIME)."""
     session = load_research_session()
     if session.get("fresh_collection_mode") or session.get("fresh_collection_start_time"):
         iso = session.get("fresh_collection_start_iso") or "n/a"
         return True, f"SESSION (fresh collection from {iso})"
-    if session.get("bot_start_time"):
+    forced = os.getenv("ANALYZER_SESSION_ONLY", "").strip().lower()
+    if forced in ("1", "true", "yes"):
         iso = session.get("bot_start_iso") or "n/a"
-        return True, f"SESSION (bot session from {iso})"
-    return True, "SESSION (no research_session.json — analyzing all loaded rows)"
+        return True, f"SESSION (ANALYZER_SESSION_ONLY from {iso})"
+    return False, "ALL-TIME (full trades_3factor.csv — fresh_collection_mode off)"
 
 
 def start_research_dashboard_server() -> threading.Thread | None:
@@ -334,9 +342,9 @@ try:
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
 except ImportError:
-    EXPECTED_BOT_VERSION = "v10.3-dashboard-ultimate-gate-2026-06-23"
+    EXPECTED_BOT_VERSION = "v10.6-melbourne-unified-2026-06-24"
     EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.3-dashboard-ultimate-gate-2026-06-23"
+    ANALYZER_SYNC_ID = "v10.6-melbourne-unified-2026-06-24"
     RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
     SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
     TRAIL_LADDER_SCENARIO_C = [
@@ -15260,7 +15268,7 @@ def write_report_manifest(payload=None):
             RESEARCH_COMPACT_SUMMARY_FILE,
         ],
         "research_dashboard_url": os.getenv(
-            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/"
+            "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9500/"
         ),
     }
     try:
@@ -16202,7 +16210,7 @@ if __name__ == "__main__":
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()
-    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://10.0.0.102:9001/")
+    dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9500/")
 
     _once_mode = len(sys.argv) > 1 and str(sys.argv[1]).startswith("--once")
 
