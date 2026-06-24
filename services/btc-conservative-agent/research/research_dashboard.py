@@ -234,24 +234,66 @@ def _report_is_empty(name: str, data: dict) -> bool:
     return False
 
 
+def _scope_priority(payload: dict, *, fresh_collection: bool) -> int:
+    scope = str(
+        payload.get("session_scope") or payload.get("data_scope") or payload.get("scope") or ""
+    ).upper()
+    if fresh_collection:
+        if "FRESH" in scope or scope == "SESSION":
+            return 3
+        if scope in ("ALL-DATA", "ALL-TIME", "ALL"):
+            return 0
+    if scope in ("ALL-DATA", "ALL-TIME"):
+        return 1
+    return 2
+
+
+def _iter_data_payloads(name: str):
+    for path in _data_file_candidates(name):
+        if not path.is_file():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            yield path, payload, mtime
+        except Exception:
+            continue
+
+
+def _pick_best_payload(name: str, default=None):
+    if default is None:
+        default = {}
+    session = _load_bot_session() or {}
+    fresh = bool(session.get("fresh_collection_mode"))
+    best = None
+    best_key = (-1, -1.0)
+    for _path, payload, mtime in _iter_data_payloads(name):
+        key = (_scope_priority(payload, fresh_collection=fresh), mtime)
+        if key > best_key:
+            best_key = key
+            best = payload
+    return best if best is not None else default
+
+
 def _read_report(name: str, default=None):
     """Load JSON from project root, reports/, or all_data fallback when SESSION file is empty."""
     if default is None:
         default = {}
-    candidates = _data_file_candidates(name)
+    session = _load_bot_session() or {}
+    fresh = bool(session.get("fresh_collection_mode"))
     primary = None
+    primary_key = (-1, -1.0)
     fallback = None
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if str(candidate).endswith(os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep)):
-            if not _report_is_empty(name, payload):
+    fallback_key = (-1, -1.0)
+    for path, payload, mtime in _iter_data_payloads(name):
+        key = (_scope_priority(payload, fresh_collection=fresh), mtime)
+        is_all_data = str(path).endswith(os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep))
+        if is_all_data:
+            if not _report_is_empty(name, payload) and key > fallback_key:
+                fallback_key = key
                 fallback = payload
-        elif primary is None:
+        elif key > primary_key:
+            primary_key = key
             primary = payload
     if primary is not None and not _report_is_empty(name, primary):
         return primary
@@ -276,17 +318,7 @@ def _data_file_candidates(name: str) -> list[Path]:
 
 
 def _read_json(name: str, default=None):
-    if default is None:
-        default = {}
-    for path in _data_file_candidates(name):
-        if not path.is_file():
-            continue
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            continue
-    return default
+    return _pick_best_payload(name, default)
 
 
 def _read_text(name: str) -> str:
