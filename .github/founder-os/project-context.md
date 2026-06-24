@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(admin): prevent 502 on control page from slow bot state fetch.
 
 ## Last Activity
 
