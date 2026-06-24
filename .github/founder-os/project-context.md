@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(analyzer): ALL-TIME scope, agent-root reports, v10.6 import path
 
 ## Last Activity
 
