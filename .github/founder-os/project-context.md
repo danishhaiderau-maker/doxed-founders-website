@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+v10.6: unified Melbourne time + P1.5 regime intelligence
 
 ## Last Activity
 
