@@ -258,16 +258,38 @@ export function resolveShowcaseTradePrices(
   return { entry: d.entry, exit: d.exit, exitReason: d.exitReason };
 }
 
-function collectShowcaseSessionTradeIds(bot: BotApiState | null): string[] {
+function showcaseTradeClosedAtMs(trade: Record<string, unknown>): number {
+  const closed = Number(trade.closed_ts ?? 0);
+  if (closed > 0) return closed * 1000;
+  if (typeof trade.ts === 'string') {
+    const parsed = Date.parse(trade.ts);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const created = Number(trade.created_ts_ts ?? 0);
+  if (created > 0) return created * 1000;
+  return 0;
+}
+
+function collectShowcaseSessionTradeIds(
+  bot: BotApiState | null,
+  relaySessionStartedAt?: Date | null,
+): string[] {
   if (!bot) return [];
+  const relayStartMs = relaySessionStartedAt?.getTime() ?? 0;
+  const includeForRelayAudit = (closedAtMs: number) =>
+    relayStartMs <= 0 || closedAtMs <= 0 || closedAtMs >= relayStartMs - 2000;
+
   const ids = new Set<string>();
   for (const t of normalizeBotSessionTrades(bot)) {
-    if (t.trade_id) ids.add(String(t.trade_id));
+    if (!t.trade_id) continue;
+    if (!includeForRelayAudit(showcaseTradeClosedAtMs(t as Record<string, unknown>))) continue;
+    ids.add(String(t.trade_id));
   }
   for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
     const sig = entry?.signal_ref as Record<string, unknown> | undefined;
     if (!sig) continue;
     if (String(sig.status ?? '') === 'CLOSED' || sig.exit_price != null || sig.closed_ts != null) {
+      if (!includeForRelayAudit(showcaseTradeClosedAtMs(sig))) continue;
       ids.add(String(sig.trade_id ?? mapKey));
     }
   }
@@ -407,14 +429,17 @@ export function buildRelayFidelitySnapshot(input: {
     }
   }
 
-  const showcaseIds = collectShowcaseSessionTradeIds(input.bot);
+  const showcaseIds = collectShowcaseSessionTradeIds(input.bot, input.sessionStartedAt);
   for (const sid of showcaseIds) {
     const hasRelay = relayTradeIds.some((rid) => tradeIdsMatch(rid, sid));
     if (!hasRelay) {
       orphans.push({
         tradeId: sid,
         kind: 'showcase_without_relay',
-        detail: 'Local bot closed trade with no relay participant in this session',
+        detail:
+          input.sessionStartedAt != null
+            ? 'Showcase trade closed after relay sim started with no matching relay fill'
+            : 'Local bot closed trade with no relay participant in this session',
       });
     }
   }

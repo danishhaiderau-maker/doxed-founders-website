@@ -1082,7 +1082,7 @@ export class TradingAgentsService implements OnModuleInit {
           p.events.some((e) => e.eventType === 'FILLED' || e.eventType === 'EXIT'),
         );
         relayFidelity =
-          fidelityParticipants.length > 0
+          copyRelaySim.active || fidelityParticipants.length > 0
             ? buildRelayFidelitySnapshot({
                 bot: botRaw,
                 participants: fidelityParticipants,

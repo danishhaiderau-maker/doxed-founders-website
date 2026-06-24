@@ -88,9 +88,9 @@ BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
 # Release label for bot + analyzer sync only (same repo folder).
 # NOT auto-copied to cloud deploy, local lab (:7800), or Agent Hub — confirm with owner before cross-stack bumps.
-RESEARCH_STACK_VERSION = "v10.6-melbourne-unified-2026-06-24"
+RESEARCH_STACK_VERSION = "v10.7-fresh-scope-relay-audit-2026-06-25"
 RESEARCH_STACK_FEATURES = (
-    "Regime intelligence · Conditional edges · Fill delay · Melbourne time · ChatGPT download fix · Relay ID sync"
+    "Fresh-collection report scope · Dashboard stale-file fix · Relay sim orphan audit · Melbourne time · Relay ID sync"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
