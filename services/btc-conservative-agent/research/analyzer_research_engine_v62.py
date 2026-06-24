@@ -93,12 +93,13 @@ EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
+REGIME_CONFIDENCE_MATRIX_REPORT_FILE = "regime_confidence_matrix.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 REPORTS_HISTORY_DIR = os.path.join("reports", "history")
 HORIZON_MIN_COVERAGE_PCT = 80
-CONFIDENCE_BANDS_STANDARD = ("50-55", "55-60", "60-65", "65+")
+CONFIDENCE_BANDS_STANDARD = ("50-55", "55-60", "60-65", "65-69", "70-74", "75+")
 MIN_LANE_FILLS_FOR_RETIREMENT = 15
 MIN_LANE_APPROVES_FOR_RETIREMENT = 10
 _CONSOLE_STDOUT = sys.stdout
@@ -626,6 +627,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
+    ("Regime Leaderboard", REGIME_LEADERBOARD_REPORT_FILE, "Best lane per market regime cell"),
+    ("Regime × Confidence", REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "EV/WR by regime and AI confidence band"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -8790,7 +8793,11 @@ def _confidence_band_label(conf) -> str:
         return "55-60"
     if c < 65:
         return "60-65"
-    return "65+"
+    if c < 69:
+        return "65-69"
+    if c < 74:
+        return "70-74"
+    return "75+"
 
 
 def _direction_cohort_stats(sub):
@@ -13655,6 +13662,94 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
     return payload
 
 
+def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
+    """Regime × AI confidence band — where conditional edge hides (recommend-only)."""
+    if session is None:
+        session = load_research_session()
+    trades = _trades_for_regime_analysis(trades=trades, session=session)
+    scope = _shadow_scope_label(session)
+    print(
+        f"\n=== REGIME × CONFIDENCE MATRIX — {scope.lower()} {ANALYZER_SYNC_ID} "
+        f"{PIPELINE_ENFORCEMENT_TAG} ==="
+    )
+    if trades is None or trades.empty:
+        payload = {
+            "schema": "regime_confidence_matrix_v1",
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "bands": list(CONFIDENCE_BANDS_STANDARD),
+            "cells": [],
+            "regime_summaries": [],
+            "note": "No trades — collect data with live tiles",
+        }
+        with open(REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
+
+    work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
+    tag_rows = work.apply(_regime_tags_from_row, axis=1)
+    work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
+    conf = pd.to_numeric(work.get("ai_win_prob", work.get("conf")), errors="coerce")
+    work["confidence_band"] = conf.apply(_confidence_band_label)
+
+    cells = []
+    regime_summaries = []
+    for regime, reg_df in work.groupby("regime_key"):
+        band_rows = []
+        for bucket in CONFIDENCE_BANDS_STANDARD:
+            sub = reg_df[reg_df["confidence_band"] == bucket]
+            stats = _direction_cohort_stats(sub)
+            cell = {
+                "regime": regime,
+                "confidence_band": bucket,
+                **stats,
+                "sample_ok": stats["trades"] >= min_trades,
+            }
+            cells.append(cell)
+            band_rows.append(cell)
+            if stats["trades"]:
+                print(
+                    f"  {regime} · {bucket}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
+                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
+                )
+        eligible = [b for b in band_rows if b.get("sample_ok") and b.get("trades")]
+        ranked = sorted(eligible or band_rows, key=lambda x: (x.get("ev_usd", 0), x.get("sum_pnl_usd", 0)), reverse=True)
+        best = ranked[0] if ranked else None
+        regime_summaries.append({
+            "regime": regime,
+            "total_trades": int(len(reg_df)),
+            "best_band": best.get("confidence_band") if best else None,
+            "best_ev_usd": best.get("ev_usd") if best else None,
+            "best_wr_pct": best.get("win_rate_pct") if best else None,
+            "conclusion_allowed": bool(best and best.get("sample_ok")),
+        })
+
+    payload = {
+        "schema": "regime_confidence_matrix_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "session_scope": scope,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "min_trades_per_cell": min_trades,
+        "bands": list(CONFIDENCE_BANDS_STANDARD),
+        "total_trades": len(work),
+        "cells": cells,
+        "regime_summaries": sorted(regime_summaries, key=lambda x: -(x.get("total_trades") or 0)),
+        "usage_note": "Recommend-only — need ≥2 trades per regime×band cell before acting on EV rank",
+    }
+    try:
+        with open(REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(
+            f"  ✅ Wrote {REGIME_CONFIDENCE_MATRIX_REPORT_FILE} "
+            f"({len(cells)} cells) {PIPELINE_ENFORCEMENT_TAG}"
+        )
+    except Exception as e:
+        print(f"  ⚠️ Could not write {REGIME_CONFIDENCE_MATRIX_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
 def roster_policy_report(trades=None, session=None, regime_payload=None, benchmark_report=None):
     """Recommend lane weights from regime leaderboard — human approval required before bot applies."""
     if session is None:
@@ -14392,6 +14487,7 @@ def pre_test_analytics_reports(
     lane_definition_report(trades=trades, session=session, benchmark_report=benchmark_report)
     lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
     regime_payload = regime_leaderboard_report(trades=trades, session=session)
+    regime_confidence_matrix_report(trades=trades, session=session)
     roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
     confidence_band_cross_report(trades=trades, session=session, benchmark_report=benchmark_report)

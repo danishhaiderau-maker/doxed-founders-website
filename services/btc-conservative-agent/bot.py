@@ -5093,6 +5093,14 @@ def dashboard_public_url() -> str:
     if custom:
         return custom if custom.endswith("/") else custom + "/"
     return f"http://{DASHBOARD_PUBLIC_HOST}:{DASHBOARD_PORT}/"
+
+
+def research_dashboard_public_url() -> str:
+    custom = (os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL") or "").strip()
+    if custom:
+        return custom if custom.endswith("/") else custom + "/"
+    return "http://127.0.0.1:9500/"
+
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 MAX_DAILY_LOSS = DAILY_DRAWDOWN_PAUSE_USD
 CONSECUTIVE_LOSS_PAUSE = 4
@@ -5221,6 +5229,7 @@ STARTUP_GRACE_PERIOD = 30
 CANDLE_STALE_SEC = 180
 MAX_ACTIVE_SIGNALS = 6
 MAX_SIGNAL_RETENTION_SEC = 7200
+RELAY_TRADES_MAP_RETENTION_SEC = int(os.getenv("RELAY_TRADES_MAP_RETENTION_SEC", str(24 * 3600)))
 BUFFER_MIN = 150  # Legacy depth target for process_signal warmup flag; readiness gate uses WINDOW_SIZE (10).
 MIN_CANDLES = 200
 READY_STABLE_SEC = 5.0
@@ -9354,6 +9363,28 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "rida",
 }
 
+
+def allocate_lane_trade_id(research_lane: str) -> str:
+    """Stable lane-prefixed trade_id — relay + CSV must never see bare UUIDs."""
+    lane = str(research_lane or RESEARCH_LANE_AI_SCAN).upper()
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        prefix = "cont"
+    elif is_ai_scan_lane(lane):
+        prefix = "scan"
+    else:
+        prefix = (
+            COMBO_LANE_SPECS.get(lane, {}).get("id_prefix")
+            or _SPAWN_LANE_ID_PREFIX.get(lane)
+            or "lane"
+        )
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def relay_publishes_approve_outcome(research_lane: str) -> bool:
+    """AI_SCAN routes to spawn lanes only — must not overwrite relay-facing approve snapshot."""
+    return not is_ai_scan_lane(str(research_lane or "").upper())
+
+
 SHADOW_RUNNER_HORIZON_SECS = {
     "15m": 900,
     "30m": 1800,
@@ -9466,9 +9497,8 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
             block_reason="LANE_TOGGLE_OFF",
         )
         return
-    prefix = COMBO_LANE_SPECS.get(target_lane, {}).get("id_prefix") or _SPAWN_LANE_ID_PREFIX.get(target_lane, "combo")
     spawn_ctx = copy.deepcopy(ctx)
-    spawn_ctx["trade_id"] = f"{prefix}-{uuid.uuid4().hex[:12]}"
+    spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
     spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
     logger.info(
         f"[{target_lane}] combo spawn trade_id={spawn_ctx['trade_id']} reason={trigger_reason} "
@@ -9533,9 +9563,8 @@ def _spawn_experimental_lane(
         )
         return
     spec = EXPERIMENTAL_LANE_SPECS.get(target_lane, {})
-    prefix = spec.get("id_prefix") or _SPAWN_LANE_ID_PREFIX.get(target_lane, "exp")
     spawn_ctx = copy.deepcopy(ctx)
-    spawn_ctx["trade_id"] = f"{prefix}-{uuid.uuid4().hex[:12]}"
+    spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
     spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
     logger.info(
         f"[{target_lane}] experimental spawn trade_id={spawn_ctx['trade_id']} "
@@ -9756,7 +9785,7 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     if not is_ai_scan_lane(source_lane) or not ai:
         return
     spawn_ctx = copy.deepcopy(ctx or {})
-    spawn_ctx["trade_id"] = f"cont-{uuid.uuid4().hex[:12]}"
+    spawn_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_CONTINUOUS)
     orders_on = continuous_ai_research_enabled()
     logger.info(
         f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
@@ -9791,7 +9820,7 @@ def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lan
     if ai.get("decision") != "APPROVE":
         return
     pg_ctx = copy.deepcopy(ctx)
-    pg_ctx["trade_id"] = f"pg-{uuid.uuid4().hex[:12]}"
+    pg_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_PROFIT_GATES)
     logger.info(
         f"[PROFIT_GATES LANE] spawn execution from {source_lane} trade_id={pg_ctx['trade_id']} "
         f"[PIPELINE ENFORCEMENT]"
@@ -12566,7 +12595,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                ctx["trade_id"] = str(uuid.uuid4())
+                ctx["trade_id"] = allocate_lane_trade_id(research_lane)
                 with state_lock:
                     state["debug_state"]["ai_gate"] = {
                         "called": False,
@@ -12650,7 +12679,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            trade_id = ctx.get("trade_id") or str(uuid.uuid4())
+            trade_id = ctx.get("trade_id") or allocate_lane_trade_id(research_lane)
             signal = {
                 "trade_id": trade_id,
                 "status": "INIT",
@@ -12678,7 +12707,8 @@ def process_signal(event: dict):
             log_setup(signal)
             enforce_log(signal, "AI", extra=f"{ai.get('decision')}", skip_stage="AI")
             log_ai(signal, ai)
-            record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai)
+            if relay_publishes_approve_outcome(research_lane):
+                record_approve_outcome("PENDING", None, pipeline_eff_thr, trade_id, edge_score, ai)
             full_pipeline_trace("[PIPELINE]", f"AI_{ai.get('decision')}", trade_id)
             with state_lock:
                 state["debug_state"]["last_pipeline_stage"] = "AI"
@@ -13211,7 +13241,8 @@ def process_signal(event: dict):
                 exit_pipeline(signal, ai, "ORDER_FAILED")
                 state["last_pipeline_stage"] = "IDLE"
                 return
-            record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
+            if relay_publishes_approve_outcome(research_lane):
+                record_approve_outcome("EXECUTED", "ORDER_PLACED", pipeline_eff_thr, trade_id, edge_score, ai)
             if signal.get("status") in ("FILLED", "OPEN"):
                 final_status = signal.get("status")
             elif signal.get("status") == SIGNAL_STATUS_AWAITING_5M:
@@ -15750,7 +15781,7 @@ HTML = """<!DOCTYPE html>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
   <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Research stack build</div>
   <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
-  <div style="font-size:0.85rem;color:#8b949e;">Local relay desk · lag telemetry · analyzer watchdog — <a href="/desk" style="color:#a371f7;font-weight:600;">Open /desk →</a> · Analyzer <a href="http://127.0.0.1:9001/" style="color:#58a6ff;">:9001</a></div>
+  <div style="font-size:0.85rem;color:#8b949e;">Local relay desk · lag telemetry · analyzer watchdog — <a href="/desk" style="color:#a371f7;font-weight:600;">Open /desk →</a> · Analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">research</a></div>
 </div>
 <p style="margin:8px 0;padding:10px 14px;background:#1f1630;border:1px solid #6e40c955;border-radius:8px;">
   <strong style="color:#a371f7;">Local relay testing</strong> — mirror this bot into paper Bitfinex relay sim before live copy.
@@ -17532,6 +17563,7 @@ def dashboard_js():
 def dashboard():
     page = (
         HTML.replace("__DASHBOARD_URL__", dashboard_public_url())
+        .replace("__ANALYZER_URL__", research_dashboard_public_url())
         .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
     )
@@ -17728,21 +17760,63 @@ def _desk_source_snapshot() -> dict:
         return {}
 
 
+def _relay_signal_ref_lite(sig: dict) -> dict:
+    if not isinstance(sig, dict):
+        return {}
+    return {
+        "trade_id": sig.get("trade_id"),
+        "status": sig.get("status"),
+        "exit_reason": sig.get("exit_reason"),
+        "exit_price": sig.get("exit_price"),
+        "closed_ts": sig.get("closed_ts"),
+        "fill_price": sig.get("fill_price"),
+        "fill_ts": sig.get("fill_ts") or (sig.get("timing") or {}).get("fill_ts"),
+        "limit_price": sig.get("limit_price"),
+        "signal_price": sig.get("signal_price"),
+        "net_pnl_usd": sig.get("net_pnl_usd"),
+        "created_ts": sig.get("created_ts"),
+        "created_ts_ts": sig.get("created_ts_ts"),
+        "research_lane": sig.get("research_lane"),
+    }
+
+
 def _relay_trades_map_lite() -> dict:
-    """Slim trades_map for NestJS relay closure sync (no full signal dump)."""
+    """Slim trades_map for NestJS relay closure sync — includes recently closed (~24h)."""
     lite = {}
+    cutoff = time.time() - RELAY_TRADES_MAP_RETENTION_SEC
+
+    def _merge(tid: str, sig: dict):
+        if not tid or not isinstance(sig, dict):
+            return
+        key = str(tid)
+        ts = sig.get("created_ts_ts") or sig.get("closed_ts_ts") or 0
+        if ts and ts < cutoff and is_terminal_signal(sig):
+            return
+        lite[key] = {"signal_ref": _relay_signal_ref_lite(sig)}
+
     with trade_lock:
         for tid, entry in trades_map.items():
             sig = entry.get("signal_ref") if isinstance(entry, dict) else None
-            if not isinstance(sig, dict):
+            if isinstance(sig, dict):
+                _merge(str(sig.get("trade_id") or tid), sig)
+        for t in reversed(trades):
+            tid = t.get("trade_id")
+            if not tid or str(tid) in lite:
+                continue
+            exit_ts = t.get("ts") or t.get("exit_ts") or t.get("closed_ts")
+            parsed_ts = parse_ts(exit_ts) if isinstance(exit_ts, str) else (exit_ts or 0)
+            if parsed_ts and parsed_ts < cutoff:
                 continue
             lite[str(tid)] = {
                 "signal_ref": {
-                    "status": sig.get("status"),
-                    "exit_reason": sig.get("exit_reason"),
-                    "exit_price": sig.get("exit_price"),
-                    "closed_ts": sig.get("closed_ts"),
-                    "net_pnl_usd": sig.get("net_pnl_usd"),
+                    "trade_id": tid,
+                    "status": "CLOSED",
+                    "exit_reason": t.get("exit_reason"),
+                    "exit_price": t.get("exit"),
+                    "fill_price": t.get("entry"),
+                    "net_pnl_usd": t.get("net_pnl_usd") if t.get("net_pnl_usd") is not None else t.get("net_usd") or t.get("net"),
+                    "closed_ts": exit_ts if isinstance(exit_ts, str) else None,
+                    "research_lane": t.get("research_lane"),
                 }
             }
     return lite
@@ -17948,7 +18022,7 @@ def api_build():
         "cwd": os.getcwd(),
         "dashboard_url": dashboard_public_url(),
         "relay_desk_url": f"{dashboard_public_url().rstrip('/')}/desk",
-        "analyzer_url": os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"),
+        "analyzer_url": research_dashboard_public_url(),
         "features": RESEARCH_STACK_FEATURES,
         "server_ts": utc_iso(),
     }), 200

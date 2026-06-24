@@ -88,8 +88,10 @@ BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "PRIMARY_PRODUCTION"
 # Single release id — bot, analyzer, research dashboard, and local relay desk.
 # Bump this string on every deploy; all UIs read it from here (not hardcoded elsewhere).
-RESEARCH_STACK_VERSION = "v10.3-dashboard-ultimate-gate-2026-06-23"
-RESEARCH_STACK_FEATURES = "Ultimate dashboard gate · Virtual chase defer · AI bands · Relay desk · Bitfinex LIVE"
+RESEARCH_STACK_VERSION = "v10.4-relay-fidelity-regime-v1-2026-06-24"
+RESEARCH_STACK_FEATURES = (
+    "Relay trade-ID sync · 24h closure map · Regime×confidence matrix · Finer AI bands · Research downloads · :9500 global"
+)
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
 RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
