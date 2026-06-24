@@ -78,6 +78,43 @@ export class BotBridgeService {
     return this.fetchState(force, 'relay');
   }
 
+  /** Admin panels — fast relay snapshot; do not block on full /api/state (large trades_map). */
+  async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
+    const base = await this.resolveBotUrl();
+    if (!base) return null;
+
+    const now = Date.now();
+    if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
+      return this.cached;
+    }
+
+    for (const path of ['/api/relay-state', '/api/state']) {
+      try {
+        const res = await fetch(`${base}${path}`, {
+          signal: AbortSignal.timeout(8_000),
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'doxxedcrypto-admin/1.0',
+          },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Bot ${path} HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as BotApiState;
+        if (!data || typeof data !== 'object') continue;
+        this.cached = data;
+        this.lastFetchAt = now;
+        return data;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Bot ${path} admin fetch failed: ${msg}`);
+      }
+    }
+
+    return null;
+  }
+
   async fetchState(force = false, mode: 'full' | 'relay' = 'full'): Promise<BotApiState | null> {
     const base = await this.resolveBotUrl();
     if (!base) return null;
@@ -189,7 +226,7 @@ export class BotBridgeService {
     for (const path of ['/api/ping', '/health']) {
       try {
         const res = await fetch(`${base}${path}`, {
-          signal: AbortSignal.timeout(20_000),
+          signal: AbortSignal.timeout(8_000),
           headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
         });
         if (!res.ok) continue;

@@ -61,13 +61,13 @@ export class AdminControlService {
   }
 
   async getAgentControlOverview() {
-    const [bridge, agent, settings, botState, credentials] = await Promise.all([
+    const [bridge, agent, settings, credentials] = await Promise.all([
       this.tradingAgents.getBotBridgeStatusAdmin(),
       this.prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } }),
       this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
-      this.botBridge.fetchState(),
       this.showcaseRuntime.getCredentialsStatus(),
     ]);
+    const botState = bridge.botState ?? null;
 
     const deepSeekConnected = Boolean(bridge.connected && bridge.deepSeekConnected);
     const exchangeProvider = (settings?.showcaseExchangeProvider ?? 'bybit') as ExchangeProvider;

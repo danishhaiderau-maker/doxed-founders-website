@@ -534,7 +534,7 @@ export class TradingAgentsService implements OnModuleInit {
     const enabled = await this.botBridge.isEnabledAsync();
     const url = await this.botBridge.resolveBotUrl();
     const [state, health] = await Promise.all([
-      enabled ? this.botBridge.fetchState(true) : Promise.resolve(null),
+      enabled ? this.botBridge.fetchStateForAdmin(true) : Promise.resolve(null),
       enabled ? this.botBridge.fetchHealth() : Promise.resolve(null),
     ]);
 
@@ -575,6 +575,7 @@ export class TradingAgentsService implements OnModuleInit {
       lastFetchAt: state ? new Date().toISOString() : null,
       stateEndpoint: host,
       health,
+      botState: state,
     };
   }
 
