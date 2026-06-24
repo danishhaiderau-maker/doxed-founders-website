@@ -18,7 +18,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, send_file, abort
+from flask import Flask, jsonify, render_template_string, send_file, abort, request
 
 try:
     from combo_pathway_config import (
@@ -105,6 +105,7 @@ REPORT_NAV = (
     ("lanes-retire", "Lane Retirement", "lane_retirement_report.json"),
     ("lanes-def", "Lane Definitions", "lane_definition_report.json"),
     ("regime", "Regime", "regime_leaderboard.json"),
+    ("regime-conf", "Regime × Conf", "regime_confidence_matrix.json"),
     ("chase", "Chase", "chase_attribution_report.json"),
     ("chase-threshold", "Chase Threshold", "chase_threshold_report.json"),
     ("chase-delay", "Chase Delay", "chase_delay_report.json"),
@@ -940,6 +941,78 @@ def api_archives():
     return jsonify(_archives_index())
 
 
+_RESEARCH_ARTIFACT_NAMES = frozenset({
+    EXECUTIVE_SUMMARY_FILE,
+    HIGHLIGHTS_FILE,
+    FINDINGS_FILE,
+    COVERAGE_FILE,
+    DEEP_DIVE_INDEX_FILE,
+    ANALYSIS_DASHBOARD_HTML,
+    ANALYZER_LOG_FILE,
+    COMPACT_SUMMARY_FILE,
+    REPORT_MANIFEST_FILE,
+})
+
+
+def _serve_research_artifact(filename: str):
+    safe = os.path.basename(filename)
+    if safe not in _RESEARCH_ARTIFACT_NAMES:
+        abort(404)
+    path = ROOT / safe
+    if not path.is_file():
+        abort(404)
+    if safe.endswith(".html"):
+        mimetype = "text/html"
+    elif safe.endswith(".json"):
+        mimetype = "application/json"
+    elif safe.endswith(".log"):
+        mimetype = "text/plain"
+    else:
+        mimetype = "text/plain"
+    as_attachment = request.args.get("download") in ("1", "true", "yes")
+    return send_file(
+        path,
+        mimetype=mimetype,
+        as_attachment=as_attachment,
+        download_name=safe if as_attachment else None,
+    )
+
+
+@app.route("/research_highlights.txt")
+def artifact_highlights():
+    return _serve_research_artifact(HIGHLIGHTS_FILE)
+
+
+@app.route("/research_findings.txt")
+def artifact_findings():
+    return _serve_research_artifact(FINDINGS_FILE)
+
+
+@app.route("/research_coverage.txt")
+def artifact_coverage():
+    return _serve_research_artifact(COVERAGE_FILE)
+
+
+@app.route("/research_deep_dive_index.txt")
+def artifact_deep_dive_index():
+    return _serve_research_artifact(DEEP_DIVE_INDEX_FILE)
+
+
+@app.route("/executive_summary.txt")
+def artifact_executive_summary():
+    return _serve_research_artifact(EXECUTIVE_SUMMARY_FILE)
+
+
+@app.route("/analysis_dashboard.html")
+def artifact_analysis_dashboard():
+    return _serve_research_artifact(ANALYSIS_DASHBOARD_HTML)
+
+
+@app.route("/analyzer_run.log")
+def artifact_analyzer_log():
+    return _serve_research_artifact(ANALYZER_LOG_FILE)
+
+
 @app.route("/download/reports")
 def download_reports():
     buf = io.BytesIO()
@@ -1201,6 +1274,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Roster policy (recommend only)</h3>
     <pre id="roster-policy-json">Loading…</pre>
   </section>
+  <section id="sec-regime-conf">
+    <h2>Regime × Confidence Matrix</h2>
+    <p class="note" id="regime-conf-note">Which AI confidence band wins in each market regime (recommend-only).</p>
+    <div class="kpis" id="regime-conf-kpis"></div>
+    <table><thead><tr><th>Regime</th><th>Band</th><th>Trades</th><th>WR%</th><th>EV</th><th>PnL</th><th>OK?</th></tr></thead><tbody id="regime-conf-body"></tbody></table>
+  </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
     <div class="kpis" id="chase-kpis"></div>
@@ -1323,6 +1402,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p style="margin-top:16px"><b>Week collection DB</b> — auto-updated every analyzer run (~30 min), v9.83+ trades only.</p>
     <a class="btn secondary" href="/download/accumulator" id="dl-accumulator">⬇ Accumulator DB + CSV</a>
     <a class="btn secondary" href="/api/accumulator" target="_blank">View accumulator status JSON</a>
+    <p style="margin-top:16px"><b>Research layers</b> — text summaries from the latest analyzer run.</p>
+    <a class="btn secondary" href="/research_highlights.txt?download=1">⬇ research_highlights.txt</a>
+    <a class="btn secondary" href="/research_findings.txt?download=1">⬇ research_findings.txt</a>
+    <a class="btn secondary" href="/research_coverage.txt?download=1">⬇ research_coverage.txt</a>
+    <a class="btn secondary" href="/research_deep_dive_index.txt?download=1">⬇ research_deep_dive_index.txt</a>
+    <a class="btn secondary" href="/analysis_dashboard.html?download=1">⬇ analysis_dashboard.html</a>
+    <a class="btn secondary" href="/analyzer_run.log?download=1">⬇ analyzer_run.log</a>
     <p style="margin-top:16px"><b>Latest snapshot only</b> — current analyzer run reports.</p>
     <a class="btn" href="/download/reports" id="dl-zip">⬇ Latest Reports ZIP</a>
     <a class="btn secondary" href="/api/manifest" target="_blank">View report_manifest.json</a>
@@ -1704,6 +1790,22 @@ async function loadRetirement() {
   }).join('');
 }
 
+async function loadRegimeConf() {
+  const r = await fetch('/api/report/regime_confidence_matrix.json');
+  const d = await r.json();
+  document.getElementById('regime-conf-note').textContent = d.usage_note || '';
+  document.getElementById('regime-conf-kpis').innerHTML = [
+    ['Total trades', d.total_trades ?? 'n/a'],
+    ['Matrix cells', (d.cells||[]).length],
+    ['Regimes', (d.regime_summaries||[]).length],
+  ].map(([k,v]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  document.getElementById('regime-conf-body').innerHTML = (d.cells||[]).filter(c => c.trades).map(c => {
+    const ok = c.sample_ok ? '✓' : '—';
+    const cls = c.sample_ok && (c.ev_usd||0) > 0 ? 'green' : (c.sample_ok ? 'red' : '');
+    return `<tr><td>${c.regime}</td><td>${c.confidence_band}</td><td>${c.trades}</td><td>${c.win_rate_pct}%</td><td>$${fmtUsd(c.ev_usd)}</td><td>$${fmtUsd(c.sum_pnl_usd)}</td><td class="${cls}">${ok}</td></tr>`;
+  }).join('') || '<tr><td colspan="7">No matrix data yet.</td></tr>';
+}
+
 async function loadRegime() {
   const [rr, rp] = await Promise.all([
     fetch('/api/report/regime_leaderboard.json'),
@@ -1800,6 +1902,7 @@ async function refreshAll() {
   await loadRetirement();
   await loadLaneDefs();
   await loadRegime();
+  await loadRegimeConf();
   await loadChase();
   await loadChaseThreshold();
   await loadChaseDelay();

@@ -46,6 +46,34 @@ import { resolveShowcaseTradeDetails, tradeIdsMatch } from './relay-fidelity.map
 
 const DDOLLAR_PER_USD = 100;
 const SIGNAL_POLL_MS = resolveSignalCyclePollMs();
+const BARE_UUID_TRADE_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isBareUuidTradeId(tradeId: string | null | undefined): boolean {
+  return Boolean(tradeId && BARE_UUID_TRADE_ID.test(tradeId));
+}
+
+/** AI_SCAN used to publish bare UUIDs — resolve the executing lane trade from live bot state. */
+function resolveRelayIntentTradeId(
+  bot: NonNullable<Awaited<ReturnType<BotBridgeService['fetchStateForExecution']>>>,
+  laoTradeId: string,
+): string {
+  if (!isBareUuidTradeId(laoTradeId)) return laoTradeId;
+
+  for (const o of [...(bot.orders ?? [])].reverse()) {
+    const tid = String(o.trade_id ?? '');
+    if (tid && !isBareUuidTradeId(tid)) return tid;
+  }
+  for (const s of [...(bot.signal_info?.signals ?? [])].reverse()) {
+    const tid = String(s.trade_id ?? '');
+    if (tid && !isBareUuidTradeId(tid)) return tid;
+  }
+  for (const t of normalizeBotSessionTrades(bot).slice(-12).reverse()) {
+    const tid = String(t.trade_id ?? '');
+    if (tid && !isBareUuidTradeId(tid)) return tid;
+  }
+  return laoTradeId;
+}
 
 export type SignalApiKeyContext = {
   userId: string;
@@ -180,17 +208,18 @@ export class SignalCyclesService implements OnModuleInit {
     if (lao.trade_id === this.lastSeenTradeId) return false;
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
-    const showcaseMatch = resolveShowcaseTradeDetails(bot, lao.trade_id);
+    const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
+    const showcaseMatch = resolveShowcaseTradeDetails(bot, intentTradeId);
     const canonicalTradeId = pickCanonicalTradeId(
-      lao.trade_id,
-      showcaseMatch?.matchedTradeId ?? lao.trade_id,
+      intentTradeId,
+      showcaseMatch?.matchedTradeId ?? intentTradeId,
     );
 
     const existing = await this.prisma.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId: agent.id, tradeId: canonicalTradeId } },
     });
     if (existing) {
-      this.lastSeenTradeId = lao.trade_id;
+      this.lastSeenTradeId = intentTradeId;
       return false;
     }
 
@@ -201,7 +230,7 @@ export class SignalCyclesService implements OnModuleInit {
       select: { tradeId: true },
     });
     if (recentCycles.some((c) => tradeIdsMatch(c.tradeId, canonicalTradeId))) {
-      this.lastSeenTradeId = lao.trade_id;
+      this.lastSeenTradeId = intentTradeId;
       return false;
     }
 
@@ -223,7 +252,7 @@ export class SignalCyclesService implements OnModuleInit {
         expiresAt: new Date(Date.now() + ttlSec * 1000),
       },
     });
-    this.lastSeenTradeId = lao.trade_id;
+    this.lastSeenTradeId = intentTradeId;
     this.logger.log(`Signal cycle INTENT ${cycleId} trade=${canonicalTradeId} (bot lao=${lao.trade_id})`);
     return true;
   }
