@@ -66,24 +66,26 @@ export default function AdminControlPage() {
   const load = useCallback(async () => {
     if (!token) return;
     try {
-      const [ov, foot] = await Promise.all([
-        fetchAdminControlOverview(token),
-        fetchGlobalShareFooter(),
-      ]);
-      setOverview(ov);
+      const foot = await fetchGlobalShareFooter();
       setFooter(foot.footer);
+    } catch {
+      /* footer is optional — keep default */
+    }
+    try {
+      const ov = await fetchAdminControlOverview(token);
+      setOverview(ov);
       if (ov.showcase?.botPublicUrl) setBotPublicUrl(ov.showcase.botPublicUrl);
       setError(null);
-      try {
-        const research = await fetchAdminResearchDashboard(token);
-        setResearchRaw(research.rawBotState);
-        setResearchVersion(research.botVersion);
-        setResearchUpdated(research.updatedAt);
-      } catch {
-        setResearchRaw(null);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load admin control');
+    }
+    try {
+      const research = await fetchAdminResearchDashboard(token);
+      setResearchRaw(research.rawBotState);
+      setResearchVersion(research.botVersion);
+      setResearchUpdated(research.updatedAt);
+    } catch {
+      setResearchRaw(null);
     }
   }, [token]);
 
