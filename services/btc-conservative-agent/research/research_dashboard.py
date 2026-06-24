@@ -3,7 +3,7 @@
 Research Dashboard v1.5 — read-only viewer for analyzer outputs.
 
 Runs independently from the trading bot. Never touches execution.
-Default: http://0.0.0.0:9001  →  http://10.0.0.102:9001/ on LAN
+Default: http://0.0.0.0:9500  →  global showcase analyzer (see config/home-showcase.lock.json)
 
   python research_dashboard.py
   RESEARCH_DASHBOARD_PORT=9001 RESEARCH_DASHBOARD_BIND_HOST=0.0.0.0 python research_dashboard.py
@@ -93,7 +93,7 @@ _parent = ROOT.parent
 DATA_ROOT = Path(os.getenv("BTC_AGENT_DATA_DIR", str(_parent if (_parent / "trades_3factor.csv").is_file() else ROOT)))
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "0.0.0.0")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
-PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://10.0.0.102:{BIND_PORT}")
+PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
@@ -163,6 +163,13 @@ app = Flask("research_dashboard")
 
 
 def _load_bot_session():
+    for base in (DATA_ROOT, ROOT):
+        path = base / "research_session.json"
+        if path.is_file():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
     return _read_json("research_session.json")
 
 
@@ -231,11 +238,7 @@ def _read_report(name: str, default=None):
     """Load JSON from project root, reports/, or all_data fallback when SESSION file is empty."""
     if default is None:
         default = {}
-    candidates = [
-        ROOT / name,
-        ROOT / REPORTS_DIR / name,
-        ROOT / ALL_DATA_REPORTS_DIR / name,
-    ]
+    candidates = _data_file_candidates(name)
     primary = None
     fallback = None
     for candidate in candidates:
@@ -245,7 +248,7 @@ def _read_report(name: str, default=None):
             payload = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if candidate == ROOT / ALL_DATA_REPORTS_DIR / name:
+        if str(candidate).endswith(os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep)):
             if not _report_is_empty(name, payload):
                 fallback = payload
         elif primary is None:
@@ -259,32 +262,57 @@ def _read_report(name: str, default=None):
     return default
 
 
+def _data_file_candidates(name: str) -> list[Path]:
+    """Analyzer writes to agent root (DATA_ROOT); legacy copies may sit under research/."""
+    bases = [DATA_ROOT, ROOT]
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for base in bases:
+        for candidate in (base / name, base / REPORTS_DIR / name, base / ALL_DATA_REPORTS_DIR / name):
+            if candidate not in seen:
+                seen.add(candidate)
+                out.append(candidate)
+    return out
+
+
 def _read_json(name: str, default=None):
-    path = ROOT / name
-    if not path.is_file():
-        return default if default is not None else {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default if default is not None else {}
+    if default is None:
+        default = {}
+    for path in _data_file_candidates(name):
+        if not path.is_file():
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return default
 
 
 def _read_text(name: str) -> str:
-    path = ROOT / name
-    if not path.is_file():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
+    for path in _data_file_candidates(name):
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+    return ""
 
 
 def _file_mtime(name: str):
-    path = ROOT / name
-    if not path.is_file():
-        return None
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    best = None
+    best_ts = 0.0
+    for path in _data_file_candidates(name):
+        if not path.is_file():
+            continue
+        try:
+            ts = path.stat().st_mtime
+            if ts >= best_ts:
+                best_ts = ts
+                best = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except Exception:
+            continue
+    return best
 
 
 def _manifest_reports():
