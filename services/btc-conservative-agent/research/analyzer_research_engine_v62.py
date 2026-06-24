@@ -94,6 +94,9 @@ EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
 REGIME_CONFIDENCE_MATRIX_REPORT_FILE = "regime_confidence_matrix.json"
+FILL_DELAY_REPORT_FILE = "fill_delay_report.json"
+TOP_CONDITIONAL_EDGES_REPORT_FILE = "top_conditional_edges.json"
+REGIME_STABILITY_REPORT_FILE = "regime_stability_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -629,6 +632,9 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
     ("Regime Leaderboard", REGIME_LEADERBOARD_REPORT_FILE, "Best lane per market regime cell"),
     ("Regime × Confidence", REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "EV/WR by regime and AI confidence band"),
+    ("Fill Delay", FILL_DELAY_REPORT_FILE, "Signal age and chase count vs outcome"),
+    ("Top Conditional Edges", TOP_CONDITIONAL_EDGES_REPORT_FILE, "Multi-factor combos ranked by EV"),
+    ("Regime Stability", REGIME_STABILITY_REPORT_FILE, "Sample size + stability score per regime cell"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -13750,6 +13756,173 @@ def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
     return payload
 
 
+def _stability_score(trades: int, wr_pct: float, ev_usd: float) -> dict:
+    """Recommend-only stability — penalize tiny samples."""
+    if trades < 2:
+        return {"score": 0.0, "tier": "INSUFFICIENT", "recommend_ok": False}
+    sample_factor = min(1.0, trades / 100.0)
+    ev_factor = max(0.0, min(1.0, (ev_usd + 2.0) / 4.0))
+    wr_factor = max(0.0, min(1.0, wr_pct / 100.0))
+    score = round(100.0 * sample_factor * (0.55 * ev_factor + 0.45 * wr_factor), 1)
+    tier = "HIGH" if trades >= 100 and ev_usd > 0 and wr_pct >= 55 else (
+        "MEDIUM" if trades >= 20 and ev_usd > 0 else "LOW"
+    )
+    return {
+        "score": score,
+        "tier": tier,
+        "recommend_ok": trades >= 100 and ev_usd > 0 and wr_pct >= 50,
+    }
+
+
+def fill_delay_report(trades=None, session=None):
+    """Time-to-fill: signal age, chase count, fill delay vs outcome."""
+    if session is None:
+        session = load_research_session()
+    trades = _trades_for_regime_analysis(trades=trades, session=session)
+    scope = _shadow_scope_label(session)
+    print(f"\n=== FILL DELAY REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
+    buckets = []
+    chase_buckets = []
+    if trades is not None and not trades.empty:
+        work = trades.drop_duplicates(subset=["trade_id"], keep="last").copy()
+        delay = pd.to_numeric(
+            work.get("execution_fill_delay_sec", work.get("signal_age_sec", work.get("entry_delay_sec"))),
+            errors="coerce",
+        )
+        chase = pd.to_numeric(work.get("limit_chase_count", work.get("chase_count")), errors="coerce").fillna(0).astype(int)
+        pnl = pd.to_numeric(work.get("net_pnl_usd"), errors="coerce")
+        work["_delay"] = delay
+        work["_chase"] = chase
+        work["_pnl"] = pnl
+        for label, lo, hi in (
+            ("0-30s", 0, 30),
+            ("30-60s", 30, 60),
+            ("1-3m", 60, 180),
+            ("3-10m", 180, 600),
+            ("10m+", 600, 999999),
+        ):
+            sub = work[(work["_delay"] >= lo) & (work["_delay"] < hi)]
+            stats = _direction_cohort_stats(sub)
+            buckets.append({"delay_bucket": label, **stats})
+            if stats["trades"]:
+                print(
+                    f"  delay {label}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
+                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
+                )
+        for ch in range(0, 7):
+            sub = work[work["_chase"] == ch] if ch < 6 else work[work["_chase"] >= 6]
+            label = f"{ch}" if ch < 6 else "6+"
+            stats = _direction_cohort_stats(sub)
+            chase_buckets.append({"chase_count": label, **stats})
+            if stats["trades"]:
+                print(
+                    f"  chase {label}: n={stats['trades']} WR={stats['win_rate_pct']:.1f}% "
+                    f"EV=${stats.get('ev_usd', 0):+.2f} {PIPELINE_ENFORCEMENT_TAG}"
+                )
+    payload = {
+        "schema": "fill_delay_report_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "session_scope": scope,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "delay_buckets": buckets,
+        "chase_buckets": chase_buckets,
+        "usage_note": "Compare immediate vs chased fills — execution quality vs signal quality",
+    }
+    try:
+        with open(FILL_DELAY_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  ✅ Wrote {FILL_DELAY_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as e:
+        print(f"  ⚠️ Could not write {FILL_DELAY_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def top_conditional_edges_report(trades=None, session=None, min_trades=3):
+    """Multi-factor interaction discovery — confidence × spread × ADX × session × lane."""
+    if session is None:
+        session = load_research_session()
+    trades = _trades_for_regime_analysis(trades=trades, session=session)
+    scope = _shadow_scope_label(session)
+    print(f"\n=== TOP CONDITIONAL EDGES — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
+    edges = []
+    if trades is not None and not trades.empty:
+        work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
+        tag_rows = work.apply(_regime_tags_from_row, axis=1)
+        work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
+        work["session"] = tag_rows.apply(lambda t: t.get("session"))
+        work["adx_bucket"] = tag_rows.apply(lambda t: t.get("adx"))
+        conf = pd.to_numeric(work.get("ai_win_prob", work.get("conf")), errors="coerce")
+        work["confidence_band"] = conf.apply(_confidence_band_label)
+        if "research_lane" not in work.columns:
+            work["research_lane"] = "UNKNOWN"
+        spread = work.get("directional_spread_bucket", work.get("spread_bucket"))
+        if spread is not None:
+            work["spread_bucket"] = spread.astype(str)
+        else:
+            work["spread_bucket"] = "unknown"
+        group_cols = ["confidence_band", "spread_bucket", "adx_bucket", "session", "research_lane"]
+        for keys, sub in work.groupby([work[c].astype(str) for c in group_cols]):
+            stats = _combo_stats_from_df(sub)
+            if stats["trades"] < 1:
+                continue
+            stab = _stability_score(stats["trades"], stats["wr_pct"], stats["ev_usd"])
+            combo = dict(zip(group_cols, keys if isinstance(keys, tuple) else (keys,)))
+            edges.append({"combo": combo, **stats, **stab})
+        edges.sort(key=lambda x: (x.get("recommend_ok", False), x.get("score", 0), x.get("ev_usd", 0)), reverse=True)
+        for row in edges[:8]:
+            if row["trades"]:
+                c = row["combo"]
+                print(
+                    f"  {c.get('confidence_band')} sp={c.get('spread_bucket')} adx={c.get('adx_bucket')} "
+                    f"sess={c.get('session')} lane={c.get('research_lane')}: "
+                    f"n={row['trades']} WR={row['wr_pct']:.1f}% EV=${row['ev_usd']:+.2f} "
+                    f"stab={row['tier']} {PIPELINE_ENFORCEMENT_TAG}"
+                )
+    payload = {
+        "schema": "top_conditional_edges_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "session_scope": scope,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "min_trades_per_combo": min_trades,
+        "edges": edges[:50],
+        "top_recommendable": [e for e in edges if e.get("recommend_ok")][:10],
+        "usage_note": "Require ≥100 trades + positive EV before auto roster changes",
+    }
+    try:
+        with open(TOP_CONDITIONAL_EDGES_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  ✅ Wrote {TOP_CONDITIONAL_EDGES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as e:
+        print(f"  ⚠️ Could not write {TOP_CONDITIONAL_EDGES_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def regime_stability_report(trades=None, session=None, regime_payload=None):
+    """Stability scores for regime × lane cells — filters noise from tiny samples."""
+    if regime_payload is None:
+        regime_payload = _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {}
+    cells = regime_payload.get("cells") or []
+    scoped = []
+    for cell in cells:
+        stab = _stability_score(cell.get("trades", 0), cell.get("wr_pct", 0), cell.get("ev_usd", 0))
+        scoped.append({**cell, **stab})
+    scoped.sort(key=lambda x: (-x.get("score", 0), -x.get("ev_usd", 0)))
+    payload = {
+        "schema": "regime_stability_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "cells": scoped,
+        "recommendable": [c for c in scoped if c.get("recommend_ok")],
+        "usage_note": "recommend_ok requires ≥100 trades, EV>0, WR≥50%",
+    }
+    try:
+        with open(REGIME_STABILITY_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+    return payload
+
+
 def roster_policy_report(trades=None, session=None, regime_payload=None, benchmark_report=None):
     """Recommend lane weights from regime leaderboard — human approval required before bot applies."""
     if session is None:
@@ -14488,6 +14661,9 @@ def pre_test_analytics_reports(
     lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
     regime_payload = regime_leaderboard_report(trades=trades, session=session)
     regime_confidence_matrix_report(trades=trades, session=session)
+    fill_delay_report(trades=trades, session=session)
+    top_conditional_edges_report(trades=trades, session=session)
+    regime_stability_report(trades=trades, session=session, regime_payload=regime_payload)
     roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
     confidence_band_cross_report(trades=trades, session=session, benchmark_report=benchmark_report)
@@ -15001,7 +15177,38 @@ def _generate_research_findings(payload):
             "⚠ Statistical confidence MODERATE — use for direction, confirm over ≥200 trades."
         )
 
-    return findings[:12]
+    cond = payload.get("conditional_edges") or {}
+    top_edge = (cond.get("top_recommendable") or cond.get("edges") or [])[:1]
+    if top_edge:
+        e = top_edge[0]
+        c = e.get("combo") or {}
+        findings.append(
+            f"Top conditional edge: {c.get('confidence_band')} + spread {c.get('spread_bucket')} + "
+            f"ADX {c.get('adx_bucket')} + {c.get('session')} → {c.get('research_lane')} "
+            f"({e.get('trades', 0)} trades, EV ${float(e.get('ev_usd', 0)):+.2f}, "
+            f"stability={e.get('tier', '?')})."
+        )
+
+    stab = payload.get("regime_stability") or {}
+    rec_cells = (stab.get("recommendable") or [])[:2]
+    if rec_cells:
+        labels = [
+            f"{c.get('regime_key', '?')}/{c.get('best_lane', c.get('lane', '?'))} "
+            f"(n={c.get('trades', 0)}, EV ${float(c.get('ev_usd', 0)):+.2f})"
+            for c in rec_cells
+        ]
+        findings.append(f"Regime-stable cells (≥100 trades): {'; '.join(labels)}.")
+
+    fd = payload.get("fill_delay") or {}
+    fd_buckets = fd.get("buckets") or []
+    if fd_buckets:
+        best_fd = max(fd_buckets, key=lambda x: float(x.get("ev_usd") or -999))
+        findings.append(
+            f"Fill delay: best bucket {best_fd.get('bucket')} "
+            f"({best_fd.get('trades', 0)} trades, EV ${float(best_fd.get('ev_usd', 0)):+.2f})."
+        )
+
+    return findings[:15]
 
 
 def _mirror_reports_to_dir():
@@ -15173,6 +15380,10 @@ def build_executive_summary_payload(
     top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
     lane_ret = _load_json_report(LANE_RETIREMENT_REPORT_FILE)
     feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
+    fill_delay = _load_json_report(FILL_DELAY_REPORT_FILE)
+    conditional_edges = _load_json_report(TOP_CONDITIONAL_EDGES_REPORT_FILE)
+    regime_stability = _load_json_report(REGIME_STABILITY_REPORT_FILE)
+    exit_leak_cohort = _load_json_report(EXIT_LEAKAGE_BY_REASON_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -15337,6 +15548,10 @@ def build_executive_summary_payload(
         "top_leakage": top_leak,
         "lane_retirement": lane_ret,
         "feature_importance": feat_imp,
+        "fill_delay": fill_delay,
+        "conditional_edges": conditional_edges,
+        "regime_stability": regime_stability,
+        "exit_leakage_by_reason": exit_leak_cohort,
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
@@ -15972,17 +16187,18 @@ def finalize_analyzer_outputs(
 
 if __name__ == "__main__":
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Home-stack runs from agent/research/; pathway_lab_validation lives in agent root.
+    _agent_root = os.path.dirname(_script_dir)
     if os.path.isfile(os.path.join(_script_dir, "pathway_lab_validation.py")):
         if _script_dir not in sys.path:
             sys.path.insert(0, _script_dir)
     else:
-        _agent_root = os.path.dirname(_script_dir)
         if _agent_root and _agent_root not in sys.path:
             sys.path.insert(0, _agent_root)
-    if os.path.abspath(os.getcwd()) != _script_dir:
-        print(f"  ℹ️ Switching cwd → {_script_dir}")
-        os.chdir(_script_dir)
+    # CSV/JSONL live in agent root; research/ subfolder hosts the script.
+    _data_dir = _agent_root if os.path.isfile(os.path.join(_agent_root, "trades_3factor.csv")) else _script_dir
+    if os.path.abspath(os.getcwd()) != _data_dir:
+        print(f"  ℹ️ Switching cwd → {_data_dir}")
+        os.chdir(_data_dir)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()

@@ -3,6 +3,7 @@ import {
   COPY_RELAY_SIM_DEFAULT_BALANCE_USD,
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
   emptyCopyRelaySimState,
+  formatMelbourneDateTime,
   readCopyRelaySimState,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
@@ -225,7 +226,7 @@ export class CopyRelaySimService {
           : '';
       lines.push(
         [
-          esc(p.updatedAt.toISOString()),
+          esc(formatMelbourneDateTime(p.updatedAt)),
           esc(p.cycle.tradeId),
           esc(showcase?.matchedTradeId ?? ''),
           esc(showcase?.matchKind ?? 'none'),
@@ -237,14 +238,14 @@ export class CopyRelaySimService {
           esc(showcase?.exit ?? ''),
           esc(p.exitPrice != null ? Number(p.exitPrice) : exitPayload.exit_price ?? ''),
           esc(exitLag),
-          esc(showcase?.entryAt ?? ''),
-          esc(showcase?.exitAt ?? ''),
-          esc(relayEntryAt?.toISOString() ?? ''),
-          esc(relayExitAt?.toISOString() ?? ''),
+          esc(showcase?.entryAt ? formatMelbourneDateTime(showcase.entryAt) : ''),
+          esc(showcase?.exitAt ? formatMelbourneDateTime(showcase.exitAt) : ''),
+          esc(relayEntryAt ? formatMelbourneDateTime(relayEntryAt) : ''),
+          esc(relayExitAt ? formatMelbourneDateTime(relayExitAt) : ''),
           esc(p.pnlUsd != null ? Number(p.pnlUsd) : ''),
           esc(p.pnlMarginPct != null ? Number(p.pnlMarginPct) : ''),
           esc(p.cycle.showcaseExitReason ?? exitPayload.exit_reason ?? ''),
-          esc(p.createdAt.toISOString()),
+          esc(formatMelbourneDateTime(p.createdAt)),
         ].join(','),
       );
     }

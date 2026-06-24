@@ -20,6 +20,7 @@ import {
   buildTradeLifecycleIntegrity,
   type CopyRelayLimitChainSnapshot,
   type TradeLifecycleIntegritySnapshot,
+  formatMelbourneDateTime,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
@@ -1496,11 +1497,11 @@ export class TradingAgentsService implements OnModuleInit {
     const totalPnlUsd = closedRows.reduce((sum, r) => sum + (r.pnlUsd ?? 0), 0);
 
     const payload: LiveTradeExportPayload = {
-      exportedAt: new Date().toISOString(),
+      exportedAt: formatMelbourneDateTime(new Date()),
       agentSlug: slug,
       agentName: agent.name,
       exchange: 'bitfinex',
-      sessionStartedAt: scope.sessionStartedAt.toISOString(),
+      sessionStartedAt: formatMelbourneDateTime(scope.sessionStartedAt),
       userId,
       tradeCount: rows.length,
       closedCount: closedRows.length,

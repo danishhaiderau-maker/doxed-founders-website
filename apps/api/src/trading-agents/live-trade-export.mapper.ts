@@ -1,4 +1,5 @@
 import type { SignalCycleStatus } from '@prisma/client';
+import { formatMelbourneDateTime } from '@dcf/utils';
 
 type IntentEnvelope = {
   direction?: string;
@@ -86,10 +87,15 @@ function payloadField(payload: unknown, key: string): unknown {
   return (payload as Record<string, unknown>)[key];
 }
 
+function melTs(input: Date | string | null | undefined): string {
+  if (input == null) return '';
+  return formatMelbourneDateTime(input instanceof Date ? input : input);
+}
+
 function mapEvent(payload: unknown, eventType: string, createdAt: Date): LiveTradeExportEvent {
   const p = (payload ?? {}) as Record<string, unknown>;
   return {
-    timestamp: createdAt.toISOString(),
+    timestamp: melTs(createdAt),
     eventType,
     limitPrice: num(p.limit_price),
     fillPrice: num(p.fill_price),
@@ -149,7 +155,7 @@ export function mapParticipantToExportRow(input: {
   const filledAt = filledEvent?.timestamp ?? null;
   const closedAt =
     input.participant.status === 'CLOSED' || input.participant.status === 'EXPIRED'
-      ? exitEvent?.timestamp ?? input.participant.updatedAt.toISOString()
+      ? exitEvent?.timestamp ?? melTs(input.participant.updatedAt)
       : null;
 
   const startMs = filledAt ? Date.parse(filledAt) : input.participant.createdAt.getTime();
@@ -185,8 +191,8 @@ export function mapParticipantToExportRow(input: {
     pnlMarginPct,
     feeUsd: num(input.participant.feeUsd),
     exitReason: exitEvent?.exitReason ?? input.cycle.showcaseExitReason,
-    signalCreatedAt: input.cycle.createdAt.toISOString(),
-    participantCreatedAt: input.participant.createdAt.toISOString(),
+    signalCreatedAt: melTs(input.cycle.createdAt),
+    participantCreatedAt: melTs(input.participant.createdAt),
     filledAt,
     closedAt,
     durationMinutes,

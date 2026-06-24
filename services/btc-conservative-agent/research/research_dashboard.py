@@ -17,6 +17,28 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
+
+
+def format_melbourne_dt(value) -> str:
+    """24h Melbourne display for dashboard (matches Agent Hub)."""
+    if value is None or value == "":
+        return "—"
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(value, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(MELBOURNE_TZ)
+        abbrev = local.strftime("%Z")
+        return local.strftime(f"%Y-%m-%d %H:%M:%S {abbrev}")
+    except Exception:
+        return str(value)[:19] if value else "—"
+
 
 from flask import Flask, jsonify, render_template_string, send_file, abort, request
 
@@ -783,6 +805,9 @@ def api_status():
         "public_url": PUBLIC_URL,
         "analyzer_sync_id": manifest_sync,
         "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
+        "generated_at_melbourne": format_melbourne_dt(manifest.get("generated_at") or compact.get("generated_at")),
+        "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),
+        "timezone": "Australia/Melbourne",
         "report_count": len(_manifest_reports()),
         "last_files": {
             "manifest": _file_mtime(REPORT_MANIFEST_FILE),
@@ -1097,11 +1122,14 @@ def download_complete_cached():
 @app.route("/download/chatgpt")
 def download_chatgpt_bundle():
     """ChatGPT-safe bundle: CSV + key reports + manifest (atomic ZIP, verified)."""
+    agent_root = ROOT.parent if (ROOT.parent / "trades_3factor.csv").is_file() else ROOT
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
     try:
         from build_chatgpt_research_bundle import build, OUT_DIR, ZIP_NAME
-    except ImportError:
-        abort(503, description="build_chatgpt_research_bundle.py not found")
-    for base in (HISTORY_ROOT, ROOT, ROOT.parent):
+    except ImportError as exc:
+        abort(503, description=f"build_chatgpt_research_bundle.py not found: {exc}")
+    for base in (RESEARCH_ROOT if (RESEARCH_ROOT := agent_root / "research").is_dir() else ROOT, ROOT, agent_root):
         candidate = base / "downloads" / ZIP_NAME
         if candidate.is_file() and candidate.stat().st_size > 10_000:
             try:
@@ -1116,7 +1144,10 @@ def download_chatgpt_bundle():
                         )
             except zipfile.BadZipFile:
                 pass
-    out_zip, _ = build()
+    try:
+        out_zip, _ = build(agent_root=agent_root)
+    except Exception as exc:
+        abort(500, description=f"ChatGPT bundle build failed: {exc}")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
         out_zip,
@@ -1234,6 +1265,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div>
     <span class="badge ok" id="health">READ-ONLY</span>
     <span class="badge" id="sync">—</span>
+    <span class="badge" id="melb-clock" title="Australia/Melbourne">Melbourne —</span>
     <span class="badge" id="updated">—</span>
   </div>
 </header>
@@ -1437,6 +1469,13 @@ try { _rdPrefs = JSON.parse(localStorage.getItem('research_dashboard_prefs_v1') 
 show(_rdPrefs.activeSection || 'summary');
 
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
+function fmtMelb(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z');
+    return new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false, timeZoneName:'short' }).format(d).replace(',', '');
+  } catch (e) { return iso.slice(0,19); }
+}
 
 async function loadSummary() {
   const r = await fetch('/api/summary');
@@ -1891,6 +1930,8 @@ async function loadStatus() {
   if (syncEl && d.expected_analyzer_sync_id) {
     syncEl.textContent = d.expected_analyzer_sync_id + (d.analyzer_sync_match === true ? ' ✓' : (d.analyzer_sync_match === false ? ' ⚠' : ''));
   }
+  const melbEl = document.getElementById('melb-clock');
+  if (melbEl && d.melbourne_now) melbEl.textContent = d.melbourne_now;
   return d;
 }
 
