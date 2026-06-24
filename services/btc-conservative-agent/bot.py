@@ -3283,19 +3283,37 @@ def _normalize_order_side_to_dir(side) -> str:
 melbourne_tz = pytz.timezone("Australia/Melbourne")
 
 def _timestamp_to_melbourne_display(ts: float) -> str:
-    """Unix epoch (UTC) → Melbourne display string."""
+    """Unix epoch (UTC) → Melbourne display string (24h, AEST/AEDT)."""
     if not ts:
         return "-"
     try:
         dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        mel = dt.astimezone(ZoneInfo("Australia/Melbourne"))
-        return mel.strftime("%Y-%m-%d %H:%M Melbourne")
+        return _format_melbourne_hm(dt.isoformat())
     except Exception:
         return "-"
 
 
 def _utc_iso_to_melbourne_display(ts_str: str) -> str:
     return _format_melbourne_hm(ts_str)
+
+
+def _enrich_melbourne_time_fields(row: dict) -> dict:
+    """Add ts_melbourne / close_ts_melbourne for dashboard + Agent Hub matching."""
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    raw = out.get("close_ts") or out.get("ts") or out.get("time")
+    if raw is not None and raw != "" and raw != "-":
+        if isinstance(raw, (int, float)):
+            mel = _timestamp_to_melbourne_display(float(raw))
+        else:
+            mel = _format_melbourne_hm(str(raw))
+        if mel and mel != "-":
+            out["ts_melbourne"] = mel
+            out["close_ts_melbourne"] = mel
+            if not out.get("time_melbourne"):
+                out["time_melbourne"] = mel
+    return out
 
 
 def _experimental_entry_filter_detail(lane_id: str, spec: dict) -> list:
@@ -8445,19 +8463,27 @@ Verify if still correct. Return same format."""
         return original_ai
 
 def _format_melbourne_hm(ts_str: str) -> str:
+    """UTC ISO or epoch string → `2026-06-24 18:37:55 AEST` (matches Agent Hub @dcf/utils)."""
     if not ts_str or ts_str == "-":
         return "-"
+    s = str(ts_str).strip()
+    if s.endswith("Melbourne") or " AEST" in s or " AEDT" in s:
+        return s
     try:
-        ts = ts_str.replace("Z", "+00:00")
-        if "+" not in ts and ts.count(":") >= 2:
-            ts = ts + "+00:00"
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        if isinstance(ts_str, (int, float)) or (s.replace(".", "", 1).isdigit() and len(s) <= 12):
+            dt = datetime.fromtimestamp(float(s), tz=timezone.utc)
+        else:
+            ts = s.replace("Z", "+00:00")
+            if "+" not in ts and ts.count(":") >= 2:
+                ts = ts + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
         mel = dt.astimezone(ZoneInfo("Australia/Melbourne"))
-        return mel.strftime("%Y-%m-%d %H:%M Melbourne")
+        abbrev = mel.strftime("%Z")
+        return mel.strftime(f"%Y-%m-%d %H:%M:%S {abbrev}")
     except Exception:
-        return ts_str
+        return s
 
 def _session_ai_history(in_memory: list, limit: int = 50) -> list:
     """Return in-memory AI history rows from current bot session only."""
@@ -14174,9 +14200,11 @@ def _expired_order_api_row(row: dict) -> dict:
                 out["time"] = utc_iso(datetime.fromtimestamp(float(ts), tz=timezone.utc))
             except Exception:
                 out["time"] = str(ts)
+    if out.get("time"):
+        out["time_melbourne"] = _format_melbourne_hm(out["time"])
     if out.get("dir"):
         out["dir"] = _normalize_order_side_to_dir(out.get("dir"))
-    return out
+    return _enrich_melbourne_time_fields(out)
 
 def cleanup_expired_orders():
     now = time.time()
@@ -14320,8 +14348,13 @@ def close_position(pos: dict, exit_reason: str):
         ai_factors = master.get("ai_factors", {}) or pos.get("ai_factors", {})
         if not isinstance(ai_factors, dict):
             ai_factors = {}
+        close_iso = utc_iso()
+        close_mel = _format_melbourne_hm(close_iso)
         trade_row = {
-            "ts": utc_iso(),
+            "ts": close_iso,
+            "close_ts": close_iso,
+            "ts_melbourne": close_mel,
+            "close_ts_melbourne": close_mel,
             "trade_id": trade_id,
             "dir": pos.get("dir"),
             "entry": entry,
@@ -16057,17 +16090,23 @@ DASHBOARD_JS = """(function () {
   try {
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
+      const s = String(ts).trim();
+      if (/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}/.test(s) && (s.includes('AEST') || s.includes('AEDT') || s.includes('Melbourne'))) return s;
       try {
-        const d = new Date(ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z');
-        if (isNaN(d.getTime())) return ts;
+        const d = typeof ts === 'number'
+          ? new Date(ts > 1e12 ? ts : ts * 1000)
+          : new Date(s.endsWith('Z') || s.includes('+') ? s : s + 'Z');
+        if (isNaN(d.getTime())) return s;
         const parts = new Intl.DateTimeFormat('en-AU', {
           timeZone: 'Australia/Melbourne',
           year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', hour12: false
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }).formatToParts(d);
         const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
-        return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} Melbourne`;
-      } catch (e) { return ts; }
+        const abbrev = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', timeZoneName: 'short' })
+          .formatToParts(d).find(p => p.type === 'timeZoneName')?.value || 'Melbourne';
+        return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${abbrev}`;
+      } catch (e) { return s; }
     }
     function formatMelbourneNow() {
       return formatMelbourneDateTime(new Date().toISOString());
@@ -17283,7 +17322,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
           <tr>
-            <td>${e.time || '-'}</td>
+            <td>${e.time_melbourne || formatMelbourneDateTime(e.time || e.expired_ts || e.created_ts)}</td>
             <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
@@ -17295,7 +17334,7 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('tradesTable', (d.trades||[]).map(t => `
           <tr>
-            <td>${t.ts || '-'}</td>
+            <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
             <td>${t.trade_id || '-'}</td>
             <td>${laneBadge(t.research_lane, t.research_model)}</td>
             <td>${t.final_direction || t.dir || '-'}</td>
@@ -18186,7 +18225,7 @@ def api_state():
         snapshot["account_balance"] = get_display_balance()
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
         session_trades = _session_trades_only(trades_copy)
-        snapshot["trades"] = session_trades
+        snapshot["trades"] = [_enrich_melbourne_time_fields(t) for t in session_trades]
         snapshot["trade_count_session"] = len(session_trades)
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
