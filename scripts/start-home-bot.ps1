@@ -51,20 +51,8 @@ Write-Host ""
 
 if ($NoWait) {
   Write-Host "Starting bot detached on port $Port ..."
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = "python"
-  $psi.Arguments = "btc_conservative_agent.py"
-  $psi.WorkingDirectory = $agentDir
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  foreach ($key in [Environment]::GetEnvironmentVariables("Process").Keys) {
-    if ($key -match '^(PORT|DASHBOARD_PORT|DEEPSEEK|BOT_|SHOWCASE_|HOME_)') {
-      $psi.Environment[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-    }
-  }
-  $psi.Environment["PORT"] = "$Port"
-  $psi.Environment["DASHBOARD_PORT"] = "$Port"
-  [System.Diagnostics.Process]::Start($psi) | Out-Null
+  Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden
+  Start-Sleep -Seconds 2
   exit 0
 }
 
