@@ -15,6 +15,7 @@ import type {
   CopyRelaySimState,
   CopyRelayLimitChainSnapshot,
   TradeLifecycleIntegritySnapshot,
+  RelaySimParticipantStats,
 } from '@dcf/utils';
 import type { TradingAgentActivityEntry, TradingAgentSummary } from '@/lib/api';
 
@@ -64,6 +65,7 @@ export function AgentDeskView({
   copyRelayReconcile,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
+  relaySimParticipantStats,
   relayFidelity,
   botConnected,
   userActivity,
@@ -90,6 +92,7 @@ export function AgentDeskView({
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relaySimParticipantStats?: RelaySimParticipantStats | null;
   relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
   botConnected?: boolean;
   userActivity: TradingAgentActivityEntry[];
@@ -116,6 +119,7 @@ export function AgentDeskView({
         simActivity={userActivity}
         copyRelayLimitChain={copyRelayLimitChain}
         tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+        relaySimParticipantStats={relaySimParticipantStats}
         botConnected={botConnected}
         onStart={onStartRelaySim}
         onStop={onStopRelaySim}

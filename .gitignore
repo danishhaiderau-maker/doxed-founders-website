@@ -93,6 +93,11 @@ scripts/win2.ps1
 scripts/_test.py
 scripts/_*.mjs
 services/btc-conservative-agent/local-collection-data/
+services/btc-conservative-agent/research.db
+services/btc-conservative-agent/research.db-journal
+services/btc-conservative-agent/research/genome/*.jsonl
+services/btc-conservative-agent/__pycache__/
+services/btc-conservative-agent/**/__pycache__/
 
 # Secrets vault lives OUTSIDE repo: ../doxedcryptofounder-secrets/
 # Audit export (code-only): ../doxedcryptofounder-audit/

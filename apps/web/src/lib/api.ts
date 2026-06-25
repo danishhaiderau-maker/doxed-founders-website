@@ -308,6 +308,9 @@ function parseApiError(body: unknown, status: number): string {
   if (status === 401) {
     return 'Your session expired or is out of sync with the API. Sign out, sign in again (Twitter or Google), then reopen this page.';
   }
+  if (status === 502 || status === 503 || status === 504) {
+    return 'Production API is temporarily unavailable — Railway may be restarting or overloaded. Wait 1–2 minutes and refresh. If login or relay start keeps failing, redeploy Railway from Home Command Center (npm run redeploy:railway) and confirm Founder Node tray is running.';
+  }
   if (body && typeof body === 'object' && 'message' in body) {
     const message = (body as { message: unknown }).message;
     if (Array.isArray(message)) {
@@ -3561,6 +3564,7 @@ export interface TradingAgentDashboard {
   copyRelayCapacity?: import('@dcf/utils').CopyRelayCapacitySnapshot | null;
   copyRelayLimitChain?: import('@dcf/utils').CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: import('@dcf/utils').TradeLifecycleIntegritySnapshot | null;
+  relaySimParticipantStats?: import('@dcf/utils').RelaySimParticipantStats | null;
   relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
 }
 

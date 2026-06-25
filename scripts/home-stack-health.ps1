@@ -54,6 +54,22 @@ function Test-TunnelPublicHealthy {
   return (Test-HttpOk "$Url/api/ping" $TimeoutSec)
 }
 
+function Test-RailwayApiHealthy {
+  param([int]$TimeoutSec = 8)
+  return (Test-HttpOk "https://doxed-founders-website-production.up.railway.app/api/health/live" $TimeoutSec)
+}
+
+function Test-ProductionSiteApiHealthy {
+  param([int]$TimeoutSec = 10)
+  if (-not (Test-HttpOk "https://doxxedcrypto.digital/api/health" $TimeoutSec)) { return $false }
+  try {
+    $h = Invoke-RestMethod -Uri "https://doxxedcrypto.digital/api/health" -TimeoutSec $TimeoutSec
+    return ($h.services.database -eq "ok" -and $h.services.api -eq "ok")
+  } catch {
+    return $false
+  }
+}
+
 function Test-BotHung {
   return ((Test-PortOpen $BotPort) -and -not (Test-BotHealthy))
 }
