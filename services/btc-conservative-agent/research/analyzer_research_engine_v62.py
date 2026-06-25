@@ -643,6 +643,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Fill Delay", FILL_DELAY_REPORT_FILE, "Signal age and chase count vs outcome"),
     ("Top Conditional Edges", TOP_CONDITIONAL_EDGES_REPORT_FILE, "Multi-factor combos ranked by EV"),
     ("Regime Stability", REGIME_STABILITY_REPORT_FILE, "Sample size + stability score per regime cell"),
+    ("Trading Genome", "research/genome/genome_analysis_report.json", "DNA-first discoveries, cluster match, decision/lifecycle DNA"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -6953,6 +6954,27 @@ def _refresh_pathway_scorecard_safe(session: dict):
         print(f"  ⚠️ pathway_scorecard refresh failed: {pe} {PIPELINE_ENFORCEMENT_TAG}")
 
 
+def run_genome_analyzer_pipeline():
+    """Trading Genome v11 — DNA-first analyzer (research.db + JSONL mirrors)."""
+    try:
+        from research.genome.run_analyzer import run_genome_analyzer
+
+        report = run_genome_analyzer()
+        layers = report.get("layer_counts") or {}
+        disc = len(report.get("discoveries") or [])
+        lib = report.get("cluster_library_size") or 0
+        dq = (report.get("dna_quality") or {}).get("overall") or {}
+        print(
+            f"  ✅ Trading Genome analyzer: layers={sum(layers.values())} "
+            f"discoveries={disc} clusters={lib} dna_quality={dq.get('dna_quality')} "
+            f"confidence={dq.get('research_confidence')} {PIPELINE_ENFORCEMENT_TAG}"
+        )
+        return report
+    except Exception as exc:
+        print(f"  ⚠️ Trading Genome analyzer failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        return None
+
+
 def _write_analyzer_crash_log(iteration: int, tb: str):
     crash_path = os.path.join(os.getcwd(), "analyzer_crash.log")
     try:
@@ -7054,6 +7076,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             shadow_vs_live_entry_report()
             ai_calibration_report(trades, session=session)
             _refresh_pathway_scorecard_safe(session)
+            run_genome_analyzer_pipeline()
             finalize_analyzer_outputs(
                 session=session,
                 trades=trades,
@@ -7164,6 +7187,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
         shadow_vs_live_fill_audit(blocked)
         shadow_vs_live_entry_report()
         _refresh_pathway_scorecard_safe(session)
+        run_genome_analyzer_pipeline()
 
         print(f"\n🔥 STRATEGY ADVICE 🔥 {PIPELINE_ENFORCEMENT_TAG}")
         print(f"Review EXECUTIVE SUMMARY first. Rules need ≥{MIN_TRADES_FOR_RULES} trades. Fix zero-variance features in bot before trusting edge buckets. {PIPELINE_ENFORCEMENT_TAG}")
