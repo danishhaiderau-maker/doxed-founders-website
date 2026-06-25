@@ -75,14 +75,15 @@ export class BotBridgeService {
     this.lastFetchAt = 0;
   }
 
-  /** Cache-first relay snapshot pushed from home bot every ~2s. */
-  private async fetchCachedRelaySnapshot(): Promise<BotApiState | null> {
+  /** Cache-first relay snapshot pushed from home bot every ~2s (admin display only). */
+  private async fetchCachedRelaySnapshot(maxAgeMs = 15_000): Promise<BotApiState | null> {
     try {
       const cached = await this.showcaseSnapshot.getCachedSnapshot();
       if (!cached.snapshot) return null;
       const ageMs = cached.at ? Date.now() - cached.at.getTime() : Number.MAX_SAFE_INTEGER;
-      if (ageMs > 30_000) {
-        this.logger.warn(`Cached showcase snapshot stale (${Math.round(ageMs / 1000)}s)`);
+      if (ageMs > maxAgeMs) {
+        this.logger.warn(`Cached showcase snapshot stale (${Math.round(ageMs / 1000)}s) — falling back to live bot`);
+        return null;
       }
       const state = cached.snapshot as BotApiState;
       state.snapshot_seq = cached.snapshot_seq;
@@ -95,9 +96,9 @@ export class BotBridgeService {
     }
   }
 
-  /** Execution paths bypass cache for instant showcase parity. */
+  /** Execution + relay sim — always live bot; never Railway cache. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
-    return this.fetchState(force, 'relay');
+    return this.fetchState(force, 'live');
   }
 
   /** Admin panels — fast relay snapshot; do not block on full /api/state (large trades_map). */
@@ -144,7 +145,7 @@ export class BotBridgeService {
     return null;
   }
 
-  async fetchState(force = false, mode: 'full' | 'relay' = 'full'): Promise<BotApiState | null> {
+  async fetchState(force = false, mode: 'full' | 'relay' | 'live' = 'full'): Promise<BotApiState | null> {
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
@@ -163,9 +164,9 @@ export class BotBridgeService {
     if (!base) return null;
 
     const paths =
-      mode === 'relay'
-        ? ['/api/relay-state', '/api/state']
-        : ['/api/state', '/api/relay-state'];
+      mode === 'full' || mode === 'live'
+        ? ['/api/state', '/api/relay-state']
+        : ['/api/relay-state', '/api/state'];
 
     for (const path of paths) {
       const timeoutMs = path.includes('relay-state') ? 20_000 : 30_000;
