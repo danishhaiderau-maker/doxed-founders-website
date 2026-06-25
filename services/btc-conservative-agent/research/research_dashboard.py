@@ -1543,6 +1543,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Trading Genome v11</h2>
     <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
     <div class="kpis" id="genome-kpis"></div>
+    <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
     <pre id="genome-cluster"></pre>
     <h2>Discoveries</h2>
@@ -1553,6 +1554,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <pre id="genome-lifecycle"></pre>
     <h2>Hypotheses</h2>
     <pre id="genome-hypotheses"></pre>
+    <h2>Replay capabilities</h2>
+    <pre id="genome-replay"></pre>
   </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
@@ -2042,15 +2045,24 @@ async function loadGenome() {
     return;
   }
   const dq = (d.dna_quality || {}).overall || {};
+  const tax = d.genome_taxonomy || {};
   document.getElementById('genome-kpis').innerHTML = [
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
     ['EV/trade', '$' + fmtUsd(dq.ev)],
     ['Confidence', dq.research_confidence || 'LOW'],
-    ['Genome Memory', (d.genome_memory || {}).persistent_genomes ?? 0],
+    ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
+    ['Validated clusters', tax.validated_clusters ?? 0],
     ['Discoveries', (d.discoveries || []).length],
     ['Validation', (d.validation || {}).verdict || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const taxNote = document.getElementById('genome-taxonomy-note');
+  if (taxNote && tax.definitions) {
+    taxNote.innerHTML = `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 0} collecting). `
+      + `<strong>Cluster</strong> = validated identity (${tax.validated_clusters ?? 0} validated, `
+      + `${tax.candidate_genomes ?? 0} candidates). `
+      + `UNKNOWN at high similarity is correct when validated_clusters=0.`;
+  }
   const rec = d.recommendation || {};
   const expl = rec.explanation || {};
   const sim = rec.similarity_pct ?? (d.current_market_cluster || {}).similarity_pct;
@@ -2062,6 +2074,7 @@ async function loadGenome() {
   document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
   document.getElementById('genome-lifecycle').textContent = JSON.stringify(d.lifecycle_dna || {}, null, 2);
   document.getElementById('genome-hypotheses').textContent = JSON.stringify(d.hypotheses || {}, null, 2);
+  document.getElementById('genome-replay').textContent = JSON.stringify(d.replay_capabilities || {}, null, 2);
   document.getElementById('genome-discoveries').innerHTML = (d.discoveries || []).map(disc => {
     const fp = disc.fingerprint || {};
     const m = disc.metrics || {};

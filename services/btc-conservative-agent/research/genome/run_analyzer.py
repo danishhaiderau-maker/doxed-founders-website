@@ -16,6 +16,7 @@ from research.genome.loader import load_all_layers
 from research.genome.memory import merge_cluster_into_library
 from research.genome.quality_score import summarize_trades
 from research.genome.similarity import nearest_cluster
+from research.genome.taxonomy import build_taxonomy_summary
 from research.genome.transitions import summarize_transitions
 from research.genome.validation import validate_genome_integrity
 
@@ -85,6 +86,58 @@ def _build_outcome_fingerprints(layers: Dict[str, List[Dict[str, Any]]]) -> List
     return out
 
 
+def _summarize_replay_capabilities(agent_root: str, layers: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Document replay layers — counterfactual, signal, lifecycle (ChatGPT audit)."""
+    root = agent_root
+    jsonl_files = (
+        "counterfactual.jsonl",
+        "signal_replay.jsonl",
+        "near_miss.jsonl",
+        "execution_funnel.jsonl",
+        "fill_quality.jsonl",
+    )
+    mirrors: Dict[str, Any] = {}
+    for name in jsonl_files:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            try:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    mirrors[name] = sum(1 for _ in fh)
+            except OSError:
+                mirrors[name] = "error"
+    lifecycle = _summarize_lifecycle_dna(layers)
+    decision = _summarize_decision_dna(layers)
+    return {
+        "counterfactual_replay": {
+            "files": ["counterfactual.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl"],
+            "lines_on_disk": {k: mirrors.get(k) for k in mirrors if "counter" in k or "near" in k},
+            "status": "ACTIVE" if mirrors.get("counterfactual.jsonl") else "PARTIAL",
+        },
+        "signal_replay": {
+            "file": "signal_replay.jsonl",
+            "lines": mirrors.get("signal_replay.jsonl"),
+            "status": "ACTIVE" if mirrors.get("signal_replay.jsonl") else "NOT_FOUND",
+        },
+        "lifecycle_replay": {
+            "status": "ACTIVE",
+            "mfe_updates": lifecycle.get("mfe_updates"),
+            "mae_updates": (lifecycle.get("event_counts") or {}).get("MAE_UPDATED", 0),
+            "ladder_events": (lifecycle.get("ladder_armed") or 0) + (lifecycle.get("ladder_hits") or 0),
+            "note": "Full trade path: entry → MFE → MAE → ladder → stop → exit in lifecycle_genome",
+        },
+        "roads_not_taken": {
+            "ai_rejections": decision.get("ai_rejections"),
+            "no_fill_signals": decision.get("no_fill_signals"),
+            "status": "PARTIAL",
+            "note": "Reject/no-fill/missed-opportunity genome expands in Priority 4",
+        },
+        "genome_replay_audit_ui": {
+            "status": "NOT_STARTED",
+            "note": "Priority 5 — per-genome trade/MFE/MAE/exit replay panel",
+        },
+    }
+
+
 def _recommendation_engine(
     cluster_match: Dict[str, Any],
     dna_summary: Dict[str, Any],
@@ -96,22 +149,21 @@ def _recommendation_engine(
     ci = dna_summary.get("confidence_interval_95") or {}
 
     if cluster_match.get("cluster_id") == "UNKNOWN" or sim < 55:
-        if cluster_match.get("cluster_id") == "UNKNOWN":
-            why = (
-                f"No matching genome in library (similarity {sim:.1f}%) — collect only."
-                if sim >= 55
-                else f"Similarity {sim:.1f}% is below 55% threshold."
-            )
-        else:
-            why = f"Similarity {sim:.1f}% is below 55% threshold."
+        why = cluster_match.get("reason") or (
+            f"No validated cluster — {cluster_match.get('persistent_genomes', 0)} genome(s) collecting."
+        )
         return {
             "action": "UNKNOWN_MARKET",
             "similarity_pct": sim,
-            "detail": "Collect only — market does not match historical genomes.",
+            "detail": "Collect only — no validated cluster match yet.",
             "research_confidence": conf,
             "explanation": {
                 "why": why,
                 "evidence": {"sample_size": n, "confidence_interval_95": ci},
+                "genome_vs_cluster": (
+                    "Genome = persistent fingerprint memory. "
+                    "Cluster = validated identity (≥30 trades, MODERATE+ confidence)."
+                ),
                 "execution_change": "NEVER",
                 "human_review_required": True,
             },
@@ -163,6 +215,7 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
     candidates = build_cluster_library(markets, trades=trades)
     existing_genomes = store.load_all_genomes()
     genome_library = merge_cluster_into_library(store, candidates, existing_genomes)
+    taxonomy = build_taxonomy_summary(genome_library, candidates)
 
     latest_market = markets[0] if markets else {}
     cluster_match = nearest_cluster(latest_market, genome_library)
@@ -189,6 +242,8 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
             "persistent_discoveries": memory_stats["discoveries"],
             "library_status": "LEARNING" if len(genome_library) < 5 else "ACTIVE",
         },
+        "genome_taxonomy": taxonomy,
+        "replay_capabilities": _summarize_replay_capabilities(agent_root, layers),
         "dna_quality": {
             "overall": dna_summary,
             "sample_confidence": dna_summary.get("research_confidence"),

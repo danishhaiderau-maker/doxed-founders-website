@@ -9,6 +9,7 @@ from research.genome.evidence import ledger_snapshot, stability_from_ledger
 from research.genome.fingerprints import fingerprint_key, market_fingerprint
 from research.genome.identity import genome_identity_label
 from research.genome.library_store import GenomeLibraryStore
+from research.genome.taxonomy import annotate_genome
 from research.genome.quality_score import dna_quality, summarize_trades
 
 
@@ -104,6 +105,7 @@ def merge_cluster_into_library(
             int(prev.get("observations") or 0) + body["new_observations"],
         )
         merged = store.upsert_genome(genome_id, fp_key, body)
+        merged = annotate_genome(merged)
         store.append_ledger(
             "genome",
             genome_id,
