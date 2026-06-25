@@ -1984,10 +1984,13 @@ async function loadGenome() {
     ['Sample', dq.sample_size ?? 0],
     ['EV/trade', '$' + fmtUsd(dq.ev)],
     ['Confidence', dq.research_confidence || 'LOW'],
-    ['Clusters', d.cluster_library_size ?? 0],
+    ['Genome Memory', (d.genome_memory || {}).persistent_genomes ?? 0],
     ['Discoveries', (d.discoveries || []).length],
-    ['Layers', Object.values(d.layer_counts || {}).reduce((a,b)=>a+b,0)],
+    ['Validation', (d.validation || {}).verdict || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const rec = d.recommendation || {};
+  document.getElementById('genome-note').textContent =
+    (rec.action || 'COLLECT') + ': ' + (rec.detail || d.disclaimer || '');
   document.getElementById('genome-cluster').textContent = JSON.stringify(d.current_market_cluster || {}, null, 2);
   document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
   document.getElementById('genome-lifecycle').textContent = JSON.stringify(d.lifecycle_dna || {}, null, 2);
@@ -1996,8 +1999,7 @@ async function loadGenome() {
     const fp = disc.fingerprint || {};
     const m = disc.metrics || {};
     const cls = disc.status === 'SUPPORTED' ? 'green' : 'amber';
-    return `<div class="kpi" style="margin-bottom:12px;text-align:left"><div class="lbl">${disc.discovery_id || ''}</div>`
-      + `<div class="val ${cls}">${disc.status || ''}</div>`
+    return `<div class="kpi" style="margin-bottom:12px;text-align:left"><div class="lbl">${disc.discovery_id || ''} · ${disc.status || ''}</div>`
       + `<div class="note">${fp.session || ''} · ${fp.adx_bucket || ''} · ${fp.spread_bucket || ''} · n=${disc.observed_trades || 0} · EV=$${fmtUsd(m.ev_usd)} · ${disc.recommendation || ''}</div></div>`;
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
