@@ -1,4 +1,4 @@
-"""Trading Genome analyzer — DNA-first pipeline (v11)."""
+"""Trading Genome analyzer — DNA-first pipeline with persistent Genome Memory (v11)."""
 from __future__ import annotations
 
 import json
@@ -11,14 +11,18 @@ from research.genome.discoveries import generate_discoveries
 from research.genome.drift import detect_drift
 from research.genome.fingerprints import index_by_id, outcome_fingerprint
 from research.genome.hypothesis_engine import generate_hypotheses
+from research.genome.library_store import GenomeLibraryStore
 from research.genome.loader import load_all_layers
+from research.genome.memory import merge_cluster_into_library
 from research.genome.quality_score import summarize_trades
 from research.genome.similarity import nearest_cluster
 from research.genome.transitions import summarize_transitions
+from research.genome.validation import validate_genome_integrity
 
 GENOME_REPORT_FILE = "genome_analysis_report.json"
-GENOME_LIBRARY_FILE = "genome_cluster_library.json"
+GENOME_LIBRARY_FILE = "genome_library.json"
 GENOME_DISCOVERIES_FILE = "genome_discoveries.json"
+ARCHITECTURE_FROZEN = "v11.0-genome-architecture-v1"
 
 
 def _agent_root() -> str:
@@ -28,10 +32,14 @@ def _agent_root() -> str:
 def _summarize_decision_dna(layers: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
     decisions = layers.get("decision") or []
     executions = layers.get("execution") or []
-    approved = sum(1 for d in decisions if str(d.get("decision") or "").upper() == "APPROVE"
-                   or d.get("event_name") == "AI_APPROVED")
-    rejected = sum(1 for d in decisions if str(d.get("decision") or "").upper() == "REJECT"
-                     or d.get("event_name") == "AI_REJECTED")
+    approved = sum(
+        1 for d in decisions
+        if str(d.get("decision") or "").upper() == "APPROVE" or d.get("event_name") == "AI_APPROVED"
+    )
+    rejected = sum(
+        1 for d in decisions
+        if str(d.get("decision") or "").upper() == "REJECT" or d.get("event_name") == "AI_REJECTED"
+    )
     by_event: Dict[str, int] = {}
     for ex in executions:
         name = str(ex.get("event_name") or "UNKNOWN")
@@ -45,6 +53,7 @@ def _summarize_decision_dna(layers: Dict[str, List[Dict[str, Any]]]) -> Dict[str
         "fills": by_event.get("ORDER_FILLED", 0),
         "chases": by_event.get("LIMIT_CHASED", 0),
         "limits_created": by_event.get("LIMIT_CREATED", 0),
+        "note": "Full Decision Genome (reject/no-fill/missed) expands in Priority 4 — counts from execution layer active.",
     }
 
 
@@ -76,77 +85,115 @@ def _build_outcome_fingerprints(layers: Dict[str, List[Dict[str, Any]]]) -> List
     return out
 
 
+def _recommendation_engine(
+    cluster_match: Dict[str, Any],
+    dna_summary: Dict[str, Any],
+    genome_count: int,
+) -> Dict[str, Any]:
+    sim = float(cluster_match.get("similarity_pct") or 0)
+    conf = dna_summary.get("research_confidence") or "LOW"
+    if cluster_match.get("cluster_id") == "UNKNOWN" or sim < 55:
+        return {
+            "action": "UNKNOWN_MARKET",
+            "detail": "Collect data — no recommendation from weak similarity.",
+            "research_confidence": conf,
+        }
+    if conf == "LOW" or int(dna_summary.get("sample_size") or 0) < 30:
+        return {
+            "action": "COLLECT_MORE_DATA",
+            "detail": "Insufficient sample — continue CONTINUOUS benchmark + COMBO_604 research candidate.",
+            "research_confidence": conf,
+        }
+    return {
+        "action": "CONTINUE_RESEARCH_CANDIDATE",
+        "detail": "Advisory only — human decides; bot execution unchanged.",
+        "research_confidence": conf,
+        "genome_library_size": genome_count,
+    }
+
+
 def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) -> dict:
     agent_root = _agent_root()
     db = db_path or os.path.join(agent_root, "research.db")
     out = out_dir or os.path.join(agent_root, "research", "genome")
     os.makedirs(out, exist_ok=True)
 
+    validation = validate_genome_integrity(db)
+    store = GenomeLibraryStore(db)
     layers = load_all_layers(db)
     trades = layers.get("trade") or []
     markets = layers.get("market") or []
 
-    # Lane summaries kept for benchmark comparison only — DNA layer is primary.
     combo_trades = [t for t in trades if "604" in str(t.get("research_lane", "")).upper()]
     cont_trades = [t for t in trades if str(t.get("research_lane", "")).upper() == "CONTINUOUS"]
 
     outcome_fps = _build_outcome_fingerprints(layers)
-    cluster_library = build_cluster_library(markets, trades=trades)
+    candidates = build_cluster_library(markets, trades=trades)
+    existing_genomes = store.load_all_genomes()
+    genome_library = merge_cluster_into_library(store, candidates, existing_genomes)
+
     latest_market = markets[0] if markets else {}
-    cluster_match = nearest_cluster(latest_market, cluster_library)
-    discoveries = generate_discoveries(outcome_fps)
+    cluster_match = nearest_cluster(latest_market, genome_library)
+    discoveries = generate_discoveries(outcome_fps, store=store)
 
     dna_summary = summarize_trades(trades)
-    decision_dna = _summarize_decision_dna(layers)
-    lifecycle_dna = _summarize_lifecycle_dna(layers)
-
-    # Baseline for drift: first half vs second half of closed trades
     mid = max(1, len(trades) // 2)
-    baseline = summarize_trades(trades[mid:])
-    current = summarize_trades(trades[:mid])
-    drift = detect_drift(current, baseline)
+    drift = detect_drift(summarize_trades(trades[:mid]), summarize_trades(trades[mid:]))
+
+    memory_stats = store.stats()
+    recommendation = _recommendation_engine(cluster_match, dna_summary, len(genome_library))
 
     report = {
         "schema": "trading_genome_analysis_v1",
         "schema_version": "1.0.0",
+        "architecture_frozen": ARCHITECTURE_FROZEN,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "analyzer_mode": "DNA_FIRST",
-        "disclaimer": "Advisory discoveries only — analyzer never changes bot execution.",
+        "analyzer_mode": "DNA_FIRST_MEMORY",
+        "disclaimer": "Advisory knowledge only — analyzer never changes bot execution.",
+        "validation": validation,
         "layer_counts": {k: len(v) for k, v in layers.items()},
+        "genome_memory": {
+            "persistent_genomes": memory_stats["genomes"],
+            "persistent_discoveries": memory_stats["discoveries"],
+            "library_status": "LEARNING" if len(genome_library) < 5 else "ACTIVE",
+        },
         "dna_quality": {
             "overall": dna_summary,
             "sample_confidence": dna_summary.get("research_confidence"),
             "confidence_interval_95": dna_summary.get("confidence_interval_95"),
         },
-        "decision_dna": decision_dna,
-        "lifecycle_dna": lifecycle_dna,
+        "decision_dna": _summarize_decision_dna(layers),
+        "lifecycle_dna": _summarize_lifecycle_dna(layers),
         "current_market_cluster": cluster_match,
-        "cluster_library_size": len(cluster_library),
-        "cluster_library_status": (
-            "LEARNING" if len(cluster_library) < 3 else "ACTIVE"
-        ),
+        "genome_library": genome_library,
+        "genome_library_size": len(genome_library),
         "transitions": summarize_transitions(outcome_fps),
         "drift": drift,
         "discoveries": discoveries,
+        "recommendation": recommendation,
         "hypotheses": generate_hypotheses(combo_trades, cont_trades),
         "outcome_fingerprints_sample": outcome_fps[:25],
         "benchmark_reference": {
             "combo_604": summarize_trades(combo_trades),
             "continuous": summarize_trades(cont_trades),
         },
+        "migration_note": "v62 CSV reports still run in parallel until Genome reproduces all required metrics (Priority 13).",
     }
 
-    report_path = os.path.join(out, GENOME_REPORT_FILE)
-    library_path = os.path.join(out, GENOME_LIBRARY_FILE)
-    discoveries_path = os.path.join(out, GENOME_DISCOVERIES_FILE)
-    with open(report_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2)
-    with open(library_path, "w", encoding="utf-8") as fh:
-        json.dump({"clusters": cluster_library, "generated_at": report["generated_at"]}, fh, indent=2)
-    with open(discoveries_path, "w", encoding="utf-8") as fh:
-        json.dump({"discoveries": discoveries, "generated_at": report["generated_at"]}, fh, indent=2)
+    for fname, key in (
+        (GENOME_REPORT_FILE, None),
+        (GENOME_LIBRARY_FILE, "genome_library"),
+        (GENOME_DISCOVERIES_FILE, "discoveries"),
+    ):
+        path = os.path.join(out, fname)
+        payload = report if key is None else (
+            {"genomes": report["genome_library"], "generated_at": report["generated_at"]}
+            if key == "genome_library"
+            else {"discoveries": discoveries, "generated_at": report["generated_at"]}
+        )
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
 
-    # Mirror to agent root for manifest / dashboard
     root_report = os.path.join(agent_root, "research", GENOME_REPORT_FILE)
     try:
         with open(root_report, "w", encoding="utf-8") as fh:

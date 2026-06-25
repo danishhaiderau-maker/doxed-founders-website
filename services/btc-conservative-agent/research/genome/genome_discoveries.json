@@ -2,9 +2,11 @@
   "discoveries": [
     {
       "discovery_id": "DNA-001",
-      "title": "NEW DISCOVERY \u2014 DNA-001",
-      "first_observed": "2026-06",
-      "observed_trades": 74,
+      "title": "NEW DISCOVERY",
+      "status": "NEW_DISCOVERY",
+      "first_observed": "2026-06-25",
+      "last_observed": "2026-06-25T21:23:23.636192+00:00",
+      "observed_trades": 76,
       "fingerprint": {
         "weekend": false,
         "session": "US",
@@ -14,19 +16,22 @@
         "regime": "BEAR"
       },
       "metrics": {
-        "win_rate": 0.8784,
-        "ev_usd": 1.9219,
-        "dna_quality": 65.0,
+        "win_rate": 0.8816,
+        "ev_usd": 1.9011,
+        "dna_quality": 67.0,
         "confidence_interval_95": {
-          "low": 1.1134,
-          "high": 2.7303
+          "low": 1.1136,
+          "high": 2.6887
         }
       },
       "research_confidence": "MODERATE",
-      "status": "SUPPORTED",
+      "evidence": "n=76 EV=1.9011 WR=88.2%",
+      "supporting_genomes": [
+        "WEEKDAY|US|LOW_ADX|SPREAD0|SHORT"
+      ],
       "recommendation": "Continue observing \u2014 advisory only; analyzer never changes execution.",
       "dna_key": "WEEKDAY|US|LOW_ADX|SPREAD0|SHORT"
     }
   ],
-  "generated_at": "2026-06-25T20:49:16.239919+00:00"
+  "generated_at": "2026-06-25T21:23:23.648748+00:00"
 }
