@@ -1,0 +1,43 @@
+{
+  "clusters": [
+    {
+      "cluster_id": "GENOME-001",
+      "fingerprint_key": "WEEKDAY|US|LOW_ADX|SPREAD0|BEAR",
+      "market_observations": 132,
+      "trade_count": 74,
+      "centroid": {
+        "adx": 0.0,
+        "atr": 0.0,
+        "volatility_percentile": 0.0,
+        "volume_percentile": 0.0,
+        "spread": 0.0,
+        "bull_score": 2.5758,
+        "bear_score": 7.5833,
+        "momentum": 0.0,
+        "structure": 0.0
+      },
+      "representative": {
+        "session": "US",
+        "is_weekend": false,
+        "adx_bucket": "LOW_ADX",
+        "adx": 0.0,
+        "atr": 0.0,
+        "spread_bucket": "SPREAD0",
+        "spread": 0.0,
+        "regime": "BEAR",
+        "volatility_percentile": null,
+        "volume_percentile": null,
+        "funding_window": false,
+        "structure": null,
+        "bull_score": 3,
+        "bear_score": 7,
+        "ai_confidence": null,
+        "direction": ""
+      },
+      "ev_usd": 1.9219,
+      "dna_quality": 65.0,
+      "research_confidence": "MODERATE"
+    }
+  ],
+  "generated_at": "2026-06-25T20:49:16.239919+00:00"
+}

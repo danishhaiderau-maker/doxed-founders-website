@@ -141,6 +141,7 @@ REPORT_NAV = (
     ("exits", "Exit Leakage", "top_leakage_report.json"),
     ("horizon", "Recovery", "horizon_profitability_report.json"),
     ("ai", "AI Lab", "ai_calibration_report.json"),
+    ("genome", "Genome", "research/genome/genome_analysis_report.json"),
     ("edge", "Edge & Features", "feature_importance_report.json"),
     ("explorer", "Report Explorer", None),
     ("archives", "Archives", None),
@@ -992,6 +993,18 @@ def api_lane_retirement():
     return jsonify(_lane_retirement_payload())
 
 
+def _genome_payload():
+    rep = _read_json(str(Path("research") / "genome" / "genome_analysis_report.json"))
+    if not rep:
+        rep = _read_json("research/genome/genome_analysis_report.json")
+    return rep or {}
+
+
+@app.route("/api/genome")
+def api_genome():
+    return jsonify(_genome_payload())
+
+
 @app.route("/api/features")
 def api_features():
     return jsonify(_feature_payload())
@@ -1335,7 +1348,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Executive Summary</h2>
     <div class="kpis" id="kpis"></div>
     <pre id="exec-text"></pre>
-    <p class="note">Auto-refreshes every 60s. Analyzer (30 min loop): <code>python analyzer_research_engine_v62.py</code></p>
+    <p class="note">Auto-refreshes every 60s. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code> (Trading Genome v11)</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -1465,6 +1478,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-cal-body"></tbody></table>
     <h3>Executed confidence bands</h3>
     <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
+  </section>
+  <section id="sec-genome">
+    <h2>Trading Genome v11</h2>
+    <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
+    <div class="kpis" id="genome-kpis"></div>
+    <h2>Current market cluster</h2>
+    <pre id="genome-cluster"></pre>
+    <h2>Discoveries</h2>
+    <div id="genome-discoveries"></div>
+    <h2>Decision DNA</h2>
+    <pre id="genome-decision"></pre>
+    <h2>Lifecycle DNA</h2>
+    <pre id="genome-lifecycle"></pre>
+    <h2>Hypotheses</h2>
+    <pre id="genome-hypotheses"></pre>
   </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
@@ -1943,6 +1971,37 @@ async function loadFeatures() {
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
 
+async function loadGenome() {
+  const r = await fetch('/api/genome');
+  const d = await r.json();
+  if (!d || !d.schema) {
+    document.getElementById('genome-note').textContent = 'No genome report yet — run analyzer once after bot records to research.db.';
+    return;
+  }
+  const dq = (d.dna_quality || {}).overall || {};
+  document.getElementById('genome-kpis').innerHTML = [
+    ['DNA Quality', dq.dna_quality ?? 'n/a'],
+    ['Sample', dq.sample_size ?? 0],
+    ['EV/trade', '$' + fmtUsd(dq.ev)],
+    ['Confidence', dq.research_confidence || 'LOW'],
+    ['Clusters', d.cluster_library_size ?? 0],
+    ['Discoveries', (d.discoveries || []).length],
+    ['Layers', Object.values(d.layer_counts || {}).reduce((a,b)=>a+b,0)],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('genome-cluster').textContent = JSON.stringify(d.current_market_cluster || {}, null, 2);
+  document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
+  document.getElementById('genome-lifecycle').textContent = JSON.stringify(d.lifecycle_dna || {}, null, 2);
+  document.getElementById('genome-hypotheses').textContent = JSON.stringify(d.hypotheses || {}, null, 2);
+  document.getElementById('genome-discoveries').innerHTML = (d.discoveries || []).map(disc => {
+    const fp = disc.fingerprint || {};
+    const m = disc.metrics || {};
+    const cls = disc.status === 'SUPPORTED' ? 'green' : 'amber';
+    return `<div class="kpi" style="margin-bottom:12px;text-align:left"><div class="lbl">${disc.discovery_id || ''}</div>`
+      + `<div class="val ${cls}">${disc.status || ''}</div>`
+      + `<div class="note">${fp.session || ''} · ${fp.adx_bucket || ''} · ${fp.spread_bucket || ''} · n=${disc.observed_trades || 0} · EV=$${fmtUsd(m.ev_usd)} · ${disc.recommendation || ''}</div></div>`;
+  }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
+}
+
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
@@ -2018,6 +2077,7 @@ async function refreshAll() {
   await loadHorizon();
   await loadFeatures();
   await loadAI();
+  await loadGenome();
   await loadExplorer();
   await loadArchives();
 }
