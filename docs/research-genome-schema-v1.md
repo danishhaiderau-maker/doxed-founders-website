@@ -61,6 +61,16 @@ Minimum events (each with `event_version`):
 - **Mirrors:** `research/genome/*.jsonl` (append-only)
 - **Legacy CSVs:** read-only during migration; analyzer regenerates reports from DB
 
+## Genome vs Cluster (v11 taxonomy)
+
+| Term | Meaning |
+|------|---------|
+| **Genome** | Persistent fingerprint entity in `genome_library` — living memory updated each analyzer cycle |
+| **Cluster** | Validated recurring market identity — genome promoted only after ≥30 trades, ≥20 observations, MODERATE/HIGH confidence |
+| **UNKNOWN** | Correct when `validated_clusters=0` — high similarity to today's fingerprint ≠ validated historical cluster |
+
+Genome learns. Cluster classifies. Execution never changes automatically.
+
 ## DNA Quality & confidence
 
 Analyzer computes:
