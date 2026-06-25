@@ -1719,6 +1719,18 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
             f"mtf {entry_mtf}->{cur_mtf} struct {entry_struct}->{cur_struct} "
             f"[PIPELINE ENFORCEMENT]"
         )
+        _emit_genome_execution_event("THESIS_CHANGED", {
+            "trade_id": pos.get("trade_id"),
+            "direction": direction,
+            "thesis_state": "INVALIDATED",
+            "entry_bull": entry_bull,
+            "entry_bear": entry_bear,
+            "live_bull": cur_bull,
+            "live_bear": cur_bear,
+            "mtf_from": entry_mtf,
+            "mtf_to": cur_mtf,
+            "research_lane": pos.get("research_lane"),
+        })
         close_position(pos, "THESIS_INVALIDATED")
         return True
     return False
@@ -3014,6 +3026,25 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             }
             pos["_candle_track_idx"] = cur_candle
 
+    prev_peak = float(pos.get("_genome_peak_pct") or -999.0)
+    new_peak = float(pos.get("max_pnl_pct") or 0)
+    if new_peak > prev_peak + 0.01:
+        pos["_genome_peak_pct"] = new_peak
+        _emit_genome_execution_event("MFE_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "mfe_pct": round(new_peak, 4),
+            "research_lane": pos.get("research_lane"),
+        })
+    prev_mae = float(pos.get("_genome_mae_pct") or 999.0)
+    new_mae = float(pos.get("max_drawdown") or 0)
+    if new_mae < prev_mae - 0.01:
+        pos["_genome_mae_pct"] = new_mae
+        _emit_genome_execution_event("MAE_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "mae_pct": round(new_mae, 4),
+            "research_lane": pos.get("research_lane"),
+        })
+
     if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
         logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
         close_position(pos, "EARLY_FAIL")
@@ -3039,6 +3070,34 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
     ladder = _position_trail_ladder(pos)
+    if peak >= ladder[0][0] and not pos.get("_genome_ladder_armed"):
+        pos["_genome_ladder_armed"] = True
+        _emit_genome_execution_event("LADDER_STEP_ARMED", {
+            "trade_id": pos.get("trade_id"),
+            "rung_peak_pct": ladder[0][0],
+            "lock_floor_pct": lock_floor,
+            "research_lane": pos.get("research_lane"),
+        })
+    if lock_floor is not None:
+        prev_stop = pos.get("_genome_stop_floor")
+        if prev_stop is None or float(lock_floor) > float(prev_stop) + 0.01:
+            pos["_genome_stop_floor"] = lock_floor
+            _emit_genome_execution_event("STOP_UPDATED", {
+                "trade_id": pos.get("trade_id"),
+                "stop_floor_pct": round(float(lock_floor), 4),
+                "peak_pct": round(float(peak), 4),
+                "research_lane": pos.get("research_lane"),
+            })
+    last_pos_update = float(pos.get("_genome_pos_update_ts") or 0)
+    if now - last_pos_update >= 60.0:
+        pos["_genome_pos_update_ts"] = now
+        _emit_genome_execution_event("POSITION_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "unreal_pct": round(float(unreal_pct), 4),
+            "peak_pct": round(float(peak), 4),
+            "mae_pct": round(float(pos.get("max_drawdown") or 0), 4),
+            "research_lane": pos.get("research_lane"),
+        })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
     if lock_floor is not None and peak >= ladder[0][0] and unreal_pct <= lock_floor:
         entry = float(pos.get("entry") or 0)
@@ -3048,6 +3107,13 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             f"source={state.get('price_source', 'WS')} [PIPELINE ENFORCEMENT]"
         )
         pos["_ladder_lock_floor_pct"] = lock_floor
+        _emit_genome_execution_event("LADDER_STEP_HIT", {
+            "trade_id": pos.get("trade_id"),
+            "peak_pct": round(float(peak), 4),
+            "lock_floor_pct": round(float(lock_floor), 4),
+            "unreal_pct": round(float(unreal_pct), 4),
+            "research_lane": pos.get("research_lane"),
+        })
         close_position(pos, "PROFIT_LOCK_LADDER")
         return True
     pos["_prev_unreal_pct"] = unreal_pct
@@ -10469,6 +10535,12 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
     with trade_lock:
         if order in pending_orders:
             lane_unregister_pending_order(order)
+    _emit_genome_execution_event("ORDER_CANCELLED", {
+        "trade_id": tid,
+        "reason": reason,
+        "chase_count": chase_n,
+        "research_lane": signal.get("research_lane") if isinstance(signal, dict) else order.get("research_lane"),
+    })
     if not isinstance(signal, dict):
         logger.info(
             f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
@@ -11977,6 +12049,15 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] urgent marketable chase log failed: {_fe}")
+    _emit_genome_execution_event("LIMIT_CHASED", {
+        "trade_id": order.get("trade_id"),
+        "old_limit": old_limit,
+        "new_limit": new_limit,
+        "chase_count": chase_count,
+        "direction": direction,
+        "urgent_marketable": True,
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+    })
     return True
 
 
@@ -12026,6 +12107,14 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] limit chase log failed: {_fe}")
+    _emit_genome_execution_event("LIMIT_CHASED", {
+        "trade_id": order.get("trade_id"),
+        "old_limit": old_limit,
+        "new_limit": new_limit,
+        "chase_count": chase_count,
+        "direction": direction,
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+    })
     return True
 
 
@@ -12254,6 +12343,21 @@ def fill_order(order):
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
+    _emit_genome_execution_event("ORDER_FILLED", {
+        "trade_id": order.get("trade_id"),
+        "fill_price": fill_px,
+        "direction": order.get("signal_dir"),
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        "chase_count": int(order.get("limit_chase_count") or 0),
+    })
+    _emit_genome_execution_event("POSITION_OPENED", {
+        "trade_id": pos.get("trade_id"),
+        "entry_price": fill_px,
+        "direction": pos.get("dir"),
+        "qty": pos.get("qty"),
+        "research_lane": pos.get("research_lane"),
+        "stop_loss": pos.get("sl"),
+    })
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
@@ -14186,6 +14290,14 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
+    genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
+    _emit_genome_execution_event(genome_event, {
+        "trade_id": tid,
+        "reason": reason,
+        "limit_price": limit_price,
+        "research_lane": row.get("research_lane"),
+        "direction": row.get("dir"),
+    })
     return row
 
 
@@ -14367,6 +14479,14 @@ def close_position(pos: dict, exit_reason: str):
         trade_id = pos.get("trade_id")
         if not trade_id:
             return
+        _emit_genome_execution_event("EXIT_TRIGGERED", {
+            "trade_id": trade_id,
+            "exit_reason": exit_reason,
+            "direction": pos.get("dir"),
+            "research_lane": pos.get("research_lane"),
+            "peak_pct": pos.get("max_pnl_pct"),
+            "mae_pct": pos.get("max_drawdown"),
+        })
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)
         assert entry > 0, f"[EXIT VALIDATION FAIL] entry={entry} <=0"
@@ -21291,8 +21411,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "

@@ -80,10 +80,10 @@ switch ($Action) {
   }
   "start-all-global" {
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
-    Start-DetachedPs1 (Join-Path $scriptDir "home-stack-start-all.ps1") @(
+    Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
       "-BotPort", "$BotPort",
       "-AnalyzerPort", "$AnalyzerPort"
-    ) -NoExit -WindowTitle "Doxed Start Everything" -Show Normal
+    ) -Title "Doxed Start Everything"
   }
   "start-all-local" {
     $labScript = Join-Path $scriptDir "home-stack-local-lab.ps1"
