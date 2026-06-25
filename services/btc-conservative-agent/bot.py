@@ -53,6 +53,8 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     PRIMARY_PRODUCTION_LANE,
     PRIMARY_PRODUCTION_ROLE,
+    RESEARCH_CANDIDATE_LANE,
+    RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
@@ -67,6 +69,7 @@ from combo_pathway_config import (
     is_chase_3plus_entry_lane,
     is_combo_execution_lane,
     is_immediate_entry_lane,
+    is_research_candidate_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -104,6 +107,15 @@ from pathway_lane_roster import (
     PATHWAY_SHADOW_COLLECTING_ENABLED,
     RETIRED_PATHWAY_LANES as ROSTER_RETIRED_PATHWAY_LANES,
 )
+
+try:
+    from research_genome import get_genome_bridge, init_genome_bridge
+except ImportError:
+    def init_genome_bridge(base_dir=None):  # type: ignore
+        return None
+
+    def get_genome_bridge():  # type: ignore
+        return None
 
 # #region agent log
 _AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
@@ -165,9 +177,9 @@ RESEARCH_LANE_URGENT_CHASE_ALPHA = "URGENT_CHASE_ALPHA"
 RESEARCH_LANE_CHASE_3PLUS_ALPHA = "CHASE_3PLUS_ALPHA"
 RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
 PATHWAY_LANE_STATUS = {
-    RESEARCH_LANE_COMBO_65_SP5_CHASE: "PRIMARY_PRODUCTION",
+    RESEARCH_LANE_COMBO_65_SP5_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "RETIRED",
-    RESEARCH_LANE_COMBO_604_SP4_CHASE: "ACTIVE",
+    RESEARCH_LANE_COMBO_604_SP4_CHASE: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
@@ -184,7 +196,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "RETIRED",
     RESEARCH_LANE_RECOVERY_MONSTER_V1: "RETIRED",
     RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "RETIRED",
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "ACTIVE",
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "RETIRED",
 }
 RETIRED_PATHWAY_LANES = ROSTER_RETIRED_PATHWAY_LANES
 RESEARCH_LANE_LABELS = {
@@ -14574,6 +14586,23 @@ def close_position(pos: dict, exit_reason: str):
         trade_id,
         {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
     )
+    bridge = get_genome_bridge()
+    if bridge:
+        try:
+            bridge.on_position_closed({
+                "trade_id": trade_id,
+                "entry_price": pos.get("entry"),
+                "exit_price": price,
+                "pnl_usd": net_pnl,
+                "mfe_pct": pos.get("peak_pct"),
+                "mae_pct": pos.get("mae_pct"),
+                "capture_pct": pos.get("capture_pct"),
+                "exit_reason": exit_reason,
+                "duration_sec": time.time() - float(pos.get("entry_ts") or time.time()),
+                "research_lane": pos.get("research_lane"),
+            })
+        except Exception as exc:
+            logger.warning(f"[GENOME] trade close record failed: {exc}")
     candidate_signal["active"] = False
     clear_pending_trade()
     pipeline_state_sync()
@@ -15149,8 +15178,13 @@ def build_static_pathway_lane_specs() -> dict:
         "post_ai_gates": shared["post_ai_gates"],
         "margin_usd": shared["margin_usd"],
     }
-    promote = "Per-trade EV > COMBO_65_SP5_CHASE_3PLUS benchmark"
-    kill = "EV <= benchmark over rolling window"
+    promote = (
+        "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS over same period · "
+        "stable DNA Quality · positive across multiple market regimes"
+    )
+    kill = (
+        "ANY after ≥50 trades: negative EV · DNA Quality deterioration · failure to outperform CONTINUOUS"
+    )
     lanes = []
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
         spec = COMBO_LANE_SPECS[lane_id]
@@ -15166,16 +15200,20 @@ def build_static_pathway_lane_specs() -> dict:
             if chase
             else "Immediate AI limit + 25% chase + Scenario C"
         )
-        is_primary = bool(spec.get("is_primary_production"))
+        is_candidate = bool(spec.get("is_research_candidate"))
+        lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
+        lane_promote = spec.get("promotion_criteria") or promote
+        lane_kill = spec.get("kill_criteria") or kill
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
             "subtitle": spec.get("subtitle", ""),
             "role": spec.get("combo_key", lane_id),
-            "status": PRIMARY_PRODUCTION_ROLE if is_primary else "ACTIVE",
+            "status": lane_status,
             "is_benchmark": False,
-            "is_primary_production": is_primary,
-            "badge": PRIMARY_PRODUCTION_ROLE if is_primary else "",
+            "is_primary_production": False,
+            "is_research_candidate": is_candidate,
+            "badge": RESEARCH_CANDIDATE_ROLE if is_candidate else "",
             "tile_number": tile_idx,
             "entry_mode_label": entry_mode_label,
             "filter_chips": [
@@ -15183,7 +15221,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Spread {spread_label}",
                 entry_mode_label,
                 "25% chase",
-                "Scenario C",
+                f"Ladder {SCENARIO_C_LADDER_LABEL}",
             ],
             "toggle_key": "research_lane_enabled",
             "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
@@ -15200,8 +15238,8 @@ def build_static_pathway_lane_specs() -> dict:
             },
             "exit": scenario_c,
             "exit_path": "Scenario C frozen — exit combo optimization next",
-            "promotion_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else promote,
-            "kill_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else kill,
+            "promotion_criteria": lane_promote,
+            "kill_criteria": lane_kill,
             "expected_advantage": "Historical winners: strong AI + spread ≥4 at entry",
             "expected_risk": "TYPE_A drag if filters too loose — monitor exit leakage",
             "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
@@ -15234,7 +15272,7 @@ def build_static_pathway_lane_specs() -> dict:
         "filter_chips": [
             f"AI ~{shared['ai_scan_cadence_sec']}s",
             "AI_SCAN mirror",
-            "Scenario C",
+            f"Ladder {SCENARIO_C_LADDER_LABEL}",
             "25% chase",
             "Toggle orders",
         ],
@@ -15342,16 +15380,18 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Pipeline/execution frozen — change tile labels, filters, toggles only unless explicitly approved",
-        "architecture_doc": "PATHWAY_ARCHITECTURE_FREEZE.md",
+        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + COMBO_604 research candidate only",
+        "architecture_doc": "docs/research-genome-schema-v1.md",
+        "genome_schema_version": "1.0.0",
         "shared_execution": shared,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": COMPARISON_BENCHMARK_LANE,
-        "primary_production_lane": PRIMARY_PRODUCTION_LANE,
+        "primary_production_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "primary_production_role": PRIMARY_PRODUCTION_ROLE,
+        "primary_production_role": RESEARCH_CANDIDATE_ROLE,
+        "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(LEGACY_PATHWAY_LANES),
         "lanes": lanes,
@@ -16662,6 +16702,26 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
+            + (spec.research_question ? ('<div style="margin-top:4px;font-size:0.76em;color:#6e7681;"><strong style="color:#8b949e;">Question:</strong> ' + spec.research_question + '</div>') : '')
+            + (function () {
+              const ef = entry.filters || {};
+              const parts = [];
+              if (ef.ai_probability_bucket) parts.push('AI ' + ef.ai_probability_bucket);
+              if (ef.directional_spread_bucket) parts.push('Spread ' + ef.directional_spread_bucket);
+              if (ef.entry_mode) parts.push(ef.entry_mode);
+              if (!parts.length && entry.trigger) parts.push(entry.trigger);
+              if (!parts.length) return '';
+              return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
+            })()
+            + (function () {
+              const prom = spec.promotion_criteria;
+              const kill = spec.kill_criteria;
+              if (!prom && !kill) return '';
+              let html = '<div style="margin-top:6px;padding:6px 8px;background:#1c2128;border-radius:6px;font-size:0.74em;line-height:1.45;">';
+              if (prom) html += '<div><strong style="color:#3fb950;">Promote:</strong> <span style="color:#8b949e;">' + prom + '</span></div>';
+              if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
+              return html + '</div>';
+            })()
             + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
@@ -16672,7 +16732,7 @@ DASHBOARD_JS = """(function () {
                 return '<div style="font-size:0.74em;color:#8b949e;line-height:1.4;">' + line + '</div>';
               }).join('');
               return '<div style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
-                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY (frozen)</div>'
+                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY · ' + (exit.profile || 'Scenario C') + ' · ' + (exit.ladder || '—') + '</div>'
                 + body + '</div>';
             })()
             + '</div>';
@@ -17967,6 +18027,10 @@ def api_relay_state():
         _enrich_orders_for_relay(snapshot)
         snapshot["trades_map"] = _relay_trades_map_lite()
         snapshot["server_ts"] = utc_iso()
+        bridge = get_genome_bridge()
+        if bridge:
+            snapshot["genome_bus_seq"] = bridge.bus_seq
+            snapshot["genome_stats"] = bridge.stats()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp
@@ -19071,6 +19135,18 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
         state["final_decision"] = "APPROVED" if approved else "AI_REJECTED"
         state["last_ai"].update({"win_prob": win_prob,"direction": dir_,"trade_id": trade_id,"comment": comment,"ai_error": None})
         state["last_engine_error"] = "" if approved else "AI rejected"
+    bridge = get_genome_bridge()
+    if bridge:
+        try:
+            bridge.on_ai_decision(
+                approved,
+                trade_id=str(trade_id or ""),
+                ai_confidence=int(win_prob or 0),
+                direction=str(dir_ or ""),
+                block_reason="" if approved else str(comment or "AI_REJECTED"),
+            )
+        except Exception as exc:
+            logger.warning(f"[GENOME] ai decision record failed: {exc}")
 
 REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
 
@@ -20927,6 +21003,11 @@ def main():
     validate_startup()
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
+    try:
+        init_genome_bridge()
+        logger.info("[GENOME] Trading Genome v1 bridge initialized")
+    except Exception as exc:
+        logger.warning(f"[GENOME] bridge init failed: {exc}")
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
     session_meta = _load_research_session_meta()

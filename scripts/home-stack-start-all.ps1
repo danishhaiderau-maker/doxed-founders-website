@@ -84,6 +84,37 @@ if (-not (Test-HomeScriptRunning "home-stack-supervisor.ps1")) {
   $messages.Add("Supervisor (hidden, 24/7 health)")
 }
 
+if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
+  Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
+  $messages.Add("Relay snapshot pusher (hidden, 2s → Railway cache)")
+}
+
+# Verify tunnel responds after start (named tunnel can take ~15s to register)
+$verifyUrl = if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) { $stableUrl } else { Get-TunnelUrl }
+if ($verifyUrl -and (Test-BotHealthy)) {
+  $deadline = (Get-Date).AddSeconds(35)
+  while ((Get-Date) -lt $deadline -and -not (Test-TunnelPublicHealthy $verifyUrl 6)) {
+    Start-Sleep -Seconds 3
+  }
+  if (-not (Test-TunnelPublicHealthy $verifyUrl 8)) {
+    if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
+      Stop-Cloudflared | Out-Null
+      Start-Sleep -Seconds 2
+      try {
+        Start-CloudflaredNamedHidden -Port $BotPort
+        $messages.Add("Tunnel verify failed — forced hidden restart")
+        Start-Sleep -Seconds 12
+      } catch {
+        $messages.Add("Tunnel verify failed — manual restart may be needed")
+      }
+    } else {
+      $messages.Add("Tunnel verify pending — check Cloudflare window for URL")
+    }
+  } elseif ($verifyUrl -eq $stableUrl) {
+    $messages.Add("Tunnel verified: $verifyUrl")
+  }
+}
+
 $log = Join-Path $repoRoot ".home-start-all.log"
 $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), ($messages -join " | ")
 Add-Content -Path $log -Value $line

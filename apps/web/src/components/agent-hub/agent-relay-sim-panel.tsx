@@ -7,6 +7,7 @@ import {
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
   type TradeLifecycleIntegritySnapshot,
+  type RelaySimParticipantStats,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
@@ -63,6 +64,7 @@ export function AgentRelaySimPanel({
   simActivity,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
+  relaySimParticipantStats,
   botConnected,
   onStart,
   onStop,
@@ -82,6 +84,7 @@ export function AgentRelaySimPanel({
   simActivity: TradingAgentActivityEntry[];
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relaySimParticipantStats?: RelaySimParticipantStats | null;
   botConnected?: boolean;
   onStart?: () => void;
   onStop?: () => void;
@@ -116,6 +119,7 @@ export function AgentRelaySimPanel({
     copyRelayReconcile: reconcile,
     copyRelayLimitChain,
     tradeLifecycleIntegrity,
+    relaySimParticipantStats,
     relayFidelity,
   });
 

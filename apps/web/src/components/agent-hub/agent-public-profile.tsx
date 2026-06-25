@@ -10,6 +10,7 @@ import {
   type CopyRelaySimState,
   type CopyRelayLimitChainSnapshot,
   type TradeLifecycleIntegritySnapshot,
+  type RelaySimParticipantStats,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
@@ -327,6 +328,7 @@ export function AgentPublicProfile({
   copyRelayReconcile,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
+  relaySimParticipantStats,
   relayFidelity,
   showcaseActivity: showcaseActivityProp,
   userActivity: userActivityProp,
@@ -371,6 +373,7 @@ export function AgentPublicProfile({
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relaySimParticipantStats?: RelaySimParticipantStats | null;
   relayFidelity?: RelayFidelitySnapshot | null;
   showcaseActivity?: TradingAgentActivityEntry[];
   userActivity?: TradingAgentActivityEntry[];
@@ -524,6 +527,7 @@ export function AgentPublicProfile({
     copyRelayReconcile,
     copyRelayLimitChain,
     tradeLifecycleIntegrity,
+    relaySimParticipantStats,
     relayFidelity,
     botConnected,
     userActivity: resolvedDesk === 'relay-sim' ? simAct : userAct,

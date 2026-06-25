@@ -19,6 +19,14 @@ export type TradeLifecycleIntegritySnapshot = {
   updatedAt: string;
 };
 
+export type RelaySimParticipantStats = {
+  closed: number;
+  expired: number;
+  open: number;
+  pending: number;
+  total: number;
+};
+
 export type CopyRelayLimitChainSnapshot = {
   configuredLimit: number | null;
   relayLimit: number | null;
@@ -120,4 +128,33 @@ export function buildCopyRelayLimitChain(input: {
     source: input.source ?? null,
     updatedAt: new Date().toISOString(),
   };
+}
+
+export function buildRelaySimParticipantStats(
+  participants: ParticipantLike[],
+): RelaySimParticipantStats {
+  const stats: RelaySimParticipantStats = {
+    closed: 0,
+    expired: 0,
+    open: 0,
+    pending: 0,
+    total: participants.length,
+  };
+  for (const p of participants) {
+    switch (p.status) {
+      case 'CLOSED':
+        stats.closed += 1;
+        break;
+      case 'EXPIRED':
+        stats.expired += 1;
+        break;
+      case 'OPEN':
+        stats.open += 1;
+        break;
+      case 'PENDING_ENTRY':
+        stats.pending += 1;
+        break;
+    }
+  }
+  return stats;
 }

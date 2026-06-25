@@ -8,6 +8,7 @@ import {
   mapBotStateToDashboard,
 } from './bot-state.mapper';
 import { PrismaService } from '../prisma/prisma.service';
+import { ShowcaseSnapshotService } from './showcase-snapshot.service';
 
 @Injectable()
 export class BotBridgeService {
@@ -20,6 +21,7 @@ export class BotBridgeService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly showcaseSnapshot: ShowcaseSnapshotService,
   ) {}
 
   getBotUrl(): string | null {
@@ -73,6 +75,26 @@ export class BotBridgeService {
     this.lastFetchAt = 0;
   }
 
+  /** Cache-first relay snapshot pushed from home bot every ~2s. */
+  private async fetchCachedRelaySnapshot(): Promise<BotApiState | null> {
+    try {
+      const cached = await this.showcaseSnapshot.getCachedSnapshot();
+      if (!cached.snapshot) return null;
+      const ageMs = cached.at ? Date.now() - cached.at.getTime() : Number.MAX_SAFE_INTEGER;
+      if (ageMs > 30_000) {
+        this.logger.warn(`Cached showcase snapshot stale (${Math.round(ageMs / 1000)}s)`);
+      }
+      const state = cached.snapshot as BotApiState;
+      state.snapshot_seq = cached.snapshot_seq;
+      state.snapshot_source = 'railway_cache';
+      return state;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Cached snapshot read failed: ${msg}`);
+      return null;
+    }
+  }
+
   /** Execution paths bypass cache for instant showcase parity. */
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
     return this.fetchState(force, 'relay');
@@ -80,13 +102,20 @@ export class BotBridgeService {
 
   /** Admin panels — fast relay snapshot; do not block on full /api/state (large trades_map). */
   async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
-    const base = await this.resolveBotUrl();
-    if (!base) return null;
-
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
     }
+
+    const cached = await this.fetchCachedRelaySnapshot();
+    if (cached) {
+      this.cached = cached;
+      this.lastFetchAt = now;
+      return cached;
+    }
+
+    const base = await this.resolveBotUrl();
+    if (!base) return null;
 
     for (const path of ['/api/relay-state', '/api/state']) {
       try {
@@ -116,13 +145,22 @@ export class BotBridgeService {
   }
 
   async fetchState(force = false, mode: 'full' | 'relay' = 'full'): Promise<BotApiState | null> {
-    const base = await this.resolveBotUrl();
-    if (!base) return null;
-
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
     }
+
+    if (mode === 'relay') {
+      const cached = await this.fetchCachedRelaySnapshot();
+      if (cached) {
+        this.cached = cached;
+        this.lastFetchAt = now;
+        return cached;
+      }
+    }
+
+    const base = await this.resolveBotUrl();
+    if (!base) return null;
 
     const paths =
       mode === 'relay'
