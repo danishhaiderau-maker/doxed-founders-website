@@ -46,7 +46,7 @@ foreach ($f in $envFiles) {
   }
 }
 if (-not $secret) {
-  Write-Host "relay-state-pusher: BOT_CONTROL_SECRET not found — exiting"
+  Write-Host "relay-state-pusher: BOT_CONTROL_SECRET not found - exiting"
   exit 1
 }
 
@@ -78,7 +78,7 @@ while ($true) {
         -Body $body | Out-Null
     }
   } catch {
-    Log ("push error: " + $_.Exception.Message)
+    Log ('push error: ' + $_.Exception.Message)
   }
   Start-Sleep -Seconds $IntervalSec
 }
