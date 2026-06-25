@@ -6962,7 +6962,7 @@ def run_genome_analyzer_pipeline():
         report = run_genome_analyzer()
         layers = report.get("layer_counts") or {}
         disc = len(report.get("discoveries") or [])
-        lib = report.get("cluster_library_size") or 0
+        lib = report.get("genome_library_size") or len(report.get("genome_library") or [])
         dq = (report.get("dna_quality") or {}).get("overall") or {}
         print(
             f"  ✅ Trading Genome analyzer: layers={sum(layers.values())} "

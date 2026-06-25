@@ -92,23 +92,55 @@ def _recommendation_engine(
 ) -> Dict[str, Any]:
     sim = float(cluster_match.get("similarity_pct") or 0)
     conf = dna_summary.get("research_confidence") or "LOW"
+    n = int(dna_summary.get("sample_size") or 0)
+    ci = dna_summary.get("confidence_interval_95") or {}
+
     if cluster_match.get("cluster_id") == "UNKNOWN" or sim < 55:
+        if cluster_match.get("cluster_id") == "UNKNOWN":
+            why = (
+                f"No matching genome in library (similarity {sim:.1f}%) — collect only."
+                if sim >= 55
+                else f"Similarity {sim:.1f}% is below 55% threshold."
+            )
+        else:
+            why = f"Similarity {sim:.1f}% is below 55% threshold."
         return {
             "action": "UNKNOWN_MARKET",
-            "detail": "Collect data — no recommendation from weak similarity.",
+            "similarity_pct": sim,
+            "detail": "Collect only — market does not match historical genomes.",
             "research_confidence": conf,
+            "explanation": {
+                "why": why,
+                "evidence": {"sample_size": n, "confidence_interval_95": ci},
+                "execution_change": "NEVER",
+                "human_review_required": True,
+            },
         }
-    if conf == "LOW" or int(dna_summary.get("sample_size") or 0) < 30:
+    if conf == "LOW" or n < 30:
         return {
             "action": "COLLECT_MORE_DATA",
-            "detail": "Insufficient sample — continue CONTINUOUS benchmark + COMBO_604 research candidate.",
+            "detail": "Insufficient sample — continue CONTINUOUS + COMBO_604 research candidate.",
             "research_confidence": conf,
+            "explanation": {
+                "why": f"Only {n} trades — need ≥30 for MODERATE confidence.",
+                "evidence": {"sample_size": n, "confidence_interval_95": ci, "dna_quality": dna_summary.get("dna_quality")},
+                "execution_change": "NEVER",
+                "human_review_required": True,
+            },
         }
     return {
         "action": "CONTINUE_RESEARCH_CANDIDATE",
+        "similarity_pct": sim,
         "detail": "Advisory only — human decides; bot execution unchanged.",
         "research_confidence": conf,
         "genome_library_size": genome_count,
+        "explanation": {
+            "why": f"Known cluster {cluster_match.get('cluster_id')} at {sim:.1f}% similarity with {n} trades.",
+            "evidence": {"sample_size": n, "confidence_interval_95": ci, "ev_usd": dna_summary.get("ev")},
+            "compared_to": "CONTINUOUS benchmark reference in discoveries",
+            "execution_change": "NEVER",
+            "human_review_required": True,
+        },
     }
 
 
@@ -134,13 +166,13 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
 
     latest_market = markets[0] if markets else {}
     cluster_match = nearest_cluster(latest_market, genome_library)
-    discoveries = generate_discoveries(outcome_fps, store=store)
-
     dna_summary = summarize_trades(trades)
+    bench_ev = summarize_trades(cont_trades).get("ev") or 0.0
     mid = max(1, len(trades) // 2)
     drift = detect_drift(summarize_trades(trades[:mid]), summarize_trades(trades[mid:]))
 
     memory_stats = store.stats()
+    discoveries = generate_discoveries(outcome_fps, store=store, benchmark_ev=float(bench_ev))
     recommendation = _recommendation_engine(cluster_match, dna_summary, len(genome_library))
 
     report = {
@@ -199,6 +231,13 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
         with open(root_report, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2)
     except OSError:
+        pass
+
+    try:
+        from build_gpt_audit_bundle import build as build_gpt_audit
+
+        build_gpt_audit(agent_root=agent_root)
+    except Exception:
         pass
 
     return report
