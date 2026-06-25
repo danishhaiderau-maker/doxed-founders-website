@@ -29,6 +29,16 @@ CREATE TABLE IF NOT EXISTS genome_discovery_memory (
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_discovery_dna ON genome_discovery_memory(dna_key);
+
+CREATE TABLE IF NOT EXISTS genome_evidence_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  period_key TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_entity ON genome_evidence_ledger(entity_type, entity_id);
 """
 
 
@@ -136,6 +146,37 @@ class GenomeLibraryStore:
             )
             conn.commit()
             conn.close()
+
+    def append_ledger(self, entity_type: str, entity_id: str, snapshot: Dict[str, Any]) -> None:
+        ts = str(snapshot.get("ts") or datetime.now(timezone.utc).isoformat())
+        period = str(snapshot.get("period_key") or ts[:7])
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                """INSERT INTO genome_evidence_ledger (entity_type, entity_id, period_key, ts, payload_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (entity_type, entity_id, period, ts, json.dumps(snapshot, default=str)),
+            )
+            conn.commit()
+            conn.close()
+
+    def load_ledger(self, entity_type: str, entity_id: str, limit: int = 52) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = []
+            for row in conn.execute(
+                """SELECT payload_json FROM genome_evidence_ledger
+                   WHERE entity_type = ? AND entity_id = ?
+                   ORDER BY ts ASC LIMIT ?""",
+                (entity_type, entity_id, limit),
+            ):
+                try:
+                    rows.append(json.loads(row["payload_json"]))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+            conn.close()
+        return rows
 
     def stats(self) -> Dict[str, int]:
         with self._lock:

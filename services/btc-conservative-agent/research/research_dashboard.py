@@ -1230,7 +1230,67 @@ def download_chatgpt_bundle():
     )
 
 
-@app.route("/api/accumulator")
+@app.route("/download/gpt-audit")
+def download_gpt_audit_bundle():
+    """Full-stack GPT audit: bot.py + analyzers + genome modules + implementation checklist."""
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
+    try:
+        from build_gpt_audit_bundle import build, OUT_DIR, ZIP_NAME, MANIFEST_NAME
+    except ImportError as exc:
+        abort(503, description=f"build_gpt_audit_bundle.py not found: {exc}")
+    out_dir = agent_root / "research" / "downloads" if (agent_root / "research" / "downloads").is_dir() else OUT_DIR
+    candidate = out_dir / ZIP_NAME
+    manifest_path = out_dir / MANIFEST_NAME
+    stale = True
+    if candidate.is_file() and candidate.stat().st_size > 50_000:
+        try:
+            if manifest_path.is_file():
+                meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+                gen = meta.get("generated_at") or ""
+                report = agent_root / "research" / "genome" / "genome_analysis_report.json"
+                if report.is_file():
+                    rep_ts = json.loads(report.read_text(encoding="utf-8")).get("generated_at") or ""
+                    stale = bool(rep_ts and gen and rep_ts > gen)
+            with zipfile.ZipFile(candidate) as zf:
+                if zf.testzip() is None and not stale:
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    return send_file(
+                        candidate,
+                        mimetype="application/zip",
+                        as_attachment=True,
+                        download_name=f"gpt_audit_bundle_{stamp}.zip",
+                    )
+        except (zipfile.BadZipFile, json.JSONDecodeError, OSError):
+            pass
+    try:
+        out_zip, _ = build(agent_root=agent_root)
+    except Exception as exc:
+        abort(500, description=f"GPT audit bundle build failed: {exc}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        out_zip,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"gpt_audit_bundle_{stamp}.zip",
+    )
+
+
+@app.route("/api/gpt-audit")
+def api_gpt_audit_status():
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    manifest_path = agent_root / "research" / "downloads" / "GPT_AUDIT_MANIFEST.json"
+    if not manifest_path.is_file():
+        return jsonify({"ready": False, "message": "Run analyzer once to generate GPT audit bundle."})
+    try:
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return jsonify({"ready": True, **meta})
+    except (json.JSONDecodeError, OSError) as exc:
+        return jsonify({"ready": False, "error": str(exc)})
+
+
+@app.route("/download/accumulator")
 def api_accumulator():
     try:
         from research_trade_accumulator import build_status
@@ -1514,7 +1574,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-download">
     <h2>Download Center</h2>
-    <p><b>Complete history</b> — all session archives, CONTINUOUS timeline, weekend vs weekday breakdown, live reports, CSVs.</p>
+    <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
+    <p><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
+    <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
+    <p style="margin-top:16px"><b>Complete history</b> — all session archives, CONTINUOUS timeline, weekend vs weekday breakdown, live reports, CSVs.</p>
     <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP (full rebuild)</a>
     <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ Complete Bundle (cached)</a>
     <p style="margin-top:16px"><b>ChatGPT upload</b> — small verified ZIP with trade counts manifest (use this instead of the 38MB archive).</p>
@@ -1989,8 +2052,12 @@ async function loadGenome() {
     ['Validation', (d.validation || {}).verdict || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const rec = d.recommendation || {};
-  document.getElementById('genome-note').textContent =
-    (rec.action || 'COLLECT') + ': ' + (rec.detail || d.disclaimer || '');
+  const expl = rec.explanation || {};
+  const sim = rec.similarity_pct ?? (d.current_market_cluster || {}).similarity_pct;
+  let note = (rec.action || 'COLLECT') + ': ' + (rec.detail || d.disclaimer || '');
+  if (expl.why) note += ' — ' + expl.why;
+  if (rec.action === 'UNKNOWN_MARKET' && sim != null) note += ` (similarity ${Number(sim).toFixed(1)}%)`;
+  document.getElementById('genome-note').textContent = note;
   document.getElementById('genome-cluster').textContent = JSON.stringify(d.current_market_cluster || {}, null, 2);
   document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
   document.getElementById('genome-lifecycle').textContent = JSON.stringify(d.lifecycle_dna || {}, null, 2);
@@ -1998,9 +2065,21 @@ async function loadGenome() {
   document.getElementById('genome-discoveries').innerHTML = (d.discoveries || []).map(disc => {
     const fp = disc.fingerprint || {};
     const m = disc.metrics || {};
-    const cls = disc.status === 'SUPPORTED' ? 'green' : 'amber';
-    return `<div class="kpi" style="margin-bottom:12px;text-align:left"><div class="lbl">${disc.discovery_id || ''} · ${disc.status || ''}</div>`
-      + `<div class="note">${fp.session || ''} · ${fp.adx_bucket || ''} · ${fp.spread_bucket || ''} · n=${disc.observed_trades || 0} · EV=$${fmtUsd(m.ev_usd)} · ${disc.recommendation || ''}</div></div>`;
+    const se = disc.statistical_evidence || {};
+    const ci = se.confidence_interval_95 || m.confidence_interval_95 || {};
+    const stab = disc.stability || {};
+    const ledger = (disc.evidence_ledger || []).slice(-4).map(h =>
+      `${h.period_key || (h.ts || '').slice(0,10)}: WR ${((h.win_rate||0)*100).toFixed(0)}% EV $${fmtUsd(h.ev_usd)}`
+    ).join(' → ');
+    const explDisc = disc.explanation || {};
+    return `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px">`
+      + `<div class="lbl"><strong>${disc.identity || disc.discovery_id || ''}</strong> · ${disc.status || ''} · ${disc.research_confidence || ''}</div>`
+      + `<div class="note">${fp.session || ''} · ADX ${fp.adx_bucket || ''} · spread ${fp.spread_bucket || ''} · ${fp.direction || ''}</div>`
+      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 0} · EV $${fmtUsd(se.expected_value_usd ?? m.ev_usd)} · CI [$${fmtUsd(ci.low)}–$${fmtUsd(ci.high)}] · DNA ${se.dna_quality ?? m.dna_quality ?? 'n/a'}%</div>`
+      + `<div class="note">p=${se.p_value_ev_gt_zero ?? 'n/a'} · sig=${se.statistically_significant ? 'yes' : 'no'} · trend ${stab.trend || 'n/a'} · stable=${stab.stable ? 'yes' : 'no'}</div>`
+      + (ledger ? `<div class="note">Ledger: ${ledger}</div>` : '')
+      + (explDisc.why ? `<div class="note">${explDisc.why}</div>` : '')
+      + `<div class="note"><em>${disc.recommendation || ''}</em></div></div>`;
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
@@ -2056,6 +2135,18 @@ async function loadStatus() {
   return d;
 }
 
+async function loadGptAuditNote() {
+  try {
+    const r = await fetch('/api/gpt-audit');
+    const d = await r.json();
+    const el = document.getElementById('gpt-audit-note');
+    if (!el || !d.ready) return;
+    const v = d.architecture_version || 'v11';
+    const mb = d.zip_size_mb != null ? d.zip_size_mb + ' MB' : '';
+    el.textContent = `GPT audit ready — ${v} — ${mb} — updated ${(d.generated_at||'').slice(0,19)}Z`;
+  } catch (_) {}
+}
+
 async function refreshAll() {
   await loadStatus();
   await loadSummary();
@@ -2080,6 +2171,7 @@ async function refreshAll() {
   await loadFeatures();
   await loadAI();
   await loadGenome();
+  await loadGptAuditNote();
   await loadExplorer();
   await loadArchives();
 }

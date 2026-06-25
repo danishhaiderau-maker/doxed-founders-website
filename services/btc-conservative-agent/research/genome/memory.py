@@ -5,7 +5,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from research.genome.evidence import ledger_snapshot, stability_from_ledger
 from research.genome.fingerprints import fingerprint_key, market_fingerprint
+from research.genome.identity import genome_identity_label
 from research.genome.library_store import GenomeLibraryStore
 from research.genome.quality_score import dna_quality, summarize_trades
 
@@ -69,6 +71,7 @@ def merge_cluster_into_library(
 
         body = {
             "genome_id": genome_id,
+            "identity": genome_identity_label(representative=rep),
             "fingerprint_key": fp_key,
             "representative": rep,
             "centroid": cand.get("centroid") or {},
@@ -100,6 +103,26 @@ def merge_cluster_into_library(
             datetime.now(timezone.utc).isoformat(),
             int(prev.get("observations") or 0) + body["new_observations"],
         )
-        updated.append(store.upsert_genome(genome_id, fp_key, body))
+        merged = store.upsert_genome(genome_id, fp_key, body)
+        store.append_ledger(
+            "genome",
+            genome_id,
+            ledger_snapshot(
+                "genome",
+                genome_id,
+                datetime.now(timezone.utc).isoformat(),
+                {
+                    "win_rate": merged.get("win_rate"),
+                    "ev_usd": merged.get("average_ev"),
+                    "trade_count": merged.get("trade_count"),
+                    "dna_quality": merged.get("dna_quality"),
+                    "trend": merged.get("strengthening"),
+                },
+            ),
+        )
+        history = store.load_ledger("genome", genome_id)
+        merged["evidence_ledger"] = history[-8:]
+        merged["stability"] = stability_from_ledger(history)
+        updated.append(merged)
 
     return updated
