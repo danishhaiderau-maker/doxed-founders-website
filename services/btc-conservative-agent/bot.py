@@ -2451,6 +2451,12 @@ def lane_register_pending_order(order: dict):
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
+    _emit_genome_execution_event("LIMIT_CREATED", {
+        "trade_id": order.get("trade_id"),
+        "limit_price": order.get("limit_price") or order.get("price"),
+        "direction": order.get("dir") or order.get("direction"),
+        "research_lane": order.get("research_lane"),
+    })
 
 
 def lane_unregister_pending_order(order: dict):
@@ -5651,6 +5657,7 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
         _push_showcase_relay_event("APPROVE_PENDING", trade_id)
     elif status == "EXECUTED" and trade_id:
         _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
     """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
@@ -9121,6 +9128,59 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
         state["ai_outcome"] = ai_result.get("decision")
         state["ai_decision"] = ai_result.get("decision")
 
+
+def _emit_genome_ai_events(ai_result: dict) -> None:
+    """Trading Genome v1 — emit AI_SCAN + decision events (bot flight recorder only)."""
+    bridge = get_genome_bridge()
+    if not bridge:
+        return
+    try:
+        with state_lock:
+            ema = state.get("ema_status") or {}
+            market = {
+                "price": state.get("price"),
+                "adx": state.get("adx"),
+                "atr": state.get("atr"),
+                "regime": state.get("regime"),
+                "bull_score": ai_result.get("bull_score"),
+                "bear_score": ai_result.get("bear_score"),
+                "spread": ai_result.get("spread"),
+                "ema_fast": ema.get("ema_fast"),
+                "ema_slow": ema.get("ema_slow"),
+                "ema_slope": ema.get("ema_spread"),
+                "volatility_percentile": state.get("volatility_percentile"),
+                "volume_percentile": state.get("volume_percentile"),
+                "funding_rate": state.get("funding_rate"),
+                "vwap_distance": state.get("vwap_distance"),
+                "delta": state.get("delta"),
+                "momentum": state.get("momentum"),
+                "structure": state.get("structure_score"),
+            }
+        bridge.on_ai_scan_complete(market)
+        decision = str(ai_result.get("decision") or "").upper()
+        approved = decision == "APPROVE" or bool(ai_result.get("approved"))
+        bridge.on_ai_decision(
+            approved,
+            trade_id=str(ai_result.get("trade_id") or ""),
+            ai_confidence=int(ai_result.get("win_prob") or 0),
+            direction=str(ai_result.get("direction") or ai_result.get("final_direction") or ""),
+            block_reason="" if approved else str(ai_result.get("comment") or decision or "REJECT"),
+            research_lane=str(ai_result.get("research_lane") or RESEARCH_LANE_AI_SCAN),
+        )
+    except Exception as exc:
+        logger.warning(f"[GENOME] ai scan events failed: {exc}")
+
+
+def _emit_genome_execution_event(event_name: str, payload: dict) -> None:
+    bridge = get_genome_bridge()
+    if not bridge:
+        return
+    try:
+        bridge.on_execution_event(event_name, payload)
+    except Exception as exc:
+        logger.warning(f"[GENOME] execution event {event_name} failed: {exc}")
+
+
 def _deepseek_api_key():
     """Read key each call so .env / env changes apply without full process restart."""
     _load_local_dotenv()
@@ -9985,6 +10045,7 @@ def evaluate_signal_with_ai(
         if not shadow_only:
             _append_ai_history_row(ai_result)
             _sync_ai_dashboard_debug(ai_result)
+            _emit_genome_ai_events(ai_result)
             with state_lock:
                 eff = get_effective_edge_threshold()
                 state["debug_state"]["ai_gate"] = {
@@ -10069,6 +10130,7 @@ def evaluate_signal_with_ai(
                 }
                 state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
             _sync_ai_dashboard_debug(ai_result)
+            _emit_genome_ai_events(ai_result)
         with state_lock:
             state["ai_call_count"] = state.get("ai_call_count", 0) + 1
         logger.info(
@@ -12694,6 +12756,7 @@ def process_signal(event: dict):
                     block_tag = ai.get("factor_gate") or f"AI_{tier}"
                     skip_stage = "AI"
                 _sync_ai_dashboard_debug(ai, trade_id)
+                _emit_genome_ai_events({**ai, "trade_id": trade_id})
                 reject_stub = {
                     "trade_id": trade_id,
                     "edge_score_at_entry": round(float(edge_score), 1),

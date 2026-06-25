@@ -86,7 +86,7 @@ if (-not (Test-HomeScriptRunning "home-stack-supervisor.ps1")) {
 
 if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
   Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
-  $messages.Add("Relay snapshot pusher (hidden, 2s → Railway cache)")
+  $messages.Add("Relay snapshot pusher (hidden, 2s -> Railway cache)")
 }
 
 # Verify tunnel responds after start (named tunnel can take ~15s to register)
@@ -102,13 +102,13 @@ if ($verifyUrl -and (Test-BotHealthy)) {
       Start-Sleep -Seconds 2
       try {
         Start-CloudflaredNamedHidden -Port $BotPort
-        $messages.Add("Tunnel verify failed — forced hidden restart")
+        $messages.Add("Tunnel verify failed - forced hidden restart")
         Start-Sleep -Seconds 12
       } catch {
-        $messages.Add("Tunnel verify failed — manual restart may be needed")
+        $messages.Add("Tunnel verify failed - manual restart may be needed")
       }
     } else {
-      $messages.Add("Tunnel verify pending — check Cloudflare window for URL")
+      $messages.Add("Tunnel verify pending - check Cloudflare window for URL")
     }
   } elseif ($verifyUrl -eq $stableUrl) {
     $messages.Add("Tunnel verified: $verifyUrl")
