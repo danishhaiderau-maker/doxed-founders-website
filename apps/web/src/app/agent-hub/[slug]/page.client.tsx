@@ -19,6 +19,13 @@ import { SignalApiPanel } from '@/components/agent-hub/signal-api-panel';
 import { AgentHubShell } from '@/components/agent-hub/agent-hub-shell';
 import { useShareOrigin } from '@/components/share-on-x-button';
 import {
+  AGENT_HUB_POLL_BOT_MS,
+  AGENT_HUB_POLL_IDLE_MS,
+  AGENT_HUB_POLL_SIM_LIVE_VIEW_MS,
+  AGENT_HUB_POLL_SIM_MS,
+  useRelaySimLiveView,
+} from '@/hooks/use-relay-sim-live-view';
+import {
   fetchPublicAgentStatus,
   fetchTradingAgent,
   fetchTradingAgentDashboard,
@@ -103,6 +110,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [renewBusy, setRenewBusy] = useState(false);
   const [syncProtectionBusy, setSyncProtectionBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
+  const liveViewUserId = session?.user?.id ?? session?.user?.email ?? undefined;
+  const { liveViewEnabled, setLiveViewEnabled } = useRelaySimLiveView(liveViewUserId);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
     setAgent(meta);
@@ -116,9 +125,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setRentalExpiresAt(meta.rentalExpiresAt ?? null);
   }, []);
 
-  const loadLive = useCallback(async () => {
+  const loadLive = useCallback(async (opts?: { showLoading?: boolean }) => {
     const token = session?.accessToken;
-    setLiveLoading(true);
+    if (opts?.showLoading) setLiveLoading(true);
     try {
       const results = await Promise.allSettled([
         withTimeout(fetchTradingAgentDashboard(slug, token), 15000, 'Dashboard'),
@@ -160,7 +169,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load live data');
     } finally {
-      setLiveLoading(false);
+      if (opts?.showLoading) setLiveLoading(false);
     }
   }, [slug, session?.accessToken]);
 
@@ -171,7 +180,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       applyAgentMeta(meta);
       setLoading(false);
 
-      void Promise.allSettled([loadLive(), fetchTradingAgents('TRADING')]).then(([, agentsR]) => {
+      void Promise.allSettled([loadLive({ showLoading: true }), fetchTradingAgents('TRADING')]).then(([, agentsR]) => {
         if (agentsR.status === 'fulfilled') setAllAgents(agentsR.value.agents);
       });
     } catch (err) {
@@ -183,10 +192,16 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   useEffect(() => {
     load();
-    const pollMs = copyRelaySim?.active ? 3_000 : botConnected ? 5_000 : 15_000;
-    const interval = setInterval(loadLive, pollMs);
+    // Background sync only — no loading banner (avoids layout pulse every tick).
+    let pollMs = AGENT_HUB_POLL_IDLE_MS;
+    if (copyRelaySim?.active) {
+      pollMs = liveViewEnabled ? AGENT_HUB_POLL_SIM_LIVE_VIEW_MS : AGENT_HUB_POLL_SIM_MS;
+    } else if (botConnected) {
+      pollMs = AGENT_HUB_POLL_BOT_MS;
+    }
+    const interval = setInterval(() => void loadLive(), pollMs);
     return () => clearInterval(interval);
-  }, [load, loadLive, copyRelaySim?.active, botConnected]);
+  }, [load, loadLive, copyRelaySim?.active, botConnected, liveViewEnabled]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !agent) return;
@@ -431,13 +446,15 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           onStopRelaySim={handleStopRelaySim}
           onResetRelaySim={handleResetRelaySim}
           relaySimBusy={relaySimBusy}
-          onAdminRefresh={load}
+          onAdminRefresh={() => void loadLive({ showLoading: true })}
           instanceBusy={instanceBusy}
           rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
           onRenewRental={handleRenewRental}
           renewBusy={renewBusy}
           onSyncProtectionBreach={handleSyncProtectionBreach}
           syncProtectionBusy={syncProtectionBusy}
+          relaySimLiveView={liveViewEnabled}
+          onRelaySimLiveViewChange={setLiveViewEnabled}
         />
       )}
       {agent && slug === 'conservative-btc' && isAdmin && (

@@ -445,6 +445,8 @@ export function AgentPublicProfile({
   renewBusy,
   onSyncProtectionBreach,
   syncProtectionBusy,
+  relaySimLiveView,
+  onRelaySimLiveViewChange,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -494,6 +496,8 @@ export function AgentPublicProfile({
   renewBusy?: boolean;
   onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
   syncProtectionBusy?: boolean;
+  relaySimLiveView?: boolean;
+  onRelaySimLiveViewChange?: (enabled: boolean) => void;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const tabs = isAdmin ? ([...PUBLIC_TABS, ...ADMIN_EXTRA_TABS] as Tab[]) : ([...PUBLIC_TABS] as Tab[]);
@@ -662,6 +666,8 @@ export function AgentPublicProfile({
     onResetRelaySim,
     relaySimBusy,
     executionOnly: showExecutionPublic,
+    relaySimLiveView,
+    onRelaySimLiveViewChange,
   } as const;
 
   return (

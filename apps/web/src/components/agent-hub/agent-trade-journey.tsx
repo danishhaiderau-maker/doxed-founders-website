@@ -309,7 +309,7 @@ export function AgentTradeJourney({
                 onClick={() => setSelected(item)}
                 className={`min-w-[120px] rounded-xl border-2 px-4 py-3 text-center text-xs font-bold uppercase transition ${
                   tileClasses(node.phase, item)
-                } ${active ? 'scale-105 ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
+                } ${active ? 'ring-2 ring-white/30' : 'opacity-90 hover:opacity-100'}`}
               >
                 {node.label}
               </button>

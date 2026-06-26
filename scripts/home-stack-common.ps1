@@ -13,6 +13,19 @@ if (-not $repoRoot) {
 }
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $tunnelUrlFile = Join-Path $repoRoot ".home-tunnel-url"
+$userStoppedFile = Join-Path $repoRoot ".home-stack-user-stopped"
+
+function Set-HomeStackUserStopped {
+  Set-Content -Path $userStoppedFile -Value (Get-Date -Format o) -NoNewline
+}
+
+function Clear-HomeStackUserStopped {
+  Remove-Item $userStoppedFile -Force -ErrorAction SilentlyContinue
+}
+
+function Test-HomeStackUserStopped {
+  return Test-Path $userStoppedFile
+}
 
 function Test-PortOpen([int]$P) {
   try {
@@ -378,6 +391,22 @@ function Close-HomeStackWindowTitles {
   return $closed
 }
 
+function Stop-BotPidFile {
+  $killed = @()
+  $pidFile = Join-Path $repoRoot ".home-bot.pid"
+  if (-not (Test-Path $pidFile)) { return $killed }
+  try {
+    $raw = Get-Content $pidFile -Raw -ErrorAction SilentlyContinue
+    $botPid = [int]"$raw".Trim()
+    if ($botPid -gt 0) {
+      Stop-Process -Id $botPid -Force -ErrorAction SilentlyContinue
+      $killed += $botPid
+    }
+  } catch { }
+  Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+  return $killed
+}
+
 function Stop-GlobalStackFast {
   param(
     [int]$GlobalBotPort = 7002,
@@ -385,16 +414,21 @@ function Stop-GlobalStackFast {
     [int[]]$ExcludeProcessIds = @()
   )
   # Stop supervisor first so it cannot restart bot/analyzer/tunnel during shutdown.
+  Set-HomeStackUserStopped
   $supervisor = @(Stop-HomeStackSupervisor)
   $relayPusher = @(Stop-RelayStatePusher)
-  $tunnel = @(Stop-Cloudflared)
-  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
-  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
+  # Kill port listeners + hidden detached bot before tunnel/other cleanup (NoWait uses Hidden python).
+  $botPidFile = @(Stop-BotPidFile)
   $botPort = @(Stop-ListenPortFast $GlobalBotPort)
+  $botPy = @(Stop-PythonMatching "btc_conservative_agent")
   $analyzerPort = @(Stop-ListenPortFast $GlobalAnalyzerPort)
+  $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
+  $tunnel = @(Stop-Cloudflared)
   Start-Sleep -Seconds 1
   $botPort += @(Stop-ListenPortFast $GlobalBotPort)
+  $botPy += @(Stop-PythonMatching "btc_conservative_agent")
   $analyzerPort += @(Stop-ListenPortFast $GlobalAnalyzerPort)
+  $analyzerPy += @(Stop-PythonMatching "analyzer_research_engine")
   $consoles = @(Close-ShowcaseStackConsoles -GlobalBotPort $GlobalBotPort -GlobalAnalyzerPort $GlobalAnalyzerPort -KeepBridge -ExcludeProcessIds $ExcludeProcessIds)
   Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
   Clear-TunnelUrlFile
@@ -404,8 +438,9 @@ function Stop-GlobalStackFast {
     tunnel = $tunnel
     relayPusher = $relayPusher
     supervisor = $supervisor
-    pythonBot = $botPy
-    pythonAnalyzer = $analyzerPy
+    botPidFile = $botPidFile
+    pythonBot = @($botPy | Select-Object -Unique)
+    pythonAnalyzer = @($analyzerPy | Select-Object -Unique)
     consoles = $consoles
   }
 }

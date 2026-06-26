@@ -228,12 +228,46 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started on :$AnalyzerPort." }
     }
     "start-tunnel" {
-      if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
-        & (Join-Path $scriptDir "restart-home-tunnel.ps1") -Port $BotPort -Force -Hidden | Out-Null
-        return @{ ok = $true; message = "Named tunnel started hidden. URL: https://bot.doxxedcrypto.digital" }
+      if (-not (Test-PortOpen $BotPort)) {
+        return @{
+          ok = $false
+          error = "Bot not running on :$BotPort — click Start bot first, wait for /api/ping, then Start tunnel."
+        }
       }
-      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
-      return @{ ok = $true; message = "Quick tunnel window opened - watch Doxed Cloudflare Tunnel for the URL" }
+      if (-not ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel")))) {
+        Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
+        return @{ ok = $true; message = "Quick tunnel window opened - watch Doxed Cloudflare Tunnel for the URL" }
+      }
+      try {
+        Start-CloudflaredNamedHidden -Port $BotPort
+      } catch {
+        return @{ ok = $false; error = "Tunnel start failed: $($_.Exception.Message)" }
+      }
+      $stableUrl = "https://bot.doxxedcrypto.digital"
+      $deadline = (Get-Date).AddSeconds(50)
+      $live = $false
+      while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 3
+        $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+        if ($cfRunning -and (Test-TunnelPublicHealthy $stableUrl)) {
+          $live = $true
+          break
+        }
+      }
+      if (-not $live) {
+        $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+        if (-not $cfRunning) {
+          return @{
+            ok = $false
+            error = "cloudflared exited immediately — open logs/cloudflared-named.err.log on this PC."
+          }
+        }
+        return @{
+          ok = $false
+          error = "cloudflared is running but $stableUrl still offline — wait 30s, click Refresh status, or run RECOVER-GLOBAL-STACK.cmd."
+        }
+      }
+      return @{ ok = $true; message = "Named tunnel live at $stableUrl (bot :$BotPort)" }
     }
     "enable-named-tunnel" {
       Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline

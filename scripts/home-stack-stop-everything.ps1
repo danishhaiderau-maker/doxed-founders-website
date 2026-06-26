@@ -30,7 +30,10 @@ if ($stale.Count -gt 0) {
 
 $result = Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort -ExcludeProcessIds $exclude
 Write-Host "Supervisor PIDs stopped: $($result.supervisor -join ', ')"
+Write-Host "Bot PID file killed: $($result.botPidFile -join ', ')"
+Write-Host "Bot python PIDs killed: $($result.pythonBot -join ', ')"
 Write-Host "Bot port PIDs killed: $($result.botPort -join ', ')"
+Write-Host "Analyzer python PIDs killed: $($result.pythonAnalyzer -join ', ')"
 Write-Host "Analyzer port PIDs killed: $($result.analyzerPort -join ', ')"
 Write-Host "Cloudflared PIDs killed: $($result.tunnel -join ', ')"
 Write-Host "Console windows closed: $($result.consoles.Count)"
@@ -38,6 +41,13 @@ Write-Host ""
 
 Start-Sleep -Seconds 3
 $botOpen = Test-PortOpen $BotPort
+if ($botOpen) {
+  Write-Host "Bot still on :$BotPort - force-killing listener again..." -ForegroundColor Yellow
+  Stop-ListenPortFast $BotPort | Out-Null
+  Stop-PythonMatching "btc_conservative_agent" | Out-Null
+  Start-Sleep -Seconds 2
+  $botOpen = Test-PortOpen $BotPort
+}
 $analyzerOpen = Test-PortOpen $AnalyzerPort
 $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
 Write-Host "After stop: bot :$BotPort open=$botOpen | analyzer :$AnalyzerPort open=$analyzerOpen | cloudflared=$cfRunning"

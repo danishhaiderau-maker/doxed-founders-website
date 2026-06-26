@@ -79,6 +79,8 @@ export function AgentDeskView({
   onResetRelaySim,
   relaySimBusy,
   executionOnly = false,
+  relaySimLiveView,
+  onRelaySimLiveViewChange,
 }: {
   activeDesk: AgentDeskId;
   mode: 'live' | 'copy' | 'showcase';
@@ -106,6 +108,8 @@ export function AgentDeskView({
   onResetRelaySim?: () => void;
   relaySimBusy?: boolean;
   executionOnly?: boolean;
+  relaySimLiveView?: boolean;
+  onRelaySimLiveViewChange?: (enabled: boolean) => void;
 }) {
   if (activeDesk === 'relay-sim') {
     return (
@@ -129,6 +133,8 @@ export function AgentDeskView({
         busy={relaySimBusy}
         instanceStatus={instanceStatus}
         hideSummaryMetrics
+        relaySimLiveView={relaySimLiveView}
+        onRelaySimLiveViewChange={onRelaySimLiveViewChange}
       />
     );
   }
