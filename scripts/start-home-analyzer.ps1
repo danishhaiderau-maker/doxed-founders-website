@@ -80,7 +80,7 @@ $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://10.0.0.102:$AnalyzerPort/"
 $env:BTC_AGENT_DATA_DIR = $agentDir
 
-. (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort
+. (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).

@@ -1,15 +1,25 @@
 # Start BTC bot on home PC using vault/home-bot.env
 param(
-  [int]$Port = 7800,
+  [int]$Port = 0,
   [string]$VaultEnv = "",
   [switch]$NoWait
 )
 
-$Host.UI.RawUI.WindowTitle = "Doxed Bot :$Port"
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port
+. (Join-Path $scriptDir "home-stack-mode.ps1")
+$stackMode = Get-HomeStackMode
+if ($Port -le 0) { $Port = [int]$stackMode.BotPort }
+$BotListenPort = $Port
+
+if ($BotListenPort -eq 7810) {
+  Write-Host "ERROR: Bot cannot use port 7810 (home bridge). Use -Port 7002 for showcase." -ForegroundColor Red
+  exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "Doxed Bot :$BotListenPort"
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotListenPort -BridgePort 7810 -AnalyzerPort ([int]$stackMode.AnalyzerPort)
 
 function Wait-ForKey {
   Write-Host ""
@@ -48,25 +58,26 @@ $existing = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -Error
 if ($existing.Count -gt 0) {
   Write-Host "Stopping $($existing.Count) existing bot process(es) before start..." -ForegroundColor Yellow
   Stop-PythonMatching "btc_conservative_agent" | Out-Null
-  Stop-ListenPortFast $Port | Out-Null
+  Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 2
-} elseif (Test-PortOpen $Port) {
-  Write-Host ("Port :" + $Port + " in use - clearing listener...") -ForegroundColor Yellow
-  Stop-ListenPortFast $Port | Out-Null
+} elseif (Test-PortOpen $BotListenPort) {
+  Write-Host ("Port :" + $BotListenPort + " in use - clearing listener...") -ForegroundColor Yellow
+  Stop-ListenPortFast $BotListenPort | Out-Null
   Start-Sleep -Seconds 1
 }
 
 Set-Location $agentDir
-$env:PORT = "$Port"
-$env:DASHBOARD_PORT = "$Port"
-Write-Host "Starting bot on port $Port from $agentDir ..."
-Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
+# Script port wins over anything in home-bot.env (vault must not override showcase :7002).
+$env:PORT = "$BotListenPort"
+$env:DASHBOARD_PORT = "$BotListenPort"
+Write-Host "Starting bot on port $BotListenPort from $agentDir ..."
+Write-Host ('Dashboard: http://127.0.0.1:' + $BotListenPort)
 Write-Host '/api/ping responds in ~1s while bot loads (full dashboard ~60-90s on home PC)'
 Write-Host "Exports: /api/export_csv  /api/export_session_trades.csv"
 Write-Host ""
 
 if ($NoWait) {
-  Write-Host "Starting bot detached on port $Port ..."
+  Write-Host "Starting bot detached on port $BotListenPort ..."
   Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden
   Start-Sleep -Seconds 2
   exit 0

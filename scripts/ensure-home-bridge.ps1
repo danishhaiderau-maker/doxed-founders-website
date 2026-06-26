@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-. (Join-Path $scriptDir "home-stack-common.ps1") -Port $Port
+. (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port
 
 function Log([string]$msg) {
   if (-not $Quiet) { Write-Host $msg }

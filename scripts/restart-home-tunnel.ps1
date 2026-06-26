@@ -19,7 +19,8 @@ $token = Join-Path $configDir "doxed-btc-bot.token"
 $useNamed = (Test-Path $namedFlag) -and (($null -ne $cred) -or (Test-Path $token))
 $stableUrl = "https://bot.doxxedcrypto.digital"
 
-. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port
+$BotPortForTunnel = $Port
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPortForTunnel -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 # Skip only when public tunnel actually responds (not just cloudflared process exists).
