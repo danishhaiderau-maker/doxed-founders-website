@@ -69,6 +69,9 @@ type ExecutionPayload = {
   stopLossPlaced?: boolean;
   lastChaseAtMs?: number;
   limitChaseCount?: number;
+  fillPrice?: number;
+  leverage?: number;
+  stopLossMarginPct?: number;
 };
 
 type PositionRuntime = {
@@ -2496,7 +2499,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     this.activeTrading = this.bitfinex;
     const mark =
-      (await this.activeTrading.getMarkPrice(creds).catch(() => null)) ??
+      (await this.activeTrading.getMarkPrice().catch(() => null)) ??
       (await this.botBridge.fetchStateForExecution(true).catch(() => null))?.price ??
       0;
 
