@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-Merge genome-architecture-v1: showcase relay API, genome pipeline, ladder v4
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
