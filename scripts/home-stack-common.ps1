@@ -94,6 +94,18 @@ function Stop-ListenPortFast([int]$ListenPort) {
   return $killed
 }
 
+function Stop-RelayStatePusher {
+  $killed = @()
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.CommandLine -and $_.CommandLine -like "*relay-state-pusher.ps1*"
+    } | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+  return $killed
+}
+
 function Stop-HomeStackSupervisor {
   $killed = @()
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
@@ -286,7 +298,8 @@ function Close-HomeStackWindows {
         $_.CommandLine -like "*auto-wire-after-tunnel.ps1*" -or
         $_.CommandLine -like "*wire-home-bot-background.ps1*" -or
         $_.CommandLine -like "*tunnel-watchdog.ps1*" -or
-        $_.CommandLine -like "*home-stack-start-all.ps1*"
+        $_.CommandLine -like "*home-stack-start-all.ps1*" -or
+        $_.CommandLine -like "*relay-state-pusher.ps1*"
       )
     } | ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -335,6 +348,7 @@ function Stop-GlobalStackFast {
   )
   # Stop supervisor first so it cannot restart bot/analyzer/tunnel during shutdown.
   $supervisor = @(Stop-HomeStackSupervisor)
+  $relayPusher = @(Stop-RelayStatePusher)
   $tunnel = @(Stop-Cloudflared)
   $botPy = @(Stop-PythonMatching "btc_conservative_agent")
   $analyzerPy = @(Stop-PythonMatching "analyzer_research_engine")
@@ -350,6 +364,7 @@ function Stop-GlobalStackFast {
     botPort = @($botPort | Select-Object -Unique)
     analyzerPort = @($analyzerPort | Select-Object -Unique)
     tunnel = $tunnel
+    relayPusher = $relayPusher
     supervisor = $supervisor
     pythonBot = $botPy
     pythonAnalyzer = $analyzerPy
@@ -391,7 +406,8 @@ function Stop-AllHomeStack {
         $_.CommandLine -like "*auto-wire-after-tunnel.ps1*" -or
         $_.CommandLine -like "*wire-home-bot-background.ps1*" -or
         $_.CommandLine -like "*tunnel-watchdog.ps1*" -or
-        $_.CommandLine -like "*home-stack-start-all.ps1*"
+        $_.CommandLine -like "*home-stack-start-all.ps1*" -or
+        $_.CommandLine -like "*relay-state-pusher.ps1*"
       )
     } | ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue

@@ -64,7 +64,7 @@ Log "relay-state-pusher started bot=$botBase api=$pushUrl interval=${IntervalSec
 
 while ($true) {
   try {
-    $resp = Invoke-RestMethod -Uri "$botBase/api/relay-state" -TimeoutSec 8 -Headers @{ Accept = "application/json" }
+    $resp = Invoke-RestMethod -Uri "$botBase/api/relay-state" -TimeoutSec 90 -Headers @{ Accept = "application/json" }
     if ($resp) {
       $seq += 1
       $body = @{
@@ -73,9 +73,12 @@ while ($true) {
         bot_version  = $resp.bot_version
         server_ts    = $resp.server_ts
       } | ConvertTo-Json -Compress -Depth 12
-      Invoke-RestMethod -Method Post -Uri $pushUrl -TimeoutSec 10 `
+      Invoke-RestMethod -Method Post -Uri $pushUrl -TimeoutSec 30 `
         -Headers @{ "Content-Type" = "application/json"; "X-Bot-Control-Secret" = $secret } `
         -Body $body | Out-Null
+      if ($seq -eq 1 -or ($seq % 30) -eq 0) {
+        Log "push ok seq=$seq bot=$($resp.bot_version)"
+      }
     }
   } catch {
     Log ('push error: ' + $_.Exception.Message)
