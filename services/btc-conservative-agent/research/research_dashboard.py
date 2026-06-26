@@ -1352,6 +1352,7 @@ def download_genome_bundle():
     )
 
 
+@app.route("/download/accumulator")
 @app.route("/api/accumulator")
 def download_accumulator():
     """Week-collection DB export: SQLite + accumulated CSV + status JSON."""

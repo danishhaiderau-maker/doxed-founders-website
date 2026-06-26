@@ -169,6 +169,44 @@ function Close-StaleOrchestratorConsoles {
   ) -ExcludeProcessIds $ExcludeProcessIds)
 }
 
+function Invoke-HomeTerminalHygiene {
+  param(
+    [int]$BotPort = 7002,
+    [int]$AnalyzerPort = 9500
+  )
+  $closed = [System.Collections.Generic.List[string]]::new()
+  foreach ($t in (Close-StaleOrchestratorConsoles)) { $closed.Add($t) }
+
+  $dupPushers = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*relay-state-pusher.ps1*" })
+  if ($dupPushers.Count -gt 1) {
+    $dupPushers | Sort-Object CreationDate -Descending | Select-Object -Skip 1 | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $closed.Add("relay-pusher-dup:$($_.ProcessId)")
+    }
+  }
+
+  $dupSupervisors = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*home-stack-supervisor.ps1*" })
+  if ($dupSupervisors.Count -gt 1) {
+    $dupSupervisors | Sort-Object CreationDate -Descending | Select-Object -Skip 1 | ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $closed.Add("supervisor-dup:$($_.ProcessId)")
+    }
+  }
+
+  foreach ($t in (Close-WindowsByTitlePrefix @(
+    "Doxed Start Everything",
+    "Doxed Stop Everything",
+    "Doxed Wire to Site",
+    "Doxed Auto-Wire"
+  ))) {
+    if ($closed -notcontains $t) { $closed.Add($t) }
+  }
+
+  return @($closed)
+}
+
 function Close-ShowcaseStackConsoles {
   param(
     [int]$GlobalBotPort = 7002,

@@ -4,9 +4,9 @@ param(
   [int]$BotPort = 7800,
   [int]$AnalyzerPort = 9001,
   [int]$BridgePort = 7810,
-  [int]$IntervalSec = 120,
-  [int]$FailThreshold = 3,
-  [int]$BotCooldownSec = 600,
+  [int]$IntervalSec = 180,
+  [int]$FailThreshold = 5,
+  [int]$BotCooldownSec = 900,
   [int]$AnalyzerCooldownSec = 600,
   [int]$TunnelCooldownSec = 900,
   [int]$BridgeCooldownSec = 300
@@ -133,6 +133,8 @@ Set-Content -Path (Join-Path $repoRoot ".home-stack-supervisor.pid") -Value $PID
 Prevent-Sleep
 Log "supervisor started bot=:$BotPort analyzer=:$AnalyzerPort interval=${IntervalSec}s threshold=$FailThreshold named=$(Test-Path $namedFlag)"
 
+$hygieneTick = 0
+
 $fail = @{
   bot = 0; analyzer = 0; tunnel = 0; bridge = 0
 }
@@ -144,6 +146,17 @@ $lastRecover = @{
 }
 
 while ($true) {
+  $hygieneTick++
+  if ($hygieneTick -ge 6) {
+    $hygieneTick = 0
+    try {
+      $hygiene = Invoke-HomeTerminalHygiene -BotPort $BotPort -AnalyzerPort $AnalyzerPort
+      if ($hygiene -and $hygiene.Count -gt 0) {
+        Log ("hygiene " + ($hygiene -join " | "))
+      }
+    } catch { }
+  }
+
   $tunnelUrl = Get-TunnelPublicUrl
   $botOk = Test-BotHealthy
   $analyzerOk = Test-AnalyzerHealthy

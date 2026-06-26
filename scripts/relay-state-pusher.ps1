@@ -2,7 +2,7 @@
 # Bot remains authoritative; Railway serves cache-first for Agent Hub.
 param(
   [int]$BotPort = 0,
-  [int]$IntervalSec = 2,
+  [int]$IntervalSec = 4,
   [string]$ApiUrl = "https://doxed-founders-website-production.up.railway.app"
 )
 
@@ -12,6 +12,14 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "home-stack-mode.ps1")
 $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
+
+$pusherLock = Join-Path $repoRoot ".home-relay-pusher.lock"
+try {
+  $script:RelayLockHandle = [System.IO.File]::Open($pusherLock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+} catch {
+  Write-Host "relay-state-pusher: another instance is running - exit"
+  exit 0
+}
 
 function Read-DotEnv([string]$Path) {
   $map = @{}
