@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Harden home stack stop/tunnel and slow Agent Hub UI polling.
 
 ## Last Activity
 
