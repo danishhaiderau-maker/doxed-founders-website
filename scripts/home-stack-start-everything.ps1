@@ -142,7 +142,7 @@ if ($tunnelOk) {
   }
   if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
     Write-Step "[3/4] Starting named tunnel hidden (stable URL)..."
-    & (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force", "-Hidden") | Out-Null
+    & (Join-Path $scriptDir "restart-home-tunnel.ps1") -Port $BotPort -Force -Hidden | Out-Null
     $messages.Add("[3/4] Named tunnel started hidden - $stableUrl")
     Start-Sleep -Seconds 6
   } else {

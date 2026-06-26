@@ -229,7 +229,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     }
     "start-tunnel" {
       if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
-        & (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force", "-Hidden") | Out-Null
+        & (Join-Path $scriptDir "restart-home-tunnel.ps1") -Port $BotPort -Force -Hidden | Out-Null
         return @{ ok = $true; message = "Named tunnel started hidden. URL: https://bot.doxxedcrypto.digital" }
       }
       Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
