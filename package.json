@@ -83,6 +83,7 @@
     "verify:bitfinex-lock": "node scripts/verify-bitfinex-production-lock.mjs",
     "verify:bitfinex-policy-lock": "node scripts/verify-bitfinex-policy-lock.mjs",
     "verify:signal-parity": "node scripts/verify-signal-parity.mjs",
+    "mirror:signal-engine": "node scripts/mirror-signal-engine.mjs",
     "lock:bitfinex-policy": "node scripts/lock-bitfinex-policy.mjs",
     "verify:copy-capacity": "node scripts/verify-copy-relay-capacity.mjs",
     "audit:trade-cycle": "node scripts/hourly-trade-cycle-anomaly-scan.mjs",

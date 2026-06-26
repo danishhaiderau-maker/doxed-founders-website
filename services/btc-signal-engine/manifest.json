@@ -1,9 +1,9 @@
 {
-  "engine_version": "v9.83-quality-roster-4-tiles-2026-06-21",
-  "combo_version": "2026-06-22",
+  "engine_version": "v11.1-virtual-chase-known-combos-v1",
+  "combo_version": "2026-06-26",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "f638db99f03a",
-  "source": "danishhaiderau-maker/bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-06-22T14:24:36.298Z"
+  "signal_hash": "c4ec3af6cbd1",
+  "source": "services/btc-conservative-agent/bot.py",
+  "updated_at": "2026-06-26T10:26:35.114Z"
 }
