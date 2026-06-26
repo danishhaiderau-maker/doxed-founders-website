@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix bridge launcher PowerShell parse errors from em dashes in strings.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
