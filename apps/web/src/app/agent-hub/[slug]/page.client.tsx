@@ -26,6 +26,7 @@ import {
   followTradingAgent,
   pauseMyAgentInstance,
   resumeMyAgentInstance,
+  renewLiveCopyRental,
   startCopyRelaySim,
   stopCopyRelaySim,
   resetCopyRelaySim,
@@ -98,6 +99,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null
   >(null);
   const [relaySimBusy, setRelaySimBusy] = useState(false);
+  const [renewBusy, setRenewBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
@@ -217,6 +219,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   async function handleResumeInstance() {
     if (!session?.accessToken) return;
+    if (rentalExpiresAt && new Date(rentalExpiresAt).getTime() <= Date.now()) {
+      setError('Live copy rental expired — renew your subscription first.');
+      return;
+    }
     setInstanceBusy(true);
     try {
       await resumeMyAgentInstance(slug, session.accessToken);
@@ -225,6 +231,21 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       setError(err instanceof Error ? err.message : 'Resume failed');
     } finally {
       setInstanceBusy(false);
+    }
+  }
+
+  async function handleRenewRental() {
+    if (!session?.accessToken) return;
+    setRenewBusy(true);
+    try {
+      const res = await renewLiveCopyRental(slug, session.accessToken);
+      setRentalExpiresAt(res.rentalExpiresAt);
+      await loadLive();
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Renewal failed');
+    } finally {
+      setRenewBusy(false);
     }
   }
 
@@ -394,6 +415,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           onAdminRefresh={load}
           instanceBusy={instanceBusy}
           rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
+          onRenewRental={handleRenewRental}
+          renewBusy={renewBusy}
         />
       )}
       {agent && slug === 'conservative-btc' && isAdmin && (

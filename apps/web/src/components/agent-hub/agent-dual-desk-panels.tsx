@@ -206,8 +206,8 @@ export function AgentDeskView({
       badge={`${exchange} · live copy`}
       badgeClassName="text-emerald-300"
       borderClassName="border-emerald-500/45"
-      title={`Your ${exchange} copy session`}
-      subtitle="Your exchange relay only — open orders, positions, expired limits, and closed copy trades from your Bitfinex account. Not the admin research bot."
+      title={`Your ${exchange} live session`}
+      subtitle="Real Bitfinex copy trades only — open orders, positions, expired limits, and closed trades from your exchange account. Not the admin showcase bot."
     >
       {slug ? (
         <AgentLiveTradeExportButton

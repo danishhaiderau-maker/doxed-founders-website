@@ -347,6 +347,12 @@ export class TradingAgentInstancesService {
       );
     }
 
+    if (!paused && instance.expiresAt && instance.expiresAt < new Date()) {
+      throw new BadRequestException(
+        'Live copy rental expired — renew your weekly subscription before starting real trading.',
+      );
+    }
+
     const status = paused ? TradingAgentInstanceStatus.PAUSED : TradingAgentInstanceStatus.ACTIVE;
     let relayAction: { cancelledOrders?: number } | undefined;
 
@@ -388,6 +394,54 @@ export class TradingAgentInstancesService {
           ? `Relay severed — ${relayAction.cancelledOrders} pending order(s) cancelled. No new showcase trades until you Start.`
           : 'Relay severed — no new showcase trades until you Start.'
         : 'Relay resumed — copying admin showcase signals on your exchange again.',
+    };
+  }
+
+  async renewLiveCopyRental(userId: string, agentSlug: string) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance || instance.exchangeProvider === 'paper') {
+      throw new BadRequestException('Connect a live exchange before renewing rental.');
+    }
+
+    const cost = agent.costDdollarWeek > 0 ? agent.costDdollarWeek : agent.costDdollarDay;
+    if (cost <= 0) {
+      throw new BadRequestException('This agent has no weekly rental fee configured.');
+    }
+
+    await this.points.spend(userId, cost, `AGENT_HIRE_RENEW:${agent.slug}`);
+    await this.points.creditAdminFee(cost, agent.slug);
+
+    const baseMs =
+      instance.expiresAt && instance.expiresAt > new Date()
+        ? instance.expiresAt.getTime()
+        : Date.now();
+    const hireExpiresAt = new Date(baseMs + 7 * 24 * 60 * 60 * 1000);
+
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        expiresAt: hireExpiresAt,
+        lastBilledAt: new Date(),
+        lastError: null,
+      },
+    });
+
+    await this.notifications.notifyUser(userId, {
+      type: NotificationType.TRADING_AGENT_UPDATE,
+      title: `${agent.name} rental renewed`,
+      body: `Live copy extended through ${hireExpiresAt.toLocaleString()} — you can start real trading again.`,
+      link: `/agent-hub/${agent.slug}`,
+    });
+
+    return {
+      ok: true,
+      rentalExpiresAt: hireExpiresAt.toISOString(),
+      ddSpent: cost,
     };
   }
 

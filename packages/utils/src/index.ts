@@ -115,6 +115,7 @@ export * from './subscriber-exit';
 export * from './bitfinex-copy-policy';
 export * from './copy-relay-sim';
 export * from './showcase-session-sync';
+export * from './showcase-sync-score';
 export * from './copy-relay-capacity';
 export * from './trade-cycle-audit';
 export * from './trade-lifecycle-integrity';

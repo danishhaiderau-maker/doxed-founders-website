@@ -3928,6 +3928,14 @@ export function resumeMyAgentInstance(slug: string, token: string) {
   );
 }
 
+export function renewLiveCopyRental(slug: string, token: string) {
+  return apiFetch<{ ok: boolean; rentalExpiresAt: string; ddSpent: number }>(
+    `/trading-agents/${slug}/instance/renew`,
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function startCopyRelaySim(slug: string, token: string) {
   return apiFetch<{ ok: boolean; copyRelaySim: import('@dcf/utils').CopyRelaySimState }>(
     `/trading-agents/${slug}/relay-sim/start`,
