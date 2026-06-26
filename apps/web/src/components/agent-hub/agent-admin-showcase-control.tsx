@@ -137,6 +137,13 @@ function cmdTimeoutMs(id: string): number {
 
 const COMMANDS: HomeCmd[] = [
   {
+    id: 'reset-home-stack',
+    label: '↻ Reset home stack',
+    hint: 'Clean stop → wait 8s → start fresh (best when :7002/tunnel flaps or duplicate bots)',
+    path: '/cmd/reset-home-stack',
+    tone: 'primary',
+  },
+  {
     id: 'start-all',
     label: '▶ Start everything',
     hint: 'Reload bridge + open bot :7002, analyzer :9500, tunnel (all visible consoles stay open)',
@@ -274,10 +281,11 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id === 'start-all' || id === 'restart-bridge' || id === 'stop-all-global') {
+        if (id === 'start-all' || id === 'restart-bridge' || id === 'stop-all-global' || id === 'reset-home-stack') {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
           setTimeout(() => void refreshStatus(), 45000);
+          setTimeout(() => void refreshStatus(), 90000);
         }
         if (id.startsWith('start') || id === 'wire') {
           setTimeout(() => onUpdated?.(), 20000);
@@ -373,24 +381,31 @@ export function AgentAdminShowcaseControl({
       )}
 
       <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
-        <p className="font-semibold text-zinc-200">Startup order (this PC)</p>
+        <p className="font-semibold text-zinc-200">How to use (this PC)</p>
         <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-zinc-400">
           <li>
-            <strong className="text-zinc-300">Start everything</strong> — reloads bridge, then opens bot, analyzer,
-            and tunnel (four windows stay open).
+            <strong className="text-zinc-300">Reset home stack</strong> when bot/tunnel keeps flapping, or after code
+            updates — clean stop, 8s pause, fresh start.
           </li>
           <li>
-            Or manually: <strong className="text-zinc-300">Restart bridge</strong> first, then start bot / analyzer /
-            tunnel individually.
+            Or <strong className="text-zinc-300">Start everything</strong> if stack is already stopped (bridge + bot +
+            analyzer + tunnel).
           </li>
-          <li>Wait 30–60s, click <strong className="text-zinc-300">Refresh status</strong> — all dots should turn green.</li>
+          <li>
+            <strong className="text-zinc-300">/api/ping</strong> on :{botPort} responds in ~1–2s while bot loads; full
+            dashboard takes <strong className="text-zinc-300">60–90s</strong> on this PC.
+          </li>
+          <li>
+            Click <strong className="text-zinc-300">Refresh status</strong> at 30s, 60s, 90s — bot, analyzer, tunnel
+            should go green.
+          </li>
           <li>
             Optional: <strong className="text-zinc-300">Wire to site</strong> after tunnel is live (Neon + Railway).
           </li>
         </ol>
         <p className="mt-2 text-[10px] text-zinc-500">
-          Do not press Enter in bot/analyzer/tunnel windows unless you want to stop them. Bridge window must stay open
-          for these buttons to work.
+          Do not press Enter in bot/analyzer/tunnel windows unless stopping them. Bridge :7810 must stay open. Close
+          extra browser tabs if the PC feels slow (duplicate bots are auto-killed on start).
         </p>
       </div>
 
