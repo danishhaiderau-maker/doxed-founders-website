@@ -1,3 +1,7 @@
+# Python bots / research (not used by Next.js deploy — keeps upload under Vercel 10mb limit)
+services/btc-conservative-agent/
+services/btc-signal-engine/
+
 services/btc-conservative-agent/research_session_archives/
 services/btc-conservative-agent/research/downloads/
 services/btc-conservative-agent/**/*.jsonl
