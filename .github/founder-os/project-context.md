@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (11 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Kill duplicate cloudflared before starting hidden named tunnel.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
