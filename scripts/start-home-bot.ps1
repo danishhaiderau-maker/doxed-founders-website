@@ -51,7 +51,7 @@ if ($existing.Count -gt 0) {
   Stop-ListenPortFast $Port | Out-Null
   Start-Sleep -Seconds 2
 } elseif (Test-PortOpen $Port) {
-  Write-Host "Port :$Port in use — clearing listener..." -ForegroundColor Yellow
+  Write-Host ("Port :" + $Port + " in use - clearing listener...") -ForegroundColor Yellow
   Stop-ListenPortFast $Port | Out-Null
   Start-Sleep -Seconds 1
 }
@@ -61,7 +61,7 @@ $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"
 Write-Host "Starting bot on port $Port from $agentDir ..."
 Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
-Write-Host "/api/ping responds in ~1s while bot loads (full dashboard ~60-90s on home PC)"
+Write-Host '/api/ping responds in ~1s while bot loads (full dashboard ~60-90s on home PC)'
 Write-Host "Exports: /api/export_csv  /api/export_session_trades.csv"
 Write-Host ""
 
