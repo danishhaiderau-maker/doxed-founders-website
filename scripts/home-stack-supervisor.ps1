@@ -181,27 +181,42 @@ while ($true) {
 
   # Never restart on a single slow probe — require fail threshold (hung alone is logged only).
   if ($fail.bot -ge $FailThreshold) {
-    $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec
-    $fail.bot = 0
-    $fail.tunnel = 0
-    Start-Sleep -Seconds 30
-    continue
+    if (Test-HomeStackUserStopped) {
+      Log "RECOVER bot skipped - user stopped stack (.home-stack-user-stopped)"
+      $fail.bot = 0
+    } else {
+      $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec
+      $fail.bot = 0
+      $fail.tunnel = 0
+      Start-Sleep -Seconds 30
+      continue
+    }
   }
 
   if ($fail.analyzer -ge $FailThreshold) {
-    $lastRecover.analyzer = Invoke-Recovery "analyzer" { Restart-AnalyzerComponent } $lastRecover.analyzer $AnalyzerCooldownSec
-    $fail.analyzer = 0
-    Start-Sleep -Seconds 20
-    continue
+    if (Test-HomeStackUserStopped) {
+      Log "RECOVER analyzer skipped - user stopped stack"
+      $fail.analyzer = 0
+    } else {
+      $lastRecover.analyzer = Invoke-Recovery "analyzer" { Restart-AnalyzerComponent } $lastRecover.analyzer $AnalyzerCooldownSec
+      $fail.analyzer = 0
+      Start-Sleep -Seconds 20
+      continue
+    }
   }
 
   # Zombie cloudflared: process up but public URL dead for multiple checks.
   if ($botOk -and $tunnelUrl -and -not $tunnelOk -and $fail.tunnel -ge $FailThreshold) {
-    $reason = if ($cfRunning) { "zombie cloudflared (process up, public ping dead)" } else { "cloudflared not running" }
-    $lastRecover.tunnel = Invoke-Recovery "tunnel" { Restart-TunnelComponent $reason } $lastRecover.tunnel $TunnelCooldownSec
-    $fail.tunnel = 0
-    Start-Sleep -Seconds 45
-    continue
+    if (Test-HomeStackUserStopped) {
+      Log "RECOVER tunnel skipped - user stopped stack"
+      $fail.tunnel = 0
+    } else {
+      $reason = if ($cfRunning) { "zombie cloudflared (process up, public ping dead)" } else { "cloudflared not running" }
+      $lastRecover.tunnel = Invoke-Recovery "tunnel" { Restart-TunnelComponent $reason } $lastRecover.tunnel $TunnelCooldownSec
+      $fail.tunnel = 0
+      Start-Sleep -Seconds 45
+      continue
+    }
   }
 
   Start-Sleep -Seconds $IntervalSec

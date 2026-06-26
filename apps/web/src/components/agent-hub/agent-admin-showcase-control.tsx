@@ -132,6 +132,7 @@ const SLOW_CMD_TIMEOUT_MS = 120000;
 
 function cmdTimeoutMs(id: string): number {
   if (id === 'wipe-research') return SLOW_CMD_TIMEOUT_MS;
+  if (id === 'start-tunnel') return 60_000;
   return INSTANT_CMD_TIMEOUT_MS;
 }
 
@@ -179,7 +180,7 @@ const COMMANDS: HomeCmd[] = [
   {
     id: 'start-tunnel',
     label: '▶ Start tunnel',
-    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002 (site API + Bitfinex copy)',
+    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002. Requires bot running first.',
     path: '/cmd/start-tunnel',
   },
   {
@@ -263,7 +264,7 @@ export function AgentAdminShowcaseControl({
 
   useEffect(() => {
     void refreshStatus();
-    const t = setInterval(() => void refreshStatus(), 30000);
+    const t = setInterval(() => void refreshStatus(), 60_000);
     return () => clearInterval(t);
   }, [refreshStatus]);
 

@@ -17,6 +17,11 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Prevent page width jump when scrollbars appear/disappear on data refresh. */
+  scrollbar-gutter: stable;
+}
+
 body {
   background: var(--color-background);
   color: var(--color-foreground);

@@ -20,6 +20,7 @@ $analyzerTitle = if ($isLocal) { "Local Collection Analyzer :$AnalyzerPort" } el
 
 switch ($Action) {
   "start-bot" {
+    Clear-HomeStackUserStopped
     if (Test-BotHung) {
       Stop-ListenPortFast $BotPort | Out-Null
       Stop-PythonMatching "btc_conservative_agent" | Out-Null
@@ -52,12 +53,16 @@ switch ($Action) {
     }
   }
   "stop-bot" {
+    Set-HomeStackUserStopped
+    Stop-BotPidFile | Out-Null
     Stop-ListenPortFast $BotPort | Out-Null
     Stop-PythonMatching "btc_conservative_agent" | Out-Null
     Stop-PythonMatching "bot.py" | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq $botTitle" 2>$null | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq Doxed Bot :7800" 2>$null | Out-Null
     & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Bot :7002" 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+    Stop-ListenPortFast $BotPort | Out-Null
   }
   "stop-analyzer" {
     Stop-PythonMatching "analyzer_research_engine" | Out-Null
@@ -79,6 +84,7 @@ switch ($Action) {
     Stop-LocalLabFast | Out-Null
   }
   "start-all-global" {
+    Clear-HomeStackUserStopped
     Remove-Item (Join-Path $repoRoot ".home-analyzer-start.lock") -Force -ErrorAction SilentlyContinue
     Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
       "-BotPort", "$BotPort",
@@ -92,6 +98,7 @@ switch ($Action) {
     ) -WorkingDirectory $repoRoot -WindowStyle Normal
   }
   "reset-home-stack" {
+    Clear-HomeStackUserStopped
     Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 8
     Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(

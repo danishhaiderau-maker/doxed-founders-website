@@ -50,6 +50,8 @@ Write-Host "=== Doxed Start Everything ===" -ForegroundColor Green
 Write-Host "Global showcase bot :$BotPort | analyzer :$AnalyzerPort | bridge :7810"
 Write-Host ""
 
+Clear-HomeStackUserStopped
+
 $exclude = @($PID)
 try {
   $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId

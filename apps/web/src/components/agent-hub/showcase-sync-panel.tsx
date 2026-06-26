@@ -106,8 +106,8 @@ export function ShowcaseSyncPanel({
             Showcase sync
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Auto-sync polls showcase :7002 every few seconds — no manual button needed. Score
-            reflects trade ID match, ledger reconcile, and lifecycle integrity.
+            Auto-sync polls showcase :7002 every 45–90s in the background — use Refresh for an instant pull.
+            Score reflects trade ID match, ledger reconcile, and lifecycle integrity.
           </p>
         </div>
         <div className="text-right">

@@ -21,6 +21,7 @@ import {
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
 import { ShowcaseSyncPanel } from '@/components/agent-hub/showcase-sync-panel';
+import { RelaySimLiveViewToggle } from '@/components/agent-hub/relay-sim-live-view-toggle';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { downloadRelaySimAudit } from '@/lib/api';
 
@@ -75,6 +76,8 @@ export function AgentRelaySimPanel({
   busy,
   instanceStatus,
   hideSummaryMetrics,
+  relaySimLiveView,
+  onRelaySimLiveViewChange,
 }: {
   signedIn: boolean;
   exchangeLabel?: string | null;
@@ -95,6 +98,8 @@ export function AgentRelaySimPanel({
   busy?: boolean;
   instanceStatus?: string | null;
   hideSummaryMetrics?: boolean;
+  relaySimLiveView?: boolean;
+  onRelaySimLiveViewChange?: (enabled: boolean) => void;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
   const sim = copyRelaySim;
@@ -212,6 +217,14 @@ export function AgentRelaySimPanel({
             Start sim to mirror showcase signals on a $500 paper book. Live relay stays paused until
             you stop sim and resume live copy.
           </p>
+        ) : null}
+
+        {active && onRelaySimLiveViewChange ? (
+          <RelaySimLiveViewToggle
+            simActive={active}
+            enabled={Boolean(relaySimLiveView)}
+            onChange={onRelaySimLiveViewChange}
+          />
         ) : null}
 
         <AgentRelaySyncAlerts alerts={syncAlerts} />
