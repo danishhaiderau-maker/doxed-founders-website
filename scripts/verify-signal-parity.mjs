@@ -18,7 +18,7 @@ const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 
 function sha256(path) {
-  const text = readFileSync(path, 'utf8');
+  const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
 
