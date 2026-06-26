@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (3 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-Fix relay pusher timeouts and stop duplicate pushers on stack shutdown.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
