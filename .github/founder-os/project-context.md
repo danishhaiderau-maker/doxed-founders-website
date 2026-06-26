@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Define your next milestone
+Product & platform (11 recent commits)
 
 ## Progress
 
@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Exclude bot services from Vercel upload to stay under 10mb limit.
+Fix Railway API crash: handle SignalCycle P2002 race + in-flight poll lock.
 
 ## Last Activity
 
