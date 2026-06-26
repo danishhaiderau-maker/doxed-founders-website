@@ -67,11 +67,19 @@ function Get-FullStatus {
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
+  # Tunnel is "live" when cloudflared is running AND the public URL answers /api/ping.
+  # Probe at most every 120s so /status stays fast (the bridge listener must not block).
   $tunnelLive = $false
-  if ($tunnelUrl) {
+  if ($tunnelUrl -and $cloudflaredRunning) {
     if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 120) {
       $tunnelLive = $script:TunnelLiveCache.live
+    } else {
+      $tunnelLive = (Test-TunnelLive $tunnelUrl)
+      $script:TunnelLiveCache = @{ url = $tunnelUrl; live = $tunnelLive; at = $now }
     }
+  } elseif (-not $cloudflaredRunning) {
+    # cloudflared gone -> invalidate cache so a restart re-probes immediately.
+    $script:TunnelLiveCache = @{ url = ""; live = $false; at = [datetime]::MinValue }
   }
   $payload = @{
     ok = $true

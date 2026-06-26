@@ -1145,6 +1145,82 @@ def artifact_analyzer_log():
     return _serve_research_artifact(ANALYZER_LOG_FILE)
 
 
+@app.route("/download/research-pack")
+def download_research_pack():
+    """Merge the 6 core research artifacts into one self-contained downloadable HTML file.
+    Files: research_highlights.txt, research_findings.txt, research_coverage.txt,
+    research_deep_dive_index.txt, analysis_dashboard.html, analyzer_run.log.
+    No secrets are included — these are analyzer-generated observation artifacts only."""
+    import html as _html
+    import datetime as _dt
+    stamp = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    parts = []
+    parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+    parts.append(f"<title>Doxxed Research Pack {stamp}</title>")
+    parts.append(
+        "<style>body{font-family:system-ui,'Segoe UI',Arial;background:#0e1116;color:#d4d7dd;margin:0;padding:24px}"
+        "h1{color:#9ad8ea}h2{color:#7bc6e6;border-bottom:1px solid #333;padding-bottom:6px;margin-top:36px}"
+        "pre{background:#06080c;border:1px solid #222;border-radius:8px;padding:14px;overflow:auto;"
+        "white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5}"
+        "iframe{width:100%;height:900px;border:1px solid #222;border-radius:8px;background:#fff}"
+        ".note{color:#889}</style></head><body>"
+    )
+    parts.append("<h1>Doxxed Crypto - Research Pack (all-in-one)</h1>")
+    parts.append(
+        f"<p class='note'>Merged {stamp} UTC. Single-file bundle of the 6 core research artifacts. "
+        "No secrets included - analyzer-generated observation data only.</p>"
+    )
+
+    for fn in (HIGHLIGHTS_FILE, FINDINGS_FILE, COVERAGE_FILE, DEEP_DIVE_INDEX_FILE):
+        p = ROOT / fn
+        parts.append(f"<h2>{fn}</h2>")
+        if p.is_file():
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                txt = f"(failed to read {fn}: {exc})"
+            parts.append(f"<pre>{_html.escape(txt)}</pre>")
+        else:
+            parts.append(f"<p class='note'>(missing: {fn})</p>")
+
+    dash = ROOT / ANALYSIS_DASHBOARD_HTML
+    parts.append(f"<h2>{ANALYSIS_DASHBOARD_HTML}</h2>")
+    if dash.is_file():
+        try:
+            dash_html = dash.read_text(encoding="utf-8", errors="replace")
+            parts.append(f"<iframe srcdoc=\"{_html.escape(dash_html, quote=True)}\"></iframe>")
+        except Exception as exc:
+            parts.append(f"<p class='note'>(failed to embed dashboard: {exc})</p>")
+    else:
+        parts.append(f"<p class='note'>(missing: {ANALYSIS_DASHBOARD_HTML})</p>")
+
+    logp = ROOT / ANALYZER_LOG_FILE
+    parts.append(f"<h2>{ANALYZER_LOG_FILE}</h2>")
+    if logp.is_file():
+        try:
+            raw = logp.read_text(encoding="utf-8", errors="replace")
+            lines = raw.splitlines()
+            if len(lines) > 4000:
+                shown = "\n".join(lines[-4000:])
+                parts.append(f"<p class='note'>(showing last 4000 of {len(lines)} lines)</p>")
+            else:
+                shown = raw
+            parts.append(f"<pre>{_html.escape(shown)}</pre>")
+        except Exception as exc:
+            parts.append(f"<p class='note'>(failed to read log: {exc})</p>")
+    else:
+        parts.append(f"<p class='note'>(missing: {ANALYZER_LOG_FILE})</p>")
+
+    parts.append("</body></html>")
+    buf = io.BytesIO("".join(parts).encode("utf-8"))
+    return send_file(
+        buf,
+        mimetype="text/html",
+        as_attachment=True,
+        download_name=f"doxxed_research_pack_{stamp}.html",
+    )
+
+
 @app.route("/download/reports")
 def download_reports():
     buf = io.BytesIO()
@@ -1652,7 +1728,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-download">
     <h2>Download Center</h2>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
-    <p><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
+    <p><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
+    <a class="btn" href="/download/research-pack" id="dl-research-pack" style="background:#2a6e2a">⬇ Research Pack (one file, all 6 merged)</a>
+    <p style="margin-top:16px"><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
     <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
     <a class="btn secondary" href="/download/genome" id="dl-genome">⬇ Genome + DNA Fingerprints ZIP</a>
     <p style="margin-top:16px"><b>Complete history</b> — cached bundle serves instantly; add <code>?rebuild=1</code> to regenerate.</p>
