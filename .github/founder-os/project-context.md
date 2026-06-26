@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix relay pusher timeouts and stop duplicate pushers on stack shutdown.
 
 ## Last Activity
 
