@@ -9,10 +9,12 @@ import {
 } from '@dcf/utils';
 
 const STORAGE_KEY = 'relay-sim-auto-stop-threshold';
+const LIVE_STORAGE_KEY = 'live-copy-auto-stop-threshold';
+const LIVE_FLATTEN_KEY = 'live-copy-flatten-on-breach';
 
-function readThreshold(): number {
+function readThreshold(storageKey = STORAGE_KEY): number {
   if (typeof window === 'undefined') return getDefaultShowcaseSyncStopThreshold();
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const raw = localStorage.getItem(storageKey);
   const n = raw ? Number(raw) : NaN;
   return Number.isFinite(n) && n >= 90 && n <= 100 ? n : getDefaultShowcaseSyncStopThreshold();
 }
@@ -36,39 +38,64 @@ export function ShowcaseSyncPanel({
   input,
   mode,
   simActive,
+  liveActive,
   onAutoStop,
   autoStopBusy,
 }: {
   input: ShowcaseSyncScoreInput;
   mode: 'sim' | 'live';
   simActive?: boolean;
-  onAutoStop?: () => void;
+  liveActive?: boolean;
+  onAutoStop?: (opts?: { flatten?: boolean }) => void;
   autoStopBusy?: boolean;
 }) {
   const score = useMemo(() => computeShowcaseSyncScore(input), [input]);
+  const storageKey = mode === 'live' ? LIVE_STORAGE_KEY : STORAGE_KEY;
   const [autoStopEnabled, setAutoStopEnabled] = useState(false);
+  const [flattenOnBreach, setFlattenOnBreach] = useState(false);
   const [threshold, setThreshold] = useState(getDefaultShowcaseSyncStopThreshold);
   const [autoStopped, setAutoStopped] = useState(false);
 
   useEffect(() => {
-    setThreshold(readThreshold());
-  }, []);
+    setThreshold(readThreshold(storageKey));
+    if (mode === 'live' && typeof window !== 'undefined') {
+      setFlattenOnBreach(localStorage.getItem(LIVE_FLATTEN_KEY) === '1');
+    }
+  }, [mode, storageKey]);
 
   useEffect(() => {
-    if (mode !== 'sim' || !simActive || !autoStopEnabled || !onAutoStop) return;
+    const active = mode === 'sim' ? simActive : liveActive;
+    if (!active || !autoStopEnabled || !onAutoStop) return;
     if (score.pct < threshold && !autoStopped && !autoStopBusy) {
       setAutoStopped(true);
-      onAutoStop();
+      onAutoStop({ flatten: mode === 'live' && flattenOnBreach });
     }
-  }, [mode, simActive, autoStopEnabled, score.pct, threshold, onAutoStop, autoStopped, autoStopBusy]);
+  }, [
+    mode,
+    simActive,
+    liveActive,
+    autoStopEnabled,
+    flattenOnBreach,
+    score.pct,
+    threshold,
+    onAutoStop,
+    autoStopped,
+    autoStopBusy,
+  ]);
 
   useEffect(() => {
-    if (simActive) setAutoStopped(false);
-  }, [simActive]);
+    if (mode === 'sim' && simActive) setAutoStopped(false);
+    if (mode === 'live' && liveActive) setAutoStopped(false);
+  }, [mode, simActive, liveActive]);
 
   const persistThreshold = (v: number) => {
     setThreshold(v);
-    localStorage.setItem(STORAGE_KEY, String(v));
+    localStorage.setItem(storageKey, String(v));
+  };
+
+  const persistFlatten = (v: boolean) => {
+    setFlattenOnBreach(v);
+    localStorage.setItem(LIVE_FLATTEN_KEY, v ? '1' : '0');
   };
 
   return (
@@ -125,7 +152,7 @@ export function ShowcaseSyncPanel({
         </ul>
       ) : null}
 
-      {mode === 'sim' ? (
+      {mode === 'sim' || mode === 'live' ? (
         <div className="mt-4 rounded-lg border border-zinc-800 bg-black/25 p-3">
           <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
             <input
@@ -135,7 +162,9 @@ export function ShowcaseSyncPanel({
               className="mt-0.5"
             />
             <span>
-              <strong className="text-white">Stop simulation if sync drops below</strong>{' '}
+              <strong className="text-white">
+                {mode === 'live' ? 'Stop live copy' : 'Stop simulation'} if sync drops below
+              </strong>{' '}
               <select
                 value={threshold}
                 onChange={(e) => persistThreshold(Number(e.target.value))}
@@ -148,12 +177,28 @@ export function ShowcaseSyncPanel({
                   </option>
                 ))}
               </select>
-              — protects you before going live with real money.
+              {mode === 'live'
+                ? '— pauses relay and cancels pending orders.'
+                : '— protects you before going live with real money.'}
             </span>
           </label>
+          {mode === 'live' ? (
+            <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
+              <input
+                type="checkbox"
+                checked={flattenOnBreach}
+                onChange={(e) => persistFlatten(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                <strong className="text-white">Also close all open positions</strong> on breach —
+                emergency flatten at market to limit damage when sync diverges.
+              </span>
+            </label>
+          ) : null}
           {autoStopped ? (
             <p className="mt-2 text-[11px] font-semibold text-amber-200">
-              Simulation auto-stopped — sync fell below {threshold}%.
+              {mode === 'live' ? 'Live copy' : 'Simulation'} auto-stopped — sync fell below {threshold}%.
             </p>
           ) : null}
         </div>

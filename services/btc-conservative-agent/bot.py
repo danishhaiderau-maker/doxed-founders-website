@@ -56,6 +56,7 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
@@ -70,6 +71,7 @@ from combo_pathway_config import (
     is_combo_execution_lane,
     is_immediate_entry_lane,
     is_research_candidate_lane,
+    is_virtual_chase_entry_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -179,8 +181,9 @@ RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pat
 PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_65_SP5_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "RETIRED",
-    RESEARCH_LANE_COMBO_604_SP4_CHASE: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_COMBO_604_SP4_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
     RESEARCH_LANE_HIGH_EDGE_RUNNER: PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -244,6 +247,7 @@ _lane_locks = {
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: threading.Lock(),
     RESEARCH_LANE_COMBO_604_SP4_CHASE: threading.Lock(),
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: threading.Lock(),
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: threading.Lock(),
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
     RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
@@ -5410,6 +5414,9 @@ VIRTUAL_CHASE_AWAITING_STATUSES = frozenset({
 CHASE_3PLUS_VIRTUAL_MIN = int(os.getenv("CHASE_3PLUS_VIRTUAL_MIN", "3"))
 CHASE_3PLUS_MAX_WAIT_SEC = int(os.getenv("CHASE_3PLUS_MAX_WAIT_SEC", "180"))
 CHASE_3PLUS_DISTANCE_PCT = float(os.getenv("CHASE_3PLUS_DISTANCE_PCT", "0.0015"))
+# Virtual Chase research lane — hide from exchange on chase 1–2, relive at 3, market after chase 6 + 60s.
+VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC = int(os.getenv("VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC", "60"))
+SIGNAL_STATUS_VIRTUAL_CHASE = "VIRTUAL_CHASE"
 # Only statuses with a committed limit on the path to a real book order count as duplicate exposure.
 # AWAITING_MIN_AGE is intentionally excluded — no order on book yet; dual-lane signals share ai_direct_limit
 # and would deadlock each other at promotion if counted here.
@@ -6428,6 +6435,279 @@ def process_awaiting_dashboard_virtual_chase_entries():
 def process_awaiting_chase_3plus_entries():
     """Legacy alias — dashboard virtual defer is the global path."""
     process_awaiting_dashboard_virtual_chase_entries()
+
+
+def _virtual_chase_fill_phase(chase_count: int, *, virtual: bool = False, waiting: bool = False, market: bool = False) -> str:
+    if market:
+        return "CHASE6_MARKET"
+    if waiting:
+        return "CHASE6_WAIT"
+    if chase_count <= 0:
+        return "CHASE0"
+    if chase_count == 3 and not virtual:
+        return "CHASE3"
+    if chase_count == 4:
+        return "CHASE4"
+    if chase_count == 5:
+        return "CHASE5"
+    if virtual and chase_count in (1, 2):
+        return f"VIRTUAL_CHASE_{chase_count}"
+    return f"CHASE{chase_count}"
+
+
+def _record_virtual_chase_execution_metrics(signal: dict, order: dict = None) -> None:
+    if not isinstance(signal, dict):
+        return
+    now = time.time()
+    virtual_since = float(signal.get("virtual_chase_since_ts") or 0)
+    visible_since = float(signal.get("visible_chase_since_ts") or 0)
+    if signal.get("virtual_chase_state") and virtual_since > 0:
+        signal["virtual_time_sec"] = round(now - virtual_since, 2)
+    elif virtual_since > 0 and visible_since > 0:
+        signal["virtual_time_sec"] = round(max(0.0, visible_since - virtual_since), 2)
+    if visible_since > 0 and not signal.get("virtual_chase_state"):
+        signal["visible_time_sec"] = round(now - visible_since, 2)
+    payload = {
+        "trade_id": signal.get("trade_id"),
+        "research_lane": signal.get("research_lane"),
+        "fill_phase": signal.get("fill_phase"),
+        "virtual_time_sec": signal.get("virtual_time_sec"),
+        "visible_time_sec": signal.get("visible_time_sec"),
+        "market_conversion": bool(signal.get("market_conversion")),
+        "market_conversion_delay": signal.get("market_conversion_delay"),
+        "conversion_slippage": signal.get("conversion_slippage"),
+        "conversion_success": signal.get("conversion_success"),
+        "limit_chase_count": signal.get("limit_chase_count"),
+    }
+    if order:
+        payload["order_id"] = order.get("order_id") or order.get("id")
+    _emit_genome_execution_event("VIRTUAL_CHASE_METRICS", payload)
+
+
+def _sync_virtual_chase_signal_order(signal: dict, order: dict = None, **fields) -> None:
+    if not isinstance(signal, dict):
+        return
+    for k, v in fields.items():
+        signal[k] = v
+    if order:
+        for k, v in fields.items():
+            if k in ("limit_price", "limit_chase_count", "last_chase_ts", "fill_phase",
+                     "virtual_chase_state", "virtual_chase_6_wait_until", "market_conversion"):
+                order[k] = v
+
+
+def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, chase_count: int, now: float) -> None:
+    tid = order.get("trade_id") or signal.get("trade_id")
+    with trade_lock:
+        if order in pending_orders:
+            lane_unregister_pending_order(order)
+    if not signal.get("virtual_chase_since_ts"):
+        signal["virtual_chase_since_ts"] = now
+    signal["virtual_chase_state"] = True
+    signal["order_placed"] = False
+    signal["status"] = SIGNAL_STATUS_VIRTUAL_CHASE
+    signal["limit_price"] = round(float(new_limit), 2)
+    signal["planned_limit_price"] = signal["limit_price"]
+    signal["limit_chase_count"] = chase_count
+    signal["last_chase_ts"] = now
+    signal["fill_phase"] = _virtual_chase_fill_phase(chase_count, virtual=True)
+    _emit_genome_execution_event("ORDER_CANCELLED", {
+        "trade_id": tid,
+        "reason": "VIRTUAL_CHASE_HIDE",
+        "chase_count": chase_count,
+        "research_lane": signal.get("research_lane"),
+    })
+    _record_virtual_chase_execution_metrics(signal)
+    logger.info(
+        f"[VIRTUAL_CHASE] chase={chase_count} trade_id={tid} hidden from exchange "
+        f"limit={fmt(signal['limit_price'])} [PIPELINE ENFORCEMENT]"
+    )
+    pipeline_state_sync()
+
+
+def _virtual_chase_signal_eligible(signal: dict, price: float, now: float) -> bool:
+    if not limit_chase_enabled():
+        return False
+    if not signal.get("virtual_chase_state"):
+        return False
+    lane = signal.get("research_lane")
+    if not is_virtual_chase_entry_lane(lane):
+        return False
+    direction = str(signal.get("final_direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return False
+    created = float(signal.get("order_created_ts") or signal.get("created_ts_ts") or 0)
+    if not created:
+        return False
+    age_sec = now - created
+    if age_sec < LIMIT_CHASE_HOLD_SEC:
+        return False
+    chase_start = float(signal.get("chase_start_sec") or get_limit_chase_start_sec())
+    if age_sec < chase_start:
+        return False
+    if age_sec >= MARKETABLE_CHASE_SEC:
+        return False
+    if not _chase_structure_valid(direction):
+        return False
+    if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
+        return False
+    last_chase = signal.get("last_chase_ts")
+    if last_chase and (now - float(last_chase)) < get_limit_chase_interval_sec():
+        return False
+    limit_price = float(signal.get("limit_price") or signal.get("planned_limit_price") or 0)
+    if limit_price <= 0 or price <= 0:
+        return False
+    if _limit_chase_near_fill_zone(direction, limit_price, price):
+        return False
+    return True
+
+
+def _virtual_chase_lane_chase_on_order(order: dict, signal: dict, price: float, now: float) -> bool:
+    """Virtual Chase lane — intercept global chase counter on resting limits."""
+    lane = order.get("research_lane") or (signal or {}).get("research_lane")
+    if not is_virtual_chase_entry_lane(lane):
+        return False
+    if order.get("virtual_chase_6_wait_until"):
+        return True
+    current = int(order.get("limit_chase_count") or (signal or {}).get("limit_chase_count") or 0)
+    next_count = current + 1
+    if not chase_bucket_allowed(next_count):
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(next_count)}")
+        return True
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    old_limit = float(order.get("limit_price") or 0)
+    original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
+    new_limit, reason = _compute_limit_chase_target(direction, old_limit, float(price), original)
+    if next_count == 1:
+        if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
+            return False
+        _pull_order_to_virtual_chase(signal, order, new_limit, next_count, now)
+        return True
+    if next_count in (4, 5):
+        return _apply_limit_chase(order, signal, price, now)
+    if next_count == 6:
+        order["limit_chase_count"] = 6
+        order["last_chase_ts"] = now
+        order["virtual_chase_6_wait_until"] = now + VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+        order["virtual_chase_6_wait_started"] = now
+        if signal:
+            signal["limit_chase_count"] = 6
+            signal["last_chase_ts"] = now
+            signal["virtual_chase_6_wait_until"] = order["virtual_chase_6_wait_until"]
+            signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+            signal["fill_phase"] = _virtual_chase_fill_phase(6, waiting=True)
+            _record_virtual_chase_execution_metrics(signal, order)
+        logger.info(
+            f"[VIRTUAL_CHASE] chase=6 trade_id={order.get('trade_id')} "
+            f"60s wait before market conversion [PIPELINE ENFORCEMENT]"
+        )
+        return True
+    if next_count > 6:
+        return False
+    return _apply_limit_chase(order, signal, price, now)
+
+
+def process_virtual_chase_lane_virtual_signals(price: float):
+    """Chase 2 (and virtual ticks) — update hidden limit, relive at chase 3."""
+    if not limit_chase_enabled() or price is None or price <= 0:
+        return
+    now = time.time()
+    with trade_lock:
+        virtual_signals = [
+            (entry.get("signal_ref") or {})
+            for entry in trades_map.values()
+            if isinstance(entry.get("signal_ref"), dict)
+            and entry["signal_ref"].get("status") == SIGNAL_STATUS_VIRTUAL_CHASE
+            and entry["signal_ref"].get("virtual_chase_state")
+            and is_virtual_chase_entry_lane(entry["signal_ref"].get("research_lane"))
+            and not is_terminal_signal(entry["signal_ref"])
+        ]
+    for signal in virtual_signals:
+        tid = signal.get("trade_id")
+        if not tid or not _virtual_chase_signal_eligible(signal, float(price), now):
+            continue
+        current = int(signal.get("limit_chase_count") or 0)
+        next_count = current + 1
+        if not chase_bucket_allowed(next_count):
+            continue
+        direction = str(signal.get("final_direction") or "").upper()
+        old_limit = float(signal.get("limit_price") or signal.get("planned_limit_price") or 0)
+        original = float(signal.get("original_limit_price") or signal.get("planned_limit_price") or old_limit)
+        new_limit, reason = _compute_limit_chase_target(direction, old_limit, float(price), original)
+        if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
+            continue
+        signal["limit_price"] = round(float(new_limit), 2)
+        signal["planned_limit_price"] = signal["limit_price"]
+        signal["limit_chase_count"] = next_count
+        signal["last_chase_ts"] = now
+        if next_count == 2:
+            signal["fill_phase"] = _virtual_chase_fill_phase(2, virtual=True)
+            _record_virtual_chase_execution_metrics(signal)
+            logger.info(
+                f"[VIRTUAL_CHASE] chase=2 trade_id={tid} still hidden limit={fmt(new_limit)} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            continue
+        if next_count == 3:
+            signal["virtual_chase_state"] = False
+            signal["visible_chase_since_ts"] = now
+            signal["status"] = "PENDING"
+            signal["fill_phase"] = _virtual_chase_fill_phase(3)
+            _record_virtual_chase_execution_metrics(signal)
+            logger.info(
+                f"[VIRTUAL_CHASE] chase=3 trade_id={tid} relive limit={fmt(new_limit)} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            _place_simulated_limit_order(signal, signal["limit_price"], signal.get("entry_mode") or ENTRY_MODE_AI_DIRECT)
+            pipeline_state_sync()
+
+
+def process_virtual_chase_chase6_market_conversions(price: float):
+    """Chase 6 — after 60s unfilled, cancel limit and market in."""
+    if price is None or price <= 0:
+        return
+    now = time.time()
+    with trade_lock:
+        waiting = [
+            o for o in list(pending_orders)
+            if isinstance(o, dict)
+            and o.get("status") == "PENDING"
+            and o.get("virtual_chase_6_wait_until")
+            and is_virtual_chase_entry_lane(o.get("research_lane"))
+        ]
+    for order in waiting:
+        until = float(order.get("virtual_chase_6_wait_until") or 0)
+        if until <= 0 or now < until:
+            continue
+        tid = order.get("trade_id")
+        meta = trades_map.get(tid, {})
+        signal = meta.get("signal_ref") or {}
+        limit_price = float(order.get("limit_price") or 0)
+        fill_px = resolve_sim_fill_price(order)
+        slippage = None
+        if limit_price > 0 and fill_px:
+            direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+            if direction == "LONG":
+                slippage = round(float(fill_px) - limit_price, 4)
+            elif direction == "SHORT":
+                slippage = round(limit_price - float(fill_px), 4)
+        order["entry_type"] = "SIM_MARKET"
+        order["fee_type"] = "TAKER"
+        order["fill_price"] = fill_px
+        order["limit_price"] = fill_px
+        order["market_conversion"] = True
+        if signal:
+            signal["market_conversion"] = True
+            signal["conversion_slippage"] = slippage
+            signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+            signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
+            _record_virtual_chase_execution_metrics(signal, order)
+        logger.info(
+            f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
+            f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
+        )
+        fill_order(order)
+
 
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
     """Research collection uses shorter periodic interval; live keeps AI_COOLDOWN_SECONDS."""
@@ -9540,6 +9820,7 @@ _SPAWN_LANE_ID_PREFIX = {
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "c65d",
     RESEARCH_LANE_COMBO_604_SP4_CHASE: "c604c",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "c604d",
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "vc603",
     RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "tbv1",
     RESEARCH_LANE_RECOVERY_MONSTER_V1: "rcv1",
     RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "aida",
@@ -11530,7 +11811,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "fee_type": "MAKER",
         "micro_structure_confirmed": True,
         "original_limit_price": limit_price,
-        "limit_chase_count": _signal_virtual_chase_count(signal),
+        "limit_chase_count": (
+            int(signal.get("limit_chase_count") or 0)
+            if is_virtual_chase_entry_lane(lane)
+            else _signal_virtual_chase_count(signal)
+        ),
         "last_chase_ts": None,
     }
     features = signal.get("features") or {}
@@ -11548,7 +11833,18 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     signal["limit_price"] = limit_price
     signal["planned_limit_price"] = limit_price
     signal["original_limit_price"] = limit_price
-    signal["limit_chase_count"] = _signal_virtual_chase_count(signal)
+    if is_virtual_chase_entry_lane(lane):
+        lc = int(signal.get("limit_chase_count") or 0)
+        signal["limit_chase_count"] = lc
+        order["limit_chase_count"] = lc
+        if lc == 0:
+            signal["visible_chase_since_ts"] = time.time()
+            signal["fill_phase"] = "CHASE0"
+        elif lc >= 3:
+            signal["fill_phase"] = _virtual_chase_fill_phase(lc)
+        signal.pop("virtual_chase_state", None)
+    else:
+        signal["limit_chase_count"] = _signal_virtual_chase_count(signal)
     signal["last_chase_ts"] = None
     if smart_meta.get("immediate_chase") or fills_first_continuous_enabled(signal):
         signal["immediate_chase"] = True
@@ -11646,6 +11942,8 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
 
 def _try_immediate_first_chase(order: dict, signal: dict) -> bool:
     """Research chase #0 — re-anchor limit once at order creation before 60s cycle."""
+    if is_virtual_chase_entry_lane(order.get("research_lane") or (signal or {}).get("research_lane")):
+        return False
     if not is_research_data_collection() or not limit_chase_enabled():
         return False
     if order.get("status") != "PENDING" or order.get("entry_type") != "SIM_LIMIT":
@@ -12241,6 +12539,7 @@ def process_limit_chase(price: float):
     if not limit_chase_enabled() or price is None or price <= 0:
         return
     enforce_dashboard_chase_gates_on_pending()
+    process_virtual_chase_lane_virtual_signals(price)
     now = time.time()
     chased = 0
     with trade_lock:
@@ -12248,10 +12547,14 @@ def process_limit_chase(price: float):
     for order in pending:
         if not lane_orders_allowed(order.get("research_lane")):
             continue
-        if not _limit_chase_eligible_order(order, price, now):
-            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        if is_virtual_chase_entry_lane(order.get("research_lane")):
+            if _virtual_chase_lane_chase_on_order(order, signal, price, now):
+                chased += 1
+            continue
+        if not _limit_chase_eligible_order(order, price, now):
+            continue
         if _apply_limit_chase(order, signal, price, now):
             chased += 1
     for order in pending:
@@ -12336,6 +12639,7 @@ def process_pending_orders():
     _update_awaiting_signal_price_extremes(price)
     _update_pending_order_price_extremes(price)
     process_limit_chase(price)
+    process_virtual_chase_chase6_market_conversions(price)
     fills = []
     with trade_lock:
         for order in list(pending_orders):
@@ -15431,16 +15735,21 @@ def build_static_pathway_lane_specs() -> dict:
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
         spec = COMBO_LANE_SPECS[lane_id]
         chase = spec.get("entry_mode") == "CHASE_3PLUS"
+        virtual_chase = spec.get("entry_mode") == "VIRTUAL_CHASE"
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
-        spread_label = "5+" if sp_hi >= 99 else str(sp_lo)
-        ai_label = "65+" if ai_lo >= 65 else "60-65"
-        entry_mode_label = "Chase 3+" if chase else "Continuous"
+        spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
+        ai_label = "60+" if virtual_chase else ("65+" if ai_lo >= 65 else "60-65")
+        entry_mode_label = "Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")
         trigger = f"AI {ai_label} + spread {spread_label} + {entry_mode_label}"
         execution = (
-            "AWAITING_CHASE_3PLUS then 25% chase + Scenario C"
-            if chase
-            else "Immediate AI limit + 25% chase + Scenario C"
+            "Chase 0 live · hide 1–2 · relive 3 · chase 6 +60s market + Scenario C"
+            if virtual_chase
+            else (
+                "AWAITING_CHASE_3PLUS then 25% chase + Scenario C"
+                if chase
+                else "Immediate AI limit + 25% chase + Scenario C"
+            )
         )
         is_candidate = bool(spec.get("is_research_candidate"))
         lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
@@ -15464,7 +15773,7 @@ def build_static_pathway_lane_specs() -> dict:
                 entry_mode_label,
                 "25% chase",
                 f"Ladder {SCENARIO_C_LADDER_LABEL}",
-            ],
+            ] + (["Hide 1–2", "Market @6+60s"] if virtual_chase else []),
             "toggle_key": "research_lane_enabled",
             "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
             "research_question": f"Does {spec['label']} beat legacy lanes on EV/appr?",
@@ -15622,7 +15931,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + COMBO_604 research candidate only",
+        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + AI60_SP3 Virtual Chase research candidate",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,

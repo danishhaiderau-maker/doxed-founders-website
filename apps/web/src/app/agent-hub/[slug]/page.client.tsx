@@ -25,6 +25,7 @@ import {
   fetchTradingAgents,
   followTradingAgent,
   pauseMyAgentInstance,
+  triggerSyncProtectionBreach,
   resumeMyAgentInstance,
   renewLiveCopyRental,
   startCopyRelaySim,
@@ -100,6 +101,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   >(null);
   const [relaySimBusy, setRelaySimBusy] = useState(false);
   const [renewBusy, setRenewBusy] = useState(false);
+  const [syncProtectionBusy, setSyncProtectionBusy] = useState(false);
   const [liveLoading, setLiveLoading] = useState(true);
 
   const applyAgentMeta = useCallback((meta: TradingAgentSummary) => {
@@ -214,6 +216,23 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       setError(err instanceof Error ? err.message : 'Pause failed');
     } finally {
       setInstanceBusy(false);
+    }
+  }
+
+  async function handleSyncProtectionBreach(opts?: { flatten?: boolean }) {
+    if (!session?.accessToken) return;
+    setSyncProtectionBusy(true);
+    try {
+      const res = await triggerSyncProtectionBreach(slug, session.accessToken, opts);
+      setInstanceStatus('PAUSED');
+      if (res.flattened && res.flattened > 0) {
+        setError(`Sync protection: flattened ${res.flattened} open position(s) and paused relay.`);
+      }
+      await loadLive();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync protection failed');
+    } finally {
+      setSyncProtectionBusy(false);
     }
   }
 
@@ -417,6 +436,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
           onRenewRental={handleRenewRental}
           renewBusy={renewBusy}
+          onSyncProtectionBreach={handleSyncProtectionBreach}
+          syncProtectionBusy={syncProtectionBusy}
         />
       )}
       {agent && slug === 'conservative-btc' && isAdmin && (
