@@ -61,9 +61,11 @@ function Get-FullStatus {
     return $script:StatusCache.payload
   }
 
-  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 400
+  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 1200
   $botPortOpen = [bool]$portMap[$BotPort]
+  if (-not $botPortOpen) { $botPortOpen = Test-BotHealthy }
   $analyzerRunning = [bool]$portMap[$AnalyzerPort]
+  if (-not $analyzerRunning) { $analyzerRunning = Test-AnalyzerHealthy }
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
@@ -71,7 +73,7 @@ function Get-FullStatus {
   if ($tunnelUrl) {
     if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 60) {
       $tunnelLive = $script:TunnelLiveCache.live
-    } elseif ($cloudflaredRunning -and $botPortOpen) {
+    } elseif ($cloudflaredRunning -and ($botPortOpen -or (Test-BotHealthy))) {
       $tunnelLive = Test-TunnelPublicHealthy $tunnelUrl
       $script:TunnelLiveCache = @{ url = $tunnelUrl; live = $tunnelLive; at = $now }
     }
