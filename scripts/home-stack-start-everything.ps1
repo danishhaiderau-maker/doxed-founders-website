@@ -3,7 +3,8 @@
 param(
   [int]$BotPort = 0,
   [int]$AnalyzerPort = 0,
-  [switch]$SkipBridgeRestart
+  [switch]$SkipBridgeRestart,
+  [switch]$NoWait
 )
 
 $ErrorActionPreference = "Continue"
@@ -164,7 +165,7 @@ if (-not (Test-HomeScriptRunning "home-stack-supervisor.ps1")) {
 }
 if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
   Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
-  $messages.Add("Relay state pusher (hidden, 2s → Railway)")
+  $messages.Add("Relay state pusher (hidden, 4s → Railway)")
 }
 
 $summary = ($messages -join " | ")
@@ -183,4 +184,4 @@ Write-Host "Refresh Agent Hub status in 30-60 seconds."
 $logLine = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $summary
 Add-Content -Path (Join-Path $repoRoot ".home-start-all.log") -Value $logLine
 
-Wait-ForKey
+if (-not $NoWait) { Wait-ForKey }
