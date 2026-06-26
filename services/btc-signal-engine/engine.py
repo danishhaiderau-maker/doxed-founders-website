@@ -15292,6 +15292,12 @@ trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
 state_lock = threading.RLock()
 trade_lock = threading.RLock()
+# Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
+_API_STATE_CACHE_TTL_SEC = 2.5
+_DASHBOARD_TRADES_MAX = 5
+_DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
+_api_state_cache_lock = threading.Lock()
+_api_state_cache = {"payload": None, "built_at": 0.0, "building": False}
 csv_lock = threading.RLock()
 replay_lock = threading.RLock()
 ws_lock = threading.RLock()
@@ -16637,18 +16643,21 @@ HTML = """<!DOCTYPE html>
 </table>
 
 <h2>Expired Orders</h2>
+<p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv.</p>
 <table>
     <thead><tr><th>Time</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
 </table>
 
 <h2>Trades</h2>
+<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
     <thead><tr><th>Time</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>AI Band</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
 <h2>AI History (Session)</h2>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 AI evaluations — full log in ai_tranche_log.csv / ai_input_log.jsonl.</p>
 <table>
     <thead><tr><th>Time</th><th>Trade ID</th><th>Model</th><th>AI Dir (raw)</th><th>Final Dir</th><th>Inverted</th><th>Decision</th><th>Win Prob</th><th>Comment</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -17970,6 +17979,14 @@ DASHBOARD_JS = """(function () {
             <td>${e.mode||'-'}</td>
           </tr>
         `).join(''));
+        const expiredHint = document.getElementById('expiredOrdersTableHint');
+        if (expiredHint) {
+          const shown = (d.expired_orders || []).length;
+          const total = d.expired_orders_total != null ? d.expired_orders_total : shown;
+          expiredHint.innerText = total > shown
+            ? ('Showing last ' + shown + ' of ' + total + ' expired orders — full log: expired_orders_3factor.csv')
+            : ('Last ' + shown + ' expired orders — full log: expired_orders_3factor.csv');
+        }
         safeHTML('tradesTable', (d.trades||[]).map(t => `
           <tr>
             <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
@@ -17987,7 +18004,23 @@ DASHBOARD_JS = """(function () {
             <td>${t.ai_band || '-'}</td>
           </tr>
         `).join(''));
+        const tradesHint = document.getElementById('tradesTableHint');
+        if (tradesHint) {
+          const shown = (d.trades || []).length;
+          const total = d.trade_count_session != null ? d.trade_count_session : shown;
+          tradesHint.innerText = total > shown
+            ? ('Showing last ' + shown + ' of ' + total + ' session trades — full export: /api/export_csv')
+            : ('Last ' + shown + ' closed trades — full export: /api/export_csv');
+        }
         const aiHist = d.ai_history || [];
+        const aiHint = document.getElementById('aiHistoryTableHint');
+        if (aiHint) {
+          const shown = aiHist.length;
+          const total = d.ai_history_total != null ? d.ai_history_total : shown;
+          aiHint.innerText = total > shown
+            ? ('Showing last ' + shown + ' of ' + total + ' AI evaluations — full log: ai_tranche_log.csv')
+            : ('Last ' + shown + ' AI evaluations this session — full log: ai_tranche_log.csv');
+        }
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
           const prob = a.win_prob != null && a.win_prob !== '' ? Number(a.win_prob) : null;
           const c = a.comment || '';
@@ -18628,19 +18661,72 @@ def api_build():
     }), 200
 
 
+_DASHBOARD_TRADE_API_KEYS = (
+    "ts", "ts_melbourne", "trade_id", "research_lane", "research_model",
+    "final_direction", "dir", "entry", "exit", "dur_min", "pnl",
+    "net_pnl_usd", "gross_pnl_usd", "trading_fees_usd", "fees_usd",
+    "funding_fees_usd", "ai_band", "exit_reason", "close_ts_melbourne",
+)
+
+
+def _slim_trade_for_dashboard(trade: dict) -> dict:
+    """Dashboard trades table only needs a small column subset — full CSV rows are megabytes."""
+    if not isinstance(trade, dict):
+        return trade
+    row = _enrich_melbourne_time_fields(trade)
+    return {k: row.get(k) for k in _DASHBOARD_TRADE_API_KEYS if row.get(k) not in (None, "")}
+
+
+def _session_trade_count() -> int:
+    """Count session trades for dashboard totals without copying rows."""
+    session_start = _showcase_trade_session_start()
+    with trade_lock:
+        if not session_start:
+            return len(trades)
+        return sum(1 for t in trades if _trade_row_in_session(t, session_start))
+
+
+def _snapshot_trades_for_api(session_start: float):
+    """Session-filtered trade rows for /api/state — cap size so dashboard polls stay fast."""
+    if session_start:
+        src = [t for t in trades if _trade_row_in_session(t, session_start)]
+    else:
+        src = list(trades)
+    if len(src) > _DASHBOARD_TRADES_MAX:
+        src = src[-_DASHBOARD_TRADES_MAX:]
+    return list(src)
+
+
 @app.route('/api/state')
 def api_state():
     t0 = time.perf_counter()
+    now_wall = time.time()
+    with _api_state_cache_lock:
+        cached = _api_state_cache.get("payload")
+        if cached is not None and now_wall - _api_state_cache["built_at"] < _API_STATE_CACHE_TTL_SEC:
+            resp = jsonify(cached)
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["X-Api-State-Cache"] = "hit"
+            return resp
+        if _api_state_cache.get("building"):
+            return ("", 204)
+        _api_state_cache["building"] = True
     try:
         # Never block HTTP on Bitfinex REST here — state_monitor_loop refreshes price/funding in background.
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
         now_ts = time.time()
+        session_start = _showcase_trade_session_start()
         with state_lock:
             snapshot = copy.deepcopy(state)
-            trades_copy = copy.deepcopy(trades)
-            expired_orders_copy = copy.deepcopy(expired_orders)
-            ai_history_copy = copy.deepcopy(state["ai_history"])
+            snapshot.pop("order_book", None)
+            ai_hist_src = state.get("ai_history") or []
+            ai_history_total = len(ai_hist_src)
+            ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
         with trade_lock:
+            trades_copy = _snapshot_trades_for_api(session_start)
+            expired_orders_total = len(expired_orders)
+            expired_orders_copy = copy.deepcopy(expired_orders[-_DASHBOARD_HISTORY_MAX:])
             for pos in open_positions:
                 if pos.get("status") == "OPEN":
                     accrue_position_funding(pos, now_ts)
@@ -18666,12 +18752,12 @@ def api_state():
                 }
                 for ln in PATHWAY_LAB_LANES
             }
-        session_start = _showcase_trade_session_start()
-        if session_start:
-            trades_copy = [t for t in trades_copy if _trade_row_in_session(t, session_start)]
         expired_orders_copy = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
-        ai_history_copy = _session_ai_history(ai_history_copy, 50)
+        ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
         snapshot["ai_history"] = ai_history_copy
+        snapshot["ai_history_total"] = ai_history_total
+        snapshot["expired_orders_total"] = expired_orders_total
+        snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
         snapshot["deepseek_key_present"] = bool(_deepseek_api_key())
         snapshot["bot_pid"] = os.getpid()
@@ -18786,9 +18872,10 @@ def api_state():
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
-        session_trades = _session_trades_only(trades_copy)
-        snapshot["trades"] = [_enrich_melbourne_time_fields(t) for t in session_trades]
-        snapshot["trade_count_session"] = len(session_trades)
+        session_trades = trades_copy
+        snapshot["trade_count_session"] = _session_trade_count()
+        snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
+        snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         snapshot["ai_input"] = LAST_AI_PAYLOAD if LAST_AI_PAYLOAD else state.get("feature_snapshot", {"status": "NO_AI_CALL_YET"})
@@ -18847,9 +18934,13 @@ def api_state():
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
             f"elapsed_ms={int((time.perf_counter() - t0) * 1000)} [PIPELINE ENFORCEMENT]"
         )
+        with _api_state_cache_lock:
+            _api_state_cache["payload"] = snapshot
+            _api_state_cache["built_at"] = time.time()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
+        resp.headers["X-Api-State-Cache"] = "miss"
         return resp
     except Exception as e:
         logger.error(f"/api/state error: {str(e)}")
@@ -18868,6 +18959,10 @@ def api_state():
         resp = jsonify(err_payload)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp, 500
+    finally:
+        with _api_state_cache_lock:
+            _api_state_cache["building"] = False
+
 
 @app.route('/health')
 @app.route('/api/status')
