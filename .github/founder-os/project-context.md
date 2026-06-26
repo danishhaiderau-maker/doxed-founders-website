@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
 
 ## Last Activity
 
