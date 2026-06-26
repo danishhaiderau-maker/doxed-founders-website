@@ -295,6 +295,13 @@ def run_genome_analyzer(db_path: str | None = None, out_dir: str | None = None) 
     except Exception:
         pass
 
+    try:
+        from research.genome.data_integrity_audit import run_golden_trade_audit
+
+        run_golden_trade_audit(db_path=db)
+    except Exception:
+        pass
+
     return report
 
 

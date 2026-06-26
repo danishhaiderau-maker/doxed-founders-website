@@ -1149,17 +1149,33 @@ def download_archive(session_id):
 
 @app.route("/download/all-sessions")
 def download_all_sessions():
-    """One ZIP: every session archive + live reports + CSVs + CONTINUOUS timeline."""
+    """One ZIP: every session archive + live reports + CSVs. Uses cache unless ?rebuild=1."""
+    force = request.args.get("rebuild") in ("1", "true", "yes")
+    if not force:
+        try:
+            return download_complete_cached()
+        except Exception:
+            pass
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
     try:
-        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT, DEFAULT_AGENT_ROOT
+        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT
     except ImportError:
-        abort(503, description="build_complete_session_bundle.py not found next to research_dashboard.py")
-    history = HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
-    live = ROOT if (ROOT / "trades_3factor.csv").is_file() or (ROOT / REPORTS_DIR).is_dir() else DEFAULT_AGENT_ROOT
-    out_dir = history / "downloads"
+        abort(503, description="build_complete_session_bundle.py not found in agent root")
+    history = agent_root if (agent_root / ARCHIVE_DIR).is_dir() else (
+        HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
+    )
+    live = agent_root if (agent_root / "trades_3factor.csv").is_file() else DATA_ROOT
+    out_dir = agent_root / "research" / "downloads"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / COMPLETE_BUNDLE_NAME
-    build_bundle(history, live, out_path)
+    try:
+        build_bundle(history, live, out_path)
+    except Exception as exc:
+        abort(500, description=f"Bundle build failed: {exc}")
+    if not out_path.is_file():
+        abort(500, description="Bundle file missing after build")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
         out_path,
@@ -1172,9 +1188,14 @@ def download_all_sessions():
 @app.route("/download/complete")
 def download_complete_cached():
     """Serve pre-built complete bundle if it exists (no rebuild)."""
-    for base in (HISTORY_ROOT, ROOT, ROOT.parent):
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    bases = (agent_root / "research" / "downloads", agent_root / "downloads", HISTORY_ROOT, ROOT, ROOT.parent)
+    for base in bases:
+        base = Path(base)
         for name in (COMPLETE_BUNDLE_NAME,) + COMPLETE_BUNDLE_FALLBACKS:
-            candidate = Path(base) / "downloads" / name
+            candidate = base / name if base.name == "downloads" else base / "downloads" / name
+            if not candidate.is_file():
+                candidate = base / name
             if candidate.is_file():
                 try:
                     with zipfile.ZipFile(candidate) as zf:
@@ -1290,19 +1311,48 @@ def api_gpt_audit_status():
         return jsonify({"ready": False, "error": str(exc)})
 
 
-@app.route("/download/accumulator")
-def api_accumulator():
-    try:
-        from research_trade_accumulator import build_status
+@app.route("/download/genome")
+def download_genome_bundle():
+    """Genome + DNA fingerprints + integrity audit — one ZIP for ChatGPT/review."""
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    genome_dir = agent_root / "research" / "genome"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    buf = io.BytesIO()
+    names = (
+        "genome_analysis_report.json",
+        "genome_library.json",
+        "genome_discoveries.json",
+        "genome_cluster_library.json",
+        "data_integrity_audit.json",
+    )
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        added = 0
+        for name in names:
+            p = genome_dir / name
+            if p.is_file():
+                zf.write(p, arcname=f"genome/{name}")
+                added += 1
+        db = agent_root / "research.db"
+        if db.is_file():
+            zf.write(db, arcname="research.db")
+            added += 1
+        zf.writestr(
+            "README.txt",
+            "Genome bundle — analysis report, library, discoveries, DNA fingerprints.\n"
+            "Upload to ChatGPT with GPT Audit Bundle for full stack review.\n",
+        )
+        if added == 0:
+            abort(404, description="No genome reports yet — run analyzer once.")
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"genome_dna_bundle_{stamp}.zip",
+    )
 
-        return jsonify(build_status(root=ROOT))
-    except ImportError:
-        abort(503)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
 
-
-@app.route("/download/accumulator")
+@app.route("/api/accumulator")
 def download_accumulator():
     """Week-collection DB export: SQLite + accumulated CSV + status JSON."""
     try:
@@ -1580,8 +1630,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
     <p><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
     <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
-    <p style="margin-top:16px"><b>Complete history</b> — all session archives, CONTINUOUS timeline, weekend vs weekday breakdown, live reports, CSVs.</p>
-    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP (full rebuild)</a>
+    <a class="btn secondary" href="/download/genome" id="dl-genome">⬇ Genome + DNA Fingerprints ZIP</a>
+    <p style="margin-top:16px"><b>Complete history</b> — cached bundle serves instantly; add <code>?rebuild=1</code> to regenerate.</p>
+    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP</a>
     <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ Complete Bundle (cached)</a>
     <p style="margin-top:16px"><b>ChatGPT upload</b> — small verified ZIP with trade counts manifest (use this instead of the 38MB archive).</p>
     <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ ChatGPT Research Bundle</a>
