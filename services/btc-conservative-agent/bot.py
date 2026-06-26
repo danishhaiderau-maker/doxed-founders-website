@@ -5157,6 +5157,20 @@ AI_EXECUTION_BAND_DEFS = (
 )
 CHASE_EXECUTION_BUCKET_ORDER = ("0_chases", "1_chase", "2_chases", "3-5_chases", "6+_chases")
 CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
+CHASE_EFFICIENCY_MATRIX_FILE = "chase_efficiency_matrix_report.json"
+SPREAD_BUCKET_ORDER = ("1", "2", "3", "4", "5+")
+
+
+def _resolve_analytics_report_path(filename: str) -> str:
+    """Prefer agent root, then research/ — analyzer writes both during collection."""
+    if os.path.isabs(filename):
+        return filename
+    cwd = os.getcwd()
+    for base in (cwd, os.path.join(cwd, "research")):
+        path = os.path.join(base, filename)
+        if os.path.isfile(path):
+            return path
+    return os.path.join(cwd, filename)
 CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 3.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
@@ -10596,7 +10610,7 @@ def _load_chase_analytics_snapshot() -> dict:
     buckets = []
     raw = {}
     generated_at = None
-    path = CHASE_EFFECTIVENESS_REPORT_FILE
+    path = _resolve_analytics_report_path(CHASE_EFFECTIVENESS_REPORT_FILE)
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -10608,11 +10622,17 @@ def _load_chase_analytics_snapshot() -> dict:
     for key in CHASE_EXECUTION_BUCKET_ORDER:
         b = raw.get(key) if isinstance(raw, dict) else None
         if isinstance(b, dict):
-            buckets.append({"bucket": key, **b})
+            buckets.append({
+                "bucket": key,
+                "trades": b.get("trades", 0),
+                "win_rate_pct": b.get("win_rate_pct", b.get("wr_pct", 0)),
+                "sum_pnl_usd": b.get("sum_pnl_usd", 0),
+                "ev_usd": b.get("ev_usd", 0),
+            })
         else:
             buckets.append({"bucket": key, "trades": 0, "win_rate_pct": 0, "sum_pnl_usd": 0, "ev_usd": 0})
     assisted = saved = ttl_expired = total_fills = None
-    attr_path = CHASE_ATTRIBUTION_REPORT_FILE
+    attr_path = _resolve_analytics_report_path(CHASE_ATTRIBUTION_REPORT_FILE)
     if os.path.isfile(attr_path):
         try:
             with open(attr_path, "r", encoding="utf-8") as f:
@@ -10632,6 +10652,45 @@ def _load_chase_analytics_snapshot() -> dict:
         "ttl_expired": ttl_expired,
         "generated_at": generated_at,
     }
+
+
+def _load_spread_analytics_snapshot() -> dict:
+    """Directional spread buckets from analyzer matrix (0-chase slice — no double count)."""
+    buckets = []
+    generated_at = None
+    path = _resolve_analytics_report_path(CHASE_EFFICIENCY_MATRIX_FILE)
+    raw_by_spread = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            generated_at = data.get("generated_at")
+            full = data.get("full_matrix") or {}
+            for key, stats in full.items():
+                if not isinstance(stats, dict):
+                    continue
+                parts = str(key).split("|")
+                if len(parts) != 2 or not parts[1].startswith("spread="):
+                    continue
+                if parts[0] != "0_chases":
+                    continue
+                spread_key = parts[1].replace("spread=", "")
+                raw_by_spread[spread_key] = stats
+        except Exception:
+            pass
+    for spread_key in SPREAD_BUCKET_ORDER:
+        b = raw_by_spread.get(spread_key)
+        if isinstance(b, dict):
+            buckets.append({
+                "spread": spread_key,
+                "trades": b.get("trades", 0),
+                "win_rate_pct": b.get("wr_pct", b.get("win_rate_pct", 0)),
+                "sum_pnl_usd": b.get("sum_pnl_usd", 0),
+                "ev_usd": b.get("ev_usd", 0),
+            })
+        else:
+            buckets.append({"spread": spread_key, "trades": 0, "win_rate_pct": 0, "sum_pnl_usd": 0, "ev_usd": 0})
+    return {"buckets": buckets, "generated_at": generated_at, "source": "0_chases|spread=*"}
 
 def set_edge_threshold(value):
     value = round(float(value), 1)
@@ -15769,16 +15828,22 @@ def get_pathway_scorecard_cached(for_api: bool = False) -> dict:
     if not is_research_data_collection():
         return _cached_pathway_scorecard or {}
     if for_api:
+        now = time.time()
         if _cached_pathway_scorecard:
             return _cached_pathway_scorecard
+        if now - _last_pathway_scorecard_api_ts < 60:
+            return {}
         try:
             from pathway_scorecard_engine import load_pathway_scorecard
             loaded = load_pathway_scorecard(os.getcwd())
             if loaded:
-                return loaded
+                _cached_pathway_scorecard = loaded
+            _last_pathway_scorecard_api_ts = now
+            return loaded or {}
         except Exception as e:
             logger.debug(f"[PATHWAY_SCORECARD] api load failed: {e}")
-        return {}
+            _last_pathway_scorecard_api_ts = now
+            return {}
     now = time.time()
     if _cached_pathway_scorecard and now - _last_pathway_scorecard_api_ts < PATHWAY_SCORECARD_API_MIN_SEC:
         return _cached_pathway_scorecard
@@ -16120,6 +16185,9 @@ HTML = """<!DOCTYPE html>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
+<h3>Spread Analytics — directional spread (0-chase fills)</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">From analyzer chase matrix — spread 4/5+ often strongest. Updates each analyzer run (~30 min).</p>
+<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Spread</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spreadBucketStats"></tbody></table>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
   <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
 </p>
@@ -16606,6 +16674,18 @@ DASHBOARD_JS = """(function () {
           <td>${b.ev_usd != null ? b.ev_usd : '—'}</td>
         </tr>`).join('') || '<tr><td colspan="5">No chase stats yet</td></tr>';
       }
+    }
+    function renderSpreadAnalyticsPanel(sp) {
+      const body = document.getElementById('spreadBucketStats');
+      if (!body) return;
+      const rows = sp.buckets || [];
+      body.innerHTML = rows.map(b => `<tr>
+          <td>${b.spread != null ? b.spread : '—'}</td>
+          <td>${b.trades != null ? b.trades : '—'}</td>
+          <td>${b.win_rate_pct != null ? b.win_rate_pct : '—'}</td>
+          <td>${b.sum_pnl_usd != null ? b.sum_pnl_usd : '—'}</td>
+          <td>${b.ev_usd != null ? b.ev_usd : '—'}</td>
+        </tr>`).join('') || '<tr><td colspan="5">No spread stats yet — run analyzer</td></tr>';
     }
     function normalizeEdgeOptionValue(value) {
       const n = parseFloat(value);
@@ -17490,6 +17570,7 @@ DASHBOARD_JS = """(function () {
           }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
+        renderSpreadAnalyticsPanel(d.spread_analytics || {});
         if (d.edge_range_preset) {
           syncEdgeRangePreset(d.edge_range_preset);
         }
@@ -18364,6 +18445,7 @@ def api_state():
         snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         snapshot["chase_analytics"] = _load_chase_analytics_snapshot()
+        snapshot["spread_analytics"] = _load_spread_analytics_snapshot()
         snapshot.setdefault("regime", "UNKNOWN")
         snapshot.setdefault("strategy", "SR")
         snapshot.setdefault("direction", "FLAT")
