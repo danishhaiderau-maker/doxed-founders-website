@@ -9,15 +9,16 @@ $Host.UI.RawUI.WindowTitle = "Doxed Bot :$Port"
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-
-if (-not $VaultEnv) {
-  $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
-}
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port
 
 function Wait-ForKey {
   Write-Host ""
   Write-Host "--- Console stays open so you can copy logs. Press Enter to close ---" -ForegroundColor Cyan
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
+}
+
+if (-not $VaultEnv) {
+  $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 }
 
 if (-not (Test-Path $VaultEnv)) {
@@ -41,11 +42,26 @@ if (-not (Test-Path $agentDir)) {
   exit 1
 }
 
+# Always kill duplicate bot processes before a fresh start (common cause of :7002 slowness).
+$existing = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*btc_conservative_agent*" })
+if ($existing.Count -gt 0) {
+  Write-Host "Stopping $($existing.Count) existing bot process(es) before start..." -ForegroundColor Yellow
+  Stop-PythonMatching "btc_conservative_agent" | Out-Null
+  Stop-ListenPortFast $Port | Out-Null
+  Start-Sleep -Seconds 2
+} elseif (Test-PortOpen $Port) {
+  Write-Host "Port :$Port in use — clearing listener..." -ForegroundColor Yellow
+  Stop-ListenPortFast $Port | Out-Null
+  Start-Sleep -Seconds 1
+}
+
 Set-Location $agentDir
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"
 Write-Host "Starting bot on port $Port from $agentDir ..."
 Write-Host ('Dashboard: http://127.0.0.1:' + $Port)
+Write-Host "/api/ping responds in ~1s while bot loads (full dashboard ~60-90s on home PC)"
 Write-Host "Exports: /api/export_csv  /api/export_session_trades.csv"
 Write-Host ""
 

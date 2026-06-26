@@ -17,14 +17,27 @@ os.environ.setdefault(
     "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/showcase-relay-event",
 )
 
-# Ensure service directory is on path for bot + showcase_ui imports.
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 
+_port = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
+_bind_host = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
+_boot_version = "booting"
+
+try:
+    from combo_pathway_config import EXECUTION_FIX_VERSION as _boot_version  # noqa: E402
+except Exception:
+    pass
+
+from early_boot import start_early_ping_server, stop_early_ping_server  # noqa: E402
+
+start_early_ping_server(_port, version=_boot_version, host=_bind_host)
+
 import bot as signal_engine  # noqa: E402 — synced research engine (signal backend)
 from showcase_ui import register_showcase_ui  # noqa: E402
 
+stop_early_ping_server()
 register_showcase_ui(signal_engine.app, bot_module=signal_engine, block_warehouse=False)
 
 

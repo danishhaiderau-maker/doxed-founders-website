@@ -91,7 +91,15 @@ if (-not $SkipBridgeRestart) {
   Write-Step "[0/4] Skipped bridge reload"
 }
 
-# Step 1 — bot
+# Step 1 — bot (kill duplicates before start)
+$botDupes = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*btc_conservative_agent*" })
+if ($botDupes.Count -gt 1) {
+  Write-Step "[1/4] Clearing $($botDupes.Count) duplicate bot processes..."
+  Stop-PythonMatching "btc_conservative_agent" | Out-Null
+  Stop-ListenPortFast $BotPort | Out-Null
+  Start-Sleep -Seconds 2
+}
 if (-not (Test-BotHealthy)) {
   if (Test-BotHung) {
     Write-Step "[1/4] Clearing hung bot on :$BotPort..."
@@ -179,7 +187,7 @@ Write-Host "  • Doxed Bot :$BotPort"
 Write-Host "  • Doxed Analyzer :$AnalyzerPort"
 Write-Host "  • Doxed Cloudflare Tunnel"
 Write-Host ""
-Write-Host "Refresh Agent Hub status in 30-60 seconds."
+Write-Host "Refresh Agent Hub status in 30s, 60s, and 90s (/api/ping is fast; full dashboard takes longer)."
 
 $logLine = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $summary
 Add-Content -Path (Join-Path $repoRoot ".home-start-all.log") -Value $logLine

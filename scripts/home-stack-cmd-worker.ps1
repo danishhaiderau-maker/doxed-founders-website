@@ -1,7 +1,7 @@
 # Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "wipe-research", "pause-trading", "resume-trading")]
+  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "reset-home-stack", "wipe-research", "pause-trading", "resume-trading")]
   [string]$Action,
   [int]$BotPort = 7002,
   [int]$AnalyzerPort = 9500,
@@ -90,6 +90,15 @@ switch ($Action) {
     Start-Process -FilePath "powershell.exe" -ArgumentList @(
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $labScript, "-Action", "start"
     ) -WorkingDirectory $repoRoot -WindowStyle Normal
+  }
+  "reset-home-stack" {
+    Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort | Out-Null
+    Start-Sleep -Seconds 8
+    Start-VisibleConsole (Join-Path $scriptDir "home-stack-start-everything.ps1") @(
+      "-BotPort", "$BotPort",
+      "-AnalyzerPort", "$AnalyzerPort",
+      "-NoWait"
+    ) -Title "Doxed Start Everything"
   }
   "wipe-research" {
     if (Test-PortOpen $BotPort) {

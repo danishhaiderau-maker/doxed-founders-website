@@ -306,6 +306,18 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         message = "Local lab stop queued (:7800 + :9001 only). Global showcase untouched."
       }
     }
+    "reset-home-stack" {
+      Invoke-HomeCommandBackground "reset-home-stack"
+      return @{
+        ok = $true
+        message = @(
+          "Clean reset queued — stop everything, wait 8s, start fresh."
+          "Step 1: /api/ping on :$BotPort within ~2s (boot probe)."
+          "Step 2: full dashboard in 60-90s on home PC."
+          "Refresh status at 30s, 60s, and 90s."
+        ) -join "`n"
+      }
+    }
     default {
       return @{ ok = $false; error = "Unknown action: $Action" }
     }
@@ -351,6 +363,7 @@ function Serve-Request([System.Net.HttpListenerContext]$Context) {
       "^/cmd/stop-all$" { Invoke-HomeCommand "stop-all-global" $tunnelParam }
       "^/cmd/stop-all-global$" { Invoke-HomeCommand "stop-all-global" $tunnelParam }
       "^/cmd/stop-all-local$" { Invoke-HomeCommand "stop-all-local" $tunnelParam }
+      "^/cmd/reset-home-stack$" { Invoke-HomeCommand "reset-home-stack" $tunnelParam }
       default {
         @{ ok = $false; error = "Unknown path: $path - run RESTART-LAUNCHER.cmd" }
       }
