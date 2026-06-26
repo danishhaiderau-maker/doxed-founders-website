@@ -12835,8 +12835,50 @@ def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
     return payload
 
 
+_COMBO_EXCLUDED_TOKENS = frozenset({"UNKNOWN", "UNK", "NAN", "NONE", "NULL", "OTHER", "MIXED"})
+_COMBO_EXCLUDED_LANE_PREFIXES = ("TYPE_B",)
+
+
+def _normalize_combo_token(val) -> str:
+    return str(val or "").strip().upper()
+
+
+def _is_known_combo_dimension(val) -> bool:
+    tok = _normalize_combo_token(val)
+    if not tok or tok in _COMBO_EXCLUDED_TOKENS:
+        return False
+    if "TYPE_B" in tok or tok == "TYPE B":
+        return False
+    return True
+
+
+def _is_known_combo_row(*, ai_bucket, spread_bucket, entry_mode, lane) -> bool:
+    if not all(
+        _is_known_combo_dimension(x)
+        for x in (ai_bucket, spread_bucket, entry_mode, lane)
+    ):
+        return False
+    lane_u = _normalize_combo_token(lane)
+    return not any(lane_u.startswith(p) for p in _COMBO_EXCLUDED_LANE_PREFIXES)
+
+
+def _is_known_regime_key(regime) -> bool:
+    r = _normalize_combo_token(regime)
+    if not r or r in _COMBO_EXCLUDED_TOKENS:
+        return False
+    parts = [p.strip() for p in r.split("|") if p.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        if part in _COMBO_EXCLUDED_TOKENS or part.startswith("UNK"):
+            return False
+        if "UNKNOWN" in part:
+            return False
+    return True
+
+
 def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
-    """Rank AI × spread × type × lane cohorts — top and bottom performers."""
+    """Rank AI × spread × entry × lane cohorts — known dimensions only, sorted by EV."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
@@ -12853,6 +12895,13 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     dims = ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"]
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
         ai_b, spread_b, entry_b, lane = keys
+        if not _is_known_combo_row(
+            ai_bucket=ai_b,
+            spread_bucket=spread_b,
+            entry_mode=entry_b,
+            lane=lane,
+        ):
+            continue
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
@@ -12881,6 +12930,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "min_trades_per_combo": min_trades,
         "dimensions": ["ai_probability_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"],
+        "filter_note": "Excludes UNKNOWN/OTHER/MIXED/TYPE_B dimensions — actionable combos only",
         "total_combos": len(combos),
         "top": top,
         "bottom": bottom,
@@ -12888,7 +12938,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     try:
         with open(analyzer_report_path(TOP_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {TOP_COMBINATIONS_REPORT_FILE} ({len(combos)} combos) {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  ✅ Wrote {TOP_COMBINATIONS_REPORT_FILE} ({len(combos)} known combos) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {TOP_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
@@ -13734,8 +13784,12 @@ def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
     cells = []
     regime_summaries = []
     for regime, reg_df in work.groupby("regime_key"):
+        if not _is_known_regime_key(regime):
+            continue
         band_rows = []
         for bucket in CONFIDENCE_BANDS_STANDARD:
+            if not _is_known_combo_dimension(bucket):
+                continue
             sub = reg_df[reg_df["confidence_band"] == bucket]
             stats = _direction_cohort_stats(sub)
             cell = {
@@ -13763,6 +13817,12 @@ def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
             "conclusion_allowed": bool(best and best.get("sample_ok")),
         })
 
+    cells.sort(key=lambda x: (x.get("ev_usd", 0), x.get("sum_pnl_usd", 0)), reverse=True)
+    regime_summaries.sort(
+        key=lambda x: (x.get("best_ev_usd") or 0, x.get("total_trades") or 0),
+        reverse=True,
+    )
+
     payload = {
         "schema": "regime_confidence_matrix_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -13773,8 +13833,8 @@ def regime_confidence_matrix_report(trades=None, session=None, min_trades=2):
         "bands": list(CONFIDENCE_BANDS_STANDARD),
         "total_trades": len(work),
         "cells": cells,
-        "regime_summaries": sorted(regime_summaries, key=lambda x: -(x.get("total_trades") or 0)),
-        "usage_note": "Recommend-only — need ≥2 trades per regime×band cell before acting on EV rank",
+        "regime_summaries": regime_summaries,
+        "usage_note": "Known regimes only (no UNKNOWN/unk) — sorted by EV; need ≥2 trades/cell before acting",
     }
     try:
         with open(REGIME_CONFIDENCE_MATRIX_REPORT_FILE, "w", encoding="utf-8") as f:
