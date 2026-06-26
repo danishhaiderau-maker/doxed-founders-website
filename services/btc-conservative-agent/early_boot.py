@@ -20,8 +20,16 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_RESERVED_PORTS = frozenset({7810})
+
+
 def start_early_ping_server(port: int, *, version: str = "booting", host: str = "0.0.0.0") -> None:
     global _server, _thread, _boot_version
+    if int(port) in _RESERVED_PORTS:
+        raise RuntimeError(
+            f"Port {port} is reserved for the home bridge (:7810). "
+            "Start bot with DASHBOARD_PORT=7002 (showcase), not the bridge port."
+        )
     if _server is not None:
         return
     _boot_version = version

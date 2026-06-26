@@ -1,6 +1,6 @@
 # Shared helpers for home-stack-launcher.ps1 and home-stack-start-all.ps1
 param(
-  [int]$Port = 7810,
+  [int]$BridgePort = 7810,
   [int]$BotPort = 7800,
   [int]$AnalyzerPort = 9001
 )

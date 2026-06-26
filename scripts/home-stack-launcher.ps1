@@ -14,7 +14,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
-. (Join-Path $scriptDir "home-stack-common.ps1") -Port $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
+. (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 $prefix = "http://127.0.0.1:$Port/"
 

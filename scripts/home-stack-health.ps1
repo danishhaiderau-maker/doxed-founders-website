@@ -1,6 +1,6 @@
 # Fast HTTP health probes for home stack (no WMI on hot path).
-# Dot-source AFTER home-stack-common.ps1 (uses $BotPort, $AnalyzerPort, $Port from scope).
-if (-not $BridgePort) { $BridgePort = $Port }
+# Dot-source AFTER home-stack-common.ps1 (uses $BotPort, $AnalyzerPort, $BridgePort from scope).
+if (-not $BridgePort) { $BridgePort = 7810 }
 function Test-HttpOk {
   param(
     [string]$Url,

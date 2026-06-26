@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 $stackMode = Get-HomeStackMode
 if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
-. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -Port 7810
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 function Write-Step([string]$msg) {

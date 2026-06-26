@@ -22,6 +22,11 @@ if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 
 _port = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
+if _port == 7810:
+    raise SystemExit(
+        "DASHBOARD_PORT=7810 is the home bridge, not the bot. "
+        "Use start-home-bot.ps1 -Port 7002 or Reset home stack from Agent Hub."
+    )
 _bind_host = os.getenv("DASHBOARD_BIND_HOST", "0.0.0.0")
 _boot_version = "booting"
 

@@ -9,7 +9,7 @@ $ErrorActionPreference = "Continue"
 $Host.UI.RawUI.WindowTitle = "Doxed Stop Everything"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -Port 7810
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort 7810
 
 Write-Host ""
 Write-Host "=== Stopping global showcase ===" -ForegroundColor Yellow
