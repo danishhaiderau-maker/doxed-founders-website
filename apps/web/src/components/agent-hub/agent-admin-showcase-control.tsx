@@ -232,7 +232,7 @@ export function AgentAdminShowcaseControl({
   const refreshStatus = useCallback(async () => {
     let bridgeOk = false;
     try {
-      const healthRes = await fetch(`${LAUNCHER}/health`, { signal: AbortSignal.timeout(3000) });
+      const healthRes = await fetch(`${LAUNCHER}/health`, { signal: AbortSignal.timeout(8000) });
       bridgeOk = healthRes.ok;
     } catch {
       bridgeOk = false;
@@ -240,7 +240,7 @@ export function AgentAdminShowcaseControl({
     setLauncherOnline(bridgeOk);
 
     try {
-      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(6000) });
+      const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(15000) });
       if (!res.ok) {
         setStatus(await probeDirectHomeStatus());
         return;

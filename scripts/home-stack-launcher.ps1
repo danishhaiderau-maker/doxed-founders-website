@@ -226,10 +226,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{ ok = $true; message = "Analyzer single pass started on :$AnalyzerPort." }
     }
     "start-tunnel" {
-      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
-      if (Use-NamedTunnel) {
-        return @{ ok = $true; message = "Named tunnel window opened - keep it open. URL: https://bot.doxxedcrypto.digital" }
+      if ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel"))) {
+        & (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force", "-Hidden") | Out-Null
+        return @{ ok = $true; message = "Named tunnel started hidden. URL: https://bot.doxxedcrypto.digital" }
       }
+      Start-VisibleConsole (Join-Path $scriptDir "restart-home-tunnel.ps1") @("-Port", "$BotPort", "-Force") -Title "Doxed Cloudflare Tunnel"
       return @{ ok = $true; message = "Quick tunnel window opened - watch Doxed Cloudflare Tunnel for the URL" }
     }
     "enable-named-tunnel" {

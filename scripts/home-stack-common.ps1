@@ -18,7 +18,7 @@ function Test-PortOpen([int]$P) {
   try {
     $c = New-Object System.Net.Sockets.TcpClient
     $iar = $c.BeginConnect("127.0.0.1", $P, $null, $null)
-    if (-not $iar.AsyncWaitHandle.WaitOne(400)) {
+    if (-not $iar.AsyncWaitHandle.WaitOne(1200)) {
       $c.Close()
       return $false
     }

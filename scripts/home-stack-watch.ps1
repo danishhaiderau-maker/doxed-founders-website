@@ -2,14 +2,18 @@
 param(
   [int]$Hours = 48,
   [int]$IntervalSec = 300,
-  [int]$BotPort = 7800,
-  [int]$AnalyzerPort = 9001,
+  [int]$BotPort = 0,
+  [int]$AnalyzerPort = 0,
   [int]$BridgePort = 7810
 )
 
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+. (Join-Path $scriptDir "home-stack-mode.ps1")
+$stackMode = Get-HomeStackMode
+if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
+if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -Port $BridgePort
 . (Join-Path $scriptDir "home-stack-health.ps1")
 

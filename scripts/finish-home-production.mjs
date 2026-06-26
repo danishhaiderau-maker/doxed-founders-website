@@ -47,10 +47,10 @@ function ensureCloudflaredRunning() {
   console.log('OK  cloudflared started');
 }
 
-async function waitBotLocal() {
+async function waitBotLocal(port = 7800) {
   for (let i = 0; i < 12; i++) {
     try {
-      const r = await fetch('http://127.0.0.1:7800/api/ping', { signal: AbortSignal.timeout(5000) });
+      const r = await fetch(`http://127.0.0.1:${port}/api/ping`, { signal: AbortSignal.timeout(5000) });
       if (r.ok) return true;
     } catch {
       /* retry */
@@ -93,8 +93,18 @@ async function main() {
   ensureCloudflaredRunning();
 
   console.log('\n--- 4/7 Local bot health ---');
-  const localOk = await waitBotLocal();
-  console.log(localOk ? 'OK  bot :7800' : 'WARN bot not on :7800 — start via Agent Hub after restart');
+  let botPort = 7800;
+  try {
+    const lockPath = path.join(repoRoot, 'config', 'home-showcase.lock.json');
+    if (fs.existsSync(lockPath)) {
+      const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      if (lock.frozen && lock.botPort) botPort = Number(lock.botPort);
+    }
+  } catch {
+    /* default */
+  }
+  const localOk = await waitBotLocal(botPort);
+  console.log(localOk ? `OK  bot :${botPort}` : `WARN bot not on :${botPort} — start via Agent Hub after restart`);
 
   console.log('\n--- 5/7 Public tunnel health ---');
   const publicOk = await waitBotPublic();
