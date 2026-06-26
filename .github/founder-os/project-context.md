@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Replace COMBO_604 research tile with AI60+ Spread3+ Virtual Chase lane and add live copy sync protection.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
