@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix PowerShell parse error in start-home-bot (ASCII-only strings).
+Fix home stack port collision: bot must bind :7002 not bridge :7810.
 
 ## Last Activity
 
