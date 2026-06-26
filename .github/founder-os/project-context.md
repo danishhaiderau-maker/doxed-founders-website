@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Kill duplicate cloudflared before starting hidden named tunnel.
 
 ## Last Activity
 
