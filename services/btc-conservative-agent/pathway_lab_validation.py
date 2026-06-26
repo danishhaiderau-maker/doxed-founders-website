@@ -19,7 +19,7 @@ from combo_pathway_config import (
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION,
     EXPECTED_EXCHANGE,
-    PRIMARY_PRODUCTION_LANE,
+    RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
     any_combo_execution_enabled,
     combo_lane_matches,
@@ -170,9 +170,11 @@ def audit_type_b_not_in_execution() -> dict:
     matcher_src = inspect.getsource(combo_lane_matches)
     forbidden = ("TYPE_B", "TYPE_A", "trade_mfe_type", "predicted_combo", "mfe_type")
     hits = [tok for tok in forbidden if tok in matcher_src]
-    sample_ai = {"win_prob": 70, "bull_score": 2, "bear_score": 8, "decision": "APPROVE"}
-    sample_spread = 6
-    matches_65_chase = combo_lane_matches(PRIMARY_PRODUCTION_LANE, sample_ai, "SHORT", sample_spread)
+    sample_ai = {"win_prob": 62, "bull_score": 2, "bear_score": 8, "decision": "APPROVE"}
+    sample_spread = 4
+    matches_research_candidate = combo_lane_matches(
+        RESEARCH_CANDIDATE_LANE, sample_ai, "SHORT", sample_spread
+    )
     checks = [
         {
             "check": "combo_lane_matches source has no TYPE_B/TYPE_A gates",
@@ -185,9 +187,9 @@ def audit_type_b_not_in_execution() -> dict:
             "detail": "matcher inspects win_prob and directional spread buckets",
         },
         {
-            "check": "sample APPROVE AI65+ spread6 matches PRIMARY_PRODUCTION lane",
-            "passed": matches_65_chase,
-            "detail": f"{PRIMARY_PRODUCTION_LANE} match={matches_65_chase}",
+            "check": "sample APPROVE AI60-65 spread4 matches RESEARCH_CANDIDATE lane",
+            "passed": matches_research_candidate,
+            "detail": f"{RESEARCH_CANDIDATE_LANE} match={matches_research_candidate}",
         },
     ]
     payload = {
@@ -490,11 +492,19 @@ def run_tile_independence_self_test(retired_status: dict = None) -> dict:
 
     combo_off = {ln: False for ln in COMBO_EXECUTION_LANES}
     exp_all_on = {lane: True for lane in EXPERIMENTAL_EXECUTION_LANES}
+    exp_all_off = {lane: False for lane in EXPERIMENTAL_EXECUTION_LANES}
+    combo_one_on = {ln: True for ln in COMBO_EXECUTION_LANES}
     add(
-        "experimental tiles ON enables AI pipeline (combo OFF)",
-        any_combo_execution_enabled({**combo_off, **exp_all_on}, continuous_enabled=False),
-        "experimental-only toggles must keep periodic AI alive",
+        "combo research tile ON enables AI pipeline (experimental OFF)",
+        any_combo_execution_enabled({**combo_one_on, **exp_all_off}, continuous_enabled=False),
+        "genome freeze: COMBO_604 research candidate keeps periodic AI alive",
     )
+    if EXPERIMENTAL_EXECUTION_LANES:
+        add(
+            "experimental tiles ON enables AI pipeline (combo OFF)",
+            any_combo_execution_enabled({**combo_off, **exp_all_on}, continuous_enabled=False),
+            "experimental-only toggles must keep periodic AI alive",
+        )
 
     for lane in EXPERIMENTAL_TILE_DISPLAY_ORDER:
         only = {ln: (ln == lane) for ln in EXPERIMENTAL_EXECUTION_LANES}

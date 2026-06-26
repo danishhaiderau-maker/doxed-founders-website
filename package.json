@@ -145,7 +145,9 @@
     "watch:relay-sim": "node scripts/watch-copy-relay-sim.mjs --hours=24 --interval=120",
     "snapshot:relay-sim": "node scripts/relay-sim-snapshot-once.mjs",
     "prepare:bitfinex-relay-test": "node scripts/prepare-bitfinex-relay-test.mjs",
-    "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs"
+    "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs",
+    "audit:export": "node scripts/prepare-audit-export.mjs",
+    "audit:gpt-bundle": "python services/btc-conservative-agent/build_gpt_audit_bundle.py"
   },
   "devDependencies": {
     "@openserv-labs/client": "^2.5.3",

@@ -1293,6 +1293,10 @@ model PlatformSettings {
   showcaseAiCredentialEnc     String? @db.Text
   /** Public URL of btc-conservative-agent Railway service (for admin reference) */
   showcaseBotPublicUrl        String?
+  /** Push-cache relay snapshot from home bot (JSON); bot remains authoritative */
+  showcaseRelaySnapshot       Json?
+  showcaseRelaySnapshotSeq    BigInt?
+  showcaseRelaySnapshotAt     DateTime?
   showcaseCredentialsUpdatedAt DateTime?
   showcaseRuntimePushedAt      DateTime?
   /** Admin: offer platform-billed AI to new founders (Gemini, DeepSeek, Cursor, Ollama). */

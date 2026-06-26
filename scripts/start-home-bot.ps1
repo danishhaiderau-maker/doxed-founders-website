@@ -52,6 +52,7 @@ Write-Host ""
 if ($NoWait) {
   Write-Host "Starting bot detached on port $Port ..."
   Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden
+  Start-Sleep -Seconds 2
   exit 0
 }
 
