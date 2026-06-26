@@ -191,7 +191,9 @@ async function main() {
   }
 
   console.log('\nDeploying Vercel production...');
-  run('vercel deploy --prod --yes --archive=tgz');
+  // No --archive=tgz: that mode bundles the whole repo (incl. bot services) and bypasses
+  // .vercelignore, causing 500MB+ uploads and BUILD_ERROR. Default deploy respects .vercelignore (~1.7MB).
+  run('vercel deploy --prod --yes');
 
   const railwayToken =
     xSecrets.RAILWAY_TOKEN?.trim() ||
