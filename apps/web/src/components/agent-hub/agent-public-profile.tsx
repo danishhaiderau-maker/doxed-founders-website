@@ -585,16 +585,31 @@ export function AgentPublicProfile({
     activeDesk === 'relay-sim' ? simAct : activeDesk === 'live' ? userAct : showcaseAct;
 
   const resolvedDesk: AgentDeskId =
-    activeDesk === 'relay-sim' && relaySimDeskAvailable
-      ? 'relay-sim'
-      : activeDesk;
+    activeDesk === 'relay-sim' && !relaySimDeskAvailable
+      ? 'live'
+      : activeDesk === 'relay-sim' && relaySimDeskAvailable
+        ? 'relay-sim'
+        : activeDesk;
+
+  const deskHeroBadge =
+    resolvedDesk === 'showcase'
+      ? isLive
+        ? { label: 'Showcase live', className: 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40' }
+        : publicStatus === 'updating'
+          ? { label: 'Updating', className: 'bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40' }
+          : { label: 'Showcase', className: 'bg-zinc-800 text-zinc-400' }
+      : resolvedDesk === 'relay-sim'
+        ? relaySimActive
+          ? { label: 'Sim active', className: 'bg-sky-500/20 text-sky-200 ring-1 ring-sky-500/40' }
+          : { label: 'Relay sim', className: 'bg-sky-500/20 text-sky-300/80 ring-1 ring-sky-500/30' }
+        : heroBadge;
+
+  const copyDetailsMode: 'live' | null =
+    resolvedDesk === 'live' && isLiveSession ? 'live' : null;
 
   const hireHref = signedIn
     ? `/agent-hub/${slug}/hire?exchange=bitfinex`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=bitfinex`)}`;
-
-  const copyDetailsMode: 'live' | null =
-    activeDesk === 'live' && isLiveSession ? 'live' : null;
 
   const deskViewProps = {
     activeDesk: resolvedDesk,
@@ -648,9 +663,9 @@ export function AgentPublicProfile({
                     <h1 className="text-2xl font-bold sm:text-3xl">{agent.name}</h1>
                     <span className="text-blue-400" title="Verified">✓</span>
                     <span
-                      className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${heroBadge.className}`}
+                      className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${deskHeroBadge.className}`}
                     >
-                      {heroBadge.label}
+                      {deskHeroBadge.label}
                     </span>
                     {dashboard.currentAction === 'ORDER PENDING' && (
                       <span className="rounded-full bg-blue-500/20 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-blue-200 ring-1 ring-blue-500/40">
@@ -748,7 +763,7 @@ export function AgentPublicProfile({
               >
                 Observe showcase
               </button>
-              {isLiveSession && rentalExpiresAt && (
+              {isLiveSession && rentalExpiresAt && resolvedDesk === 'live' && (
                 <LiveCopyRentalBadge expiresAt={rentalExpiresAt} />
               )}
               {onFollow && (
@@ -826,12 +841,10 @@ export function AgentPublicProfile({
                 instanceStatus={instanceStatus}
                 copyRelaySim={copyRelaySim}
                 showcaseAgent={deskShowcaseAgent}
-                activeDesk={activeDesk}
+                activeDesk={resolvedDesk}
                 onSelectDesk={setActiveDesk}
-                onStartRelaySim={onStartRelaySim}
-                onStopRelaySim={onStopRelaySim}
-                relaySimBusy={relaySimBusy}
                 hireHref={hireHref}
+                botConnected={botConnected}
               />
             </div>
           )}
@@ -844,22 +857,19 @@ export function AgentPublicProfile({
                   agent={agent}
                   exchangeLabel={exchangeLabel}
                   copyRelayReconcile={copyRelayReconcile}
-                  copyRelaySim={copyRelaySim}
                   copyRelayLimitChain={copyRelayLimitChain}
                   tradeLifecycleIntegrity={tradeLifecycleIntegrity}
-                  relayFidelity={relayFidelity}
                   instanceStatus={instanceStatus}
                   botConnected={botConnected}
-                  mode="live"
                 />
               ) : null}
-              {activeDesk === 'relay-sim' ? null : activeDesk === 'live' && isLiveSession ? (
+              {resolvedDesk === 'relay-sim' ? null : resolvedDesk === 'live' && isLiveSession ? (
                 <LiveRelayReasoningPanel
                   agent={agent}
                   exchangeLabel={exchangeLabel}
                   liveBook={exchangeLiveBook}
                 />
-              ) : activeDesk === 'showcase' ? (
+              ) : resolvedDesk === 'showcase' ? (
                 showExecutionPublic ? (
                   <AgentExecutionChart
                     dashboard={dashboard}
@@ -870,30 +880,30 @@ export function AgentPublicProfile({
                   <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
                 )
               ) : null}
-              {activeDesk !== 'relay-sim' && !(activeDesk === 'showcase') ? (
+              {resolvedDesk !== 'relay-sim' && resolvedDesk !== 'showcase' ? (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
                   title={
-                    activeDesk === 'live' && isLiveSession
+                    resolvedDesk === 'live' && isLiveSession
                       ? `Your ${exchangeLabel ?? 'Bitfinex'} feed`
                       : 'Showcase bot feed'
                   }
                 />
                 <AgentPerformanceChart
                   agentReturnPct={
-                    activeDesk === 'live' && isLiveSession
+                    resolvedDesk === 'live' && isLiveSession
                       ? agent.netReturnPct
                       : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
                   }
                   label={
-                    activeDesk === 'live' && isLiveSession
+                    resolvedDesk === 'live' && isLiveSession
                       ? 'Your session'
                       : 'Showcase bot'
                   }
                 />
               </div>
-              ) : activeDesk === 'showcase' ? (
+              ) : resolvedDesk === 'showcase' ? (
                 showExecutionPublic ? (
                   <AgentExecutionChart
                     dashboard={dashboard}
@@ -998,7 +1008,7 @@ export function AgentPublicProfile({
             </section>
           )}
 
-          <AgentHubBottomBanner agents={allAgents ?? [agent]} />
+          <AgentHubBottomBanner agents={allAgents ?? [agent]} hidden={resolvedDesk === 'relay-sim'} />
         </div>
 
         <HireSidebar

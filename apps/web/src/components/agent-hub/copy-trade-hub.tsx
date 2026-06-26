@@ -13,41 +13,31 @@ import {
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { AgentDeskSwitcher } from '@/components/agent-hub/agent-desk-switcher';
 import { AgentDeskMetricsBar } from '@/components/agent-hub/agent-desk-metrics-bar';
+import { ShowcaseReferenceBar } from '@/components/agent-hub/showcase-reference-bar';
 import {
   AgentRelaySyncAlerts,
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
-import {
-  AgentRelayFidelityPanel,
-  type RelayFidelitySnapshot,
-} from '@/components/agent-hub/agent-relay-fidelity-panel';
 import type { TradingAgentSummary } from '@/lib/api';
 
 export function CopyTradeDetailsStrip({
   agent,
   exchangeLabel,
   copyRelayReconcile,
-  copyRelaySim,
   copyRelayLimitChain,
   tradeLifecycleIntegrity,
-  relayFidelity,
   instanceStatus,
   botConnected,
-  mode,
 }: {
   agent: TradingAgentSummary;
   exchangeLabel?: string | null;
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
-  copyRelaySim?: CopyRelaySimState | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
-  relayFidelity?: RelayFidelitySnapshot | null;
   instanceStatus?: string | null;
   botConnected?: boolean;
-  mode: 'live';
 }) {
-  const exchange = exchangeLabel ?? 'Bitfinex';
-  const reconcile = copyRelayReconcile ?? copyRelaySim?.reconcile ?? null;
+  const reconcile = copyRelayReconcile ?? null;
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaBad = reconcile?.alert ?? Math.abs(delta) > 0.001;
   const limitChain = copyRelayLimitChain;
@@ -55,21 +45,20 @@ export function CopyTradeDetailsStrip({
   const lifecycle = tradeLifecycleIntegrity;
   const lifecycleBad = lifecycle != null && lifecycle.integrityPct < 100;
   const paused = instanceStatus === 'PAUSED';
+  const exchange = exchangeLabel ?? 'Bitfinex';
   const syncAlerts = buildRelaySyncAlerts({
     mode: 'live',
     botConnected,
-    copyRelaySim,
     copyRelayReconcile: reconcile,
     copyRelayLimitChain: limitChain,
     tradeLifecycleIntegrity: lifecycle,
-    relayFidelity,
   });
 
   return (
     <section className="rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-950/90 to-emerald-950/10 p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-bold uppercase tracking-widest text-zinc-400">
-          Relay diagnostics
+          Live relay diagnostics
         </h3>
         <span
           className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
@@ -144,11 +133,7 @@ export function CopyTradeDetailsStrip({
         </div>
       ) : null}
 
-      <div className="mt-4">
-        <AgentRelayFidelityPanel fidelity={relayFidelity} reconcile={reconcile} />
-      </div>
-
-      {agent.walletStatusHint && mode === 'live' ? (
+      {agent.walletStatusHint ? (
         <p className="mt-3 text-xs text-amber-200/85">{agent.walletStatusHint}</p>
       ) : null}
 
@@ -158,6 +143,46 @@ export function CopyTradeDetailsStrip({
       </p>
     </section>
   );
+}
+
+function deskHeader(
+  activeDesk: AgentDeskId,
+  exchange: string,
+  isLive: boolean,
+  instanceStatus: string | null | undefined,
+  simActive: boolean,
+): { eyebrow: string; title: string; hint: string } {
+  if (activeDesk === 'showcase') {
+    return {
+      eyebrow: 'Global showcase bot',
+      title: 'Conservative BTC · admin :7002',
+      hint: 'Public research bot — signals, positions, and trades from the home showcase stack. Not your copy session.',
+    };
+  }
+  if (activeDesk === 'relay-sim') {
+    return {
+      eyebrow: `${exchange} relay simulation`,
+      title: `Your ${exchange} relay sim session`,
+      hint: simActive
+        ? 'Paper book with real BTC prices — test sync with showcase before risking real USDT.'
+        : 'Connect API once, then start simulation to mirror showcase signals without spending real money.',
+    };
+  }
+  if (isLive) {
+    return {
+      eyebrow: `${exchange} live copy`,
+      title: `Your ${exchange} live session`,
+      hint:
+        instanceStatus === 'PAUSED'
+          ? 'Relay paused — open positions stay on your exchange. Start real trading when ready.'
+          : 'Real orders on your exchange when showcase signals fire — your money, your API.',
+    };
+  }
+  return {
+    eyebrow: `${exchange} live copy`,
+    title: `Connect ${exchange} for live copy`,
+    hint: 'Mirror the global showcase bot on your real Bitfinex derivatives account.',
+  };
 }
 
 export function CopyTradeHub({
@@ -172,11 +197,9 @@ export function CopyTradeHub({
   showcaseAgent,
   activeDesk,
   onSelectDesk,
-  onStartRelaySim,
-  onStopRelaySim,
-  relaySimBusy,
   hireHref,
   slug,
+  botConnected,
 }: {
   slug?: string;
   signedIn: boolean;
@@ -190,67 +213,69 @@ export function CopyTradeHub({
   showcaseAgent: TradingAgentSummary;
   activeDesk: AgentDeskId;
   onSelectDesk: (desk: AgentDeskId) => void;
-  onStartRelaySim?: () => void;
-  onStopRelaySim?: () => void;
-  relaySimBusy?: boolean;
   hireHref: string;
+  botConnected?: boolean;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
   const isLive = hired && instanceMode === 'live';
   const simActive = Boolean(copyRelaySim?.active);
   const canSim = isLive && exchangeProvider === 'bitfinex';
-
-  const deskHint =
+  const header = deskHeader(activeDesk, exchange, isLive, instanceStatus, simActive);
+  const borderAccent =
     activeDesk === 'showcase'
-      ? 'Admin research bot on your home PC — signals and reasoning only, not your copy session.'
+      ? 'border-violet-500/25 from-violet-950/20'
       : activeDesk === 'relay-sim'
-        ? simActive
-          ? 'Paper book with real BTC prices. Live orders blocked while sim runs.'
-          : 'Test Option B relay logic before placing real orders.'
-        : isLive
-          ? instanceStatus === 'PAUSED'
-            ? 'Relay paused — open positions stay on your exchange.'
-            : 'Real orders on your exchange when showcase signals fire.'
-          : `Connect ${exchange} API keys to mirror showcase signals on your account.`;
+        ? 'border-sky-500/25 from-sky-950/20'
+        : 'border-emerald-500/25 from-emerald-950/20';
+  const eyebrowAccent =
+    activeDesk === 'showcase'
+      ? 'text-violet-400'
+      : activeDesk === 'relay-sim'
+        ? 'text-sky-400'
+        : 'text-emerald-400';
 
   return (
     <section className="space-y-3">
-      <div className="rounded-xl border border-emerald-500/25 bg-gradient-to-br from-emerald-950/20 via-zinc-950/50 to-zinc-950/80 p-4 sm:p-5">
+      <div
+        className={`rounded-xl border bg-gradient-to-br via-zinc-950/50 to-zinc-950/80 p-4 sm:p-5 ${borderAccent}`}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="max-w-xl">
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">
-              Real copy trading
+            <p className={`text-[10px] font-bold uppercase tracking-[0.2em] ${eyebrowAccent}`}>
+              {header.eyebrow}
             </p>
-            <h2 className="mt-1 text-lg font-bold text-white sm:text-xl">
-              {isLive
-                ? `Your ${exchange} copy session`
-                : `Connect ${exchange} — mirror the showcase bot`}
-            </h2>
-            <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">{deskHint}</p>
+            <h2 className="mt-1 text-lg font-bold text-white sm:text-xl">{header.title}</h2>
+            <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">{header.hint}</p>
           </div>
-          {!isLive && signedIn ? (
+          {activeDesk === 'live' && !isLive && signedIn ? (
             <Link
               href={hireHref}
               className="shrink-0 rounded-lg bg-emerald-600 px-5 py-2.5 text-center text-sm font-bold text-white hover:bg-emerald-500"
             >
               Connect {exchange}
             </Link>
-          ) : !signedIn ? (
+          ) : activeDesk === 'live' && !signedIn ? (
             <Link
               href={`/login?callbackUrl=${encodeURIComponent(hireHref)}`}
               className="shrink-0 rounded-lg bg-emerald-600 px-5 py-2.5 text-center text-sm font-bold text-white hover:bg-emerald-500"
             >
               Sign in
             </Link>
-          ) : (
+          ) : activeDesk === 'live' && isLive ? (
             <div className="shrink-0 text-right">
               <p className="text-[10px] uppercase tracking-widest text-emerald-400">Connected</p>
               <p className="mt-0.5 text-base font-bold text-white">
                 {formatUsd(agent.exchangeBalanceUsd ?? 0, 0)}
               </p>
-              <p className="text-[10px] text-zinc-500">derivatives</p>
+              <p className="text-[10px] text-zinc-500">derivatives USDT</p>
             </div>
-          )}
+          ) : activeDesk === 'relay-sim' && isLive ? (
+            <div className="shrink-0 text-right">
+              <p className="text-[10px] uppercase tracking-widest text-sky-400">API</p>
+              <p className="mt-0.5 text-sm font-bold text-white">Connected</p>
+              <p className="text-[10px] text-zinc-500">no rental · paper only</p>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -263,6 +288,10 @@ export function CopyTradeHub({
         relaySimActive={simActive}
       />
 
+      {(activeDesk === 'live' || activeDesk === 'relay-sim') && (
+        <ShowcaseReferenceBar showcaseAgent={showcaseAgent} botConnected={botConnected} />
+      )}
+
       <AgentDeskMetricsBar
         activeDesk={activeDesk}
         userAgent={agent}
@@ -272,35 +301,6 @@ export function CopyTradeHub({
         isLiveSession={isLive}
         instanceStatus={instanceStatus}
       />
-
-      {canSim && activeDesk === 'relay-sim' ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-500/20 bg-sky-950/10 px-3 py-2">
-          {simActive ? (
-            <button
-              type="button"
-              disabled={relaySimBusy}
-              onClick={onStopRelaySim}
-              className="rounded-lg border border-red-500/50 bg-red-950/40 px-3 py-1.5 text-xs font-semibold text-red-200 disabled:opacity-50"
-            >
-              {relaySimBusy ? 'Stopping…' : 'Stop relay simulation'}
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={relaySimBusy}
-              onClick={onStartRelaySim}
-              className="rounded-lg border border-sky-500/50 bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
-            >
-              {relaySimBusy ? 'Starting…' : 'Start relay simulation'}
-            </button>
-          )}
-          <p className="text-[11px] text-sky-100/70">
-            {simActive
-              ? 'Paper book only on this tab — compare against Research local bot tab before going live.'
-              : 'Safe paper test using the same execution path as live copy.'}
-          </p>
-        </div>
-      ) : null}
     </section>
   );
 }
