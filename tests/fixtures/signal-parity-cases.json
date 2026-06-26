@@ -1,38 +1,33 @@
 {
-  "description": "Frozen parity cases — combo lane matching and spread logic (no AI API calls).",
+  "description": "Frozen parity cases — combo lane matching for v11.1 Virtual Chase tile (legacy lanes always reject).",
   "cases": [
     {
-      "id": "primary-long-70-spread10",
+      "id": "virtual-chase-long-70-spread10",
       "ai": { "win_prob": 70, "bull_score": 85, "bear_score": 75 },
       "direction": "LONG",
       "spread": 10,
-      "expect_lanes": [
+      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
+      "reject_lanes": [
         "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_65_SP5_DIRECT"
-      ],
-      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS", "COMBO_604_SP4_DIRECT"]
+        "COMBO_604_SP4_CHASE_3PLUS",
+        "COMBO_604_SP4_DIRECT"
+      ]
     },
     {
-      "id": "primary-short-68-spread6",
+      "id": "virtual-chase-short-68-spread6",
       "ai": { "win_prob": 68, "bull_score": 40, "bear_score": 46 },
       "direction": "SHORT",
       "spread": null,
-      "expect_lanes": [
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_65_SP5_DIRECT"
-      ],
-      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS"]
+      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
+      "reject_lanes": ["COMBO_65_SP5_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"]
     },
     {
-      "id": "604-band-long-62-spread4",
+      "id": "virtual-chase-long-62-spread4",
       "ai": { "win_prob": 62, "bull_score": 70, "bear_score": 66 },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": [
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "COMBO_604_SP4_DIRECT"
-      ],
-      "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS"]
+      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
+      "reject_lanes": ["COMBO_604_SP4_CHASE_3PLUS", "COMBO_65_SP5_CHASE_3PLUS"]
     },
     {
       "id": "ai-low-reject-all",
@@ -41,19 +36,26 @@
       "spread": 8,
       "expect_lanes": [],
       "reject_lanes": [
+        "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_65_SP5_DIRECT",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "COMBO_604_SP4_DIRECT"
+        "COMBO_604_SP4_CHASE_3PLUS"
       ]
     },
     {
-      "id": "spread-too-low-primary",
+      "id": "spread-min-edge-virtual-chase",
       "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 68 },
       "direction": "LONG",
       "spread": 3,
-      "expect_lanes": [],
+      "expect_lanes": ["AI60_SP3_VIRTUAL_CHASE"],
       "reject_lanes": ["COMBO_65_SP5_CHASE_3PLUS", "COMBO_65_SP5_DIRECT"]
+    },
+    {
+      "id": "spread-too-low-virtual-chase",
+      "ai": { "win_prob": 72, "bull_score": 70, "bear_score": 69 },
+      "direction": "LONG",
+      "spread": 2,
+      "expect_lanes": [],
+      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_CHASE_3PLUS"]
     },
     {
       "id": "benchmark-flag-continuous",
@@ -61,8 +63,8 @@
       "expect_benchmark": true
     },
     {
-      "id": "primary-not-benchmark",
-      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "id": "virtual-chase-not-benchmark",
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
       "expect_benchmark": false
     }
   ]
