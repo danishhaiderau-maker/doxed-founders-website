@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-Complete desk separation: showcase reference bar and per-desk overview routing.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
