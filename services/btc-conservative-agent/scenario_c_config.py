@@ -8,8 +8,7 @@ from __future__ import annotations
 
 TRAIL_LADDER_SCENARIO_C = [
     (10, 6),
-    (20, 10),
-    (30, 20),
+    (19, 17),
     (40, 28),
     (60, 45),
     (80, 60),
@@ -17,5 +16,5 @@ TRAIL_LADDER_SCENARIO_C = [
     (150, 120),
 ]
 
-SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_10_v3"
-SCENARIO_C_LADDER_LABEL = "10→6, 20→10, 30→20, 40→28, 60→45, 80→60, 100→75, 150→120"
+SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_10_v4"
+SCENARIO_C_LADDER_LABEL = "10→6, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120"
