@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Add early boot ping, duplicate bot kill, and Reset home stack command center button.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
