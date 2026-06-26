@@ -1,7 +1,8 @@
 # Visible stop for global showcase (:7002 bot, :9500 analyzer, tunnel).
 param(
   [int]$BotPort = 7002,
-  [int]$AnalyzerPort = 9500
+  [int]$AnalyzerPort = 9500,
+  [switch]$NoWait
 )
 
 $ErrorActionPreference = "Continue"
@@ -49,5 +50,7 @@ if ($botOpen -or $analyzerOpen -or $cfRunning) {
 Write-Host ""
 Write-Host "You can close duplicate 'Doxed Home Bridge' windows manually (keep one on :7810)." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "--- Press Enter to close this window ---" -ForegroundColor Cyan
-try { Read-Host } catch { Start-Sleep -Seconds 3600 }
+if (-not $NoWait) {
+  Write-Host "--- Press Enter to close this window ---" -ForegroundColor Cyan
+  try { Read-Host } catch { Start-Sleep -Seconds 3600 }
+}
