@@ -13,6 +13,7 @@ import {
   UserRole,
   type Prisma,
 } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import {
   computeSignalSuccessFeeUsd,
   SIGNAL_LEGAL_DISCLAIMER,
@@ -85,6 +86,7 @@ export type SignalApiKeyContext = {
 export class SignalCyclesService implements OnModuleInit {
   private readonly logger = new Logger(SignalCyclesService.name);
   private lastSeenTradeId: string | null = null;
+  private pollingIntents = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -194,6 +196,16 @@ export class SignalCyclesService implements OnModuleInit {
   }
 
   async pollBotForIntents(): Promise<boolean> {
+    if (this.pollingIntents) return false; // prevent setInterval + setTimeout + wake race
+    this.pollingIntents = true;
+    try {
+      return await this._pollBotForIntentsInner();
+    } finally {
+      this.pollingIntents = false;
+    }
+  }
+
+  private async _pollBotForIntentsInner(): Promise<boolean> {
     if (!this.botBridge.isEnabled()) return false;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
@@ -240,18 +252,29 @@ export class SignalCyclesService implements OnModuleInit {
     if (!envelope) return false;
 
     const ttlSec = envelope.entry.ttl_sec;
-    await this.prisma.signalCycle.create({
-      data: {
-        id: cycleId,
-        agentId: agent.id,
-        tradeId: canonicalTradeId,
-        status: SignalCycleStatus.INTENT,
-        botVersion: bot.bot_version ?? null,
-        intentEnvelope: envelope as unknown as Prisma.InputJsonValue,
-        researchVenue: 'bitfinex',
-        expiresAt: new Date(Date.now() + ttlSec * 1000),
-      },
-    });
+    try {
+      await this.prisma.signalCycle.create({
+        data: {
+          id: cycleId,
+          agentId: agent.id,
+          tradeId: canonicalTradeId,
+          status: SignalCycleStatus.INTENT,
+          botVersion: bot.bot_version ?? null,
+          intentEnvelope: envelope as unknown as Prisma.InputJsonValue,
+          researchVenue: 'bitfinex',
+          expiresAt: new Date(Date.now() + ttlSec * 1000),
+        },
+      });
+    } catch (err) {
+      // Concurrent poll/wake can race past the findUnique pre-check and hit the
+      // (agentId, tradeId) unique constraint. Treat as "already created" — never crash the API.
+      if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
+        this.lastSeenTradeId = intentTradeId;
+        this.logger.warn(`Signal cycle already exists for trade=${canonicalTradeId} (P2002) — skipping`);
+        return false;
+      }
+      throw err;
+    }
     this.lastSeenTradeId = intentTradeId;
     this.logger.log(`Signal cycle INTENT ${cycleId} trade=${canonicalTradeId} (bot lao=${lao.trade_id})`);
     return true;
