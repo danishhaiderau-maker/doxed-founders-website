@@ -567,6 +567,14 @@ function Start-CloudflaredNamedHidden {
   }
 
   Set-Content -Path $tunnelUrlFile -Value "https://bot.doxxedcrypto.digital" -NoNewline
+  foreach ($rotLog in @($outLog, $errLog)) {
+    try {
+      if ((Get-Item $rotLog -ErrorAction SilentlyContinue).Length -gt 1048576) {
+        $tail = Get-Content $rotLog -Tail 200 -ErrorAction SilentlyContinue
+        if ($tail) { $tail | Set-Content $rotLog -Encoding UTF8 }
+      }
+    } catch { }
+  }
   Start-Process -FilePath "cloudflared" -ArgumentList $args -WindowStyle Hidden `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog -WorkingDirectory $repoRoot
 }
