@@ -18795,6 +18795,20 @@ def api_state():
             "deriv_mark_price": (snapshot.get("funding") or {}).get("mark_price"),
         }
         snapshot["positions"] = []
+        # Dedupe by trade_id: a position must never appear twice. If the fill path
+        # double-appended an identical trade_id, render it once (real exposure = 1x)
+        # and warn so the underlying open_positions double-entry stays visible.
+        _seen_pos_ids = set()
+        _deduped_positions = []
+        for _p in positions_copy:
+            _tid = _p.get("trade_id")
+            if _tid and _tid in _seen_pos_ids:
+                logger.warning(f"/api_state duplicate position suppressed trade_id={_tid} (open_positions double-entry - investigate fill path)")
+                continue
+            if _tid:
+                _seen_pos_ids.add(_tid)
+            _deduped_positions.append(_p)
+        positions_copy = _deduped_positions
         total_unreal = 0.0
         funding_snap = snapshot.get("funding") or {}
         for pos in positions_copy:
