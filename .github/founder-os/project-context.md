@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix Railway API crash: handle SignalCycle P2002 race + in-flight poll lock.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
