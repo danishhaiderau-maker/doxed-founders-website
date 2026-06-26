@@ -231,7 +231,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       if (-not (Test-PortOpen $BotPort)) {
         return @{
           ok = $false
-          error = "Bot not running on :$BotPort — click Start bot first, wait for /api/ping, then Start tunnel."
+          error = "Bot not running on :$BotPort - click Start bot first, wait for /api/ping, then Start tunnel."
         }
       }
       if (-not ((Use-NamedTunnel) -and (Test-Path (Join-Path $repoRoot ".home-use-named-tunnel")))) {
@@ -259,12 +259,12 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         if (-not $cfRunning) {
           return @{
             ok = $false
-            error = "cloudflared exited immediately — open logs/cloudflared-named.err.log on this PC."
+            error = "cloudflared exited immediately - open logs/cloudflared-named.err.log on this PC."
           }
         }
         return @{
           ok = $false
-          error = "cloudflared is running but $stableUrl still offline — wait 30s, click Refresh status, or run RECOVER-GLOBAL-STACK.cmd."
+          error = "cloudflared is running but $stableUrl still offline - wait 30s, click Refresh status, or run RECOVER-GLOBAL-STACK.cmd."
         }
       }
       return @{ ok = $true; message = "Named tunnel live at $stableUrl (bot :$BotPort)" }
@@ -345,7 +345,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return @{
         ok = $true
         message = @(
-          "Clean reset queued — stop everything, wait 8s, start fresh."
+          "Clean reset queued - stop everything, wait 8s, start fresh."
           "Step 1: /api/ping on :$BotPort within ~2s (boot probe)."
           "Step 2: full dashboard in 60-90s on home PC."
           "Refresh status at 30s, 60s, and 90s."
