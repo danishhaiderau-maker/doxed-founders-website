@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Bump to v11.1 with known-combo dashboard filters and fix Bitfinex policy lock for CI.
 
 ## Last Activity
 
