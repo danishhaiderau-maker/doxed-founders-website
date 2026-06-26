@@ -24,9 +24,10 @@ $logFile = Join-Path $logDir ("overnight-architecture-guard-{0}.log" -f (Get-Dat
 $deadline = (Get-Date).AddHours($DurationHours)
 $tunnelUrl = "https://bot.doxxedcrypto.digital"
 $prodApi = "https://doxxedcrypto.digital"
-$fail = @{ bot = 0; analyzer = 0; bridge = 0; tunnel = 0; prod = 0 }
-$lastRecover = @{ bot = [datetime]::MinValue; analyzer = [datetime]::MinValue; bridge = [datetime]::MinValue; tunnel = [datetime]::MinValue; wire = [datetime]::MinValue }
-$cooldown = @{ bot = 480; analyzer = 480; bridge = 240; tunnel = 420; wire = 1800 }
+$railwayApi = "https://doxed-founders-website-production.up.railway.app"
+$fail = @{ bot = 0; analyzer = 0; bridge = 0; tunnel = 0; prod = 0; railway = 0 }
+$lastRecover = @{ bot = [datetime]::MinValue; analyzer = [datetime]::MinValue; bridge = [datetime]::MinValue; tunnel = [datetime]::MinValue; wire = [datetime]::MinValue; railway = [datetime]::MinValue }
+$cooldown = @{ bot = 480; analyzer = 480; bridge = 240; tunnel = 420; wire = 1800; railway = 3600 }
 
 function Log([string]$msg) {
   $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -124,10 +125,23 @@ function Recover-ProdWire {
   Mark-Recover "wire"
   Push-Location $repoRoot
   try {
-    & npm run wire:home-bot 2>&1 | ForEach-Object { Log "  $_" }
+    & npm run wire:home-bot -- https://bot.doxxedcrypto.digital --skip-health-check 2>&1 | ForEach-Object { Log "  $_" }
   } finally {
     Pop-Location
   }
+}
+
+function Recover-RailwayApi {
+  if (-not (Can-Recover "railway")) { return }
+  Log "RECOVER Railway API (npm run redeploy:railway)"
+  Mark-Recover "railway"
+  Push-Location $repoRoot
+  try {
+    & npm run redeploy:railway 2>&1 | ForEach-Object { Log "  $_" }
+  } finally {
+    Pop-Location
+  }
+  Start-Sleep -Seconds 90
 }
 
 function Get-ProdBotStatus {
@@ -165,16 +179,19 @@ while ((Get-Date) -lt $deadline) {
   $tunnelOk = if ($botOk) { Test-TunnelPublicHealthy $tunnelUrl 10 } else { $false }
   $prodBot = Get-ProdBotStatus
   $prodOk = $prodBot -eq "online"
+  $railwayOk = Test-RailwayApiHealthy 10
+  $siteApiOk = Test-ProductionSiteApiHealthy 12
 
   if ($botOk) { $fail.bot = 0 } else { $fail.bot++ }
   if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
   if ($prodOk) { $fail.prod = 0 } else { $fail.prod++ }
+  if ($railwayOk -and $siteApiOk) { $fail.railway = 0 } else { $fail.railway++ }
 
-  Log ("tick #{0} bot={1} analyzer={2} bridge={3} tunnel={4} cf={5} prod_bot={6} fails=b{7}/a{8}/t{9}/br{10}/p{11}" -f `
-    $tick, $botOk, $analyzerOk, $bridgeOk, $tunnelOk, $cf, $prodBot, `
-    $fail.bot, $fail.analyzer, $fail.tunnel, $fail.bridge, $fail.prod)
+  Log ("tick #{0} bot={1} analyzer={2} bridge={3} tunnel={4} cf={5} prod_bot={6} railway={7} site_api={8} fails=b{9}/a{10}/t{11}/br{12}/p{13}/rw{14}" -f `
+    $tick, $botOk, $analyzerOk, $bridgeOk, $tunnelOk, $cf, $prodBot, $railwayOk, $siteApiOk, `
+    $fail.bot, $fail.analyzer, $fail.tunnel, $fail.bridge, $fail.prod, $fail.railway)
 
   if ($fail.bridge -ge $FailThreshold) {
     Recover-Bridge
@@ -203,6 +220,10 @@ while ((Get-Date) -lt $deadline) {
 
   if ($botOk -and $tunnelOk -and -not $prodOk -and $fail.prod -ge $FailThreshold) {
     Recover-ProdWire
+  }
+
+  if ($fail.railway -ge $FailThreshold) {
+    Recover-RailwayApi
   }
 
   if ($tick % 5 -eq 0) {

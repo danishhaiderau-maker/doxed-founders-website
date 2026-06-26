@@ -141,6 +141,7 @@ REPORT_NAV = (
     ("exits", "Exit Leakage", "top_leakage_report.json"),
     ("horizon", "Recovery", "horizon_profitability_report.json"),
     ("ai", "AI Lab", "ai_calibration_report.json"),
+    ("genome", "Genome", "research/genome/genome_analysis_report.json"),
     ("edge", "Edge & Features", "feature_importance_report.json"),
     ("explorer", "Report Explorer", None),
     ("archives", "Archives", None),
@@ -992,6 +993,18 @@ def api_lane_retirement():
     return jsonify(_lane_retirement_payload())
 
 
+def _genome_payload():
+    rep = _read_json(str(Path("research") / "genome" / "genome_analysis_report.json"))
+    if not rep:
+        rep = _read_json("research/genome/genome_analysis_report.json")
+    return rep or {}
+
+
+@app.route("/api/genome")
+def api_genome():
+    return jsonify(_genome_payload())
+
+
 @app.route("/api/features")
 def api_features():
     return jsonify(_feature_payload())
@@ -1136,17 +1149,33 @@ def download_archive(session_id):
 
 @app.route("/download/all-sessions")
 def download_all_sessions():
-    """One ZIP: every session archive + live reports + CSVs + CONTINUOUS timeline."""
+    """One ZIP: every session archive + live reports + CSVs. Uses cache unless ?rebuild=1."""
+    force = request.args.get("rebuild") in ("1", "true", "yes")
+    if not force:
+        try:
+            return download_complete_cached()
+        except Exception:
+            pass
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
     try:
-        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT, DEFAULT_AGENT_ROOT
+        from build_complete_session_bundle import build_bundle, FINAL_BOTS_ROOT
     except ImportError:
-        abort(503, description="build_complete_session_bundle.py not found next to research_dashboard.py")
-    history = HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
-    live = ROOT if (ROOT / "trades_3factor.csv").is_file() or (ROOT / REPORTS_DIR).is_dir() else DEFAULT_AGENT_ROOT
-    out_dir = history / "downloads"
+        abort(503, description="build_complete_session_bundle.py not found in agent root")
+    history = agent_root if (agent_root / ARCHIVE_DIR).is_dir() else (
+        HISTORY_ROOT if (HISTORY_ROOT / ARCHIVE_DIR).is_dir() else FINAL_BOTS_ROOT
+    )
+    live = agent_root if (agent_root / "trades_3factor.csv").is_file() else DATA_ROOT
+    out_dir = agent_root / "research" / "downloads"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / COMPLETE_BUNDLE_NAME
-    build_bundle(history, live, out_path)
+    try:
+        build_bundle(history, live, out_path)
+    except Exception as exc:
+        abort(500, description=f"Bundle build failed: {exc}")
+    if not out_path.is_file():
+        abort(500, description="Bundle file missing after build")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
         out_path,
@@ -1159,9 +1188,14 @@ def download_all_sessions():
 @app.route("/download/complete")
 def download_complete_cached():
     """Serve pre-built complete bundle if it exists (no rebuild)."""
-    for base in (HISTORY_ROOT, ROOT, ROOT.parent):
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    bases = (agent_root / "research" / "downloads", agent_root / "downloads", HISTORY_ROOT, ROOT, ROOT.parent)
+    for base in bases:
+        base = Path(base)
         for name in (COMPLETE_BUNDLE_NAME,) + COMPLETE_BUNDLE_FALLBACKS:
-            candidate = Path(base) / "downloads" / name
+            candidate = base / name if base.name == "downloads" else base / "downloads" / name
+            if not candidate.is_file():
+                candidate = base / name
             if candidate.is_file():
                 try:
                     with zipfile.ZipFile(candidate) as zf:
@@ -1217,19 +1251,108 @@ def download_chatgpt_bundle():
     )
 
 
-@app.route("/api/accumulator")
-def api_accumulator():
+@app.route("/download/gpt-audit")
+def download_gpt_audit_bundle():
+    """Full-stack GPT audit: bot.py + analyzers + genome modules + implementation checklist."""
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
     try:
-        from research_trade_accumulator import build_status
-
-        return jsonify(build_status(root=ROOT))
-    except ImportError:
-        abort(503)
+        from build_gpt_audit_bundle import build, OUT_DIR, ZIP_NAME, MANIFEST_NAME
+    except ImportError as exc:
+        abort(503, description=f"build_gpt_audit_bundle.py not found: {exc}")
+    out_dir = agent_root / "research" / "downloads" if (agent_root / "research" / "downloads").is_dir() else OUT_DIR
+    candidate = out_dir / ZIP_NAME
+    manifest_path = out_dir / MANIFEST_NAME
+    stale = True
+    if candidate.is_file() and candidate.stat().st_size > 50_000:
+        try:
+            if manifest_path.is_file():
+                meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+                gen = meta.get("generated_at") or ""
+                report = agent_root / "research" / "genome" / "genome_analysis_report.json"
+                if report.is_file():
+                    rep_ts = json.loads(report.read_text(encoding="utf-8")).get("generated_at") or ""
+                    stale = bool(rep_ts and gen and rep_ts > gen)
+            with zipfile.ZipFile(candidate) as zf:
+                if zf.testzip() is None and not stale:
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    return send_file(
+                        candidate,
+                        mimetype="application/zip",
+                        as_attachment=True,
+                        download_name=f"gpt_audit_bundle_{stamp}.zip",
+                    )
+        except (zipfile.BadZipFile, json.JSONDecodeError, OSError):
+            pass
+    try:
+        out_zip, _ = build(agent_root=agent_root)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        abort(500, description=f"GPT audit bundle build failed: {exc}")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        out_zip,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"gpt_audit_bundle_{stamp}.zip",
+    )
 
 
-@app.route("/download/accumulator")
+@app.route("/api/gpt-audit")
+def api_gpt_audit_status():
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    manifest_path = agent_root / "research" / "downloads" / "GPT_AUDIT_MANIFEST.json"
+    if not manifest_path.is_file():
+        return jsonify({"ready": False, "message": "Run analyzer once to generate GPT audit bundle."})
+    try:
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return jsonify({"ready": True, **meta})
+    except (json.JSONDecodeError, OSError) as exc:
+        return jsonify({"ready": False, "error": str(exc)})
+
+
+@app.route("/download/genome")
+def download_genome_bundle():
+    """Genome + DNA fingerprints + integrity audit — one ZIP for ChatGPT/review."""
+    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    genome_dir = agent_root / "research" / "genome"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    buf = io.BytesIO()
+    names = (
+        "genome_analysis_report.json",
+        "genome_library.json",
+        "genome_discoveries.json",
+        "genome_cluster_library.json",
+        "data_integrity_audit.json",
+    )
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        added = 0
+        for name in names:
+            p = genome_dir / name
+            if p.is_file():
+                zf.write(p, arcname=f"genome/{name}")
+                added += 1
+        db = agent_root / "research.db"
+        if db.is_file():
+            zf.write(db, arcname="research.db")
+            added += 1
+        zf.writestr(
+            "README.txt",
+            "Genome bundle — analysis report, library, discoveries, DNA fingerprints.\n"
+            "Upload to ChatGPT with GPT Audit Bundle for full stack review.\n",
+        )
+        if added == 0:
+            abort(404, description="No genome reports yet — run analyzer once.")
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"genome_dna_bundle_{stamp}.zip",
+    )
+
+
+@app.route("/api/accumulator")
 def download_accumulator():
     """Week-collection DB export: SQLite + accumulated CSV + status JSON."""
     try:
@@ -1335,7 +1458,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Executive Summary</h2>
     <div class="kpis" id="kpis"></div>
     <pre id="exec-text"></pre>
-    <p class="note">Auto-refreshes every 60s. Analyzer (30 min loop): <code>python analyzer_research_engine_v62.py</code></p>
+    <p class="note">Auto-refreshes every 60s. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code> (Trading Genome v11)</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -1466,6 +1589,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Executed confidence bands</h3>
     <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
   </section>
+  <section id="sec-genome">
+    <h2>Trading Genome v11</h2>
+    <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
+    <div class="kpis" id="genome-kpis"></div>
+    <p class="note" id="genome-taxonomy-note"></p>
+    <h2>Current market cluster</h2>
+    <pre id="genome-cluster"></pre>
+    <h2>Discoveries</h2>
+    <div id="genome-discoveries"></div>
+    <h2>Decision DNA</h2>
+    <pre id="genome-decision"></pre>
+    <h2>Lifecycle DNA</h2>
+    <pre id="genome-lifecycle"></pre>
+    <h2>Hypotheses</h2>
+    <pre id="genome-hypotheses"></pre>
+    <h2>Replay capabilities</h2>
+    <pre id="genome-replay"></pre>
+  </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
     <p class="note">Pearson correlation with PnL — validation only, not for auto-tuning.</p>
@@ -1486,8 +1627,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-download">
     <h2>Download Center</h2>
-    <p><b>Complete history</b> — all session archives, CONTINUOUS timeline, weekend vs weekday breakdown, live reports, CSVs.</p>
-    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP (full rebuild)</a>
+    <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
+    <p><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
+    <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
+    <a class="btn secondary" href="/download/genome" id="dl-genome">⬇ Genome + DNA Fingerprints ZIP</a>
+    <p style="margin-top:16px"><b>Complete history</b> — cached bundle serves instantly; add <code>?rebuild=1</code> to regenerate.</p>
+    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP</a>
     <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ Complete Bundle (cached)</a>
     <p style="margin-top:16px"><b>ChatGPT upload</b> — small verified ZIP with trade counts manifest (use this instead of the 38MB archive).</p>
     <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ ChatGPT Research Bundle</a>
@@ -1943,6 +2088,65 @@ async function loadFeatures() {
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
 
+async function loadGenome() {
+  const r = await fetch('/api/genome');
+  const d = await r.json();
+  if (!d || !d.schema) {
+    document.getElementById('genome-note').textContent = 'No genome report yet — run analyzer once after bot records to research.db.';
+    return;
+  }
+  const dq = (d.dna_quality || {}).overall || {};
+  const tax = d.genome_taxonomy || {};
+  document.getElementById('genome-kpis').innerHTML = [
+    ['DNA Quality', dq.dna_quality ?? 'n/a'],
+    ['Sample', dq.sample_size ?? 0],
+    ['EV/trade', '$' + fmtUsd(dq.ev)],
+    ['Confidence', dq.research_confidence || 'LOW'],
+    ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
+    ['Validated clusters', tax.validated_clusters ?? 0],
+    ['Discoveries', (d.discoveries || []).length],
+    ['Validation', (d.validation || {}).verdict || 'n/a'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const taxNote = document.getElementById('genome-taxonomy-note');
+  if (taxNote && tax.definitions) {
+    taxNote.innerHTML = `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 0} collecting). `
+      + `<strong>Cluster</strong> = validated identity (${tax.validated_clusters ?? 0} validated, `
+      + `${tax.candidate_genomes ?? 0} candidates). `
+      + `UNKNOWN at high similarity is correct when validated_clusters=0.`;
+  }
+  const rec = d.recommendation || {};
+  const expl = rec.explanation || {};
+  const sim = rec.similarity_pct ?? (d.current_market_cluster || {}).similarity_pct;
+  let note = (rec.action || 'COLLECT') + ': ' + (rec.detail || d.disclaimer || '');
+  if (expl.why) note += ' — ' + expl.why;
+  if (rec.action === 'UNKNOWN_MARKET' && sim != null) note += ` (similarity ${Number(sim).toFixed(1)}%)`;
+  document.getElementById('genome-note').textContent = note;
+  document.getElementById('genome-cluster').textContent = JSON.stringify(d.current_market_cluster || {}, null, 2);
+  document.getElementById('genome-decision').textContent = JSON.stringify(d.decision_dna || {}, null, 2);
+  document.getElementById('genome-lifecycle').textContent = JSON.stringify(d.lifecycle_dna || {}, null, 2);
+  document.getElementById('genome-hypotheses').textContent = JSON.stringify(d.hypotheses || {}, null, 2);
+  document.getElementById('genome-replay').textContent = JSON.stringify(d.replay_capabilities || {}, null, 2);
+  document.getElementById('genome-discoveries').innerHTML = (d.discoveries || []).map(disc => {
+    const fp = disc.fingerprint || {};
+    const m = disc.metrics || {};
+    const se = disc.statistical_evidence || {};
+    const ci = se.confidence_interval_95 || m.confidence_interval_95 || {};
+    const stab = disc.stability || {};
+    const ledger = (disc.evidence_ledger || []).slice(-4).map(h =>
+      `${h.period_key || (h.ts || '').slice(0,10)}: WR ${((h.win_rate||0)*100).toFixed(0)}% EV $${fmtUsd(h.ev_usd)}`
+    ).join(' → ');
+    const explDisc = disc.explanation || {};
+    return `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px">`
+      + `<div class="lbl"><strong>${disc.identity || disc.discovery_id || ''}</strong> · ${disc.status || ''} · ${disc.research_confidence || ''}</div>`
+      + `<div class="note">${fp.session || ''} · ADX ${fp.adx_bucket || ''} · spread ${fp.spread_bucket || ''} · ${fp.direction || ''}</div>`
+      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 0} · EV $${fmtUsd(se.expected_value_usd ?? m.ev_usd)} · CI [$${fmtUsd(ci.low)}–$${fmtUsd(ci.high)}] · DNA ${se.dna_quality ?? m.dna_quality ?? 'n/a'}%</div>`
+      + `<div class="note">p=${se.p_value_ev_gt_zero ?? 'n/a'} · sig=${se.statistically_significant ? 'yes' : 'no'} · trend ${stab.trend || 'n/a'} · stable=${stab.stable ? 'yes' : 'no'}</div>`
+      + (ledger ? `<div class="note">Ledger: ${ledger}</div>` : '')
+      + (explDisc.why ? `<div class="note">${explDisc.why}</div>` : '')
+      + `<div class="note"><em>${disc.recommendation || ''}</em></div></div>`;
+  }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
+}
+
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
@@ -1995,6 +2199,18 @@ async function loadStatus() {
   return d;
 }
 
+async function loadGptAuditNote() {
+  try {
+    const r = await fetch('/api/gpt-audit');
+    const d = await r.json();
+    const el = document.getElementById('gpt-audit-note');
+    if (!el || !d.ready) return;
+    const v = d.architecture_version || 'v11';
+    const mb = d.zip_size_mb != null ? d.zip_size_mb + ' MB' : '';
+    el.textContent = `GPT audit ready — ${v} — ${mb} — updated ${(d.generated_at||'').slice(0,19)}Z`;
+  } catch (_) {}
+}
+
 async function refreshAll() {
   await loadStatus();
   await loadSummary();
@@ -2018,6 +2234,8 @@ async function refreshAll() {
   await loadHorizon();
   await loadFeatures();
   await loadAI();
+  await loadGenome();
+  await loadGptAuditNote();
   await loadExplorer();
   await loadArchives();
 }

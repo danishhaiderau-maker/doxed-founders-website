@@ -18,8 +18,10 @@ import {
   type ExchangeProvider,
   buildCopyRelayLimitChain,
   buildTradeLifecycleIntegrity,
+  buildRelaySimParticipantStats,
   type CopyRelayLimitChainSnapshot,
   type TradeLifecycleIntegritySnapshot,
+  type RelaySimParticipantStats,
   formatMelbourneDateTime,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -1016,6 +1018,7 @@ export class TradingAgentsService implements OnModuleInit {
     let copyRelayCapacity: CopyRelayCapacitySnapshot | null = null;
     let copyRelayLimitChain: CopyRelayLimitChainSnapshot | null = null;
     let tradeLifecycleIntegrity: TradeLifecycleIntegritySnapshot | null = null;
+    let relaySimParticipantStats: RelaySimParticipantStats | null = null;
     let relayFidelity = null;
 
     if (userId && agentRowId) {
@@ -1073,6 +1076,10 @@ export class TradingAgentsService implements OnModuleInit {
           lifecycleParticipants.length > 0
             ? buildTradeLifecycleIntegrity(lifecycleParticipants)
             : null;
+        relaySimParticipantStats =
+          copyRelaySim?.active && lifecycleParticipants.length > 0
+            ? buildRelaySimParticipantStats(lifecycleParticipants)
+            : null;
 
         const botRaw =
           sharedBot ??
@@ -1123,6 +1130,7 @@ export class TradingAgentsService implements OnModuleInit {
       copyRelayCapacity,
       copyRelayLimitChain,
       tradeLifecycleIntegrity,
+      relaySimParticipantStats,
       relayFidelity,
       showcaseNote:
         viewScope === 'user' && userInstance?.instanceMode === 'live'

@@ -6,6 +6,7 @@ import {
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
   type TradeLifecycleIntegritySnapshot,
+  type RelaySimParticipantStats,
 } from '@dcf/utils';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 
@@ -18,6 +19,7 @@ export function buildRelaySyncAlerts(input: {
   copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
   copyRelayLimitChain?: CopyRelayLimitChainSnapshot | null;
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  relaySimParticipantStats?: RelaySimParticipantStats | null;
   relayFidelity?: RelayFidelitySnapshot | null;
 }): Alert[] {
   const alerts: Alert[] = [];
@@ -95,6 +97,16 @@ export function buildRelaySyncAlerts(input: {
   }
 
   if (input.mode === 'sim' && input.copyRelaySim?.active) {
+    const stats = input.relaySimParticipantStats;
+    const terminal = stats ? stats.closed + stats.expired : 0;
+    if (stats && terminal >= 5 && stats.expired / terminal >= 0.75) {
+      alerts.push({
+        level: 'warn',
+        title: 'Most relay limits expiring before fill',
+        detail: `${stats.expired} expired vs ${stats.closed} filled this sim session (${stats.pending} pending, ${stats.open} open). Usually means showcase chase deferred entry or limits rested away from market. Confirm global bot :7002 is wired, then restart sim after a fresh showcase session if fills stay near zero.`,
+      });
+    }
+
     const showcasePnl = input.copyRelaySim.showcasePnlUsd ?? 0;
     const simPnl = input.copyRelaySim.sessionPnlUsd ?? 0;
     const gap = simPnl - showcasePnl;

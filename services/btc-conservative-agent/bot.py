@@ -53,6 +53,8 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     PRIMARY_PRODUCTION_LANE,
     PRIMARY_PRODUCTION_ROLE,
+    RESEARCH_CANDIDATE_LANE,
+    RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_COMBO_604_SP4_CHASE,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT,
@@ -67,6 +69,7 @@ from combo_pathway_config import (
     is_chase_3plus_entry_lane,
     is_combo_execution_lane,
     is_immediate_entry_lane,
+    is_research_candidate_lane,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
@@ -104,6 +107,15 @@ from pathway_lane_roster import (
     PATHWAY_SHADOW_COLLECTING_ENABLED,
     RETIRED_PATHWAY_LANES as ROSTER_RETIRED_PATHWAY_LANES,
 )
+
+try:
+    from research_genome import get_genome_bridge, init_genome_bridge
+except ImportError:
+    def init_genome_bridge(base_dir=None):  # type: ignore
+        return None
+
+    def get_genome_bridge():  # type: ignore
+        return None
 
 # #region agent log
 _AGENT_DEBUG_LOG = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "agent-debug.log")
@@ -165,9 +177,9 @@ RESEARCH_LANE_URGENT_CHASE_ALPHA = "URGENT_CHASE_ALPHA"
 RESEARCH_LANE_CHASE_3PLUS_ALPHA = "CHASE_3PLUS_ALPHA"
 RESEARCH_LANE_PROFIT_GATES = "PROFIT_GATES"  # legacy — spawn disabled; no Pathway Lab tile
 PATHWAY_LANE_STATUS = {
-    RESEARCH_LANE_COMBO_65_SP5_CHASE: "PRIMARY_PRODUCTION",
+    RESEARCH_LANE_COMBO_65_SP5_CHASE: "RETIRED",
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: "RETIRED",
-    RESEARCH_LANE_COMBO_604_SP4_CHASE: "ACTIVE",
+    RESEARCH_LANE_COMBO_604_SP4_CHASE: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
@@ -184,7 +196,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_TYPE_B_PREDICTOR_V1: "RETIRED",
     RESEARCH_LANE_RECOVERY_MONSTER_V1: "RETIRED",
     RESEARCH_LANE_AI_DISAGREEMENT_ALPHA: "RETIRED",
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "ACTIVE",
+    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY: "RETIRED",
 }
 RETIRED_PATHWAY_LANES = ROSTER_RETIRED_PATHWAY_LANES
 RESEARCH_LANE_LABELS = {
@@ -1707,6 +1719,18 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
             f"mtf {entry_mtf}->{cur_mtf} struct {entry_struct}->{cur_struct} "
             f"[PIPELINE ENFORCEMENT]"
         )
+        _emit_genome_execution_event("THESIS_CHANGED", {
+            "trade_id": pos.get("trade_id"),
+            "direction": direction,
+            "thesis_state": "INVALIDATED",
+            "entry_bull": entry_bull,
+            "entry_bear": entry_bear,
+            "live_bull": cur_bull,
+            "live_bear": cur_bear,
+            "mtf_from": entry_mtf,
+            "mtf_to": cur_mtf,
+            "research_lane": pos.get("research_lane"),
+        })
         close_position(pos, "THESIS_INVALIDATED")
         return True
     return False
@@ -2439,6 +2463,12 @@ def lane_register_pending_order(order: dict):
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
+    _emit_genome_execution_event("LIMIT_CREATED", {
+        "trade_id": order.get("trade_id"),
+        "limit_price": order.get("limit_price") or order.get("price"),
+        "direction": order.get("dir") or order.get("direction"),
+        "research_lane": order.get("research_lane"),
+    })
 
 
 def lane_unregister_pending_order(order: dict):
@@ -2996,6 +3026,25 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             }
             pos["_candle_track_idx"] = cur_candle
 
+    prev_peak = float(pos.get("_genome_peak_pct") or -999.0)
+    new_peak = float(pos.get("max_pnl_pct") or 0)
+    if new_peak > prev_peak + 0.01:
+        pos["_genome_peak_pct"] = new_peak
+        _emit_genome_execution_event("MFE_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "mfe_pct": round(new_peak, 4),
+            "research_lane": pos.get("research_lane"),
+        })
+    prev_mae = float(pos.get("_genome_mae_pct") or 999.0)
+    new_mae = float(pos.get("max_drawdown") or 0)
+    if new_mae < prev_mae - 0.01:
+        pos["_genome_mae_pct"] = new_mae
+        _emit_genome_execution_event("MAE_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "mae_pct": round(new_mae, 4),
+            "research_lane": pos.get("research_lane"),
+        })
+
     if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
         logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
         close_position(pos, "EARLY_FAIL")
@@ -3021,6 +3070,34 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
     ladder = _position_trail_ladder(pos)
+    if peak >= ladder[0][0] and not pos.get("_genome_ladder_armed"):
+        pos["_genome_ladder_armed"] = True
+        _emit_genome_execution_event("LADDER_STEP_ARMED", {
+            "trade_id": pos.get("trade_id"),
+            "rung_peak_pct": ladder[0][0],
+            "lock_floor_pct": lock_floor,
+            "research_lane": pos.get("research_lane"),
+        })
+    if lock_floor is not None:
+        prev_stop = pos.get("_genome_stop_floor")
+        if prev_stop is None or float(lock_floor) > float(prev_stop) + 0.01:
+            pos["_genome_stop_floor"] = lock_floor
+            _emit_genome_execution_event("STOP_UPDATED", {
+                "trade_id": pos.get("trade_id"),
+                "stop_floor_pct": round(float(lock_floor), 4),
+                "peak_pct": round(float(peak), 4),
+                "research_lane": pos.get("research_lane"),
+            })
+    last_pos_update = float(pos.get("_genome_pos_update_ts") or 0)
+    if now - last_pos_update >= 60.0:
+        pos["_genome_pos_update_ts"] = now
+        _emit_genome_execution_event("POSITION_UPDATED", {
+            "trade_id": pos.get("trade_id"),
+            "unreal_pct": round(float(unreal_pct), 4),
+            "peak_pct": round(float(peak), 4),
+            "mae_pct": round(float(pos.get("max_drawdown") or 0), 4),
+            "research_lane": pos.get("research_lane"),
+        })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
     if lock_floor is not None and peak >= ladder[0][0] and unreal_pct <= lock_floor:
         entry = float(pos.get("entry") or 0)
@@ -3030,6 +3107,13 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             f"source={state.get('price_source', 'WS')} [PIPELINE ENFORCEMENT]"
         )
         pos["_ladder_lock_floor_pct"] = lock_floor
+        _emit_genome_execution_event("LADDER_STEP_HIT", {
+            "trade_id": pos.get("trade_id"),
+            "peak_pct": round(float(peak), 4),
+            "lock_floor_pct": round(float(lock_floor), 4),
+            "unreal_pct": round(float(unreal_pct), 4),
+            "research_lane": pos.get("research_lane"),
+        })
         close_position(pos, "PROFIT_LOCK_LADDER")
         return True
     pos["_prev_unreal_pct"] = unreal_pct
@@ -5639,6 +5723,7 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
         _push_showcase_relay_event("APPROVE_PENDING", trade_id)
     elif status == "EXECUTED" and trade_id:
         _push_showcase_relay_event("ORDER_PLACED", trade_id, {"reason": reason})
+        _emit_genome_execution_event("ORDER_FILLED", {"trade_id": trade_id, "reason": reason})
 
 def resolve_pending_approve_blocked(signal: dict, ai: dict, reason: str):
     """After record_approve_outcome(PENDING), upgrade to BLOCKED if pipeline exits early."""
@@ -9109,6 +9194,59 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
         state["ai_outcome"] = ai_result.get("decision")
         state["ai_decision"] = ai_result.get("decision")
 
+
+def _emit_genome_ai_events(ai_result: dict) -> None:
+    """Trading Genome v1 — emit AI_SCAN + decision events (bot flight recorder only)."""
+    bridge = get_genome_bridge()
+    if not bridge:
+        return
+    try:
+        with state_lock:
+            ema = state.get("ema_status") or {}
+            market = {
+                "price": state.get("price"),
+                "adx": state.get("adx"),
+                "atr": state.get("atr"),
+                "regime": state.get("regime"),
+                "bull_score": ai_result.get("bull_score"),
+                "bear_score": ai_result.get("bear_score"),
+                "spread": ai_result.get("spread"),
+                "ema_fast": ema.get("ema_fast"),
+                "ema_slow": ema.get("ema_slow"),
+                "ema_slope": ema.get("ema_spread"),
+                "volatility_percentile": state.get("volatility_percentile"),
+                "volume_percentile": state.get("volume_percentile"),
+                "funding_rate": state.get("funding_rate"),
+                "vwap_distance": state.get("vwap_distance"),
+                "delta": state.get("delta"),
+                "momentum": state.get("momentum"),
+                "structure": state.get("structure_score"),
+            }
+        bridge.on_ai_scan_complete(market)
+        decision = str(ai_result.get("decision") or "").upper()
+        approved = decision == "APPROVE" or bool(ai_result.get("approved"))
+        bridge.on_ai_decision(
+            approved,
+            trade_id=str(ai_result.get("trade_id") or ""),
+            ai_confidence=int(ai_result.get("win_prob") or 0),
+            direction=str(ai_result.get("direction") or ai_result.get("final_direction") or ""),
+            block_reason="" if approved else str(ai_result.get("comment") or decision or "REJECT"),
+            research_lane=str(ai_result.get("research_lane") or RESEARCH_LANE_AI_SCAN),
+        )
+    except Exception as exc:
+        logger.warning(f"[GENOME] ai scan events failed: {exc}")
+
+
+def _emit_genome_execution_event(event_name: str, payload: dict) -> None:
+    bridge = get_genome_bridge()
+    if not bridge:
+        return
+    try:
+        bridge.on_execution_event(event_name, payload)
+    except Exception as exc:
+        logger.warning(f"[GENOME] execution event {event_name} failed: {exc}")
+
+
 def _deepseek_api_key():
     """Read key each call so .env / env changes apply without full process restart."""
     _load_local_dotenv()
@@ -9973,6 +10111,7 @@ def evaluate_signal_with_ai(
         if not shadow_only:
             _append_ai_history_row(ai_result)
             _sync_ai_dashboard_debug(ai_result)
+            _emit_genome_ai_events(ai_result)
             with state_lock:
                 eff = get_effective_edge_threshold()
                 state["debug_state"]["ai_gate"] = {
@@ -10057,6 +10196,7 @@ def evaluate_signal_with_ai(
                 }
                 state["debug_state"]["skip_reason"] = f"AI_ERROR:{ai_result.get('error_type', 'unknown')}"
             _sync_ai_dashboard_debug(ai_result)
+            _emit_genome_ai_events(ai_result)
         with state_lock:
             state["ai_call_count"] = state.get("ai_call_count", 0) + 1
         logger.info(
@@ -10395,6 +10535,12 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
     with trade_lock:
         if order in pending_orders:
             lane_unregister_pending_order(order)
+    _emit_genome_execution_event("ORDER_CANCELLED", {
+        "trade_id": tid,
+        "reason": reason,
+        "chase_count": chase_n,
+        "research_lane": signal.get("research_lane") if isinstance(signal, dict) else order.get("research_lane"),
+    })
     if not isinstance(signal, dict):
         logger.info(
             f"[DASHBOARD GATE] cancelled pending trade_id={tid} "
@@ -11903,6 +12049,15 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] urgent marketable chase log failed: {_fe}")
+    _emit_genome_execution_event("LIMIT_CHASED", {
+        "trade_id": order.get("trade_id"),
+        "old_limit": old_limit,
+        "new_limit": new_limit,
+        "chase_count": chase_count,
+        "direction": direction,
+        "urgent_marketable": True,
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+    })
     return True
 
 
@@ -11952,6 +12107,14 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
         logger.debug(f"[FUNNEL] limit chase log failed: {_fe}")
+    _emit_genome_execution_event("LIMIT_CHASED", {
+        "trade_id": order.get("trade_id"),
+        "old_limit": old_limit,
+        "new_limit": new_limit,
+        "chase_count": chase_count,
+        "direction": direction,
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+    })
     return True
 
 
@@ -12180,6 +12343,21 @@ def fill_order(order):
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
+    _emit_genome_execution_event("ORDER_FILLED", {
+        "trade_id": order.get("trade_id"),
+        "fill_price": fill_px,
+        "direction": order.get("signal_dir"),
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        "chase_count": int(order.get("limit_chase_count") or 0),
+    })
+    _emit_genome_execution_event("POSITION_OPENED", {
+        "trade_id": pos.get("trade_id"),
+        "entry_price": fill_px,
+        "direction": pos.get("dir"),
+        "qty": pos.get("qty"),
+        "research_lane": pos.get("research_lane"),
+        "stop_loss": pos.get("sl"),
+    })
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     if master:
@@ -12682,6 +12860,7 @@ def process_signal(event: dict):
                     block_tag = ai.get("factor_gate") or f"AI_{tier}"
                     skip_stage = "AI"
                 _sync_ai_dashboard_debug(ai, trade_id)
+                _emit_genome_ai_events({**ai, "trade_id": trade_id})
                 reject_stub = {
                     "trade_id": trade_id,
                     "edge_score_at_entry": round(float(edge_score), 1),
@@ -14111,6 +14290,14 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
+    genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
+    _emit_genome_execution_event(genome_event, {
+        "trade_id": tid,
+        "reason": reason,
+        "limit_price": limit_price,
+        "research_lane": row.get("research_lane"),
+        "direction": row.get("dir"),
+    })
     return row
 
 
@@ -14292,6 +14479,14 @@ def close_position(pos: dict, exit_reason: str):
         trade_id = pos.get("trade_id")
         if not trade_id:
             return
+        _emit_genome_execution_event("EXIT_TRIGGERED", {
+            "trade_id": trade_id,
+            "exit_reason": exit_reason,
+            "direction": pos.get("dir"),
+            "research_lane": pos.get("research_lane"),
+            "peak_pct": pos.get("max_pnl_pct"),
+            "mae_pct": pos.get("max_drawdown"),
+        })
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)
         assert entry > 0, f"[EXIT VALIDATION FAIL] entry={entry} <=0"
@@ -14574,6 +14769,23 @@ def close_position(pos: dict, exit_reason: str):
         trade_id,
         {"exit_reason": exit_reason, "direction": pos.get("dir"), "exit_price": price},
     )
+    bridge = get_genome_bridge()
+    if bridge:
+        try:
+            bridge.on_position_closed({
+                "trade_id": trade_id,
+                "entry_price": pos.get("entry"),
+                "exit_price": price,
+                "pnl_usd": net_pnl,
+                "mfe_pct": pos.get("peak_pct"),
+                "mae_pct": pos.get("mae_pct"),
+                "capture_pct": pos.get("capture_pct"),
+                "exit_reason": exit_reason,
+                "duration_sec": time.time() - float(pos.get("entry_ts") or time.time()),
+                "research_lane": pos.get("research_lane"),
+            })
+        except Exception as exc:
+            logger.warning(f"[GENOME] trade close record failed: {exc}")
     candidate_signal["active"] = False
     clear_pending_trade()
     pipeline_state_sync()
@@ -15149,8 +15361,13 @@ def build_static_pathway_lane_specs() -> dict:
         "post_ai_gates": shared["post_ai_gates"],
         "margin_usd": shared["margin_usd"],
     }
-    promote = "Per-trade EV > COMBO_65_SP5_CHASE_3PLUS benchmark"
-    kill = "EV <= benchmark over rolling window"
+    promote = (
+        "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS over same period · "
+        "stable DNA Quality · positive across multiple market regimes"
+    )
+    kill = (
+        "ANY after ≥50 trades: negative EV · DNA Quality deterioration · failure to outperform CONTINUOUS"
+    )
     lanes = []
     for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
         spec = COMBO_LANE_SPECS[lane_id]
@@ -15166,16 +15383,20 @@ def build_static_pathway_lane_specs() -> dict:
             if chase
             else "Immediate AI limit + 25% chase + Scenario C"
         )
-        is_primary = bool(spec.get("is_primary_production"))
+        is_candidate = bool(spec.get("is_research_candidate"))
+        lane_status = RESEARCH_CANDIDATE_ROLE if is_candidate else "ACTIVE"
+        lane_promote = spec.get("promotion_criteria") or promote
+        lane_kill = spec.get("kill_criteria") or kill
         lanes.append({
             "lane": lane_id,
             "label": spec["label"],
             "subtitle": spec.get("subtitle", ""),
             "role": spec.get("combo_key", lane_id),
-            "status": PRIMARY_PRODUCTION_ROLE if is_primary else "ACTIVE",
+            "status": lane_status,
             "is_benchmark": False,
-            "is_primary_production": is_primary,
-            "badge": PRIMARY_PRODUCTION_ROLE if is_primary else "",
+            "is_primary_production": False,
+            "is_research_candidate": is_candidate,
+            "badge": RESEARCH_CANDIDATE_ROLE if is_candidate else "",
             "tile_number": tile_idx,
             "entry_mode_label": entry_mode_label,
             "filter_chips": [
@@ -15183,7 +15404,7 @@ def build_static_pathway_lane_specs() -> dict:
                 f"Spread {spread_label}",
                 entry_mode_label,
                 "25% chase",
-                "Scenario C",
+                f"Ladder {SCENARIO_C_LADDER_LABEL}",
             ],
             "toggle_key": "research_lane_enabled",
             "hypothesis": "Tradable at entry: AI band + directional spread only. TYPE_B is classified after the trade from peak MFE.",
@@ -15200,8 +15421,8 @@ def build_static_pathway_lane_specs() -> dict:
             },
             "exit": scenario_c,
             "exit_path": "Scenario C frozen — exit combo optimization next",
-            "promotion_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else promote,
-            "kill_criteria": "N/A — PRIMARY_PRODUCTION" if is_primary else kill,
+            "promotion_criteria": lane_promote,
+            "kill_criteria": lane_kill,
             "expected_advantage": "Historical winners: strong AI + spread ≥4 at entry",
             "expected_risk": "TYPE_A drag if filters too loose — monitor exit leakage",
             "benchmark_comparison": f"vs {COMPARISON_BENCHMARK_LANE} yardstick",
@@ -15234,7 +15455,7 @@ def build_static_pathway_lane_specs() -> dict:
         "filter_chips": [
             f"AI ~{shared['ai_scan_cadence_sec']}s",
             "AI_SCAN mirror",
-            "Scenario C",
+            f"Ladder {SCENARIO_C_LADDER_LABEL}",
             "25% chase",
             "Toggle orders",
         ],
@@ -15342,16 +15563,18 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Pipeline/execution frozen — change tile labels, filters, toggles only unless explicitly approved",
-        "architecture_doc": "PATHWAY_ARCHITECTURE_FREEZE.md",
+        "architecture_freeze_note": "Genome architecture v1 — CONTINUOUS benchmark + COMBO_604 research candidate only",
+        "architecture_doc": "docs/research-genome-schema-v1.md",
+        "genome_schema_version": "1.0.0",
         "shared_execution": shared,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": "v112-combo-pathway",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": COMPARISON_BENCHMARK_LANE,
-        "primary_production_lane": PRIMARY_PRODUCTION_LANE,
+        "primary_production_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "primary_production_role": PRIMARY_PRODUCTION_ROLE,
+        "primary_production_role": RESEARCH_CANDIDATE_ROLE,
+        "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(LEGACY_PATHWAY_LANES),
         "lanes": lanes,
@@ -16662,6 +16885,26 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
+            + (spec.research_question ? ('<div style="margin-top:4px;font-size:0.76em;color:#6e7681;"><strong style="color:#8b949e;">Question:</strong> ' + spec.research_question + '</div>') : '')
+            + (function () {
+              const ef = entry.filters || {};
+              const parts = [];
+              if (ef.ai_probability_bucket) parts.push('AI ' + ef.ai_probability_bucket);
+              if (ef.directional_spread_bucket) parts.push('Spread ' + ef.directional_spread_bucket);
+              if (ef.entry_mode) parts.push(ef.entry_mode);
+              if (!parts.length && entry.trigger) parts.push(entry.trigger);
+              if (!parts.length) return '';
+              return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
+            })()
+            + (function () {
+              const prom = spec.promotion_criteria;
+              const kill = spec.kill_criteria;
+              if (!prom && !kill) return '';
+              let html = '<div style="margin-top:6px;padding:6px 8px;background:#1c2128;border-radius:6px;font-size:0.74em;line-height:1.45;">';
+              if (prom) html += '<div><strong style="color:#3fb950;">Promote:</strong> <span style="color:#8b949e;">' + prom + '</span></div>';
+              if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
+              return html + '</div>';
+            })()
             + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
@@ -16672,7 +16915,7 @@ DASHBOARD_JS = """(function () {
                 return '<div style="font-size:0.74em;color:#8b949e;line-height:1.4;">' + line + '</div>';
               }).join('');
               return '<div style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
-                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY (frozen)</div>'
+                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY · ' + (exit.profile || 'Scenario C') + ' · ' + (exit.ladder || '—') + '</div>'
                 + body + '</div>';
             })()
             + '</div>';
@@ -17967,6 +18210,10 @@ def api_relay_state():
         _enrich_orders_for_relay(snapshot)
         snapshot["trades_map"] = _relay_trades_map_lite()
         snapshot["server_ts"] = utc_iso()
+        bridge = get_genome_bridge()
+        if bridge:
+            snapshot["genome_bus_seq"] = bridge.bus_seq
+            snapshot["genome_stats"] = bridge.stats()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp
@@ -19071,6 +19318,18 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
         state["final_decision"] = "APPROVED" if approved else "AI_REJECTED"
         state["last_ai"].update({"win_prob": win_prob,"direction": dir_,"trade_id": trade_id,"comment": comment,"ai_error": None})
         state["last_engine_error"] = "" if approved else "AI rejected"
+    bridge = get_genome_bridge()
+    if bridge:
+        try:
+            bridge.on_ai_decision(
+                approved,
+                trade_id=str(trade_id or ""),
+                ai_confidence=int(win_prob or 0),
+                direction=str(dir_ or ""),
+                block_reason="" if approved else str(comment or "AI_REJECTED"),
+            )
+        except Exception as exc:
+            logger.warning(f"[GENOME] ai decision record failed: {exc}")
 
 REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
 
@@ -20927,6 +21186,11 @@ def main():
     validate_startup()
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
+    try:
+        init_genome_bridge()
+        logger.info("[GENOME] Trading Genome v1 bridge initialized")
+    except Exception as exc:
+        logger.warning(f"[GENOME] bridge init failed: {exc}")
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
     session_meta = _load_research_session_meta()
@@ -21147,8 +21411,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(1)
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "

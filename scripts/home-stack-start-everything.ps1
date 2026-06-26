@@ -159,6 +159,10 @@ if (-not (Test-HomeScriptRunning "home-stack-supervisor.ps1")) {
   Start-HiddenPs1 (Join-Path $scriptDir "home-stack-supervisor.ps1") @("-BotPort", "$BotPort", "-AnalyzerPort", "$AnalyzerPort")
   $messages.Add("Supervisor (hidden, 24/7 health)")
 }
+if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
+  Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
+  $messages.Add("Relay state pusher (hidden, 2s → Railway)")
+}
 
 $summary = ($messages -join " | ")
 Write-Host ""

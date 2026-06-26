@@ -1,3 +1,12 @@
+services/btc-conservative-agent/research_session_archives/
+services/btc-conservative-agent/research/downloads/
+services/btc-conservative-agent/**/*.jsonl
+services/btc-conservative-agent/**/*.csv
+services/btc-conservative-agent/**/*.db
+services/btc-conservative-agent/**/__pycache__/
+services/btc-conservative-agent/bot_runtime.log*
+services/btc-conservative-agent/research/genome/genome_analysis_report.json
+
 # Founder Node desktop builds (not part of web deploy)
 apps/founder-node/release/
 apps/founder-node/build/

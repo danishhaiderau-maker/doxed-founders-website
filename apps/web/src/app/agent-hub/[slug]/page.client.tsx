@@ -10,6 +10,7 @@ import {
   type CopyRelaySimState,
   type CopyRelayLimitChainSnapshot,
   type TradeLifecycleIntegritySnapshot,
+  type RelaySimParticipantStats,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
 import { AgentPublicProfile } from '@/components/agent-hub/agent-public-profile';
@@ -91,6 +92,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   );
   const [tradeLifecycleIntegrity, setTradeLifecycleIntegrity] =
     useState<TradeLifecycleIntegritySnapshot | null>(null);
+  const [relaySimParticipantStats, setRelaySimParticipantStats] =
+    useState<RelaySimParticipantStats | null>(null);
   const [relayFidelity, setRelayFidelity] = useState<
     import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null
   >(null);
@@ -140,6 +143,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setCopyRelayReconcile(dashR.value.copyRelayReconcile ?? null);
         setCopyRelayLimitChain(dashR.value.copyRelayLimitChain ?? null);
         setTradeLifecycleIntegrity(dashR.value.tradeLifecycleIntegrity ?? null);
+        setRelaySimParticipantStats(dashR.value.relaySimParticipantStats ?? null);
         setRelayFidelity(dashR.value.relayFidelity ?? null);
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
@@ -375,6 +379,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           copyRelayReconcile={copyRelayReconcile}
           copyRelayLimitChain={copyRelayLimitChain}
           tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+          relaySimParticipantStats={relaySimParticipantStats}
           relayFidelity={relayFidelity}
           showcaseActivity={showcaseActivity}
           userActivity={userActivity}

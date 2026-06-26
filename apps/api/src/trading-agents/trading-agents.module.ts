@@ -11,6 +11,8 @@ import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { ShowcaseRelayEventsService } from './showcase-relay-events.service';
+import { ShowcaseSnapshotService } from './showcase-snapshot.service';
+import { InternalShowcaseController } from './internal-showcase.controller';
 import { ShowcaseSessionSyncService } from './showcase-session-sync.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
@@ -19,7 +21,7 @@ import { TradingAgentsService } from './trading-agents.service';
 
 @Module({
   imports: [NotificationsModule, PointsModule, ExchangesModule],
-  controllers: [TradingAgentsController, SignalCyclesController, AgentRegistryController],
+  controllers: [TradingAgentsController, SignalCyclesController, AgentRegistryController, InternalShowcaseController],
   providers: [
     TradingAgentsService,
     TradingAgentInstancesService,
@@ -32,6 +34,7 @@ import { TradingAgentsService } from './trading-agents.service';
     AgentRegistryService,
     ShowcaseSessionSyncService,
     ShowcaseRelayEventsService,
+    ShowcaseSnapshotService,
   ],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],
 })
