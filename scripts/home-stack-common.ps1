@@ -585,6 +585,9 @@ function Start-CloudflaredNamedHidden {
     throw "cloudflared not installed"
   }
 
+  Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+
   $args = @()
   if (Test-Path $tokenFile) {
     $token = (Get-Content $tokenFile -Raw).Trim()
