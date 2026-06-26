@@ -130,7 +130,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     if (opts?.showLoading) setLiveLoading(true);
     try {
       const results = await Promise.allSettled([
-        withTimeout(fetchTradingAgentDashboard(slug, token), 15000, 'Dashboard'),
+        withTimeout(fetchTradingAgentDashboard(slug, token), 30_000, 'Dashboard'),
         fetchPublicAgentStatus(),
       ]);
 
@@ -161,8 +161,10 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
         setError(null);
-      } else {
-        setError('Live bot slow — showing cached stats. Refresh in a moment.');
+      } else if (agent) {
+        setError(
+          'Live data slow — showing last known stats. If you just clicked Start showcase, wait 60–90s for bot + tunnel, then refresh.',
+        );
       }
 
       if (statusR.status === 'fulfilled') setPublicStatus(statusR.value);
@@ -191,8 +193,11 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   }, [slug, session?.accessToken, applyAgentMeta, loadLive]);
 
   useEffect(() => {
-    load();
-    // Background sync only — no loading banner (avoids layout pulse every tick).
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (!agent) return;
     let pollMs = AGENT_HUB_POLL_IDLE_MS;
     if (copyRelaySim?.active) {
       pollMs = liveViewEnabled ? AGENT_HUB_POLL_SIM_LIVE_VIEW_MS : AGENT_HUB_POLL_SIM_MS;
@@ -201,7 +206,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     }
     const interval = setInterval(() => void loadLive(), pollMs);
     return () => clearInterval(interval);
-  }, [load, loadLive, copyRelaySim?.active, botConnected, liveViewEnabled]);
+  }, [loadLive, copyRelaySim?.active, botConnected, liveViewEnabled, agent]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !agent) return;
@@ -394,6 +399,12 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       ) : !agent ? (
         <div className="p-8 text-center">
           <p className="text-zinc-500">Agent not found.</p>
+          {error && (
+            <p className="mt-2 text-sm text-amber-200/90">{error}</p>
+          )}
+          <p className="mt-2 text-xs text-zinc-600">
+            If the home bot is offline, open this page on your Home PC and use Start showcase in the command center.
+          </p>
           <Link href="/agent-hub" className="mt-2 inline-block text-violet-400">
             ← Marketplace
           </Link>
