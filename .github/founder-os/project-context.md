@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Bump to v11.1 with known-combo dashboard filters and fix Bitfinex policy lock for CI.
+Fix CI signal parity: mirror showcase bot to signal engine and update v11.1 fixtures.
 
 ## Last Activity
 
