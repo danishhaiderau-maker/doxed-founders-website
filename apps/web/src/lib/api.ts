@@ -3920,6 +3920,18 @@ export function pauseMyAgentInstance(slug: string, token: string) {
   );
 }
 
+export function triggerSyncProtectionBreach(
+  slug: string,
+  token: string,
+  opts?: { flatten?: boolean },
+) {
+  return apiFetch<{ ok: boolean; status: string; message: string; flattened?: number }>(
+    `/trading-agents/${slug}/sync-protection/breach`,
+    { method: 'POST', body: JSON.stringify(opts ?? {}) },
+    token,
+  );
+}
+
 export function resumeMyAgentInstance(slug: string, token: string) {
   return apiFetch<{ ok: boolean; status: string; message: string }>(
     `/trading-agents/${slug}/instance/resume`,

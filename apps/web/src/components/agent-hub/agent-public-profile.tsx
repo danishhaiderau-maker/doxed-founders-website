@@ -239,6 +239,12 @@ function HireSidebar({
   activeDesk,
   onRenewRental,
   renewBusy,
+  botConnected,
+  copyRelayReconcile,
+  relayFidelity,
+  tradeLifecycleIntegrity,
+  onSyncProtectionBreach,
+  syncProtectionBusy,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -261,6 +267,12 @@ function HireSidebar({
   activeDesk: AgentDeskId;
   onRenewRental?: () => void;
   renewBusy?: boolean;
+  botConnected?: boolean;
+  copyRelayReconcile?: CopyRelayReconcileSnapshot | null;
+  relayFidelity?: import('@/components/agent-hub/agent-relay-fidelity-panel').RelayFidelitySnapshot | null;
+  tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
+  onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
+  syncProtectionBusy?: boolean;
 }) {
   const isLiveHired = hired && instanceMode === 'live';
   const rentalExpired =
@@ -361,6 +373,14 @@ function HireSidebar({
         onStopRelay={onPauseInstance}
         onStartRelay={onResumeInstance}
         relayBusy={instanceBusy}
+        syncInput={{
+          botConnected,
+          reconcile: copyRelayReconcile ?? undefined,
+          fidelity: relayFidelity ?? undefined,
+          lifecycle: tradeLifecycleIntegrity ?? undefined,
+        }}
+        onSyncProtectionBreach={onSyncProtectionBreach}
+        syncProtectionBusy={syncProtectionBusy}
       />
 
       {isLiveHired && (
@@ -423,6 +443,8 @@ export function AgentPublicProfile({
   rentalExpiresAt,
   onRenewRental,
   renewBusy,
+  onSyncProtectionBreach,
+  syncProtectionBusy,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -470,6 +492,8 @@ export function AgentPublicProfile({
   rentalExpiresAt?: string | null;
   onRenewRental?: () => void;
   renewBusy?: boolean;
+  onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
+  syncProtectionBusy?: boolean;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const tabs = isAdmin ? ([...PUBLIC_TABS, ...ADMIN_EXTRA_TABS] as Tab[]) : ([...PUBLIC_TABS] as Tab[]);
@@ -1033,6 +1057,12 @@ export function AgentPublicProfile({
           activeDesk={resolvedDesk}
           onRenewRental={onRenewRental}
           renewBusy={renewBusy}
+          botConnected={botConnected}
+          copyRelayReconcile={copyRelayReconcile}
+          relayFidelity={relayFidelity}
+          tradeLifecycleIntegrity={tradeLifecycleIntegrity}
+          onSyncProtectionBreach={onSyncProtectionBreach}
+          syncProtectionBusy={syncProtectionBusy}
         />
       </div>
     </div>

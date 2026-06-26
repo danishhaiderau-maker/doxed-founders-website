@@ -12,6 +12,8 @@ import {
 } from '@dcf/utils';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
 import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
+import { ShowcaseSyncPanel } from '@/components/agent-hub/showcase-sync-panel';
+import type { ShowcaseSyncScoreInput } from '@dcf/utils';
 import { BitfinexDerivativesFundingGuide } from '@/components/agent-hub/bitfinex-derivatives-funding-guide';
 import { ExchangeProviderOption, fetchExchangeProviders } from '@/lib/api';
 import { formatUsd } from '@dcf/utils';
@@ -46,6 +48,9 @@ export function ExchangeHirePanel({
   onStopRelay,
   onStartRelay,
   relayBusy,
+  syncInput,
+  onSyncProtectionBreach,
+  syncProtectionBusy,
 }: {
   slug: string;
   signedIn: boolean;
@@ -61,6 +66,9 @@ export function ExchangeHirePanel({
   onStopRelay?: () => void;
   onStartRelay?: () => void;
   relayBusy?: boolean;
+  syncInput?: ShowcaseSyncScoreInput;
+  onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
+  syncProtectionBusy?: boolean;
 }) {
   const [exchange, setExchange] = useState<ExchangeProvider>(
     (exchangeProvider as ExchangeProvider) || 'bitfinex',
@@ -174,6 +182,18 @@ export function ExchangeHirePanel({
             />
           </div>
         </div>
+
+        {isLiveHired && syncInput ? (
+          <div className="mt-4">
+            <ShowcaseSyncPanel
+              input={syncInput}
+              mode="live"
+              liveActive={relayState === 'active'}
+              onAutoStop={onSyncProtectionBreach}
+              autoStopBusy={syncProtectionBusy}
+            />
+          </div>
+        ) : null}
 
         {!isLiveHired && exchange === 'bitfinex' && (
           <div className="mt-4">

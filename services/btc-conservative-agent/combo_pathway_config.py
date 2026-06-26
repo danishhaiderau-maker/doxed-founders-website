@@ -2,9 +2,9 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-COMBO_604_SP4_CHASE_3PLUS: research candidate (NOT production).
+AI60_SP3_VIRTUAL_CHASE: research candidate (NOT production).
 
-All other combo/experimental lanes → legacy metadata only.
+Retired: COMBO_604_SP4_CHASE_3PLUS — historical data preserved, no new orders.
 """
 from __future__ import annotations
 
@@ -14,11 +14,12 @@ RESEARCH_LANE_COMBO_65_SP5_CHASE = "COMBO_65_SP5_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_65_SP5_DIRECT = "COMBO_65_SP5_DIRECT"
 RESEARCH_LANE_COMBO_604_SP4_CHASE = "COMBO_604_SP4_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_604_SP4_DIRECT = "COMBO_604_SP4_DIRECT"
+RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE = "AI60_SP3_VIRTUAL_CHASE"
 
 # Live order generation — research candidate only (+ CONTINUOUS benchmark toggle)
-COMBO_EXECUTION_LANES = (RESEARCH_LANE_COMBO_604_SP4_CHASE,)
+COMBO_EXECUTION_LANES = (RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,)
 
-COMBO_TILE_DISPLAY_ORDER = (RESEARCH_LANE_COMBO_604_SP4_CHASE,)
+COMBO_TILE_DISPLAY_ORDER = (RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE,)
 
 COMBO_LANE_SPECS = {
     RESEARCH_LANE_COMBO_65_SP5_CHASE: {
@@ -51,7 +52,7 @@ COMBO_LANE_SPECS = {
     },
     RESEARCH_LANE_COMBO_604_SP4_CHASE: {
         "label": "AI60-65 · Spread4 · Chase 3+",
-        "subtitle": "RESEARCH CANDIDATE · validate AI 60–65 + spread ≥4 + CHASE_3PLUS",
+        "subtitle": "RETIRED 2026-06-26 · historical research only — replaced by Virtual Chase tile",
         "combo_key": "AI60-65+SPREAD4+TYPE_B+CHASE_3PLUS_ALPHA",
         "ai_min": 60,
         "ai_max": 65,
@@ -60,16 +61,9 @@ COMBO_LANE_SPECS = {
         "entry_mode": "CHASE_3PLUS",
         "is_benchmark": False,
         "is_primary_production": False,
-        "is_research_candidate": True,
+        "is_research_candidate": False,
+        "is_legacy": True,
         "id_prefix": "c604c",
-        "promotion_criteria": (
-            "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS "
-            "over same period · stable DNA Quality · positive across multiple market regimes"
-        ),
-        "kill_criteria": (
-            "ANY after ≥50 trades: negative EV · DNA Quality deterioration · "
-            "failure to outperform CONTINUOUS"
-        ),
     },
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: {
         "label": "AI60-65 · Spread4 · Continuous",
@@ -84,6 +78,28 @@ COMBO_LANE_SPECS = {
         "is_legacy": True,
         "id_prefix": "c604d",
     },
+    RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: {
+        "label": "AI60+ · Spread ≥3 · Virtual Chase",
+        "subtitle": "RESEARCH CANDIDATE · hide limit chases 1–2, relive at chase 3, market at chase 6+60s",
+        "combo_key": "AI60++SPREAD3++VIRTUAL_CHASE",
+        "ai_min": 60,
+        "ai_max": 100,
+        "spread_min": 3,
+        "spread_max": 99,
+        "entry_mode": "VIRTUAL_CHASE",
+        "is_benchmark": False,
+        "is_primary_production": False,
+        "is_research_candidate": True,
+        "id_prefix": "vc603",
+        "promotion_criteria": (
+            "ALL required: ≥100 completed trades · positive EV · beats CONTINUOUS "
+            "over same period · stable DNA Quality · positive across multiple market regimes"
+        ),
+        "kill_criteria": (
+            "ANY after ≥50 trades: negative EV · DNA Quality deterioration · "
+            "failure to outperform CONTINUOUS"
+        ),
+    },
 }
 
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
@@ -93,13 +109,13 @@ BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "RESEARCH_CANDIDATE"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_COMBO_604_SP4_CHASE
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v11.0-genome-architecture-v1"
 RESEARCH_STACK_FEATURES = (
-    "Trading Genome v1 · Architecture freeze · CONTINUOUS benchmark + COMBO_604 research candidate · "
-    "Event bus + research.db + JSONL mirrors · Relay snapshot push · DNA Quality + UNKNOWN cluster"
+    "Trading Genome v1 · CONTINUOUS benchmark + AI60_SP3 Virtual Chase research · "
+    "Event bus + research.db + JSONL mirrors · Relay snapshot push · DNA Quality"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -121,6 +137,7 @@ _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_COMBO_65_SP5_CHASE: False,
     RESEARCH_LANE_COMBO_65_SP5_DIRECT: False,
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: False,
+    RESEARCH_LANE_COMBO_604_SP4_CHASE: False,
 })
 
 
@@ -163,8 +180,13 @@ def is_chase_3plus_entry_lane(lane: str) -> bool:
     return combo_entry_mode(lane) == "CHASE_3PLUS"
 
 
+def is_virtual_chase_entry_lane(lane: str) -> bool:
+    return combo_entry_mode(lane) == "VIRTUAL_CHASE"
+
+
 def is_immediate_entry_lane(lane: str) -> bool:
-    return combo_entry_mode(lane) == "IMMEDIATE"
+    mode = combo_entry_mode(lane)
+    return mode in ("IMMEDIATE", "VIRTUAL_CHASE")
 
 
 def is_benchmark_lane(lane: str) -> bool:

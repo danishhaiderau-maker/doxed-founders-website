@@ -8,6 +8,7 @@ import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { ShowcaseRelayEventsService, type ShowcaseRelayEventBody } from './showcase-relay-events.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
+import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { TradingAgentsService } from './trading-agents.service';
 
 @Controller('trading-agents')
@@ -17,6 +18,7 @@ export class TradingAgentsController {
     private readonly instances: TradingAgentInstancesService,
     private readonly relaySim: CopyRelaySimService,
     private readonly showcaseRelay: ShowcaseRelayEventsService,
+    private readonly execution: SignalSubscriberExecutionService,
   ) {}
 
   @Public()
@@ -94,6 +96,21 @@ export class TradingAgentsController {
   @Post(':slug/instance/resume')
   resumeInstance(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.setInstancePaused(user.id, slug, false);
+  }
+
+  @Post(':slug/sync-protection/breach')
+  async syncProtectionBreach(
+    @CurrentUser() user: AuthUser,
+    @Param('slug') slug: string,
+    @Body() body: { flatten?: boolean },
+  ) {
+    const pause = await this.instances.setInstancePaused(user.id, slug, true);
+    let flattened = 0;
+    if (body?.flatten) {
+      const res = await this.execution.emergencyFlattenOpenCopyLots(user.id, slug);
+      flattened = res.flattened;
+    }
+    return { ...pause, flattened };
   }
 
   @Post(':slug/instance/renew')

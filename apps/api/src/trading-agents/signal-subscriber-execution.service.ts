@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import {
   SignalCycleStatus,
   TradingAgentInstanceStatus,
@@ -2479,5 +2479,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     meta.peakMarginPct = Math.max(meta.peakMarginPct ?? 0, peakFromEvents);
     if (lockFloorFromEvents > 0) meta.profitLockFloor = lockFloorFromEvents;
     return meta;
+  }
+
+  /** Emergency flatten all OPEN copy lots (sync protection breach). */
+  async emergencyFlattenOpenCopyLots(userId: string, agentSlug: string): Promise<{ flattened: number }> {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') {
+      return { flattened: 0 };
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+    if (!creds) return { flattened: 0 };
+
+    this.activeTrading = this.bitfinex;
+    const mark =
+      (await this.activeTrading.getMarkPrice(creds).catch(() => null)) ??
+      (await this.botBridge.fetchStateForExecution(true).catch(() => null))?.price ??
+      0;
+
+    const openRows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.OPEN,
+        cycle: { agentId: agent.id },
+      },
+    });
+
+    let flattened = 0;
+    for (const row of openRows) {
+      const meta = await this.loadExecutionMeta(row.id);
+      if (!meta.qty || !meta.direction) continue;
+      const fillPrice = meta.fillPrice ?? mark;
+      await this.closeVirtualLot(agent.id, userId, row.cycleId, row.id, meta, creds, {
+        reason: 'HARD_STOP',
+        mark: mark || fillPrice,
+        fillPrice,
+        leverage: meta.leverage ?? DEFAULT_SUBSCRIBER_LEVERAGE,
+        peakMarginPct: meta.peakMarginPct ?? 0,
+        unrealMarginPct: 0,
+        stopLossMarginPct: meta.stopLossMarginPct ?? 0,
+      });
+      flattened += 1;
+    }
+
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instance.id },
+      data: {
+        lastError: `Sync protection — emergency flatten closed ${flattened} open lot(s). Relay paused.`,
+      },
+    });
+
+    return { flattened };
   }
 }
