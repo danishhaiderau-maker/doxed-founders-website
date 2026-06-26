@@ -12,7 +12,7 @@ Product & platform (3 recent commits)
 
 ## Last Commit
 
-Merge genome-architecture-v1: showcase relay API, genome pipeline, ladder v4
+Merge branch 'master' of https://github.com/danishhaiderau-maker/doxed-founders-website
 
 ## Last Activity
 
