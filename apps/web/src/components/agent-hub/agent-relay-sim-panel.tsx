@@ -20,6 +20,7 @@ import {
   AgentRelaySyncAlerts,
   buildRelaySyncAlerts,
 } from '@/components/agent-hub/agent-relay-sync-alerts';
+import { ShowcaseSyncPanel } from '@/components/agent-hub/showcase-sync-panel';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { downloadRelaySimAudit } from '@/lib/api';
 
@@ -58,7 +59,7 @@ export function AgentRelaySimPanel({
   exchangeLabel,
   signedIn,
   copyRelaySim,
-  copyRelayReconcile,
+  copyRelayReconcile: _copyRelayReconcile,
   relayFidelity,
   relaySimLiveBook,
   simActivity,
@@ -98,7 +99,7 @@ export function AgentRelaySimPanel({
   const exchange = exchangeLabel ?? 'Bitfinex';
   const sim = copyRelaySim;
   const active = Boolean(sim?.active);
-  const reconcile = active ? (sim?.reconcile ?? null) : (copyRelayReconcile ?? sim?.reconcile ?? null);
+  const reconcile = active ? (sim?.reconcile ?? null) : null;
   const delta = reconcile?.deltaBtc ?? 0;
   const deltaAlert =
     reconcile?.alert ?? Math.abs(delta) > COPY_RELAY_SIM_RECONCILE_ALERT_BTC;
@@ -154,7 +155,7 @@ export function AgentRelaySimPanel({
                   onClick={onStop}
                   className="rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
                 >
-                  {busy ? 'Stopping…' : 'Stop relay sim'}
+                  {busy ? 'Stopping…' : 'Stop simulation'}
                 </button>
               </>
             ) : (
@@ -164,7 +165,7 @@ export function AgentRelaySimPanel({
                 onClick={onStart}
                 className="rounded-lg border border-sky-500/50 bg-sky-950/40 px-4 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50"
               >
-                {busy ? 'Starting…' : 'Start relay sim'}
+                {busy ? 'Starting…' : 'Start simulation trading'}
               </button>
             )}
             {slug && accessToken ? (
@@ -269,6 +270,19 @@ export function AgentRelaySimPanel({
         ) : active ? (
           <p className="text-xs text-zinc-500">Waiting for first reconcile tick…</p>
         ) : null}
+
+        <ShowcaseSyncPanel
+          input={{
+            botConnected,
+            reconcile,
+            fidelity: relayFidelity ?? undefined,
+            lifecycle: tradeLifecycleIntegrity ?? undefined,
+          }}
+          mode="sim"
+          simActive={active}
+          onAutoStop={onStop}
+          autoStopBusy={busy}
+        />
 
         <AgentRelayFidelityPanel fidelity={relayFidelity} reconcile={reconcile} />
 

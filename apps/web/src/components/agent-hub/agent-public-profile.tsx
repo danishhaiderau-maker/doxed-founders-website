@@ -236,6 +236,9 @@ function HireSidebar({
   instanceBusy,
   rentalExpiresAt,
   accessToken,
+  activeDesk,
+  onRenewRental,
+  renewBusy,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -255,13 +258,92 @@ function HireSidebar({
   copyRelaySim?: CopyRelaySimState | null;
   instanceBusy?: boolean;
   rentalExpiresAt?: string | null;
+  activeDesk: AgentDeskId;
+  onRenewRental?: () => void;
+  renewBusy?: boolean;
 }) {
   const isLiveHired = hired && instanceMode === 'live';
+  const rentalExpired =
+    rentalExpiresAt != null && new Date(rentalExpiresAt).getTime() <= Date.now();
+
+  if (activeDesk === 'showcase') {
+    return (
+      <aside className="space-y-4 xl:sticky xl:top-28">
+        <div className="rounded-2xl border border-violet-500/30 bg-violet-950/15 p-5">
+          <p className="text-xs font-bold uppercase text-violet-400">Global showcase bot</p>
+          <p className="mt-2 text-xs text-zinc-400">
+            Admin research on :7002 — observe signals here. Switch to Live Copy or Relay Sim to
+            trade on your exchange.
+          </p>
+        </div>
+      </aside>
+    );
+  }
+
+  if (activeDesk === 'relay-sim') {
+    const simActive = Boolean(copyRelaySim?.active);
+    return (
+      <aside className="space-y-4 xl:sticky xl:top-28">
+        <div className="rounded-2xl border border-sky-500/30 bg-sky-950/15 p-5">
+          <p className="text-xs font-bold uppercase text-sky-400">Relay simulation</p>
+          <p className="mt-2 text-xs text-zinc-400">
+            Paper book only — no rental, no real USDT. Connect API once to validate sync with the
+            showcase bot before going live.
+          </p>
+          <p className="mt-3 rounded-lg border border-zinc-800 bg-black/25 px-3 py-2 text-xs text-zinc-300">
+            API:{' '}
+            <strong className={isLiveHired ? 'text-emerald-300' : 'text-amber-300'}>
+              {isLiveHired ? `${exchangeLabel ?? 'Bitfinex'} connected` : 'Not connected'}
+            </strong>
+          </p>
+          {isLiveHired ? (
+            <div className="mt-3">
+              {simActive ? (
+                <button
+                  type="button"
+                  disabled={relaySimBusy}
+                  onClick={onStopRelaySim}
+                  className="w-full rounded-lg border border-red-500/50 bg-red-950/40 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
+                >
+                  {relaySimBusy ? '…' : 'Stop simulation trading'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={relaySimBusy}
+                  onClick={onStartRelaySim}
+                  className="w-full rounded-lg border border-sky-500/50 bg-sky-600 py-2 text-sm font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  {relaySimBusy ? '…' : 'Start simulation trading'}
+                </button>
+              )}
+            </div>
+          ) : (
+            <Link
+              href={
+                signedIn
+                  ? `/agent-hub/${slug}/hire?exchange=bitfinex`
+                  : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=bitfinex`)}`
+              }
+              className="mt-3 block rounded-lg bg-sky-600 py-2.5 text-center text-sm font-bold text-white hover:bg-sky-500"
+            >
+              Connect API to simulate
+            </Link>
+          )}
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside className="space-y-4 xl:sticky xl:top-28">
       {isLiveHired && rentalExpiresAt && (
-        <AgentRentalCountdown expiresAt={rentalExpiresAt} />
+        <AgentRentalCountdown
+          expiresAt={rentalExpiresAt}
+          onRenew={onRenewRental}
+          renewBusy={renewBusy}
+          costWeek={agent.costDdollarWeek ?? 2000}
+        />
       )}
 
       <ExchangeHirePanel
@@ -275,14 +357,10 @@ function HireSidebar({
         exchangeLabel={exchangeLabel}
         exchangeConnected={exchangeConnected}
         exchangeBalanceUsd={agent.exchangeBalanceUsd ?? agent.balanceUsd}
-        rentalExpiresAt={rentalExpiresAt}
+        rentalExpired={rentalExpired}
         onStopRelay={onPauseInstance}
         onStartRelay={onResumeInstance}
         relayBusy={instanceBusy}
-        copyRelaySim={copyRelaySim}
-        onStartRelaySim={onStartRelaySim}
-        onStopRelaySim={onStopRelaySim}
-        relaySimBusy={relaySimBusy}
       />
 
       {isLiveHired && (
@@ -343,6 +421,8 @@ export function AgentPublicProfile({
   onAdminRefresh,
   instanceBusy,
   rentalExpiresAt,
+  onRenewRental,
+  renewBusy,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -388,6 +468,8 @@ export function AgentPublicProfile({
   onAdminRefresh?: () => void;
   instanceBusy?: boolean;
   rentalExpiresAt?: string | null;
+  onRenewRental?: () => void;
+  renewBusy?: boolean;
 }) {
   const [tab, setTab] = useState<Tab>('Overview');
   const tabs = isAdmin ? ([...PUBLIC_TABS, ...ADMIN_EXTRA_TABS] as Tab[]) : ([...PUBLIC_TABS] as Tab[]);
@@ -938,6 +1020,9 @@ export function AgentPublicProfile({
           instanceBusy={instanceBusy}
           rentalExpiresAt={rentalExpiresAt}
           accessToken={accessToken ?? adminToken}
+          activeDesk={resolvedDesk}
+          onRenewRental={onRenewRental}
+          renewBusy={renewBusy}
         />
       </div>
     </div>

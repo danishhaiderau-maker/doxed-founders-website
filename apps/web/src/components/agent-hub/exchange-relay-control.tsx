@@ -32,6 +32,7 @@ export function ExchangeRelayControl({
   onStart,
   showSelector = true,
   hideConnect = false,
+  rentalExpired,
   providers,
   onExchangeChange,
 }: {
@@ -46,12 +47,13 @@ export function ExchangeRelayControl({
   onStart?: () => void;
   showSelector?: boolean;
   hideConnect?: boolean;
+  rentalExpired?: boolean;
   providers?: { id: string; label: string; available: boolean }[];
   onExchangeChange?: (id: string) => void;
 }) {
   const isLiveRelay = relayState === 'active' || relayState === 'paused';
-  const isSimRelay = relayState === 'sim';
-  const canToggle = signedIn && isLiveRelay && (onStop || onStart);
+  const canToggle =
+    signedIn && isLiveRelay && (onStop || onStart) && !rentalExpired;
   const hireHref = signedIn
     ? `/agent-hub/${slug}/hire?exchange=${exchange}`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=${exchange}`)}`;
@@ -128,7 +130,7 @@ export function ExchangeRelayControl({
               onClick={onStart}
               className="shrink-0 rounded-lg border border-emerald-500/50 bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
             >
-              {busy ? '…' : 'Start'}
+              {busy ? '…' : 'Start real trading'}
             </button>
           ) : (
             <button
@@ -140,6 +142,10 @@ export function ExchangeRelayControl({
               {busy ? '…' : 'Stop'}
             </button>
           )
+        ) : rentalExpired && isLiveRelay ? (
+          <span className="shrink-0 rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-2 text-sm font-semibold text-red-200">
+            Renew rental to start
+          </span>
         ) : relayState === 'idle' && !hideConnect ? (
           <Link
             href={hireHref}
@@ -150,18 +156,12 @@ export function ExchangeRelayControl({
         ) : relayState === 'copy' && canToggle ? null : null}
       </div>
 
-      {isSimRelay && (
-        <p className="text-[11px] leading-relaxed text-sky-200/80">
-          Relay simulation is running from the main agent hub. Stop the sim there before using Start to resume live
-          copy on {exchangeLabel}.
-        </p>
-      )}
-
       {isLiveRelay && (
         <p className="text-[11px] leading-relaxed text-zinc-500">
           <strong className="text-zinc-400">Stop</strong> severs the showcase relay — no new trades from the admin bot
           will hit your {exchangeLabel} account. Open positions stay on the exchange.{' '}
-          <strong className="text-zinc-400">Start</strong> resumes copy trading from where you left off.
+          <strong className="text-zinc-400">Start real trading</strong> resumes copy from where you left off
+          {rentalExpired ? ' after you renew your rental.' : '.'}
         </p>
       )}
     </div>

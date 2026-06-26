@@ -4,7 +4,15 @@ import Link from 'next/link';
 import type { TradingAgentSummary } from '@/lib/api';
 import { formatUsd } from '@dcf/utils';
 
-export function AgentHubBottomBanner({ agents }: { agents: TradingAgentSummary[] }) {
+export function AgentHubBottomBanner({
+  agents,
+  hidden,
+}: {
+  agents: TradingAgentSummary[];
+  hidden?: boolean;
+}) {
+  if (hidden) return null;
+
   const live = agents.filter((a) => a.status !== 'PAUSED');
   const activeCount = live.length;
   const avgWin =

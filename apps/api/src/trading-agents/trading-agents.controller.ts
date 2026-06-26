@@ -96,6 +96,11 @@ export class TradingAgentsController {
     return this.instances.setInstancePaused(user.id, slug, false);
   }
 
+  @Post(':slug/instance/renew')
+  renewRental(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
+    return this.instances.renewLiveCopyRental(user.id, slug);
+  }
+
   @Public()
   @Post(':slug/showcase-relay-event')
   showcaseRelayEvent(

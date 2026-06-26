@@ -8,12 +8,10 @@ import {
   EXCHANGE_API_GUIDES,
   EXCHANGE_PROVIDER_LABELS,
   EXCHANGE_PROVIDERS,
-  type CopyRelaySimState,
   type ExchangeProvider,
 } from '@dcf/utils';
 import { ExchangeApiGuideDrawer } from '@/components/agent-hub/exchange-api-guide-drawer';
 import { ExchangeRelayControl } from '@/components/agent-hub/exchange-relay-control';
-import { AgentRentalCountdown } from '@/components/agent-hub/agent-rental-countdown';
 import { BitfinexDerivativesFundingGuide } from '@/components/agent-hub/bitfinex-derivatives-funding-guide';
 import { ExchangeProviderOption, fetchExchangeProviders } from '@/lib/api';
 import { formatUsd } from '@dcf/utils';
@@ -44,14 +42,10 @@ export function ExchangeHirePanel({
   exchangeLabel,
   exchangeConnected,
   exchangeBalanceUsd,
-  rentalExpiresAt,
+  rentalExpired,
   onStopRelay,
   onStartRelay,
   relayBusy,
-  copyRelaySim,
-  onStartRelaySim,
-  onStopRelaySim,
-  relaySimBusy,
 }: {
   slug: string;
   signedIn: boolean;
@@ -63,14 +57,10 @@ export function ExchangeHirePanel({
   exchangeLabel?: string | null;
   exchangeConnected?: boolean;
   exchangeBalanceUsd?: number | null;
-  rentalExpiresAt?: string | null;
+  rentalExpired?: boolean;
   onStopRelay?: () => void;
   onStartRelay?: () => void;
   relayBusy?: boolean;
-  copyRelaySim?: CopyRelaySimState | null;
-  onStartRelaySim?: () => void;
-  onStopRelaySim?: () => void;
-  relaySimBusy?: boolean;
 }) {
   const [exchange, setExchange] = useState<ExchangeProvider>(
     (exchangeProvider as ExchangeProvider) || 'bitfinex',
@@ -102,38 +92,16 @@ export function ExchangeHirePanel({
     ? `/agent-hub/${slug}/hire?exchange=${exchange}`
     : `/login?callbackUrl=${encodeURIComponent(`/agent-hub/${slug}/hire?exchange=${exchange}`)}`;
 
-  const simActive = Boolean(copyRelaySim?.active);
   const isLiveHired = hired && instanceMode === 'live';
 
   const relayState =
     isLiveHired
-      ? simActive
+      ? rentalExpired
         ? ('paused' as const)
         : instanceStatus === 'PAUSED'
           ? ('paused' as const)
           : ('active' as const)
       : ('idle' as const);
-
-  const copyModes = [
-    {
-      id: 'live',
-      title: 'Live relay',
-      detail: 'Real orders on your exchange when showcase signals fire.',
-      active: isLiveHired && !simActive && instanceStatus !== 'PAUSED',
-    },
-    {
-      id: 'sim',
-      title: 'Relay simulation',
-      detail: 'Paper book, real BTC prices — test reconcile before live.',
-      active: simActive,
-    },
-    {
-      id: 'observe',
-      title: 'Showcase observe',
-      detail: 'Home research bot — signals only, not your copy session.',
-      active: !isLiveHired,
-    },
-  ];
 
   return (
     <>
@@ -149,50 +117,17 @@ export function ExchangeHirePanel({
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-5">
         {isLiveHired ? (
           <>
-            <p className="font-semibold text-white">Your {selectedLabel} copy relay</p>
-            {rentalExpiresAt && (
-              <div className="mt-3">
-                <AgentRentalCountdown expiresAt={rentalExpiresAt} compact />
-              </div>
+            <p className="font-semibold text-white">Your {selectedLabel} live copy relay</p>
+            {rentalExpired ? (
+              <p className="mt-3 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs font-semibold text-red-100">
+                Rental expired — renew above before starting real trading.
+              </p>
+            ) : (
+              <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+                Derivatives balance:{' '}
+                <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
+              </p>
             )}
-            <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
-              Derivatives balance:{' '}
-              <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
-            </p>
-            <div className="mt-3 space-y-2">
-              {copyModes.slice(0, 2).map((m) => (
-                <div
-                  key={m.id}
-                  className={`rounded-lg border px-3 py-2 text-xs ${
-                    m.active
-                      ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
-                      : 'border-zinc-800 text-zinc-500'
-                  }`}
-                >
-                  <span className="font-semibold text-zinc-200">{m.title}</span>
-                  <span className="mt-0.5 block">{m.detail}</span>
-                </div>
-              ))}
-            </div>
-            {exchange === 'bitfinex' && simActive && onStopRelaySim ? (
-              <button
-                type="button"
-                disabled={relaySimBusy}
-                onClick={onStopRelaySim}
-                className="mt-3 w-full rounded-lg border border-red-500/50 bg-red-950/40 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
-              >
-                {relaySimBusy ? '…' : 'Stop relay simulation'}
-              </button>
-            ) : exchange === 'bitfinex' && onStartRelaySim ? (
-              <button
-                type="button"
-                disabled={relaySimBusy || simActive}
-                onClick={onStartRelaySim}
-                className="mt-3 w-full rounded-lg border border-sky-500/50 bg-sky-950/40 py-2 text-sm font-semibold text-sky-200 disabled:opacity-50"
-              >
-                {relaySimBusy ? '…' : 'Start relay simulation'}
-              </button>
-            ) : null}
             {exchange === 'bitfinex' && (
               <div className="mt-3">
                 <BitfinexDerivativesFundingGuide compact />
@@ -203,7 +138,8 @@ export function ExchangeHirePanel({
           <>
             <p className="font-semibold text-white">Start real copy trading</p>
             <p className="mt-2 text-xs text-zinc-500">
-              Connect API keys once — choose live relay or simulation from the main hub.
+              Connect API keys — live copy requires an active weekly rental. Use Relay Sim tab to
+              test sync first without spending USDT.
             </p>
             <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
               Hiring fee:{' '}
@@ -231,6 +167,7 @@ export function ExchangeHirePanel({
               busy={relayBusy}
               onStop={onStopRelay}
               onStart={onStartRelay}
+              rentalExpired={rentalExpired}
               showSelector={!isLiveHired}
               providers={sorted}
               onExchangeChange={(id) => setExchange(id as ExchangeProvider)}
