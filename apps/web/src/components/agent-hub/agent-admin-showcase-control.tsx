@@ -136,79 +136,42 @@ function cmdTimeoutMs(id: string): number {
   return INSTANT_CMD_TIMEOUT_MS;
 }
 
-const COMMANDS: HomeCmd[] = [
+/** One-click orchestration — same sequence as home-stack-start-everything.ps1 */
+const START_SHOWCASE: HomeCmd = {
+  id: 'start-showcase',
+  label: '▶ Start showcase',
+  hint: 'Bridge :7810 → bot :7002 → analyzer :9500 → tunnel → auto-wire (correct order, one click)',
+  path: '/cmd/start-all-global',
+  tone: 'primary',
+};
+
+const STOP_SHOWCASE: HomeCmd = {
+  id: 'stop-showcase',
+  label: '■ Stop showcase',
+  hint: 'Stop bot, analyzer, and tunnel (bridge :7810 stays running for next Start)',
+  path: '/cmd/stop-all-global',
+  tone: 'danger',
+};
+
+const ADVANCED_COMMANDS: HomeCmd[] = [
   {
     id: 'reset-home-stack',
-    label: '↻ Reset home stack',
-    hint: 'Clean stop → wait 8s → start fresh (best when :7002/tunnel flaps or duplicate bots)',
+    label: '↻ Clean reset + start',
+    hint: 'Stop everything, wait 8s, then run the full Start sequence (use when stack keeps flapping)',
     path: '/cmd/reset-home-stack',
     tone: 'primary',
   },
   {
-    id: 'start-all',
-    label: '▶ Start everything',
-    hint: 'Reload bridge + open bot :7002, analyzer :9500, tunnel (all visible consoles stay open)',
-    path: '/cmd/start-all-global',
-    tone: 'primary',
-  },
-  {
     id: 'restart-bridge',
-    label: '↻ Restart bridge',
-    hint: 'Reload RESTART-LAUNCHER logic — opens Doxed Home Bridge :7810 (required for buttons)',
+    label: '↻ Restart bridge only',
+    hint: 'Reload bridge :7810 if Start/Stop buttons stop responding',
     path: '/cmd/restart-bridge',
-    tone: 'primary',
-  },
-  {
-    id: 'start-bot',
-    label: '▶ Start bot',
-    hint: 'Conservative BTC agent on :7002 (signals + relay webhook for site subscribers)',
-    path: '/cmd/start-bot',
-    tone: 'primary',
-  },
-  {
-    id: 'start-analyzer',
-    label: '▶ Start analyzer',
-    hint: 'Research loop + dashboard on :9500',
-    path: '/cmd/start-analyzer',
-  },
-  {
-    id: 'start-analyzer-once',
-    label: '▶ Analyzer once',
-    hint: 'Single research pass then exit',
-    path: '/cmd/start-analyzer-once',
-  },
-  {
-    id: 'start-tunnel',
-    label: '▶ Start tunnel',
-    hint: 'Named tunnel bot.doxxedcrypto.digital → :7002. Requires bot running first.',
-    path: '/cmd/start-tunnel',
-  },
-  {
-    id: 'wire',
-    label: '☁ Wire to site',
-    hint: 'Push tunnel URL to Neon + Railway so doxxedcrypto.digital can reach home bot',
-    path: '/cmd/wire',
-    tone: 'primary',
   },
   {
     id: 'wipe-research',
     label: '🗑 Wipe research CSVs',
     hint: 'Fresh collection reset — archive + wipe CSV/JSONL, restart at $500',
     path: '/cmd/wipe-research',
-    tone: 'danger',
-  },
-  {
-    id: 'stop-bot',
-    label: '■ Stop bot',
-    hint: 'Stop showcase bot on :7002',
-    path: '/cmd/stop-bot',
-    tone: 'danger',
-  },
-  {
-    id: 'stop-all-global',
-    label: '■ Stop everything',
-    hint: 'Stop :7002 bot, :9500 analyzer, and tunnel',
-    path: '/cmd/stop-all-global',
     tone: 'danger',
   },
 ];
@@ -229,7 +192,8 @@ export function AgentAdminShowcaseControl({
   const [msg, setMsg] = useState<string | null>(null);
   const [launcherOnline, setLauncherOnline] = useState<boolean | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
-  const [tunnelUrl, setTunnelUrl] = useState(PUBLIC_BOT_URL);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [startSteps, setStartSteps] = useState<string | null>(null);
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
@@ -256,7 +220,6 @@ export function AgentAdminShowcaseControl({
       const json = (await res.json()) as HomeStatus & { ok?: boolean };
       const normalized = await normalizeHomeStatus(json);
       setStatus(normalized);
-      if (normalized.tunnel?.url) setTunnelUrl(normalized.tunnel.url);
     } catch {
       setStatus(await probeDirectHomeStatus());
     }
@@ -272,8 +235,7 @@ export function AgentAdminShowcaseControl({
     setBusy(id);
     setMsg(null);
     try {
-      const q = id === 'wire' && tunnelUrl.trim() ? `?url=${encodeURIComponent(tunnelUrl.trim())}` : '';
-      const res = await fetch(`${LAUNCHER}${path}${q}`, { signal: AbortSignal.timeout(cmdTimeoutMs(id)) });
+      const res = await fetch(`${LAUNCHER}${path}`, { signal: AbortSignal.timeout(cmdTimeoutMs(id)) });
       const json = (await res.json()) as { ok?: boolean; message?: string; error?: string; log?: string };
       if (!json.ok) {
         setMsg(json.error ?? 'Command failed — run RESTART-LAUNCHER.cmd on this PC');
@@ -282,15 +244,27 @@ export function AgentAdminShowcaseControl({
         if (json.log) setMsg((m) => `${m ?? ''}\n${json.log}`.trim());
         void refreshStatus();
         onUpdated?.();
-        if (id === 'start-all' || id === 'restart-bridge' || id === 'stop-all-global' || id === 'reset-home-stack') {
+        if (
+          id === 'start-showcase' ||
+          id === 'restart-bridge' ||
+          id === 'stop-showcase' ||
+          id === 'reset-home-stack'
+        ) {
           setTimeout(() => void refreshStatus(), 5000);
           setTimeout(() => void refreshStatus(), 15000);
           setTimeout(() => void refreshStatus(), 45000);
           setTimeout(() => void refreshStatus(), 90000);
         }
-        if (id.startsWith('start') || id === 'wire') {
+        if (id === 'start-showcase' || id === 'reset-home-stack') {
+          setStartSteps(
+            'Starting in order: (1) bridge :7810 → (2) bot :7002 → (3) analyzer :9500 → (4) tunnel → (5) auto-wire. Four console windows should open — keep them open. Refresh this page at 30s, 60s, 90s.',
+          );
           setTimeout(() => onUpdated?.(), 20000);
           setTimeout(() => onUpdated?.(), 60000);
+          setTimeout(() => onUpdated?.(), 120000);
+        }
+        if (id === 'stop-showcase') {
+          setStartSteps(null);
         }
       }
     } catch (err) {
@@ -376,37 +350,22 @@ export function AgentAdminShowcaseControl({
 
       {launcherOnline === false && (
         <p className="mt-2 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">
-          Bridge :7810 is offline — click <strong>Restart bridge</strong> below, or double-click{' '}
-          <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then hard-refresh this page.
+          Bridge :7810 is offline — click <strong>Start showcase</strong> below (step 1 reloads the bridge), or
+          double-click <code className="text-red-100">RESTART-LAUNCHER.cmd</code>, then hard-refresh this page.
         </p>
       )}
 
       <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
-        <p className="font-semibold text-zinc-200">How to use (this PC)</p>
-        <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-zinc-400">
-          <li>
-            <strong className="text-zinc-300">Reset home stack</strong> when bot/tunnel keeps flapping, or after code
-            updates — clean stop, 8s pause, fresh start.
-          </li>
-          <li>
-            Or <strong className="text-zinc-300">Start everything</strong> if stack is already stopped (bridge + bot +
-            analyzer + tunnel).
-          </li>
-          <li>
-            <strong className="text-zinc-300">/api/ping</strong> on :{botPort} responds in ~1–2s while bot loads; full
-            dashboard takes <strong className="text-zinc-300">60–90s</strong> on this PC.
-          </li>
-          <li>
-            Click <strong className="text-zinc-300">Refresh status</strong> at 30s, 60s, 90s — bot, analyzer, tunnel
-            should go green.
-          </li>
-          <li>
-            Optional: <strong className="text-zinc-300">Wire to site</strong> after tunnel is live (Neon + Railway).
-          </li>
-        </ol>
+        <p className="font-semibold text-zinc-200">One-click on this PC</p>
+        <p className="mt-1.5 text-zinc-400">
+          <strong className="text-zinc-300">Start showcase</strong> runs the full stack in the correct order (bridge →
+          bot → analyzer → tunnel → wire). <strong className="text-zinc-300">Stop showcase</strong> shuts down bot,
+          analyzer, and tunnel. After Start, wait <strong className="text-zinc-300">60–90s</strong> for the live Agent
+          Hub page to sync — &quot;Live bot slow&quot; clears once the tunnel and bot are up.
+        </p>
         <p className="mt-2 text-[10px] text-zinc-500">
-          Do not press Enter in bot/analyzer/tunnel windows unless stopping them. Bridge :7810 must stay open. Close
-          extra browser tabs if the PC feels slow (duplicate bots are auto-killed on start).
+          Keep the four Doxed console windows open. Do not press Enter in them unless stopping. Use Advanced only for
+          clean reset or bridge-only restart.
         </p>
       </div>
 
@@ -418,40 +377,66 @@ export function AgentAdminShowcaseControl({
         <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
       </div>
 
-      <p className="mt-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-        Showcase controls (this PC)
-      </p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {COMMANDS.map((cmd) => (
-          <button
-            key={cmd.id}
-            type="button"
-            disabled={busy === cmd.id}
-            title={cmd.hint}
-            onClick={() => void runLocal(cmd.path, cmd.id)}
-            className={`rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${
-              cmd.tone === 'primary'
-                ? 'bg-violet-600 text-white hover:bg-violet-500'
-                : cmd.tone === 'danger'
-                  ? 'bg-red-700 text-white hover:bg-red-600'
-                  : 'border border-zinc-600 text-zinc-200 hover:border-violet-500/50'
-            }`}
-          >
-            {busy === cmd.id ? '…' : cmd.label}
-          </button>
-        ))}
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={busy === START_SHOWCASE.id}
+          title={START_SHOWCASE.hint}
+          onClick={() => void runLocal(START_SHOWCASE.path, START_SHOWCASE.id)}
+          className="min-w-[160px] flex-1 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-500 disabled:opacity-50 sm:flex-none"
+        >
+          {busy === START_SHOWCASE.id ? 'Starting…' : START_SHOWCASE.label}
+        </button>
+        <button
+          type="button"
+          disabled={busy === STOP_SHOWCASE.id}
+          title={STOP_SHOWCASE.hint}
+          onClick={() => void runLocal(STOP_SHOWCASE.path, STOP_SHOWCASE.id)}
+          className="min-w-[160px] flex-1 rounded-xl bg-red-700 px-5 py-3 text-sm font-bold text-white hover:bg-red-600 disabled:opacity-50 sm:flex-none"
+        >
+          {busy === STOP_SHOWCASE.id ? 'Stopping…' : STOP_SHOWCASE.label}
+        </button>
+      </div>
+
+      {startSteps && (
+        <p className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+          {startSteps}
+        </p>
+      )}
+
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((o) => !o)}
+          className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 hover:text-zinc-300"
+        >
+          {advancedOpen ? '▾ Advanced' : '▸ Advanced'}
+        </button>
+        {advancedOpen && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {ADVANCED_COMMANDS.map((cmd) => (
+              <button
+                key={cmd.id}
+                type="button"
+                disabled={busy === cmd.id}
+                title={cmd.hint}
+                onClick={() => void runLocal(cmd.path, cmd.id)}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${
+                  cmd.tone === 'primary'
+                    ? 'bg-violet-600 text-white hover:bg-violet-500'
+                    : cmd.tone === 'danger'
+                      ? 'bg-red-700 text-white hover:bg-red-600'
+                      : 'border border-zinc-600 text-zinc-200 hover:border-violet-500/50'
+                }`}
+              >
+                {busy === cmd.id ? '…' : cmd.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-end gap-2">
-        <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-[10px] text-zinc-500">
-          Tunnel URL (for Wire to site)
-          <input
-            value={tunnelUrl}
-            onChange={(e) => setTunnelUrl(e.target.value)}
-            placeholder={PUBLIC_BOT_URL}
-            className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200"
-          />
-        </label>
         <button
           type="button"
           disabled={execBusy}
@@ -493,8 +478,8 @@ export function AgentAdminShowcaseControl({
       </div>
 
       <p className="mt-2 text-[10px] text-zinc-600">
-        Named Cloudflare tunnel (free plan) → bot.doxxedcrypto.digital. Use <strong>Start everything</strong> for the
-        full stack; use <strong>Restart bridge</strong> if buttons stop responding.
+        Named Cloudflare tunnel → bot.doxxedcrypto.digital. Start showcase handles bridge, bot, analyzer, tunnel, and
+        auto-wire in one sequence.
       </p>
 
       {status?.analyzer?.note && (

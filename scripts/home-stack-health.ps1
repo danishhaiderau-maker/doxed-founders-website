@@ -15,12 +15,23 @@ function Test-HttpOk {
   }
 }
 
+function Test-BotHealthyQuick {
+  # Bridge /status must stay under ~2s — single-threaded HttpListener blocks all buttons.
+  if (-not (Test-PortOpen $BotPort)) { return $false }
+  return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 2)
+}
+
 function Test-BotHealthy {
   if (-not (Test-PortOpen $BotPort)) { return $false }
   if (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 12) { return $true }
   # One retry — slow laptops often miss the first probe under load.
   Start-Sleep -Milliseconds 800
   return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 15)
+}
+
+function Test-AnalyzerHealthyQuick {
+  if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
+  return (Test-HttpOk "http://127.0.0.1:$AnalyzerPort/api/status" 2)
 }
 
 function Test-AnalyzerHealthy {

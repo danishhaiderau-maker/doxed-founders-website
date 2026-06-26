@@ -61,21 +61,16 @@ function Get-FullStatus {
     return $script:StatusCache.payload
   }
 
-  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 1200
+  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 400
   $botPortOpen = [bool]$portMap[$BotPort]
-  if (-not $botPortOpen) { $botPortOpen = Test-BotHealthy }
   $analyzerRunning = [bool]$portMap[$AnalyzerPort]
-  if (-not $analyzerRunning) { $analyzerRunning = Test-AnalyzerHealthy }
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
   $tunnelLive = $false
   if ($tunnelUrl) {
-    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 60) {
+    if ($script:TunnelLiveCache.url -eq $tunnelUrl -and ($now - $script:TunnelLiveCache.at).TotalSeconds -lt 120) {
       $tunnelLive = $script:TunnelLiveCache.live
-    } elseif ($cloudflaredRunning -and ($botPortOpen -or (Test-BotHealthy))) {
-      $tunnelLive = Test-TunnelPublicHealthy $tunnelUrl
-      $script:TunnelLiveCache = @{ url = $tunnelUrl; live = $tunnelLive; at = $now }
     }
   }
   $payload = @{
@@ -244,30 +239,10 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
         return @{ ok = $false; error = "Tunnel start failed: $($_.Exception.Message)" }
       }
       $stableUrl = "https://bot.doxxedcrypto.digital"
-      $deadline = (Get-Date).AddSeconds(50)
-      $live = $false
-      while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 3
-        $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-        if ($cfRunning -and (Test-TunnelPublicHealthy $stableUrl)) {
-          $live = $true
-          break
-        }
+      return @{
+        ok = $true
+        message = "Named tunnel starting at $stableUrl - refresh status in 30-60s (bridge stays responsive)."
       }
-      if (-not $live) {
-        $cfRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
-        if (-not $cfRunning) {
-          return @{
-            ok = $false
-            error = "cloudflared exited immediately - open logs/cloudflared-named.err.log on this PC."
-          }
-        }
-        return @{
-          ok = $false
-          error = "cloudflared is running but $stableUrl still offline - wait 30s, click Refresh status, or run RECOVER-GLOBAL-STACK.cmd."
-        }
-      }
-      return @{ ok = $true; message = "Named tunnel live at $stableUrl (bot :$BotPort)" }
     }
     "enable-named-tunnel" {
       Set-Content -Path (Join-Path $repoRoot ".home-use-named-tunnel") -Value "enabled" -NoNewline
@@ -431,9 +406,23 @@ try {
 }
 
 try {
+  $runspacePool = [runspacefactory]::CreateRunspacePool(1, 6)
+  $runspacePool.Open()
   while ($listener.IsListening) {
-    Serve-Request $listener.GetContext()
+    $context = $listener.GetContext()
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $runspacePool
+    [void]$ps.AddScript({
+      param($Ctx)
+      Serve-Request $Ctx
+    }).AddArgument($context)
+    $handle = $ps.BeginInvoke()
+    [void][System.Threading.Tasks.Task]::Run({
+      try { $ps.EndInvoke($handle) | Out-Null } catch { }
+      finally { $ps.Dispose() }
+    })
   }
 } finally {
+  if ($runspacePool) { $runspacePool.Close() }
   $listener.Stop()
 }
