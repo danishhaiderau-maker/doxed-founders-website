@@ -17,7 +17,8 @@ const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 
 function sha256(text) {
-  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+  const normalized = text.replace(/\r\n/g, '\n');
+  return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 12);
 }
 
 function extractEngineVersion(comboSrc) {
