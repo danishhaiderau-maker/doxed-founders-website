@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix CI signal parity: mirror showcase bot to signal engine and update v11.1 fixtures.
+Add early boot ping, duplicate bot kill, and Reset home stack command center button.
 
 ## Last Activity
 
