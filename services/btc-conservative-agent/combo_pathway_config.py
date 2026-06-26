@@ -112,10 +112,10 @@ PRIMARY_PRODUCTION_ROLE = "RESEARCH_CANDIDATE"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v11.0-genome-architecture-v1"
+RESEARCH_STACK_VERSION = "v11.1-virtual-chase-known-combos-v1"
 RESEARCH_STACK_FEATURES = (
-    "Trading Genome v1 · CONTINUOUS benchmark + AI60_SP3 Virtual Chase research · "
-    "Event bus + research.db + JSONL mirrors · Relay snapshot push · DNA Quality"
+    "AI60_SP3 Virtual Chase · known-combo dashboard filters · "
+    "Trading Genome v1 · Event bus + research.db · Relay snapshot push"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

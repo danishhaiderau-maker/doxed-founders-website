@@ -137,7 +137,6 @@ REPORT_NAV = (
     ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
     ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
     ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
-    ("typeb", "Type B Predictor", "type_b_predictor_report.json"),
     ("exits", "Exit Leakage", "top_leakage_report.json"),
     ("horizon", "Recovery", "horizon_profitability_report.json"),
     ("ai", "AI Lab", "ai_calibration_report.json"),
@@ -568,14 +567,49 @@ def _chase_payload():
     }
 
 
+def _combo_token_known(val) -> bool:
+    tok = str(val or "").strip().upper()
+    if not tok or tok in {"UNKNOWN", "UNK", "NAN", "NONE", "NULL", "OTHER", "MIXED"}:
+        return False
+    if "TYPE_B" in tok:
+        return False
+    return True
+
+
+def _combo_row_known(row: dict) -> bool:
+    if not row:
+        return False
+    lane = str(row.get("lane") or row.get("research_lane") or "").upper()
+    if lane.startswith("TYPE_B"):
+        return False
+    return all(
+        _combo_token_known(row.get(key))
+        for key in ("ai_bucket", "spread_bucket", "entry_mode", "type", "lane")
+        if row.get(key) not in (None, "")
+    ) and (not row.get("combo") or _combo_token_known(row.get("combo")))
+
+
+def _regime_key_known(regime) -> bool:
+    r = str(regime or "").strip().upper()
+    if not r or r in {"UNKNOWN", "UNK"}:
+        return False
+    for part in r.split("|"):
+        p = part.strip()
+        if not p or p in {"UNKNOWN", "UNK", "NAN", "NONE"} or p.startswith("UNK"):
+            return False
+    return True
+
+
 def _combos_payload():
     rep = _read_report("top_combinations_report.json")
-    top = rep.get("top") or []
+    top = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
+    top.sort(key=lambda x: (x.get("ev_usd") or 0, x.get("pnl_usd") or 0), reverse=True)
     return {
         "generated_at": rep.get("generated_at"),
-        "total_combos": rep.get("total_combos", len(top)),
+        "total_combos": len(top),
         "min_trades": rep.get("min_trades_per_combo"),
         "dimensions": rep.get("dimensions") or [],
+        "filter_note": rep.get("filter_note") or "Known AI × spread × entry × lane only (no UNKNOWN/TYPE_B/OTHER)",
         "top": top[:50],
     }
 
@@ -1521,13 +1555,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Top Combinations</h2>
-    <p class="note" id="combos-note">Best AI × spread × TYPE × lane combos (min trades filter).</p>
+    <p class="note" id="combos-note">Known AI × spread × entry × lane combos — sorted by EV (no UNKNOWN/TYPE_B/OTHER).</p>
     <div class="kpis" id="combos-kpis"></div>
     <table><thead><tr><th>Combo</th><th>AI</th><th>Spread</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
   </section>
   <section id="sec-pathway-audit">
     <h2>Pathway Audit</h2>
-    <p class="note">Startup validation — TYPE_B not an entry gate, tile independence, version sync, exit reports.</p>
+    <p class="note">Startup validation — tile independence, version sync, exit reports.</p>
     <div class="kpis" id="audit-kpis"></div>
     <h3>Tile independence tests</h3>
     <table><thead><tr><th>Test</th><th>Pass</th><th>Detail</th></tr></thead><tbody id="audit-tile-body"></tbody></table>
@@ -1537,17 +1571,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Check</th><th>Pass</th><th>Detail</th></tr></thead><tbody id="audit-aiscan-role-body"></tbody></table>
     <h3>Runtime pathway integrity</h3>
     <table><thead><tr><th>Issue</th><th>Severity</th></tr></thead><tbody id="audit-runtime-body"></tbody></table>
-    <h3>TYPE_B execution audit</h3>
-    <table><thead><tr><th>Check</th><th>Pass</th><th>Detail</th></tr></thead><tbody id="audit-typeb-body"></tbody></table>
-  </section>
-  <section id="sec-typeb">
-    <h2>Type B Predictor</h2>
-    <p class="note" id="typeb-note">TYPE_A vs TYPE_B vs MIXED cohorts — MFE-based trade classification.</p>
-    <div class="kpis" id="typeb-kpis"></div>
-    <h3>Cohorts</h3>
-    <table><thead><tr><th>Cohort</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="typeb-cohort-body"></tbody></table>
-    <h3>Top separators (TYPE_A vs TYPE_B)</h3>
-    <table><thead><tr><th>Feature</th><th>TYPE_A mean</th><th>TYPE_B mean</th><th>|Δ|</th><th>Direction</th></tr></thead><tbody id="typeb-sep-body"></tbody></table>
   </section>
   <section id="sec-exit-combos">
     <h2>Exit Combinations</h2>
@@ -1782,37 +1805,16 @@ async function loadCombos() {
   const r = await fetch('/api/combos');
   const d = await r.json();
   const note = document.getElementById('combos-note');
-  if (note) note.textContent = `Best AI × spread × TYPE × lane combos (min ${d.min_trades ?? 3} trades, ${d.total_combos ?? 0} total).`;
+  if (note) note.textContent = d.filter_note || `Known AI × spread × entry × lane (min ${d.min_trades ?? 3} trades, ${d.total_combos ?? 0} shown).`;
   document.getElementById('combos-kpis').innerHTML = [
-    ['Total combos', d.total_combos ?? 0],
+    ['Known combos', d.total_combos ?? 0],
     ['Shown', (d.top||[]).length],
     ['Dimensions', (d.dimensions||[]).join(', ') || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('combos-body').innerHTML = (d.top||[]).map(c => {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
-    return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||c.type||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="9">No combo data — run analyzer first.</td></tr>';
-}
-
-async function loadTypeB() {
-  const r = await fetch('/api/typeb');
-  const d = await r.json();
-  const note = document.getElementById('typeb-note');
-  if (note) note.textContent = d.classification || 'TYPE_A vs TYPE_B vs MIXED cohorts.';
-  const tb = (d.cohorts||[]).find(c => c.cohort === 'TYPE_B') || {};
-  document.getElementById('typeb-kpis').innerHTML = [
-    ['TYPE_B trades', tb.trades ?? 0],
-    ['TYPE_B WR', (tb.wr_pct ?? 'n/a') + '%'],
-    ['TYPE_B EV', '$' + fmtUsd(tb.ev_usd)],
-    ['TYPE_B PnL', '$' + fmtUsd(tb.pnl_usd)],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('typeb-cohort-body').innerHTML = (d.cohorts||[]).map(c => {
-    const cls = c.cohort === 'TYPE_B' ? 'green' : (c.cohort === 'TYPE_A' ? 'red' : '');
-    return `<tr class="${cls}"><td>${c.cohort}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">No cohort data.</td></tr>';
-  document.getElementById('typeb-sep-body').innerHTML = (d.separators||[]).map(s =>
-    `<tr><td>${s.feature||''}</td><td>${s.type_a_mean ?? 'n/a'}</td><td>${s.type_b_mean ?? 'n/a'}</td><td>${s.delta_abs ?? 'n/a'}</td><td>${s.direction||''}</td></tr>`).join('') ||
-    '<tr><td colspan="5">No separator data.</td></tr>';
+    return `<tr class="${cls}"><td>${c.combo||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
+  }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
 }
 
 async function loadChaseThreshold() {
@@ -1948,7 +1950,6 @@ async function loadPathwayAudit() {
   const r = await fetch('/api/pathway-audit');
   const d = await r.json();
   const ti = d.tile_independence || {};
-  const tb = d.type_b_audit || {};
   const ai = d.ai_scan_independence || {};
   const air = d.ai_scan_role || {};
   const lm = d.lane_memory || {};
@@ -1967,7 +1968,6 @@ async function loadPathwayAudit() {
     ['AI scan path', ai.verdict || 'n/a'],
     ['AI scan role', air.verdict || 'n/a'],
     ['Runtime integrity', rpi.verdict || 'n/a'],
-    ['TYPE_B audit', tb.verdict || 'n/a'],
     ['Exit reports', ev.verdict || 'n/a'],
     ['Lane memory', lmv.verdict || lm.verdict || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -1985,9 +1985,6 @@ async function loadPathwayAudit() {
     .concat((rpi.issues||[]).filter(i => !(rpi.critical_issues||[]).includes(i)).map(i => `<tr><td>${i}</td><td class="amber">WARN</td></tr>`));
   document.getElementById('audit-runtime-body').innerHTML = runtimeRows.join('')
     || `<tr><td>${rpi.verdict ? 'Last check: '+rpi.verdict : 'No runtime checks yet — bot runs validate_runtime_pathway_integrity every 10m'}</td><td>—</td></tr>`;
-  document.getElementById('audit-typeb-body').innerHTML = (tb.checks||[]).map(c =>
-    `<tr><td>${c.check||''}</td><td>${passCell(c.passed)}</td><td>${c.detail||''}</td></tr>`
-  ).join('') || '<tr><td colspan="3">Run bot startup to generate type_b_execution_audit.json</td></tr>';
 }
 
 async function loadHorizon() {
@@ -2038,17 +2035,24 @@ async function loadRetirement() {
 async function loadRegimeConf() {
   const r = await fetch('/api/report/regime_confidence_matrix.json');
   const d = await r.json();
-  document.getElementById('regime-conf-note').textContent = d.usage_note || '';
+  const known = (c) => {
+    const reg = String(c.regime || '').toUpperCase();
+    if (!reg || reg.includes('UNKNOWN') || reg.includes('|UNK')) return false;
+    return true;
+  };
+  const cells = (d.cells||[]).filter(c => c.trades && known(c))
+    .sort((a,b) => (b.ev_usd||0) - (a.ev_usd||0) || (b.sum_pnl_usd||0) - (a.sum_pnl_usd||0));
+  document.getElementById('regime-conf-note').textContent = d.usage_note || 'Known regimes only — sorted by EV (most profitable first).';
   document.getElementById('regime-conf-kpis').innerHTML = [
     ['Total trades', d.total_trades ?? 'n/a'],
-    ['Matrix cells', (d.cells||[]).length],
-    ['Regimes', (d.regime_summaries||[]).length],
+    ['Known cells', cells.length],
+    ['Regimes', (d.regime_summaries||[]).filter(r => known({regime: r.regime})).length],
   ].map(([k,v]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-  document.getElementById('regime-conf-body').innerHTML = (d.cells||[]).filter(c => c.trades).map(c => {
+  document.getElementById('regime-conf-body').innerHTML = cells.map(c => {
     const ok = c.sample_ok ? '✓' : '—';
     const cls = c.sample_ok && (c.ev_usd||0) > 0 ? 'green' : (c.sample_ok ? 'red' : '');
     return `<tr><td>${c.regime}</td><td>${c.confidence_band}</td><td>${c.trades}</td><td>${c.win_rate_pct}%</td><td>$${fmtUsd(c.ev_usd)}</td><td>$${fmtUsd(c.sum_pnl_usd)}</td><td class="${cls}">${ok}</td></tr>`;
-  }).join('') || '<tr><td colspan="7">No matrix data yet.</td></tr>';
+  }).join('') || '<tr><td colspan="7">No known regime×confidence data yet.</td></tr>';
 }
 
 async function loadRegime() {
@@ -2230,7 +2234,6 @@ async function refreshAll() {
   await loadExitReasonLeak();
   await loadLadderSim();
   await loadPathwayAudit();
-  await loadTypeB();
   await loadLeakage();
   await loadHorizon();
   await loadFeatures();
