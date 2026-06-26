@@ -20,6 +20,9 @@ export type BotApiState = {
   execution_reason?: string;
   execution_status?: string;
   data_source?: string;
+  /** Set when state is served from Railway showcase relay cache (not live bot). */
+  snapshot_seq?: number;
+  snapshot_source?: 'railway_cache' | 'live_bot' | string;
   price_source?: string;
   ws_ready?: boolean;
   data_quality?: number;
