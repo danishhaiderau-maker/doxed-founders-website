@@ -4,7 +4,7 @@ if (-not $BridgePort) { $BridgePort = $Port }
 function Test-HttpOk {
   param(
     [string]$Url,
-    [int]$TimeoutSec = 4
+    [int]$TimeoutSec = 12
   )
   if (-not $Url) { return $false }
   try {
@@ -17,13 +17,16 @@ function Test-HttpOk {
 
 function Test-BotHealthy {
   if (-not (Test-PortOpen $BotPort)) { return $false }
-  return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping")
+  if (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 12) { return $true }
+  # One retry — slow laptops often miss the first probe under load.
+  Start-Sleep -Milliseconds 800
+  return (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 15)
 }
 
 function Test-AnalyzerHealthy {
   if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
   try {
-    $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 5
+    $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
     if (-not $s.ok) { return $false }
     if ($s.generated_at) { return $true }
     if ($s.analyzer_sync_match -eq $true) { return $true }
@@ -71,7 +74,11 @@ function Test-ProductionSiteApiHealthy {
 }
 
 function Test-BotHung {
-  return ((Test-PortOpen $BotPort) -and -not (Test-BotHealthy))
+  # Port open but /api/ping dead after generous retries — true hung listener.
+  if (-not (Test-PortOpen $BotPort)) { return $false }
+  if (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20) { return $false }
+  Start-Sleep -Seconds 2
+  return -not (Test-HttpOk "http://127.0.0.1:$BotPort/api/ping" 20)
 }
 
 function Test-AnalyzerHung {

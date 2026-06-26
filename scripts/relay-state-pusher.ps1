@@ -58,6 +58,12 @@ $pushUrl = ($ApiUrl.TrimEnd("/") + "/api/internal/showcase-snapshot")
 function Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
   Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
+  try {
+    if ((Get-Item $logFile -ErrorAction SilentlyContinue).Length -gt 512000) {
+      $tail = Get-Content $logFile -Tail 100 -ErrorAction SilentlyContinue
+      if ($tail) { $tail | Set-Content $logFile -Encoding UTF8 }
+    }
+  } catch { }
 }
 
 Log "relay-state-pusher started bot=$botBase api=$pushUrl interval=${IntervalSec}s"

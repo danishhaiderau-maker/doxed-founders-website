@@ -166,7 +166,8 @@ while ($true) {
     continue
   }
 
-  if ($botHung -or $fail.bot -ge $FailThreshold) {
+  # Never restart on a single slow probe — require fail threshold (hung alone is logged only).
+  if ($fail.bot -ge $FailThreshold) {
     $lastRecover.bot = Invoke-Recovery "bot" { Restart-BotComponent } $lastRecover.bot $BotCooldownSec
     $fail.bot = 0
     $fail.tunnel = 0
