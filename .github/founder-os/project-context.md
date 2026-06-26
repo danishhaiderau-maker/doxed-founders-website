@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix home stack port collision: bot must bind :7002 not bridge :7810.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
