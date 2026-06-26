@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Exclude bot services from Vercel upload to stay under 10mb limit.
 
 ## Last Activity
 
