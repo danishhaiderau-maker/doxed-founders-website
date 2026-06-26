@@ -113,11 +113,10 @@ function upsertVercelEnv(name, value, environments = ['production'], sensitive =
     return;
   }
   for (const env of environments) {
-    const args = ['env', 'add', name, env, '--force'];
+    const args = ['env', 'add', name, env, '--force', '--yes', '--value', value.trim()];
     if (sensitive) args.push('--sensitive');
     const add = spawnSync('vercel', args, {
       cwd: root,
-      input: `${value.trim()}\n`,
       encoding: 'utf8',
       shell: process.platform === 'win32',
     });
