@@ -27,6 +27,45 @@ function Wait-ForKey {
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
 }
 
+# --- Crash feedback cycle -----------------------------------------------------
+# On any non-zero bot exit we: (1) snapshot the crash to logs/last_crash.json +
+# logs/crash_history.jsonl, (2) fire an optional webhook (CRASH_NOTIFY_WEBHOOK)
+# so you get pinged on your phone/Discord the moment it dies, (3) pop a Windows
+# toast. This is the record an AI agent (Cursor Automation) reads to investigate.
+function Write-CrashReport([int]$Code, [string]$Message) {
+  try {
+    $logsDir = Join-Path $repoRoot "logs"
+    if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+    $botLog = Join-Path $agentDir "bot_runtime.log"
+    $tail = @()
+    if (Test-Path $botLog) {
+      $tail = @(Get-Content $botLog -Tail 60 -ErrorAction SilentlyContinue)
+    }
+    $report = [ordered]@{
+      ts            = (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz")
+      exit_code     = $Code
+      message       = $Message
+      port          = $BotListenPort
+      pid           = $PID
+      bot_version   = "v11.1-virtual-chase-known-combos-v1"
+      log_tail      = ($tail -join "`n")
+    }
+    $json = $report | ConvertTo-Json -Depth 4
+    Set-Content -Path (Join-Path $logsDir "last_crash.json") -Value $json -Encoding UTF8
+    Add-Content -Path (Join-Path $logsDir "crash_history.jsonl") -Value $json.Replace("`n"," ").Replace("`r","") -Encoding UTF8
+
+    # Optional webhook notification (set CRASH_NOTIFY_WEBHOOK to a Discord/Slack/custom URL)
+    $wh = (Get-Item -Path "env:CRASH_NOTIFY_WEBHOOK" -ErrorAction SilentlyContinue).Value
+    if ($wh) {
+      $body = @{ content = "BOT CRASH exit=$Code port=$BotListenPort ts=$($report.ts)`n```````n$($tail -join "`n" | Select-Object -First 30)`n``````" } | ConvertTo-Json
+      try { Invoke-RestMethod -Uri $wh -Method Post -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null } catch { }
+    }
+
+    # Windows toast (best-effort)
+    try { msg * /TIME:30 "Doxed bot crashed (exit $Code) on port $BotListenPort. See logs\last_crash.json" 2>$null } catch { }
+  } catch { Write-Host "Write-CrashReport failed: $($_.Exception.Message)" -ForegroundColor DarkGray }
+}
+
 if (-not $VaultEnv) {
   $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 }
@@ -81,21 +120,30 @@ if ($NoWait) {
   $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   if ($botProc -and $botProc.Id -gt 0) {
     Set-Content -Path (Join-Path $repoRoot ".home-bot.pid") -Value "$($botProc.Id)" -NoNewline
+    # Background monitor: writes logs/last_crash.json when the detached bot dies,
+    # so crashes are captured even with no console watching.
+    $mon = Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $scriptDir "bot-crash-monitor.ps1"),"-BotPid","$($botProc.Id)","-Port","$BotListenPort") -WindowStyle Hidden -PassThru
+    if ($mon -and $mon.Id -gt 0) {
+      Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
+    }
   }
   Start-Sleep -Seconds 2
   exit 0
 }
 
 $exitCode = 0
+$crashMsg = $null
 try {
   python btc_conservative_agent.py
   $exitCode = $LASTEXITCODE
 } catch {
   Write-Host "Bot crashed: $($_.Exception.Message)" -ForegroundColor Red
   $exitCode = 1
+  $crashMsg = $_.Exception.Message
 } finally {
   if ($exitCode -ne 0) {
     Write-Host "Bot exited with code $exitCode" -ForegroundColor Yellow
+    Write-CrashReport -Code $exitCode -Message ($crashMsg ?? "non-zero exit")
   } else {
     Write-Host "Bot process ended." -ForegroundColor Yellow
   }
