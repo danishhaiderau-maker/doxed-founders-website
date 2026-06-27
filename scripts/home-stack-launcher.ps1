@@ -414,23 +414,24 @@ try {
 }
 
 try {
-  $runspacePool = [runspacefactory]::CreateRunspacePool(1, 6)
-  $runspacePool.Open()
+  # Synchronous request handling in the main runspace. The earlier runspace-pool +
+  # Task.Run approach had two PowerShell-specific bugs: Task.Run(ScriptBlock) is an
+  # ambiguous overload (kills the listener on the first request), and functions
+  # defined in the main runspace (Serve-Request, Get-FullStatus, etc.) are NOT
+  # visible inside pool runspaces, so no response was ever sent. Get-FullStatus is
+  # port-only (<500ms), so serialized handling is fine for an admin command bridge.
   while ($listener.IsListening) {
     $context = $listener.GetContext()
-    $ps = [powershell]::Create()
-    $ps.RunspacePool = $runspacePool
-    [void]$ps.AddScript({
-      param($Ctx)
-      Serve-Request $Ctx
-    }).AddArgument($context)
-    $handle = $ps.BeginInvoke()
-    [void][System.Threading.Tasks.Task]::Run({
-      try { $ps.EndInvoke($handle) | Out-Null } catch { }
-      finally { $ps.Dispose() }
-    })
+    try {
+      Serve-Request $context
+    } catch {
+      # A single bad request must never take the listener down.
+      try {
+        $context.Response.StatusCode = 500
+        $context.Response.Close()
+      } catch { }
+    }
   }
 } finally {
-  if ($runspacePool) { $runspacePool.Close() }
   $listener.Stop()
 }
