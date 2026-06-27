@@ -34,7 +34,10 @@ export type RelayFidelityRow = {
 
 export type RelayFidelityOrphan = {
   tradeId: string;
-  kind: 'relay_without_showcase' | 'showcase_without_relay';
+  kind:
+    | 'relay_without_showcase'
+    | 'showcase_without_relay'
+    | 'showcase_without_relay_offline';
   detail: string;
 };
 
@@ -52,6 +55,7 @@ export type RelayFidelitySnapshot = {
     avgExitLagSec: number | null;
     unmatchedRelayCount: number;
     unmatchedShowcaseCount: number;
+    unmatchedShowcaseOfflineCount: number;
   };
   audit: {
     orphans: RelayFidelityOrphan[];
@@ -273,27 +277,35 @@ function showcaseTradeClosedAtMs(trade: Record<string, unknown>): number {
 function collectShowcaseSessionTradeIds(
   bot: BotApiState | null,
   relaySessionStartedAt?: Date | null,
-): string[] {
+): Array<{ tradeId: string; closedAtMs: number }> {
   if (!bot) return [];
   const relayStartMs = relaySessionStartedAt?.getTime() ?? 0;
   const includeForRelayAudit = (closedAtMs: number) =>
     relayStartMs <= 0 || closedAtMs <= 0 || closedAtMs >= relayStartMs - 2000;
 
-  const ids = new Set<string>();
+  const out: Array<{ tradeId: string; closedAtMs: number }> = [];
+  const seen = new Set<string>();
+  const push = (id: string, closedAtMs: number) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    out.push({ tradeId: id, closedAtMs });
+  };
   for (const t of normalizeBotSessionTrades(bot)) {
     if (!t.trade_id) continue;
-    if (!includeForRelayAudit(showcaseTradeClosedAtMs(t as Record<string, unknown>))) continue;
-    ids.add(String(t.trade_id));
+    const closedMs = showcaseTradeClosedAtMs(t as Record<string, unknown>);
+    if (!includeForRelayAudit(closedMs)) continue;
+    push(String(t.trade_id), closedMs);
   }
   for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
     const sig = entry?.signal_ref as Record<string, unknown> | undefined;
     if (!sig) continue;
     if (String(sig.status ?? '') === 'CLOSED' || sig.exit_price != null || sig.closed_ts != null) {
-      if (!includeForRelayAudit(showcaseTradeClosedAtMs(sig))) continue;
-      ids.add(String(sig.trade_id ?? mapKey));
+      const closedMs = showcaseTradeClosedAtMs(sig);
+      if (!includeForRelayAudit(closedMs)) continue;
+      push(String(sig.trade_id ?? mapKey), closedMs);
     }
   }
-  return [...ids];
+  return out;
 }
 
 export function buildRelayFidelitySnapshot(input: {
@@ -430,9 +442,49 @@ export function buildRelayFidelitySnapshot(input: {
   }
 
   const showcaseIds = collectShowcaseSessionTradeIds(input.bot, input.sessionStartedAt);
-  for (const sid of showcaseIds) {
+  // Relay fill timestamps (sorted) — used to infer whether the relay was active
+  // around the time a showcase orphan closed. If the relay had no fills within a
+  // reasonable window of an orphan's close, the relay was almost certainly
+  // offline/disconnected and could not have copied that trade — so we exempt it
+  // from the sync score instead of permanently penalizing fidelity.
+  const relayFillMs = rows
+    .map((r) => r.relayEntryAt)
+    .filter((v): v is string => Boolean(v))
+    .map((iso) => Date.parse(iso))
+    .filter((ms) => Number.isFinite(ms))
+    .sort((a, b) => a - b);
+  const RELAY_OFFLINE_GAP_MS = 30 * 60 * 1000; // 30 min with no relay fill => considered offline
+  const nearestRelayActivityGapMs = (t: number): number | null => {
+    if (relayFillMs.length === 0) return null;
+    let best = Infinity;
+    for (const ms of relayFillMs) {
+      const d = Math.abs(ms - t);
+      if (d < best) best = d;
+      if (ms > t && d > best) break;
+    }
+    return best;
+  };
+
+  let unmatchedShowcaseOffline = 0;
+  for (const sidEntry of showcaseIds) {
+    const sid = sidEntry.tradeId;
     const hasRelay = relayTradeIds.some((rid) => tradeIdsMatch(rid, sid));
-    if (!hasRelay) {
+    if (hasRelay) continue;
+    const closedMs = sidEntry.closedAtMs;
+    const nearestGap = Number.isFinite(closedMs) ? nearestRelayActivityGapMs(closedMs) : null;
+    const relayLikelyOffline =
+      relayFillMs.length === 0 || (nearestGap != null && nearestGap > RELAY_OFFLINE_GAP_MS);
+    if (relayLikelyOffline) {
+      unmatchedShowcaseOffline += 1;
+      orphans.push({
+        tradeId: sid,
+        kind: 'showcase_without_relay_offline',
+        detail:
+          input.sessionStartedAt != null
+            ? 'Showcase trade closed while relay sim was offline — not counted against sync score'
+            : 'Showcase trade closed with relay sim offline — not counted against sync score',
+      });
+    } else {
       orphans.push({
         tradeId: sid,
         kind: 'showcase_without_relay',
@@ -464,6 +516,7 @@ export function buildRelayFidelitySnapshot(input: {
       avgExitLagSec: avg(exitLags) != null ? Number(avg(exitLags)!.toFixed(1)) : null,
       unmatchedRelayCount: trimmed.filter((r) => r.matchKind === 'none').length,
       unmatchedShowcaseCount: orphans.filter((o) => o.kind === 'showcase_without_relay').length,
+      unmatchedShowcaseOfflineCount: unmatchedShowcaseOffline,
     },
     audit: {
       orphans: orphans.slice(0, 20),

@@ -3575,6 +3575,18 @@ FUNDING_REFRESH_SEC = 60
 BBO_REFRESH_SEC = 3
 BOOK_REFRESH_SEC = 3
 BOOK_STALE_SEC = 10
+# Cap raw P0 book depth we parse/store. Bitfinex P0 can return 1000+ levels;
+# for ~$5-margin sim fills we only walk the top of book, so parsing/sorting/
+# storing the full raw book burns CPU under the state_lock and starves the
+# Flask HTTP thread. 100 levels per side is far more than enough depth.
+MAX_BOOK_LEVELS = 100
+# Hard floor between any two REST book fetches, including force=True callers.
+# Without this, multiple hot loops (process_pending_orders, process_positions,
+# dashboard refresh, stale-book path) each force a full P0 fetch when the book
+# goes stale, serialized under _book_refresh_lock — that is the CPU-starvation
+# root cause. force=True now means "refresh if older than this floor", not
+# "refresh no matter what".
+BOOK_FORCE_MIN_SEC = 1.5
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
@@ -3755,18 +3767,31 @@ def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = 
             asks.append([price, count, abs(amount)])
     bids.sort(key=lambda x: -x[0])
     asks.sort(key=lambda x: x[0])
-    return {"bids": bids, "asks": asks, "level_count": len(rows)}
+    # Cap depth — top-of-book is all sim fills ever walk; storing the full raw
+    # P0 book (1000+ levels) wastes CPU and memory under the state_lock.
+    if MAX_BOOK_LEVELS > 0:
+        bids = bids[:MAX_BOOK_LEVELS]
+        asks = asks[:MAX_BOOK_LEVELS]
+    return {"bids": bids, "asks": asks, "level_count": len(bids) + len(asks)}
 
 
 def refresh_order_book_state(force: bool = False):
-    """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence)."""
+    """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence).
+
+    ``force=True`` coalesces to ``BOOK_FORCE_MIN_SEC`` so multiple hot loops
+    (pending orders, positions, dashboard, stale-book path) demanding a refresh
+    at the same time only trigger ONE REST fetch, not one per caller. That
+    coalescing is what keeps the Flask HTTP thread from being CPU-starved.
+    """
     global _last_book_refresh_ts
     now = time.time()
-    if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+    min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
+    if (now - _last_book_refresh_ts) < min_interval:
         return
     with _book_refresh_lock:
         now = time.time()
-        if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+        min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
+        if (now - _last_book_refresh_ts) < min_interval:
             return
         try:
             book = fetch_bitfinex_book_rest()
