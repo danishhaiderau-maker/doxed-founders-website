@@ -15343,7 +15343,25 @@ POSITIONS_FILE = "open_positions.json"
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
-MARKETS = bitfinex_public.load_markets()
+
+
+def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.0):
+    """load_markets() at import time is fragile — a single transient SSL/network
+    hiccup to api-pub.bitfinex.com (SSLEOFError, ConnectionReset, timeout) would
+    crash the bot with exit 1 before main() runs. Retry with backoff instead so
+    the bot survives transient Bitfinex/ISP/Python-3.14 TLS quirks at boot."""
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            return exchange.load_markets()
+        except Exception as e:
+            last_err = e
+            print(f"[STARTUP] load_markets attempt {i + 1}/{attempts} failed: {e}", flush=True)
+            time.sleep(base_delay * (i + 1))
+    raise last_err
+
+
+MARKETS = _load_markets_with_retry(bitfinex_public)
 bitfinex_private = ccxt.bitfinex({
     "apiKey": api_key,
     "secret": api_secret,
