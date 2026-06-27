@@ -3299,11 +3299,9 @@ export type FounderPromoPlatformSettings = {
   message: string;
   credentialsConfigured: boolean;
   credentialsStatus?: {
+    glm: boolean;
     gemini: boolean;
     deepseek: boolean;
-    cursor: boolean;
-    openai: boolean;
-    anthropic: boolean;
   };
   credentialsUpdatedAt?: string | null;
 };
