@@ -79,6 +79,8 @@
     "housekeeping": "node scripts/housekeeping.mjs",
     "sync:production": "node scripts/sync-production-cloud.mjs",
     "sync:all": "node scripts/sync-all-production.mjs",
+    "ci:neon-push": "node scripts/ci-neon-schema-push.mjs",
+    "ci:railway-redeploy": "node scripts/ci-railway-redeploy.mjs",
     "sync:btc-research-bot": "node scripts/sync-btc-research-bot.mjs",
     "verify:bitfinex-lock": "node scripts/verify-bitfinex-production-lock.mjs",
     "verify:bitfinex-policy-lock": "node scripts/verify-bitfinex-policy-lock.mjs",
