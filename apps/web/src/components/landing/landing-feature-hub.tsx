@@ -24,10 +24,12 @@ function NavTile({
   label: string;
   icon: string;
   badge?: string;
-  accent: 'gray' | 'gold' | 'purple';
+  accent: 'gray' | 'gold' | 'purple' | 'emerald';
 }) {
   const accentClass =
-    accent === 'gold'
+    accent === 'emerald'
+      ? 'border-emerald-500/15 bg-emerald-950/15 hover:border-emerald-500/40 hover:bg-emerald-950/30'
+      : accent === 'gold'
       ? 'border-amber-500/15 bg-amber-950/15 hover:border-amber-500/40 hover:bg-amber-950/30'
       : accent === 'purple'
         ? 'border-violet-500/15 bg-violet-950/15 hover:border-violet-500/40 hover:bg-violet-950/30'
@@ -65,9 +67,10 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
     return item.href;
   }
 
-  function rowAccent(id: string): 'gray' | 'gold' | 'purple' {
-    if (id === 'trading') return 'gold';
+  function rowAccent(id: string): 'gray' | 'gold' | 'purple' | 'emerald' {
+    if (id === 'community') return 'gold';
     if (id === 'build') return 'purple';
+    if (id === 'trade') return 'emerald';
     return 'gray';
   }
 
@@ -75,7 +78,7 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
     <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="border-b border-zinc-800/70 px-4 py-3 sm:px-5">
         <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500">Platform hub</p>
-        <p className="mt-0.5 text-sm text-zinc-400">Everything on Doxxed Crypto — grouped for quick access</p>
+        <p className="mt-0.5 text-sm text-zinc-400">Trade · Community · Build — quick access to everything</p>
       </div>
       <div className="grid gap-3 p-3 sm:p-4 lg:grid-cols-3">
         {HUB_NAV_ROWS.map((row) => (

@@ -32,7 +32,16 @@ const ADMIN_PROFILE_LINKS = [
 ] as const;
 
 function sectionAccent(id: string) {
-  if (id === 'trading') {
+  if (id === 'trade') {
+    return {
+      trigger: 'text-emerald-200/90 hover:bg-emerald-500/10 hover:text-emerald-50',
+      triggerActive: 'bg-emerald-500/20 text-emerald-50 ring-1 ring-emerald-400/40',
+      panel: 'border-emerald-500/20',
+      itemHover: 'hover:bg-emerald-500/10 hover:border-emerald-500/30',
+      itemActive: 'bg-emerald-500/15 border-emerald-400/40 text-emerald-50',
+    };
+  }
+  if (id === 'community') {
     return {
       trigger: 'text-amber-200/90 hover:bg-amber-500/10 hover:text-amber-50',
       triggerActive: 'bg-amber-500/20 text-amber-50 ring-1 ring-amber-400/40',
@@ -70,6 +79,7 @@ function navActive(pathname: string, href: string) {
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
   if (href === '/mobile') return pathname === '/mobile';
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
+  if (href === '/founder-node') return pathname.startsWith('/founder-node');
   if (href === '/founder-den') {
     return (
       pathname.startsWith('/founder-den') ||
@@ -319,7 +329,7 @@ function MobileNavDrawer({
   fallbackRole: ReturnType<typeof resolveGamifiedRole>;
 }) {
   const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState<string | null>('explore');
+  const [expanded, setExpanded] = useState<string | null>('trade');
 
   useEffect(() => {
     if (!open) {
