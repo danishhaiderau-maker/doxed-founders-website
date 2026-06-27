@@ -102,6 +102,7 @@ export function LandingHero({ topAgent }: Props) {
           </h1>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400 sm:text-base">
             Founder OS is the control plane. Your laptop is the compute. Cloud is optional glue — DB, auth, sync.
+            Built for shrimps, not whales — everyone starts with free DDollar. Skill over capital.
             We back doxxed founders who show their face, not anonymous pump cycles.
           </p>
         </div>

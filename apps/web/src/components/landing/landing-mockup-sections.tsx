@@ -34,7 +34,7 @@ export function LandingSinglePage({
 
   return (
     <div className="mx-auto w-full max-w-[88rem] space-y-4 px-4 py-4 sm:px-6 lg:space-y-5 lg:px-8 lg:py-5">
-      <LandingProjectsSection platformStats={stats} />
+      <LandingProjectsSection />
 
       <LandingHero topAgent={highlights?.topAgent ?? null} />
 

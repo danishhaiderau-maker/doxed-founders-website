@@ -147,43 +147,6 @@ export function LandingPlatformAdoption() {
           </div>
         )}
       </div>
-
-      {chartData.length > 0 && data && data.projects.length > 0 && (
-        <div className="mt-5 overflow-x-auto">
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            Project traction (last {data.days} days)
-          </p>
-          <table className="mt-2 w-full min-w-[520px] text-left text-xs">
-            <thead>
-              <tr className="border-b border-zinc-800 text-zinc-500">
-                <th className="py-2 pr-3 font-medium">Project</th>
-                <th className="py-2 pr-3 font-medium">Activity</th>
-                <th className="py-2 pr-3 font-medium">Tokens in/out</th>
-                <th className="py-2 pr-3 font-medium">DDollar vol.</th>
-                <th className="py-2 font-medium">GitHub · Posts</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.projects.map((p) => (
-                <tr key={p.slug} className="border-b border-zinc-800/60 text-zinc-300">
-                  <td className="py-2 pr-3 font-semibold text-white">
-                    {p.ticker}
-                    <span className="ml-1 font-normal text-zinc-600">· {p.name}</span>
-                  </td>
-                  <td className="py-2 pr-3 text-emerald-400">{p.activityScore}</td>
-                  <td className="py-2 pr-3">
-                    {formatTokens(p.tokensIn)} / {formatTokens(p.tokensOut)}
-                  </td>
-                  <td className="py-2 pr-3">{formatUsd(p.ddollarVolume, 0)}</td>
-                  <td className="py-2">
-                    {p.githubEvents} · {p.buildPosts}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </section>
   );
 }
