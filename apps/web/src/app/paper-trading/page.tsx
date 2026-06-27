@@ -144,6 +144,28 @@ function PaperTradingPageContent() {
 
     async function bootstrap() {
       const authUserId = session?.user?.id;
+
+      // Load the portfolio, but if it's missing/inaccessible (e.g. a guest
+      // portfolio wiped from the DB, or the auth access token isn't available
+      // yet so the API can't identify the owner), create a fresh guest session
+      // and retry once. This keeps the paper terminal working instead of
+      // stranding the user on "Could not load your portfolio". Network blips
+      // (Cannot reach API) are NOT recovered here — those should retry, not
+      // create a new portfolio.
+      async function loadWithRecovery(id: string, token?: string) {
+        try {
+          await refreshPortfolio(id, token);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const isPortfolioMissing = /portfolio not found|session token|forbidden|403/i.test(msg);
+          if (!isPortfolioMissing) throw err;
+          const fresh = await createPaperSession();
+          setUserId(fresh.userId);
+          localStorage.setItem(SESSION_KEY, fresh.userId);
+          await refreshPortfolio(fresh.userId);
+        }
+      }
+
       if (authUserId) {
         const stored = localStorage.getItem(SESSION_KEY);
         if (stored && stored !== authUserId && !migrationDone) {
@@ -169,14 +191,20 @@ function PaperTradingPageContent() {
         }
         setUserId(authUserId);
         localStorage.setItem(SESSION_KEY, authUserId);
-        await refreshPortfolio(authUserId, session?.accessToken);
+        await loadWithRecovery(authUserId, session?.accessToken);
         return;
       }
 
       const stored = localStorage.getItem(SESSION_KEY);
       if (stored) {
         setUserId(stored);
-        await refreshPortfolio(stored, authToken);
+        await loadWithRecovery(stored, authToken);
+      } else {
+        // No session at all yet — create one so the user lands on a working portfolio.
+        const fresh = await createPaperSession();
+        setUserId(fresh.userId);
+        localStorage.setItem(SESSION_KEY, fresh.userId);
+        await refreshPortfolio(fresh.userId);
       }
     }
 
