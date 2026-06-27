@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Add glm to founder promo credentialsStatus type for Vercel build
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
