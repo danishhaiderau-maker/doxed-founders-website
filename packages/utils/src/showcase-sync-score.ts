@@ -12,6 +12,7 @@ export type ShowcaseSyncScoreInput = {
       tradeCount?: number;
       unmatchedRelayCount?: number;
       unmatchedShowcaseCount?: number;
+      unmatchedShowcaseOfflineCount?: number;
       missingShowcaseEntryCount?: number;
       missingShowcaseExitCount?: number;
       maxEntryDeltaPct?: number | null;
@@ -29,6 +30,7 @@ export type ShowcaseSyncScore = {
   autoSyncing: boolean;
   healthy: boolean;
   issues: string[];
+  notes: string[];
 };
 
 const DEFAULT_AUTO_STOP_THRESHOLD_PCT = 98;
@@ -40,6 +42,7 @@ export function getDefaultShowcaseSyncStopThreshold(): number {
 /** Weighted sync score vs global showcase bot :7002 (0–100). */
 export function computeShowcaseSyncScore(input: ShowcaseSyncScoreInput): ShowcaseSyncScore {
   const issues: string[] = [];
+  const notes: string[] = [];
 
   if (input.botConnected === false) {
     issues.push('Showcase bot offline — relay cannot mirror new signals');
@@ -49,6 +52,7 @@ export function computeShowcaseSyncScore(input: ShowcaseSyncScoreInput): Showcas
       autoSyncing: false,
       healthy: false,
       issues,
+      notes,
     };
   }
 
@@ -75,8 +79,13 @@ export function computeShowcaseSyncScore(input: ShowcaseSyncScoreInput): Showcas
 
   const fidelity = input.fidelity?.summary;
   if (fidelity) {
+    // Only genuine misses (relay was active but failed to copy) count against
+    // the score. Trades missed while the relay was offline are reported as a
+    // non-penalizing info issue — they reflect past downtime, not current
+    // sync quality, and would otherwise permanently tank the score.
     const orphans =
       (fidelity.unmatchedRelayCount ?? 0) + (fidelity.unmatchedShowcaseCount ?? 0);
+    const offlineMisses = fidelity.unmatchedShowcaseOfflineCount ?? 0;
     const gaps =
       (fidelity.missingShowcaseEntryCount ?? 0) + (fidelity.missingShowcaseExitCount ?? 0);
     const matched = fidelity.tradeCount ?? 0;
@@ -86,6 +95,9 @@ export function computeShowcaseSyncScore(input: ShowcaseSyncScoreInput): Showcas
     }
     if (orphans > 0) {
       issues.push(`${orphans} trade ID orphan(s) vs showcase`);
+    }
+    if (offlineMisses > 0) {
+      notes.push(`${offlineMisses} trade(s) missed while relay offline (not scored)`);
     }
     if (gaps > 0) {
       fidelityScore = Math.min(fidelityScore, Math.max(0, 100 - gaps * 8));
@@ -138,6 +150,7 @@ export function computeShowcaseSyncScore(input: ShowcaseSyncScoreInput): Showcas
     autoSyncing: true,
     healthy,
     issues,
+    notes,
   };
 }
 

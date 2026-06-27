@@ -152,6 +152,14 @@ export function ShowcaseSyncPanel({
         </ul>
       ) : null}
 
+      {score.notes.length > 0 ? (
+        <ul className="mt-2 space-y-0.5 text-[11px] text-zinc-600">
+          {score.notes.map((note) => (
+            <li key={note}>· {note}</li>
+          ))}
+        </ul>
+      ) : null}
+
       {mode === 'sim' || mode === 'live' ? (
         <div className="mt-4 rounded-lg border border-zinc-800 bg-black/25 p-3">
           <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
