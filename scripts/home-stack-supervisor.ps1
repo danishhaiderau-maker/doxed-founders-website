@@ -4,9 +4,10 @@ param(
   [int]$BotPort = 7800,
   [int]$AnalyzerPort = 9001,
   [int]$BridgePort = 7810,
-  [int]$IntervalSec = 180,
+  [int]$IntervalSec = 60,
   [int]$FailThreshold = 5,
-  [int]$BotCooldownSec = 900,
+  [int]$BotFailThreshold = 2,
+  [int]$BotCooldownSec = 300,
   [int]$AnalyzerCooldownSec = 600,
   [int]$TunnelCooldownSec = 900,
   [int]$BridgeCooldownSec = 300
@@ -180,7 +181,8 @@ while ($true) {
   }
 
   # Never restart on a single slow probe — require fail threshold (hung alone is logged only).
-  if ($fail.bot -ge $FailThreshold) {
+  # Bot uses a tighter threshold (BotFailThreshold=2) so a real crash restarts in ~2 min, not 15.
+  if ($fail.bot -ge $BotFailThreshold) {
     if (Test-HomeStackUserStopped) {
       Log "RECOVER bot skipped - user stopped stack (.home-stack-user-stopped)"
       $fail.bot = 0
