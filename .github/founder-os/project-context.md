@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Add auto-deploy pipeline — GitHub Action syncs Neon + Railway + smoke tests on every push
 
 ## Last Activity
 
