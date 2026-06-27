@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(home-stack): crash feedback loop + self-healing watchdog
 
 ## Last Activity
 
