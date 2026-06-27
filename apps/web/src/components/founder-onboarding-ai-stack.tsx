@@ -136,7 +136,11 @@ export function FounderOnboardingAiStack({
             {promo?.hasLlm ? ' · platform promo' : ''}
             {defaultProvider !== 'RULE_BASED' ? ` · default: ${defaultProvider}` : ''}.
           </p>
-        ) : promo?.eligible && promo?.enabled ? (
+        ) : promo?.eligible && promo?.hasLlm ? (
+          <p className="mt-2 text-sm text-emerald-300">
+            Covered by founder promo — ask Brain a question to verify it works.
+          </p>
+        ) : (
           <div className="mt-3 space-y-3">
             {QUICK_LLM.map((item) => (
               <div
