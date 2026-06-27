@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Ship founder onboarding: promo banner, agent panel, landing CTA, public promo API
 
 ## Last Activity
 
