@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Redesign landing page around BTC agent and Founder OS with live highlights
 
 ## Last Activity
 
