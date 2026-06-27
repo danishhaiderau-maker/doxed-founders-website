@@ -8,6 +8,7 @@ import { LandingPlatformAdoption } from '@/components/landing/landing-platform-a
 import { LandingFunFactBar } from '@/components/landing/landing-fun-fact-bar';
 import { LandingHero } from '@/components/landing/landing-hero';
 import { LandingPulseBar } from '@/components/landing/landing-pulse-bar';
+import { LandingProjectsSection } from '@/components/landing/landing-projects-section';
 import type { LandingHighlights } from '@/components/landing/landing-live-highlights';
 import { LandingFounderSpotlight } from '@/components/landing/landing-founder-spotlight';
 import type { PlatformStats } from '@/lib/api';
@@ -86,11 +87,13 @@ export function LandingSinglePage({
 
   return (
     <div className="mx-auto w-full max-w-[88rem] space-y-4 px-4 py-4 sm:px-6 lg:space-y-5 lg:px-8 lg:py-5">
-      <LandingHero scoutPending={pendingReviews} topAgent={highlights?.topAgent ?? null} />
+      <LandingHero topAgent={highlights?.topAgent ?? null} />
 
       <LandingPulseBar data={highlights} stats={stats} scoutPending={pendingReviews} />
 
       <LandingFunFactBar />
+
+      <LandingProjectsSection />
 
       <LandingFounderSpotlight />
 

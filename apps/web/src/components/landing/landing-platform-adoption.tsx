@@ -4,8 +4,6 @@ import { useEffect, useState } from 'react';
 import {
   Area,
   AreaChart,
-  Bar,
-  BarChart,
   CartesianGrid,
   Legend,
   ResponsiveContainer,
@@ -150,32 +148,7 @@ export function LandingPlatformAdoption() {
         )}
       </div>
 
-      {chartData.length > 0 && (
-        <div className="mt-4 h-36 w-full">
-          <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            DDollar + shipping signals (daily)
-          </p>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="#27272a" strokeDasharray="3 3" />
-              <XAxis dataKey="label" tick={{ fill: '#71717a', fontSize: 9 }} hide />
-              <YAxis tick={{ fill: '#71717a', fontSize: 9 }} width={36} />
-              <Tooltip
-                contentStyle={{
-                  background: '#09090b',
-                  border: '1px solid #3f3f46',
-                  borderRadius: 8,
-                  fontSize: 11,
-                }}
-              />
-              <Bar dataKey="githubEvents" name="GitHub events" fill="#3b82f6" radius={[2, 2, 0, 0]} />
-              <Bar dataKey="buildPosts" name="Build posts" fill="#22c55e" radius={[2, 2, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {data && data.projects.length > 0 && (
+      {chartData.length > 0 && data && data.projects.length > 0 && (
         <div className="mt-5 overflow-x-auto">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
             Project traction (last {data.days} days)
