@@ -20,7 +20,28 @@ import {
 } from '@/lib/api';
 import { LandingAiStackPreview } from '@/components/landing/landing-ai-stack-preview';
 
-const FEED_FILTERS = ['All', 'Projects', 'Announcements', 'Listings', 'Investigations', 'Agent'] as const;
+const FEED_FILTERS = ['Trades', 'Listings', 'Broadcasts'] as const;
+
+/** Landing-only feed allowlist — only trades, new listings, and admin broadcasts. */
+const LANDING_FEED_EVENT_TYPES = new Set([
+  'TRADE_BUY',
+  'TRADE_SELL',
+  'TRADE',
+  'LISTING',
+  'LISTING_NEW',
+  'PROJECT_LISTED',
+  'BROADCAST',
+  'ADMIN_BROADCAST',
+  'ANNOUNCEMENT',
+]);
+
+function isLandingFeedItem(item: UnifiedFeedItem): boolean {
+  if (item.category === 'trading') return true;
+  if (item.eventType && LANDING_FEED_EVENT_TYPES.has(item.eventType)) return true;
+  if (item.category === 'market' && /list/i.test(item.eventType)) return true;
+  if (item.pinned && /broadcast|announce/i.test(item.headline)) return true;
+  return false;
+}
 
 const WAYS_TO_EARN = [
   { label: 'Create account', amount: POINTS.REGISTER },
@@ -167,11 +188,11 @@ export function LandingHubPreviewWidgets({
           ]);
         }
         if (!cancelled) {
+          const allFeed = feedRes.stream
+            .filter((e): e is { kind: 'unified'; at: string; item: UnifiedFeedItem } => e.kind === 'unified')
+            .map((e) => e.item);
           setData({
-            feed: feedRes.stream
-              .filter((e): e is { kind: 'unified'; at: string; item: UnifiedFeedItem } => e.kind === 'unified')
-              .map((e) => e.item)
-              .slice(0, 4),
+            feed: (compact ? allFeed.filter(isLandingFeedItem) : allFeed).slice(0, compact ? 5 : 4),
             trust,
             reviewCount: reviews.length,
             overview,
@@ -213,7 +234,7 @@ export function LandingHubPreviewWidgets({
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
       <WidgetShell
         title="Feed"
-        subtitle="Trades, predictions, and listings — not GitHub commits."
+        subtitle="Trades · new listings · admin broadcasts only."
         headerClass="bg-amber-950/30"
         href="/feed"
         footerLabel="View all updates →"
@@ -253,12 +274,13 @@ export function LandingHubPreviewWidgets({
         </ul>
       </WidgetShell>
 
-      <WidgetShell
-        title="DDollar"
-        subtitle="Earn DDollar by contributing to the ecosystem."
-        headerClass="bg-amber-950/30"
-        href="/ddollar"
-      >
+      {!compact ? (
+        <WidgetShell
+          title="DDollar"
+          subtitle="Earn DDollar by contributing to the ecosystem."
+          headerClass="bg-amber-950/30"
+          href="/ddollar"
+        >
         {token && data.overview ? (
           <>
             <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-black/40 px-2.5 py-2">
@@ -313,6 +335,7 @@ export function LandingHubPreviewWidgets({
           </div>
         </div>
       </WidgetShell>
+      ) : null}
 
       <WidgetShell
         title="Trust Center"
