@@ -129,9 +129,12 @@ type HubPreviewData = {
 export function LandingHubPreviewWidgets({
   scoutPending,
   platformStats,
+  compact = false,
 }: {
   scoutPending: number;
   platformStats: PlatformStats | null;
+  /** Landing page: Feed · Trust · DDollar only (no duplicate Founder OS / Node / AI). */
+  compact?: boolean;
 }) {
   const { data: session } = useSession();
   const token = session?.accessToken;
@@ -336,6 +339,8 @@ export function LandingHubPreviewWidgets({
         </div>
       </WidgetShell>
 
+      {!compact ? (
+        <>
       <WidgetShell
         title="Founder OS"
         subtitle="The cockpit — mission control for builders."
@@ -428,6 +433,8 @@ export function LandingHubPreviewWidgets({
           </ul>
         )}
       </WidgetShell>
+        </>
+      ) : null}
       </div>
     </div>
   );
