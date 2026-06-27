@@ -1,0 +1,66 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T19:55:35.618005+00:00",
+  "sample_replays_with_trades": 4,
+  "early_tags": {
+    "immediately_right": {
+      "n": 4,
+      "wins": 4,
+      "sum_pnl_usd": 9.04
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "cont-28ce671cc6f4",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.34,
+      "win": true,
+      "unreal_5m_pct": 3.98,
+      "unreal_15m_pct": 37.37,
+      "unreal_30m_pct": 48.45,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c604c-addaa929bf3e",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.25,
+      "win": true,
+      "unreal_5m_pct": 3.54,
+      "unreal_15m_pct": 36.94,
+      "unreal_30m_pct": 48.02,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-a873a02b432f",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 5.26,
+      "win": true,
+      "unreal_5m_pct": 29.06,
+      "unreal_15m_pct": 38.63,
+      "unreal_30m_pct": 31.41,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c604c-e8b11badd7c8",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.19,
+      "win": true,
+      "unreal_5m_pct": 11.46,
+      "unreal_15m_pct": -7.91,
+      "unreal_30m_pct": 8.43,
+      "early_tag": "immediately_right"
+    }
+  ]
+}

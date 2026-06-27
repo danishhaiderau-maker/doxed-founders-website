@@ -1,0 +1,30 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T23:31:38.407786+00:00",
+  "sample_replays_with_trades": 1,
+  "early_tags": {
+    "immediately_right": {
+      "n": 1,
+      "wins": 1,
+      "sum_pnl_usd": 0.83
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "cont-afe1ed352a47",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.83,
+      "win": true,
+      "unreal_5m_pct": 17.18,
+      "unreal_15m_pct": 11.11,
+      "unreal_30m_pct": 6.36,
+      "early_tag": "immediately_right"
+    }
+  ]
+}

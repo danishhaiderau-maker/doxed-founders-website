@@ -1,0 +1,16 @@
+{
+  "cwd": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent",
+  "generated_at": "2026-06-24T12:04:00.572942+00:00",
+  "unique_trade_ids": 291,
+  "approve_count": 289,
+  "order_submitted_count": 152,
+  "price_touch_count": 0,
+  "filled_count": 58,
+  "closed_count": 55,
+  "approval_to_order_rate_pct": 52.6,
+  "order_to_fill_rate_pct": 38.2,
+  "fill_to_close_rate_pct": 94.8,
+  "approve_to_fill_rate_pct": 20.1,
+  "terminal_reasons": {},
+  "unaccounted_approves": 231
+}

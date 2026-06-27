@@ -1,0 +1,35 @@
+{
+  "schema": "scenario_c_leakage_v1",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "expected_bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T17:29:01.946618+00:00",
+  "overall": {
+    "trades": 29,
+    "peak_profit_usd": 66.5,
+    "booked_profit_usd": 16.26,
+    "left_on_table_usd": 50.26,
+    "capture_ratio_pct": -486.5,
+    "avg_mfe_margin_pct": 15.29
+  },
+  "by_exit_reason": {
+    "PROFIT_LOCK_LADDER": {
+      "trades": 20,
+      "peak_profit_usd": 63.31,
+      "booked_profit_usd": 38.6,
+      "capture_ratio_pct": 58.5
+    },
+    "STOP_LOSS": {
+      "trades": 3,
+      "peak_profit_usd": 2.33,
+      "booked_profit_usd": -12.81,
+      "capture_ratio_pct": -669.3
+    },
+    "THESIS_FAST_CUT": {
+      "trades": 6,
+      "peak_profit_usd": 0.86,
+      "booked_profit_usd": -9.53,
+      "capture_ratio_pct": -2211.7
+    }
+  }
+}

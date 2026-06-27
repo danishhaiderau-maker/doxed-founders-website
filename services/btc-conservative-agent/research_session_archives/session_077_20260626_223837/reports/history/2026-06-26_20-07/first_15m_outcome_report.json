@@ -1,0 +1,42 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T20:07:09.318858+00:00",
+  "sample_replays_with_trades": 2,
+  "early_tags": {
+    "immediately_right": {
+      "n": 2,
+      "wins": 2,
+      "sum_pnl_usd": 3.09
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "vc603-4e7e87e38d7a",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.47,
+      "win": true,
+      "unreal_5m_pct": 9.66,
+      "unreal_15m_pct": -2.17,
+      "unreal_30m_pct": 10.99,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-0a7478e24c09",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.62,
+      "win": true,
+      "unreal_5m_pct": 9.08,
+      "unreal_15m_pct": 11.58,
+      "unreal_30m_pct": 15.58,
+      "early_tag": "immediately_right"
+    }
+  ]
+}

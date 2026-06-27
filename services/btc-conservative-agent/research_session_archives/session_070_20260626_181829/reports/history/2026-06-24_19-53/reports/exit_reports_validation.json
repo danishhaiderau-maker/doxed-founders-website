@@ -1,0 +1,34 @@
+{
+  "schema": "exit_reports_validation_v2",
+  "generated_at": "2026-06-24T19:52:44.271553+00:00",
+  "trade_count": 64,
+  "min_trades": 30,
+  "verdict": "PASS",
+  "checks": [
+    {
+      "file": "exit_combinations_report.json",
+      "passed": true,
+      "detail": "count=10 need>=6 combinations",
+      "minimum": 6
+    },
+    {
+      "file": "exit_leakage_by_reason_report.json",
+      "passed": true,
+      "detail": "count=4 need>=2 exit reasons",
+      "minimum": 2
+    },
+    {
+      "file": "exit_ladder_simulator_report.json",
+      "passed": true,
+      "detail": "count=7 need>=2 ladder profiles",
+      "minimum": 2
+    },
+    {
+      "file": "top_leakage_report.json",
+      "passed": true,
+      "detail": "count=50 need>=6 leakage trade rows",
+      "minimum": 6
+    }
+  ],
+  "errors": []
+}

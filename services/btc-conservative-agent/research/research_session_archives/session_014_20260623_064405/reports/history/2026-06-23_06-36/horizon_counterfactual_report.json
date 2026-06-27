@@ -1,0 +1,274 @@
+{
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "analyzer_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "SESSION",
+  "blocked_approve_cohort": 19,
+  "summary": {
+    "had_30m_data": 19,
+    "avg_outcome_30m_pct": 42.51,
+    "horizon_pnl_usd_sum": 161.53,
+    "horizon_winners": 9,
+    "fill_failures": 9,
+    "early_exit_miss": 0,
+    "good_blocks": 1
+  },
+  "by_lane": {
+    "AI_SCAN": {
+      "blocked_approve_cohort": 5,
+      "had_30m_data": 5,
+      "avg_outcome_30m_pct": 42.74,
+      "horizon_pnl_usd_sum": 42.74,
+      "horizon_winners": 2,
+      "fill_failures": 3,
+      "early_exit_miss": 0,
+      "good_blocks": 0,
+      "shadow_net_usd_sum": 7.2
+    },
+    "CONTINUOUS": {
+      "blocked_approve_cohort": 3,
+      "had_30m_data": 3,
+      "avg_outcome_30m_pct": 41.04,
+      "horizon_pnl_usd_sum": 24.63,
+      "horizon_winners": 1,
+      "fill_failures": 2,
+      "early_exit_miss": 0,
+      "good_blocks": 0,
+      "shadow_net_usd_sum": 3.6
+    },
+    "UNKNOWN": {
+      "blocked_approve_cohort": 11,
+      "had_30m_data": 11,
+      "avg_outcome_30m_pct": 42.8,
+      "horizon_pnl_usd_sum": 94.16,
+      "horizon_winners": 6,
+      "fill_failures": 4,
+      "early_exit_miss": 0,
+      "good_blocks": 1,
+      "shadow_net_usd_sum": 9.6
+    }
+  },
+  "vs_continuous": {
+    "AI_SCAN": {
+      "delta_horizon_winners": 1,
+      "delta_horizon_pnl_usd": 18.11,
+      "delta_good_blocks": 0
+    },
+    "UNKNOWN": {
+      "delta_horizon_winners": 5,
+      "delta_horizon_pnl_usd": 69.53,
+      "delta_good_blocks": 1
+    }
+  },
+  "rows": [
+    {
+      "trade_id": "c2e0e691-15cf-4292-9223-ae75e1b81b0b",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 41.9232,
+      "horizon_pnl_usd": 8.38,
+      "shadow_exit_t_sec": 4648.36,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "576ff481-c1fe-4ca3-8f68-4715414c9a30",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 48.6239,
+      "horizon_pnl_usd": 9.72,
+      "shadow_exit_t_sec": 4548.565,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "cb4e3ad7-90a1-4c2e-801d-a9f268947e2d",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 70.711,
+      "horizon_pnl_usd": 14.14,
+      "shadow_exit_t_sec": 4517.553,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "a021c4cb-0cf5-4be4-a725-ddaa4859ceb9",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 68.1352,
+      "horizon_pnl_usd": 13.63,
+      "shadow_exit_t_sec": 4361.172,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "cont-d0d1b0be03ac",
+      "research_lane": "UNKNOWN",
+      "block_reason": "WOULD_BLOCK_GOLDEN_STACK_MOMENTUM_CHOP_1.00",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 51.1791,
+      "horizon_pnl_usd": 10.24,
+      "shadow_exit_t_sec": 4145.583,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "70063cbe-ee2a-46a4-a087-b0db8c6fee8f",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 49.9106,
+      "horizon_pnl_usd": 9.98,
+      "shadow_exit_t_sec": 4128.395,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "15692cab-7d9c-4973-9824-76b1742336d5",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 55.2237,
+      "horizon_pnl_usd": 11.04,
+      "shadow_exit_t_sec": 3971.547,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "2560c451-49b9-4f93-8430-14d47537a179",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 66.4271,
+      "horizon_pnl_usd": 13.29,
+      "shadow_exit_t_sec": 3797.187,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "rida-042c2a3a4996",
+      "research_lane": "UNKNOWN",
+      "block_reason": "WOULD_BLOCK_CLUSTER_ENTRY",
+      "shadow_filled": true,
+      "shadow_net_usd": -2.4,
+      "outcome_30m_pct": -46.4134,
+      "horizon_pnl_usd": -9.28,
+      "shadow_exit_t_sec": 3788.928,
+      "classification": "GOOD_BLOCK"
+    },
+    {
+      "trade_id": "fc99a878-9046-45df-86ef-6fd735397a73",
+      "research_lane": "AI_SCAN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 64.4117,
+      "horizon_pnl_usd": 12.88,
+      "shadow_exit_t_sec": 3644.095,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "cont-f72ac4f948a8",
+      "research_lane": "CONTINUOUS",
+      "block_reason": "WOULD_BLOCK_GOLDEN_STACK_MOMENTUM_CHOP_1.00",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 47.9948,
+      "horizon_pnl_usd": 9.6,
+      "shadow_exit_t_sec": 3559.872,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "eabc2493-b1aa-4709-b262-1af55044d1c6",
+      "research_lane": "AI_SCAN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 47.9948,
+      "horizon_pnl_usd": 9.6,
+      "shadow_exit_t_sec": 3559.388,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "b38c8dfb-298b-4ff3-bc0b-a2a2e7c01034",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 43.9209,
+      "horizon_pnl_usd": 8.78,
+      "shadow_exit_t_sec": 3575.563,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "cont-989acd2d7c20",
+      "research_lane": "CONTINUOUS",
+      "block_reason": "WOULD_BLOCK_GOLDEN_STACK_MOMENTUM_CHOP_1.00",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 47.7401,
+      "horizon_pnl_usd": 9.55,
+      "shadow_exit_t_sec": 3581.928,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "841365cf-cb6a-4eff-a7de-a945ec072d67",
+      "research_lane": "AI_SCAN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": false,
+      "shadow_net_usd": 0.0,
+      "outcome_30m_pct": 47.7401,
+      "horizon_pnl_usd": 9.55,
+      "shadow_exit_t_sec": 3581.713,
+      "classification": "FILL_FAILURE"
+    },
+    {
+      "trade_id": "cont-a77e52915914",
+      "research_lane": "CONTINUOUS",
+      "block_reason": "WOULD_BLOCK_GOLDEN_STACK_MOMENTUM_CHOP_1.00",
+      "shadow_filled": true,
+      "shadow_net_usd": 3.6,
+      "outcome_30m_pct": 27.3939,
+      "horizon_pnl_usd": 5.48,
+      "shadow_exit_t_sec": 3598.152,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "c20c516c-9341-4ea3-b05e-4e596b290437",
+      "research_lane": "AI_SCAN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": true,
+      "shadow_net_usd": 3.6,
+      "outcome_30m_pct": 27.3939,
+      "horizon_pnl_usd": 5.48,
+      "shadow_exit_t_sec": 3598.036,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "8785450b-7ea4-4983-ba95-7b3e899656a2",
+      "research_lane": "UNKNOWN",
+      "block_reason": "SOFT_REJECT:AI_REJECT",
+      "shadow_filled": true,
+      "shadow_net_usd": 2.0,
+      "outcome_30m_pct": 21.1868,
+      "horizon_pnl_usd": 4.24,
+      "shadow_exit_t_sec": 3649.764,
+      "classification": "HORIZON_WINNER"
+    },
+    {
+      "trade_id": "a5b5b273-5f4d-4594-9ce7-79cbaa7cb875",
+      "research_lane": "AI_SCAN",
+      "block_reason": "SHADOW_TTL",
+      "shadow_filled": true,
+      "shadow_net_usd": 3.6,
+      "outcome_30m_pct": 26.1557,
+      "horizon_pnl_usd": 5.23,
+      "shadow_exit_t_sec": 3651.255,
+      "classification": "HORIZON_WINNER"
+    }
+  ]
+}

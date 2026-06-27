@@ -1,0 +1,11 @@
+{
+  "schema": "runtime_pathway_integrity_v1",
+  "generated_at": "2026-06-27T03:25:24.109103+00:00",
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "startup_captured_at": "2026-06-27T01:44:28.038086+00:00",
+  "verdict": "WARN",
+  "critical_issues": [],
+  "issues": [
+    "TYPE_B_HUNTER still listed in RESEARCH_SPAWN_LANES (legacy tuple)"
+  ]
+}

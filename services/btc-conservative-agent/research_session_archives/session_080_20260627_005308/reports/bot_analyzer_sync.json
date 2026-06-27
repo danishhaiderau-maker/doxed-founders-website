@@ -1,0 +1,14 @@
+{
+  "schema": "bot_analyzer_sync_v1",
+  "generated_at": "2026-06-27T00:35:54.158585+00:00",
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "expected_analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_expected_bot": "v11.1-virtual-chase-known-combos-v1",
+  "verdict": "READY",
+  "checks": {
+    "bot_version_match": true,
+    "analyzer_sync_id_match": true,
+    "analyzer_expected_bot_match": true
+  }
+}

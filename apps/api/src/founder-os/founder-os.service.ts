@@ -69,6 +69,15 @@ export class FounderOsService {
     private readonly founderPromo: FounderPromoService,
   ) {}
 
+  async getPublicPromoTeaser() {
+    const settings = await this.founderPromo.getPlatformPromoSettings();
+    return {
+      enabled: settings.enabled && settings.credentialsConfigured,
+      message: settings.enabled ? settings.message : null,
+      windowDays: settings.windowDays,
+    };
+  }
+
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
     const founder = await this.prisma.founder.update({
       where: { id: founderId },

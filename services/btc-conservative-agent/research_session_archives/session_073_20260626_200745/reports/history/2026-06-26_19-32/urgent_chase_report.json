@@ -1,0 +1,54 @@
+{
+  "schema": "urgent_chase_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T19:31:28.897793+00:00",
+  "experiment_lane": "URGENT_CHASE_ALPHA",
+  "benchmark_lane": "CONTINUOUS",
+  "purpose": "Test whether velocity-aware chase improves benchmark performance",
+  "chase_tiers": {
+    "normal": "25% gap closure",
+    "medium": "50% gap closure",
+    "high": "75% gap closure",
+    "extreme": "immediate marketable limit"
+  },
+  "urgent_chase_alpha": {
+    "fills": 408,
+    "approves": 408,
+    "fill_pct": 100.0,
+    "pnl_usd": 164.51,
+    "ev_per_approve": 0.4,
+    "chase_assisted_fills": 0,
+    "ttl_prevented": 0
+  },
+  "continuous_benchmark": {
+    "fills": 234,
+    "approves": 594,
+    "fill_pct": 39.4,
+    "pnl_usd": 187.04,
+    "ev_per_approve": 0.47
+  },
+  "benchmark_delta": {
+    "delta_ev_per_approve": -0.07,
+    "delta_pnl_usd": -22.53,
+    "delta_fill_pct": 60.6
+  },
+  "forensics": {
+    "continuous": {
+      "trades": 234,
+      "wins": 176,
+      "wr_pct": 75.2,
+      "pnl_usd": 187.04,
+      "ev_usd": 0.8,
+      "avg_mfe_margin_pct": 16.73,
+      "avg_mae_margin_pct": -7.14,
+      "avg_signal_age_sec": 213.9,
+      "avg_entry_slippage_usd": 45.62,
+      "avg_chase_count": 0.0
+    }
+  },
+  "success_criteria": "Must outperform CONTINUOUS on EV or net PnL after adequate sample",
+  "verdict": "RETIRE_CANDIDATE",
+  "min_fills_for_decision": 15
+}

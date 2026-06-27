@@ -1,0 +1,71 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "expected_bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T17:46:50.057468+00:00",
+  "sample_replays_with_trades": 4,
+  "early_tags": {
+    "immediately_right": {
+      "n": 3,
+      "wins": 3,
+      "sum_pnl_usd": 7.26
+    },
+    "mixed": {
+      "n": 1,
+      "wins": 1,
+      "sum_pnl_usd": 1.01
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "cont-d5427cbbdea1",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 4.67,
+      "win": true,
+      "unreal_5m_pct": 17.14,
+      "unreal_15m_pct": 98.55,
+      "unreal_30m_pct": null,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-ee099fc7ad84",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.46,
+      "win": true,
+      "unreal_5m_pct": 29.88,
+      "unreal_15m_pct": 75.16,
+      "unreal_30m_pct": 74.66,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-d4ea1e0a1dde",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.13,
+      "win": true,
+      "unreal_5m_pct": 11.99,
+      "unreal_15m_pct": 29.15,
+      "unreal_30m_pct": 40.82,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-90b70a3b8508",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.01,
+      "win": true,
+      "unreal_5m_pct": 2.0,
+      "unreal_15m_pct": 28.16,
+      "unreal_30m_pct": 39.99,
+      "early_tag": "mixed"
+    }
+  ]
+}

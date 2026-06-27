@@ -1,0 +1,53 @@
+{
+  "schema": "scenario_c_leakage_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-27T00:50:46.242742+00:00",
+  "overall": {
+    "trades": 389,
+    "peak_profit_usd": 1060.53,
+    "booked_profit_usd": 292.13,
+    "left_on_table_usd": 768.48,
+    "capture_ratio_pct": -203.3,
+    "avg_mfe_margin_pct": 15.58
+  },
+  "by_exit_reason": {
+    "EARLY_FAIL": {
+      "trades": 10,
+      "peak_profit_usd": 12.29,
+      "booked_profit_usd": -51.29,
+      "capture_ratio_pct": -447.0
+    },
+    "PROFIT_LOCK_LADDER": {
+      "trades": 278,
+      "peak_profit_usd": 951.47,
+      "booked_profit_usd": 524.76,
+      "capture_ratio_pct": 54.4
+    },
+    "STOP_LOSS": {
+      "trades": 19,
+      "peak_profit_usd": 18.45,
+      "booked_profit_usd": -86.67,
+      "capture_ratio_pct": -675.5
+    },
+    "TAKE_PROFIT": {
+      "trades": 1,
+      "peak_profit_usd": 22.59,
+      "booked_profit_usd": 22.51,
+      "capture_ratio_pct": 99.7
+    },
+    "THESIS_FAST_CUT": {
+      "trades": 41,
+      "peak_profit_usd": 3.81,
+      "booked_profit_usd": -80.46,
+      "capture_ratio_pct": -3073.7
+    },
+    "THESIS_INVALIDATED": {
+      "trades": 40,
+      "peak_profit_usd": 51.92,
+      "booked_profit_usd": -36.72,
+      "capture_ratio_pct": -136.3
+    }
+  }
+}

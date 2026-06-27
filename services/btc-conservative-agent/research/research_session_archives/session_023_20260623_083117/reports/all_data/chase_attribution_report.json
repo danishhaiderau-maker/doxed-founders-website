@@ -1,0 +1,27 @@
+{
+  "schema": "chase_attribution_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-22T17:04:09.876164+00:00",
+  "note": "saved_fill=true when filled after chase moved limit away from original (> $1 or chase events logged).",
+  "overnight_watch": {
+    "approve": 0,
+    "orders_created": 0,
+    "chase_events": 0,
+    "chase_assisted_fills": 0,
+    "saved_fills_heuristic": 0,
+    "static_limit_fills": 0,
+    "ttl_expired": 0,
+    "total_fills": 0
+  },
+  "totals": {
+    "trades_with_orders": 0,
+    "chase_events": 0,
+    "chase_assisted_fills": 0,
+    "saved_fills_heuristic": 0,
+    "ttl_expired": 0
+  },
+  "by_lane": {},
+  "trades": []
+}

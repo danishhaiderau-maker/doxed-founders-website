@@ -1,0 +1,60 @@
+{
+  "schema": "exit_leakage_by_reason_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T20:27:53.651825+00:00",
+  "overall_left_usd": 143.66,
+  "overall_booked_usd": 30.74,
+  "overall_peak_usd": 174.36,
+  "reasons": [
+    {
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "trades": 54,
+      "left_on_table_usd": 65.99,
+      "avg_left_usd": 1.22,
+      "avg_mfe_margin_pct": 19.79,
+      "avg_realized_margin_pct": 11.64,
+      "avg_leakage_margin_pct": 8.15,
+      "booked_profit_usd": 94.34,
+      "peak_profit_usd": 160.3,
+      "capture_ratio_pct": 57.1
+    },
+    {
+      "exit_reason": "STOP_LOSS",
+      "trades": 9,
+      "left_on_table_usd": 44.8,
+      "avg_left_usd": 4.98,
+      "avg_mfe_margin_pct": 7.11,
+      "avg_realized_margin_pct": -26.07,
+      "avg_leakage_margin_pct": 33.18,
+      "booked_profit_usd": -35.19,
+      "peak_profit_usd": 9.6,
+      "capture_ratio_pct": -434.8
+    },
+    {
+      "exit_reason": "EARLY_FAIL",
+      "trades": 3,
+      "left_on_table_usd": 20.05,
+      "avg_left_usd": 6.68,
+      "avg_mfe_margin_pct": 7.78,
+      "avg_realized_margin_pct": -36.77,
+      "avg_leakage_margin_pct": 44.55,
+      "booked_profit_usd": -16.55,
+      "peak_profit_usd": 3.5,
+      "capture_ratio_pct": -479.7
+    },
+    {
+      "exit_reason": "THESIS_FAST_CUT",
+      "trades": 9,
+      "left_on_table_usd": 12.83,
+      "avg_left_usd": 1.43,
+      "avg_mfe_margin_pct": 0.71,
+      "avg_realized_margin_pct": -8.79,
+      "avg_leakage_margin_pct": 9.5,
+      "booked_profit_usd": -11.86,
+      "peak_profit_usd": 0.96,
+      "capture_ratio_pct": -1924.4
+    }
+  ]
+}

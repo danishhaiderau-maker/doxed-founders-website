@@ -1,0 +1,23 @@
+{
+  "schema": "roster_policy_v2",
+  "generated_at": "2026-06-24T17:21:11.094150+00:00",
+  "current_regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+  "action": "RECOMMEND_WEIGHTS",
+  "confidence": "MODERATE",
+  "reason": "Regime unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid: favor COMBO_65_SP5_CHASE_3PLUS (EV $+0.26, n=20)",
+  "tile_weights": {
+    "COMBO_65_SP5_CHASE_3PLUS": 0.7,
+    "COMBO_604_SP4_CHASE_3PLUS": 0.1,
+    "CONTINUOUS": 0.0,
+    "AI_DISAGREEMENT_REPLAY": 0.1
+  },
+  "auto_apply": false,
+  "requires_human_approval": true,
+  "collection_progress": {
+    "accumulated_trades": 138,
+    "target_trades": 200,
+    "progress_pct": 69.0,
+    "ready_for_roster_decision": false
+  },
+  "phase": "COLLECT"
+}

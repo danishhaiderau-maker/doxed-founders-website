@@ -1,0 +1,24 @@
+{
+  "schema": "benchmark_contribution_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T14:08:49.948310+00:00",
+  "total_pnl_usd": 3.6,
+  "lanes": [
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "fills": 20,
+      "pnl_usd": 2.51,
+      "pnl_pct_of_total": 69.7
+    },
+    {
+      "lane": "AI_DISAGREEMENT_REPLAY",
+      "label": "AI_DISAGREEMENT_REPLAY",
+      "fills": 1,
+      "pnl_usd": 1.09,
+      "pnl_pct_of_total": 30.3
+    }
+  ]
+}

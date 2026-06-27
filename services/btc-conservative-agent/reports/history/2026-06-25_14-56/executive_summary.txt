@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — FRESH-COLLECTION (~26.3h bot session) | v11.0-genome-architecture-v1 ===
+========================================================================
+Data scope: SESSION | CSV trades: 213 | Analyzed fills: 192
+Trades 192 | WR 75.5% | PnL +161.16 | EV 0.84/trade | MFE capture 30.4%
+APPROVE 821 → executed 213 | Gate damage $+131.90 | Edge: edge_may_add_value
+Sample confidence: MODERATE — 192 trades — directional only; prefer ≥200 trades before strong edge/lane claims.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — FRESH-COLLECTION (~56.7h bot session) | v11.1-virtual-chase-known-combos-v1 ===
+========================================================================
+Data scope: SESSION | CSV trades: 403 | Analyzed fills: 376
+Trades 376 | WR 75.0% | PnL +286.21 | EV 0.76/trade | MFE capture 31.7%
+APPROVE 1618 → executed 403 | Gate damage $+184.69 | Edge: edge_no_incremental_value
+Sample confidence: GOOD — 376 trades / 1618 approves — adequate for lane and edge conclusions.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

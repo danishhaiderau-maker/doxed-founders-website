@@ -1,0 +1,1158 @@
+{
+  "schema": "regime_leaderboard_v2",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "data_source": "research_accumulator_db",
+  "generated_at": "2026-06-25T14:18:35.462485+00:00",
+  "min_trades_per_cell": 3,
+  "target_trades_for_roster": 200,
+  "total_trades": 300,
+  "regime_dimensions": [
+    "day_type",
+    "session",
+    "adx",
+    "volatility",
+    "funding",
+    "liquidity"
+  ],
+  "cells": [
+    {
+      "regime": "unknown|UNKNOWN|adx_high|unknown|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -4.5,
+      "ev_usd": -4.5
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 4,
+      "wins": 3,
+      "wr_pct": 75.0,
+      "pnl_usd": 2.31,
+      "ev_usd": 0.58
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 10,
+      "wins": 8,
+      "wr_pct": 80.0,
+      "pnl_usd": 5.87,
+      "ev_usd": 0.59
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 20,
+      "wins": 14,
+      "wr_pct": 70.0,
+      "pnl_usd": 5.17,
+      "ev_usd": 0.26
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 44,
+      "wins": 26,
+      "wr_pct": 59.1,
+      "pnl_usd": -0.96,
+      "ev_usd": -0.02
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_neutral|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 0.64,
+      "ev_usd": 0.64
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -1.01,
+      "ev_usd": -1.01
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "AI_DISAGREEMENT_REPLAY",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.09,
+      "ev_usd": 1.09
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -2.68,
+      "ev_usd": -1.34
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 9,
+      "wins": 8,
+      "wr_pct": 88.9,
+      "pnl_usd": 9.72,
+      "ev_usd": 1.08
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 2.99,
+      "ev_usd": 1.5
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 4,
+      "wins": 2,
+      "wr_pct": 50.0,
+      "pnl_usd": -3.85,
+      "ev_usd": -0.96
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 8.63,
+      "ev_usd": 4.32
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -1.85,
+      "ev_usd": -1.85
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 16,
+      "wins": 11,
+      "wr_pct": 68.8,
+      "pnl_usd": 2.7,
+      "ev_usd": 0.17
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 5.38,
+      "ev_usd": 2.69
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.89,
+      "ev_usd": 1.89
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 1,
+      "wr_pct": 50.0,
+      "pnl_usd": -3.97,
+      "ev_usd": -1.99
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 8,
+      "wins": 8,
+      "wr_pct": 100.0,
+      "pnl_usd": 10.1,
+      "ev_usd": 1.26
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -0.5,
+      "ev_usd": -0.25
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 2,
+      "wins": 1,
+      "wr_pct": 50.0,
+      "pnl_usd": 0.27,
+      "ev_usd": 0.14
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 4,
+      "wins": 1,
+      "wr_pct": 25.0,
+      "pnl_usd": -2.59,
+      "ev_usd": -0.65
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 4,
+      "wins": 1,
+      "wr_pct": 25.0,
+      "pnl_usd": -2.83,
+      "ev_usd": -0.71
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 3,
+      "wins": 3,
+      "wr_pct": 100.0,
+      "pnl_usd": 7.26,
+      "ev_usd": 2.42
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 6,
+      "wins": 5,
+      "wr_pct": 83.3,
+      "pnl_usd": 10.59,
+      "ev_usd": 1.76
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 18,
+      "wins": 16,
+      "wr_pct": 88.9,
+      "pnl_usd": 15.22,
+      "ev_usd": 0.85
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 13,
+      "wins": 10,
+      "wr_pct": 76.9,
+      "pnl_usd": 2.4,
+      "ev_usd": 0.18
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 3.01,
+      "ev_usd": 3.01
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.46,
+      "ev_usd": 1.46
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.47,
+      "ev_usd": 1.47
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 4,
+      "wins": 3,
+      "wr_pct": 75.0,
+      "pnl_usd": 2.76,
+      "ev_usd": 0.69
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 4,
+      "wins": 3,
+      "wr_pct": 75.0,
+      "pnl_usd": 4.01,
+      "ev_usd": 1.0
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 11,
+      "wins": 11,
+      "wr_pct": 100.0,
+      "pnl_usd": 16.75,
+      "ev_usd": 1.52
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|unknown|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 3.44,
+      "ev_usd": 3.44
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|unknown|funding_positive|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -3.62,
+      "ev_usd": -3.62
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": -6.24,
+      "ev_usd": -6.24
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 6,
+      "wins": 5,
+      "wr_pct": 83.3,
+      "pnl_usd": 5.02,
+      "ev_usd": 0.84
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 9,
+      "wins": 4,
+      "wr_pct": 44.4,
+      "pnl_usd": -8.99,
+      "ev_usd": -1.0
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_low",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.62,
+      "ev_usd": 1.62
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.69,
+      "ev_usd": 1.69
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 24,
+      "wins": 17,
+      "wr_pct": 70.8,
+      "pnl_usd": 4.63,
+      "ev_usd": 0.19
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 35,
+      "wins": 26,
+      "wr_pct": 74.3,
+      "pnl_usd": 27.01,
+      "ev_usd": 0.77
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_neutral|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 2,
+      "wins": 1,
+      "wr_pct": 50.0,
+      "pnl_usd": -2.61,
+      "ev_usd": -1.3
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_neutral|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 2,
+      "wins": 1,
+      "wr_pct": 50.0,
+      "pnl_usd": -2.0,
+      "ev_usd": -1.0
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_high",
+      "lane": "CONTINUOUS",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.86,
+      "ev_usd": 1.86
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 6,
+      "wins": 4,
+      "wr_pct": 66.7,
+      "pnl_usd": 1.43,
+      "ev_usd": 0.24
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 5,
+      "wins": 4,
+      "wr_pct": 80.0,
+      "pnl_usd": 2.69,
+      "ev_usd": 0.54
+    }
+  ],
+  "regimes": [
+    {
+      "regime": "unknown|UNKNOWN|adx_high|unknown|funding_positive|liquidity_mid",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": -4.5,
+      "best_pnl_usd": -4.5,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_high|unknown|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -4.5,
+          "ev_usd": -4.5
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_high",
+      "total_trades": 14,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.59,
+      "best_pnl_usd": 5.87,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 10,
+          "wins": 8,
+          "wr_pct": 80.0,
+          "pnl_usd": 5.87,
+          "ev_usd": 0.59
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 4,
+          "wins": 3,
+          "wr_pct": 75.0,
+          "pnl_usd": 2.31,
+          "ev_usd": 0.58
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 64,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "best_ev_usd": 0.26,
+      "best_pnl_usd": 5.17,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 20,
+          "wins": 14,
+          "wr_pct": 70.0,
+          "pnl_usd": 5.17,
+          "ev_usd": 0.26
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 44,
+          "wins": 26,
+          "wr_pct": 59.1,
+          "pnl_usd": -0.96,
+          "ev_usd": -0.02
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_neutral|liquidity_high",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.64,
+      "best_pnl_usd": 0.64,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_neutral|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 0.64,
+          "ev_usd": 0.64
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_high",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": -1.01,
+      "best_pnl_usd": -1.01,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -1.01,
+          "ev_usd": -1.01
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 12,
+      "lanes_observed": 3,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.08,
+      "best_pnl_usd": 9.72,
+      "second_lane": null,
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+          "lane": "AI_DISAGREEMENT_REPLAY",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.09,
+          "ev_usd": 1.09
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 9,
+          "wins": 8,
+          "wr_pct": 88.9,
+          "pnl_usd": 9.72,
+          "ev_usd": 1.08
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_low|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -2.68,
+          "ev_usd": -1.34
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_high",
+      "total_trades": 6,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": -0.96,
+      "best_pnl_usd": -3.85,
+      "second_lane": null,
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 2,
+          "wr_pct": 100.0,
+          "pnl_usd": 2.99,
+          "ev_usd": 1.5
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 4,
+          "wins": 2,
+          "wr_pct": 50.0,
+          "pnl_usd": -3.85,
+          "ev_usd": -0.96
+        }
+      ]
+    },
+    {
+      "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 19,
+      "lanes_observed": 3,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.17,
+      "best_pnl_usd": 2.7,
+      "second_lane": null,
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 2,
+          "wr_pct": 100.0,
+          "pnl_usd": 8.63,
+          "ev_usd": 4.32
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 16,
+          "wins": 11,
+          "wr_pct": 68.8,
+          "pnl_usd": 2.7,
+          "ev_usd": 0.17
+        },
+        {
+          "regime": "unknown|UNKNOWN|adx_mid|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -1.85,
+          "ev_usd": -1.85
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+      "total_trades": 3,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": 2.69,
+      "best_pnl_usd": 5.38,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 2,
+          "wr_pct": 100.0,
+          "pnl_usd": 5.38,
+          "ev_usd": 2.69
+        },
+        {
+          "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.89,
+          "ev_usd": 1.89
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 10,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.26,
+      "best_pnl_usd": 10.1,
+      "second_lane": null,
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 8,
+          "wins": 8,
+          "wr_pct": 100.0,
+          "pnl_usd": 10.1,
+          "ev_usd": 1.26
+        },
+        {
+          "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 1,
+          "wr_pct": 50.0,
+          "pnl_usd": -3.97,
+          "ev_usd": -1.99
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+      "total_trades": 4,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.14,
+      "best_pnl_usd": 0.27,
+      "second_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 2,
+          "wins": 1,
+          "wr_pct": 50.0,
+          "pnl_usd": 0.27,
+          "ev_usd": 0.14
+        },
+        {
+          "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -0.5,
+          "ev_usd": -0.25
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 8,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": -0.65,
+      "best_pnl_usd": -2.59,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 4,
+          "wins": 1,
+          "wr_pct": 25.0,
+          "pnl_usd": -2.59,
+          "ev_usd": -0.65
+        },
+        {
+          "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 4,
+          "wins": 1,
+          "wr_pct": 25.0,
+          "pnl_usd": -2.83,
+          "ev_usd": -0.71
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+      "total_trades": 9,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": 2.42,
+      "best_pnl_usd": 7.26,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 3,
+          "wins": 3,
+          "wr_pct": 100.0,
+          "pnl_usd": 7.26,
+          "ev_usd": 2.42
+        },
+        {
+          "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 6,
+          "wins": 5,
+          "wr_pct": 83.3,
+          "pnl_usd": 10.59,
+          "ev_usd": 1.76
+        }
+      ]
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 31,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": 0.85,
+      "best_pnl_usd": 15.22,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 18,
+          "wins": 16,
+          "wr_pct": 88.9,
+          "pnl_usd": 15.22,
+          "ev_usd": 0.85
+        },
+        {
+          "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 13,
+          "wins": 10,
+          "wr_pct": 76.9,
+          "pnl_usd": 2.4,
+          "ev_usd": 0.18
+        }
+      ]
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_high",
+      "total_trades": 2,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": 3.01,
+      "best_pnl_usd": 3.01,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 3.01,
+          "ev_usd": 3.01
+        },
+        {
+          "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.46,
+          "ev_usd": 1.46
+        }
+      ]
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_mid",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.47,
+      "best_pnl_usd": 1.47,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|LONDON|adx_high|unknown|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.47,
+          "ev_usd": 1.47
+        }
+      ]
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 19,
+      "lanes_observed": 3,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.52,
+      "best_pnl_usd": 16.75,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 11,
+          "wins": 11,
+          "wr_pct": 100.0,
+          "pnl_usd": 16.75,
+          "ev_usd": 1.52
+        },
+        {
+          "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 4,
+          "wins": 3,
+          "wr_pct": 75.0,
+          "pnl_usd": 4.01,
+          "ev_usd": 1.0
+        },
+        {
+          "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 4,
+          "wins": 3,
+          "wr_pct": 75.0,
+          "pnl_usd": 2.76,
+          "ev_usd": 0.69
+        }
+      ]
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|unknown|funding_positive|liquidity_mid",
+      "total_trades": 2,
+      "lanes_observed": 2,
+      "best_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "best_ev_usd": 3.44,
+      "best_pnl_usd": 3.44,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|NEW_YORK|adx_high|unknown|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 3.44,
+          "ev_usd": 3.44
+        },
+        {
+          "regime": "weekday|NEW_YORK|adx_high|unknown|funding_positive|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -3.62,
+          "ev_usd": -3.62
+        }
+      ]
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+      "total_trades": 16,
+      "lanes_observed": 3,
+      "best_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "best_ev_usd": 0.84,
+      "best_pnl_usd": 5.02,
+      "second_lane": "CONTINUOUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 6,
+          "wins": 5,
+          "wr_pct": 83.3,
+          "pnl_usd": 5.02,
+          "ev_usd": 0.84
+        },
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 9,
+          "wins": 4,
+          "wr_pct": 44.4,
+          "pnl_usd": -8.99,
+          "ev_usd": -1.0
+        },
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 0,
+          "wr_pct": 0.0,
+          "pnl_usd": -6.24,
+          "ev_usd": -6.24
+        }
+      ]
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_low",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.62,
+      "best_pnl_usd": 1.62,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_low",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.62,
+          "ev_usd": 1.62
+        }
+      ]
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+      "total_trades": 60,
+      "lanes_observed": 3,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.77,
+      "best_pnl_usd": 27.01,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_604_SP4_CHASE_3PLUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.69,
+          "ev_usd": 1.69
+        },
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 35,
+          "wins": 26,
+          "wr_pct": 74.3,
+          "pnl_usd": 27.01,
+          "ev_usd": 0.77
+        },
+        {
+          "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 24,
+          "wins": 17,
+          "wr_pct": 70.8,
+          "pnl_usd": 4.63,
+          "ev_usd": 0.19
+        }
+      ]
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_neutral|liquidity_mid",
+      "total_trades": 4,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": -1.0,
+      "best_pnl_usd": -2.0,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|OVERLAP|adx_high|vol_high|funding_neutral|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 2,
+          "wins": 1,
+          "wr_pct": 50.0,
+          "pnl_usd": -2.0,
+          "ev_usd": -1.0
+        },
+        {
+          "regime": "weekday|OVERLAP|adx_high|vol_high|funding_neutral|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 2,
+          "wins": 1,
+          "wr_pct": 50.0,
+          "pnl_usd": -2.61,
+          "ev_usd": -1.3
+        }
+      ]
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_high",
+      "total_trades": 1,
+      "lanes_observed": 1,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 1.86,
+      "best_pnl_usd": 1.86,
+      "second_lane": null,
+      "conclusion_allowed": false,
+      "lanes": [
+        {
+          "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_high",
+          "lane": "CONTINUOUS",
+          "trades": 1,
+          "wins": 1,
+          "wr_pct": 100.0,
+          "pnl_usd": 1.86,
+          "ev_usd": 1.86
+        }
+      ]
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+      "total_trades": 11,
+      "lanes_observed": 2,
+      "best_lane": "CONTINUOUS",
+      "best_ev_usd": 0.54,
+      "best_pnl_usd": 2.69,
+      "second_lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "conclusion_allowed": true,
+      "lanes": [
+        {
+          "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+          "lane": "CONTINUOUS",
+          "trades": 5,
+          "wins": 4,
+          "wr_pct": 80.0,
+          "pnl_usd": 2.69,
+          "ev_usd": 0.54
+        },
+        {
+          "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+          "lane": "COMBO_65_SP5_CHASE_3PLUS",
+          "trades": 6,
+          "wins": 4,
+          "wr_pct": 66.7,
+          "pnl_usd": 1.43,
+          "ev_usd": 0.24
+        }
+      ]
+    }
+  ],
+  "usage_note": "Recommend-only \u2014 do not auto-switch lanes until \u226520 trades per regime cell (~200 total tagged)"
+}

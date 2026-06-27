@@ -1,0 +1,52 @@
+{
+  "schema": "chatgpt_research_bundle_manifest_v1",
+  "generated_at": "2026-06-24T10:59:10.868615+00:00",
+  "purpose": "Upload this ZIP to ChatGPT for regime/lane analysis",
+  "files_included": [
+    "csv/trades_3factor.csv",
+    "accumulator/trades_accumulated.csv",
+    "csv/decisions_3factor.csv",
+    "csv/blocked_signals_3factor.csv",
+    "reports/benchmark_vs_lanes_report.json",
+    "reports/lane_retirement_report.json",
+    "reports/lane_definition_report.json",
+    "reports/research_compact_summary.json",
+    "reports/report_manifest.json",
+    "reports/lane_pnl_ledger.json",
+    "reports/real_edge_summary.json",
+    "reports/regime_leaderboard.json",
+    "reports/regime_confidence_matrix.json",
+    "reports/roster_policy.json",
+    "summaries/executive_summary.txt",
+    "summaries/research_findings.txt",
+    "summaries/research_highlights.txt"
+  ],
+  "trade_stats": {
+    "total_trades": 152,
+    "weekend_trades": 0,
+    "weekday_trades": 152,
+    "by_lane": {
+      "AI_DISAGREEMENT_REPLAY": {
+        "n": 1,
+        "pnl": 1.09
+      },
+      "CONTINUOUS": {
+        "n": 108,
+        "pnl": 5.21
+      },
+      "COMBO_604_SP4_CHASE_3PLUS": {
+        "n": 10,
+        "pnl": 18.83
+      },
+      "COMBO_65_SP5_CHASE_3PLUS": {
+        "n": 33,
+        "pnl": 7.92
+      }
+    }
+  },
+  "session_archives_on_disk": 82,
+  "accumulator_trades": 836,
+  "zip_path": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\downloads\\chatgpt_research_bundle.zip",
+  "zip_size_mb": 0.32,
+  "zip_verified": true
+}

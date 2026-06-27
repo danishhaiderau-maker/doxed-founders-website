@@ -1,0 +1,59 @@
+{
+  "schema": "ai_direction_bias_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T22:55:43.738021+00:00",
+  "executed_trades": {
+    "LONG": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "wr": 0.0,
+      "pnl": 0.0
+    },
+    "SHORT": {
+      "count": 103,
+      "avg_bull_score": 2.31,
+      "avg_bear_score": 8.08,
+      "avg_structure": -5.65,
+      "avg_spread": -5.77,
+      "wr": 71.8,
+      "pnl": 39.61
+    }
+  },
+  "ai_decisions": {
+    "LONG": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "pct_bull_mtf": 0.0,
+      "pct_bear_mtf": 0.0
+    },
+    "SHORT": {
+      "count": 189,
+      "avg_bull_score": 2.32,
+      "avg_bear_score": 8.04,
+      "avg_structure": -5.35,
+      "avg_spread": 5.72,
+      "pct_bull_mtf": 0.0,
+      "pct_bear_mtf": 71.4
+    },
+    "long_short_call_ratio": 0.0
+  },
+  "feature_importance": {
+    "bull_score_importance": 0.0,
+    "bear_score_importance": 0.0,
+    "structure_importance": 0.0,
+    "mtf_importance": 0.0
+  },
+  "interpretation": {
+    "executed_edge_favors": "SHORT",
+    "ai_call_bias_favors": "SHORT",
+    "top_driver": "bull_score_importance"
+  }
+}

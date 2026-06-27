@@ -1,0 +1,14 @@
+========================================================================
+=== KEY FINDINGS ===
+========================================================================
+
+1. Lowest lane: COMBO_65_SP5_CHASE_3PLUS at $+0.00 (0 fills) — review if sample grows.
+2. No fast-cut exits in sample.
+3. Gate damage $+0.00 — post-AI gates are not the main PnL leak.
+4. Scenario C left $62.0 on table vs peak — exit timing is the bigger lever than entry gates.
+5. Edge filter: insufficient_data (sample POOR — Only 0 trades / 137 approves — treat calibration, edge, and lane verdicts as noisy.).
+6. Blocked shadow opportunity (heuristic): $+0.00.
+7. ⚠ Statistical confidence POOR — do not change bot thresholds from this run alone.
+8. Top conditional edge: 60-65 + spread 5+ + ADX adx_high + OVERLAP → CONTINUOUS (20 trades, EV $-1.04, stability=LOW).
+
+========================================================================

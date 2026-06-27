@@ -1,0 +1,55 @@
+================================================================================================================
+=== RESEARCH HIGHLIGHTS — ALL-DATA | v10.6-melbourne-unified-2026-06-24 ===
+================================================================================================================
+
+=== RESEARCH HIGHLIGHTS (at-a-glance) ===
+Top Lane:     n/a  $+0.00
+Worst Lane:   n/a  $+0.00
+Best Conf:    60-65  61.5% WR
+Worst Conf:   60-65  61.5% WR
+Fast-Cut PnL: $-42.44
+Blocked Opp:  $+0.00
+Edge corr:    -0.1317
+Best Exit:    PROFIT_LOCK_LADDER  $+125.33
+
+--- Exit mix ---
+Exit reason                   N       WR%       PnL         
+PROFIT_LOCK_LADDER            71      100.0%    +125.33     
+THESIS_FAST_CUT               22      0.0%      -42.44      
+THESIS_INVALIDATED            13      53.8%     -1.73       
+STOP_LOSS                     11      0.0%      -52.04      
+EARLY_FAIL                    1       0.0%      -4.85       
+
+--- Confidence bands (executed) ---
+Band        N       WR%       PnL         
+0-45        1       100.0%    +1.09       
+55-60       2       100.0%    +1.71       
+60-65       65      61.5%     +8.31       
+
+--- Chase ---
+Assisted: 0/0 fills | Saved: 0 | TTL expired: 0
+
+--- Scenario C / exits ---
+Leakage left on table: $211.12 | MFE capture: 21.3% | Fast-cut trades: 22
+  Capture distribution: 0-30%: n=2, 30-50%: n=17, 50-70%: n=45, 70-90%: n=11, 90%+: n=3
+  Fast-cut: n=22 saved=$0.00 missed=$0.00
+
+--- Horizon (losers → green later?) ---
+  5m: green=0 still_red=0 unknown=40 (n/a% of known)
+  10m: green=0 still_red=0 unknown=40 (n/a% of known)
+  15m: green=0 still_red=0 unknown=40 (n/a% of known)
+  30m: green=0 still_red=0 unknown=40 (n/a% of known)
+
+--- Direction ---
+  LONG: n=27 WR=66.7% PnL=$+7.76
+  SHORT: n=91 WR=65.9% PnL=$+16.51
+
+--- Edge validation ---
+Incremental: insufficient_data
+  Decile corr(edge,PnL)=-0.1317 verdict=edge_weak_signal
+Edge decile   N       WR%       EV        
+1-2           2       100.0%    +1.52     
+2-3           10      90.0%     +1.19     
+3-4           42      66.7%     +0.01     
+4+            64      60.9%     +0.14     
+================================================================================================================

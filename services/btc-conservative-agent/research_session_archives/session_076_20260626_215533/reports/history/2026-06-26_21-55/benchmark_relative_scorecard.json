@@ -1,0 +1,378 @@
+{
+  "schema": "benchmark_relative_scorecard_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "benchmark_lane": "CONTINUOUS",
+  "benchmark_frozen": {
+    "scenario_c_exits": true,
+    "ai_cadence_sec": 180,
+    "note": "CONTINUOUS is the scientific control \u2014 do not mutate during research collection."
+  },
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T21:54:01.214872+00:00",
+  "benchmark_summary": {
+    "pnl_usd": 203.53,
+    "win_rate_pct": 76.1,
+    "ev_per_approve_usd": 0.45,
+    "approves": 638
+  },
+  "lanes": [
+    {
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "label": "AI60+ \u00b7 Spread \u22653 \u00b7 Virtual Chase",
+      "is_benchmark": false,
+      "approves": 150,
+      "fills": 35,
+      "win_rate_pct": 69.0,
+      "pnl_usd": 13.34,
+      "ev_per_approve_usd": 0.1,
+      "vs_benchmark": {
+        "pnl_delta": -190.19,
+        "wr_delta": -7.1,
+        "ev_delta": -0.35,
+        "fill_pct_delta": -16.4,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "is_benchmark": true,
+      "approves": 638,
+      "fills": 253,
+      "win_rate_pct": 76.1,
+      "pnl_usd": 203.53,
+      "ev_per_approve_usd": 0.45,
+      "vs_benchmark": {
+        "pnl_delta": 0.0,
+        "wr_delta": 0.0,
+        "ev_delta": 0.0,
+        "fill_pct_delta": 0.0,
+        "beats_benchmark": null
+      }
+    },
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "is_benchmark": false,
+      "approves": 146,
+      "fills": 68,
+      "win_rate_pct": 75.0,
+      "pnl_usd": 56.64,
+      "ev_per_approve_usd": 0.58,
+      "vs_benchmark": {
+        "pnl_delta": -146.89,
+        "wr_delta": -1.1,
+        "ev_delta": 0.13,
+        "fill_pct_delta": 6.9,
+        "beats_benchmark": true
+      }
+    },
+    {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "label": "AI65+ \u00b7 Spread5+ \u00b7 Chase 3+",
+      "is_benchmark": false,
+      "approves": 90,
+      "fills": 54,
+      "win_rate_pct": 69.8,
+      "pnl_usd": 5.51,
+      "ev_per_approve_usd": 0.65,
+      "vs_benchmark": {
+        "pnl_delta": -198.02,
+        "wr_delta": -6.3,
+        "ev_delta": 0.2,
+        "fill_pct_delta": 20.3,
+        "beats_benchmark": true
+      }
+    },
+    {
+      "lane": "COMBO_604_SP4_DIRECT",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Continuous",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "COMBO_65_SP5_DIRECT",
+      "label": "AI65+ \u00b7 Spread5+ \u00b7 Continuous",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "AI_DISAGREEMENT_REPLAY",
+      "label": "AI Disagreement \u00b7 Replay Wins",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "RECOVERY_MONSTER_V1",
+      "label": "Recovery Monster v1",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "TYPE_B_PREDICTOR_V1",
+      "label": "Type B Predictor v1",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "AI_DISAGREEMENT_ALPHA",
+      "label": "AI Disagreement \u00b7 AI Wins",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "EXTREME_EDGE",
+      "label": "Extreme Edge",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "EDGE_PLUS_STACK",
+      "label": "Edge Plus Stack",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "AI_SCAN",
+      "label": "AI Scan (no orders)",
+      "is_benchmark": false,
+      "approves": 630,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.26,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.19,
+        "fill_pct_delta": -39.7,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "HIGH_EDGE_RUNNER",
+      "label": "High Edge Runner",
+      "is_benchmark": false,
+      "approves": 22,
+      "fills": 22,
+      "win_rate_pct": 0.0,
+      "pnl_usd": -23.2,
+      "ev_per_approve_usd": -1.05,
+      "vs_benchmark": {
+        "pnl_delta": -226.73,
+        "wr_delta": -76.1,
+        "ev_delta": -1.5,
+        "fill_pct_delta": 60.3,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "SHADOW_RUNNER",
+      "label": "Shadow Runner",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "EDGE_ALPHA_4",
+      "label": "Edge Alpha 4",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "TYPE_B_HUNTER",
+      "label": "Type B Hunter",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "SHORT_BEAR_ALPHA",
+      "label": "Short Bear Alpha",
+      "is_benchmark": false,
+      "approves": 0,
+      "fills": 0,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve_usd": 0.0,
+      "vs_benchmark": {
+        "pnl_delta": -203.53,
+        "wr_delta": -76.1,
+        "ev_delta": -0.45,
+        "fill_pct_delta": null,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "AI_60_65_ALPHA",
+      "label": "AI 60-65 Alpha",
+      "is_benchmark": false,
+      "approves": 138,
+      "fills": 138,
+      "win_rate_pct": 0.0,
+      "pnl_usd": -23.8,
+      "ev_per_approve_usd": -0.17,
+      "vs_benchmark": {
+        "pnl_delta": -227.33,
+        "wr_delta": -76.1,
+        "ev_delta": -0.62,
+        "fill_pct_delta": 60.3,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "URGENT_CHASE_ALPHA",
+      "label": "Urgent Chase Alpha",
+      "is_benchmark": false,
+      "approves": 452,
+      "fills": 452,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 170.11,
+      "ev_per_approve_usd": 0.38,
+      "vs_benchmark": {
+        "pnl_delta": -33.42,
+        "wr_delta": -76.1,
+        "ev_delta": -0.07,
+        "fill_pct_delta": 60.3,
+        "beats_benchmark": false
+      }
+    },
+    {
+      "lane": "CHASE_3PLUS_ALPHA",
+      "label": "Chase 3+ Alpha",
+      "is_benchmark": false,
+      "approves": 452,
+      "fills": 452,
+      "win_rate_pct": 0.0,
+      "pnl_usd": 170.11,
+      "ev_per_approve_usd": 0.38,
+      "vs_benchmark": {
+        "pnl_delta": -33.42,
+        "wr_delta": -76.1,
+        "ev_delta": -0.07,
+        "fill_pct_delta": 60.3,
+        "beats_benchmark": false
+      }
+    }
+  ]
+}

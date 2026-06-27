@@ -1,0 +1,134 @@
+{
+  "schema": "chase_efficiency_matrix_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T18:01:35.317527+00:00",
+  "overall_by_chase_count": {
+    "0_chases": {
+      "trades": 225,
+      "wins": 172,
+      "sum_pnl_usd": 179.85,
+      "wr_pct": 76.4,
+      "ev_usd": 0.8
+    }
+  },
+  "by_lane_and_chase_count": {
+    "0_chases|lane=NAN": {
+      "trades": 225,
+      "wins": 172,
+      "sum_pnl_usd": 179.85,
+      "wr_pct": 76.4,
+      "ev_usd": 0.8
+    }
+  },
+  "golden_ai60_spread4": [
+    {
+      "trades": 75,
+      "wins": 59,
+      "sum_pnl_usd": 65.58,
+      "wr_pct": 78.7,
+      "ev_usd": 0.87
+    }
+  ],
+  "full_matrix": {
+    "0_chases": {
+      "trades": 225,
+      "wins": 172,
+      "sum_pnl_usd": 179.85,
+      "wr_pct": 76.4,
+      "ev_usd": 0.8
+    },
+    "0_chases|lane=NAN": {
+      "trades": 225,
+      "wins": 172,
+      "sum_pnl_usd": 179.85,
+      "wr_pct": 76.4,
+      "ev_usd": 0.8
+    },
+    "0_chases|ai=65+": {
+      "trades": 97,
+      "wins": 70,
+      "sum_pnl_usd": 41.2,
+      "wr_pct": 72.2,
+      "ev_usd": 0.42
+    },
+    "0_chases|spread=5+": {
+      "trades": 146,
+      "wins": 110,
+      "sum_pnl_usd": 112.37,
+      "wr_pct": 75.3,
+      "ev_usd": 0.77
+    },
+    "0_chases|ai=65+|spread=5+|lane=NAN": {
+      "trades": 96,
+      "wins": 69,
+      "sum_pnl_usd": 40.5,
+      "wr_pct": 71.9,
+      "ev_usd": 0.42
+    },
+    "0_chases|ai=60-65": {
+      "trades": 127,
+      "wins": 102,
+      "sum_pnl_usd": 140.97,
+      "wr_pct": 80.3,
+      "ev_usd": 1.11
+    },
+    "0_chases|ai=60-65|spread=5+|lane=NAN": {
+      "trades": 50,
+      "wins": 41,
+      "sum_pnl_usd": 71.87,
+      "wr_pct": 82.0,
+      "ev_usd": 1.44
+    },
+    "0_chases|spread=4": {
+      "trades": 77,
+      "wins": 60,
+      "sum_pnl_usd": 63.96,
+      "wr_pct": 77.9,
+      "ev_usd": 0.83
+    },
+    "0_chases|ai=60-65|spread=4|lane=NAN": {
+      "trades": 75,
+      "wins": 59,
+      "sum_pnl_usd": 65.58,
+      "wr_pct": 78.7,
+      "ev_usd": 0.87
+    },
+    "0_chases|ai=55-60": {
+      "trades": 1,
+      "wins": 0,
+      "sum_pnl_usd": -2.32,
+      "wr_pct": 0.0,
+      "ev_usd": -2.32
+    },
+    "0_chases|ai=55-60|spread=4|lane=NAN": {
+      "trades": 1,
+      "wins": 0,
+      "sum_pnl_usd": -2.32,
+      "wr_pct": 0.0,
+      "ev_usd": -2.32
+    },
+    "0_chases|ai=65+|spread=4|lane=NAN": {
+      "trades": 1,
+      "wins": 1,
+      "sum_pnl_usd": 0.7,
+      "wr_pct": 100.0,
+      "ev_usd": 0.7
+    },
+    "0_chases|spread=3": {
+      "trades": 2,
+      "wins": 2,
+      "sum_pnl_usd": 3.52,
+      "wr_pct": 100.0,
+      "ev_usd": 1.76
+    },
+    "0_chases|ai=60-65|spread=3|lane=NAN": {
+      "trades": 2,
+      "wins": 2,
+      "sum_pnl_usd": 3.52,
+      "wr_pct": 100.0,
+      "ev_usd": 1.76
+    }
+  }
+}

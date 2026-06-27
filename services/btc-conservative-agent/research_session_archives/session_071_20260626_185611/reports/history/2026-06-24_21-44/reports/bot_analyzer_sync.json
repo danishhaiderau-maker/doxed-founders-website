@@ -1,0 +1,14 @@
+{
+  "schema": "bot_analyzer_sync_v1",
+  "generated_at": "2026-06-24T19:40:02.765448+00:00",
+  "bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "analyzer_expected_bot": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "verdict": "READY",
+  "checks": {
+    "bot_version_match": true,
+    "analyzer_sync_id_match": true,
+    "analyzer_expected_bot_match": true
+  }
+}

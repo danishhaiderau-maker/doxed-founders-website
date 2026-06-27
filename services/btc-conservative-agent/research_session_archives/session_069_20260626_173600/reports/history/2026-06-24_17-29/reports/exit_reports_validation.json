@@ -1,0 +1,9 @@
+{
+  "schema": "exit_reports_validation_v2",
+  "generated_at": "2026-06-24T17:29:22.651762+00:00",
+  "trade_count": 29,
+  "min_trades": 30,
+  "verdict": "SKIPPED",
+  "detail": "trades=29 < 30",
+  "checks": []
+}

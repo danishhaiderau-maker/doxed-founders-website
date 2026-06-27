@@ -1,0 +1,14 @@
+{
+  "schema": "real_edge_summary_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "generated_at": "2026-06-25T00:06:37.746945+00:00",
+  "approve_attempts": 528,
+  "executed": 137,
+  "blocked": 391,
+  "executed_pnl_usd": 30.84,
+  "blocked_shadow_pnl_usd": 64.79,
+  "counterfactual_all_approve_usd": 95.63,
+  "gate_damage_usd": 64.79,
+  "per_approve_ev_executed": 0.23,
+  "per_approve_ev_counterfactual": 0.18
+}

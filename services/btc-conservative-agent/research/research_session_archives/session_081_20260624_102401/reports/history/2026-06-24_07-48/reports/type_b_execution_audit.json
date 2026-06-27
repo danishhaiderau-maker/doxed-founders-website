@@ -1,0 +1,25 @@
+{
+  "schema": "type_b_execution_audit_v1",
+  "generated_at": "2026-06-24T07:48:58.906857+00:00",
+  "bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "verdict": "PASS",
+  "policy": "TYPE_B is post-trade classification only \u2014 never an entry/execution gate",
+  "checks": [
+    {
+      "check": "combo_lane_matches source has no TYPE_B/TYPE_A gates",
+      "passed": true,
+      "detail": "forbidden tokens in matcher: none"
+    },
+    {
+      "check": "combo_lane_matches uses ai_min/ai_max + spread only",
+      "passed": true,
+      "detail": "matcher inspects win_prob and directional spread buckets"
+    },
+    {
+      "check": "sample APPROVE AI65+ spread6 matches PRIMARY_PRODUCTION lane",
+      "passed": true,
+      "detail": "COMBO_65_SP5_CHASE_3PLUS match=True"
+    }
+  ]
+}

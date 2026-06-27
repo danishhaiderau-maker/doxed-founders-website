@@ -1,0 +1,919 @@
+{
+  "schema": "horizon_profitability_v3",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T15:32:55.877228+00:00",
+  "question": "Would losing trades have become profitable N minutes after exit?",
+  "method": "Tick replay at exit_t + horizon; profitable = unreal > 0 at horizon.",
+  "min_coverage_pct_for_conclusions": 80,
+  "max_horizon_coverage_pct": 19.1,
+  "conclusions_allowed": false,
+  "losing_trades": 47,
+  "horizons": {
+    "5m": {
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "profitable_pct": 55.6,
+      "coverage_pct": 19.1
+    },
+    "10m": {
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "profitable_pct": 55.6,
+      "coverage_pct": 19.1
+    },
+    "15m": {
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "profitable_pct": 55.6,
+      "coverage_pct": 19.1
+    },
+    "30m": {
+      "profitable": 9,
+      "still_loss": 0,
+      "unknown": 38,
+      "profitable_pct": 100.0,
+      "coverage_pct": 19.1
+    },
+    "60m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 47,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "120m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 47,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    }
+  },
+  "recovery_summary": [
+    {
+      "horizon": "5m",
+      "recovery_rate_pct": null,
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "coverage_pct": 19.1,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "10m",
+      "recovery_rate_pct": null,
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "coverage_pct": 19.1,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "15m",
+      "recovery_rate_pct": null,
+      "profitable": 5,
+      "still_loss": 4,
+      "unknown": 38,
+      "coverage_pct": 19.1,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "30m",
+      "recovery_rate_pct": null,
+      "profitable": 9,
+      "still_loss": 0,
+      "unknown": 38,
+      "coverage_pct": 19.1,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "60m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 47,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "120m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 47,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    }
+  ],
+  "fast_cut_recovery": {
+    "5m": {
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "10m": {
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "15m": {
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "30m": {
+      "profitable": 6,
+      "still_loss": 0,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "60m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 15,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "120m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 15,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    }
+  },
+  "fast_cut_recovery_summary": [
+    {
+      "horizon": "5m",
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "10m",
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "15m",
+      "profitable": 3,
+      "still_loss": 3,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "30m",
+      "profitable": 6,
+      "still_loss": 0,
+      "unknown": 9,
+      "coverage_pct": 40.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "60m",
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 15,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "120m",
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 15,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    }
+  ],
+  "stop_loss_recovery": {
+    "5m": {
+      "profitable": 2,
+      "still_loss": 1,
+      "unknown": 10,
+      "coverage_pct": 23.1,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "10m": {
+      "profitable": 2,
+      "still_loss": 1,
+      "unknown": 10,
+      "coverage_pct": 23.1,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "15m": {
+      "profitable": 2,
+      "still_loss": 1,
+      "unknown": 10,
+      "coverage_pct": 23.1,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "30m": {
+      "profitable": 3,
+      "still_loss": 0,
+      "unknown": 10,
+      "coverage_pct": 23.1,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "60m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 13,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    },
+    "120m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 13,
+      "coverage_pct": 0.0,
+      "recovery_rate_pct": null,
+      "conclusion_allowed": false
+    }
+  },
+  "by_exit_reason": {
+    "THESIS_FAST_CUT": {
+      "5m": {
+        "profitable": 3,
+        "still_loss": 3,
+        "unknown": 9
+      },
+      "10m": {
+        "profitable": 3,
+        "still_loss": 3,
+        "unknown": 9
+      },
+      "15m": {
+        "profitable": 3,
+        "still_loss": 3,
+        "unknown": 9
+      },
+      "30m": {
+        "profitable": 6,
+        "still_loss": 0,
+        "unknown": 9
+      },
+      "60m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 15
+      },
+      "120m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 15
+      }
+    },
+    "STOP_LOSS": {
+      "5m": {
+        "profitable": 2,
+        "still_loss": 1,
+        "unknown": 10
+      },
+      "10m": {
+        "profitable": 2,
+        "still_loss": 1,
+        "unknown": 10
+      },
+      "15m": {
+        "profitable": 2,
+        "still_loss": 1,
+        "unknown": 10
+      },
+      "30m": {
+        "profitable": 3,
+        "still_loss": 0,
+        "unknown": 10
+      },
+      "60m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 13
+      },
+      "120m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 13
+      }
+    },
+    "EARLY_FAIL": {
+      "5m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      },
+      "10m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      },
+      "15m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      },
+      "30m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      },
+      "60m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      },
+      "120m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 7
+      }
+    },
+    "THESIS_INVALIDATED": {
+      "5m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      },
+      "10m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      },
+      "15m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      },
+      "30m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      },
+      "60m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      },
+      "120m": {
+        "profitable": 0,
+        "still_loss": 0,
+        "unknown": 12
+      }
+    }
+  },
+  "trades": [
+    {
+      "trade_id": "c65c-fd8ad0743257",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.96,
+      "green_after_5m": true,
+      "green_after_10m": true,
+      "green_after_15m": true,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-7db7da86b27d",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.62,
+      "green_after_5m": false,
+      "green_after_10m": false,
+      "green_after_15m": false,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-85bb9696d488",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.52,
+      "green_after_5m": false,
+      "green_after_10m": false,
+      "green_after_15m": false,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-098d36efc109",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.13,
+      "green_after_5m": true,
+      "green_after_10m": true,
+      "green_after_15m": true,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-0b584b0f0da2",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.86,
+      "green_after_5m": true,
+      "green_after_10m": true,
+      "green_after_15m": true,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-0695dfa6b217",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -3.82,
+      "green_after_5m": false,
+      "green_after_10m": false,
+      "green_after_15m": false,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-ff9719d3d08f",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.21,
+      "green_after_5m": false,
+      "green_after_10m": false,
+      "green_after_15m": false,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-599a8aade415",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.81,
+      "green_after_5m": true,
+      "green_after_10m": true,
+      "green_after_15m": true,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-d483a1d2967c",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.41,
+      "green_after_5m": true,
+      "green_after_10m": true,
+      "green_after_15m": true,
+      "green_after_30m": true,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-47b25b7d3845",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.04,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-7453abd96670",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -3.62,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-6876099b2025",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -0.29,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-bab541b2795b",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -0.19,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-abfa55a3ae4a",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -6.61,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-69fa607ed486",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -6.32,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-a9d233406736",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.4,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-49887d1b0b0e",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.67,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-e52320077693",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -1.6,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-c2918272ebb4",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -3.85,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-4d01f61f02c9",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -3.82,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-bbbbde5b4489",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.85,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-062c6eb6f028",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -3.33,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-c158d87a3d1a",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.05,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-92e51deb6f9f",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -4.33,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-cc7a369fa096",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -2.84,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-916ad5d1d904",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -5.27,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-485080169c7f",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -1.55,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-0351d0d18522",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -2.22,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-587ffb84beb0",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -6.24,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-6f8a05f41164",
+      "exit_reason": "STOP_LOSS",
+      "exit_pnl_usd": -5.89,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-beeb12f9a8d8",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -6.45,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-777603d0622e",
+      "exit_reason": "EARLY_FAIL",
+      "exit_pnl_usd": -6.62,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-88bcdb5e6f63",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -3.08,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-ab1afb9c1f91",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -0.22,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-fd1397105059",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -2.42,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-ec30ac6d6239",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -2.32,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-a47a7a46ef3e",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -2.37,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-5fac45232774",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -2.32,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-a5157e0324d3",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -0.01,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-7a160b545dbd",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -0.48,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-a7dc60484780",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -1.37,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-bd5895a872b8",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -1.34,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "cont-9850a247ad5e",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -1.31,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-0c5e29e41a6e",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -1.32,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-d5bc5c4d842f",
+      "exit_reason": "THESIS_INVALIDATED",
+      "exit_pnl_usd": -0.02,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c604c-05f9068085fe",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -2.49,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    },
+    {
+      "trade_id": "c65c-4bf13797f457",
+      "exit_reason": "THESIS_FAST_CUT",
+      "exit_pnl_usd": -2.01,
+      "green_after_5m": null,
+      "green_after_10m": null,
+      "green_after_15m": null,
+      "green_after_30m": null,
+      "green_after_60m": null,
+      "green_after_120m": null
+    }
+  ],
+  "note": "Recovery rates hidden until coverage >= 80%. Bot v1.1.41+ collects 120m post-exit replay ticks \u2014 re-run after fresh data."
+}

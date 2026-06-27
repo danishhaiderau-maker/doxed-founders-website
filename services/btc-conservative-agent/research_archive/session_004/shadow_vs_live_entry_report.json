@@ -1,0 +1,12 @@
+{
+  "schema": "shadow_vs_live_entry_report_v1",
+  "generated_ts": "2026-06-24T12:24:10.106780+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "sample_count": 0,
+  "avg_delta_usd": null,
+  "median_delta_usd": null,
+  "avg_signed_delta_usd": null,
+  "by_lane": {},
+  "recent": []
+}

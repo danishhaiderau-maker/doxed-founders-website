@@ -1,0 +1,58 @@
+{
+  "schema": "missed_opportunity_heatmap_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T13:27:05.074548+00:00",
+  "note": "missed_profit_usd = sum of positive shadow PnL on blocked APPROVEs (money left on table).",
+  "heatmap": [
+    {
+      "reason": "POST_AI_GATE",
+      "count": 848,
+      "missed_profit_usd": 238.97,
+      "shadow_pnl_total_usd": NaN,
+      "missed_winner_usd": 238.97,
+      "saved_loss_usd": NaN,
+      "sample_raw_reasons": [
+        "PROFIT_GATE_EDGE_LT_3.0",
+        "PROFIT_GATE_AI_BAND",
+        "GOLDEN_STACK_MOMENTUM_CHOP_1.00",
+        "GOLDEN_STACK_ADX_BAND_25.0",
+        "GOLDEN_STACK_MOMENTUM_CHOP_0.98"
+      ]
+    },
+    {
+      "reason": "OTHER",
+      "count": 596,
+      "missed_profit_usd": 233.69,
+      "shadow_pnl_total_usd": NaN,
+      "missed_winner_usd": 233.69,
+      "saved_loss_usd": NaN,
+      "sample_raw_reasons": [
+        "SHORT_BLOCKED_NEAR_SUPPORT_WEAK",
+        "CLUSTER_ENTRY",
+        "RISK_PAUSE"
+      ]
+    },
+    {
+      "reason": "EDGE_GATE",
+      "count": 246,
+      "missed_profit_usd": 66.15,
+      "shadow_pnl_total_usd": NaN,
+      "missed_winner_usd": 66.15,
+      "saved_loss_usd": NaN,
+      "sample_raw_reasons": [
+        "WEAK_SETUP_LOW_EDGE_1.0_LT_3.0",
+        "WEAK_SETUP_LOW_EDGE_1.1_LT_3.0",
+        "WEAK_SETUP_LOW_EDGE_2.2_LT_3.0",
+        "WEAK_SETUP_LOW_EDGE_2.6_LT_3.0",
+        "WEAK_SETUP_LOW_EDGE_2.7_LT_3.0"
+      ]
+    }
+  ],
+  "totals": {
+    "events": 1690,
+    "missed_profit_usd": 538.81,
+    "shadow_pnl_total_usd": NaN
+  }
+}

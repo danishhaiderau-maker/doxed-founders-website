@@ -1,0 +1,52 @@
+{
+  "schema": "chase_threshold_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-27T00:50:30.706437+00:00",
+  "question": "At which cumulative chase_count threshold does EV turn positive?",
+  "thresholds": {
+    "0_plus": {
+      "trades": 389,
+      "wins": 291,
+      "wr": 74.8,
+      "ev": 0.75,
+      "pnl": 292.13
+    },
+    "1_plus": {
+      "trades": 0,
+      "wins": 0,
+      "wr": 0.0,
+      "ev": 0.0,
+      "pnl": 0.0
+    },
+    "2_plus": {
+      "trades": 0,
+      "wins": 0,
+      "wr": 0.0,
+      "ev": 0.0,
+      "pnl": 0.0
+    },
+    "3_plus": {
+      "trades": 0,
+      "wins": 0,
+      "wr": 0.0,
+      "ev": 0.0,
+      "pnl": 0.0
+    },
+    "4_plus": {
+      "trades": 0,
+      "wins": 0,
+      "wr": 0.0,
+      "ev": 0.0,
+      "pnl": 0.0
+    },
+    "5_plus": {
+      "trades": 0,
+      "wins": 0,
+      "wr": 0.0,
+      "ev": 0.0,
+      "pnl": 0.0
+    }
+  }
+}

@@ -2,10 +2,11 @@
   "discoveries": [
     {
       "discovery_id": "DNA-001",
-      "title": "NEW DISCOVERY",
+      "identity": "WEEKDAY_US_LOW_VOL_SPREAD0_BEAR_SHORT",
+      "title": "WEEKDAY US LOW VOL SPREAD0 BEAR SHORT",
       "status": "NEW_DISCOVERY",
       "first_observed": "2026-06-25",
-      "last_observed": "2026-06-25T21:23:23.636192+00:00",
+      "last_observed": "2026-06-27T00:52:00.661392+00:00",
       "observed_trades": 76,
       "fingerprint": {
         "weekend": false,
@@ -14,6 +15,24 @@
         "spread_bucket": "SPREAD0",
         "direction": "SHORT",
         "regime": "BEAR"
+      },
+      "statistical_evidence": {
+        "sample_size": 76,
+        "expected_value_usd": 1.9011,
+        "confidence_interval_95": {
+          "low": 1.1136,
+          "high": 2.6887
+        },
+        "win_rate_ci_95": {
+          "low": 0.79,
+          "high": 0.9364
+        },
+        "effect_size": 2.414,
+        "p_value_ev_gt_zero": 0.0,
+        "statistically_significant": true,
+        "dna_quality": 67.0,
+        "research_confidence": "MODERATE",
+        "recommendation_allowed": true
       },
       "metrics": {
         "win_rate": 0.8816,
@@ -24,14 +43,607 @@
           "high": 2.6887
         }
       },
-      "research_confidence": "MODERATE",
-      "evidence": "n=76 EV=1.9011 WR=88.2%",
-      "supporting_genomes": [
-        "WEEKDAY|US|LOW_ADX|SPREAD0|SHORT"
+      "stability": {
+        "trend": "STABLE",
+        "stable": true,
+        "win_rate_delta": 0.0,
+        "ev_delta_usd": 0.0,
+        "ledger_points": 32
+      },
+      "evidence_ledger": [
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:07:36.978172+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:43:34.458307+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:18:50.194461+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:55:24.503399+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T22:38:25.970881+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T23:17:11.204897+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:08:39.305209+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-001",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:52:00.642700+00:00",
+          "win_rate": 0.8816,
+          "ev_usd": 1.9011,
+          "sample_size": 76,
+          "dna_quality": 67.0
+        }
       ],
+      "research_confidence": "MODERATE",
       "recommendation": "Continue observing \u2014 advisory only; analyzer never changes execution.",
-      "dna_key": "WEEKDAY|US|LOW_ADX|SPREAD0|SHORT"
+      "dna_key": "WEEKDAY|US|LOW_ADX|SPREAD0|SHORT",
+      "explanation": {
+        "why": "Observed 76 trades in US/LOW_ADX/SPREAD0 with EV $1.90 (95% CI $1.11\u2013$2.69).",
+        "evidence": {
+          "sample_size": 76,
+          "expected_value_usd": 1.9011,
+          "confidence_interval_95": {
+            "low": 1.1136,
+            "high": 2.6887
+          },
+          "win_rate_ci_95": {
+            "low": 0.79,
+            "high": 0.9364
+          },
+          "effect_size": 2.414,
+          "p_value_ev_gt_zero": 0.0,
+          "statistically_significant": true,
+          "dna_quality": 67.0,
+          "research_confidence": "MODERATE",
+          "recommendation_allowed": true
+        },
+        "compared_to_benchmark_ev": 0.9804,
+        "vs_benchmark": 0.9207,
+        "how_long_observed": "2026-06-25",
+        "last_seen": "2026-06-27T00:52:00.642700+00:00",
+        "confidence": "MODERATE",
+        "stability": {
+          "trend": "STABLE",
+          "stable": true,
+          "win_rate_delta": 0.0,
+          "ev_delta_usd": 0.0,
+          "ledger_points": 32
+        },
+        "human_review_required": true,
+        "execution_change": "NEVER \u2014 advisory only"
+      }
+    },
+    {
+      "discovery_id": "DNA-003",
+      "identity": "WEEKEND_US_LOW_VOL_SPREAD0_BEAR_SHORT",
+      "title": "WEEKEND US LOW VOL SPREAD0 BEAR SHORT",
+      "status": "REPEATING_DISCOVERY",
+      "first_observed": "2026-06-26",
+      "last_observed": "2026-06-27T00:52:00.689062+00:00",
+      "observed_trades": 65,
+      "fingerprint": {
+        "weekend": true,
+        "session": "US",
+        "adx_bucket": "LOW_ADX",
+        "spread_bucket": "SPREAD0",
+        "direction": "SHORT",
+        "regime": "BEAR"
+      },
+      "statistical_evidence": {
+        "sample_size": 65,
+        "expected_value_usd": 0.704,
+        "confidence_interval_95": {
+          "low": 0.1436,
+          "high": 1.2643
+        },
+        "win_rate_ci_95": {
+          "low": 0.6042,
+          "high": 0.8171
+        },
+        "effect_size": 1.256,
+        "p_value_ev_gt_zero": 0.0069,
+        "statistically_significant": true,
+        "dna_quality": 40.0,
+        "research_confidence": "MODERATE",
+        "recommendation_allowed": true
+      },
+      "metrics": {
+        "win_rate": 0.7231,
+        "ev_usd": 0.704,
+        "dna_quality": 40.0,
+        "confidence_interval_95": {
+          "low": 0.1436,
+          "high": 1.2643
+        }
+      },
+      "stability": {
+        "trend": "STABLE",
+        "stable": true,
+        "win_rate_delta": 0.0,
+        "ev_delta_usd": 0.0,
+        "ledger_points": 11
+      },
+      "evidence_ledger": [
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:07:36.978172+00:00",
+          "win_rate": 0.6949,
+          "ev_usd": 0.6364,
+          "sample_size": 59,
+          "dna_quality": 33.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:43:34.458307+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:18:50.194461+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:55:24.503399+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T22:38:25.970881+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T23:17:11.204897+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:08:39.305209+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-003",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:52:00.642700+00:00",
+          "win_rate": 0.7231,
+          "ev_usd": 0.704,
+          "sample_size": 65,
+          "dna_quality": 40.0
+        }
+      ],
+      "research_confidence": "MODERATE",
+      "recommendation": "Continue observing \u2014 advisory only; analyzer never changes execution.",
+      "dna_key": "WEEKEND|US|LOW_ADX|SPREAD0|SHORT",
+      "explanation": {
+        "why": "Observed 65 trades in US/LOW_ADX/SPREAD0 with EV $0.70 (95% CI $0.14\u2013$1.26).",
+        "evidence": {
+          "sample_size": 65,
+          "expected_value_usd": 0.704,
+          "confidence_interval_95": {
+            "low": 0.1436,
+            "high": 1.2643
+          },
+          "win_rate_ci_95": {
+            "low": 0.6042,
+            "high": 0.8171
+          },
+          "effect_size": 1.256,
+          "p_value_ev_gt_zero": 0.0069,
+          "statistically_significant": true,
+          "dna_quality": 40.0,
+          "research_confidence": "MODERATE",
+          "recommendation_allowed": true
+        },
+        "compared_to_benchmark_ev": 0.9804,
+        "vs_benchmark": -0.2764,
+        "how_long_observed": "2026-06-26",
+        "last_seen": "2026-06-27T00:52:00.642700+00:00",
+        "confidence": "MODERATE",
+        "stability": {
+          "trend": "STABLE",
+          "stable": true,
+          "win_rate_delta": 0.0,
+          "ev_delta_usd": 0.0,
+          "ledger_points": 11
+        },
+        "human_review_required": true,
+        "execution_change": "NEVER \u2014 advisory only"
+      }
+    },
+    {
+      "discovery_id": "DNA-002",
+      "identity": "WEEKDAY_OVERLAP_LOW_VOL_SPREAD0_BEAR_SHORT",
+      "title": "WEEKDAY OVERLAP LOW VOL SPREAD0 BEAR SHORT",
+      "status": "REPEATING_DISCOVERY",
+      "first_observed": "2026-06-26",
+      "last_observed": "2026-06-27T00:52:00.715990+00:00",
+      "observed_trades": 21,
+      "fingerprint": {
+        "weekend": false,
+        "session": "OVERLAP",
+        "adx_bucket": "LOW_ADX",
+        "spread_bucket": "SPREAD0",
+        "direction": "SHORT",
+        "regime": "BEAR"
+      },
+      "statistical_evidence": {
+        "sample_size": 21,
+        "expected_value_usd": 0.6903,
+        "confidence_interval_95": {
+          "low": -0.0597,
+          "high": 1.4404
+        },
+        "win_rate_ci_95": {
+          "low": 0.5491,
+          "high": 0.8937
+        },
+        "effect_size": 0.92,
+        "p_value_ev_gt_zero": 0.0356,
+        "statistically_significant": false,
+        "dna_quality": 13.5,
+        "research_confidence": "LOW",
+        "recommendation_allowed": false
+      },
+      "metrics": {
+        "win_rate": 0.7619,
+        "ev_usd": 0.6903,
+        "dna_quality": 13.5,
+        "confidence_interval_95": {
+          "low": -0.0597,
+          "high": 1.4404
+        }
+      },
+      "stability": {
+        "trend": "STABLE",
+        "stable": true,
+        "win_rate_delta": 0.0,
+        "ev_delta_usd": 0.0,
+        "ledger_points": 16
+      },
+      "evidence_ledger": [
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:07:36.978172+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T20:43:34.458307+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:18:50.194461+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T21:55:24.503399+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T22:38:25.970881+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T23:17:11.204897+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:08:39.305209+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-002",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:52:00.642700+00:00",
+          "win_rate": 0.7619,
+          "ev_usd": 0.6903,
+          "sample_size": 21,
+          "dna_quality": 13.5
+        }
+      ],
+      "research_confidence": "LOW",
+      "recommendation": "Collect only \u2014 sample too small or confidence LOW.",
+      "dna_key": "WEEKDAY|OVERLAP|LOW_ADX|SPREAD0|SHORT",
+      "explanation": {
+        "why": "Observed 21 trades in OVERLAP/LOW_ADX/SPREAD0 with EV $0.69 (95% CI $-0.06\u2013$1.44).",
+        "evidence": {
+          "sample_size": 21,
+          "expected_value_usd": 0.6903,
+          "confidence_interval_95": {
+            "low": -0.0597,
+            "high": 1.4404
+          },
+          "win_rate_ci_95": {
+            "low": 0.5491,
+            "high": 0.8937
+          },
+          "effect_size": 0.92,
+          "p_value_ev_gt_zero": 0.0356,
+          "statistically_significant": false,
+          "dna_quality": 13.5,
+          "research_confidence": "LOW",
+          "recommendation_allowed": false
+        },
+        "compared_to_benchmark_ev": 0.9804,
+        "vs_benchmark": -0.2901,
+        "how_long_observed": "2026-06-26",
+        "last_seen": "2026-06-27T00:52:00.642700+00:00",
+        "confidence": "LOW",
+        "stability": {
+          "trend": "STABLE",
+          "stable": true,
+          "win_rate_delta": 0.0,
+          "ev_delta_usd": 0.0,
+          "ledger_points": 16
+        },
+        "human_review_required": true,
+        "execution_change": "NEVER \u2014 advisory only"
+      }
+    },
+    {
+      "discovery_id": "DNA-004",
+      "identity": "WEEKEND_EUROPE_LOW_VOL_SPREAD0_BEAR_SHORT",
+      "title": "WEEKEND EUROPE LOW VOL SPREAD0 BEAR SHORT",
+      "status": "NEW_DISCOVERY",
+      "first_observed": "2026-06-26",
+      "last_observed": "2026-06-27T00:52:00.738922+00:00",
+      "observed_trades": 12,
+      "fingerprint": {
+        "weekend": true,
+        "session": "EUROPE",
+        "adx_bucket": "LOW_ADX",
+        "spread_bucket": "SPREAD0",
+        "direction": "SHORT",
+        "regime": "BEAR"
+      },
+      "statistical_evidence": {
+        "sample_size": 12,
+        "expected_value_usd": 0.4653,
+        "confidence_interval_95": {
+          "low": -0.8654,
+          "high": 1.796
+        },
+        "win_rate_ci_95": {
+          "low": 0.3906,
+          "high": 0.8619
+        },
+        "effect_size": 0.35,
+        "p_value_ev_gt_zero": 0.2466,
+        "statistically_significant": false,
+        "dna_quality": 5.9,
+        "research_confidence": "LOW",
+        "recommendation_allowed": false
+      },
+      "metrics": {
+        "win_rate": 0.6667,
+        "ev_usd": 0.4653,
+        "dna_quality": 5.9,
+        "confidence_interval_95": {
+          "low": -0.8654,
+          "high": 1.796
+        }
+      },
+      "stability": {
+        "trend": "STABLE",
+        "stable": true,
+        "win_rate_delta": 0.0,
+        "ev_delta_usd": 0.0,
+        "ledger_points": 4
+      },
+      "evidence_ledger": [
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-004",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T22:38:25.970881+00:00",
+          "win_rate": 0.6667,
+          "ev_usd": 0.4653,
+          "sample_size": 12,
+          "dna_quality": 5.9
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-004",
+          "period_key": "2026-W26",
+          "ts": "2026-06-26T23:17:11.204897+00:00",
+          "win_rate": 0.6667,
+          "ev_usd": 0.4653,
+          "sample_size": 12,
+          "dna_quality": 5.9
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-004",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:08:39.305209+00:00",
+          "win_rate": 0.6667,
+          "ev_usd": 0.4653,
+          "sample_size": 12,
+          "dna_quality": 5.9
+        },
+        {
+          "entity_type": "discovery",
+          "entity_id": "DNA-004",
+          "period_key": "2026-W26",
+          "ts": "2026-06-27T00:52:00.642700+00:00",
+          "win_rate": 0.6667,
+          "ev_usd": 0.4653,
+          "sample_size": 12,
+          "dna_quality": 5.9
+        }
+      ],
+      "research_confidence": "LOW",
+      "recommendation": "Collect only \u2014 sample too small or confidence LOW.",
+      "dna_key": "WEEKEND|EUROPE|LOW_ADX|SPREAD0|SHORT",
+      "explanation": {
+        "why": "Observed 12 trades in EUROPE/LOW_ADX/SPREAD0 with EV $0.47 (95% CI $-0.87\u2013$1.80).",
+        "evidence": {
+          "sample_size": 12,
+          "expected_value_usd": 0.4653,
+          "confidence_interval_95": {
+            "low": -0.8654,
+            "high": 1.796
+          },
+          "win_rate_ci_95": {
+            "low": 0.3906,
+            "high": 0.8619
+          },
+          "effect_size": 0.35,
+          "p_value_ev_gt_zero": 0.2466,
+          "statistically_significant": false,
+          "dna_quality": 5.9,
+          "research_confidence": "LOW",
+          "recommendation_allowed": false
+        },
+        "compared_to_benchmark_ev": 0.9804,
+        "vs_benchmark": -0.5151,
+        "how_long_observed": "2026-06-26",
+        "last_seen": "2026-06-27T00:52:00.642700+00:00",
+        "confidence": "LOW",
+        "stability": {
+          "trend": "STABLE",
+          "stable": true,
+          "win_rate_delta": 0.0,
+          "ev_delta_usd": 0.0,
+          "ledger_points": 4
+        },
+        "human_review_required": true,
+        "execution_change": "NEVER \u2014 advisory only"
+      }
     }
   ],
-  "generated_at": "2026-06-25T21:23:23.648748+00:00"
+  "generated_at": "2026-06-27T00:52:00.750554+00:00"
 }

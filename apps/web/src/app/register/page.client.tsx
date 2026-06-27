@@ -5,6 +5,7 @@ import { signIn } from 'next-auth/react';
 import { FormEvent, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { OAuthButtons } from '@/components/oauth-buttons';
+import { FounderPromoSignupBanner } from '@/components/founder-promo-signup-banner';
 import { registerAccount } from '@/lib/api';
 import { persistReferralCode, readReferralCode } from '@/lib/referral-storage';
 
@@ -65,6 +66,7 @@ export default function RegisterPageClient({ oauthEnabled, nextAuthUrl }: Regist
           ← Home
         </Link>
         <h1 className="mt-6 text-2xl font-bold">Create account</h1>
+        <FounderPromoSignupBanner className="mt-4" />
         <p className="mt-3 rounded-lg border border-cyan-500/25 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-100">
           <strong className="text-white">Sign in with X</strong> to unlock your public @handle, referrals, and 1-click
           Proof of Conviction. Email signups get a legacy platform ID (animal · country) until X is connected.

@@ -1,0 +1,20 @@
+========================================================================
+=== KEY FINDINGS ===
+========================================================================
+
+1. Best confidence band 60-65: 61.5% WR over 65 trades.
+2. Fast-cut exits: 22 trades, $-42.44 booked — review thesis cut threshold.
+3. Dominant exit: PROFIT_LOCK_LADDER (71 trades, $+125.33).
+4. Gate damage $+0.00 — post-AI gates are not the main PnL leak.
+5. Scenario C left $211.1 on table vs peak — exit timing is the bigger lever than entry gates.
+6. Edge filter: insufficient_data (sample MODERATE — 118 trades — directional only; prefer ≥200 trades before strong edge/lane claims.).
+7. Edge score correlation with PnL: -0.132.
+8. Blocked shadow opportunity (heuristic): $+0.00.
+9. Top leakage: $211 left on table across 50 ranked trades — see top_leakage_report.json.
+10. Biggest leak by exit type: PROFIT_LOCK_LADDER ($84 left).
+11. Strongest PnL predictor: momentum (r=+0.134).
+12. Weak / dead signals (|r|<0.05): volatility, confidence, adx.
+13. ⚠ Statistical confidence MODERATE — use for direction, confirm over ≥200 trades.
+14. Top conditional edge: 60-65 + spread 5+ + ADX adx_high + OVERLAP → CONTINUOUS (20 trades, EV $-1.04, stability=LOW).
+
+========================================================================

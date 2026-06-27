@@ -1,0 +1,91 @@
+{
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "generated_at": "2026-06-26T22:37:19.846956+00:00",
+  "trade_count": 387,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 387,
+      "win_rate_pct": 74.7,
+      "sum_net_usd": 290.22,
+      "avg_net_usd": 0.75
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0034,
+    "exit_avg_usd": 0.0752,
+    "total_avg_usd": 0.0786,
+    "total_sum_usd": 30.41,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 246,
+        "win_rate_pct": 73.6,
+        "sum_net_usd": 177.1,
+        "avg_book_slip_usd": 0.0001
+      },
+      {
+        "bucket": "0.01-0.50",
+        "trades": 132,
+        "win_rate_pct": 77.3,
+        "sum_net_usd": 122.94,
+        "avg_book_slip_usd": 0.1491
+      },
+      {
+        "bucket": "0.50-2",
+        "trades": 7,
+        "win_rate_pct": 85.7,
+        "sum_net_usd": 3.25,
+        "avg_book_slip_usd": 0.6329
+      },
+      {
+        "bucket": "2+",
+        "trades": 2,
+        "win_rate_pct": 0.0,
+        "sum_net_usd": -13.07,
+        "avg_book_slip_usd": 3.1409
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 372,
+        "wr": 74.46,
+        "sum_net": 277.4
+      },
+      {
+        "execution_entry_type": "TAKER",
+        "n": 15,
+        "wr": 80.0,
+        "sum_net": 12.82
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "MAKER",
+        "n": 1,
+        "wr": 100.0,
+        "sum_net": 22.51
+      },
+      {
+        "execution_exit_type": "TAKER",
+        "n": 386,
+        "wr": 74.61,
+        "sum_net": 267.71
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 277,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 43.885426,
+  "execution_slippage_mean": 43.885426
+}

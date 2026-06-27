@@ -1,0 +1,55 @@
+{
+  "schema": "edge_score_decile_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-27T00:50:47.611534+00:00",
+  "question": "Does edge score predict outcomes, or is it flat noise?",
+  "usage_note": "Validation only \u2014 do not calibrate edge thresholds from this report.",
+  "deciles": [
+    {
+      "edge_bucket": "0-1",
+      "trades": 9,
+      "win_rate_pct": 66.7,
+      "sum_pnl_usd": 6.57,
+      "ev_usd": 0.73
+    },
+    {
+      "edge_bucket": "1-2",
+      "trades": 71,
+      "win_rate_pct": 83.1,
+      "sum_pnl_usd": 93.27,
+      "ev_usd": 1.31
+    },
+    {
+      "edge_bucket": "2-3",
+      "trades": 110,
+      "win_rate_pct": 71.8,
+      "sum_pnl_usd": 67.21,
+      "ev_usd": 0.61
+    },
+    {
+      "edge_bucket": "3-4",
+      "trades": 80,
+      "win_rate_pct": 76.2,
+      "sum_pnl_usd": 73.76,
+      "ev_usd": 0.92
+    },
+    {
+      "edge_bucket": "4+",
+      "trades": 119,
+      "win_rate_pct": 72.3,
+      "sum_pnl_usd": 51.32,
+      "ev_usd": 0.43
+    }
+  ],
+  "overall": {
+    "trades": 389,
+    "correlation_edge_vs_pnl": -0.0716,
+    "wr_spread_across_deciles_pct": 16.4,
+    "ev_spread_across_deciles_usd": 0.88,
+    "edge_predictive": false,
+    "verdict": "edge_non_predictive",
+    "recommendation": "Treat edge as informational only \u2014 correlation to PnL is ~0 (|r| < 0.10)."
+  }
+}

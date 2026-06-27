@@ -1,0 +1,79 @@
+{
+  "schema": "approve_outcome_confidence_direction_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T13:27:03.318646+00:00",
+  "buckets": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65+"
+  ],
+  "matrix": {
+    "50-55": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    },
+    "55-60": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 4,
+        "win_rate_pct": 25.0,
+        "avg_pnl_usd": 0.32,
+        "ev_usd": 0.32,
+        "sum_pnl_usd": 1.28
+      }
+    },
+    "60-65": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 448,
+        "win_rate_pct": 51.1,
+        "avg_pnl_usd": 0.38,
+        "ev_usd": 0.38,
+        "sum_pnl_usd": 170.44
+      }
+    },
+    "65+": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 237,
+        "win_rate_pct": 51.1,
+        "avg_pnl_usd": 0.74,
+        "ev_usd": 0.74,
+        "sum_pnl_usd": 175.6
+      }
+    }
+  }
+}

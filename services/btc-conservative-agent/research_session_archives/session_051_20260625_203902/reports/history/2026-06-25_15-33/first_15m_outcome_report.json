@@ -1,0 +1,83 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T15:32:50.980948+00:00",
+  "sample_replays_with_trades": 5,
+  "early_tags": {
+    "immediately_wrong": {
+      "n": 2,
+      "wins": 2,
+      "sum_pnl_usd": 5.51
+    },
+    "immediately_right": {
+      "n": 3,
+      "wins": 3,
+      "sum_pnl_usd": 12.9
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "cont-1faaedbf68da",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.9,
+      "win": true,
+      "unreal_5m_pct": -72.86,
+      "unreal_15m_pct": -61.44,
+      "unreal_30m_pct": -101.16,
+      "early_tag": "immediately_wrong"
+    },
+    {
+      "trade_id": "cont-d897b36f1d10",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 4.16,
+      "win": true,
+      "unreal_5m_pct": 107.22,
+      "unreal_15m_pct": 36.09,
+      "unreal_30m_pct": 17.46,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-6d64fe79d72a",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 3.61,
+      "win": true,
+      "unreal_5m_pct": -70.64,
+      "unreal_15m_pct": 8.58,
+      "unreal_30m_pct": 23.72,
+      "early_tag": "immediately_wrong"
+    },
+    {
+      "trade_id": "cont-79bacbc4353e",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 3.96,
+      "win": true,
+      "unreal_5m_pct": 74.95,
+      "unreal_15m_pct": 66.3,
+      "unreal_30m_pct": 137.51,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-a17750e5917c",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 4.78,
+      "win": true,
+      "unreal_5m_pct": 37.55,
+      "unreal_15m_pct": 30.52,
+      "unreal_30m_pct": 97.51,
+      "early_tag": "immediately_right"
+    }
+  ]
+}

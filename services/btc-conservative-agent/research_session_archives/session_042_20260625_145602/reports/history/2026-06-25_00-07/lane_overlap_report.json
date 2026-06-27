@@ -1,0 +1,36 @@
+{
+  "schema": "lane_overlap_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T00:07:38.617854+00:00",
+  "benchmark_lane": "CONTINUOUS",
+  "match_method": "30s approve bucket + direction + AI win_prob",
+  "continuous_approve_keys": 209,
+  "lanes": [
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "approves": 31,
+      "overlap_with_continuous": 28,
+      "unique_signals": 3,
+      "overlap_pct": 90.3,
+      "unique_pct": 9.7,
+      "overlap_pnl_usd": -2.21,
+      "unique_pnl_usd": 0,
+      "recommendation": "LIKELY_DUPLICATE"
+    },
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "approves": 209,
+      "overlap_with_continuous": 209,
+      "unique_signals": 0,
+      "overlap_pct": 100.0,
+      "unique_pct": 0.0,
+      "overlap_pnl_usd": 31.79,
+      "unique_pnl_usd": 0,
+      "recommendation": "LIKELY_DUPLICATE"
+    }
+  ]
+}

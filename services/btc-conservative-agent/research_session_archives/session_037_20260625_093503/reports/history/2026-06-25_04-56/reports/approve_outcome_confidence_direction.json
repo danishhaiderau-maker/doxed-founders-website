@@ -1,0 +1,79 @@
+{
+  "schema": "approve_outcome_confidence_direction_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T04:54:56.584786+00:00",
+  "buckets": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65+"
+  ],
+  "matrix": {
+    "50-55": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    },
+    "55-60": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 4,
+        "win_rate_pct": 25.0,
+        "avg_pnl_usd": 0.32,
+        "ev_usd": 0.32,
+        "sum_pnl_usd": 1.28
+      }
+    },
+    "60-65": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 411,
+        "win_rate_pct": 49.4,
+        "avg_pnl_usd": 0.32,
+        "ev_usd": 0.32,
+        "sum_pnl_usd": 129.88
+      }
+    },
+    "65+": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 228,
+        "win_rate_pct": 49.6,
+        "avg_pnl_usd": 0.71,
+        "ev_usd": 0.71,
+        "sum_pnl_usd": 161.9
+      }
+    }
+  }
+}

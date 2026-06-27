@@ -1,0 +1,21 @@
+========================================================================
+=== KEY FINDINGS ===
+========================================================================
+
+1. URGENT_CHASE_ALPHA lane accounts for 155% of net profit ($+38.08).
+2. Lowest lane: AI_60_65_ALPHA at $-19.60 (48 fills) — review if sample grows.
+3. Best confidence band 60-65: 70.6% WR over 17 trades.
+4. AI calibration: over-confident (actual 40.1% vs AI 67.1% implied).
+5. Fast-cut exits: 11 trades, $-12.88 booked — review thesis cut threshold.
+6. Dominant exit: PROFIT_LOCK_LADDER (59 trades, $+104.94).
+7. Gate damage $+76.93 — investigate blocked APPROVEs.
+8. Scenario C left $174.0 on table vs peak — exit timing is the bigger lever than entry gates.
+9. Edge filter: edge_no_incremental_value (sample MODERATE — 86 trades — directional only; prefer ≥200 trades before strong edge/lane claims.).
+10. Edge score correlation with PnL: +0.025.
+11. Chase assisted 0/111 fills — 3-5 chase bucket historically strongest EV in this run.
+12. Blocked shadow opportunity (heuristic): $+252.30.
+13. Top leakage: $174 left on table across 50 ranked trades — see top_leakage_report.json.
+14. Biggest leak by exit type: PROFIT_LOCK_LADDER ($75 left).
+15. Strongest PnL predictor: momentum (r=+0.183).
+
+========================================================================

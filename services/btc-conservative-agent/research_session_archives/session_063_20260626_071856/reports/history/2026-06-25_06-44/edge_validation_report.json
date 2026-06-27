@@ -1,0 +1,19 @@
+{
+  "schema": "edge_validation_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T06:44:18.356442+00:00",
+  "edge_validation_status": "DEPRECATED",
+  "status_labels": [
+    "ACTIVE",
+    "WATCHLIST",
+    "DEPRECATED"
+  ],
+  "edge_correlation_with_pnl": -0.0816,
+  "incremental_verdict": "edge_no_incremental_value",
+  "reasons": [
+    "edge_no_incremental_value"
+  ],
+  "usage_note": "Validation only \u2014 do not auto-remove edge from bot based on this report alone."
+}

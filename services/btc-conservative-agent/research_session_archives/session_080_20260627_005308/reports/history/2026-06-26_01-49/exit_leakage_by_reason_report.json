@@ -1,0 +1,84 @@
+{
+  "schema": "exit_leakage_by_reason_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T01:48:40.877697+00:00",
+  "overall_left_usd": 548.61,
+  "overall_booked_usd": 230.45,
+  "overall_peak_usd": 779.01,
+  "reasons": [
+    {
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "trades": 196,
+      "left_on_table_usd": 322.33,
+      "avg_left_usd": 1.64,
+      "avg_mfe_margin_pct": 20.7,
+      "avg_realized_margin_pct": 11.21,
+      "avg_leakage_margin_pct": 9.49,
+      "booked_profit_usd": 375.52,
+      "peak_profit_usd": 697.84,
+      "capture_ratio_pct": 53.1
+    },
+    {
+      "exit_reason": "STOP_LOSS",
+      "trades": 16,
+      "left_on_table_usd": 85.54,
+      "avg_left_usd": 5.35,
+      "avg_mfe_margin_pct": 6.48,
+      "avg_realized_margin_pct": -27.08,
+      "avg_leakage_margin_pct": 33.55,
+      "booked_profit_usd": -69.3,
+      "peak_profit_usd": 16.23,
+      "capture_ratio_pct": -531.1
+    },
+    {
+      "exit_reason": "THESIS_INVALIDATED",
+      "trades": 23,
+      "left_on_table_usd": 55.85,
+      "avg_left_usd": 2.43,
+      "avg_mfe_margin_pct": 6.67,
+      "avg_realized_margin_pct": -5.56,
+      "avg_leakage_margin_pct": 12.22,
+      "booked_profit_usd": -25.61,
+      "peak_profit_usd": 30.22,
+      "capture_ratio_pct": -181.5
+    },
+    {
+      "exit_reason": "EARLY_FAIL",
+      "trades": 8,
+      "left_on_table_usd": 51.56,
+      "avg_left_usd": 6.45,
+      "avg_mfe_margin_pct": 7.58,
+      "avg_realized_margin_pct": -31.98,
+      "avg_leakage_margin_pct": 39.56,
+      "booked_profit_usd": -41.65,
+      "peak_profit_usd": 9.92,
+      "capture_ratio_pct": -456.5
+    },
+    {
+      "exit_reason": "THESIS_FAST_CUT",
+      "trades": 21,
+      "left_on_table_usd": 33.25,
+      "avg_left_usd": 1.58,
+      "avg_mfe_margin_pct": 0.65,
+      "avg_realized_margin_pct": -8.99,
+      "avg_leakage_margin_pct": 9.65,
+      "booked_profit_usd": -31.02,
+      "peak_profit_usd": 2.21,
+      "capture_ratio_pct": -1360.5
+    },
+    {
+      "exit_reason": "TAKE_PROFIT",
+      "trades": 1,
+      "left_on_table_usd": 0.08,
+      "avg_left_usd": 0.08,
+      "avg_mfe_margin_pct": 150.57,
+      "avg_realized_margin_pct": 150.04,
+      "avg_leakage_margin_pct": 0.53,
+      "booked_profit_usd": 22.51,
+      "peak_profit_usd": 22.59,
+      "capture_ratio_pct": 99.7
+    }
+  ]
+}

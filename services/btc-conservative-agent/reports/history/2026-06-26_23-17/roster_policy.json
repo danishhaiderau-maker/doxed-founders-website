@@ -1,0 +1,21 @@
+{
+  "schema": "roster_policy_v2",
+  "generated_at": "2026-06-26T23:16:08.537541+00:00",
+  "current_regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+  "action": "RECOMMEND_WEIGHTS",
+  "confidence": "MODERATE",
+  "reason": "Regime weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid: favor CONTINUOUS (EV $+0.33, n=8)",
+  "tile_weights": {
+    "AI60_SP3_VIRTUAL_CHASE": 0.1,
+    "CONTINUOUS": 0.5
+  },
+  "auto_apply": false,
+  "requires_human_approval": true,
+  "collection_progress": {
+    "accumulated_trades": 506,
+    "target_trades": 200,
+    "progress_pct": 100.0,
+    "ready_for_roster_decision": true
+  },
+  "phase": "RECOMMEND_REVIEW"
+}

@@ -1,0 +1,69 @@
+{
+  "schema": "regime_stability_v1",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "generated_at": "2026-06-24T12:38:56.706900+00:00",
+  "cells": [
+    {
+      "regime": "weekday|LONDON|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 5,
+      "wins": 5,
+      "wr_pct": 100.0,
+      "pnl_usd": 9.57,
+      "ev_usd": 1.91,
+      "score": 4.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 11,
+      "wins": 4,
+      "wr_pct": 36.4,
+      "pnl_usd": -14.27,
+      "ev_usd": -1.3,
+      "score": 2.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 4.11,
+      "ev_usd": 2.06,
+      "score": 2.0,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "regime": "weekday|LONDON|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "lane": "CONTINUOUS",
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 3.1,
+      "ev_usd": 1.55,
+      "score": 1.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "regime": "weekday|LONDON|adx_low|vol_high|funding_positive|liquidity_mid",
+      "lane": "AI_DISAGREEMENT_REPLAY",
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.09,
+      "ev_usd": 1.09,
+      "score": 0.0,
+      "tier": "INSUFFICIENT",
+      "recommend_ok": false
+    }
+  ],
+  "recommendable": [],
+  "usage_note": "recommend_ok requires \u2265100 trades, EV>0, WR\u226550%"
+}

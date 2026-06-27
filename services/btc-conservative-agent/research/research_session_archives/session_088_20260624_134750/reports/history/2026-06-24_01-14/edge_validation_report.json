@@ -1,0 +1,19 @@
+{
+  "schema": "edge_validation_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T01:14:35.475651+00:00",
+  "edge_validation_status": "WATCHLIST",
+  "status_labels": [
+    "ACTIVE",
+    "WATCHLIST",
+    "DEPRECATED"
+  ],
+  "edge_correlation_with_pnl": null,
+  "incremental_verdict": "insufficient_data",
+  "reasons": [
+    "edge shows weak but non-zero signal \u2014 keep collecting"
+  ],
+  "usage_note": "Validation only \u2014 do not auto-remove edge from bot based on this report alone."
+}

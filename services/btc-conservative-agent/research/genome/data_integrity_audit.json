@@ -1,0 +1,125 @@
+{
+  "schema": "genome_data_integrity_audit_v1",
+  "generated_at": "2026-06-27T00:52:05.133072+00:00",
+  "architecture_frozen": "v11.0-genome-architecture-v1",
+  "validation": {
+    "schema": "genome_validation_v1",
+    "verdict": "PASS",
+    "orphan_decisions": 0,
+    "broken_trades": 0,
+    "duplicate_trade_ids": 0,
+    "issues": []
+  },
+  "layer_counts": {
+    "environment": 1142,
+    "market": 1142,
+    "decision": 1142,
+    "execution": 2156,
+    "lifecycle": 63714,
+    "trade": 207
+  },
+  "trade_count": 207,
+  "golden_sample_size": 10,
+  "golden_pass": 0,
+  "golden_fail": 10,
+  "ready_for_long_collection": false,
+  "samples": [
+    {
+      "trade_id": "cont-721b5f12c7a1",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 3.960061786986134,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-d897b36f1d10",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 4.160797765706857,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-800c073a673f",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 8.9587026913209,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-5724b4cba70d",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 0.9218438658345406,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-145e54cca4ca",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 0.7911502062123026,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-28ce671cc6f4",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": 1.3350069453618945,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "vc603-a4957b8ec79f",
+      "research_lane": "AI60_SP3_VIRTUAL_CHASE",
+      "pnl_usd": 2.696781989166906,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "c604c-dfc26fd6ab57",
+      "research_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "pnl_usd": -1.7018775127769084,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "cont-c96fcd559f4a",
+      "research_lane": "CONTINUOUS",
+      "pnl_usd": -1.6213744825804512,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    },
+    {
+      "trade_id": "c604c-5739b3c7e81e",
+      "research_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "pnl_usd": 1.0228662481409152,
+      "issues": [
+        "missing execution_id"
+      ],
+      "pass": false
+    }
+  ],
+  "checklist": {
+    "genome_layers_recorded": true,
+    "id_chain_validated": false,
+    "lifecycle_present": true,
+    "replay_ui": "NOT_STARTED",
+    "note": "Ladder/config changes are forward-compatible \u2014 no data wipe required."
+  }
+}

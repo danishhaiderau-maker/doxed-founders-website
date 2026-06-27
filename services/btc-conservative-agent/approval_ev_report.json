@@ -1,0 +1,32 @@
+{
+  "cwd": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent",
+  "generated_at": "2026-06-27T03:08:00.037448+00:00",
+  "AI_APPROVE_EV": {
+    "n": 1030,
+    "with_pnl_n": 820,
+    "sum_pnl_usd": 419.86,
+    "avg_pnl_usd": 0.512,
+    "win_rate_pct": 58.5
+  },
+  "ORDER_PLACED_EV": {
+    "n": 562,
+    "with_pnl_n": 483,
+    "sum_pnl_usd": 370.1,
+    "avg_pnl_usd": 0.766,
+    "win_rate_pct": 67.3
+  },
+  "FILLED_EV": {
+    "n": 429,
+    "with_pnl_n": 396,
+    "sum_pnl_usd": 290.57,
+    "avg_pnl_usd": 0.734,
+    "win_rate_pct": 74.5
+  },
+  "TRADED_EV": {
+    "n": 396,
+    "with_pnl_n": 396,
+    "sum_pnl_usd": 290.57,
+    "avg_pnl_usd": 0.734,
+    "win_rate_pct": 74.5
+  }
+}

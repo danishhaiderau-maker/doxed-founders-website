@@ -1,0 +1,11 @@
+{
+  "schema": "lane_overlap_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T10:47:44.179782+00:00",
+  "benchmark_lane": "CONTINUOUS",
+  "match_method": "30s approve bucket + direction + AI win_prob",
+  "continuous_approve_keys": 0,
+  "lanes": []
+}

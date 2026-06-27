@@ -1,0 +1,7 @@
+{
+  "schema": "exit_leakage_by_reason_v1",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T15:19:07.846116+00:00",
+  "overall_left_usd": 0.0,
+  "reasons": []
+}

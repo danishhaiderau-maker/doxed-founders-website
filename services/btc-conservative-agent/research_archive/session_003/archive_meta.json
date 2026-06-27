@@ -1,0 +1,30 @@
+{
+  "reason": "fresh_collection_dashboard",
+  "archived_ts": "2026-06-24T12:12:07.248459+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "files": [
+    "pipeline_events_3factor.csv",
+    "trend_health.csv"
+  ],
+  "file_integrity": [
+    {
+      "file": "pipeline_events_3factor.csv",
+      "source": "pipeline_events_3factor.csv",
+      "size": 625,
+      "sha256": "e58a9848831995d9c3fe268261fe6ea4d0dee547edc72b1dd49e304bb350c488"
+    },
+    {
+      "file": "trend_health.csv",
+      "source": "trend_health.csv",
+      "size": 230,
+      "sha256": "4387398a10fab7fa444f63669f3a1e2dbda2ec72a83627be190f4139239b224e"
+    }
+  ],
+  "integrity": {
+    "verified": true,
+    "method": "sha256",
+    "file_count": 2,
+    "total_bytes": 855
+  }
+}

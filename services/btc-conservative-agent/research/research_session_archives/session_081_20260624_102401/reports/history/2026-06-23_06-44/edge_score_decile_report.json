@@ -1,0 +1,9 @@
+{
+  "schema": "edge_score_decile_v1",
+  "analyzer_sync_id": "v10.2-ai-chase-bands-desk-2026-06-23",
+  "expected_bot_version": "v10.2-ai-chase-bands-desk-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T06:44:01.293527+00:00",
+  "deciles": [],
+  "overall": {}
+}

@@ -1,0 +1,59 @@
+{
+  "schema": "ai_direction_bias_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T09:43:47.818748+00:00",
+  "executed_trades": {
+    "LONG": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "wr": 0.0,
+      "pnl": 0.0
+    },
+    "SHORT": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "wr": 0.0,
+      "pnl": 0.0
+    }
+  },
+  "ai_decisions": {
+    "LONG": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "pct_bull_mtf": 0.0,
+      "pct_bear_mtf": 0.0
+    },
+    "SHORT": {
+      "count": 0,
+      "avg_bull_score": 0.0,
+      "avg_bear_score": 0.0,
+      "avg_structure": 0.0,
+      "avg_spread": 0.0,
+      "pct_bull_mtf": 0.0,
+      "pct_bear_mtf": 0.0
+    },
+    "long_short_call_ratio": 0.0
+  },
+  "feature_importance": {
+    "bull_score_importance": 0.0,
+    "bear_score_importance": 0.0,
+    "structure_importance": 0.0,
+    "mtf_importance": 0.0
+  },
+  "interpretation": {
+    "executed_edge_favors": "LONG",
+    "ai_call_bias_favors": "SHORT",
+    "top_driver": "bull_score_importance"
+  }
+}

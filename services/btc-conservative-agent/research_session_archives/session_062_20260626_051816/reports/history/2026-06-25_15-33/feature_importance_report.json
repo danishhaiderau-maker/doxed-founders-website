@@ -1,0 +1,71 @@
+{
+  "schema": "feature_importance_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T15:33:05.186174+00:00",
+  "method": "Pearson correlation with net_pnl_usd \u2014 validation only, not for auto-tuning",
+  "trades": 197,
+  "features": [
+    {
+      "feature": "volatility",
+      "column": "volatility",
+      "correlation_with_pnl": 0.1671,
+      "abs_correlation": 0.1671,
+      "n": 197
+    },
+    {
+      "feature": "confidence",
+      "column": "ai_win_prob",
+      "correlation_with_pnl": -0.1104,
+      "abs_correlation": 0.1104,
+      "n": 197
+    },
+    {
+      "feature": "momentum",
+      "column": "momentum",
+      "correlation_with_pnl": 0.1083,
+      "abs_correlation": 0.1083,
+      "n": 197
+    },
+    {
+      "feature": "structure",
+      "column": "structure_score_at_entry",
+      "correlation_with_pnl": 0.1038,
+      "abs_correlation": 0.1038,
+      "n": 197
+    },
+    {
+      "feature": "velocity",
+      "column": "features_velocity",
+      "correlation_with_pnl": -0.0989,
+      "abs_correlation": 0.0989,
+      "n": 197
+    },
+    {
+      "feature": "adx",
+      "column": "adx_at_entry",
+      "correlation_with_pnl": -0.0574,
+      "abs_correlation": 0.0574,
+      "n": 197
+    },
+    {
+      "feature": "edge",
+      "column": "edge_score",
+      "correlation_with_pnl": -0.0135,
+      "abs_correlation": 0.0135,
+      "n": 197
+    },
+    {
+      "feature": "participation",
+      "column": "features_volume_ratio",
+      "correlation_with_pnl": 0.0014,
+      "abs_correlation": 0.0014,
+      "n": 197
+    }
+  ],
+  "weak_signals": [
+    "edge",
+    "participation"
+  ]
+}

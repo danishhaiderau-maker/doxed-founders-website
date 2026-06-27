@@ -1,0 +1,31 @@
+{
+  "generated_ts": "2026-06-24T11:33:22.489060+00:00",
+  "sample_count": 471,
+  "features": {
+    "delta": {
+      "mean_7d": 8.303452,
+      "mean_30d": 8.303452,
+      "mean_current_24h": 9.388082
+    },
+    "volume_ratio": {
+      "mean_7d": 0.884783,
+      "mean_30d": 0.884783,
+      "mean_current_24h": 0.859847
+    },
+    "velocity": {
+      "mean_7d": 5e-06,
+      "mean_30d": 5e-06,
+      "mean_current_24h": 5e-06
+    },
+    "structure_score": {
+      "mean_7d": -0.732484,
+      "mean_30d": -0.732484,
+      "mean_current_24h": -0.711009
+    },
+    "reversal_risk_score": {
+      "mean_7d": 39.070064,
+      "mean_30d": 39.070064,
+      "mean_current_24h": 38.87844
+    }
+  }
+}

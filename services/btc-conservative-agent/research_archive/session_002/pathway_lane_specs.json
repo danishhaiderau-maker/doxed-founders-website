@@ -1,0 +1,816 @@
+{
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "analyzer_version": "v10.6-melbourne-unified-2026-06-24",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "benchmark_lane": "CONTINUOUS",
+  "benchmark_profile_id": "PRIMARY_PRODUCTION_v1",
+  "session_scope": "SESSION",
+  "generated_at": "2026-06-24T12:10:31.779066+00:00",
+  "lanes": [
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "subtitle": "FROZEN SCENARIO C BENCHMARK",
+      "role": "yardstick \u2014 all experiments compared to this",
+      "is_benchmark": true,
+      "badge": "\u2605 BENCHMARK",
+      "toggle_key": "continuous_ai_research_enabled",
+      "hypothesis": "Periodic AI + AI_DIRECT is the minimum viable research baseline.",
+      "research_question": "What is baseline approve\u2192fill\u2192PnL under frozen Scenario C?",
+      "entry": {
+        "trigger": "~180s AI when edge > 0",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "N/A \u2014 benchmark",
+      "kill_criteria": "N/A \u2014 benchmark",
+      "expected_advantage": "Reference yardstick",
+      "expected_risk": "Baseline drawdown profile",
+      "benchmark_comparison": "Self",
+      "diff_vs_benchmark": [],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      }
+    },
+    {
+      "lane": "AI_DISAGREEMENT_REPLAY",
+      "label": "AI Disagreement \u00b7 Replay Wins",
+      "subtitle": "AI REJECT + replay APPROVE",
+      "role": "disagreement cohort \u2014 replay approves, AI rejected",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Replay-approved signals that AI skipped are hidden alpha.",
+      "research_question": "Does replay find winners the LLM rejects?",
+      "entry": {
+        "trigger": "spawn when AI REJECT and replay_approve=True",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "201/242 AI calls disagreed with replay in session",
+      "expected_risk": "Replay model may be overfit to features",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: AI/replay disagreement (replay side)"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "RECOVERY_MONSTER_V1",
+      "label": "Recovery Monster v1",
+      "subtitle": "Benchmark entry \u00b7 thesis \u221240% \u00b7 ladder 18\u219214",
+      "role": "exit-only experiment \u2014 wide thesis + runner ladder",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "\u221212% thesis fast-cut kills recoverable trades; replay sweep favors \u221240%.",
+      "research_question": "Do exits (not entries) explain benchmark underperformance?",
+      "entry": {
+        "trigger": "spawn on every AI_SCAN APPROVE (benchmark entry)",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Recovery Monster v1",
+        "ladder": "18\u219214, 25\u219218, 40\u219228, 55\u219238",
+        "thesis_stop_margin_pct": -40.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Thesis \u221240% \u00b7 ladder 18\u219214 \u00b7 MFE protect 2%",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Replay grid: +$79 vs live \u221212% on sample",
+      "expected_risk": "Wider stop increases tail loss on true failures",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C entry",
+      "diff_vs_benchmark": [
+        "Entry: same as benchmark",
+        "Exit: \u221240% thesis + runner ladder"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "TYPE_B_PREDICTOR_V1",
+      "label": "Type B Predictor v1",
+      "subtitle": "AI\u226560 \u00b7 spread\u22654 \u00b7 ADX\u226520 \u00b7 vol\u22651.8 \u00b7 struct\u2264-3",
+      "role": "pre-entry Type-B fingerprint test",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Entry features matching Type-B averages predict outsized MFE at entry.",
+      "research_question": "Can we identify Type-B runners before peak MFE is known?",
+      "entry": {
+        "trigger": "spawn on AI_SCAN APPROVE when predictor filters pass",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "TYPE_B cohort historically +$56 vs TYPE_A \u2212$69 on session sample",
+      "expected_risk": "Filter stack may over-constrain spawn rate",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Entry: Type-B predictor fingerprint",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "AI_DISAGREEMENT_ALPHA",
+      "label": "AI Disagreement \u00b7 AI Wins",
+      "subtitle": "AI APPROVE + replay REJECT",
+      "role": "disagreement cohort \u2014 AI approves, replay scorecard rejects",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "AI may outperform deterministic replay on disagreement.",
+      "research_question": "Does AI APPROVE + replay REJECT still carry edge?",
+      "entry": {
+        "trigger": "spawn when AI APPROVE and replay_approve=False",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Tests LLM vs replay where they diverge",
+      "expected_risk": "Replay may be right \u2014 AI false positives",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: AI/replay disagreement (AI side)"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "EXTREME_EDGE",
+      "label": "Extreme Edge",
+      "subtitle": "EDGE\u22654.5 ONLY \u00b7 RETIRED",
+      "role": "retired \u2014 edge has no predictive value; historical analytics only",
+      "parent_lane": "CONTINUOUS",
+      "status": "RETIRED",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Tail-edge approves outperform average edge band.",
+      "research_question": "Is edge\u22654.5 sufficient alone for superior EV?",
+      "entry": {
+        "trigger": "spawn on CONTINUOUS APPROVE when edge\u22654.5",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "N/A \u2014 retired",
+      "kill_criteria": "RETIRED \u2014 edge hypothesis failed validation",
+      "expected_advantage": "N/A",
+      "expected_risk": "N/A",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: edge\u22654.5 only",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "EDGE_PLUS_STACK",
+      "label": "Edge Plus Stack",
+      "subtitle": "EDGE\u22653.5 \u00b7 GS PASS \u00b7 RETIRED",
+      "role": "retired \u2014 edge + extra filters; historical analytics only",
+      "parent_lane": "CONTINUOUS",
+      "status": "RETIRED",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
+      "research_question": "Does GS-pass subset beat raw edge\u22653.5?",
+      "entry": {
+        "trigger": "spawn when edge\u22653.5 AND golden_stack_eval pass",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "N/A \u2014 retired",
+      "kill_criteria": "RETIRED \u2014 edge stack adds complexity without alpha",
+      "expected_advantage": "N/A",
+      "expected_risk": "N/A",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: edge\u22653.5 + GS eval pass",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "HIGH_EDGE_RUNNER",
+      "label": "High Edge Runner",
+      "subtitle": "EDGE\u22653.5 \u00b7 VOL\u22651.5 \u00b7 RUNNER EXIT PROFILE",
+      "role": "high-edge + volume continuation with wider runner exits",
+      "parent_lane": "CONTINUOUS",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Strong edge + elevated volume deserves wider profit ladder rungs.",
+      "research_question": "Does runner exit capture more tail on high-edge/high-volume approves?",
+      "entry": {
+        "trigger": "spawn on CONTINUOUS APPROVE when edge\u22653.5 & vol_ratio\u22651.5",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C Runner Variant",
+        "ladder": "18\u219214, 25\u219218, 40\u219228, 55\u219238",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C Runner Variant (18\u219214 first rung)",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Higher MFE capture on runners",
+      "expected_risk": "Wider ladder gives back more peak profit",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: edge\u22653.5 & vol_ratio\u22651.5",
+        "Exit: runner ladder 18\u219214 vs 12\u21928"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "SHADOW_RUNNER",
+      "label": "Shadow Runner",
+      "subtitle": "POST-EXIT HORIZON STUDY \u00b7 PROBATION",
+      "role": "shadow-only \u2014 retire if no unique EV contribution",
+      "parent_lane": "CONTINUOUS",
+      "status": "PROBATION",
+      "live_trading": false,
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
+      "research_question": "What is +15/+30/+60/+90m outcome after APPROVE at edge\u22653.5?",
+      "entry": {
+        "trigger": "shadow log on CONTINUOUS APPROVE edge\u22653.5",
+        "entry_path": "SHADOW",
+        "fill_path": "NONE"
+      },
+      "exit": {
+        "profile": "horizon study",
+        "horizons_min": "15, 30, 60, 90"
+      },
+      "exit_path": "Horizon counterfactual (+15/+30/+60/+90m)",
+      "promotion_criteria": "Inform runner exit design \u2014 not promoted to live",
+      "kill_criteria": "N/A \u2014 observational",
+      "expected_advantage": "Counterfactual insight",
+      "expected_risk": "None \u2014 shadow only",
+      "benchmark_comparison": "vs CONTINUOUS post-approve paths",
+      "diff_vs_benchmark": [
+        "Live trading OFF",
+        "Measures post-approve horizons"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "EDGE_ALPHA_4",
+      "label": "Edge Alpha 4",
+      "subtitle": "EDGE >= 4.0 \u00b7 NEAR_SUPPORT \u00b7 Scenario C",
+      "role": "high-edge concentration near support",
+      "parent_lane": "CONTINUOUS",
+      "status": "LIVE TEST",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Edge 4+ near support outperforms the broad CONTINUOUS cohort.",
+      "research_question": "Can Edge 4+ outperform benchmark?",
+      "entry": {
+        "trigger": "spawn on CONTINUOUS APPROVE when edge>=4.0 & NEAR_SUPPORT",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Elite edge band (session WR ~74% on edge 4+)",
+      "expected_risk": "Lower spawn rate vs CONTINUOUS",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: edge>=4.0 & NEAR_SUPPORT",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "TYPE_B_HUNTER",
+      "label": "Type B Hunter",
+      "subtitle": "Edge>=3.5 \u00b7 Vol>1.2 \u00b7 NEAR_SUPPORT \u00b7 AI 50-55",
+      "role": "pre-Type-B fingerprint before entry",
+      "parent_lane": "CONTINUOUS",
+      "status": "LIVE TEST",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Type-B winners share edge, volume, SR, and AI-prob fingerprints.",
+      "research_question": "Can we predict Type B before entry?",
+      "entry": {
+        "trigger": "spawn when edge>=3.5, vol_ratio>1.2, NEAR_SUPPORT, AI 50-55%",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Capture Type-B runner profile early",
+      "expected_risk": "Strict filter \u2014 sparse samples",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: edge>=3.5, vol>1.2, NEAR_SUPPORT, AI 50-55",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "SHORT_BEAR_ALPHA",
+      "label": "Short Bear Alpha",
+      "subtitle": "SHORT \u00b7 struct\u2264-3 \u00b7 bear>bull \u00b7 spread\u22653 \u00b7 AI\u226555",
+      "role": "bearish regime asymmetry \u2014 highest session edge cohort",
+      "parent_lane": "CONTINUOUS",
+      "status": "LIVE TEST",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Short + bear structure + wide spread beats broad CONTINUOUS.",
+      "research_question": "Can directional/regime filter beat benchmark EV?",
+      "entry": {
+        "trigger": "spawn SHORT when structure\u2264-3, bear>bull, spread\u22653, AI\u226555%",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Session data: SHORT 71% WR vs LONG 56%",
+      "expected_risk": "Direction filter reduces spawn rate",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: SHORT bear-alpha fingerprint",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "AI_60_65_ALPHA",
+      "label": "AI 60-65 Alpha",
+      "subtitle": "AI 60-65 \u00b7 spread\u22653 \u00b7 edge\u22653",
+      "role": "strongest AI confidence band (82% WR in session)",
+      "parent_lane": "CONTINUOUS",
+      "status": "LIVE TEST",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "AI 60-65 band outperforms 65+ and 55-60 bands.",
+      "research_question": "Does mid-high confidence alone beat benchmark?",
+      "entry": {
+        "trigger": "spawn when 60\u2264AI<65, spread\u22653, edge\u22653",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "fills-first, chase 0s",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "EV <= CONTINUOUS benchmark over rolling window",
+      "expected_advantage": "Session 60-65 band: 82% WR, +$122",
+      "expected_risk": "Narrow AI band \u2014 sparse spawns",
+      "benchmark_comparison": "vs CONTINUOUS Scenario C",
+      "diff_vs_benchmark": [
+        "Activation: AI 60-65 + spread\u22653 + edge\u22653",
+        "Exit: frozen Scenario C"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "URGENT_CHASE_ALPHA",
+      "label": "Urgent Chase Alpha",
+      "subtitle": "VELOCITY-AWARE CHASE \u00b7 SAME ENTRY/EXIT AS BENCHMARK",
+      "role": "execution experiment \u2014 velocity-aware chase vs benchmark 25% step",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Velocity-aware chase captures more profitable fills than fixed 25% step.",
+      "research_question": "Does market-velocity chase beat CONTINUOUS on EV or net PnL?",
+      "entry": {
+        "trigger": "spawn on every CONTINUOUS APPROVE \u2014 same AI, same limit plan",
+        "fill_path": "URGENT_VELOCITY_CHASE",
+        "entry_path": "AI_DIRECT",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "normal 25% \u00b7 medium 50% \u00b7 high 75% \u00b7 extreme marketable",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
+      "expected_advantage": "Better fills in fast markets without changing AI or exits",
+      "expected_risk": "Over-chasing in chop",
+      "benchmark_comparison": "vs CONTINUOUS chase (25% fixed step)",
+      "diff_vs_benchmark": [
+        "Chase only: normal 25% / medium 50% / high 75% / extreme marketable",
+        "Entry, AI, Scenario C exits, TTL: frozen same as CONTINUOUS"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    },
+    {
+      "lane": "CHASE_3PLUS_ALPHA",
+      "label": "Chase 3+ Alpha",
+      "subtitle": "DELAYED ENTRY \u00b7 VIRTUAL CHASE \u22653 OR 180s",
+      "role": "late-entry experiment \u2014 observe persistence before first limit",
+      "parent_lane": "CONTINUOUS",
+      "status": "ACTIVE",
+      "toggle_key": "research_lane_enabled",
+      "hypothesis": "Trades that would reach chase #3+ are stronger; delayed entry avoids weak early fills.",
+      "research_question": "Does waiting for virtual chase persistence beat immediate CONTINUOUS entry?",
+      "entry": {
+        "trigger": "spawn on every CONTINUOUS APPROVE \u2014 observe, do not submit immediately",
+        "entry_path": "AI_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "same as CONTINUOUS benchmark",
+        "execution": "activate when virtual_chase\u22653 OR age\u2265180s OR signal distance threshold; then normal chase",
+        "post_ai_gates": "log-only telemetry",
+        "margin_usd": 20.0
+      },
+      "exit": {
+        "profile": "Scenario C",
+        "ladder": "12\u21928, 15\u219210, 25\u219218, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120",
+        "thesis_stop_margin_pct": -12.0,
+        "mfe_protect_margin_pct": 2.0,
+        "thesis_pause_above_margin_pct": 8.0,
+        "type_a_stall": "OFF",
+        "fixed_time_exit": "2h global (7200s)"
+      },
+      "exit_path": "Scenario C frozen",
+      "promotion_criteria": "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS",
+      "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
+      "expected_advantage": "Skip 0\u20132 chase noise cohort; enter demonstrated trends",
+      "expected_risk": "Miss early fills; correlation\u2260causation on chase buckets",
+      "benchmark_comparison": "vs CONTINUOUS immediate entry",
+      "diff_vs_benchmark": [
+        "Entry delay: virtual chase observation before first limit",
+        "After activation: same AI limit, 25% chase, Scenario C, TTL"
+      ],
+      "session_stats": {
+        "approves": 0,
+        "real_fills": 0,
+        "approve_to_fill_pct": 0,
+        "shadow_fill_pct": 0,
+        "net_pnl_real": 0,
+        "per_approve_ev": 0,
+        "verdict": null,
+        "summary_line": "n=0 approves \u00b7 0 trades \u00b7 0% fill \u00b7 $0.00 real \u00b7 EV $0.00/approve"
+      },
+      "delta_vs_benchmark": {
+        "delta_approve_to_fill_pct": 0,
+        "delta_net_pnl_real": 0,
+        "delta_per_approve_ev": 0,
+        "verdict": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema": "chase_delay_v2",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T15:51:14.785421+00:00",
+  "question": "Does COMBO Chase 3+ beat COMBO Direct on EV per approve within each AI/spread tier?",
+  "benchmark_lane": "CONTINUOUS",
+  "direct_reference_lane": "COMBO_604_SP4_DIRECT",
+  "lane_order": [
+    "AI60_SP3_VIRTUAL_CHASE"
+  ],
+  "lanes": {
+    "AI60_SP3_VIRTUAL_CHASE": {
+      "approves": 49,
+      "fills": 5,
+      "fill_pct": 10.2,
+      "pnl_usd": -1.89,
+      "ev_per_approve": -0.04,
+      "wr_pct": 60.0,
+      "ev_usd": -0.38,
+      "avg_signal_age_sec": 269.1,
+      "avg_entry_distance_pct": 35.782,
+      "label": "AI60+ \u00b7 Spread \u22653 \u00b7 Virtual Chase"
+    }
+  },
+  "delta_chase_vs_direct_primary": {
+    "ev_per_approve": 0,
+    "pnl_usd": 0,
+    "fill_pct": 0,
+    "avg_signal_age_sec": null
+  },
+  "delta_chase_3plus_vs_continuous": {
+    "ev_per_approve": 0,
+    "pnl_usd": 0,
+    "fill_pct": 0,
+    "avg_signal_age_sec": null
+  },
+  "verdict": "COLLECTING",
+  "success_criteria": "Beat COMBO_604_SP4_DIRECT on EV per approve or total PnL after adequate sample",
+  "min_fills_for_decision": 15
+}

@@ -1,0 +1,433 @@
+{
+  "schema": "gpt_audit_bundle_manifest_v1",
+  "generated_at": "2026-06-27T00:52:01.085340+00:00",
+  "architecture_version": "v11.0-genome-architecture-v1",
+  "purpose": "Upload to ChatGPT for full-stack genome architecture audit",
+  "start_here": [
+    "GPT_AUDIT_MANIFEST.json",
+    "README.txt",
+    "IMPLEMENTATION_STATUS.json",
+    "source/bot.py",
+    "source/research/analyzer_research_engine_v62.py",
+    "source/research/genome/run_analyzer.py",
+    "data/genome_analysis_report.json"
+  ],
+  "files_included": [
+    "source/bot.py",
+    "source/btc_conservative_agent.py",
+    "source/pathway_lab_validation.py",
+    "source/scenario_c_config.py",
+    "source/research/analyzer_research_engine_v62.py",
+    "source/research/research_dashboard.py",
+    "source/research/genome/__init__.py",
+    "source/research/genome/clustering.py",
+    "source/research/genome/dashboard.py",
+    "source/research/genome/data_integrity_audit.py",
+    "source/research/genome/decision_genome.py",
+    "source/research/genome/discoveries.py",
+    "source/research/genome/drift.py",
+    "source/research/genome/environment_genome.py",
+    "source/research/genome/evidence.py",
+    "source/research/genome/execution_genome.py",
+    "source/research/genome/feature_engineering.py",
+    "source/research/genome/fingerprints.py",
+    "source/research/genome/hypothesis_engine.py",
+    "source/research/genome/identity.py",
+    "source/research/genome/library_store.py",
+    "source/research/genome/loader.py",
+    "source/research/genome/market_genome.py",
+    "source/research/genome/memory.py",
+    "source/research/genome/quality_score.py",
+    "source/research/genome/reports.py",
+    "source/research/genome/run_analyzer.py",
+    "source/research/genome/similarity.py",
+    "source/research/genome/taxonomy.py",
+    "source/research/genome/trade_genome.py",
+    "source/research/genome/transitions.py",
+    "source/research/genome/validation.py",
+    "source/research_genome/__init__.py",
+    "source/research_genome/bridge.py",
+    "source/research_genome/event_bus.py",
+    "source/research_genome/events.py",
+    "source/research_genome/ids.py",
+    "source/research_genome/recorders.py",
+    "source/research_genome/store.py",
+    "data/genome_analysis_report.json",
+    "data/genome_library.json",
+    "data/genome_discoveries.json",
+    "data/bot_analyzer_sync.json",
+    "data/repo_version_sync.json",
+    "data/genome_v1.json"
+  ],
+  "file_index": [
+    {
+      "path": "source/bot.py",
+      "bytes": 1015345,
+      "sha256_prefix": "cae0af5b16513403"
+    },
+    {
+      "path": "source/btc_conservative_agent.py",
+      "bytes": 1714,
+      "sha256_prefix": "01f94546d77c3521"
+    },
+    {
+      "path": "source/pathway_lab_validation.py",
+      "bytes": 34194,
+      "sha256_prefix": "9e37b4a1cf0bbf32"
+    },
+    {
+      "path": "source/scenario_c_config.py",
+      "bytes": 601,
+      "sha256_prefix": "355a5beabb769276"
+    },
+    {
+      "path": "source/research/analyzer_research_engine_v62.py",
+      "bytes": 759839,
+      "sha256_prefix": "0047fdce028cc5ac"
+    },
+    {
+      "path": "source/research/research_dashboard.py",
+      "bytes": 110093,
+      "sha256_prefix": "4cc00a95e6d7e271"
+    },
+    {
+      "path": "source/research/genome/__init__.py",
+      "bytes": 139,
+      "sha256_prefix": "0a14f5b18622c438"
+    },
+    {
+      "path": "source/research/genome/clustering.py",
+      "bytes": 2632,
+      "sha256_prefix": "f558669ea8c86fd9"
+    },
+    {
+      "path": "source/research/genome/dashboard.py",
+      "bytes": 198,
+      "sha256_prefix": "fb3a1b74b8bf66de"
+    },
+    {
+      "path": "source/research/genome/data_integrity_audit.py",
+      "bytes": 4196,
+      "sha256_prefix": "7f399d6b9d7005dc"
+    },
+    {
+      "path": "source/research/genome/decision_genome.py",
+      "bytes": 180,
+      "sha256_prefix": "9e3eeab9fb130d10"
+    },
+    {
+      "path": "source/research/genome/discoveries.py",
+      "bytes": 6439,
+      "sha256_prefix": "31eabbdfa6d4ce86"
+    },
+    {
+      "path": "source/research/genome/drift.py",
+      "bytes": 959,
+      "sha256_prefix": "bd521238a3b7d48f"
+    },
+    {
+      "path": "source/research/genome/environment_genome.py",
+      "bytes": 186,
+      "sha256_prefix": "3ac5a6fb60bc6b9b"
+    },
+    {
+      "path": "source/research/genome/evidence.py",
+      "bytes": 4525,
+      "sha256_prefix": "2007196b9a1c7b8c"
+    },
+    {
+      "path": "source/research/genome/execution_genome.py",
+      "bytes": 182,
+      "sha256_prefix": "f309a265a19d4ebd"
+    },
+    {
+      "path": "source/research/genome/feature_engineering.py",
+      "bytes": 375,
+      "sha256_prefix": "41abf36df5ab1d7a"
+    },
+    {
+      "path": "source/research/genome/fingerprints.py",
+      "bytes": 3150,
+      "sha256_prefix": "bfb468e098dbd2bf"
+    },
+    {
+      "path": "source/research/genome/hypothesis_engine.py",
+      "bytes": 2167,
+      "sha256_prefix": "c28f041e0fa64810"
+    },
+    {
+      "path": "source/research/genome/identity.py",
+      "bytes": 2129,
+      "sha256_prefix": "3d72640e57286a05"
+    },
+    {
+      "path": "source/research/genome/library_store.py",
+      "bytes": 7780,
+      "sha256_prefix": "207dfb8a2092ff21"
+    },
+    {
+      "path": "source/research/genome/loader.py",
+      "bytes": 1419,
+      "sha256_prefix": "1e58b14eec1eddd2"
+    },
+    {
+      "path": "source/research/genome/market_genome.py",
+      "bytes": 176,
+      "sha256_prefix": "790d3828114b6cc2"
+    },
+    {
+      "path": "source/research/genome/memory.py",
+      "bytes": 5760,
+      "sha256_prefix": "a33c4886b191aaec"
+    },
+    {
+      "path": "source/research/genome/quality_score.py",
+      "bytes": 2281,
+      "sha256_prefix": "b790344485f357b2"
+    },
+    {
+      "path": "source/research/genome/reports.py",
+      "bytes": 179,
+      "sha256_prefix": "c93cb02472aa2eff"
+    },
+    {
+      "path": "source/research/genome/run_analyzer.py",
+      "bytes": 13622,
+      "sha256_prefix": "b13ced7fae1ef48d"
+    },
+    {
+      "path": "source/research/genome/similarity.py",
+      "bytes": 3828,
+      "sha256_prefix": "d503df2d43c9e1ae"
+    },
+    {
+      "path": "source/research/genome/taxonomy.py",
+      "bytes": 2857,
+      "sha256_prefix": "d074d539e7c2aa15"
+    },
+    {
+      "path": "source/research/genome/trade_genome.py",
+      "bytes": 174,
+      "sha256_prefix": "e8068741d6ae7934"
+    },
+    {
+      "path": "source/research/genome/transitions.py",
+      "bytes": 899,
+      "sha256_prefix": "baac0eee7bb9740e"
+    },
+    {
+      "path": "source/research/genome/validation.py",
+      "bytes": 1328,
+      "sha256_prefix": "6d12b817f03e70e4"
+    },
+    {
+      "path": "source/research_genome/__init__.py",
+      "bytes": 282,
+      "sha256_prefix": "c92ab299393570cb"
+    },
+    {
+      "path": "source/research_genome/bridge.py",
+      "bytes": 4840,
+      "sha256_prefix": "ce8a51af53fa019b"
+    },
+    {
+      "path": "source/research_genome/event_bus.py",
+      "bytes": 1893,
+      "sha256_prefix": "57edeb3c5e7a7886"
+    },
+    {
+      "path": "source/research_genome/events.py",
+      "bytes": 593,
+      "sha256_prefix": "d04e1e9076953229"
+    },
+    {
+      "path": "source/research_genome/ids.py",
+      "bytes": 617,
+      "sha256_prefix": "924fa41febae4074"
+    },
+    {
+      "path": "source/research_genome/recorders.py",
+      "bytes": 4422,
+      "sha256_prefix": "0b6219ddf105ca95"
+    },
+    {
+      "path": "source/research_genome/store.py",
+      "bytes": 6709,
+      "sha256_prefix": "02c8efc06d94a58c"
+    },
+    {
+      "path": "data/genome_analysis_report.json",
+      "bytes": 82260
+    },
+    {
+      "path": "data/genome_library.json",
+      "bytes": 30402
+    },
+    {
+      "path": "data/genome_discoveries.json",
+      "bytes": 20255
+    },
+    {
+      "path": "data/bot_analyzer_sync.json",
+      "bytes": 506
+    },
+    {
+      "path": "data/repo_version_sync.json",
+      "bytes": 770
+    },
+    {
+      "path": "data/genome_v1.json",
+      "bytes": 10229
+    }
+  ],
+  "research_db": {
+    "exists": true,
+    "tables": {
+      "environment_genome": 1142,
+      "market_genome": 1142,
+      "decision_genome": 1142,
+      "execution_genome": 2156,
+      "lifecycle_genome": 63714,
+      "trade_genome": 207,
+      "research_events": 68410,
+      "genome_library": 7,
+      "genome_discovery_memory": 4,
+      "genome_evidence_ledger": 188
+    }
+  },
+  "genome_report_summary": {
+    "generated_at": "2026-06-27T00:52:00.750554+00:00",
+    "layer_counts": {
+      "environment": 1142,
+      "market": 1142,
+      "decision": 1142,
+      "execution": 2156,
+      "lifecycle": 63714,
+      "trade": 207
+    },
+    "genome_memory": {
+      "persistent_genomes": 7,
+      "persistent_discoveries": 4,
+      "library_status": "ACTIVE"
+    },
+    "discoveries_count": 4,
+    "recommendation": "CONTINUE_RESEARCH_CANDIDATE",
+    "validation_verdict": "PASS"
+  },
+  "implementation_status": {
+    "architecture_version": "v11.0-genome-architecture-v1",
+    "schema_version": "1.0.0",
+    "analyzer_mode": "DNA_FIRST_MEMORY",
+    "execution_automation": "NEVER \u2014 human review only",
+    "components": {
+      "execution_engine_scenario_c": {
+        "status": "IMPLEMENTED",
+        "note": "bot.py frozen tiles"
+      },
+      "genome_recorders": {
+        "status": "IMPLEMENTED",
+        "path": "research_genome/"
+      },
+      "persistent_genome_library": {
+        "status": "IMPLEMENTED",
+        "module": "library_store.py"
+      },
+      "genome_memory": {
+        "status": "IMPLEMENTED",
+        "module": "memory.py"
+      },
+      "genome_validation": {
+        "status": "IMPLEMENTED",
+        "module": "validation.py"
+      },
+      "discovery_engine": {
+        "status": "IMPLEMENTED",
+        "module": "discoveries.py"
+      },
+      "statistical_evidence": {
+        "status": "IMPLEMENTED",
+        "module": "evidence.py"
+      },
+      "evidence_ledger": {
+        "status": "IMPLEMENTED",
+        "table": "genome_evidence_ledger"
+      },
+      "unknown_market_safeguard": {
+        "status": "IMPLEMENTED",
+        "module": "run_analyzer.py"
+      },
+      "recommendation_gates": {
+        "status": "IMPLEMENTED",
+        "gate": "recommendation_allowed n>=30"
+      },
+      "genome_identity_labels": {
+        "status": "IMPLEMENTED",
+        "module": "identity.py"
+      },
+      "genome_vs_cluster_taxonomy": {
+        "status": "IMPLEMENTED",
+        "module": "taxonomy.py"
+      },
+      "replay_capabilities_doc": {
+        "status": "IMPLEMENTED",
+        "module": "run_analyzer.py replay_capabilities"
+      },
+      "decision_genome_full": {
+        "status": "PARTIAL",
+        "note": "counts only; Priority 4"
+      },
+      "outcome_genome_full": {
+        "status": "PARTIAL",
+        "note": "fingerprints active"
+      },
+      "replay_audit": {
+        "status": "NOT_STARTED",
+        "note": "Priority 5 \u2014 per-genome UI; lifecycle replay ACTIVE"
+      },
+      "evolution_timeline_viz": {
+        "status": "PARTIAL",
+        "note": "ledger supports; UI pending"
+      },
+      "v62_retirement": {
+        "status": "NOT_STARTED",
+        "note": "parallel until parity"
+      }
+    },
+    "genome_modules": [
+      "__init__.py",
+      "clustering.py",
+      "dashboard.py",
+      "data_integrity_audit.py",
+      "decision_genome.py",
+      "discoveries.py",
+      "drift.py",
+      "environment_genome.py",
+      "evidence.py",
+      "execution_genome.py",
+      "feature_engineering.py",
+      "fingerprints.py",
+      "hypothesis_engine.py",
+      "identity.py",
+      "library_store.py",
+      "loader.py",
+      "market_genome.py",
+      "memory.py",
+      "quality_score.py",
+      "reports.py",
+      "run_analyzer.py",
+      "similarity.py",
+      "taxonomy.py",
+      "trade_genome.py",
+      "transitions.py",
+      "validation.py"
+    ],
+    "data_collection_phase": {
+      "target_500_trades": "Validate recorder + genome integrity",
+      "target_1000_trades": "Evaluate discovery quality",
+      "target_2000_3000_trades": "Out-of-sample genome validation"
+    }
+  },
+  "zip_path": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\downloads\\gpt_audit_bundle.zip",
+  "zip_size_mb": 0.46,
+  "zip_verified": true
+}

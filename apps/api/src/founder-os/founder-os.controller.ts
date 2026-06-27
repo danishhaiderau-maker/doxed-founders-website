@@ -25,6 +25,12 @@ export class FounderOsController {
     return this.founderOs.getIntegrationProviders();
   }
 
+  @Public()
+  @Get('promo/public')
+  async publicPromo() {
+    return this.founderOs.getPublicPromoTeaser();
+  }
+
   @Get('onboarding')
   onboarding(@CurrentUser() user: AuthUser) {
     return this.founderOs.getOnboardingStatus(user.id);

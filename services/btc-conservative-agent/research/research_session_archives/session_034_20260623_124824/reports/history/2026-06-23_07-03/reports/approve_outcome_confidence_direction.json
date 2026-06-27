@@ -1,0 +1,79 @@
+{
+  "schema": "approve_outcome_confidence_direction_v1",
+  "analyzer_sync_id": "v10.2-ai-chase-bands-desk-2026-06-23",
+  "expected_bot_version": "v10.2-ai-chase-bands-desk-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T07:02:39.325943+00:00",
+  "buckets": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65+"
+  ],
+  "matrix": {
+    "50-55": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    },
+    "55-60": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    },
+    "60-65": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    },
+    "65+": {
+      "long": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      "short": {
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    }
+  }
+}

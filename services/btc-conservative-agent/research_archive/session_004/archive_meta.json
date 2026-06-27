@@ -1,0 +1,93 @@
+{
+  "reason": "fresh_collection_dashboard",
+  "archived_ts": "2026-06-24T12:30:22.280124+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "files": [
+    "bot_analyzer_sync.json",
+    "near_edge.log",
+    "pipeline_events_3factor.csv",
+    "repo_version_sync.json",
+    "reversal_study.jsonl",
+    "runtime_pathway_integrity.json",
+    "setup_log_3factor.csv",
+    "shadow_vs_live_entry_report.json",
+    "signal_persist.log",
+    "signal_snapshot.jsonl",
+    "trend_health.csv"
+  ],
+  "file_integrity": [
+    {
+      "file": "bot_analyzer_sync.json",
+      "source": "bot_analyzer_sync.json",
+      "size": 526,
+      "sha256": "11348e347e81265616a8c63d3cbd3fa1912d185abc0983cf03a3ae6964361cb2"
+    },
+    {
+      "file": "near_edge.log",
+      "source": "near_edge.log",
+      "size": 4476,
+      "sha256": "d2d70ef88e78d3fc49d80ee620daa4beaad68c07d4d64f0250b9f1edfe897faa"
+    },
+    {
+      "file": "pipeline_events_3factor.csv",
+      "source": "pipeline_events_3factor.csv",
+      "size": 1225,
+      "sha256": "c6927d68746575e63bc6f4895b028c57d60dac764be5aacc3df987be547705ff"
+    },
+    {
+      "file": "repo_version_sync.json",
+      "source": "repo_version_sync.json",
+      "size": 805,
+      "sha256": "2d96bd315f308b857b1af83dc8693dc981f82fb616c184a122ebf92b93b0936c"
+    },
+    {
+      "file": "reversal_study.jsonl",
+      "source": "reversal_study.jsonl",
+      "size": 4853,
+      "sha256": "33d483edb0c29318289b6cf3aaf40e9ef50ed2a93e4bfdfb63a832bbc7895fbe"
+    },
+    {
+      "file": "runtime_pathway_integrity.json",
+      "source": "runtime_pathway_integrity.json",
+      "size": 363,
+      "sha256": "6f4611cda1725ad510b81045cdb82cc1956be3b177ce4adaf397908cadd32bbe"
+    },
+    {
+      "file": "setup_log_3factor.csv",
+      "source": "setup_log_3factor.csv",
+      "size": 3134,
+      "sha256": "9e4eb641466bf4c653d4b2adc5325dafda3f6ab8f5879b0c6bdb6f0a3e261369"
+    },
+    {
+      "file": "shadow_vs_live_entry_report.json",
+      "source": "shadow_vs_live_entry_report.json",
+      "size": 367,
+      "sha256": "68a360f9fcc95ae8a63182ef9a8188bc8da463e65739be54f2bba84fa53a94c1"
+    },
+    {
+      "file": "signal_persist.log",
+      "source": "signal_persist.log",
+      "size": 3324,
+      "sha256": "69036a19e03ad8161b433a0c294ba1656edc08cb7bc5a256a10a7914d20c023d"
+    },
+    {
+      "file": "signal_snapshot.jsonl",
+      "source": "signal_snapshot.jsonl",
+      "size": 147857,
+      "sha256": "3b40f966b4dd08817b71fed66ca975fef24701bf42992e1b3e9a53422b3520a7"
+    },
+    {
+      "file": "trend_health.csv",
+      "source": "trend_health.csv",
+      "size": 3660,
+      "sha256": "230bd98362bb081cf3fcc3f189d21223941dd7e0ff9d2c9ad1fb44cf5455908d"
+    }
+  ],
+  "integrity": {
+    "verified": true,
+    "method": "sha256",
+    "file_count": 11,
+    "total_bytes": 170590
+  }
+}

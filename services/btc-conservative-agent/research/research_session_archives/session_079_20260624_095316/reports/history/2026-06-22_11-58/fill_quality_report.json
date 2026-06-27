@@ -1,0 +1,58 @@
+{
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "generated_at": "2026-06-22T11:37:14.485557+00:00",
+  "trade_count": 2,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 2,
+      "win_rate_pct": 100.0,
+      "sum_net_usd": 3.09,
+      "avg_net_usd": 1.54
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0,
+    "exit_avg_usd": 0.0,
+    "total_avg_usd": 0.0,
+    "total_sum_usd": 0.0,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 2,
+        "win_rate_pct": 100.0,
+        "sum_net_usd": 3.09,
+        "avg_book_slip_usd": 0.0
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 2,
+        "wr": 100.0,
+        "sum_net": 3.09
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "TAKER",
+        "n": 2,
+        "wr": 100.0,
+        "sum_net": 3.09
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 1,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 6.79,
+  "execution_slippage_mean": 6.79
+}

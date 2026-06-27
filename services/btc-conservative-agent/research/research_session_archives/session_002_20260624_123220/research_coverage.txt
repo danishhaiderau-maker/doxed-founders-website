@@ -1,0 +1,33 @@
+========================================================================
+=== RESEARCH COVERAGE & STATISTICAL CONFIDENCE ===
+========================================================================
+Scope: ALL-DATA (ALL)
+CSV rows — trades: 0 | blocked: 0 | decisions: 0
+Analyzed — trades: 0 | approves: 0 | blocked: 0 | decisions: 0
+
+Coverage status: POOR
+Only 0 trades / 0 approves — treat calibration, edge, and lane verdicts as noisy.
+
+Confidence bands (executed):
+  0-45: n=0
+  45-50: n=0
+  50-55: n=0
+  55-60: n=0
+  60-65: n=0
+  65+: n=0
+
+AI calibration bands:
+  50-55: n=0
+  55-60: n=0
+  60-65: n=0
+  65+: n=0
+
+Edge buckets:
+  0-1: n=0
+  1-2: n=0
+  2-3: n=0
+  3-4: n=0
+  4+: n=0
+
+Minimum for edge conclusions: ≥50 approves
+========================================================================

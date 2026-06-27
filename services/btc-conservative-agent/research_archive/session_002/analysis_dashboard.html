@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<title>Research Dashboard — 2026-06-24T12:10:32</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; background: #0f1419; color: #e7ecf1; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .meta { color: #8b9aab; font-size: 0.85rem; margin-bottom: 24px; }
+  .kpis { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+  .kpi { background: #1a2332; border: 1px solid #2a3544; border-radius: 8px; padding: 14px 20px; min-width: 120px; }
+  .kpi .val { font-size: 1.5rem; font-weight: 700; }
+  .kpi .lbl { font-size: 0.75rem; color: #8b9aab; text-transform: uppercase; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 1rem; border-bottom: 1px solid #2a3544; padding-bottom: 6px; }
+  table { border-collapse: collapse; width: 100%; max-width: 900px; font-size: 0.9rem; }
+  th, td { border: 1px solid #2a3544; padding: 8px 10px; text-align: left; }
+  th { background: #1a2332; }
+  tr:nth-child(even) { background: #151c26; }
+  .note { color: #8b9aab; font-size: 0.8rem; margin-top: 8px; }
+  a { color: #6eb5ff; }
+</style></head><body>
+<h1>Research Analysis Dashboard</h1>
+<p class="meta">ALL-DATA · 152 CSV trade rows · v10.6-melbourne-unified-2026-06-24 · confidence: MODERATE</p>
+<div class="kpis">
+  <div class="kpi"><div class="lbl">Trades</div><div class="val">118</div></div>
+  <div class="kpi"><div class="lbl">Win Rate</div><div class="val">66.1%</div></div>
+  <div class="kpi"><div class="lbl">Net PnL</div><div class="val">$+24.27</div></div>
+  <div class="kpi"><div class="lbl">Expectancy</div><div class="val">$0.21</div></div>
+  <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">21.3%</div></div>
+  <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">$+0.00</div></div>
+</div>
+<section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr><tr><td>COMBO_65_SP5_CHASE_3PLUS</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>COMBO_604_SP4_CHASE_3PLUS</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>CONTINUOUS</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>AI_DISAGREEMENT_REPLAY</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>COMBO_65_SP5_DIRECT</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>COMBO_604_SP4_DIRECT</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>RECOVERY_MONSTER_V1</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>TYPE_B_PREDICTOR_V1</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>AI_DISAGREEMENT_ALPHA</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>EXTREME_EDGE</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>EDGE_PLUS_STACK</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>AI_SCAN</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>HIGH_EDGE_RUNNER</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>SHADOW_RUNNER</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>EDGE_ALPHA_4</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>TYPE_B_HUNTER</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>SHORT_BEAR_ALPHA</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>AI_60_65_ALPHA</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>URGENT_CHASE_ALPHA</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+<tr><td>CHASE_3PLUS_ALPHA</td><td>0</td><td>0</td><td>$0.00</td><td>$0.00</td></tr>
+</table></section>
+<section><h2>AI Confidence</h2><table><tr><th>Band</th><th>Trades</th><th>WR</th><th>PnL</th></tr><tr><td colspan="4">No data</td></tr></table></section>
+<section><h2>Chase</h2><p>Assisted fills: <b>0</b> / 0 · Saved: 0 · TTL expired: 0</p></section>
+<section><h2>Scenario C — Leakage &amp; Exits</h2>
+<p>Peak $235.29 → Booked $24.27 · Left $211.12</p>
+<p>Fast-cut trades: 22 · Missed ladder profit: $0.00</p></section>
+<section><h2>Horizon Profitability (losers)</h2>
+<p class="note">Would losing trades have been green N minutes after exit? (tick replay)</p>
+<table><tr><th>Horizon</th><th>Profitable</th><th>Still loss</th><th>Unknown</th><th>% profitable</th></tr><tr><td>5m</td><td>0</td><td>0</td><td>40</td><td>None%</td></tr>
+<tr><td>10m</td><td>0</td><td>0</td><td>40</td><td>None%</td></tr>
+<tr><td>15m</td><td>0</td><td>0</td><td>40</td><td>None%</td></tr>
+<tr><td>30m</td><td>0</td><td>0</td><td>40</td><td>None%</td></tr>
+</table></section>
+<section><h2>Key Findings</h2><ol><li>Best confidence band 60-65: 61.5% WR over 65 trades.</li><li>Fast-cut exits: 22 trades, $-42.44 booked — review thesis cut threshold.</li><li>Dominant exit: PROFIT_LOCK_LADDER (71 trades, $+125.33).</li><li>Gate damage $+0.00 — post-AI gates are not the main PnL leak.</li><li>Scenario C left $211.1 on table vs peak — exit timing is the bigger lever than entry gates.</li><li>Edge filter: insufficient_data (sample MODERATE — 118 trades — directional only; prefer ≥200 trades before strong edge/lane claims.).</li><li>Edge score correlation with PnL: -0.132.</li><li>Blocked shadow opportunity (heuristic): $+0.00.</li><li>Top leakage: $211 left on table across 50 ranked trades — see top_leakage_report.json.</li><li>Biggest leak by exit type: PROFIT_LOCK_LADDER ($84 left).</li></ol></section>
+<section><h2>Report Layers</h2><ul>
+<li><a href="executive_summary.txt">executive_summary.txt</a> — 60-second overview</li>
+<li><a href="research_highlights.txt">research_highlights.txt</a> — detailed tables</li>
+<li><a href="research_findings.txt">research_findings.txt</a> — conclusions</li>
+<li><a href="research_coverage.txt">research_coverage.txt</a> — sample health</li>
+<li><a href="research_deep_dive_index.txt">research_deep_dive_index.txt</a> — all reports</li>
+<li><a href="analyzer_run.log">analyzer_run.log</a> — full verbose</li>
+</ul></section>
+<section><h2>Deep Dive Reports (sample)</h2><ul><li><a href="reports\ai_calibration_report.json">AI Calibration</a></li>
+<li><a href="reports\ai_funnel_report.json">AI Funnel</a></li>
+<li><a href="reports\ai_decision_fingerprint_report.json">AI Decision Fingerprints</a></li>
+<li><a href="reports\approve_outcome_confidence_direction.json">Approve Outcome × Conf × Direction</a></li>
+<li><a href="reports\benchmark_relative_scorecard.json">Benchmark Scorecard</a></li>
+<li><a href="reports\chase_attribution_report.json">Chase Attribution</a></li>
+<li><a href="reports\chase_effectiveness_report.json">Chase Effectiveness</a></li>
+<li><a href="reports\chase_threshold_report.json">Chase Threshold</a></li>
+<li><a href="reports\chase_delay_report.json">Chase Delay Lanes</a></li>
+<li><a href="reports\confidence_band_report.json">Confidence Bands</a></li>
+<li><a href="reports\direction_report.json">Direction Bias</a></li>
+</ul>
+<p class="note">Full index: research_deep_dive_index.txt · 43 JSON files mirrored to reports/</p></section>
+</body></html>

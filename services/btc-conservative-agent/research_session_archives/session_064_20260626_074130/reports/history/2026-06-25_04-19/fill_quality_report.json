@@ -1,0 +1,79 @@
+{
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "generated_at": "2026-06-25T04:19:12.710488+00:00",
+  "trade_count": 158,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 158,
+      "win_rate_pct": 72.2,
+      "sum_net_usd": 68.89,
+      "avg_net_usd": 0.44
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0036,
+    "exit_avg_usd": 0.0917,
+    "total_avg_usd": 0.0953,
+    "total_sum_usd": 15.06,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 96,
+        "win_rate_pct": 70.8,
+        "sum_net_usd": 34.3,
+        "avg_book_slip_usd": 0.0
+      },
+      {
+        "bucket": "0.01-0.50",
+        "trades": 59,
+        "win_rate_pct": 78.0,
+        "sum_net_usd": 52.33,
+        "avg_book_slip_usd": 0.1399
+      },
+      {
+        "bucket": "0.50-2",
+        "trades": 1,
+        "win_rate_pct": 0.0,
+        "sum_net_usd": -4.67,
+        "avg_book_slip_usd": 0.5244
+      },
+      {
+        "bucket": "2+",
+        "trades": 2,
+        "win_rate_pct": 0.0,
+        "sum_net_usd": -13.07,
+        "avg_book_slip_usd": 3.1409
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 158,
+        "wr": 72.15,
+        "sum_net": 68.89
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "TAKER",
+        "n": 158,
+        "wr": 72.15,
+        "sum_net": 68.89
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 109,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 44.292278,
+  "execution_slippage_mean": 44.292278
+}

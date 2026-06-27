@@ -1,0 +1,31 @@
+================================================================================================================
+=== RESEARCH HIGHLIGHTS — ALL-TIME | v9.83-quality-roster-4-tiles-2026-06-21 ===
+================================================================================================================
+
+=== RESEARCH HIGHLIGHTS (at-a-glance) ===
+Top Lane:     n/a  $+0.00
+Worst Lane:   n/a  $+0.00
+Best Conf:    n/a  0.0% WR
+Worst Conf:   n/a  0.0% WR
+Fast-Cut PnL: $+0.00
+Blocked Opp:  $+0.00
+Edge corr:    None
+Best Exit:    n/a  $+0.00
+
+--- Chase ---
+Assisted: 0/0 fills | Saved: 0 | TTL expired: 0
+
+--- Scenario C / exits ---
+Leakage left on table: $None | MFE capture: None% | Fast-cut trades: 0
+
+--- Horizon (losers → green later?) ---
+  5m: green=0 still_red=0 unknown=0 (n/a% of known)
+  10m: green=0 still_red=0 unknown=0 (n/a% of known)
+  15m: green=0 still_red=0 unknown=0 (n/a% of known)
+  30m: green=0 still_red=0 unknown=0 (n/a% of known)
+
+--- Direction ---
+
+--- Edge validation ---
+Incremental: insufficient_data
+================================================================================================================

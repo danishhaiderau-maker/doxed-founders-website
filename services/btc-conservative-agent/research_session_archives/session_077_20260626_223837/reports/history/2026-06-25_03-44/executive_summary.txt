@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — FRESH-COLLECTION (~15.1h bot session) | v10.7-fresh-scope-relay-audit-2026-06-25 ===
+========================================================================
+Data scope: SESSION | CSV trades: 175 | Analyzed fills: 154
+Trades 154 | WR 74.0% | PnL +74.23 | EV 0.48/trade | MFE capture 20.6%
+APPROVE 682 → executed 175 | Gate damage $+119.10 | Edge: edge_no_incremental_value
+Sample confidence: MODERATE — 154 trades — directional only; prefer ≥200 trades before strong edge/lane claims.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

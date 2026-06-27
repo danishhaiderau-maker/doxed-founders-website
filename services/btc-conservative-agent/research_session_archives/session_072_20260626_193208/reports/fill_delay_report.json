@@ -1,0 +1,131 @@
+{
+  "schema": "fill_delay_report_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T19:31:46.145692+00:00",
+  "delay_buckets": [
+    {
+      "delay_bucket": "0-30s",
+      "trades": 19,
+      "win_rate_pct": 73.7,
+      "avg_pnl_usd": -0.02,
+      "ev_usd": -0.02,
+      "sum_pnl_usd": -0.36,
+      "avg_edge": 3.95,
+      "avg_ai_confidence": 66.1
+    },
+    {
+      "delay_bucket": "30-60s",
+      "trades": 16,
+      "win_rate_pct": 50.0,
+      "avg_pnl_usd": -0.49,
+      "ev_usd": -0.49,
+      "sum_pnl_usd": -7.85,
+      "avg_edge": 3.79,
+      "avg_ai_confidence": 66.2
+    },
+    {
+      "delay_bucket": "1-3m",
+      "trades": 157,
+      "win_rate_pct": 70.7,
+      "avg_pnl_usd": 0.59,
+      "ev_usd": 0.59,
+      "sum_pnl_usd": 93.13,
+      "avg_edge": 3.6,
+      "avg_ai_confidence": 64.2
+    },
+    {
+      "delay_bucket": "3-10m",
+      "trades": 260,
+      "win_rate_pct": 76.9,
+      "avg_pnl_usd": 0.79,
+      "ev_usd": 0.79,
+      "sum_pnl_usd": 204.52,
+      "avg_edge": 3.11,
+      "avg_ai_confidence": 64.2
+    },
+    {
+      "delay_bucket": "10m+",
+      "trades": 19,
+      "win_rate_pct": 47.4,
+      "avg_pnl_usd": 0.12,
+      "ev_usd": 0.12,
+      "sum_pnl_usd": 2.19,
+      "avg_edge": 2.79,
+      "avg_ai_confidence": 64.3
+    }
+  ],
+  "chase_buckets": [
+    {
+      "chase_count": "0",
+      "trades": 72,
+      "win_rate_pct": 52.8,
+      "avg_pnl_usd": -0.48,
+      "ev_usd": -0.48,
+      "sum_pnl_usd": -34.65,
+      "avg_edge": 4.1,
+      "avg_ai_confidence": 65.9
+    },
+    {
+      "chase_count": "1",
+      "trades": 47,
+      "win_rate_pct": 55.3,
+      "avg_pnl_usd": -0.37,
+      "ev_usd": -0.37,
+      "sum_pnl_usd": -17.52,
+      "avg_edge": 3.71,
+      "avg_ai_confidence": 64.5
+    },
+    {
+      "chase_count": "2",
+      "trades": 58,
+      "win_rate_pct": 67.2,
+      "avg_pnl_usd": 0.27,
+      "ev_usd": 0.27,
+      "sum_pnl_usd": 15.54,
+      "avg_edge": 3.35,
+      "avg_ai_confidence": 63.9
+    },
+    {
+      "chase_count": "3",
+      "trades": 89,
+      "win_rate_pct": 78.7,
+      "avg_pnl_usd": 0.98,
+      "ev_usd": 0.98,
+      "sum_pnl_usd": 87.63,
+      "avg_edge": 3.41,
+      "avg_ai_confidence": 64.3
+    },
+    {
+      "chase_count": "4",
+      "trades": 86,
+      "win_rate_pct": 83.7,
+      "avg_pnl_usd": 1.4,
+      "ev_usd": 1.4,
+      "sum_pnl_usd": 120.1,
+      "avg_edge": 3.32,
+      "avg_ai_confidence": 64.2
+    },
+    {
+      "chase_count": "5",
+      "trades": 60,
+      "win_rate_pct": 86.7,
+      "avg_pnl_usd": 1.07,
+      "ev_usd": 1.07,
+      "sum_pnl_usd": 64.44,
+      "avg_edge": 2.58,
+      "avg_ai_confidence": 64.1
+    },
+    {
+      "chase_count": "6+",
+      "trades": 59,
+      "win_rate_pct": 76.3,
+      "avg_pnl_usd": 0.95,
+      "ev_usd": 0.95,
+      "sum_pnl_usd": 56.09,
+      "avg_edge": 2.65,
+      "avg_ai_confidence": 63.4
+    }
+  ],
+  "usage_note": "Compare immediate vs chased fills \u2014 execution quality vs signal quality"
+}

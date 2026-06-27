@@ -1,0 +1,14 @@
+{
+  "schema": "real_edge_summary_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "generated_at": "2026-06-26T21:53:45.395747+00:00",
+  "approve_attempts": 1653,
+  "executed": 410,
+  "blocked": 1243,
+  "executed_pnl_usd": 279.02,
+  "blocked_shadow_pnl_usd": 160.69,
+  "counterfactual_all_approve_usd": 439.71,
+  "gate_damage_usd": 160.69,
+  "per_approve_ev_executed": 0.68,
+  "per_approve_ev_counterfactual": 0.27
+}

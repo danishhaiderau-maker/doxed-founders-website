@@ -1,0 +1,79 @@
+{
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-25T12:46:09.182401+00:00",
+  "trade_count": 182,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 182,
+      "win_rate_pct": 74.2,
+      "sum_net_usd": 98.61,
+      "avg_net_usd": 0.54
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0031,
+    "exit_avg_usd": 0.0985,
+    "total_avg_usd": 0.1016,
+    "total_sum_usd": 18.5,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 106,
+        "win_rate_pct": 72.6,
+        "sum_net_usd": 47.96,
+        "avg_book_slip_usd": 0.0
+      },
+      {
+        "bucket": "0.01-0.50",
+        "trades": 71,
+        "win_rate_pct": 78.9,
+        "sum_net_usd": 65.28,
+        "avg_book_slip_usd": 0.1496
+      },
+      {
+        "bucket": "0.50-2",
+        "trades": 3,
+        "win_rate_pct": 66.7,
+        "sum_net_usd": -1.56,
+        "avg_book_slip_usd": 0.5308
+      },
+      {
+        "bucket": "2+",
+        "trades": 2,
+        "win_rate_pct": 0.0,
+        "sum_net_usd": -13.07,
+        "avg_book_slip_usd": 3.1409
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 182,
+        "wr": 74.18,
+        "sum_net": 98.61
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "TAKER",
+        "n": 182,
+        "wr": 74.18,
+        "sum_net": 98.61
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 129,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 43.676319,
+  "execution_slippage_mean": 43.676319
+}

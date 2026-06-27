@@ -1,0 +1,19 @@
+{
+  "schema": "edge_validation_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T18:55:45.561716+00:00",
+  "edge_validation_status": "DEPRECATED",
+  "status_labels": [
+    "ACTIVE",
+    "WATCHLIST",
+    "DEPRECATED"
+  ],
+  "edge_correlation_with_pnl": -0.0611,
+  "incremental_verdict": "edge_no_incremental_value",
+  "reasons": [
+    "edge_no_incremental_value"
+  ],
+  "usage_note": "Validation only \u2014 do not auto-remove edge from bot based on this report alone."
+}

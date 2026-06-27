@@ -267,8 +267,17 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           <span className="mt-0.5 block text-[10px] font-normal text-indigo-200/70">Constitution · Oracle rank</span>
         </Link>
         <Link
-          href="/founder-den"
+          href="/founder-den?onboard=byo"
           className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500"
+        >
+          Start Founder OS
+          <span className="mt-0.5 block text-[10px] font-normal text-violet-200/80">
+            Free month AI promo · Mission Control
+          </span>
+        </Link>
+        <Link
+          href="/founder-den"
+          className="rounded-xl border border-violet-500/40 px-5 py-2.5 text-sm font-semibold text-violet-100 hover:border-violet-400"
         >
           Open Mission Control →
         </Link>

@@ -1,0 +1,837 @@
+ts,trade_id,dir,entry,exit,dur_min,pnl,margin_usdt,conviction_spread,net_pnl_usd,gross_pnl_usd,trading_fees_usd,fees_usd,funding_fees_usd,total_cost_usd,exit_reason,leverage,r_multiple,ai_win_prob,ai_threshold,ai_approved,entry_type,entry_mode,ema_hybrid_base,ema_hybrid_limit,ema_hybrid_offset_usd,dist_to_ema_hybrid_pct,tp_stage,regime,strategy,ai_band,ai_source,structure,structure_score_at_entry,structure_bias_at_entry,mtf_agreement_at_entry,adx_at_entry,trend_score_at_entry,bull_score_at_entry,bear_score_at_entry,funding_rate_pct_8h_at_entry,exchange,data_symbol,bot_version,fee_profile,analyzer_sync_id,research_lane,research_model,ai_decision,price_at_signal,distance_to_resistance,distance_to_support,sr_state,ema_spread,momentum,volatility,duration_min,max_drawdown,max_profit,entry_delay,entry_delay_sec,signal_age_sec,signal_age_bucket,entry_path,fill_model,limit_chase_count,urgent_chase_tier,slippage,book_slippage_usd_entry,book_slippage_usd_exit,book_slippage_usd_total,entry_partial_fill,maker_fees,taker_fees,funding_fees,features_velocity,features_volume,features_volume_ratio,features_delta,features_delta_change,features_imbalance,context_price,context_ema9,context_ema21,context_ema200,context_ema_slope,context_sr_state,context_sr_bias,context_dist_to_resistance,context_dist_to_support,context_regime,controls_edge_threshold,controls_ai_threshold,controls_pullback_pct,controls_leverage,decision_edge_score,decision_trigger,decision_ai_called,decision_ai_decision,decision_ai_win_prob,decision_ai_reason,execution_entry_price,execution_exit_price,execution_entry_type,execution_exit_type,execution_qty,execution_slippage,execution_fill_delay_sec,outcome_net_pnl_usd,outcome_gross_pnl_usd,outcome_trading_fees_usd,outcome_fees_usd,outcome_funding_fees_usd,outcome_total_cost_usd,outcome_pnl_pct,outcome_duration_sec,outcome_exit_reason,feature_delta,feature_volume_ratio,feature_velocity,feature_imbalance,early_fail_triggered,early_fail_enabled,entry_features,entry_edge,entry_controls,entry_indicators,setup_type,edge_score,edge_score_at_entry,invert_signal,early_fail_enabled_global,experiment_tag,final_direction,cfg_ladder_first_trigger_pct,cfg_ladder_first_lock_pct,cfg_exit_profile_id,cfg_peak_never_loser_min_peak,cfg_peak_never_loser_floor,cfg_thesis_fast_exit_unreal_pct,cfg_thesis_mfe_protect_pct,cfg_thesis_exit_if_above_unreal_pct,cfg_thesis_min_age_sec,cfg_thesis_score_flip_margin,cfg_thesis_early_decay_delta,cfg_early_fail_pct_threshold,cfg_type_a_first_candle_enabled,cfg_type_a_early_fail_enabled,cfg_scenario_c_exit_profile,cfg_type_a_stall_enabled,cfg_type_a_stall_min_age_sec,cfg_type_a_stall_min_candles,cfg_type_a_stall_max_mfe_pct,cfg_trend_weakening_enabled,cfg_spread_penalty_threshold,cfg_spread_penalty_margin_mult,cfg_trail_ladder_json,exit_config_json
+2026-06-22T11:23:52.386037+00:00,rida-b2f7e4217798,SHORT,64333.0,64298.0,5.033884,5.45,20.0,-3,1.09,1.09,0.0,0.0,-0.0,-0.0,THESIS_INVALIDATED,100,0.18,42,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,0-50,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,10.28,5,7,4,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,AI_DISAGREEMENT_REPLAY,AI Disagreement · Replay Wins,APPROVE,64323.0,0.007628,0.016654,NEAR_RESISTANCE,0.000224,1.0,95.3,5.033885,-3.264266,10.103679,160.252,160.252,160.252,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,10.0,0.0,0.0,0.0,False,0.0,0.0,-0.002479,1.2e-05,0.013949,0.00525,-0.768913,0.0,0.187578,64323.0,64230.280689,64219.748225,64028.100737,0.000164,NEAR_RESISTANCE,LONG_PREFERRED,0.007628,0.016654,BULL,3.0,44.0,0.0,100,3.6,True,True,APPROVE,42,"```json
+{
+  ""direction"": ""NO_TRADE"",
+  ""confidence"": 42,
+  ""long_score"": 55,
+  ""short_score"": 40,
+  ""preferred_direction"": ""NO_TRADE"",
+  ""entry_zone_low"": 0,
+  ""entry_zone_high"": 0,
+  ""limit_price"": 0,
+  ""expected_mfe"": 0,
+  ""expected_mae"": 0,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""EMA stack is bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score=9 and intact interpretation"",
+    ""Market structure shows higher lows sequence (HL, HL, HL) with BULLISH_STRUCTURE bias"",
+    ""Price is above all EMAs and near micro resistance (64318) with potential breakout""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is NEAR_RESISTANCE (0.76% away) with micro resistance at 64318 - limited upside room for short-duration trade"",
+    ""Volume ratio is low (0.34) indicating weak participation in current move"",
+    ""Delta is negative (-0.78) suggesting selling pressure despite bullish structure"",
+    ""ADX is only 10.28 - market is not trending strongly, mean reversion risk present"",
+    ""Reversal risk score is 41 - moderate risk of rejection at resistance"",
+    ""Market regime is COMPRESSION - low volatility environment reduces expectancy for directional moves""
+  ],
+  ""bull_score"": 7,
+  ""bear_score"": 4
+}
+```
+
+Direction: NO_TRADE
+Win probability: 42
+Long score: 55
+Short score: 40
+Bull score: 7
+Bear score: 4
+Decision: SOFT_REJECT
+Reason: Bullish structure and MTF alignment favor longs, but price is at micro resistance (64318) with low volume, negative delta, and compression regime. The 5-point gap between long_score (55) and short_score (40) is insufficient for approval (needs >=10). Reversal risk at resistance and weak ADX suggest waiting for either a pullback to support or a confirmed breakout above resistance with volume.",64333.0,64298.0,MAKER,TAKER,0.031093,10.0,160.252,1.09,1.09,0.0,0.0,-0.0,-0.0,5.45,302.033155,THESIS_INVALIDATED,-0.768913,0.00525,1.2e-05,0.187578,False,True,"{'price': 64323.0, 'ret_1m': -0.0004040466829321357, 'ret_5m': -0.0005748912367930392, 'ema9': 64230.280689123334, 'ema21': 64219.748225243704, 'ema200': 64028.100736837056, 'dist_to_support': 0.01665372067733416, 'dist_to_resistance': 0.007627776914711822, 'volume': 0.013948974, 'volume_ratio': 0.005250041804643339, 'delta': -0.7689133380000006, 'velocity': 1.2486878769072577e-05, 'imbalance': 0.1875778853905441, 'candle_range': 95.3, 'body_ratio': 0.42504086821012105, 'wick_ratio': 0.474959131789879}",3.4,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64230.280689123334, 'ema21': 64219.748225243704, 'ema200': 64028.100736837056, 'ema_spread': 0.000164, 'ema9_slope_pct': 0.019, 'ema21_slope_pct': 0.0066, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,3.4,3.4,False,True,INV_False_EF_True,SHORT,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T11:25:46.564221+00:00,cont-5e81a80442e1,LONG,64277.42,64363.0,0.317316,13.31,15.0,6,2.0,2.0,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.44,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,10.75,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64281.0,0.009023,0.015292,RANGE_COMPRESSION,0.000308,1.0,85.2,0.317317,0.0,13.314162,185.328,185.328,185.328,0-5m,AI_DIRECT,AI_DIRECT_CHASE,4,,3.58,0.0,0.0,0.0,False,0.0,0.0,0.000117,2e-05,0.012332,0.259168,-0.08982,0.0,0.01243,64281.0,64247.064551,64228.126486,64033.163465,0.000295,RANGE_COMPRESSION,LONG_PREFERRED,0.009023,0.015292,BULL,3.0,44.0,0.0,100,3.1,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64110,
+  ""entry_zone_high"": 64200,
+  ""limit_price"": 64155,
+  ""expected_mfe"": 120,
+  ""expected_mae"": 45,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with active HH/HL sequence"",
+    ""EMA stack is fully bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Micro structure shows higher low detected and price near micro support (64110)"",
+    ""Edge score (3.1) exceeds threshold (3.0), indicating favorable risk/reward"",
+    ""Quality score is high (82.52) with strong micro SR and trend components"",
+    ""Regime is BULL with range compression suggesting imminent breakout""
+  ],
+  ""reasons_against_trade"": [
+    ""ADX is low (10.75) indicating weak trend strength, not trending"",
+    ""Volume ratio is low (0.26) suggesting lack of participation"",
+    ""Delta is negative (-0.09) showing slight selling pressure"",
+    ""Reversal risk score is moderate (41) indicating some uncertainty"",
+    ""Price is near micro resistance (64318) with only 0.0576% room to upside"",
+    ""Weaken signals count is 2, suggesting some trend fatigue""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```",64277.42,64363.0,MAKER,TAKER,0.023335,3.58,185.328,2.0,2.0,0.0,0.0,0.0,0.0,13.31,19.03903,PROFIT_LOCK_LADDER,-0.08982,0.259168,2e-05,0.01243,False,True,"{'price': 64281.0, 'ret_1m': 0.0, 'ret_5m': -0.000559727599235039, 'ema9': 64247.06455129867, 'ema21': 64228.12648575904, 'ema200': 64033.16346492842, 'dist_to_support': 0.015292232541497487, 'dist_to_resistance': 0.009022883900374916, 'volume': 0.012332008, 'volume_ratio': 0.2591676674499032, 'delta': -0.08981991700000011, 'velocity': 2.023188691368677e-05, 'imbalance': 0.012430058127006602, 'candle_range': 85.2, 'body_ratio': 0.4282085700734751, 'wick_ratio': 0.47179142992652484}",3.1,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64247.06455129867, 'ema21': 64228.12648575904, 'ema200': 64033.16346492842, 'ema_spread': 0.000295, 'ema9_slope_pct': 0.0742, 'ema21_slope_pct': 0.0324, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,3.1,3.1,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T11:48:12.655517+00:00,cont-793ef3a0918c,LONG,64603.54,64709.0,1.153155,16.32,15.0,6,2.45,2.45,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.54,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,13.31,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64681.0,0.002783,0.021382,NEAR_RESISTANCE,0.001478,1.0,75.4,1.153156,0.0,16.324183,316.465,316.465,316.465,5-15m,AI_DIRECT,AI_DIRECT_CHASE,4,,77.46,0.0,0.0,0.0,False,0.0,0.0,0.000425,3.6e-05,0.002872,0.93768,10.560673,0.0,0.399923,64681.0,64343.971641,64274.610855,64042.770418,0.001079,NEAR_RESISTANCE,LONG_PREFERRED,0.002783,0.021382,BULL,3.0,44.0,0.0,100,4.6,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64450,
+  ""entry_zone_high"": 64550,
+  ""limit_price"": 64500,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 15,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with active HH/HL sequence"",
+    ""EMA stack is fully bullish (price above all EMAs, ema9 > ema21 > ema200)"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Micro structure confirmed with higher_low detected and liquidity sweep high"",
+    ""Orderflow delta positive (10.56) and imbalance favors buyers (0.40)"",
+    ""Edge score (4.6) above threshold (3.0) supports bullish bias"",
+    ""Price is in mid-stage of impulse with room to run toward recent high (64861)""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.28% away) which may cause short-term rejection"",
+    ""ADX is low (13.31) indicating weak trend momentum - mean reversion risk"",
+    ""Reversal risk score is 15, suggesting some caution on extended moves"",
+    ""Volume ratio is below 1.0 (0.94), showing no strong volume confirmation"",
+    ""Market regime tracker shows recent compression/transition cycles""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```
+
+**Direction:** LONG  
+**Win probability:** 62%  
+**Long score:** 72  
+**Short score:** 28  
+**Bull score:** 9  
+**Bear score:** 3  
+**Decision:** APPROVE  
+**Reason:** Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA stack, trend health) with positive orderflow and micro structure confirmation. Price is in a mid-impulse position with room to test recent high. The near-resistance location is a minor concern but not enough to override the dominant bullish trend. Low ADX suggests a patient exit style to capture continuation rather than chasing.",64603.54,64709.0,MAKER,TAKER,0.023191,77.46,316.465,2.45,2.45,0.0,0.0,0.0,0.0,16.32,69.189424,PROFIT_LOCK_LADDER,10.560673,0.93768,3.6e-05,0.399923,False,True,"{'price': 64681.0, 'ret_1m': 1.5460729746444033e-05, 'ret_5m': 0.0007271714577466968, 'ema9': 64343.97164103894, 'ema21': 64274.61085482346, 'ema200': 64042.77041777239, 'dist_to_support': 0.021381858660193875, 'dist_to_resistance': 0.0027828883288755586, 'volume': 0.002871998, 'volume_ratio': 0.9376802928388913, 'delta': 10.560672650999935, 'velocity': 3.5569003584689794e-05, 'imbalance': 0.3999229450058141, 'candle_range': 75.4, 'body_ratio': 0.3618820394612302, 'wick_ratio': 0.43811796053876984}",4.6,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64343.97164103894, 'ema21': 64274.61085482346, 'ema200': 64042.77041777239, 'ema_spread': 0.001079, 'ema9_slope_pct': 0.2315, 'ema21_slope_pct': 0.1089, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,4.6,4.6,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T12:01:42.793335+00:00,cont-1de42c53b178,LONG,64635.38,64757.12,0.511681,18.83,15.0,6,2.83,2.83,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.63,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,15.32,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64737.0,0.002705,0.021458,NEAR_RESISTANCE,0.002229,0.463671,68.0,0.511682,-5.766192,38.310288,188.232,188.232,188.232,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,101.62,0.0,0.3216,0.3216,False,0.0,0.0,0.000189,2.5e-05,0.005267,0.526374,8.170231,0.0,0.25473,64686.0,64407.577313,64309.778463,64051.988451,0.001521,NEAR_RESISTANCE,LONG_PREFERRED,0.002705,0.021458,BULL,3.0,44.0,0.0,100,3.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64450,
+  ""entry_zone_high"": 64550,
+  ""limit_price"": 64500,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 80,
+  ""reversal_probability"": 15,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is bullish (price above all EMAs, EMA9 > EMA21 > EMA200)"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Micro structure shows higher_low_detected and liquidity_sweep_high, suggesting bullish continuation"",
+    ""Edge score (3.8) exceeds threshold (3.0), indicating favorable risk/reward"",
+    ""Regime is BULL and trend_health_detail indicates 'Bullish and intact'"",
+    ""Distance to support (2.15%) is much larger than distance to resistance (0.27%), suggesting room to run""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (dist_to_resistance only 0.27%), increasing rejection risk"",
+    ""ADX is low at 15.32 (below 25), indicating weak trend strength and mean reversion risk"",
+    ""Volume ratio is low (0.53), suggesting lack of strong participation"",
+    ""Market regime tracker shows recent COMPRESSION/TRANSITION cycles, not strong trending"",
+    ""Reversal risk score is 15, indicating some reversal probability near resistance""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```
+
+Direction: LONG
+Win probability: 62%
+Long score: 72
+Short score: 28
+Bull score: 9
+Bear score: 3
+Decision: APPROVE
+Reason: Strong bullish alignment across MTF, structure, and EMA stack supports continuation. Price near resistance is a concern but the bullish trend hierarchy dominates. Low ADX suggests caution but not enough to override the clear bullish bias. Entry is set for a pullback below current price to improve risk/reward.",64635.38,64757.12,MAKER,TAKER,0.023171,101.62,188.232,2.83,2.83,0.0,0.0,0.0,0.0,18.83,30.700941,PROFIT_LOCK_LADDER,8.170231,0.526374,2.5e-05,0.25473,False,True,"{'price': 64686.0, 'ret_1m': 0.0, 'ret_5m': -0.00023183567487364956, 'ema9': 64407.577312831156, 'ema21': 64309.77846306585, 'ema200': 64051.98845065089, 'dist_to_support': 0.02145750239619083, 'dist_to_resistance': 0.0027053767430355873, 'volume': 0.0052674290000000006, 'volume_ratio': 0.5263738544380875, 'delta': 8.170230803999903, 'velocity': 2.47428104833122e-05, 'imbalance': 0.2547296109109763, 'candle_range': 68.0, 'body_ratio': 0.418222042009975, 'wick_ratio': 0.381777957990025}",3.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64407.577312831156, 'ema21': 64309.77846306585, 'ema200': 64051.98845065089, 'ema_spread': 0.001521, 'ema9_slope_pct': 0.2826, 'ema21_slope_pct': 0.1432, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,3.8,3.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T12:12:37.207817+00:00,cont-73b49f4587e1,LONG,64749.97,64797.0,2.2386,7.26,15.0,6,1.09,1.09,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.24,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,17.69,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64768.0,0.003057,0.022696,NEAR_RESISTANCE,0.002067,0.694691,68.7,2.238601,-2.926642,12.977612,359.395,359.395,359.395,5-15m,AI_DIRECT,AI_DIRECT_CHASE,3,,18.03,0.0,0.0,0.0,False,0.0,0.0,0.000827,1.9e-05,0.0142,0.000971,23.377958,0.0,0.454657,64768.0,64487.06185,64355.14571,64063.782319,0.00205,NEAR_RESISTANCE,LONG_PREFERRED,0.003057,0.022696,BULL,3.0,44.0,0.0,100,4.2,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64650,
+  ""entry_zone_high"": 64720,
+  ""limit_price"": 64685,
+  ""expected_mfe"": 120,
+  ""expected_mae"": 80,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED (15m, 1h, 4h all bullish)"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is bullish (price above all EMAs, EMA9 > EMA21 > EMA200)"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Higher low detected and micro structure supports continuation"",
+    ""Edge score (4.2) above threshold (3.0) indicating favorable risk/reward"",
+    ""Price is in early stage of bull move with compression regime suggesting breakout potential""
+  ],
+  ""reasons_against_trade"": [
+    ""ADX at 17.69 is below 25, indicating non-trending/mean reversion risk"",
+    ""Price is near resistance (0.3% away) which may cause short-term rejection"",
+    ""Volume ratio is very low (0.001), suggesting lack of conviction"",
+    ""Reversal risk score of 33 indicates moderate pullback probability"",
+    ""Funding rate positive (0.01182% per 8h) means longs pay shorts, slight headwind""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```",64749.97,64797.0,MAKER,TAKER,0.02316,18.03,359.395,1.09,1.09,0.0,0.0,0.0,0.0,7.26,134.316074,PROFIT_LOCK_LADDER,23.377958,0.000971,1.9e-05,0.454657,False,True,"{'price': 64768.0, 'ret_1m': -0.0001389382033746546, 'ret_5m': 0.000308889849879533, 'ema9': 64487.06185026493, 'ema21': 64355.14571023036, 'ema200': 64063.782319241516, 'dist_to_support': 0.022696393280632412, 'dist_to_resistance': 0.0030570652173913045, 'volume': 0.014199987000000002, 'volume_ratio': 0.0009709100714223458, 'delta': 23.377957868999847, 'velocity': 1.8543096002302972e-05, 'imbalance': 0.4546574995235435, 'candle_range': 68.7, 'body_ratio': 0.41234616172828475, 'wick_ratio': 0.38765383827171523}",4.2,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64487.06185026493, 'ema21': 64355.14571023036, 'ema200': 64063.782319241516, 'ema_spread': 0.00205, 'ema9_slope_pct': 0.3511, 'ema21_slope_pct': 0.1876, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,4.2,4.2,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T12:22:28.714897+00:00,cont-09996ebc481a,LONG,64761.25,64813.0,6.77597,7.97,15.0,6,1.2,1.2,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.27,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,17.69,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64833.0,0.002283,0.02345,NEAR_RESISTANCE,0.002368,1.0,68.7,6.775971,-5.751896,12.160049,86.433,86.433,86.433,0-5m,AI_DIRECT,AI_DIRECT_CHASE,2,,71.75,0.0,0.0,0.0,False,0.0,0.0,0.0025,6.2e-05,0.019222,0.436111,23.856993,0.0,0.42734,64833.0,64491.86185,64357.327528,64064.021125,0.00209,NEAR_RESISTANCE,LONG_PREFERRED,0.002283,0.02345,BULL,3.0,44.0,0.0,100,5.0,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64650,
+  ""entry_zone_high"": 64750,
+  ""limit_price"": 64700,
+  ""expected_mfe"": 120,
+  ""expected_mae"": 80,
+  ""reversal_probability"": 15,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with active HH/HL sequence"",
+    ""EMA stack is fully bullish (price above all EMAs, 9>21>200)"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Higher low detected at micro support 64110, price rejecting upward"",
+    ""Liquidity sweep of recent high suggests continuation momentum"",
+    ""Volume ratio above 1.0 (1.29) supporting bullish orderflow"",
+    ""Positive delta (23.87) and imbalance (0.43) favoring buyers"",
+    ""Edge score (5.0) above threshold (3.0) indicating favorable setup""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.24% away) which may cause short-term rejection"",
+    ""ADX at 17.69 is below 25, indicating non-trending/mean-reversion risk"",
+    ""Reversal risk score is 15, suggesting some caution on pullback depth"",
+    ""Entry stage is MID, not early, reducing potential reward"",
+    ""Funding rate positive (0.01182% per 8h) means longs pay shorts, slight headwind""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```",64761.25,64813.0,MAKER,TAKER,0.023136,71.75,86.433,1.2,1.2,0.0,0.0,0.0,0.0,7.97,406.558306,PROFIT_LOCK_LADDER,23.856993,0.436111,6.2e-05,0.42734,False,True,"{'price': 64833.0, 'ret_1m': 0.0002314171989262242, 'ret_5m': 0.0002468488205254794, 'ema9': 64491.86185026493, 'ema21': 64357.32752841218, 'ema200': 64064.021125211664, 'dist_to_support': 0.023450276157857386, 'dist_to_resistance': 0.0022833163627387454, 'volume': 0.019221821, 'volume_ratio': 0.43611135276525737, 'delta': 23.856992605999913, 'velocity': 6.173282734116598e-05, 'imbalance': 0.42734015189255103, 'candle_range': 68.7, 'body_ratio': 0.41234616172828475, 'wick_ratio': 0.38765383827171523}",5.0,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64491.86185026493, 'ema21': 64357.32752841218, 'ema200': 64064.021125211664, 'ema_spread': 0.00209, 'ema9_slope_pct': 0.3585, 'ema21_slope_pct': 0.1909, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,5.0,5.0,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T12:34:37.343129+00:00,cont-f740242af42c,LONG,64916.11,64964.0,3.918012,7.37,15.0,6,1.11,1.11,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.25,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,20.09,5,9,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64930.0,0.001201,0.02551,NEAR_RESISTANCE,0.003142,0.692958,56.2,3.918013,-6.640879,12.614742,209.696,209.696,209.696,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,13.89,0.0,0.0,0.0,False,0.0,0.0,0.001447,0.0,0.00848,0.015824,27.687737,0.0,0.437283,64930.0,64584.64948,64411.744034,64077.237671,0.002684,NEAR_RESISTANCE,LONG_PREFERRED,0.001201,0.02551,BULL,3.0,44.0,0.0,100,4.0,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64800,
+  ""entry_zone_high"": 64900,
+  ""limit_price"": 64850,
+  ""expected_mfe"": 120,
+  ""expected_mae"": 80,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is fully bullish (price above all EMAs, EMA9 > EMA21 > EMA200)"",
+    ""Trend health state is BULL with bull_score 9 vs bear_score 3"",
+    ""Higher low detected with liquidity sweep high indicating bullish continuation"",
+    ""Orderflow delta positive (27.33) and imbalance leans bullish (0.44)"",
+    ""Edge score (4.0) above threshold (3.0) supporting trade quality""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.12% away) which may cause short-term rejection"",
+    ""ADX at 20.09 is below 25, indicating non-trending/compression regime"",
+    ""Volume ratio is low (0.25), suggesting lack of strong participation"",
+    ""Reversal risk score is 33, indicating moderate reversal potential"",
+    ""Market regime tracker shows COMPRESSION, which can precede sharp moves either way""
+  ],
+  ""bull_score"": 9,
+  ""bear_score"": 3
+}
+```",64916.11,64964.0,MAKER,TAKER,0.023102,13.89,209.696,1.11,1.11,0.0,0.0,0.0,0.0,7.37,235.080794,PROFIT_LOCK_LADDER,27.687737,0.015824,0.0,0.437283,False,True,"{'price': 64930.0, 'ret_1m': -0.00013859160134895826, 'ret_5m': -0.00032332065711074504, 'ema9': 64584.64948021195, 'ema21': 64411.74403409963, 'ema200': 64077.2376705457, 'dist_to_support': 0.025509968439689015, 'dist_to_resistance': 0.0012008313447771535, 'volume': 0.008479952, 'volume_ratio': 0.015823551928819884, 'delta': 27.687736523000115, 'velocity': 2.788428912372891e-08, 'imbalance': 0.43728282178250605, 'candle_range': 56.2, 'body_ratio': 0.362760391747778, 'wick_ratio': 0.437239608252222}",4.0,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64584.64948021195, 'ema21': 64411.74403409963, 'ema200': 64077.2376705457, 'ema_spread': 0.002684, 'ema9_slope_pct': 0.3756, 'ema21_slope_pct': 0.2141, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,4.0,4.0,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T12:58:54.565389+00:00,cont-25354e875fec,LONG,65137.0,65202.0,2.848881,9.97,20.0,5,1.99,2.0,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.33,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,25.45,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65163.0,0.001535,0.028635,NEAR_RESISTANCE,0.003853,1.0,267.8,2.848882,0.0,16.11987,101.743,101.743,101.743,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,26.0,0.0,0.0,0.0,False,0.0,0.0,0.001402,-4.4e-05,0.009737,0.010809,0.069754,0.0,0.337211,65163.0,64792.799667,64542.036392,64104.978968,0.003885,NEAR_RESISTANCE,LONG_PREFERRED,0.001535,0.028635,BULL,3.0,44.0,0.0,100,3.2,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65050,
+  ""entry_zone_high"": 65180,
+  ""limit_price"": 65115,
+  ""expected_mfe"": 120,
+  ""expected_mae"": 65,
+  ""reversal_probability"": 35,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure bias is BULLISH with HH/HL sequence active"",
+    ""EMA stack is bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX at 25.45 indicates trending conditions favoring continuation"",
+    ""Volume ratio 2.06 confirms strong participation in current move"",
+    ""Delta positive at 0.085 suggests buying pressure"",
+    ""Higher low detected at micro support 64110, price bouncing from it"",
+    ""Liquidity sweep of recent high suggests absorption of sell-side liquidity"",
+    ""Edge score 3.2 above threshold 3.0 supports trade viability""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.07% away) which may cause short-term rejection"",
+    ""Velocity is slightly negative (-0.004%) indicating minor pullback risk"",
+    ""Reversal risk score of 35 suggests some probability of mean reversion"",
+    ""Entry stage is MID, not ideal for maximum risk/reward"",
+    ""Funding rate positive (0.01182% per 8h) means longs pay shorts, slight headwind""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+**Direction:** LONG  
+**Win probability:** 62%  
+**Long score:** 72  
+**Short score:** 28  
+**Bull score:** 8/10  
+**Bear score:** 3/10  
+**Decision:** APPROVE  
+**Reason:** Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA, ADX) with positive orderflow and volume confirmation. Price is in a pullback from resistance, offering a continuation entry near micro support. The slight proximity to resistance is a timing concern but does not override the dominant trend. Entry zone set below current price for a pullback fill.",65137.0,65202.0,MAKER,TAKER,0.030692,26.0,101.743,1.99,2.0,0.0,0.0,0.0,0.0,9.97,170.933012,PROFIT_LOCK_LADDER,0.069754,0.010809,-4.4e-05,0.337211,False,True,"{'price': 65163.0, 'ret_1m': 6.138829632130635e-05, 'ret_5m': -0.0015475606766364306, 'ema9': 64792.799667335654, 'ema21': 64542.0363918241, 'ema200': 64104.978967858566, 'dist_to_support': 0.0286354428825732, 'dist_to_resistance': 0.0015345896507273954, 'volume': 0.009736641, 'volume_ratio': 0.010809154868849742, 'delta': 0.069754202, 'velocity': -4.448687993490333e-05, 'imbalance': 0.33721149609390544, 'candle_range': 267.8, 'body_ratio': 0.442772598873864, 'wick_ratio': 0.557227401126136}",3.2,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64792.799667335654, 'ema21': 64542.0363918241, 'ema200': 64104.978967858566, 'ema_spread': 0.003885, 'ema9_slope_pct': 0.4663, 'ema21_slope_pct': 0.2869, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,3.2,3.2,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:04:29.680731+00:00,cont-407efc103f25,LONG,65094.11,65166.0,1.289553,11.04,20.0,5,2.21,2.21,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.37,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,27.9,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65141.0,0.001888,0.028292,NEAR_RESISTANCE,0.004148,1.0,265.6,1.289554,0.0,16.420841,142.342,142.342,142.342,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,46.89,0.0,0.0,0.0,False,0.0,0.0,0.000635,-1.4e-05,0.00385,0.108002,-0.695777,0.0,0.256707,65141.0,64861.719734,64596.140521,64117.043506,0.004111,NEAR_RESISTANCE,LONG_PREFERRED,0.001888,0.028292,BULL,3.0,44.0,0.0,100,4.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64950,
+  ""entry_zone_high"": 65100,
+  ""limit_price"": 65025,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 61,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure is BULLISH with active HH/HL sequence and structure_score=3"",
+    ""EMA stack is fully bullish (price > EMA9 > EMA21 > EMA200, all slopes positive)"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3"",
+    ""ADX=27.9 confirms trending market favoring continuation"",
+    ""Higher low detected at 64110 with liquidity sweep of recent high (bullish micro structure)"",
+    ""Edge_score=4.8 above threshold of 3.0, supporting trade quality"",
+    ""Regime is BULL and market_structure_shift is BULL_CONTINUATION""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.19% away) which may cause rejection"",
+    ""Reversal risk score is elevated at 61, suggesting potential exhaustion"",
+    ""Volume ratio is very low (0.108), indicating weak participation"",
+    ""Delta is negative (-0.696) showing selling pressure on current candle"",
+    ""Velocity is slightly negative (-0.0014%), short-term momentum fading"",
+    ""Market regime tracker shows recent shift from TRENDING to COMPRESSION""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```",65094.11,65166.0,MAKER,TAKER,0.030703,46.89,142.342,2.21,2.21,0.0,0.0,0.0,0.0,11.04,77.373268,PROFIT_LOCK_LADDER,-0.695777,0.108002,-1.4e-05,0.256707,False,True,"{'price': 65141.0, 'ret_1m': 0.00036856734800436137, 'ret_5m': -0.00030693206058838874, 'ema9': 64861.71973386853, 'ema21': 64596.14052149464, 'ema200': 64117.0435060147, 'dist_to_support': 0.02829247325033389, 'dist_to_resistance': 0.001888211725334275, 'volume': 0.0038501749999999995, 'volume_ratio': 0.10800213991119936, 'delta': -0.6957774230000003, 'velocity': -1.380017762676043e-05, 'imbalance': 0.25670660014759006, 'candle_range': 265.6, 'body_ratio': 0.47351124712663645, 'wick_ratio': 0.5264887528733635}",4.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64861.71973386853, 'ema21': 64596.14052149464, 'ema200': 64117.0435060147, 'ema_spread': 0.004111, 'ema9_slope_pct': 0.4187, 'ema21_slope_pct': 0.2816, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_SHORT,4.8,4.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:15:04.140543+00:00,cont-0521baf64e24,LONG,65101.21,65163.0,2.565963,9.48,20.0,5,1.9,1.9,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.32,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,27.9,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65106.0,0.002427,0.02777,NEAR_RESISTANCE,0.004207,0.829761,265.6,2.565964,0.0,20.858291,307.709,307.709,307.709,5-15m,AI_DIRECT,AI_DIRECT_CHASE,6,,4.79,0.0,0.0,0.0,False,0.0,0.0,0.001264,2.5e-05,0.003844,0.020026,-2.080894,0.0,0.452936,65106.0,64863.319734,64596.867794,64117.123108,0.004125,NEAR_RESISTANCE,LONG_PREFERRED,0.002427,0.02777,BULL,3.0,44.0,0.0,100,3.2,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64850,
+  ""entry_zone_high"": 65050,
+  ""limit_price"": 64950,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 61,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED (15m, 1h, 4h all bullish)"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is fully bullish (price above all EMAs, EMA9 > EMA21 > EMA200)"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX at 27.9 indicates trending market favoring continuation"",
+    ""Higher low detected and micro structure shows LEAN_BULL bias"",
+    ""Edge score (3.2) exceeds threshold (3.0), suggesting favorable risk/reward"",
+    ""Price is in early stage of bull move with compression regime suggesting breakout potential""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.18% away), increasing rejection risk"",
+    ""Reversal risk score is elevated at 61, indicating potential pullback"",
+    ""Velocity is slightly negative (-0.007%), showing minor short-term weakness"",
+    ""Delta is negative (-1.73), suggesting some selling pressure"",
+    ""Volume ratio is very low (0.0035), indicating low participation in current move""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+**Direction:** LONG  
+**Win probability:** 62%  
+**Long score:** 72  
+**Short score:** 28  
+**Bull score:** 8/10  
+**Bear score:** 3/10  
+**Decision:** APPROVE  
+**Reason:** Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA, ADX) supports continuation. Price is in early stage of bull move with compression regime. While near resistance and showing minor weakness signals, the trend strength and structure bias outweigh these concerns. Entry on pullback to 64950 allows for better risk/reward. The elevated reversal risk (61) is noted but does not override the dominant bullish trend.",65101.21,65163.0,MAKER,TAKER,0.030719,4.79,307.709,1.9,1.9,0.0,0.0,0.0,0.0,9.48,153.957873,PROFIT_LOCK_LADDER,-2.080894,0.020026,2.5e-05,0.452936,False,True,"{'price': 65106.0, 'ret_1m': 0.0, 'ret_5m': 0.00041488037615820773, 'ema9': 64863.31973386853, 'ema21': 64596.867794221915, 'ema200': 64117.123108004744, 'dist_to_support': 0.02777009799404049, 'dist_to_resistance': 0.002426811660983627, 'volume': 0.0038442409999999995, 'volume_ratio': 0.020025641560495504, 'delta': -2.080893876000001, 'velocity': 2.459801433945091e-05, 'imbalance': 0.45293591073806444, 'candle_range': 265.6, 'body_ratio': 0.47351124712663645, 'wick_ratio': 0.5264887528733635}",3.2,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64863.31973386853, 'ema21': 64596.867794221915, 'ema200': 64117.123108004744, 'ema_spread': 0.004125, 'ema9_slope_pct': 0.4212, 'ema21_slope_pct': 0.2827, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,3.2,3.2,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:28:40.693941+00:00,cont-6f15e21708a1,LONG,65057.31,65018.0,0.318524,-6.04,15.0,7,-0.91,-0.91,0.0,0.0,0.0,0.0,THESIS_FAST_CUT,100,0.2,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,30.12,6,10,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65116.0,0.002273,0.027919,NEAR_RESISTANCE,0.004135,1.0,246.5,0.318525,-12.498211,0.720903,361.915,361.915,361.915,5-15m,AI_DIRECT,AI_DIRECT_CHASE,3,,58.69,0.0,0.0,0.0,False,0.0,0.0,0.000118,-4.8e-05,0.009289,0.01407,0.120998,0.0,0.760039,65116.0,64908.895787,64642.045102,64128.701734,0.004128,NEAR_RESISTANCE,LONG_PREFERRED,0.002273,0.027919,BULL,3.0,44.0,0.0,100,4.1,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64900,
+  ""entry_zone_high"": 65050,
+  ""limit_price"": 64975,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with active HH/HL sequence"",
+    ""EMA stack is fully bullish (price > EMA9 > EMA21 > EMA200, all slopes positive)"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3"",
+    ""ADX=30.12 indicates strong trending market favoring continuation"",
+    ""Higher low detected at 64110, micro structure supports continuation"",
+    ""Edge score 4.1 above threshold 3.0, indicating favorable risk/reward setup"",
+    ""Funding rate positive (0.01182% per 8h) but moderate, not extreme""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is very close to micro resistance at 65264 (0.18% away), limiting upside"",
+    ""Volume ratio is very low (0.011), suggesting lack of conviction on current move"",
+    ""Reversal risk score is 33, indicating some probability of rejection at resistance"",
+    ""Market regime tracker shows COMPRESSION, which could precede either breakout or reversal"",
+    ""Distance to support is large (2.84%), making pullback risk significant if resistance holds""
+  ],
+  ""bull_score"": 10,
+  ""bear_score"": 3
+}
+```",65057.31,65018.0,MAKER,TAKER,0.023036,58.69,361.915,-0.91,-0.91,0.0,0.0,0.0,0.0,-6.04,19.111556,THESIS_FAST_CUT,0.120998,0.01407,-4.8e-05,0.760039,False,True,"{'price': 65116.0, 'ret_1m': -0.00032239740853892565, 'ret_5m': 0.0002150471567693773, 'ema9': 64908.89578709483, 'ema21': 64642.045102187825, 'ema200': 64128.70173398716, 'dist_to_support': 0.027919405368880153, 'dist_to_resistance': 0.0022728668837152157, 'volume': 0.009288648, 'volume_ratio': 0.014070372263807675, 'delta': 0.12099837600000003, 'velocity': -4.7577502147227915e-05, 'imbalance': 0.7600385443912757, 'candle_range': 246.5, 'body_ratio': 0.4783106075330636, 'wick_ratio': 0.5216893924669364}",4.1,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64908.89578709483, 'ema21': 64642.045102187825, 'ema200': 64128.70173398716, 'ema_spread': 0.004128, 'ema9_slope_pct': 0.3337, 'ema21_slope_pct': 0.2559, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.1,4.1,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:31:31.903427+00:00,cont-0fc8b5c35528,LONG,65005.14,65184.25,0.658246,27.55,20.0,5,5.51,5.51,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.92,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,30.12,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,64990.0,0.003969,0.026274,NEAR_RESISTANCE,0.004156,1.0,246.5,0.658247,0.0,46.282494,121.102,121.102,121.102,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,15.14,0.0,0.146,0.146,False,0.0,0.0,0.000324,-2.5e-05,0.014021,0.025125,-1.680779,0.0,0.782303,64990.0,64909.695787,64642.408739,64128.741535,0.004135,NEAR_RESISTANCE,LONG_PREFERRED,0.003969,0.026274,BULL,3.0,44.0,0.0,100,4.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64850,
+  ""entry_zone_high"": 64950,
+  ""limit_price"": 64900,
+  ""expected_mfe"": 250,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH with active HH/HL sequence"",
+    ""EMA stack is fully bullish (price > ema9 > ema21 > ema200, all slopes positive)"",
+    ""ADX at 30.12 confirms trending market favoring continuation"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""Higher low detected at 64110, price pulling back toward ema9/ema21 support zone"",
+    ""Entry stage is EARLY, suggesting pullback within intact uptrend"",
+    ""Edge score 4.8 above threshold 3.0 supports directional bias""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.38% away from recent high 65264), limiting short-term upside"",
+    ""Volume ratio is low (0.051), indicating weak participation in current move"",
+    ""Delta is negative (-1.67), showing slight selling pressure at current levels"",
+    ""Reversal risk score is 41, suggesting moderate reversal potential near resistance"",
+    ""Market regime is COMPRESSION, which can precede either breakout or reversal""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+**Direction:** LONG  
+**Win probability:** 62%  
+**Long score:** 72  
+**Short score:** 28  
+**Bull score:** 8/10  
+**Bear score:** 3/10  
+**Decision:** APPROVE  
+**Reason:** Strong bullish trend hierarchy (MTF BULL_ALIGNED, bullish structure, bullish EMA stack, ADX > 25) strongly favors continuation. Price is pulling back toward EMA support (ema9 at 64910, ema21 at 64642) after a higher low, providing a favorable entry within the uptrend. While near resistance and low volume/negative delta add caution, the trend framework overrides SR location as context only. Entry zone targets pullback to ema9 area with limit below current price. Exit style PATIENT to allow trend extension toward resistance breakout.",65005.14,65184.25,MAKER,TAKER,0.030774,15.14,121.102,5.51,5.51,0.0,0.0,0.0,0.0,27.55,39.494889,PROFIT_LOCK_LADDER,-1.680779,0.025125,-2.5e-05,0.782303,False,True,"{'price': 64990.0, 'ret_1m': -0.000246131126357567, 'ret_5m': 0.00013850202366845693, 'ema9': 64909.695787094824, 'ema21': 64642.408738551465, 'ema200': 64128.74153498219, 'dist_to_support': 0.026274497738670275, 'dist_to_resistance': 0.003968864412515768, 'volume': 0.014021081000000001, 'volume_ratio': 0.025125391669523548, 'delta': -1.6807785389999998, 'velocity': -2.4582618718798346e-05, 'imbalance': 0.7823027244898823, 'candle_range': 246.5, 'body_ratio': 0.4783106075330636, 'wick_ratio': 0.5216893924669364}",4.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64909.695787094824, 'ema21': 64642.408738551465, 'ema200': 64128.74153498219, 'ema_spread': 0.004135, 'ema9_slope_pct': 0.335, 'ema21_slope_pct': 0.2565, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_SHORT,4.8,4.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:38:27.963751+00:00,cont-78165f11be80,LONG,65205.95,65312.0,0.509368,16.26,20.0,5,3.25,3.25,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.54,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,30.77,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65147.0,0.003272,0.027576,NEAR_RESISTANCE,0.00447,1.0,281.8,0.509369,0.0,27.919231,183.48,183.48,183.48,0-5m,AI_DIRECT,AI_DIRECT_CHASE,4,,58.95,0.0,0.0,0.0,False,0.0,0.0,0.000251,9.1e-05,0.008489,0.011393,-0.215689,0.0,0.891279,65147.0,64939.03663,64679.677366,64139.981334,0.00401,NEAR_RESISTANCE,LONG_PREFERRED,0.003272,0.027576,BULL,3.0,44.0,0.0,100,4.6,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64850,
+  ""entry_zone_high"": 65000,
+  ""limit_price"": 64925,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with active HH/HL sequence"",
+    ""EMA stack is fully bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX at 30.77 confirms trending conditions favoring continuation"",
+    ""Price is above all EMAs and near micro resistance (65264) but structure shows higher lows"",
+    ""Edge score (4.6) above threshold (3.0) supports trade quality"",
+    ""Entry stage is EARLY with higher_low_detected = 1, suggesting pullback opportunity""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.33% away) which may cause rejection"",
+    ""Reversal risk score is 41, indicating moderate reversal probability"",
+    ""Volume ratio is very low (0.0076), suggesting lack of participation"",
+    ""Delta is negative (-0.21) showing selling pressure on current candle"",
+    ""Weaken signals count is 2, indicating some trend fatigue""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+Direction: LONG
+Win probability: 62
+Long score: 72
+Short score: 28
+Bull score: 8
+Bear score: 3
+Decision: APPROVE
+Reason: Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA, ADX) supports continuation. Price pullback near EMAs offers entry opportunity. Negative delta and near-resistance location are minor concerns but do not override dominant trend. Entry zone set for pullback below current price.",65205.95,65312.0,MAKER,TAKER,0.0307,58.95,183.48,3.25,3.25,0.0,0.0,0.0,0.0,16.26,30.562175,PROFIT_LOCK_LADDER,-0.215689,0.011393,9.1e-05,0.891279,False,True,"{'price': 65147.0, 'ret_1m': 0.0, 'ret_5m': 0.0008449579057334235, 'ema9': 64939.03662967587, 'ema21': 64679.67736562656, 'ema200': 64139.981334255644, 'dist_to_support': 0.027575929823483322, 'dist_to_resistance': 0.0032722412548200266, 'volume': 0.008489082, 'volume_ratio': 0.011393431482723823, 'delta': -0.21568863600000004, 'velocity': 9.064558520380417e-05, 'imbalance': 0.8912786347245933, 'candle_range': 281.8, 'body_ratio': 0.3698859773851228, 'wick_ratio': 0.6301140226148771}",4.6,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64939.03662967587, 'ema21': 64679.67736562656, 'ema200': 64139.981334255644, 'ema_spread': 0.00401, 'ema9_slope_pct': 0.2263, 'ema21_slope_pct': 0.2135, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.6,4.6,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T13:41:30.567732+00:00,cont-dd59de253055,LONG,65279.25,65305.0,2.13417,3.94,20.0,5,0.79,0.79,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.13,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,31.01,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65313.0,0.000122,0.031963,NEAR_RESISTANCE,0.004388,1.0,281.8,2.134171,-1.87349,12.829498,54.054,54.054,54.054,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,33.75,0.0,0.0,0.0,False,0.0,0.0,0.00105,-5e-05,0.000911,0.127026,0.489544,0.0,0.244892,65313.0,64993.83663,64704.586457,64142.707702,0.00447,NEAR_RESISTANCE,LONG_PREFERRED,0.000122,0.031963,BULL,3.0,44.0,0.0,100,4.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65200,
+  ""entry_zone_high"": 65300,
+  ""limit_price"": 65250,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is bullish (price above all EMAs, EMA9 > EMA21 > EMA200)"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX at 31.01 indicates trending market favoring continuation"",
+    ""Higher low detected with micro structure leaning bull"",
+    ""Orderflow delta positive (0.45) and imbalance bullish (0.23)"",
+    ""Edge score 4.8 above threshold 3.0 supports trade quality""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near micro resistance (65264) and global resistance (65396) - limited upside room"",
+    ""Volume ratio is low (0.124) suggesting weak participation"",
+    ""Reversal risk score at 33 indicates some pullback probability"",
+    ""Entry stage is MID, not early in the move"",
+    ""Compression regime may precede a breakout or reversal""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+Direction: LONG  
+Win probability: 62%  
+Long score: 72  
+Short score: 28  
+Bull score: 8  
+Bear score: 3  
+Decision: APPROVE  
+Reason: Strong bullish trend alignment across all timeframes, EMA stack, and structure. Price is near resistance but the trend is intact and ADX confirms trending conditions. Low volume and proximity to resistance warrant a pullback entry rather than chasing. The bullish case clearly outweighs the bearish case by a wide margin (72 vs 28).",65279.25,65305.0,MAKER,TAKER,0.030622,33.75,54.054,0.79,0.79,0.0,0.0,0.0,0.0,3.94,128.050351,PROFIT_LOCK_LADDER,0.489544,0.127026,-5e-05,0.244892,False,True,"{'price': 65313.0, 'ret_1m': -4.593055300385817e-05, 'ret_5m': -0.0005355940503152354, 'ema9': 64993.83662967587, 'ema21': 64704.58645653565, 'ema200': 64142.707702414846, 'dist_to_support': 0.03196305132440203, 'dist_to_resistance': 0.00012234660794029485, 'volume': 0.0009108969999999999, 'volume_ratio': 0.12702645343665164, 'delta': 0.48954379699999767, 'velocity': -5.047501878824355e-05, 'imbalance': 0.24489249907089886, 'candle_range': 281.8, 'body_ratio': 0.3698859773851228, 'wick_ratio': 0.6301140226148771}",4.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 64993.83662967587, 'ema21': 64704.58645653565, 'ema200': 64142.707702414846, 'ema_spread': 0.00447, 'ema9_slope_pct': 0.3109, 'ema21_slope_pct': 0.2521, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.8,4.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:17:22.021028+00:00,cont-22790fc84a7e,LONG,65467.5,65230.0,14.995552,-36.31,15.0,7,-5.45,-5.44,0.0,0.0,0.01,0.01,STOP_LOSS,100,1.21,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,33.41,6,10,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65618.0,6.1e-05,0.035356,NEAR_RESISTANCE,0.005211,0.597025,272.6,14.995553,-30.320388,3.895062,130.207,130.207,130.207,0-5m,AI_DIRECT,AI_DIRECT_CHASE,2,,150.5,0.0,0.0,0.0,False,0.0,0.0,0.005517,-7.5e-05,0.020027,0.009529,0.174129,0.0,0.543354,65618.0,65125.869304,64791.838927,64157.676847,0.005155,NEAR_RESISTANCE,LONG_PREFERRED,6.1e-05,0.035356,BULL,3.0,44.0,0.0,100,3.2,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65320,
+  ""entry_zone_high"": 65450,
+  ""limit_price"": 65385,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure is BULLISH with HH/HL sequence active and structure_score=3"",
+    ""EMA stack is fully bullish (price above all EMAs, EMA9>EMA21>EMA200, slopes positive)"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3"",
+    ""ADX=33.41 indicates strong trending conditions favoring continuation"",
+    ""Higher low detected at micro_support=64973, price bouncing from it"",
+    ""Edge_score=3.2 above threshold=3.0, supporting trade viability"",
+    ""Delta positive (0.071) and imbalance bullish (0.892) show buying pressure"",
+    ""Regime is BULL and market_structure_shift is BULL_CONTINUATION""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (dist_to_resistance=0.006%) with sr_state=NEAR_RESISTANCE"",
+    ""Volume ratio is very low (0.016) suggesting lack of conviction"",
+    ""Reversal risk score is 33 (moderate) - price may reject at resistance"",
+    ""Entry stage is MID, not early pullback - reduced risk/reward"",
+    ""Micro structure not fully confirmed (micro_structure_confirmed=false)""
+  ],
+  ""bull_score"": 10,
+  ""bear_score"": 3
+}
+```
+
+Direction: LONG
+Win probability: 62
+Long score: 72
+Short score: 28
+Bull score: 10
+Bear score: 3
+Decision: APPROVE
+Reason: Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA, ADX) with positive orderflow. Price is near resistance but the dominant trend is continuation, not reversal. The low volume ratio and proximity to resistance warrant a pullback entry rather than chasing. Entry zone set below current price to capture a micro-pullback before continuation toward the next swing high.",65467.5,65230.0,MAKER,TAKER,0.02286,150.5,130.207,-5.45,-5.44,0.0,0.0,0.01,0.01,-36.31,899.733238,STOP_LOSS,0.174129,0.009529,-7.5e-05,0.543354,False,True,"{'price': 65618.0, 'ret_1m': 3.0480370641307e-05, 'ret_5m': -0.00025900815113887406, 'ema9': 65125.8693037407, 'ema21': 64791.83892742974, 'ema200': 64157.6768467486, 'dist_to_support': 0.03535615227529032, 'dist_to_resistance': 6.095888323325917e-05, 'volume': 0.020027494, 'volume_ratio': 0.009528616352294841, 'delta': 0.17412889600000003, 'velocity': -7.462812150040082e-05, 'imbalance': 0.5433537792589209, 'candle_range': 272.6, 'body_ratio': 0.476370341659651, 'wick_ratio': 0.5236296583403488}",3.2,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65125.8693037407, 'ema21': 64791.83892742974, 'ema200': 64157.6768467486, 'ema_spread': 0.005155, 'ema9_slope_pct': 0.3973, 'ema21_slope_pct': 0.2984, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,3.2,3.2,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:20:53.883212+00:00,cont-6247472f84eb,LONG,65369.0,65169.01,13.392372,-30.63,20.0,5,-6.13,-6.12,0.0,0.0,0.01,0.01,STOP_LOSS,100,1.02,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,35.53,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65461.0,0.003039,0.033294,NEAR_RESISTANCE,0.004599,0.574454,264.7,13.392374,-31.819364,8.413774,257.125,257.125,257.125,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,92.0,0.0,0.0609,0.0609,False,0.0,0.0,0.006586,7.2e-05,0.005128,0.151261,0.047103,0.0,0.053909,65461.0,65212.695443,64862.068446,64171.803706,0.005406,NEAR_RESISTANCE,LONG_PREFERRED,0.003039,0.033294,BULL,3.0,44.0,0.0,100,4.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65200,
+  ""entry_zone_high"": 65350,
+  ""limit_price"": 65275,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 33,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure is BULLISH with HH/HL sequence active and structure_score=3"",
+    ""EMA stack is fully bullish (price above all EMAs, EMA9>EMA21>EMA200)"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3"",
+    ""ADX=35.53 indicates strong trending market favoring continuation"",
+    ""Micro structure shows higher low detected and BULL_CONTINUATION shift"",
+    ""Edge_score=4.8 above threshold of 3.0"",
+    ""Quality score is high at 87.5 with strong micro SR and trend components"",
+    ""Distance to micro support (0.79%) is closer than resistance (0.35%) - pullback entry opportunity"",
+    ""Funding rate positive but moderate (0.0118% per 8h) - not extreme enough to deter longs""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.30% away) - potential rejection zone"",
+    ""Volume ratio is low (0.146) - weak participation on this move"",
+    ""Weaken signals count is 1 - minor deterioration in trend health"",
+    ""Reversal risk score is 33 - moderate risk of mean reversion"",
+    ""Market regime is COMPRESSION (only 181s duration) - could break either way"",
+    ""Candle range is moderate with balanced wick/body - no strong momentum signal""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```",65369.0,65169.01,MAKER,TAKER,0.030553,92.0,257.125,-6.13,-6.12,0.0,0.0,0.01,0.01,-30.63,803.542496,STOP_LOSS,0.047103,0.151261,7.2e-05,0.053909,False,True,"{'price': 65490.0, 'ret_1m': -4.5806422060372865e-05, 'ret_5m': 6.108175793299331e-05, 'ema9': 65212.69544299256, 'ema21': 64862.068446424935, 'ema200': 64171.80370627825, 'dist_to_support': 0.03329362533980879, 'dist_to_resistance': 0.003039188735147683, 'volume': 0.005127685, 'volume_ratio': 0.1512608041810906, 'delta': 0.047102635999999774, 'velocity': 7.18067870272419e-05, 'imbalance': 0.053908981793008626, 'candle_range': 264.7, 'body_ratio': 0.5203049128356015, 'wick_ratio': 0.47969508716439846}",4.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65212.69544299256, 'ema21': 64862.068446424935, 'ema200': 64171.80370627825, 'ema_spread': 0.005406, 'ema9_slope_pct': 0.4783, 'ema21_slope_pct': 0.345, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_LONG,4.8,4.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:24:32.965203+00:00,cont-4464e15e42d1,LONG,65250.0,65053.0,7.128022,-30.21,15.0,7,-4.53,-4.53,0.0,0.0,0.0,0.0,STOP_LOSS,100,1.01,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,34.74,6,10,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65372.0,0.005311,0.031104,NEAR_RESISTANCE,0.004527,1.0,264.7,7.128023,-31.724138,10.114943,254.402,254.402,254.402,0-5m,AI_DIRECT,AI_DIRECT_CHASE,3,,122.0,0.0,0.0,0.0,False,0.0,0.0,0.002628,7e-05,0.008609,0.004716,-0.956012,0.0,0.317695,65372.0,65189.495443,64851.522992,64170.649477,0.005211,NEAR_RESISTANCE,LONG_PREFERRED,0.005311,0.031104,BULL,3.0,44.0,0.0,100,4.8,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 78,
+  ""short_score"": 22,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65150,
+  ""entry_zone_high"": 65250,
+  ""limit_price"": 65200,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 23,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m, 1h, 4h"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is bullish (price above EMA9, EMA21, EMA200; EMA9 above EMA21 above EMA200)"",
+    ""ADX at 34.74 indicates strong trending market favoring continuation"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""Micro structure shows higher low detected and BULL_CONTINUATION shift"",
+    ""Volume ratio at 5.89 suggests strong participation supporting the trend"",
+    ""Edge score of 4.8 above threshold of 3.0 supports trade quality""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (dist_to_resistance 0.53%) which may cause short-term rejection"",
+    ""Delta is negative (-0.947) indicating some selling pressure on recent candles"",
+    ""Reversal risk score of 23 suggests moderate reversal probability near resistance"",
+    ""Weaken signals count of 1 indicates slight trend fatigue""
+  ],
+  ""bull_score"": 10,
+  ""bear_score"": 3
+}
+```
+
+Direction: LONG
+Win probability: 62
+Long score: 78
+Short score: 22
+Bull score: 10
+Bear score: 3
+Decision: APPROVE
+Reason: Strong bullish alignment across all trend hierarchy layers (MTF, structure, EMA, ADX) with micro structure confirming continuation. Price near resistance is a location context only and does not override the dominant trend. Entry on pullback to micro support zone (65150-65250) provides favorable risk/reward. Negative delta is a minor concern but volume ratio and trend strength outweigh it.",65250.0,65053.0,MAKER,TAKER,0.022946,122.0,254.402,-4.53,-4.53,0.0,0.0,0.0,0.0,-30.21,427.681443,STOP_LOSS,-0.956012,0.004716,7e-05,0.317695,False,True,"{'price': 65372.0, 'ret_1m': -1.529683508482095e-05, 'ret_5m': 0.0006122573930080206, 'ema9': 65189.495442992564, 'ema21': 64851.52299187948, 'ema200': 64170.64947742253, 'dist_to_support': 0.031103627736108985, 'dist_to_resistance': 0.005311495484463493, 'volume': 0.008609221, 'volume_ratio': 0.004715638365347415, 'delta': -0.9560124499999987, 'velocity': 7.041679443676538e-05, 'imbalance': 0.3176954584352112, 'candle_range': 264.7, 'body_ratio': 0.5203049128356015, 'wick_ratio': 0.47969508716439846}",4.8,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65189.495442992564, 'ema21': 64851.52299187948, 'ema200': 64170.64947742253, 'ema_spread': 0.005211, 'ema9_slope_pct': 0.4425, 'ema21_slope_pct': 0.3287, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.8,4.8,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:30:11.541060+00:00,cont-7be8530617d3,LONG,65071.5,64974.0,2.436289,-14.99,20.0,5,-3.0,-3.0,0.0,0.0,0.0,0.0,THESIS_FAST_CUT,100,0.5,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,33.91,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65107.0,0.008724,0.027815,NEAR_RESISTANCE,0.004322,0.276506,243.5,2.43629,-12.832039,0.0,80.27,80.27,80.27,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,35.5,0.0,0.0,0.0,False,0.0,0.0,0.001179,1.4e-05,0.009586,0.11317,-2.421961,0.0,0.421837,65107.0,65156.076354,64866.144869,64177.877982,0.00447,NEAR_RESISTANCE,LONG_PREFERRED,0.008724,0.027815,BULL,3.0,44.0,0.0,100,4.4,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 65000,
+  ""entry_zone_high"": 65100,
+  ""limit_price"": 65050,
+  ""expected_mfe"": 250,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED (15m ranging, 1h/4h bullish)"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX at 33.91 indicates trending market favoring continuation"",
+    ""Micro structure shows higher low detected and bull continuation pattern"",
+    ""Price is near micro support (64973) with 0.2% distance, offering pullback entry"",
+    ""Edge score (4.4) above threshold (3.0) supports trade quality""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.87% away) which may cap upside in short term"",
+    ""Volume ratio is low (0.113) suggesting weak participation"",
+    ""Delta is negative (-2.42) indicating selling pressure on recent candles"",
+    ""Reversal risk score is 41, moderate risk of mean reversion"",
+    ""Market regime is COMPRESSION which may lead to choppy movement""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```
+
+**Directional Scoring Summary:**
+- **Bullish case (72/100):** Strong multi-timeframe alignment (BULL_ALIGNED), bullish structure with HH/HL sequence, EMA stack fully bullish, ADX > 25 confirming trending conditions, trend health robust (bull_score 10), micro structure confirms higher low and bull continuation, price near micro support offering a pullback entry within the prevailing uptrend.
+- **Bearish case (28/100):** Price near resistance (0.87% away) could stall momentum, low volume ratio suggests lack of conviction, negative delta indicates recent selling, compression regime may produce choppy price action, moderate reversal risk (41). However, these are weaker signals against the dominant bullish trend.
+
+**Decision:** APPROVE - The bullish case clearly outweighs the bearish (gap > 5), with strong trend hierarchy support (MTF agreement, structure, EMA, ADX). The entry near micro support within a bull continuation context is valid. The low volume and negative delta are noted but not sufficient to override the higher timeframe bullish alignment.",65071.5,64974.0,MAKER,TAKER,0.030719,35.5,80.27,-3.0,-3.0,0.0,0.0,0.0,0.0,-14.99,146.177466,THESIS_FAST_CUT,-2.421961,0.11317,1.4e-05,0.421837,False,True,"{'price': 65107.0, 'ret_1m': -1.535909565644775e-05, 'ret_5m': 0.00013825309533318996, 'ema9': 65156.076354394056, 'ema21': 64866.144868644486, 'ema200': 64177.87798158013, 'dist_to_support': 0.027814895022193552, 'dist_to_resistance': 0.00872383234268688, 'volume': 0.009585882, 'volume_ratio': 0.11317047679219824, 'delta': -2.4219608740000003, 'velocity': 1.3831940962110096e-05, 'imbalance': 0.4218365005274657, 'candle_range': 243.5, 'body_ratio': 0.5900106915530081, 'wick_ratio': 0.4099893084469919}",4.4,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65156.076354394056, 'ema21': 64866.144868644486, 'ema200': 64177.87798158013, 'ema_spread': 0.00447, 'ema9_slope_pct': 0.2203, 'ema21_slope_pct': 0.2363, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.4,4.4,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:31:06.993874+00:00,cont-83dced961d3d,LONG,65102.0,64924.0,6.502351,-27.36,20.0,5,-5.47,-5.47,0.0,0.0,0.0,0.0,STOP_LOSS,100,0.91,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,34.69,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65130.0,0.007316,0.029172,NEAR_RESISTANCE,0.003682,1.0,268.7,6.502353,-30.406132,3.379312,75.397,75.397,75.397,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,28.0,0.0,0.0,0.0,False,0.0,0.0,0.003201,-4.1e-05,0.019824,0.122661,-0.403275,0.0,0.294762,65130.0,65185.476354,64879.508505,64179.340668,0.004716,NEAR_RESISTANCE,LONG_PREFERRED,0.007316,0.029172,BULL,3.0,44.0,0.0,100,4.6,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64973,
+  ""entry_zone_high"": 65137,
+  ""limit_price"": 65055,
+  ""expected_mfe"": 0.0045,
+  ""expected_mae"": 0.0025,
+  ""reversal_probability"": 53,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED across 15m/1h/4h"",
+    ""Market structure is BULLISH with HH/HL sequence active and structure_score=3"",
+    ""EMA stack is fully bullish (9>21>200) with positive slopes"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3"",
+    ""ADX=34.69 indicates strong trending conditions favoring continuation"",
+    ""Price is near micro support (64973) with 0.25% distance, offering pullback entry"",
+    ""Higher low detected and micro structure confirmed, supporting continuation"",
+    ""Edge score (4.6) exceeds threshold (3.0), indicating favorable risk/reward""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (0.73% away) which may cap upside in short term"",
+    ""Reversal risk score is 53, indicating moderate reversal probability"",
+    ""Volume ratio is low (0.067), suggesting lack of aggressive buying"",
+    ""Delta is negative (-0.368), showing selling pressure on current candle"",
+    ""Market regime tracker shows COMPRESSION, which could precede either breakout or breakdown""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```",65102.0,64924.0,MAKER,TAKER,0.030708,28.0,75.397,-5.47,-5.47,0.0,0.0,0.0,0.0,-27.36,390.14125,STOP_LOSS,-0.403275,0.122661,-4.1e-05,0.294762,False,True,"{'price': 65130.0, 'ret_1m': -0.00038370040672243113, 'ret_5m': -0.0007211132761556991, 'ema9': 65185.47635439405, 'ema21': 64879.50850500812, 'ema200': 64179.3406681473, 'dist_to_support': 0.029171779141104293, 'dist_to_resistance': 0.007315950920245399, 'volume': 0.019823989, 'volume_ratio': 0.12266104205905198, 'delta': -0.40327528000000007, 'velocity': -4.142439602206941e-05, 'imbalance': 0.29476249127464305, 'candle_range': 268.7, 'body_ratio': 0.5698970995294866, 'wick_ratio': 0.43010290047051336}",4.6,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65185.47635439405, 'ema21': 64879.50850500812, 'ema200': 64179.3406681473, 'ema_spread': 0.004716, 'ema9_slope_pct': 0.2655, 'ema21_slope_pct': 0.257, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_SHORT,4.6,4.6,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:36:13.607085+00:00,cont-ace49fb7754c,LONG,64932.25,65055.04,4.962736,18.9,20.0,5,3.78,3.78,0.0,0.0,0.0,0.0,PROFIT_LOCK_LADDER,100,0.63,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,33.79,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65014.0,0.0104,0.0262,NEAR_RESISTANCE,0.003744,1.0,243.5,4.962737,-1.578568,25.218593,53.826,53.826,53.826,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,81.75,0.0,0.2449,0.2449,False,0.0,0.0,0.002441,-4e-05,0.000567,0.008647,-2.814529,0.0,0.456724,65014.0,65138.476354,64858.144869,64177.00236,0.004322,NEAR_RESISTANCE,LONG_PREFERRED,0.0104,0.0262,BULL,3.0,44.0,0.0,100,3.4,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64850,
+  ""entry_zone_high"": 64950,
+  ""limit_price"": 64900,
+  ""expected_mfe"": 180,
+  ""expected_mae"": 120,
+  ""reversal_probability"": 61,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED (15m ranging, 1h/4h bullish) supporting continuation"",
+    ""Market structure is BULLISH_STRUCTURE with active HH/HL sequence and structure_score=3"",
+    ""EMA stack is fully bullish (9>21>200) with positive slopes and spread"",
+    ""Trend health state is BULL with bull_score=10 vs bear_score=3, indicating strong bullish momentum"",
+    ""ADX=33.79 (>25) confirms trending market, favoring continuation over reversal"",
+    ""Price is near micro support (64973) with distance_to_micro_support=0.0154%, offering a pullback entry within the bull trend"",
+    ""Higher low detected and micro_structure_confirmed=true, supporting bullish micro structure"",
+    ""Edge_score=3.4 above threshold=3.0, indicating favorable risk/reward setup""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (dist_to_resistance=1.03%) and SR state is NEAR_RESISTANCE, limiting upside potential"",
+    ""Reversal risk score is 61, suggesting elevated probability of a pullback or reversal from current levels"",
+    ""Volume ratio is very low (0.009), indicating lack of participation and potential false breakout risk"",
+    ""Delta is negative (-2.8) and velocity is slightly negative, showing short-term selling pressure"",
+    ""Current regime is COMPRESSION (duration 785s), which may precede a volatile move but direction is uncertain"",
+    ""Funding rate is positive (0.01182% per 8h), favoring shorts and indicating crowded longs""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```",64932.25,65055.04,MAKER,TAKER,0.030763,81.75,53.826,3.78,3.78,0.0,0.0,0.0,0.0,18.9,297.76428,PROFIT_LOCK_LADDER,-2.814529,0.008647,-4e-05,0.456724,False,True,"{'price': 65014.0, 'ret_1m': 0.00019999692312425962, 'ret_5m': -0.0008452565737908989, 'ema9': 65138.47635439405, 'ema21': 64858.144868644486, 'ema200': 64177.002359689584, 'dist_to_support': 0.02619959692927801, 'dist_to_resistance': 0.0103998400024615, 'volume': 0.000567156, 'volume_ratio': 0.008646646898188072, 'delta': -2.814528972000004, 'velocity': -3.995589739128587e-05, 'imbalance': 0.45672417051998354, 'candle_range': 243.5, 'body_ratio': 0.5900106915530081, 'wick_ratio': 0.4099893084469919}",4.4,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65138.47635439405, 'ema21': 64858.144868644486, 'ema200': 64177.002359689584, 'ema_spread': 0.004322, 'ema9_slope_pct': 0.1933, 'ema21_slope_pct': 0.2239, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",MOMENTUM_SHORT,4.4,4.4,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"
+2026-06-22T14:37:28.898771+00:00,cont-478b8a0d447b,LONG,65052.5,64984.0,0.39999,-10.53,20.0,5,-2.11,-2.11,0.0,0.0,0.0,0.0,THESIS_FAST_CUT,100,0.35,62,44.0,True,SIM_LIMIT,AI_DIRECT_LIMIT,,,,,0,BULL,SR,60-70,SPAWN,3,3,BULLISH_STRUCTURE,BULL_ALIGNED,32.47,6,8,3,0.01182,bitfinex,tBTCF0:USTF0,v9.83-quality-roster-4-tiles-2026-06-21,BITFINEX_ZERO,v9.83-quality-roster-4-tiles-2026-06-21,CONTINUOUS,Continuous AI Research,APPROVE,65062.0,0.009453,0.027113,NEAR_RESISTANCE,0.003858,0.860717,220.2,0.399991,-12.821952,0.0,35.881,35.881,35.881,0-5m,AI_DIRECT,AI_DIRECT_CHASE,1,,9.5,0.0,0.0,0.0,False,0.0,0.0,0.000185,8e-06,2e-05,0.001381,-0.761634,0.0,0.085566,65062.0,65116.461084,64873.553186,64184.995811,0.003744,NEAR_RESISTANCE,LONG_PREFERRED,0.009453,0.027113,BULL,3.0,44.0,0.0,100,4.2,True,True,APPROVE,62,"```json
+{
+  ""direction"": ""LONG"",
+  ""confidence"": 62,
+  ""long_score"": 72,
+  ""short_score"": 28,
+  ""preferred_direction"": ""LONG"",
+  ""entry_zone_low"": 64973,
+  ""entry_zone_high"": 65089,
+  ""limit_price"": 65031,
+  ""expected_mfe"": 488,
+  ""expected_mae"": 116,
+  ""reversal_probability"": 41,
+  ""exit_style"": ""PATIENT"",
+  ""reasons_for_trade"": [
+    ""Multi-timeframe agreement is BULL_ALIGNED (15m ranging, 1h/4h bullish)"",
+    ""Market structure bias is BULLISH_STRUCTURE with HH/HL sequence active"",
+    ""EMA stack is fully bullish (price above all EMAs, ema9 above ema21 above ema200)"",
+    ""Trend health state is BULL with bull_score 10 vs bear_score 3"",
+    ""ADX 32.47 indicates trending market favoring continuation"",
+    ""Micro structure shows higher low detected and liquidity sweep of recent high"",
+    ""Edge score 4.2 above threshold 3.0 supports trade quality"",
+    ""Price near micro support (64973) with 0.178% distance offers pullback entry""
+  ],
+  ""reasons_against_trade"": [
+    ""Price is near resistance (65677) at 0.945% distance, limiting upside"",
+    ""Reversal risk score 41 suggests moderate reversal probability"",
+    ""Volume ratio extremely low (0.00138) indicates weak participation"",
+    ""Delta is negative (-0.76) showing selling pressure on recent moves"",
+    ""Market regime tracker shows recent compression/trending cycles, potential exhaustion""
+  ],
+  ""bull_score"": 8,
+  ""bear_score"": 3
+}
+```",65052.5,64984.0,MAKER,TAKER,0.03074,9.5,35.881,-2.11,-2.11,0.0,0.0,0.0,0.0,-10.53,23.99953,THESIS_FAST_CUT,-0.761634,0.001381,8e-06,0.085566,False,True,"{'price': 65062.0, 'ret_1m': 1.5363579099386993e-05, 'ret_5m': 0.00043035873474531986, 'ema9': 65116.46108351525, 'ema21': 64873.55318636933, 'ema200': 64184.99581124229, 'dist_to_support': 0.027112600288955152, 'dist_to_resistance': 0.009452522209584703, 'volume': 2.0002000000000003e-05, 'volume_ratio': 0.0013807833073239783, 'delta': -0.7616344649999992, 'velocity': 7.68311141766686e-06, 'imbalance': 0.08556604553786144, 'candle_range': 220.2, 'body_ratio': 0.5427508777512998, 'wick_ratio': 0.45724912224870023}",4.2,"{'early_fail_enabled': True, 'invert_signal': False, 'ai_enabled': True, 'edge_threshold': 3.0, 'edge_threshold_max': None, 'edge_range_preset': 'min_only', 'ai_threshold': 44.0, 'leverage': 100, 'pullback_threshold': 0.001}","{'ema9': 65116.46108351525, 'ema21': 64873.55318636933, 'ema200': 64184.99581124229, 'ema_spread': 0.003744, 'ema9_slope_pct': -0.0267, 'ema21_slope_pct': 0.1205, 'ema9_above_ema21': True, 'ema21_above_ema200': True}",WEAK_SETUP,4.2,4.2,False,True,INV_False_EF_True,LONG,12,8,SCENARIO_C_EARLY_12_v2_frozen,40.0,10.0,-12.0,2.0,8.0,300,1,2,-32.0,False,False,True,False,480,3,5.0,False,5,0.75,"[[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]","{""trail_ladder"": [[12, 8], [15, 10], [25, 18], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]], ""ladder_first_trigger_pct"": 12, ""ladder_first_lock_pct"": 8, ""exit_profile_id"": ""SCENARIO_C_EARLY_12_v2_frozen"", ""peak_never_loser_min_peak"": 40.0, ""peak_never_loser_floor"": 10.0, ""thesis_fast_exit_unreal_pct"": -12.0, ""thesis_mfe_protect_pct"": 2.0, ""thesis_exit_if_above_unreal_pct"": 8.0, ""thesis_min_age_sec"": 300, ""thesis_score_flip_margin"": 1, ""thesis_early_decay_delta"": 2, ""early_fail_pct_threshold"": -32.0, ""type_a_first_candle_enabled"": false, ""type_a_early_fail_enabled"": false, ""scenario_c_exit_profile"": true, ""type_a_stall_enabled"": false, ""type_a_stall_min_age_sec"": 480, ""type_a_stall_min_candles"": 3, ""type_a_stall_max_mfe_pct"": 5.0, ""trend_weakening_enabled"": false, ""spread_penalty_threshold"": 5, ""spread_penalty_margin_mult"": 0.75}"

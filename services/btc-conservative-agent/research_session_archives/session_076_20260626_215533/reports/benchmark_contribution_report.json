@@ -1,0 +1,66 @@
+{
+  "schema": "benchmark_contribution_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T21:55:10.730366+00:00",
+  "total_pnl_usd": 572.24,
+  "lanes": [
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "fills": 253,
+      "pnl_usd": 203.53,
+      "pnl_pct_of_total": 35.6
+    },
+    {
+      "lane": "URGENT_CHASE_ALPHA",
+      "label": "Urgent Chase Alpha",
+      "fills": 452,
+      "pnl_usd": 170.11,
+      "pnl_pct_of_total": 29.7
+    },
+    {
+      "lane": "CHASE_3PLUS_ALPHA",
+      "label": "Chase 3+ Alpha",
+      "fills": 452,
+      "pnl_usd": 170.11,
+      "pnl_pct_of_total": 29.7
+    },
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "fills": 68,
+      "pnl_usd": 56.64,
+      "pnl_pct_of_total": 9.9
+    },
+    {
+      "lane": "AI_60_65_ALPHA",
+      "label": "AI 60-65 Alpha",
+      "fills": 138,
+      "pnl_usd": -23.8,
+      "pnl_pct_of_total": -4.2
+    },
+    {
+      "lane": "HIGH_EDGE_RUNNER",
+      "label": "High Edge Runner",
+      "fills": 22,
+      "pnl_usd": -23.2,
+      "pnl_pct_of_total": -4.1
+    },
+    {
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "label": "AI60+ \u00b7 Spread \u22653 \u00b7 Virtual Chase",
+      "fills": 35,
+      "pnl_usd": 13.34,
+      "pnl_pct_of_total": 2.3
+    },
+    {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "label": "AI65+ \u00b7 Spread5+ \u00b7 Chase 3+",
+      "fills": 54,
+      "pnl_usd": 5.51,
+      "pnl_pct_of_total": 1.0
+    }
+  ]
+}

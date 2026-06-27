@@ -1,0 +1,161 @@
+{
+  "schema": "lane_chase_isolation_v2",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T00:25:49.423752+00:00",
+  "verdict": "ISOLATED",
+  "isolation_notes": [
+    "COMBO Direct lanes use immediate limit entry; COMBO Chase lanes require virtual chase 3+ (or age/dist) before fill.",
+    "fill_model=AI_DIRECT_CHASE tags limit_chase_count>0 on AI_DIRECT path \u2014 expected on both when chase steps fire.",
+    "Compare Direct vs Chase within the same AI/spread tier \u2014 not legacy CONTINUOUS / URGENT lanes."
+  ],
+  "global_fill_model": {
+    "AI_DIRECT_CHASE": 242,
+    "AI_DIRECT": 43
+  },
+  "pairs": [
+    {
+      "direct_lane": "COMBO_604_SP4_DIRECT",
+      "chase_lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "direct_label": "AI60-65 \u00b7 Spread4 \u00b7 Continuous",
+      "chase_label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "direct": {
+        "trades": 0,
+        "wins": 0,
+        "wr_pct": 0.0,
+        "pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "fill_model": {},
+        "entry_path": {},
+        "chase_assisted_fills": 0,
+        "static_limit_fills": 0,
+        "avg_chase_count": 0.0,
+        "avg_signal_age_sec": null,
+        "avg_entry_slippage_usd": null,
+        "chase_policy": "immediate limit (COMBO Direct)",
+        "virtual_chase_gate": false
+      },
+      "chase": {
+        "trades": 53,
+        "wins": 41,
+        "wr_pct": 77.4,
+        "pnl_usd": 48.12,
+        "ev_usd": 0.91,
+        "fill_model": {
+          "AI_DIRECT_CHASE": 52,
+          "AI_DIRECT": 1
+        },
+        "entry_path": {
+          "AI_DIRECT": 53
+        },
+        "chase_assisted_fills": 0,
+        "static_limit_fills": 53,
+        "avg_chase_count": 0.0,
+        "avg_signal_age_sec": 261.2,
+        "avg_entry_slippage_usd": 35.1,
+        "chase_policy": "virtual chase 3+ gate before fill",
+        "virtual_chase_gate": true
+      },
+      "delta": {
+        "ev_usd": 0.91,
+        "wr_pct": 77.4,
+        "avg_chase_count": 0.0,
+        "avg_signal_age_sec": null
+      }
+    }
+  ],
+  "primary_pair": {
+    "direct_lane": "COMBO_604_SP4_DIRECT",
+    "chase_lane": "COMBO_604_SP4_CHASE_3PLUS",
+    "direct_label": "AI60-65 \u00b7 Spread4 \u00b7 Continuous",
+    "chase_label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+    "direct": {
+      "trades": 0,
+      "wins": 0,
+      "wr_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "fill_model": {},
+      "entry_path": {},
+      "chase_assisted_fills": 0,
+      "static_limit_fills": 0,
+      "avg_chase_count": 0.0,
+      "avg_signal_age_sec": null,
+      "avg_entry_slippage_usd": null,
+      "chase_policy": "immediate limit (COMBO Direct)",
+      "virtual_chase_gate": false
+    },
+    "chase": {
+      "trades": 53,
+      "wins": 41,
+      "wr_pct": 77.4,
+      "pnl_usd": 48.12,
+      "ev_usd": 0.91,
+      "fill_model": {
+        "AI_DIRECT_CHASE": 52,
+        "AI_DIRECT": 1
+      },
+      "entry_path": {
+        "AI_DIRECT": 53
+      },
+      "chase_assisted_fills": 0,
+      "static_limit_fills": 53,
+      "avg_chase_count": 0.0,
+      "avg_signal_age_sec": 261.2,
+      "avg_entry_slippage_usd": 35.1,
+      "chase_policy": "virtual chase 3+ gate before fill",
+      "virtual_chase_gate": true
+    },
+    "delta": {
+      "ev_usd": 0.91,
+      "wr_pct": 77.4,
+      "avg_chase_count": 0.0,
+      "avg_signal_age_sec": null
+    }
+  },
+  "benchmark_lane": "CONTINUOUS",
+  "continuous_benchmark": {
+    "trades": 0,
+    "wins": 0,
+    "wr_pct": 0.0,
+    "pnl_usd": 0.0,
+    "ev_usd": 0.0,
+    "fill_model": {},
+    "entry_path": {},
+    "chase_assisted_fills": 0,
+    "static_limit_fills": 0,
+    "avg_chase_count": 0.0,
+    "avg_signal_age_sec": null,
+    "avg_entry_slippage_usd": null,
+    "chase_policy": "immediate limit (COMBO Direct)",
+    "virtual_chase_gate": false
+  },
+  "urgent_chase_alpha": {
+    "trades": 53,
+    "wins": 41,
+    "wr_pct": 77.4,
+    "pnl_usd": 48.12,
+    "ev_usd": 0.91,
+    "fill_model": {
+      "AI_DIRECT_CHASE": 52,
+      "AI_DIRECT": 1
+    },
+    "entry_path": {
+      "AI_DIRECT": 53
+    },
+    "chase_assisted_fills": 0,
+    "static_limit_fills": 53,
+    "avg_chase_count": 0.0,
+    "avg_signal_age_sec": 261.2,
+    "avg_entry_slippage_usd": 35.1,
+    "chase_policy": "virtual chase 3+ gate before fill",
+    "virtual_chase_gate": true
+  },
+  "benchmark_delta": {
+    "ev_usd": 0.91,
+    "wr_pct": 77.4,
+    "avg_chase_count": 0.0,
+    "avg_signal_age_sec": null
+  }
+}

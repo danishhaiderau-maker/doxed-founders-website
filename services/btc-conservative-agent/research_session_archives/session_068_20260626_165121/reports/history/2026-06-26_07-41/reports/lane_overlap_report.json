@@ -1,0 +1,36 @@
+{
+  "schema": "lane_overlap_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T07:40:41.438582+00:00",
+  "benchmark_lane": "CONTINUOUS",
+  "match_method": "30s approve bucket + direction + AI win_prob",
+  "continuous_approve_keys": 460,
+  "lanes": [
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "approves": 131,
+      "overlap_with_continuous": 111,
+      "unique_signals": 20,
+      "overlap_pct": 84.7,
+      "unique_pct": 15.3,
+      "overlap_pnl_usd": 41.33,
+      "unique_pnl_usd": 8.8,
+      "recommendation": "MIXED"
+    },
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "approves": 460,
+      "overlap_with_continuous": 460,
+      "unique_signals": 0,
+      "overlap_pct": 100.0,
+      "unique_pct": 0.0,
+      "overlap_pnl_usd": 161.75,
+      "unique_pnl_usd": 0,
+      "recommendation": "LIKELY_DUPLICATE"
+    }
+  ]
+}

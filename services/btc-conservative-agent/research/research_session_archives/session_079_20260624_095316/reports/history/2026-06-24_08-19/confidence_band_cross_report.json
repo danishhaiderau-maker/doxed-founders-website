@@ -1,0 +1,17 @@
+{
+  "schema": "confidence_band_cross_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T08:19:39.082456+00:00",
+  "bands": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65+"
+  ],
+  "overall_by_band": [],
+  "benchmark_continuous_by_band": [],
+  "lanes_by_band": [],
+  "continuous_benchmark_ev": 0.0
+}

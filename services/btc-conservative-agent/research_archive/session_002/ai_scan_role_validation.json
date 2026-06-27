@@ -1,0 +1,54 @@
+{
+  "schema": "ai_scan_role_validation_v1",
+  "generated_at": "2026-06-24T12:10:30.000730+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "policy": "AI_SCAN is coordinator-only \u2014 never an execution or spawn target lane",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "check": "AI_SCAN is not a combo execution lane",
+      "passed": true,
+      "detail": "is_combo_execution_lane(AI_SCAN)=False"
+    },
+    {
+      "check": "AI_SCAN not in COMBO_EXECUTION_LANES",
+      "passed": true,
+      "detail": "COMBO_EXECUTION_LANES=['COMBO_65_SP5_CHASE_3PLUS', 'COMBO_604_SP4_CHASE_3PLUS']"
+    },
+    {
+      "check": "AI_SCAN not in legacy spawn target lanes",
+      "passed": true,
+      "detail": "legacy_spawn=('HIGH_EDGE_RUNNER', 'EDGE_ALPHA_4', 'TYPE_B_HUNTER', 'SHORT_BEAR_ALPHA', 'AI_60_65_ALPHA', 'URGENT_CHASE_ALPHA', 'CHASE_3PLUS_ALPHA')"
+    },
+    {
+      "check": "spawn_combo_lanes_from_ai_scan iterates COMBO_EXECUTION_LANES only",
+      "passed": true,
+      "detail": "combo fan-out iterates COMBO_EXECUTION_LANES only"
+    },
+    {
+      "check": "spawn_combo_lanes_from_ai_scan also calls spawn_experimental_lanes_from_ai_scan",
+      "passed": true,
+      "detail": "experimental lanes fan out after combo match loop"
+    },
+    {
+      "check": "spawn_experimental_lanes_from_ai_scan retired or uses EXPERIMENTAL lane specs",
+      "passed": true,
+      "detail": "experimental approve-spawn retired (v9.83 stub)"
+    },
+    {
+      "check": "combo_lane_matches has no AI_SCAN lane spec",
+      "passed": true,
+      "detail": "matcher specs exclude AI_SCAN"
+    },
+    {
+      "check": "simulated spawn targets are combo execution lanes only",
+      "passed": true,
+      "detail": "spawn_targets=['COMBO_65_SP5_CHASE_3PLUS']"
+    },
+    {
+      "check": "AI_SCAN never appears in simulated spawn targets",
+      "passed": true,
+      "detail": "spawn_targets=['COMBO_65_SP5_CHASE_3PLUS']"
+    }
+  ]
+}

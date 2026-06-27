@@ -1,0 +1,41 @@
+{
+  "schema": "scenario_c_leakage_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T20:27:59.922751+00:00",
+  "overall": {
+    "trades": 75,
+    "peak_profit_usd": 174.36,
+    "booked_profit_usd": 30.74,
+    "left_on_table_usd": 143.66,
+    "capture_ratio_pct": -215.6,
+    "avg_mfe_margin_pct": 15.5
+  },
+  "by_exit_reason": {
+    "EARLY_FAIL": {
+      "trades": 3,
+      "peak_profit_usd": 3.5,
+      "booked_profit_usd": -16.55,
+      "capture_ratio_pct": -479.7
+    },
+    "PROFIT_LOCK_LADDER": {
+      "trades": 54,
+      "peak_profit_usd": 160.3,
+      "booked_profit_usd": 94.34,
+      "capture_ratio_pct": 57.1
+    },
+    "STOP_LOSS": {
+      "trades": 9,
+      "peak_profit_usd": 9.6,
+      "booked_profit_usd": -35.19,
+      "capture_ratio_pct": -434.8
+    },
+    "THESIS_FAST_CUT": {
+      "trades": 9,
+      "peak_profit_usd": 0.96,
+      "booked_profit_usd": -11.86,
+      "capture_ratio_pct": -1924.4
+    }
+  }
+}

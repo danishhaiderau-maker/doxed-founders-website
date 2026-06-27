@@ -1,0 +1,14 @@
+{
+  "schema": "bot_analyzer_sync_v1",
+  "generated_at": "2026-06-23T08:27:09.323161+00:00",
+  "bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "analyzer_expected_bot": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "verdict": "READY",
+  "checks": {
+    "bot_version_match": true,
+    "analyzer_sync_id_match": true,
+    "analyzer_expected_bot_match": true
+  }
+}

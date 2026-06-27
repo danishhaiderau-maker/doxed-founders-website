@@ -1,0 +1,212 @@
+{
+  "schema": "type_b_predictor_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T21:54:07.695053+00:00",
+  "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
+  "cohorts": {
+    "TYPE_A": {
+      "trades": 113,
+      "wins": 8,
+      "wr_pct": 7.1,
+      "pnl_usd": -273.56,
+      "ev_usd": -2.42,
+      "feature_averages": {
+        "edge_score": 3.304,
+        "spread": 4.894,
+        "structure": -3.425,
+        "adx": 27.518,
+        "volume_ratio": 1.051,
+        "imbalance": 0.314,
+        "delta": -21.085,
+        "velocity": 0.0,
+        "ai_prob": 64.372,
+        "conviction_spread": 4.894
+      }
+    },
+    "TYPE_B": {
+      "trades": 157,
+      "wins": 157,
+      "wr_pct": 100.0,
+      "pnl_usd": 419.31,
+      "ev_usd": 2.67,
+      "feature_averages": {
+        "edge_score": 3.24,
+        "spread": 5.006,
+        "structure": -3.325,
+        "adx": 30.472,
+        "volume_ratio": 0.973,
+        "imbalance": 0.307,
+        "delta": -24.348,
+        "velocity": 0.0,
+        "ai_prob": 64.178,
+        "conviction_spread": 5.006
+      }
+    },
+    "MIXED": {
+      "trades": 140,
+      "wins": 136,
+      "wr_pct": 97.1,
+      "pnl_usd": 133.27,
+      "ev_usd": 0.95,
+      "feature_averages": {
+        "edge_score": 3.173,
+        "spread": 5.121,
+        "structure": -3.279,
+        "adx": 29.262,
+        "volume_ratio": 0.947,
+        "imbalance": 0.267,
+        "delta": -25.174,
+        "velocity": 0.0,
+        "ai_prob": 64.271,
+        "conviction_spread": 5.121
+      }
+    }
+  },
+  "separators_ranked": [
+    {
+      "feature": "delta",
+      "type_a_mean": -21.085,
+      "type_b_mean": -24.348,
+      "delta_abs": 3.263,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "adx",
+      "type_a_mean": 27.518,
+      "type_b_mean": 30.472,
+      "delta_abs": 2.955,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "ai_prob",
+      "type_a_mean": 64.372,
+      "type_b_mean": 64.178,
+      "delta_abs": 0.193,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "spread",
+      "type_a_mean": 4.894,
+      "type_b_mean": 5.006,
+      "delta_abs": 0.113,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "conviction_spread",
+      "type_a_mean": 4.894,
+      "type_b_mean": 5.006,
+      "delta_abs": 0.113,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "structure",
+      "type_a_mean": -3.425,
+      "type_b_mean": -3.325,
+      "delta_abs": 0.1,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "volume_ratio",
+      "type_a_mean": 1.051,
+      "type_b_mean": 0.973,
+      "delta_abs": 0.078,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "edge_score",
+      "type_a_mean": 3.304,
+      "type_b_mean": 3.24,
+      "delta_abs": 0.064,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "imbalance",
+      "type_a_mean": 0.314,
+      "type_b_mean": 0.307,
+      "delta_abs": 0.007,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "velocity",
+      "type_a_mean": 0.0,
+      "type_b_mean": 0.0,
+      "delta_abs": 0.0,
+      "direction": "higher_in_B"
+    }
+  ],
+  "top_separators": [
+    {
+      "feature": "delta",
+      "type_a_mean": -21.085,
+      "type_b_mean": -24.348,
+      "delta_abs": 3.263,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "adx",
+      "type_a_mean": 27.518,
+      "type_b_mean": 30.472,
+      "delta_abs": 2.955,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "ai_prob",
+      "type_a_mean": 64.372,
+      "type_b_mean": 64.178,
+      "delta_abs": 0.193,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "spread",
+      "type_a_mean": 4.894,
+      "type_b_mean": 5.006,
+      "delta_abs": 0.113,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "conviction_spread",
+      "type_a_mean": 4.894,
+      "type_b_mean": 5.006,
+      "delta_abs": 0.113,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "structure",
+      "type_a_mean": -3.425,
+      "type_b_mean": -3.325,
+      "delta_abs": 0.1,
+      "direction": "higher_in_B"
+    },
+    {
+      "feature": "volume_ratio",
+      "type_a_mean": 1.051,
+      "type_b_mean": 0.973,
+      "delta_abs": 0.078,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "edge_score",
+      "type_a_mean": 3.304,
+      "type_b_mean": 3.24,
+      "delta_abs": 0.064,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "imbalance",
+      "type_a_mean": 0.314,
+      "type_b_mean": 0.307,
+      "delta_abs": 0.007,
+      "direction": "lower_in_B"
+    },
+    {
+      "feature": "velocity",
+      "type_a_mean": 0.0,
+      "type_b_mean": 0.0,
+      "delta_abs": 0.0,
+      "direction": "higher_in_B"
+    }
+  ],
+  "hypothesis": "Moderate AI (60-65) + spread 4 + high participation \u2192 Type B sweet spot"
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "horizon_profitability_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T06:48:22.266475+00:00",
+  "question": "Would losing trades have become profitable N minutes after exit?",
+  "losing_trades": 0,
+  "horizons": {
+    "5m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    },
+    "10m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    },
+    "15m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    },
+    "30m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    },
+    "60m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    },
+    "120m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0
+    }
+  },
+  "by_exit_reason": {},
+  "trades": []
+}

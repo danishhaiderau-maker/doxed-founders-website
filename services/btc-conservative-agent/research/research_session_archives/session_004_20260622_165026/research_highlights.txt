@@ -1,0 +1,60 @@
+================================================================================================================
+=== RESEARCH HIGHLIGHTS — ALL-TIME | v9.83-quality-roster-4-tiles-2026-06-21 ===
+================================================================================================================
+
+=== RESEARCH HIGHLIGHTS (at-a-glance) ===
+Top Lane:     CONTINUOUS  $+2.51
+Worst Lane:   COMBO_65_SP5_CHASE_3PLUS  $+0.00
+Best Conf:    n/a  0.0% WR
+Worst Conf:   n/a  0.0% WR
+Fast-Cut PnL: $+0.00
+Blocked Opp:  $+3.20
+Edge corr:    None
+Best Exit:    n/a  $+0.00
+
+--- APPROVE funnel ---
+APPROVE     Executed    Exec PnL      All-APPROVE CF    Gate damage   
+10          2           -8.47         -5.27             +3.20         
+
+--- Lanes (profile: PRIMARY_PRODUCTION_v1) ---
+Lane                    Appr    Fill    Fill%    PnL         EV/appr   
+COMBO_65_SP5_CHASE_3P…  0       0       0.0%     +0.00       +0.00     
+COMBO_604_SP4_CHASE_3…  0       0       0.0%     +0.00       +0.00     
+AI_DISAGREEMENT_REPLAY  0       1       0.0%     +1.09       +0.00     
+CONTINUOUS              48      20      42.0%    +2.51       +0.13     
+COMBO_65_SP5_DIRECT     0       0       0.0%     +0.00       +0.00     
+COMBO_604_SP4_DIRECT    0       0       0.0%     +0.00       +0.00     
+RECOVERY_MONSTER_V1     0       0       0.0%     +0.00       +0.00     
+TYPE_B_PREDICTOR_V1     0       0       0.0%     +0.00       +0.00     
+AI_DISAGREEMENT_ALPHA   0       0       0.0%     +0.00       +0.00     
+EXTREME_EDGE            0       0       0.0%     +0.00       +0.00     
+EDGE_PLUS_STACK         0       0       0.0%     +0.00       +0.00     
+AI_SCAN                 48      0       0.0%     +0.00       +0.15     
+HIGH_EDGE_RUNNER        0       0       0.0%     +0.00       +0.00     
+SHADOW_RUNNER           0       0       0.0%     +0.00       +0.00     
+EDGE_ALPHA_4            0       0       0.0%     +0.00       +0.00     
+TYPE_B_HUNTER           0       0       0.0%     +0.00       +0.00     
+SHORT_BEAR_ALPHA        0       0       0.0%     +0.00       +0.00     
+AI_60_65_ALPHA          0       0       0.0%     +0.00       +0.00     
+URGENT_CHASE_ALPHA      0       0       0.0%     +0.00       +0.00     
+CHASE_3PLUS_ALPHA       0       0       0.0%     +0.00       +0.00     
+  Best: CONTINUOUS $+2.51 | Worst: COMBO_65_SP5_CHASE_3PLUS $+0.00
+
+--- Chase ---
+Assisted: 0/0 fills | Saved: 0 | TTL expired: 0
+
+--- Scenario C / exits ---
+Leakage left on table: $15.19 | MFE capture: -456.0% | Fast-cut trades: 0
+  Capture distribution: 0-30%: n=0, 30-50%: n=0, 50-70%: n=0, 70-90%: n=0, 90%+: n=0
+
+--- Horizon (losers → green later?) ---
+  5m: green=0 still_red=0 unknown=0 (n/a% of known)
+  10m: green=0 still_red=0 unknown=0 (n/a% of known)
+  15m: green=0 still_red=0 unknown=0 (n/a% of known)
+  30m: green=0 still_red=0 unknown=0 (n/a% of known)
+
+--- Direction ---
+
+--- Edge validation ---
+Incremental: insufficient_data
+================================================================================================================

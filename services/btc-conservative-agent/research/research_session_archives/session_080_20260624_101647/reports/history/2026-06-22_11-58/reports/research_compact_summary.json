@@ -1,0 +1,1078 @@
+{
+  "schema": "research_hierarchy_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "analyzer_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "generated_at": "2026-06-22T11:37:24.098381+00:00",
+  "data_scope": "session",
+  "session_scope": "FRESH-COLLECTION",
+  "session_hours": 0.29,
+  "dataset": {
+    "csv_trades": 2,
+    "csv_blocked": 6,
+    "csv_decisions": 14,
+    "csv_ai_log": 10,
+    "csv_setups": 8
+  },
+  "performance": {
+    "trades": 2,
+    "win_rate_pct": 100.0,
+    "net_pnl_usd": 3.09,
+    "expectancy_usd": 1.54,
+    "mfe_capture_pct": 76.9
+  },
+  "real_edge": {
+    "schema": "real_edge_summary_v1",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "generated_at": "2026-06-22T11:37:14.469973+00:00",
+    "approve_attempts": 8,
+    "executed": 1,
+    "blocked": 7,
+    "executed_pnl_usd": 2.0,
+    "blocked_shadow_pnl_usd": 0.0,
+    "counterfactual_all_approve_usd": 2.0,
+    "gate_damage_usd": 0.0,
+    "per_approve_ev_executed": 2.0,
+    "per_approve_ev_counterfactual": 0.25
+  },
+  "benchmark": {
+    "profile_id": "PRIMARY_PRODUCTION_v1",
+    "lanes": [
+      {
+        "lane": "COMBO_65_SP5_CHASE_3PLUS",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "COMBO_604_SP4_CHASE_3PLUS",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "AI_DISAGREEMENT_REPLAY",
+        "approves": 0,
+        "fills": 1,
+        "fill_pct": 0.0,
+        "pnl": 1.09,
+        "ev": 0.0
+      },
+      {
+        "lane": "CONTINUOUS",
+        "approves": 4,
+        "fills": 1,
+        "fill_pct": 25.0,
+        "pnl": 2.0,
+        "ev": 0.5
+      },
+      {
+        "lane": "COMBO_65_SP5_DIRECT",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "COMBO_604_SP4_DIRECT",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "RECOVERY_MONSTER_V1",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "TYPE_B_PREDICTOR_V1",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "AI_DISAGREEMENT_ALPHA",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "EXTREME_EDGE",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "EDGE_PLUS_STACK",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "AI_SCAN",
+        "approves": 4,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "HIGH_EDGE_RUNNER",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "SHADOW_RUNNER",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "EDGE_ALPHA_4",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "TYPE_B_HUNTER",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "SHORT_BEAR_ALPHA",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "AI_60_65_ALPHA",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "URGENT_CHASE_ALPHA",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      },
+      {
+        "lane": "CHASE_3PLUS_ALPHA",
+        "approves": 0,
+        "fills": 0,
+        "fill_pct": 0.0,
+        "pnl": 0.0,
+        "ev": 0.0
+      }
+    ],
+    "best_lane": {
+      "lane": "CONTINUOUS",
+      "pnl": 2.0,
+      "fills": 1,
+      "approves": 4
+    },
+    "worst_lane": {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "pnl": 0.0,
+      "fills": 0,
+      "approves": 0
+    }
+  },
+  "exit_mix": [
+    {
+      "reason": "PROFIT_LOCK_LADDER",
+      "n": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 2.0
+    },
+    {
+      "reason": "THESIS_INVALIDATED",
+      "n": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.09
+    }
+  ],
+  "highlights": {
+    "best_lane": {
+      "lane": "CONTINUOUS",
+      "pnl": 2.0,
+      "fills": 1,
+      "approves": 4
+    },
+    "worst_lane": {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "pnl": 0.0,
+      "fills": 0,
+      "approves": 0
+    },
+    "best_confidence": null,
+    "worst_confidence": null,
+    "fast_cut_damage_usd": 0,
+    "blocked_opportunity_usd": 0.0,
+    "edge_correlation": 0.0,
+    "best_exit": {
+      "reason": "PROFIT_LOCK_LADDER",
+      "n": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 2.0
+    },
+    "worst_exit": null,
+    "gate_damage_usd": 0.0,
+    "leakage_left_usd": 0.93
+  },
+  "coverage": {
+    "trades": 2,
+    "approves": 8,
+    "blocked": 7,
+    "decisions": 14,
+    "confidence_bands": {
+      "0-45": 1,
+      "45-50": 0,
+      "50-55": 0,
+      "55-60": 0,
+      "60-65": 1,
+      "65+": 0
+    },
+    "ai_confidence_bands": {
+      "50-55": 0,
+      "55-60": 0,
+      "60-65": 1,
+      "65+": 0
+    },
+    "edge_buckets": {
+      "0-1": 0,
+      "1-2": 0,
+      "2-3": 0,
+      "3-4": 2,
+      "4+": 0
+    },
+    "confidence_status": "POOR",
+    "confidence_note": "Only 2 trades / 8 approves \u2014 treat calibration, edge, and lane verdicts as noisy."
+  },
+  "ai_calibration": {
+    "verdict": "over-confident (actual 20.0% vs AI 62.0% implied)",
+    "bands": [
+      {
+        "bucket": "50-55",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      {
+        "bucket": "55-60",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      },
+      {
+        "bucket": "60-65",
+        "trades": 1,
+        "win_rate_pct": 100.0,
+        "avg_pnl_usd": 2.0,
+        "ev_usd": 2.0,
+        "sum_pnl_usd": 2.0
+      },
+      {
+        "bucket": "65+",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "avg_pnl_usd": 0.0,
+        "ev_usd": 0.0,
+        "sum_pnl_usd": 0.0
+      }
+    ],
+    "expected_vs_actual": {
+      "per_bucket": [
+        {
+          "bucket": "60-65",
+          "trades": 5,
+          "expected_wr_pct": 62.0,
+          "actual_wr_pct": 20.0,
+          "calibration_error": 0.42
+        }
+      ],
+      "mean_absolute_calibration_error": 0.42,
+      "brier_score": 0.3364,
+      "overall_expected_wr_pct": 62.0,
+      "overall_actual_wr_pct": 20.0,
+      "overall_calibration_error": 0.42
+    }
+  },
+  "confidence_bands": [
+    {
+      "bucket": "0-45",
+      "source": "filled_trades",
+      "trades": 1,
+      "win_rate_pct": 100.0,
+      "avg_pnl_usd": 1.09,
+      "ev_usd": 1.09,
+      "sum_pnl_usd": 1.09,
+      "avg_edge": 3.4,
+      "avg_ai_confidence": 42.0
+    },
+    {
+      "bucket": "45-50",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "50-55",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "55-60",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "60-65",
+      "source": "filled_trades",
+      "trades": 1,
+      "win_rate_pct": 100.0,
+      "avg_pnl_usd": 2.0,
+      "ev_usd": 2.0,
+      "sum_pnl_usd": 2.0,
+      "avg_edge": 3.1,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "bucket": "65+",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "best_confidence": null,
+  "worst_confidence": null,
+  "chase": {
+    "assisted_fills": 0,
+    "total_fills": 1,
+    "saved_fills": 0,
+    "ttl_expired": 0,
+    "buckets": [
+      {
+        "bucket": "0_chases",
+        "trades": 1,
+        "wins": 1,
+        "sum_pnl_usd": 2.0,
+        "win_rate_pct": 100.0,
+        "ev_usd": 2.0
+      }
+    ]
+  },
+  "scenario_c": {
+    "leakage_left_usd": 0.93,
+    "capture_pct": 76.9,
+    "capture_distribution": [
+      {
+        "bucket": "0-30%",
+        "trades": 0
+      },
+      {
+        "bucket": "30-50%",
+        "trades": 0
+      },
+      {
+        "bucket": "50-70%",
+        "trades": 1
+      },
+      {
+        "bucket": "70-90%",
+        "trades": 0
+      },
+      {
+        "bucket": "90%+",
+        "trades": 1
+      }
+    ],
+    "fast_cut_trades": 0,
+    "fast_cut_summary": {
+      "fast_cut_trades": 0,
+      "green_after_5m": 0,
+      "green_after_10m": 0,
+      "green_after_15m": 0,
+      "green_after_30m": 0,
+      "green_after_5m_coverage": 0,
+      "green_after_10m_coverage": 0,
+      "green_after_15m_coverage": 0,
+      "green_after_30m_coverage": 0,
+      "would_hit_ladder_1": 0,
+      "would_hit_ladder_2": 0,
+      "would_hit_ladder_3": 0,
+      "counterfactual_ladder_exits": 0,
+      "missed_ladder_profit_usd": 0.0,
+      "pct_would_hit_ladder_1": 0.0,
+      "interpretation": "mixed"
+    }
+  },
+  "horizon_profitability": {
+    "5m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "10m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "15m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "30m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "60m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    },
+    "120m": {
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "profitable_pct": null,
+      "coverage_pct": 0.0
+    }
+  },
+  "top_missed_opportunities": [
+    {
+      "reason": "POST_AI_GATE",
+      "missed_profit_usd": 0.0,
+      "count": 8
+    },
+    {
+      "reason": "OTHER",
+      "missed_profit_usd": 0.0,
+      "count": 4
+    }
+  ],
+  "direction": {
+    "schema": "direction_report_v1",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "session_scope": "FRESH-COLLECTION",
+    "generated_at": "2026-06-22T11:37:23.784361+00:00",
+    "long": {
+      "trades": 1,
+      "win_rate_pct": 100.0,
+      "avg_pnl_usd": 2.0,
+      "ev_usd": 2.0,
+      "sum_pnl_usd": 2.0,
+      "avg_edge": 3.1,
+      "avg_ai_confidence": 62.0
+    },
+    "short": {
+      "trades": 1,
+      "win_rate_pct": 100.0,
+      "avg_pnl_usd": 1.09,
+      "ev_usd": 1.09,
+      "sum_pnl_usd": 1.09,
+      "avg_edge": 3.4,
+      "avg_ai_confidence": 42.0
+    },
+    "long_calls": 4,
+    "short_calls": 0,
+    "no_trade_calls": 1,
+    "total_ai_calls": 5,
+    "long_wr": 100.0,
+    "short_wr": 100.0,
+    "long_pnl": 2.0,
+    "short_pnl": 1.09,
+    "by_regime_direction": [
+      {
+        "regime": "BULL",
+        "direction": "LONG",
+        "trades": 1,
+        "win_rate_pct": 100.0,
+        "avg_pnl_usd": 2.0,
+        "ev_usd": 2.0,
+        "sum_pnl_usd": 2.0,
+        "avg_edge": 3.1,
+        "avg_ai_confidence": 62.0
+      },
+      {
+        "regime": "BULL",
+        "direction": "SHORT",
+        "trades": 1,
+        "win_rate_pct": 100.0,
+        "avg_pnl_usd": 1.09,
+        "ev_usd": 1.09,
+        "sum_pnl_usd": 1.09,
+        "avg_edge": 3.4,
+        "avg_ai_confidence": 42.0
+      }
+    ],
+    "ai_recommendations": {
+      "long": {
+        "approved": 0,
+        "filled": 1
+      },
+      "short": {
+        "approved": 0,
+        "filled": 1
+      }
+    },
+    "ai_call_stats": {
+      "long_calls": 4,
+      "short_calls": 0,
+      "no_trade_calls": 1,
+      "total_calls": 5
+    }
+  },
+  "edge_verdict": "edge_no_incremental_value",
+  "edge_validation": {
+    "schema": "edge_score_decile_v1",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "session_scope": "FRESH-COLLECTION",
+    "generated_at": "2026-06-22T11:37:23.399422+00:00",
+    "question": "Does edge score predict outcomes, or is it flat noise?",
+    "usage_note": "Validation only \u2014 do not calibrate edge thresholds from this report.",
+    "deciles": [
+      {
+        "edge_bucket": "0-1",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "sum_pnl_usd": 0.0,
+        "ev_usd": 0.0
+      },
+      {
+        "edge_bucket": "1-2",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "sum_pnl_usd": 0.0,
+        "ev_usd": 0.0
+      },
+      {
+        "edge_bucket": "2-3",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "sum_pnl_usd": 0.0,
+        "ev_usd": 0.0
+      },
+      {
+        "edge_bucket": "3-4",
+        "trades": 2,
+        "win_rate_pct": 100.0,
+        "sum_pnl_usd": 3.09,
+        "ev_usd": 1.54
+      },
+      {
+        "edge_bucket": "4+",
+        "trades": 0,
+        "win_rate_pct": 0.0,
+        "sum_pnl_usd": 0.0,
+        "ev_usd": 0.0
+      }
+    ],
+    "overall": {
+      "trades": 2,
+      "correlation_edge_vs_pnl": 0.0,
+      "wr_spread_across_deciles_pct": 0.0,
+      "ev_spread_across_deciles_usd": 0.0,
+      "edge_predictive": false,
+      "verdict": "edge_non_predictive",
+      "recommendation": "Treat edge as informational only \u2014 correlation to PnL is ~0 (|r| < 0.10)."
+    }
+  },
+  "top_leakage": {
+    "schema": "top_leakage_v1",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "session_scope": "FRESH-COLLECTION",
+    "generated_at": "2026-06-22T11:37:23.500098+00:00",
+    "question": "Which trades left the most profit on the table?",
+    "top_n": 50,
+    "overall_left_usd": 0.93,
+    "by_exit_reason": {
+      "THESIS_INVALIDATED": {
+        "trades": 1,
+        "left_usd": 0.93
+      },
+      "PROFIT_LOCK_LADDER": {
+        "trades": 1,
+        "left_usd": 0.0
+      }
+    },
+    "trades": [
+      {
+        "trade_id": "rida-b2f7e4217798",
+        "lane": "AI_DISAGREEMENT_REPLAY",
+        "direction": "SHORT",
+        "exit_reason": "THESIS_INVALIDATED",
+        "realized_usd": 1.09,
+        "peak_profit_usd": 2.02,
+        "left_on_table_usd": 0.93,
+        "capture_pct": 53.9,
+        "mfe_margin_pct": 10.1,
+        "realized_margin_pct": 5.45,
+        "leakage_margin_pct": 4.65
+      },
+      {
+        "trade_id": "cont-5e81a80442e1",
+        "lane": "CONTINUOUS",
+        "direction": "LONG",
+        "exit_reason": "PROFIT_LOCK_LADDER",
+        "realized_usd": 2.0,
+        "peak_profit_usd": 2.0,
+        "left_on_table_usd": 0.0,
+        "capture_pct": 100.1,
+        "mfe_margin_pct": 13.31,
+        "realized_margin_pct": 13.31,
+        "leakage_margin_pct": 0.0
+      }
+    ]
+  },
+  "lane_retirement": {
+    "schema": "lane_retirement_v2",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "session_scope": "FRESH-COLLECTION",
+    "generated_at": "2026-06-22T11:37:23.506728+00:00",
+    "benchmark_lane": "CONTINUOUS",
+    "active_roster": [
+      "COMBO_65_SP5_CHASE_3PLUS",
+      "COMBO_604_SP4_CHASE_3PLUS",
+      "AI_DISAGREEMENT_REPLAY"
+    ],
+    "retired_lanes": [
+      "AI_DISAGREEMENT_ALPHA",
+      "COMBO_604_SP4_DIRECT",
+      "COMBO_65_SP5_DIRECT",
+      "EDGE_PLUS_STACK",
+      "EXTREME_EDGE",
+      "RECOVERY_MONSTER_V1",
+      "TYPE_B_PREDICTOR_V1"
+    ],
+    "min_fills_for_decision": 15,
+    "retire_candidates": [],
+    "lanes": [
+      {
+        "lane": "CONTINUOUS",
+        "trades": 1,
+        "approves": 4,
+        "pnl_usd": 2.0,
+        "ev_per_approve": 0.5,
+        "benchmark_ev": 0.5,
+        "recommendation": "KEEP (BENCHMARK)",
+        "reason": "baseline lane \u2014 do not retire"
+      },
+      {
+        "lane": "COMBO_65_SP5_CHASE_3PLUS",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "PRIMARY_PRODUCTION",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "COMBO_604_SP4_CHASE_3PLUS",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "ACTIVE",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "AI_DISAGREEMENT_REPLAY",
+        "trades": 1,
+        "approves": 0,
+        "pnl_usd": 1.09,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "ACTIVE",
+        "all_time_fills": 1,
+        "all_time_pnl_usd": 1.09,
+        "recommendation": "INSUFFICIENT_SAMPLE",
+        "reason": "only 1 fills / 0 approves \u2014 need \u226515 fills"
+      },
+      {
+        "lane": "COMBO_65_SP5_DIRECT",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "COMBO_604_SP4_DIRECT",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "RECOVERY_MONSTER_V1",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "TYPE_B_PREDICTOR_V1",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "AI_DISAGREEMENT_ALPHA",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "EXTREME_EDGE",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "EDGE_PLUS_STACK",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "RETIRED",
+        "reason": "Frozen \u2014 no active research budget; historical analytics only"
+      },
+      {
+        "lane": "AI_SCAN",
+        "trades": 0,
+        "approves": 4,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "ACTIVE",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "INSUFFICIENT_SAMPLE",
+        "reason": "only 0 fills / 4 approves \u2014 need \u226515 fills"
+      },
+      {
+        "lane": "HIGH_EDGE_RUNNER",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "SHADOW_RUNNER",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "EDGE_ALPHA_4",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "TYPE_B_HUNTER",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "SHORT_BEAR_ALPHA",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "AI_60_65_ALPHA",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "URGENT_CHASE_ALPHA",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      },
+      {
+        "lane": "CHASE_3PLUS_ALPHA",
+        "trades": 0,
+        "approves": 0,
+        "pnl_usd": 0.0,
+        "ev_per_approve": 0.0,
+        "benchmark_ev": 0.5,
+        "pathway_status": "DATA_RETIRED",
+        "all_time_fills": 0,
+        "all_time_pnl_usd": 0.0,
+        "recommendation": "NO_DATA",
+        "reason": "No session or historical fills in CSV for this lane"
+      }
+    ]
+  },
+  "feature_importance": {
+    "schema": "feature_importance_v1",
+    "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+    "session_scope": "FRESH-COLLECTION",
+    "generated_at": "2026-06-22T11:37:23.561724+00:00",
+    "method": "Pearson correlation with net_pnl_usd \u2014 validation only, not for auto-tuning",
+    "trades": 2,
+    "features": [],
+    "weak_signals": []
+  },
+  "recovery_summary": [
+    {
+      "horizon": "5m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "10m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "15m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "30m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "60m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    },
+    {
+      "horizon": "120m",
+      "recovery_rate_pct": null,
+      "profitable": 0,
+      "still_loss": 0,
+      "unknown": 0,
+      "coverage_pct": 0.0,
+      "conclusion_allowed": false
+    }
+  ],
+  "blocked_opportunity_usd": 0.0,
+  "json_reports_written": 5,
+  "artifacts": {
+    "executive_summary_txt": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\executive_summary.txt",
+    "research_highlights_txt": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_highlights.txt",
+    "research_findings_txt": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_findings.txt",
+    "research_coverage_txt": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_coverage.txt",
+    "deep_dive_index_txt": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_deep_dive_index.txt",
+    "analysis_dashboard_html": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\analysis_dashboard.html",
+    "reports_dir": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\reports",
+    "full_log": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\analyzer_run.log"
+  },
+  "key_findings": [
+    "CONTINUOUS lane accounts for 65% of net profit ($+2.00).",
+    "Lowest lane: COMBO_65_SP5_CHASE_3PLUS at $+0.00 (0 fills) \u2014 review if sample grows.",
+    "AI calibration: over-confident (actual 20.0% vs AI 62.0% implied).",
+    "No fast-cut exits in sample.",
+    "Dominant exit: PROFIT_LOCK_LADDER (1 trades, $+2.00).",
+    "Gate damage $+0.00 \u2014 post-AI gates are not the main PnL leak.",
+    "Scenario C left $0.9 on table vs peak \u2014 exit timing is the bigger lever than entry gates.",
+    "Edge filter: edge_no_incremental_value (sample POOR \u2014 Only 2 trades / 8 approves \u2014 treat calibration, edge, and lane verdicts as noisy.).",
+    "Edge score correlation with PnL: +0.000.",
+    "Chase assisted 0/1 fills \u2014 3-5 chase bucket historically strongest EV in this run.",
+    "Blocked shadow opportunity (heuristic): $+0.00.",
+    "Top leakage: $1 left on table across 2 ranked trades \u2014 see top_leakage_report.json."
+  ]
+}

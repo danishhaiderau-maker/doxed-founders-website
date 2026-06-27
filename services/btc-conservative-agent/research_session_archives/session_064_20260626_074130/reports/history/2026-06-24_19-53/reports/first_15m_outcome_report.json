@@ -1,0 +1,143 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T19:52:21.613136+00:00",
+  "sample_replays_with_trades": 10,
+  "early_tags": {
+    "immediately_right": {
+      "n": 9,
+      "wins": 9,
+      "sum_pnl_usd": 10.03
+    },
+    "immediately_wrong": {
+      "n": 1,
+      "wins": 0,
+      "sum_pnl_usd": -4.4
+    }
+  },
+  "fast_cut_early_tags": {},
+  "trades": [
+    {
+      "trade_id": "cont-063bfbc47142",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.41,
+      "win": true,
+      "unreal_5m_pct": 17.72,
+      "unreal_15m_pct": 58.93,
+      "unreal_30m_pct": 63.26,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-f12905ae3412",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.05,
+      "win": true,
+      "unreal_5m_pct": 36.22,
+      "unreal_15m_pct": 52.57,
+      "unreal_30m_pct": 62.42,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-14626031ea05",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.62,
+      "win": true,
+      "unreal_5m_pct": 29.23,
+      "unreal_15m_pct": 26.39,
+      "unreal_30m_pct": 18.86,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-e78434c0fa94",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 2.78,
+      "win": true,
+      "unreal_5m_pct": 25.21,
+      "unreal_15m_pct": 28.9,
+      "unreal_30m_pct": -2.08,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-1f2ad171a434",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.53,
+      "win": true,
+      "unreal_5m_pct": 2.62,
+      "unreal_15m_pct": -12.47,
+      "unreal_30m_pct": 5.14,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-167166637db8",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.98,
+      "win": true,
+      "unreal_5m_pct": 21.97,
+      "unreal_15m_pct": -9.05,
+      "unreal_30m_pct": -7.88,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "cont-1d9b18b19235",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 1.01,
+      "win": true,
+      "unreal_5m_pct": 16.82,
+      "unreal_15m_pct": -5.82,
+      "unreal_30m_pct": -7.33,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-a9d233406736",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "STOP_LOSS",
+      "net_pnl_usd": -4.4,
+      "win": false,
+      "unreal_5m_pct": -18.59,
+      "unreal_15m_pct": -24.13,
+      "unreal_30m_pct": -16.57,
+      "early_tag": "immediately_wrong"
+    },
+    {
+      "trade_id": "cont-e03726d38502",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.79,
+      "win": true,
+      "unreal_5m_pct": 2.39,
+      "unreal_15m_pct": 18.98,
+      "unreal_30m_pct": -30.96,
+      "early_tag": "immediately_right"
+    },
+    {
+      "trade_id": "c65c-684d5863c464",
+      "lane": "executed",
+      "direction": "SHORT",
+      "exit_reason": "PROFIT_LOCK_LADDER",
+      "net_pnl_usd": 0.86,
+      "win": true,
+      "unreal_5m_pct": 2.86,
+      "unreal_15m_pct": 19.45,
+      "unreal_30m_pct": -30.49,
+      "early_tag": "immediately_right"
+    }
+  ]
+}

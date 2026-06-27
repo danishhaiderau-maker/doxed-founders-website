@@ -1,0 +1,116 @@
+{
+  "schema": "top_combinations_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-26T19:32:07.788862+00:00",
+  "min_trades_per_combo": 3,
+  "dimensions": [
+    "ai_probability_bucket",
+    "directional_spread_bucket",
+    "entry_mode_bucket",
+    "research_lane"
+  ],
+  "filter_note": "Excludes UNKNOWN/OTHER/MIXED/TYPE_B dimensions \u2014 actionable combos only",
+  "total_combos": 4,
+  "top": [
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+COMBO_604_SP4_CHASE_3PLUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 68,
+      "wins": 51,
+      "wr_pct": 75.0,
+      "pnl_usd": 56.64,
+      "ev_usd": 0.83
+    },
+    {
+      "combo": "AI60-65+SPREAD5++CHASE_3PLUS+AI60_SP3_VIRTUAL_CHASE",
+      "ai_bucket": "60-65",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "trades": 10,
+      "wins": 8,
+      "wr_pct": 80.0,
+      "pnl_usd": 4.74,
+      "ev_usd": 0.47
+    },
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+AI60_SP3_VIRTUAL_CHASE",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "trades": 22,
+      "wins": 12,
+      "wr_pct": 54.5,
+      "pnl_usd": 5.8,
+      "ev_usd": 0.26
+    },
+    {
+      "combo": "AI65++SPREAD5++CHASE_3PLUS+COMBO_65_SP5_CHASE_3PLUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 54,
+      "wins": 36,
+      "wr_pct": 66.7,
+      "pnl_usd": 5.51,
+      "ev_usd": 0.1
+    }
+  ],
+  "bottom": [
+    {
+      "combo": "AI65++SPREAD5++CHASE_3PLUS+COMBO_65_SP5_CHASE_3PLUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 54,
+      "wins": 36,
+      "wr_pct": 66.7,
+      "pnl_usd": 5.51,
+      "ev_usd": 0.1
+    },
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+AI60_SP3_VIRTUAL_CHASE",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "trades": 22,
+      "wins": 12,
+      "wr_pct": 54.5,
+      "pnl_usd": 5.8,
+      "ev_usd": 0.26
+    },
+    {
+      "combo": "AI60-65+SPREAD5++CHASE_3PLUS+AI60_SP3_VIRTUAL_CHASE",
+      "ai_bucket": "60-65",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "AI60_SP3_VIRTUAL_CHASE",
+      "trades": 10,
+      "wins": 8,
+      "wr_pct": 80.0,
+      "pnl_usd": 4.74,
+      "ev_usd": 0.47
+    },
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+COMBO_604_SP4_CHASE_3PLUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 68,
+      "wins": 51,
+      "wr_pct": 75.0,
+      "pnl_usd": 56.64,
+      "ev_usd": 0.83
+    }
+  ]
+}

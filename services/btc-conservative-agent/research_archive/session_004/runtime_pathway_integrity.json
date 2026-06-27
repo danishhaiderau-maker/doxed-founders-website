@@ -1,0 +1,11 @@
+{
+  "schema": "runtime_pathway_integrity_v1",
+  "generated_at": "2026-06-24T12:23:28.883933+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "startup_captured_at": "2026-06-24T11:33:16.749317+00:00",
+  "verdict": "WARN",
+  "critical_issues": [],
+  "issues": [
+    "TYPE_B_HUNTER still listed in RESEARCH_SPAWN_LANES (legacy tuple)"
+  ]
+}

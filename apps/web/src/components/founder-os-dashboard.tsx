@@ -11,6 +11,7 @@ import {
 import { AutopilotPromoToast } from '@/components/autopilot-promo-toast';
 import { FounderCopilotChat } from '@/components/founder-copilot-chat';
 import { FounderCommandCenterPanels } from '@/components/founder-command-center-panels';
+import { CursorAgentSessionsPanel } from '@/components/cursor-agent-sessions-panel';
 import { FounderPersonalGuide } from '@/components/founder-personal-guide';
 import { AgentRunStepsPanel } from '@/components/agent-run-steps-panel';
 import { FounderGraphMiniPanel } from '@/components/founder-graph-mini-panel';
@@ -410,6 +411,16 @@ export function FounderOsDashboardLayout({
                 </div>
 
                 <aside className="flex min-h-0 w-full shrink-0 flex-col gap-2 overflow-y-auto lg:max-w-[17rem] lg:flex-[0_0_22%]">
+                  <CursorAgentSessionsPanel
+                    cursorAgentUrl={workerStatus?.cursorAgentUrl}
+                    cursorAgentId={workerStatus?.cursorAgentId}
+                    cursorLatestRunId={workerStatus?.latestRunId}
+                    activeRun={isAgentRunActive(activeAgentRun) ? activeAgentRun : null}
+                    onFollowUp={(prompt) => {
+                      setQuickPrompt(prompt);
+                      setChatKey((k) => k + 1);
+                    }}
+                  />
                   {activeAgentRun && isAgentRunActive(activeAgentRun) && (
                     <AgentRunStepsPanel run={activeAgentRun} />
                   )}

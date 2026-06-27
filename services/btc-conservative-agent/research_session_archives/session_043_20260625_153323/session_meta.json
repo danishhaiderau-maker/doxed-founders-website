@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_043_20260625_153323",
+  "generated_at": "2026-06-25T15:33:17.842681+00:00",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "data_scope": "session",
+  "trades": 197,
+  "net_pnl_usd": 164.95,
+  "win_rate_pct": 76.1
+}

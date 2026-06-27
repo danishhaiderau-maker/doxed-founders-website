@@ -1,0 +1,23 @@
+{
+  "schema": "roster_policy_v2",
+  "generated_at": "2026-06-23T01:24:01.034492+00:00",
+  "current_regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+  "action": "RECOMMEND_WEIGHTS",
+  "confidence": "MODERATE",
+  "reason": "Regime weekday|OVERLAP|adx_high|vol_high|funding_positive|liquidity_mid: favor CONTINUOUS (EV $-1.10, n=12)",
+  "tile_weights": {
+    "COMBO_65_SP5_CHASE_3PLUS": 0.1,
+    "COMBO_604_SP4_CHASE_3PLUS": 0.1,
+    "AI_DISAGREEMENT_REPLAY": 0.1,
+    "CONTINUOUS": 0.5
+  },
+  "auto_apply": false,
+  "requires_human_approval": true,
+  "collection_progress": {
+    "accumulated_trades": 33,
+    "target_trades": 200,
+    "progress_pct": 16.5,
+    "ready_for_roster_decision": false
+  },
+  "phase": "COLLECT"
+}

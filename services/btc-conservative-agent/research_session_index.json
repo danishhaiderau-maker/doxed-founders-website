@@ -1,0 +1,504 @@
+{
+  "sessions": [
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_080_20260627_005308",
+      "generated_at": "2026-06-27T00:52:05.422018+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 389,
+      "net_pnl_usd": 292.13,
+      "win_rate_pct": 74.8
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_079_20260627_000905",
+      "generated_at": "2026-06-27T00:08:47.218491+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 389,
+      "net_pnl_usd": 292.13,
+      "win_rate_pct": 74.8
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_078_20260626_231739",
+      "generated_at": "2026-06-26T23:17:15.415802+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 389,
+      "net_pnl_usd": 292.13,
+      "win_rate_pct": 74.8
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_077_20260626_223837",
+      "generated_at": "2026-06-26T22:38:29.043631+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 387,
+      "net_pnl_usd": 290.22,
+      "win_rate_pct": 74.7
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_076_20260626_215533",
+      "generated_at": "2026-06-26T21:55:27.082766+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 383,
+      "net_pnl_usd": 285.35,
+      "win_rate_pct": 74.7
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_075_20260626_211858",
+      "generated_at": "2026-06-26T21:18:52.560578+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 376,
+      "net_pnl_usd": 286.21,
+      "win_rate_pct": 75.0
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_074_20260626_204342",
+      "generated_at": "2026-06-26T20:43:36.881781+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 374,
+      "net_pnl_usd": 284.01,
+      "win_rate_pct": 74.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_073_20260626_200745",
+      "generated_at": "2026-06-26T20:07:39.581748+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 368,
+      "net_pnl_usd": 275.12,
+      "win_rate_pct": 74.5
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_072_20260626_193208",
+      "generated_at": "2026-06-26T19:32:02.268023+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 361,
+      "net_pnl_usd": 269.35,
+      "win_rate_pct": 74.5
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_071_20260626_185611",
+      "generated_at": "2026-06-26T18:56:04.929907+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 351,
+      "net_pnl_usd": 263.98,
+      "win_rate_pct": 74.6
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_070_20260626_181829",
+      "generated_at": "2026-06-26T18:18:17.000139+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 341,
+      "net_pnl_usd": 249.44,
+      "win_rate_pct": 74.5
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_069_20260626_173600",
+      "generated_at": "2026-06-26T17:35:46.034777+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 334,
+      "net_pnl_usd": 232.2,
+      "win_rate_pct": 74.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_068_20260626_165121",
+      "generated_at": "2026-06-26T16:51:04.405436+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 326,
+      "net_pnl_usd": 238.35,
+      "win_rate_pct": 75.2
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_067_20260626_155429",
+      "generated_at": "2026-06-26T15:53:56.578157+00:00",
+      "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+      "data_scope": "session",
+      "trades": 319,
+      "net_pnl_usd": 229.72,
+      "win_rate_pct": 74.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_066_20260626_100142",
+      "generated_at": "2026-06-26T09:59:38.043570+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 300,
+      "net_pnl_usd": 234.23,
+      "win_rate_pct": 75.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_065_20260626_084616",
+      "generated_at": "2026-06-26T08:44:13.823254+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 286,
+      "net_pnl_usd": 221.47,
+      "win_rate_pct": 75.5
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_064_20260626_074130",
+      "generated_at": "2026-06-26T07:41:17.157007+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 285,
+      "net_pnl_usd": 220.74,
+      "win_rate_pct": 75.4
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_063_20260626_071856",
+      "generated_at": "2026-06-26T07:18:37.257486+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 278,
+      "net_pnl_usd": 227.49,
+      "win_rate_pct": 76.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_062_20260626_051816",
+      "generated_at": "2026-06-26T05:17:08.849588+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 278,
+      "net_pnl_usd": 227.49,
+      "win_rate_pct": 76.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_061_20260626_041423",
+      "generated_at": "2026-06-26T04:13:55.962053+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 278,
+      "net_pnl_usd": 227.49,
+      "win_rate_pct": 76.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_060_20260626_031737",
+      "generated_at": "2026-06-26T03:16:55.561204+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 269,
+      "net_pnl_usd": 230.49,
+      "win_rate_pct": 76.6
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_059_20260626_024720",
+      "generated_at": "2026-06-26T02:47:17.385195+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 265,
+      "net_pnl_usd": 230.45,
+      "win_rate_pct": 77.0
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_058_20260626_014954",
+      "generated_at": "2026-06-26T01:49:53.543456+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 265,
+      "net_pnl_usd": 230.45,
+      "win_rate_pct": 77.0
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_057_20260626_010533",
+      "generated_at": "2026-06-26T01:05:33.271383+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 264,
+      "net_pnl_usd": 228.76,
+      "win_rate_pct": 76.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_056_20260626_002635",
+      "generated_at": "2026-06-26T00:26:35.039787+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 264,
+      "net_pnl_usd": 228.76,
+      "win_rate_pct": 76.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_055_20260625_234551",
+      "generated_at": "2026-06-25T23:45:51.206017+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 264,
+      "net_pnl_usd": 228.76,
+      "win_rate_pct": 76.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_054_20260625_230655",
+      "generated_at": "2026-06-25T23:06:54.439873+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "all",
+      "trades": 264,
+      "net_pnl_usd": 228.76,
+      "win_rate_pct": 76.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_053_20260625_220428",
+      "generated_at": "2026-06-25T22:04:13.370353+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 264,
+      "net_pnl_usd": 228.76,
+      "win_rate_pct": 76.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_052_20260625_211312",
+      "generated_at": "2026-06-25T21:11:53.900397+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 256,
+      "net_pnl_usd": 240.81,
+      "win_rate_pct": 78.1
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_051_20260625_203902",
+      "generated_at": "2026-06-25T20:38:55.885017+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 253,
+      "net_pnl_usd": 237.22,
+      "win_rate_pct": 78.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_050_20260625_195608",
+      "generated_at": "2026-06-25T19:56:01.275564+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 244,
+      "net_pnl_usd": 232.67,
+      "win_rate_pct": 78.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_049_20260625_191815",
+      "generated_at": "2026-06-25T19:18:08.951948+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 237,
+      "net_pnl_usd": 220.73,
+      "win_rate_pct": 77.6
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_048_20260625_183955",
+      "generated_at": "2026-06-25T18:39:48.061248+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 233,
+      "net_pnl_usd": 204.96,
+      "win_rate_pct": 77.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_047_20260625_180244",
+      "generated_at": "2026-06-25T18:02:00.251341+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 225,
+      "net_pnl_usd": 179.85,
+      "win_rate_pct": 76.4
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_046_20260625_172526",
+      "generated_at": "2026-06-25T17:25:19.303192+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 215,
+      "net_pnl_usd": 162.59,
+      "win_rate_pct": 75.3
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_045_20260625_164835",
+      "generated_at": "2026-06-25T16:48:29.705438+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 209,
+      "net_pnl_usd": 162.59,
+      "win_rate_pct": 75.6
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_044_20260625_161120",
+      "generated_at": "2026-06-25T16:11:14.030429+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 202,
+      "net_pnl_usd": 153.64,
+      "win_rate_pct": 75.2
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_043_20260625_153323",
+      "generated_at": "2026-06-25T15:33:17.842681+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 197,
+      "net_pnl_usd": 164.95,
+      "win_rate_pct": 76.1
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_042_20260625_145602",
+      "generated_at": "2026-06-25T14:55:57.166143+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 192,
+      "net_pnl_usd": 161.16,
+      "win_rate_pct": 75.5
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_041_20260625_141911",
+      "generated_at": "2026-06-25T14:19:01.926027+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 187,
+      "net_pnl_usd": 142.75,
+      "win_rate_pct": 74.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_040_20260625_132844",
+      "generated_at": "2026-06-25T13:28:32.876943+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 182,
+      "net_pnl_usd": 98.61,
+      "win_rate_pct": 74.2
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_039_20260625_124825",
+      "generated_at": "2026-06-25T12:48:08.906739+00:00",
+      "analyzer_sync_id": "v11.0-genome-architecture-v1",
+      "data_scope": "session",
+      "trades": 182,
+      "net_pnl_usd": 98.61,
+      "win_rate_pct": 74.2
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_038_20260625_101109",
+      "generated_at": "2026-06-25T10:11:04.137382+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_037_20260625_093503",
+      "generated_at": "2026-06-25T09:34:47.572433+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_036_20260625_085605",
+      "generated_at": "2026-06-25T08:55:58.506867+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_035_20260625_083238",
+      "generated_at": "2026-06-25T08:32:32.926651+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_034_20260625_075634",
+      "generated_at": "2026-06-25T07:56:29.034270+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_033_20260625_072029",
+      "generated_at": "2026-06-25T07:20:23.274155+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_032_20260625_064433",
+      "generated_at": "2026-06-25T06:44:28.578980+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    },
+    {
+      "schema": "research_session_archive_v1",
+      "session_id": "session_031_20260625_060905",
+      "generated_at": "2026-06-25T06:09:00.212351+00:00",
+      "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+      "data_scope": "session",
+      "trades": 160,
+      "net_pnl_usd": 69.15,
+      "win_rate_pct": 71.9
+    }
+  ]
+}

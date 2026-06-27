@@ -1,0 +1,145 @@
+{
+  "schema": "confidence_band_cross_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-22T17:04:08.897951+00:00",
+  "bands": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65+"
+  ],
+  "overall_by_band": [
+    {
+      "band": "50-55",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "55-60",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "60-65",
+      "trades": 25,
+      "win_rate_pct": 64.0,
+      "avg_pnl_usd": 0.14,
+      "ev_usd": 0.14,
+      "sum_pnl_usd": 3.52,
+      "avg_edge": 4.22,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "band": "65+",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "benchmark_continuous_by_band": [
+    {
+      "band": "50-55",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "55-60",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "60-65",
+      "trades": 25,
+      "win_rate_pct": 64.0,
+      "avg_pnl_usd": 0.14,
+      "ev_usd": 0.14,
+      "sum_pnl_usd": 3.52,
+      "avg_edge": 4.22,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "band": "65+",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "lanes_by_band": [
+    {
+      "lane": "CONTINUOUS",
+      "bands": [
+        {
+          "band": "50-55",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "55-60",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "60-65",
+          "trades": 25,
+          "win_rate_pct": 64.0,
+          "avg_pnl_usd": 0.14,
+          "ev_usd": 0.14,
+          "sum_pnl_usd": 3.52,
+          "avg_edge": 4.22,
+          "avg_ai_confidence": 62.0
+        },
+        {
+          "band": "65+",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        }
+      ]
+    }
+  ],
+  "continuous_benchmark_ev": 0.0
+}

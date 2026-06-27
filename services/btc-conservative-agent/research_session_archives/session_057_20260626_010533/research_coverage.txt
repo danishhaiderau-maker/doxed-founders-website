@@ -1,0 +1,33 @@
+========================================================================
+=== RESEARCH COVERAGE & STATISTICAL CONFIDENCE ===
+========================================================================
+Scope: ALL-DATA (ALL)
+CSV rows — trades: 285 | blocked: 1441 | decisions: 2472
+Analyzed — trades: 264 | approves: 1087 | blocked: 802 | decisions: 2472
+
+Coverage status: GOOD
+264 trades / 1087 approves — adequate for lane and edge conclusions.
+
+Confidence bands (executed):
+  0-45: n=0
+  45-50: n=0
+  50-55: n=0
+  55-60: n=1
+  60-65: n=166
+  65+: n=0
+
+AI calibration bands:
+  50-55: n=0
+  55-60: n=4
+  60-65: n=623
+  65+: n=313
+
+Edge buckets:
+  0-1: n=4
+  1-2: n=50
+  2-3: n=68
+  3-4: n=46
+  4+: n=96
+
+Minimum for edge conclusions: ≥50 approves
+========================================================================

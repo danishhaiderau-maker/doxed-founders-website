@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_031_20260625_060905",
+  "generated_at": "2026-06-25T06:09:00.212351+00:00",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "data_scope": "session",
+  "trades": 160,
+  "net_pnl_usd": 69.15,
+  "win_rate_pct": 71.9
+}

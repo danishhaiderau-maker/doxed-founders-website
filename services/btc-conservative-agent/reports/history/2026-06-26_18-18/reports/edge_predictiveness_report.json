@@ -1,0 +1,82 @@
+{
+  "schema": "edge_predictiveness_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T18:17:15.795295+00:00",
+  "buckets": [
+    {
+      "edge_bucket": "0.5-1.0",
+      "trades": 9,
+      "win_rate_pct": 66.7,
+      "sum_pnl": 6.57,
+      "ev_usd": 0.73,
+      "avg_mfe_margin_pct": 15.46
+    },
+    {
+      "edge_bucket": "1.0-1.5",
+      "trades": 22,
+      "win_rate_pct": 86.4,
+      "sum_pnl": 24.79,
+      "ev_usd": 1.13,
+      "avg_mfe_margin_pct": 17.44
+    },
+    {
+      "edge_bucket": "1.5-2.0",
+      "trades": 46,
+      "win_rate_pct": 80.4,
+      "sum_pnl": 61.23,
+      "ev_usd": 1.33,
+      "avg_mfe_margin_pct": 14.99
+    },
+    {
+      "edge_bucket": "2.0-2.5",
+      "trades": 62,
+      "win_rate_pct": 67.7,
+      "sum_pnl": 20.39,
+      "ev_usd": 0.33,
+      "avg_mfe_margin_pct": 12.87
+    },
+    {
+      "edge_bucket": "2.5-3.0",
+      "trades": 28,
+      "win_rate_pct": 78.6,
+      "sum_pnl": 27.4,
+      "ev_usd": 0.98,
+      "avg_mfe_margin_pct": 17.29
+    },
+    {
+      "edge_bucket": "3.0-3.5",
+      "trades": 39,
+      "win_rate_pct": 74.4,
+      "sum_pnl": 20.29,
+      "ev_usd": 0.52,
+      "avg_mfe_margin_pct": 14.84
+    },
+    {
+      "edge_bucket": "3.5-4.0",
+      "trades": 25,
+      "win_rate_pct": 72.0,
+      "sum_pnl": 33.27,
+      "ev_usd": 1.33,
+      "avg_mfe_margin_pct": 19.36
+    },
+    {
+      "edge_bucket": "4.0+",
+      "trades": 110,
+      "win_rate_pct": 73.6,
+      "sum_pnl": 55.5,
+      "ev_usd": 0.5,
+      "avg_mfe_margin_pct": 17.43
+    }
+  ],
+  "overall": {
+    "trades": 341,
+    "correlation_edge_vs_pnl": -0.0561,
+    "correlation_edge_vs_mfe": 0.0797,
+    "correlation_edge_vs_win": 0.0,
+    "monotonicity_verdict": "NOISY",
+    "best_pnl_bucket": "1.5-2.0",
+    "edge_predictive": false
+  }
+}

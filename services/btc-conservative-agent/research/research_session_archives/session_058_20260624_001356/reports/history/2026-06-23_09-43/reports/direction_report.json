@@ -1,0 +1,44 @@
+{
+  "schema": "direction_report_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T09:43:48.757331+00:00",
+  "long": {
+    "trades": 0,
+    "win_rate_pct": 0.0,
+    "avg_pnl_usd": 0.0,
+    "ev_usd": 0.0,
+    "sum_pnl_usd": 0.0,
+    "avg_edge": 0.0,
+    "avg_ai_confidence": 0.0
+  },
+  "short": {
+    "trades": 0,
+    "win_rate_pct": 0.0,
+    "avg_pnl_usd": 0.0,
+    "ev_usd": 0.0,
+    "sum_pnl_usd": 0.0,
+    "avg_edge": 0.0,
+    "avg_ai_confidence": 0.0
+  },
+  "long_calls": 0,
+  "short_calls": 0,
+  "no_trade_calls": 0,
+  "total_ai_calls": 0,
+  "long_wr": 0,
+  "short_wr": 0,
+  "long_pnl": 0,
+  "short_pnl": 0,
+  "by_regime_direction": [],
+  "ai_recommendations": {
+    "long": {},
+    "short": {}
+  },
+  "ai_call_stats": {
+    "long_calls": 0,
+    "short_calls": 0,
+    "no_trade_calls": 0,
+    "total_calls": 0
+  }
+}

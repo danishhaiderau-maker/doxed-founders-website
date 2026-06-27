@@ -1,0 +1,14 @@
+{
+  "schema": "missed_opportunity_heatmap_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T01:23:56.997382+00:00",
+  "note": "missed_profit_usd = sum of positive shadow PnL on blocked APPROVEs (money left on table).",
+  "heatmap": [],
+  "totals": {
+    "events": 0,
+    "missed_profit_usd": 0,
+    "shadow_pnl_total_usd": 0
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "scenario_c_leakage_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-22T11:37:23.354165+00:00",
+  "overall": {
+    "trades": 2,
+    "peak_profit_usd": 4.02,
+    "booked_profit_usd": 3.09,
+    "left_on_table_usd": 0.93,
+    "capture_ratio_pct": 77.0,
+    "avg_mfe_margin_pct": 11.71
+  },
+  "by_exit_reason": {
+    "PROFIT_LOCK_LADDER": {
+      "trades": 1,
+      "peak_profit_usd": 2.0,
+      "booked_profit_usd": 2.0,
+      "capture_ratio_pct": 100.1
+    },
+    "THESIS_INVALIDATED": {
+      "trades": 1,
+      "peak_profit_usd": 2.02,
+      "booked_profit_usd": 1.09,
+      "capture_ratio_pct": 53.9
+    }
+  }
+}

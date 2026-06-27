@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_004_20260622_143837",
+  "generated_at": "2026-06-22T14:38:35.621333+00:00",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "data_scope": "session",
+  "trades": 3,
+  "net_pnl_usd": -13.0,
+  "win_rate_pct": 0.0
+}

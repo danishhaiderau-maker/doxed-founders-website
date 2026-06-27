@@ -1,0 +1,55 @@
+{
+  "schema": "chase_delay_v2",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T19:52:12.227823+00:00",
+  "question": "Does COMBO Chase 3+ beat COMBO Direct on EV per approve within each AI/spread tier?",
+  "benchmark_lane": "CONTINUOUS",
+  "direct_reference_lane": "COMBO_65_SP5_DIRECT",
+  "lane_order": [
+    "COMBO_65_SP5_CHASE_3PLUS",
+    "COMBO_604_SP4_CHASE_3PLUS"
+  ],
+  "lanes": {
+    "COMBO_65_SP5_CHASE_3PLUS": {
+      "approves": 78,
+      "fills": 44,
+      "fill_pct": 56.4,
+      "pnl_usd": 6.5,
+      "ev_per_approve": 0.74,
+      "wr_pct": 68.2,
+      "ev_usd": 0.15,
+      "avg_signal_age_sec": 230.1,
+      "avg_entry_distance_pct": 55.6343,
+      "label": "AI65+ \u00b7 Spread5+ \u00b7 Chase 3+"
+    },
+    "COMBO_604_SP4_CHASE_3PLUS": {
+      "approves": 3,
+      "fills": 0,
+      "fill_pct": 0.0,
+      "pnl_usd": 0.0,
+      "ev_per_approve": 0.0,
+      "wr_pct": null,
+      "ev_usd": null,
+      "avg_signal_age_sec": null,
+      "avg_entry_distance_pct": null,
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+"
+    }
+  },
+  "delta_chase_vs_direct_primary": {
+    "ev_per_approve": 0,
+    "pnl_usd": 0,
+    "fill_pct": 0,
+    "avg_signal_age_sec": null
+  },
+  "delta_chase_3plus_vs_continuous": {
+    "ev_per_approve": 0,
+    "pnl_usd": 0,
+    "fill_pct": 0,
+    "avg_signal_age_sec": null
+  },
+  "verdict": "COLLECTING",
+  "success_criteria": "Beat COMBO_65_SP5_DIRECT on EV per approve or total PnL after adequate sample",
+  "min_fills_for_decision": 15
+}

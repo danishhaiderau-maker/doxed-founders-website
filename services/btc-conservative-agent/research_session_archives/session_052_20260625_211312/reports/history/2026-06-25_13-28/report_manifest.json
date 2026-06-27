@@ -1,0 +1,478 @@
+{
+  "schema": "report_manifest_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "analyzer_version": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-25T13:28:33.033052+00:00",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "data_scope": "session",
+  "session_scope": "FRESH-COLLECTION",
+  "performance": {
+    "trades": 182,
+    "win_rate_pct": 74.2,
+    "net_pnl_usd": 98.61,
+    "expectancy_usd": 0.54,
+    "mfe_capture_pct": 22.9
+  },
+  "report_count": 56,
+  "reports": [
+    {
+      "title": "AI Calibration",
+      "file": "ai_calibration_report.json",
+      "category": "AI",
+      "description": "Confidence buckets, expected vs actual WR, calibration error",
+      "size_bytes": 24641,
+      "modified_at": "2026-06-25T13:28:31.294747+00:00"
+    },
+    {
+      "title": "AI Funnel",
+      "file": "ai_funnel_report.json",
+      "category": "AI",
+      "description": "AI decision funnel stages and drop-offs",
+      "size_bytes": 8957,
+      "modified_at": "2026-06-25T13:26:58.289004+00:00"
+    },
+    {
+      "title": "AI Decision Fingerprints",
+      "file": "ai_decision_fingerprint_report.json",
+      "category": "AI",
+      "description": "Cluster fingerprints driving APPROVE/REJECT",
+      "size_bytes": 19556,
+      "modified_at": "2026-06-25T13:27:01.491466+00:00"
+    },
+    {
+      "title": "Approve Outcome \u00d7 Conf \u00d7 Direction",
+      "file": "approve_outcome_confidence_direction.json",
+      "category": "Funnels",
+      "description": "Outcome matrix by confidence and direction",
+      "size_bytes": 1756,
+      "modified_at": "2026-06-25T13:27:03.319588+00:00"
+    },
+    {
+      "title": "Benchmark Scorecard",
+      "file": "benchmark_relative_scorecard.json",
+      "category": "Pathways",
+      "description": "Experiment lanes vs PRIMARY_PRODUCTION benchmark",
+      "size_bytes": 9380,
+      "modified_at": "2026-06-25T13:27:03.905028+00:00"
+    },
+    {
+      "title": "Lane Analysis",
+      "file": "benchmark_vs_lanes_report.json",
+      "category": "Pathways",
+      "description": "Per-lane approves, fills, PnL, EV/approve",
+      "size_bytes": 13284,
+      "modified_at": "2026-06-25T13:26:56.631424+00:00"
+    },
+    {
+      "title": "Chase Attribution",
+      "file": "chase_attribution_report.json",
+      "category": "Chase",
+      "description": "Per-trade chase counts and saved-fill heuristic",
+      "size_bytes": 122669,
+      "modified_at": "2026-06-25T13:27:11.045985+00:00"
+    },
+    {
+      "title": "Chase Effectiveness",
+      "file": "chase_effectiveness_report.json",
+      "category": "Chase",
+      "description": "PnL by chase-count bucket",
+      "size_bytes": 1059,
+      "modified_at": "2026-06-25T13:27:11.143724+00:00"
+    },
+    {
+      "title": "Chase Threshold",
+      "file": "chase_threshold_report.json",
+      "category": "Chase",
+      "description": "Cumulative EV/WR/PnL at chase_count N+ thresholds",
+      "size_bytes": 1064,
+      "modified_at": "2026-06-25T13:27:11.157689+00:00"
+    },
+    {
+      "title": "Chase Delay Lanes",
+      "file": "chase_delay_report.json",
+      "category": "Pathways",
+      "description": "COMBO Direct vs Chase 3+ within each AI/spread tier",
+      "size_bytes": 1307,
+      "modified_at": "2026-06-25T13:27:11.317263+00:00"
+    },
+    {
+      "title": "Confidence Bands",
+      "file": "confidence_band_report.json",
+      "category": "AI",
+      "description": "Executed trades by AI confidence band",
+      "size_bytes": 2419,
+      "modified_at": "2026-06-25T13:28:31.558940+00:00"
+    },
+    {
+      "title": "Direction Bias",
+      "file": "direction_report.json",
+      "category": "Funnels",
+      "description": "LONG vs SHORT performance split",
+      "size_bytes": 1387,
+      "modified_at": "2026-06-25T13:28:31.427288+00:00"
+    },
+    {
+      "title": "Edge Incremental Value",
+      "file": "edge_incremental_value_report.json",
+      "category": "Edge",
+      "description": "AI-only vs AI+edge filter uplift",
+      "size_bytes": 4982,
+      "modified_at": "2026-06-25T13:27:23.444923+00:00"
+    },
+    {
+      "title": "Edge Predictiveness",
+      "file": "edge_predictiveness_report.json",
+      "category": "Edge",
+      "description": "Does edge score rank outcomes?",
+      "size_bytes": 1980,
+      "modified_at": "2026-06-25T13:27:21.815278+00:00"
+    },
+    {
+      "title": "Edge Score Deciles",
+      "file": "edge_score_decile_report.json",
+      "category": "Edge",
+      "description": "PnL/WR by edge decile bucket",
+      "size_bytes": 1501,
+      "modified_at": "2026-06-25T13:27:21.913009+00:00"
+    },
+    {
+      "title": "Fast-Cut Survivors",
+      "file": "fast_cut_survivor_report.json",
+      "category": "Exits",
+      "description": "Thesis fast-cut trades \u2014 saved vs missed ladder",
+      "size_bytes": 11475,
+      "modified_at": "2026-06-25T13:27:41.022048+00:00"
+    },
+    {
+      "title": "Fill Quality",
+      "file": "fill_quality_report.json",
+      "category": "Reports",
+      "description": "Slippage, distance, fill realism metrics",
+      "size_bytes": 2062,
+      "modified_at": "2026-06-25T13:26:28.750216+00:00"
+    },
+    {
+      "title": "First 15m Outcomes",
+      "file": "first_15m_outcome_report.json",
+      "category": "Reports",
+      "description": "Early post-fill trajectory",
+      "size_bytes": 353,
+      "modified_at": "2026-06-25T13:27:21.531026+00:00"
+    },
+    {
+      "title": "Horizon Counterfactual",
+      "file": "horizon_counterfactual_report.json",
+      "category": "Exits",
+      "description": "What-if hold horizons on exits",
+      "size_bytes": 256543,
+      "modified_at": "2026-06-25T13:28:28.209969+00:00"
+    },
+    {
+      "title": "Horizon Recovery",
+      "file": "horizon_profitability_report.json",
+      "category": "Exits",
+      "description": "Would losers have turned green later?",
+      "size_bytes": 23946,
+      "modified_at": "2026-06-25T13:27:30.854166+00:00"
+    },
+    {
+      "title": "Lane Opportunity",
+      "file": "lane_opportunity_capture.json",
+      "category": "Pathways",
+      "description": "Missed lane capture vs shadow fills",
+      "size_bytes": 9001,
+      "modified_at": "2026-06-25T13:26:57.373445+00:00"
+    },
+    {
+      "title": "Missed Opportunities",
+      "file": "missed_opportunity_heatmap.json",
+      "category": "Funnels",
+      "description": "Blocked signals by reason and $ left",
+      "size_bytes": 1721,
+      "modified_at": "2026-06-25T13:27:05.074909+00:00"
+    },
+    {
+      "title": "Pathway Survival",
+      "file": "pathway_survival_report.json",
+      "category": "Pathways",
+      "description": "Pathway stage survival and drop rates",
+      "size_bytes": 8525,
+      "modified_at": "2026-06-25T13:27:45.569920+00:00"
+    },
+    {
+      "title": "Real Edge / Gate Damage",
+      "file": "real_edge_summary.json",
+      "category": "Edge",
+      "description": "APPROVE funnel, executed vs blocked shadow PnL",
+      "size_bytes": 435,
+      "modified_at": "2026-06-25T13:26:28.423088+00:00"
+    },
+    {
+      "title": "Scenario C Capture",
+      "file": "scenario_c_capture_ratio.json",
+      "category": "Exits",
+      "description": "MFE capture % distribution",
+      "size_bytes": 2492,
+      "modified_at": "2026-06-25T13:27:23.514739+00:00"
+    },
+    {
+      "title": "Scenario C Leakage",
+      "file": "scenario_c_leakage_report.json",
+      "category": "Exits",
+      "description": "Peak vs booked profit left on table",
+      "size_bytes": 1274,
+      "modified_at": "2026-06-25T13:27:21.605828+00:00"
+    },
+    {
+      "title": "AI Direction Bias",
+      "file": "ai_direction_bias_report.json",
+      "category": "AI",
+      "description": "AI directional skew vs outcomes",
+      "size_bytes": 1476,
+      "modified_at": "2026-06-25T13:27:21.710550+00:00"
+    },
+    {
+      "title": "Compact Summary",
+      "file": "research_compact_summary.json",
+      "category": "Reports",
+      "description": "Machine-readable rollup of all KPIs",
+      "size_bytes": 94769,
+      "modified_at": "2026-06-25T13:28:33.017047+00:00"
+    },
+    {
+      "title": "Top Leakage Trades",
+      "file": "top_leakage_report.json",
+      "category": "Reports",
+      "description": "Top 50 trades \u2014 peak vs booked, money left on table",
+      "size_bytes": 20220,
+      "modified_at": "2026-06-25T13:27:45.819254+00:00"
+    },
+    {
+      "title": "Lane Retirement",
+      "file": "lane_retirement_report.json",
+      "category": "Pathways",
+      "description": "KEEP / RETIRE / COLLECT MORE per pathway lane",
+      "size_bytes": 8526,
+      "modified_at": "2026-06-25T13:27:50.525462+00:00"
+    },
+    {
+      "title": "Feature Importance",
+      "file": "feature_importance_report.json",
+      "category": "Reports",
+      "description": "Which trading features correlate with PnL",
+      "size_bytes": 1842,
+      "modified_at": "2026-06-25T13:27:57.047067+00:00"
+    },
+    {
+      "title": "Chase Profit",
+      "file": "chase_profit_report.json",
+      "category": "Chase",
+      "description": "Incremental PnL from chase-assisted vs static fills",
+      "size_bytes": 630,
+      "modified_at": "2026-06-25T13:27:11.220521+00:00"
+    },
+    {
+      "title": "Confidence \u00d7 Lane",
+      "file": "confidence_band_cross_report.json",
+      "category": "AI",
+      "description": "Performance by AI band per lane",
+      "size_bytes": 8127,
+      "modified_at": "2026-06-25T13:27:57.510830+00:00"
+    },
+    {
+      "title": "Edge Validation",
+      "file": "edge_validation_report.json",
+      "category": "Edge",
+      "description": "ACTIVE / WATCHLIST / DEPRECATED status for edge filter",
+      "size_bytes": 624,
+      "modified_at": "2026-06-25T13:27:57.642481+00:00"
+    },
+    {
+      "title": "Benchmark Contribution",
+      "file": "benchmark_contribution_report.json",
+      "category": "Pathways",
+      "description": "% of session PnL from each lane",
+      "size_bytes": 1502,
+      "modified_at": "2026-06-25T13:27:57.709301+00:00"
+    },
+    {
+      "title": "Lane Overlap",
+      "file": "lane_overlap_report.json",
+      "category": "Pathways",
+      "description": "Overlap vs CONTINUOUS \u2014 unique alpha signals",
+      "size_bytes": 1094,
+      "modified_at": "2026-06-25T13:27:58.465286+00:00"
+    },
+    {
+      "title": "Fast Cut Sweep",
+      "file": "fast_cut_sweep_report.json",
+      "category": "Exits",
+      "description": "Replay sweep at -6/-8/-10/-12 vs booked PnL",
+      "size_bytes": 1353,
+      "modified_at": "2026-06-25T13:28:06.484901+00:00"
+    },
+    {
+      "title": "Lane Definitions",
+      "file": "lane_definition_report.json",
+      "category": "Pathways",
+      "description": "Entry conditions, dependencies, and status per pathway lane",
+      "size_bytes": 14137,
+      "modified_at": "2026-06-25T13:27:50.469609+00:00"
+    },
+    {
+      "title": "Urgent Chase Alpha",
+      "file": "urgent_chase_report.json",
+      "category": "Chase",
+      "description": "Legacy URGENT_CHASE_ALPHA vs CONTINUOUS (historical)",
+      "size_bytes": 1549,
+      "modified_at": "2026-06-25T13:27:11.300308+00:00"
+    },
+    {
+      "title": "Lane Chase Isolation",
+      "file": "lane_chase_isolation_report.json",
+      "category": "Pathways",
+      "description": "COMBO Direct vs Chase 3+ fill_model and chase policy",
+      "size_bytes": 4707,
+      "modified_at": "2026-06-25T13:27:11.386078+00:00"
+    },
+    {
+      "title": "Top Combinations",
+      "file": "top_combinations_report.json",
+      "category": "Reports",
+      "description": "AI \u00d7 spread \u00d7 type \u00d7 lane ranked cohorts",
+      "size_bytes": 3569,
+      "modified_at": "2026-06-25T13:27:11.469868+00:00"
+    },
+    {
+      "title": "Exit Combinations",
+      "file": "exit_combinations_report.json",
+      "category": "Reports",
+      "description": "Exit reason \u00d7 entry combo \u2014 leakage and best exit paths",
+      "size_bytes": 21546,
+      "modified_at": "2026-06-25T13:27:11.653366+00:00"
+    },
+    {
+      "title": "Exit Leakage by Reason",
+      "file": "exit_leakage_by_reason_report.json",
+      "category": "Reports",
+      "description": "Which exit reasons destroy the most value",
+      "size_bytes": 2167,
+      "modified_at": "2026-06-25T13:27:11.863804+00:00"
+    },
+    {
+      "title": "Exit Ladder Simulator",
+      "file": "exit_ladder_simulator_report.json",
+      "category": "Reports",
+      "description": "Replay tick sim \u2014 alternate ladder rungs vs live",
+      "size_bytes": 5164,
+      "modified_at": "2026-06-25T13:27:20.811944+00:00"
+    },
+    {
+      "title": "AI Scan Independence",
+      "file": "ai_scan_independence_report.json",
+      "category": "AI",
+      "description": "AI pipeline vs production tile ON/OFF",
+      "size_bytes": 1451,
+      "modified_at": "2026-06-25T13:27:45.835213+00:00"
+    },
+    {
+      "title": "Lane Memory",
+      "file": "lane_memory_validation.json",
+      "category": "Pathways",
+      "description": "Retired lane exposure + bucket bounds",
+      "size_bytes": 494,
+      "modified_at": "2026-06-25T12:31:11.731839+00:00"
+    },
+    {
+      "title": "Bot\u2194Analyzer Sync",
+      "file": "bot_analyzer_sync.json",
+      "category": "Reports",
+      "description": "SYSTEM_NOT_READY gate at startup",
+      "size_bytes": 478,
+      "modified_at": "2026-06-25T13:23:11.092826+00:00"
+    },
+    {
+      "title": "TYPE_B Execution Audit",
+      "file": "type_b_execution_audit.json",
+      "category": "Reports",
+      "description": "Proof TYPE_B is not an entry gate",
+      "size_bytes": 844,
+      "modified_at": "2026-06-25T13:27:45.832220+00:00"
+    },
+    {
+      "title": "Exit Reports Validation",
+      "file": "exit_reports_validation.json",
+      "category": "Reports",
+      "description": "Analyzer gate \u2014 exit reports populated",
+      "size_bytes": 842,
+      "modified_at": "2026-06-25T13:27:50.380843+00:00"
+    },
+    {
+      "title": "Chase Efficiency Matrix",
+      "file": "chase_efficiency_matrix_report.json",
+      "category": "Chase",
+      "description": "Chase count \u00d7 AI \u00d7 spread \u00d7 lane EV matrix",
+      "size_bytes": 2686,
+      "modified_at": "2026-06-25T13:27:21.321589+00:00"
+    },
+    {
+      "title": "Type B Predictor",
+      "file": "type_b_predictor_report.json",
+      "category": "Reports",
+      "description": "Pre-entry feature separators for Type B runners",
+      "size_bytes": 5172,
+      "modified_at": "2026-06-25T13:27:21.408354+00:00"
+    },
+    {
+      "title": "Regime Leaderboard",
+      "file": "regime_leaderboard.json",
+      "category": "Reports",
+      "description": "Best lane per market regime cell",
+      "size_bytes": 33600,
+      "modified_at": "2026-06-25T13:27:51.589620+00:00"
+    },
+    {
+      "title": "Regime \u00d7 Confidence",
+      "file": "regime_confidence_matrix.json",
+      "category": "AI",
+      "description": "EV/WR by regime and AI confidence band",
+      "size_bytes": 55735,
+      "modified_at": "2026-06-25T13:27:53.933370+00:00"
+    },
+    {
+      "title": "Fill Delay",
+      "file": "fill_delay_report.json",
+      "category": "Reports",
+      "description": "Signal age and chase count vs outcome",
+      "size_bytes": 3125,
+      "modified_at": "2026-06-25T13:27:54.730246+00:00"
+    },
+    {
+      "title": "Top Conditional Edges",
+      "file": "top_conditional_edges.json",
+      "category": "Edge",
+      "description": "Multi-factor combos ranked by EV",
+      "size_bytes": 18142,
+      "modified_at": "2026-06-25T13:27:56.652120+00:00"
+    },
+    {
+      "title": "Regime Stability",
+      "file": "regime_stability_report.json",
+      "category": "Reports",
+      "description": "Sample size + stability score per regime cell",
+      "size_bytes": 15292,
+      "modified_at": "2026-06-25T13:27:56.713956+00:00"
+    }
+  ],
+  "text_artifacts": [
+    "executive_summary.txt",
+    "research_highlights.txt",
+    "research_findings.txt",
+    "research_coverage.txt",
+    "research_deep_dive_index.txt",
+    "analysis_dashboard.html",
+    "analyzer_run.log",
+    "research_compact_summary.json"
+  ],
+  "research_dashboard_url": "http://10.0.0.102:9500/"
+}

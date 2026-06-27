@@ -1,0 +1,65 @@
+{
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "generated_at": "2026-06-22T17:03:44.684494+00:00",
+  "trade_count": 26,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 26,
+      "win_rate_pct": 65.4,
+      "sum_net_usd": 4.61,
+      "avg_net_usd": 0.18
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0,
+    "exit_avg_usd": 0.0332,
+    "total_avg_usd": 0.0332,
+    "total_sum_usd": 0.86,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 20,
+        "win_rate_pct": 65.0,
+        "sum_net_usd": -1.97,
+        "avg_book_slip_usd": 0.0
+      },
+      {
+        "bucket": "0.01-0.50",
+        "trades": 6,
+        "win_rate_pct": 66.7,
+        "sum_net_usd": 6.58,
+        "avg_book_slip_usd": 0.1441
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 26,
+        "wr": 65.38,
+        "sum_net": 4.61
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "TAKER",
+        "n": 26,
+        "wr": 65.38,
+        "sum_net": 4.61
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 16,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 47.093077,
+  "execution_slippage_mean": 47.093077
+}

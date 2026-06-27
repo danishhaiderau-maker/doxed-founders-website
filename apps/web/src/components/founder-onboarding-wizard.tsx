@@ -10,6 +10,7 @@ import { FounderPathSelector } from '@/components/founder-path-selector';
 import { FounderStarterPackPicker } from '@/components/founder-starter-pack-picker';
 import { FounderOnboardingAiStack } from '@/components/founder-onboarding-ai-stack';
 import { FounderOnboardingComplete } from '@/components/founder-onboarding-complete';
+import { trackOnboardingStep } from '@/lib/onboarding-track';
 import {
   connectGitHubRepo,
   connectGitHubToken,
@@ -134,6 +135,23 @@ export function FounderOnboardingWizard({
     const target = firstIncomplete >= 0 ? firstIncomplete : anyIncomplete;
     if (target >= 0) setStepIndex(target);
   }, [status]);
+
+  useEffect(() => {
+    if (!status || !currentStepId) return;
+    trackOnboardingStep(currentStepId, 'view', status.onboardingPath ?? status.effectivePath);
+  }, [currentStepId, status?.onboardingPath, status?.effectivePath]);
+
+  useEffect(() => {
+    if (!currentStep?.complete || currentStep.optional) return;
+    const nextIdx = stepIndex + 1;
+    if (nextIdx >= stepOrder.length) return;
+    const nextId = stepOrder[nextIdx];
+    if (nextId === 'goal' || nextId === 'founder') return;
+    const nextStep = stepById(status, nextId);
+    if (nextStep && !nextStep.complete) {
+      setStepIndex(nextIdx);
+    }
+  }, [currentStep?.complete, currentStep?.optional, currentStepId, stepIndex, stepOrder, status]);
 
   if (dismissed) return null;
 

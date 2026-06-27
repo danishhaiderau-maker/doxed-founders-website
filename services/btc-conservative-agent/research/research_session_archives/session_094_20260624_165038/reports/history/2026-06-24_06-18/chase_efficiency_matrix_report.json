@@ -1,0 +1,11 @@
+{
+  "schema": "chase_efficiency_matrix_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T06:18:07.002147+00:00",
+  "overall_by_chase_count": {},
+  "by_lane_and_chase_count": {},
+  "golden_ai60_spread4": [],
+  "full_matrix": {}
+}

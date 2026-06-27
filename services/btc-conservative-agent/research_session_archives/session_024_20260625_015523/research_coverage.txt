@@ -1,0 +1,33 @@
+========================================================================
+=== RESEARCH COVERAGE & STATISTICAL CONFIDENCE ===
+========================================================================
+Scope: FRESH-COLLECTION (SESSION)
+CSV rows — trades: 157 | blocked: 883 | decisions: 1149
+Analyzed — trades: 136 | approves: 617 | blocked: 460 | decisions: 1134
+
+Coverage status: MODERATE
+136 trades — directional only; prefer ≥200 trades before strong edge/lane claims.
+
+Confidence bands (executed):
+  0-45: n=0
+  45-50: n=0
+  50-55: n=0
+  55-60: n=0
+  60-65: n=67
+  65+: n=0
+
+AI calibration bands:
+  50-55: n=0
+  55-60: n=3
+  60-65: n=307
+  65+: n=228
+
+Edge buckets:
+  0-1: n=4
+  1-2: n=25
+  2-3: n=27
+  3-4: n=9
+  4+: n=71
+
+Minimum for edge conclusions: ≥50 approves
+========================================================================

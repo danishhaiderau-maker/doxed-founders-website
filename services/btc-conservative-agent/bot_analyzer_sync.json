@@ -1,10 +1,10 @@
 {
   "schema": "bot_analyzer_sync_v1",
-  "generated_at": "2026-06-25T13:36:55.391137+00:00",
-  "bot_version": "v11.0-genome-architecture-v1",
-  "expected_analyzer_sync_id": "v11.0-genome-architecture-v1",
-  "analyzer_sync_id": "v11.0-genome-architecture-v1",
-  "analyzer_expected_bot": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-27T01:44:27.929868+00:00",
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "expected_analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_expected_bot": "v11.1-virtual-chase-known-combos-v1",
   "verdict": "READY",
   "checks": {
     "bot_version_match": true,

@@ -1,0 +1,20 @@
+{
+  "schema": "chase_profit_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T19:52:12.141156+00:00",
+  "question": "How much profit does chase contribute vs static limits?",
+  "chase_assisted": {
+    "fills": 0,
+    "sum_pnl_usd": 0,
+    "ev_usd": 0.0
+  },
+  "static_limit": {
+    "fills": 64,
+    "sum_pnl_usd": 29.44,
+    "ev_usd": 0.46
+  },
+  "incremental_value_usd": 0.0,
+  "note": "Incremental = chase PnL minus (static EV \u00d7 chase fill count). Validation only."
+}

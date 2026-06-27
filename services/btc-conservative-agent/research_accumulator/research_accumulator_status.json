@@ -1,0 +1,122 @@
+{
+  "schema": "research_accumulator_status_v1",
+  "schema_version": "v983_week_collection_v1",
+  "generated_at": "2026-06-27T00:52:06.035850+00:00",
+  "epoch_start_iso": "2026-06-22T11:19:45+00:00",
+  "backfill_policy": "none \u2014 only trades after epoch",
+  "sync_interval_minutes": 30,
+  "total_trades": 507,
+  "last_sync": {
+    "synced_at": "2026-06-27T00:52:05.687033+00:00",
+    "new_rows": 0,
+    "total_rows": 507
+  },
+  "by_lane": {
+    "CONTINUOUS": {
+      "n": 334,
+      "pnl": 218.0
+    },
+    "COMBO_604_SP4_CHASE_3PLUS": {
+      "n": 74,
+      "pnl": 65.58
+    },
+    "COMBO_65_SP5_CHASE_3PLUS": {
+      "n": 68,
+      "pnl": 14.49
+    },
+    "AI60_SP3_VIRTUAL_CHASE": {
+      "n": 30,
+      "pnl": 17.24
+    },
+    "AI_DISAGREEMENT_REPLAY": {
+      "n": 1,
+      "pnl": 1.09
+    }
+  },
+  "top_regime_cells": [
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_mid",
+      "n": 74
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_positive|liquidity_mid",
+      "n": 46
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_low|vol_high|funding_positive|liquidity_mid",
+      "n": 45
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 41
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 37
+    },
+    {
+      "regime": "weekday|LONDON|adx_high|vol_high|funding_positive|liquidity_mid",
+      "n": 37
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_high|vol_high|funding_positive|liquidity_high",
+      "n": 23
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 22
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_mid",
+      "n": 21
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_low|vol_high|funding_positive|liquidity_high",
+      "n": 17
+    },
+    {
+      "regime": "weekday|NEW_YORK|adx_mid|vol_high|funding_positive|liquidity_high",
+      "n": 16
+    },
+    {
+      "regime": "weekday|LONDON|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 14
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_mid",
+      "n": 13
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|vol_high|funding_positive|liquidity_high",
+      "n": 12
+    },
+    {
+      "regime": "weekday|ASIA|adx_high|vol_high|funding_positive|liquidity_high",
+      "n": 12
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_neutral|liquidity_mid",
+      "n": 11
+    },
+    {
+      "regime": "weekday|LONDON|adx_low|vol_high|funding_positive|liquidity_mid",
+      "n": 8
+    },
+    {
+      "regime": "weekday|ASIA|adx_mid|unknown|funding_positive|liquidity_mid",
+      "n": 6
+    },
+    {
+      "regime": "weekday|ASIA|adx_low|vol_high|funding_positive|liquidity_high",
+      "n": 6
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_positive|liquidity_high",
+      "n": 5
+    }
+  ],
+  "db_path": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research_accumulator\\research_trades_v983.db",
+  "export_csv": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research_accumulator\\trades_accumulated.csv",
+  "target_trades_for_roster": 200,
+  "collection_goal_days": 7
+}

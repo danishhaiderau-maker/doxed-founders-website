@@ -1,0 +1,337 @@
+{
+  "schema": "confidence_band_cross_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "SESSION",
+  "generated_at": "2026-06-25T23:06:28.150609+00:00",
+  "bands": [
+    "50-55",
+    "55-60",
+    "60-65",
+    "65-69",
+    "70-74",
+    "75+"
+  ],
+  "overall_by_band": [
+    {
+      "band": "50-55",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "55-60",
+      "trades": 1,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": -2.32,
+      "ev_usd": -2.32,
+      "sum_pnl_usd": -2.32,
+      "avg_edge": 2.2,
+      "avg_ai_confidence": 58.0
+    },
+    {
+      "band": "60-65",
+      "trades": 166,
+      "win_rate_pct": 80.1,
+      "avg_pnl_usd": 1.14,
+      "ev_usd": 1.14,
+      "sum_pnl_usd": 189.88,
+      "avg_edge": 2.49,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "band": "65-69",
+      "trades": 54,
+      "win_rate_pct": 79.6,
+      "avg_pnl_usd": 0.83,
+      "ev_usd": 0.83,
+      "sum_pnl_usd": 45.05,
+      "avg_edge": 4.4,
+      "avg_ai_confidence": 68.0
+    },
+    {
+      "band": "70-74",
+      "trades": 43,
+      "win_rate_pct": 62.8,
+      "avg_pnl_usd": -0.09,
+      "ev_usd": -0.09,
+      "sum_pnl_usd": -3.85,
+      "avg_edge": 4.9,
+      "avg_ai_confidence": 72.0
+    },
+    {
+      "band": "75+",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "benchmark_continuous_by_band": [
+    {
+      "band": "50-55",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "band": "55-60",
+      "trades": 1,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": -2.32,
+      "ev_usd": -2.32,
+      "sum_pnl_usd": -2.32,
+      "avg_edge": 2.2,
+      "avg_ai_confidence": 58.0
+    },
+    {
+      "band": "60-65",
+      "trades": 166,
+      "win_rate_pct": 80.1,
+      "avg_pnl_usd": 1.14,
+      "ev_usd": 1.14,
+      "sum_pnl_usd": 189.88,
+      "avg_edge": 2.49,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "band": "65-69",
+      "trades": 54,
+      "win_rate_pct": 79.6,
+      "avg_pnl_usd": 0.83,
+      "ev_usd": 0.83,
+      "sum_pnl_usd": 45.05,
+      "avg_edge": 4.4,
+      "avg_ai_confidence": 68.0
+    },
+    {
+      "band": "70-74",
+      "trades": 43,
+      "win_rate_pct": 62.8,
+      "avg_pnl_usd": -0.09,
+      "ev_usd": -0.09,
+      "sum_pnl_usd": -3.85,
+      "avg_edge": 4.9,
+      "avg_ai_confidence": 72.0
+    },
+    {
+      "band": "75+",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "lanes_by_band": [
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "bands": [
+        {
+          "band": "50-55",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "55-60",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "60-65",
+          "trades": 53,
+          "win_rate_pct": 77.4,
+          "avg_pnl_usd": 0.91,
+          "ev_usd": 0.91,
+          "sum_pnl_usd": 48.12,
+          "avg_edge": 2.05,
+          "avg_ai_confidence": 62.0
+        },
+        {
+          "band": "65-69",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "70-74",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "75+",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        }
+      ]
+    },
+    {
+      "lane": "CONTINUOUS",
+      "bands": [
+        {
+          "band": "50-55",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "55-60",
+          "trades": 1,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": -2.32,
+          "ev_usd": -2.32,
+          "sum_pnl_usd": -2.32,
+          "avg_edge": 2.2,
+          "avg_ai_confidence": 58.0
+        },
+        {
+          "band": "60-65",
+          "trades": 113,
+          "win_rate_pct": 81.4,
+          "avg_pnl_usd": 1.25,
+          "ev_usd": 1.25,
+          "sum_pnl_usd": 141.76,
+          "avg_edge": 2.69,
+          "avg_ai_confidence": 62.0
+        },
+        {
+          "band": "65-69",
+          "trades": 30,
+          "win_rate_pct": 86.7,
+          "avg_pnl_usd": 1.17,
+          "ev_usd": 1.17,
+          "sum_pnl_usd": 35.16,
+          "avg_edge": 4.38,
+          "avg_ai_confidence": 68.0
+        },
+        {
+          "band": "70-74",
+          "trades": 24,
+          "win_rate_pct": 58.3,
+          "avg_pnl_usd": -0.12,
+          "ev_usd": -0.12,
+          "sum_pnl_usd": -2.82,
+          "avg_edge": 4.85,
+          "avg_ai_confidence": 72.0
+        },
+        {
+          "band": "75+",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        }
+      ]
+    },
+    {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "bands": [
+        {
+          "band": "50-55",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "55-60",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "60-65",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        },
+        {
+          "band": "65-69",
+          "trades": 24,
+          "win_rate_pct": 70.8,
+          "avg_pnl_usd": 0.41,
+          "ev_usd": 0.41,
+          "sum_pnl_usd": 9.89,
+          "avg_edge": 4.43,
+          "avg_ai_confidence": 68.0
+        },
+        {
+          "band": "70-74",
+          "trades": 19,
+          "win_rate_pct": 68.4,
+          "avg_pnl_usd": -0.05,
+          "ev_usd": -0.05,
+          "sum_pnl_usd": -1.03,
+          "avg_edge": 4.95,
+          "avg_ai_confidence": 72.0
+        },
+        {
+          "band": "75+",
+          "trades": 0,
+          "win_rate_pct": 0.0,
+          "avg_pnl_usd": 0.0,
+          "ev_usd": 0.0,
+          "sum_pnl_usd": 0.0,
+          "avg_edge": 0.0,
+          "avg_ai_confidence": 0.0
+        }
+      ]
+    }
+  ],
+  "continuous_benchmark_ev": 0.63
+}

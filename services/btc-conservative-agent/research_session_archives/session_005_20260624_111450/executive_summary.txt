@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — SESSION (~44.9h bot session) | v10.3-dashboard-ultimate-gate-2026-06-23 ===
+========================================================================
+Data scope: SESSION | CSV trades: 152 | Analyzed fills: 102
+Trades 102 | WR 63.7% | PnL +9.34 | EV 0.09/trade | MFE capture 18.8%
+APPROVE 609 → executed 81 | Gate damage $+107.35 | Edge: edge_no_incremental_value
+Sample confidence: MODERATE — 102 trades — directional only; prefer ≥200 trades before strong edge/lane claims.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 47 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

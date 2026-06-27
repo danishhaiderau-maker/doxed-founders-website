@@ -1,0 +1,52 @@
+{
+  "schema": "fast_cut_sweep_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T18:55:50.319076+00:00",
+  "current_cut_pct": -12.0,
+  "replay_coverage_pct": 10.8,
+  "booked": {
+    "trades": 351,
+    "sum_pnl_usd": 263.98
+  },
+  "sweep_levels": [
+    {
+      "cut_pct": -12.0,
+      "is_current": true,
+      "trades": 38,
+      "sum_pnl_usd": 38.05,
+      "avg_pnl_usd": 1.0,
+      "win_rate_pct": 55.3,
+      "delta_vs_booked_usd": -225.93
+    },
+    {
+      "cut_pct": -10.0,
+      "is_current": false,
+      "trades": 38,
+      "sum_pnl_usd": 32.65,
+      "avg_pnl_usd": 0.86,
+      "win_rate_pct": 50.0,
+      "delta_vs_booked_usd": -231.33
+    },
+    {
+      "cut_pct": -8.0,
+      "is_current": false,
+      "trades": 38,
+      "sum_pnl_usd": 38.85,
+      "avg_pnl_usd": 1.02,
+      "win_rate_pct": 50.0,
+      "delta_vs_booked_usd": -225.13
+    },
+    {
+      "cut_pct": -6.0,
+      "is_current": false,
+      "trades": 38,
+      "sum_pnl_usd": 41.6,
+      "avg_pnl_usd": 1.09,
+      "win_rate_pct": 47.4,
+      "delta_vs_booked_usd": -222.38
+    }
+  ],
+  "note": "Counterfactual replay sim \u2014 not for auto-tuning until post-exit replay coverage is high."
+}

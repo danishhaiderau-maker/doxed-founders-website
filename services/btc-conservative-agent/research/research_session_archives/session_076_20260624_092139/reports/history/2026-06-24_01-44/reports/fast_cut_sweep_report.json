@@ -1,0 +1,12 @@
+{
+  "schema": "fast_cut_sweep_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T01:44:51.074434+00:00",
+  "current_cut_pct": -12.0,
+  "sweep_levels": [],
+  "booked": {
+    "trades": 0,
+    "sum_pnl_usd": 0
+  }
+}

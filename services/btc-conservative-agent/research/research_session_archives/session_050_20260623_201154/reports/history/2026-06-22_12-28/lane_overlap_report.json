@@ -1,0 +1,11 @@
+{
+  "schema": "lane_overlap_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-22T12:28:41.015949+00:00",
+  "benchmark_lane": "CONTINUOUS",
+  "match_method": "30s approve bucket + direction + AI win_prob",
+  "continuous_approve_keys": 0,
+  "lanes": []
+}

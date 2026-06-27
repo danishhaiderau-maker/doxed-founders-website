@@ -1,0 +1,163 @@
+{
+  "schema": "top_combinations_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-26T07:18:55.210161+00:00",
+  "min_trades_per_combo": 3,
+  "dimensions": [
+    "ai_probability_bucket",
+    "directional_spread_bucket",
+    "entry_mode_bucket",
+    "research_lane"
+  ],
+  "total_combos": 6,
+  "top": [
+    {
+      "combo": "AI60-65+SPREAD5++OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "5+",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 50,
+      "wins": 41,
+      "wr_pct": 82.0,
+      "pnl_usd": 71.87,
+      "ev_usd": 1.44
+    },
+    {
+      "combo": "AI60-65+SPREAD4+OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 50,
+      "wins": 38,
+      "wr_pct": 76.0,
+      "pnl_usd": 42.51,
+      "ev_usd": 0.85
+    },
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+COMBO_604_SP4_CHASE_3PLUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 60,
+      "wins": 45,
+      "wr_pct": 75.0,
+      "pnl_usd": 49.17,
+      "ev_usd": 0.82
+    },
+    {
+      "combo": "AI60-65+SPREAD3+OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "3",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 22,
+      "wins": 17,
+      "wr_pct": 77.3,
+      "pnl_usd": 16.23,
+      "ev_usd": 0.74
+    },
+    {
+      "combo": "AI65++SPREAD5++OTHER+CONTINUOUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 63,
+      "wins": 45,
+      "wr_pct": 71.4,
+      "pnl_usd": 31.4,
+      "ev_usd": 0.5
+    },
+    {
+      "combo": "AI65++SPREAD5++CHASE_3PLUS+COMBO_65_SP5_CHASE_3PLUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 54,
+      "wins": 36,
+      "wr_pct": 66.7,
+      "pnl_usd": 5.51,
+      "ev_usd": 0.1
+    }
+  ],
+  "bottom": [
+    {
+      "combo": "AI65++SPREAD5++CHASE_3PLUS+COMBO_65_SP5_CHASE_3PLUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "trades": 54,
+      "wins": 36,
+      "wr_pct": 66.7,
+      "pnl_usd": 5.51,
+      "ev_usd": 0.1
+    },
+    {
+      "combo": "AI65++SPREAD5++OTHER+CONTINUOUS",
+      "ai_bucket": "65+",
+      "spread_bucket": "5+",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 63,
+      "wins": 45,
+      "wr_pct": 71.4,
+      "pnl_usd": 31.4,
+      "ev_usd": 0.5
+    },
+    {
+      "combo": "AI60-65+SPREAD3+OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "3",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 22,
+      "wins": 17,
+      "wr_pct": 77.3,
+      "pnl_usd": 16.23,
+      "ev_usd": 0.74
+    },
+    {
+      "combo": "AI60-65+SPREAD4+CHASE_3PLUS+COMBO_604_SP4_CHASE_3PLUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "CHASE_3PLUS",
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "trades": 60,
+      "wins": 45,
+      "wr_pct": 75.0,
+      "pnl_usd": 49.17,
+      "ev_usd": 0.82
+    },
+    {
+      "combo": "AI60-65+SPREAD4+OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "4",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 50,
+      "wins": 38,
+      "wr_pct": 76.0,
+      "pnl_usd": 42.51,
+      "ev_usd": 0.85
+    },
+    {
+      "combo": "AI60-65+SPREAD5++OTHER+CONTINUOUS",
+      "ai_bucket": "60-65",
+      "spread_bucket": "5+",
+      "entry_mode": "OTHER",
+      "lane": "CONTINUOUS",
+      "trades": 50,
+      "wins": 41,
+      "wr_pct": 82.0,
+      "pnl_usd": 71.87,
+      "ev_usd": 1.44
+    }
+  ]
+}

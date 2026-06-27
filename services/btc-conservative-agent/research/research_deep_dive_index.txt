@@ -1,0 +1,178 @@
+========================================================================
+=== DEEP DIVE INDEX — AVAILABLE REPORTS ===
+========================================================================
+Reports directory: C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports
+Full verbose log:  C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\analyzer_run.log
+
+ 1. [✓] AI Calibration
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\ai_calibration_report.json
+     Confidence buckets, expected vs actual WR, calibration error
+ 2. [✓] AI Funnel
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\ai_funnel_report.json
+     AI decision funnel stages and drop-offs
+ 3. [✓] AI Decision Fingerprints
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\ai_decision_fingerprint_report.json
+     Cluster fingerprints driving APPROVE/REJECT
+ 4. [✓] Approve Outcome × Conf × Direction
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\approve_outcome_confidence_direction.json
+     Outcome matrix by confidence and direction
+ 5. [✓] Benchmark Scorecard
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\benchmark_relative_scorecard.json
+     Experiment lanes vs PRIMARY_PRODUCTION benchmark
+ 6. [✓] Lane Analysis
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\benchmark_vs_lanes_report.json
+     Per-lane approves, fills, PnL, EV/approve
+ 7. [✓] Chase Attribution
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_attribution_report.json
+     Per-trade chase counts and saved-fill heuristic
+ 8. [✓] Chase Effectiveness
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_effectiveness_report.json
+     PnL by chase-count bucket
+ 9. [✓] Chase Threshold
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_threshold_report.json
+     Cumulative EV/WR/PnL at chase_count N+ thresholds
+10. [✓] Chase Delay Lanes
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_delay_report.json
+     COMBO Direct vs Chase 3+ within each AI/spread tier
+11. [✓] Confidence Bands
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\confidence_band_report.json
+     Executed trades by AI confidence band
+12. [✓] Direction Bias
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\direction_report.json
+     LONG vs SHORT performance split
+13. [✓] Edge Incremental Value
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\edge_incremental_value_report.json
+     AI-only vs AI+edge filter uplift
+14. [✓] Edge Predictiveness
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\edge_predictiveness_report.json
+     Does edge score rank outcomes?
+15. [✓] Edge Score Deciles
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\edge_score_decile_report.json
+     PnL/WR by edge decile bucket
+16. [✓] Fast-Cut Survivors
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\fast_cut_survivor_report.json
+     Thesis fast-cut trades — saved vs missed ladder
+17. [✓] Fill Quality
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\fill_quality_report.json
+     Slippage, distance, fill realism metrics
+18. [✓] First 15m Outcomes
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\first_15m_outcome_report.json
+     Early post-fill trajectory
+19. [✓] Horizon Counterfactual
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\horizon_counterfactual_report.json
+     What-if hold horizons on exits
+20. [✓] Horizon Recovery
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\horizon_profitability_report.json
+     Would losers have turned green later?
+21. [✓] Lane Opportunity
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\lane_opportunity_capture.json
+     Missed lane capture vs shadow fills
+22. [✓] Missed Opportunities
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\missed_opportunity_heatmap.json
+     Blocked signals by reason and $ left
+23. [✓] Pathway Survival
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\pathway_survival_report.json
+     Pathway stage survival and drop rates
+24. [✓] Real Edge / Gate Damage
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\real_edge_summary.json
+     APPROVE funnel, executed vs blocked shadow PnL
+25. [✓] Scenario C Capture
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\scenario_c_capture_ratio.json
+     MFE capture % distribution
+26. [✓] Scenario C Leakage
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\scenario_c_leakage_report.json
+     Peak vs booked profit left on table
+27. [✓] AI Direction Bias
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\ai_direction_bias_report.json
+     AI directional skew vs outcomes
+28. [✓] Compact Summary
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\research_compact_summary.json
+     Machine-readable rollup of all KPIs
+29. [✓] Top Leakage Trades
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\top_leakage_report.json
+     Top 50 trades — peak vs booked, money left on table
+30. [✓] Lane Retirement
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\lane_retirement_report.json
+     KEEP / RETIRE / COLLECT MORE per pathway lane
+31. [✓] Feature Importance
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\feature_importance_report.json
+     Which trading features correlate with PnL
+32. [✓] Chase Profit
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_profit_report.json
+     Incremental PnL from chase-assisted vs static fills
+33. [✓] Confidence × Lane
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\confidence_band_cross_report.json
+     Performance by AI band per lane
+34. [✓] Edge Validation
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\edge_validation_report.json
+     ACTIVE / WATCHLIST / DEPRECATED status for edge filter
+35. [✓] Benchmark Contribution
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\benchmark_contribution_report.json
+     % of session PnL from each lane
+36. [✓] Lane Overlap
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\lane_overlap_report.json
+     Overlap vs CONTINUOUS — unique alpha signals
+37. [✓] Fast Cut Sweep
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\fast_cut_sweep_report.json
+     Replay sweep at -6/-8/-10/-12 vs booked PnL
+38. [✓] Lane Definitions
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\lane_definition_report.json
+     Entry conditions, dependencies, and status per pathway lane
+39. [✓] Urgent Chase Alpha
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\urgent_chase_report.json
+     Legacy URGENT_CHASE_ALPHA vs CONTINUOUS (historical)
+40. [✓] Lane Chase Isolation
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\lane_chase_isolation_report.json
+     COMBO Direct vs Chase 3+ fill_model and chase policy
+41. [✓] Top Combinations
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\top_combinations_report.json
+     AI × spread × type × lane ranked cohorts
+42. [✓] Exit Combinations
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\exit_combinations_report.json
+     Exit reason × entry combo — leakage and best exit paths
+43. [✓] Exit Leakage by Reason
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\exit_leakage_by_reason_report.json
+     Which exit reasons destroy the most value
+44. [✓] Exit Ladder Simulator
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\exit_ladder_simulator_report.json
+     Replay tick sim — alternate ladder rungs vs live
+45. [✓] AI Scan Independence
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\ai_scan_independence_report.json
+     AI pipeline vs production tile ON/OFF
+46. [ ] Lane Memory
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\lane_memory_validation.json
+     Retired lane exposure + bucket bounds
+47. [ ] Bot↔Analyzer Sync
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\bot_analyzer_sync.json
+     SYSTEM_NOT_READY gate at startup
+48. [✓] TYPE_B Execution Audit
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\type_b_execution_audit.json
+     Proof TYPE_B is not an entry gate
+49. [ ] Exit Reports Validation
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\exit_reports_validation.json
+     Analyzer gate — exit reports populated
+50. [✓] Chase Efficiency Matrix
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\chase_efficiency_matrix_report.json
+     Chase count × AI × spread × lane EV matrix
+51. [✓] Type B Predictor
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\type_b_predictor_report.json
+     Pre-entry feature separators for Type B runners
+52. [✓] Regime Leaderboard
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\regime_leaderboard.json
+     Best lane per market regime cell
+53. [✓] Regime × Confidence
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\regime_confidence_matrix.json
+     EV/WR by regime and AI confidence band
+54. [✓] Fill Delay
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\fill_delay_report.json
+     Signal age and chase count vs outcome
+55. [✓] Top Conditional Edges
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\top_conditional_edges.json
+     Multi-factor combos ranked by EV
+56. [✓] Regime Stability
+     C:\Users\user\Desktop\Final Bots\doxedcryptofounder\services\btc-conservative-agent\research\reports\regime_stability_report.json
+     Sample size + stability score per regime cell
+
+Written this run: 48 reports
+Run: python analyzer_research_engine_v62.py  (30-min loop + dashboard :9001, fresh-collection session only)
+========================================================================

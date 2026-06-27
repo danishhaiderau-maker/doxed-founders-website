@@ -1,0 +1,9 @@
+{
+  "schema": "edge_score_decile_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T01:39:19.014199+00:00",
+  "deciles": [],
+  "overall": {}
+}

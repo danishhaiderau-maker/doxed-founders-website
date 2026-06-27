@@ -1,0 +1,1472 @@
+{
+  "reason": "fresh_collection_dashboard",
+  "archived_ts": "2026-06-24T12:11:43.673196+00:00",
+  "bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "files": [
+    "ai_calibration_report.json",
+    "ai_confidence_expectancy.json",
+    "ai_decision_fingerprint_report.json",
+    "ai_direction_bias_report.json",
+    "ai_funnel_report.json",
+    "ai_scan_independence_report.json",
+    "ai_scan_role_validation.json",
+    "analysis_dashboard.html",
+    "analyzer_run.log",
+    "approve_outcome_confidence_direction.json",
+    "benchmark_contribution_report.json",
+    "benchmark_relative_scorecard.json",
+    "chase_attribution_report.json",
+    "chase_delay_report.json",
+    "chase_effectiveness_report.json",
+    "chase_efficiency_matrix_report.json",
+    "chase_profit_report.json",
+    "chase_threshold_report.json",
+    "confidence_band_cross_report.json",
+    "confidence_band_report.json",
+    "direction_report.json",
+    "edge_incremental_value_report.json",
+    "edge_predictiveness_report.json",
+    "edge_score_decile_report.json",
+    "edge_validation_report.json",
+    "executive_summary.txt",
+    "exit_combinations_report.json",
+    "exit_ladder_simulator_report.json",
+    "exit_leakage_by_reason_report.json",
+    "exit_reports_validation.json",
+    "fast_cut_survivor_report.json",
+    "fast_cut_sweep_report.json",
+    "feature_importance_report.json",
+    "fill_delay_report.json",
+    "first_15m_outcome_report.json",
+    "horizon_profitability_report.json",
+    "lane_chase_isolation_report.json",
+    "lane_definition_report.json",
+    "lane_opportunity_capture.json",
+    "lane_overlap_report.json",
+    "lane_retirement_report.json",
+    "pathway_lane_specs.json",
+    "pathway_survival_report.json",
+    "pipeline_events_3factor.csv",
+    "regime_stability_report.json",
+    "repo_version_sync.json",
+    "report_manifest.json",
+    "ai_calibration_report_47.json",
+    "ai_decision_fingerprint_report_48.json",
+    "ai_direction_bias_report_49.json",
+    "ai_funnel_report_50.json",
+    "ai_scan_independence_report_51.json",
+    "approve_outcome_confidence_direction_52.json",
+    "benchmark_contribution_report_53.json",
+    "benchmark_relative_scorecard_54.json",
+    "chase_attribution_report_55.json",
+    "chase_delay_report_56.json",
+    "chase_effectiveness_report_57.json",
+    "chase_efficiency_matrix_report_58.json",
+    "chase_profit_report_59.json",
+    "chase_threshold_report_60.json",
+    "confidence_band_cross_report_61.json",
+    "confidence_band_report_62.json",
+    "direction_report_63.json",
+    "edge_incremental_value_report_64.json",
+    "edge_predictiveness_report_65.json",
+    "edge_score_decile_report_66.json",
+    "edge_validation_report_67.json",
+    "exit_combinations_report_68.json",
+    "exit_ladder_simulator_report_69.json",
+    "exit_leakage_by_reason_report_70.json",
+    "exit_reports_validation_71.json",
+    "fast_cut_survivor_report_72.json",
+    "fast_cut_sweep_report_73.json",
+    "feature_importance_report_74.json",
+    "fill_delay_report_75.json",
+    "first_15m_outcome_report_76.json",
+    "ai_calibration_report_77.json",
+    "ai_decision_fingerprint_report_78.json",
+    "ai_direction_bias_report_79.json",
+    "ai_funnel_report_80.json",
+    "approve_outcome_confidence_direction_81.json",
+    "benchmark_contribution_report_82.json",
+    "benchmark_relative_scorecard_83.json",
+    "chase_attribution_report_84.json",
+    "chase_delay_report_85.json",
+    "chase_effectiveness_report_86.json",
+    "chase_efficiency_matrix_report_87.json",
+    "chase_profit_report_88.json",
+    "chase_threshold_report_89.json",
+    "confidence_band_cross_report_90.json",
+    "confidence_band_report_91.json",
+    "direction_report_92.json",
+    "edge_incremental_value_report_93.json",
+    "edge_predictiveness_report_94.json",
+    "edge_score_decile_report_95.json",
+    "edge_validation_report_96.json",
+    "executive_summary_97.txt",
+    "exit_combinations_report_98.json",
+    "exit_ladder_simulator_report_99.json",
+    "exit_leakage_by_reason_report_100.json",
+    "fast_cut_survivor_report_101.json",
+    "fast_cut_sweep_report_102.json",
+    "feature_importance_report_103.json",
+    "first_15m_outcome_report_104.json",
+    "horizon_profitability_report_105.json",
+    "lane_chase_isolation_report_106.json",
+    "lane_definition_report_107.json",
+    "lane_opportunity_capture_108.json",
+    "lane_overlap_report_109.json",
+    "lane_retirement_report_110.json",
+    "missed_opportunity_heatmap.json",
+    "pathway_survival_report_112.json",
+    "regime_leaderboard.json",
+    "report_manifest_114.json",
+    "ai_calibration_report_115.json",
+    "ai_decision_fingerprint_report_116.json",
+    "ai_direction_bias_report_117.json",
+    "ai_funnel_report_118.json",
+    "ai_scan_independence_report_119.json",
+    "approve_outcome_confidence_direction_120.json",
+    "benchmark_contribution_report_121.json",
+    "benchmark_relative_scorecard_122.json",
+    "chase_attribution_report_123.json",
+    "chase_delay_report_124.json",
+    "chase_effectiveness_report_125.json",
+    "chase_efficiency_matrix_report_126.json",
+    "chase_profit_report_127.json",
+    "chase_threshold_report_128.json",
+    "confidence_band_cross_report_129.json",
+    "confidence_band_report_130.json",
+    "direction_report_131.json",
+    "edge_incremental_value_report_132.json",
+    "edge_predictiveness_report_133.json",
+    "edge_score_decile_report_134.json",
+    "edge_validation_report_135.json",
+    "exit_combinations_report_136.json",
+    "exit_ladder_simulator_report_137.json",
+    "exit_leakage_by_reason_report_138.json",
+    "exit_reports_validation_139.json",
+    "fast_cut_survivor_report_140.json",
+    "fast_cut_sweep_report_141.json",
+    "feature_importance_report_142.json",
+    "fill_delay_report_143.json",
+    "first_15m_outcome_report_144.json",
+    "horizon_profitability_report_145.json",
+    "lane_chase_isolation_report_146.json",
+    "lane_definition_report_147.json",
+    "lane_opportunity_capture_148.json",
+    "lane_overlap_report_149.json",
+    "lane_retirement_report_150.json",
+    "missed_opportunity_heatmap_151.json",
+    "pathway_survival_report_152.json",
+    "regime_confidence_matrix.json",
+    "regime_leaderboard_154.json",
+    "regime_stability_report_155.json",
+    "scenario_c_capture_ratio.json",
+    "scenario_c_leakage_report.json",
+    "top_combinations_report.json",
+    "top_conditional_edges.json",
+    "top_leakage_report.json",
+    "type_b_execution_audit.json",
+    "type_b_predictor_report.json",
+    "urgent_chase_report.json",
+    "research_compact_summary.json",
+    "research_findings.txt",
+    "roster_policy.json",
+    "scenario_c_capture_ratio_167.json",
+    "scenario_c_leakage_report_168.json",
+    "snapshot_meta.json",
+    "top_combinations_report_170.json",
+    "top_leakage_report_171.json",
+    "type_b_predictor_report_172.json",
+    "urgent_chase_report_173.json",
+    "horizon_profitability_report_174.json",
+    "lane_chase_isolation_report_175.json",
+    "lane_definition_report_176.json",
+    "lane_opportunity_capture_177.json",
+    "lane_overlap_report_178.json",
+    "lane_retirement_report_179.json",
+    "missed_opportunity_heatmap_180.json",
+    "pathway_survival_report_181.json",
+    "regime_confidence_matrix_182.json",
+    "regime_leaderboard_183.json",
+    "regime_stability_report_184.json",
+    "scenario_c_capture_ratio_185.json",
+    "scenario_c_leakage_report_186.json",
+    "top_combinations_report_187.json",
+    "top_conditional_edges_188.json",
+    "top_leakage_report_189.json",
+    "type_b_execution_audit_190.json",
+    "type_b_predictor_report_191.json",
+    "urgent_chase_report_192.json",
+    "research_compact_summary_193.json",
+    "research_coverage.txt",
+    "research_deep_dive_index.txt",
+    "research_findings_196.txt",
+    "research_highlights.txt",
+    "research_session_index.json",
+    "scenario_c_capture_ratio_199.json",
+    "scenario_c_leakage_report_200.json",
+    "tile_independence_report.json",
+    "top_combinations_report_202.json",
+    "top_leakage_report_203.json",
+    "trend_health.csv",
+    "type_b_execution_audit_205.json",
+    "type_b_predictor_report_206.json",
+    "urgent_chase_report_207.json"
+  ],
+  "file_integrity": [
+    {
+      "file": "ai_calibration_report.json",
+      "source": "ai_calibration_report.json",
+      "size": 1660,
+      "sha256": "a309c46f2a1ce017a6795c97830a5986bb4b8e6f228910e135a62bb31a0b5383"
+    },
+    {
+      "file": "ai_confidence_expectancy.json",
+      "source": "ai_confidence_expectancy.json",
+      "size": 1213,
+      "sha256": "6ca01b9423e90c683f8dcb94e1c0b6ddb22a9dde25189341d0c766dae9612b73"
+    },
+    {
+      "file": "ai_decision_fingerprint_report.json",
+      "source": "ai_decision_fingerprint_report.json",
+      "size": 346,
+      "sha256": "b627e6064eea9d6e878a8df4c021af4335784a53ba05dab05e8e69b2f3b58c64"
+    },
+    {
+      "file": "ai_direction_bias_report.json",
+      "source": "ai_direction_bias_report.json",
+      "size": 1480,
+      "sha256": "0c963284b07ed81de3af539f6a952ef02dd41ddc928492b83da6945ffdf83e90"
+    },
+    {
+      "file": "ai_funnel_report.json",
+      "source": "ai_funnel_report.json",
+      "size": 8918,
+      "sha256": "a67e13d2fbcc1056fb7dbce9195e9cece5f75ad006ed480e28eec8bd07a67ea2"
+    },
+    {
+      "file": "ai_scan_independence_report.json",
+      "source": "ai_scan_independence_report.json",
+      "size": 2213,
+      "sha256": "de318085a73eccf7e71b5c126c3173113187503d70392a626e8ff2d212899af5"
+    },
+    {
+      "file": "ai_scan_role_validation.json",
+      "source": "ai_scan_role_validation.json",
+      "size": 1994,
+      "sha256": "b7f805b707c6a50691fcfc5fe762f203d9dd28b565ae3e6aba87e6dc34609882"
+    },
+    {
+      "file": "analysis_dashboard.html",
+      "source": "analysis_dashboard.html",
+      "size": 7162,
+      "sha256": "f552a4a4ea479544942b1dc215da52c584b1a7872c4453ef8e81308617fea55f"
+    },
+    {
+      "file": "analyzer_run.log",
+      "source": "analyzer_run.log",
+      "size": 288633,
+      "sha256": "f1262bdb026381f5227aedf7c2ddbe3823c76ac2897bccf7a69b62d0d205f198"
+    },
+    {
+      "file": "approve_outcome_confidence_direction.json",
+      "source": "approve_outcome_confidence_direction.json",
+      "size": 1740,
+      "sha256": "4fcf3307ee13c67e637d65b2aa747af379f273f9fe728b429e1120b51a520403"
+    },
+    {
+      "file": "benchmark_contribution_report.json",
+      "source": "benchmark_contribution_report.json",
+      "size": 460,
+      "sha256": "1090174151f33197466d43838169486c1b724a6e07679bf18ec78137969ed890"
+    },
+    {
+      "file": "benchmark_relative_scorecard.json",
+      "source": "benchmark_relative_scorecard.json",
+      "size": 188,
+      "sha256": "e1390a9279b53a9e185e2404cf9b57d628f223e78506608781ca86fe39afd16f"
+    },
+    {
+      "file": "chase_attribution_report.json",
+      "source": "chase_attribution_report.json",
+      "size": 804,
+      "sha256": "5f93d9cc0d4cf3a579a96060c528d5df3cca920ccfd197fd0e2445a89c93bb3a"
+    },
+    {
+      "file": "chase_delay_report.json",
+      "source": "chase_delay_report.json",
+      "size": 1676,
+      "sha256": "e685ef07163b794bc30356a4e8d4014717dd2dd8ab1eb230c063ee2e568bf6b6"
+    },
+    {
+      "file": "chase_effectiveness_report.json",
+      "source": "chase_effectiveness_report.json",
+      "size": 1054,
+      "sha256": "fde9c2622145b64c2f006278893fa9823b5a490ce0a5ec3d76cb92a0dd49a263"
+    },
+    {
+      "file": "chase_efficiency_matrix_report.json",
+      "source": "chase_efficiency_matrix_report.json",
+      "size": 377,
+      "sha256": "6981503ed5a723521f70cfd6551321fd0abf9a0074f9d2b97d0e75ad0ac6f20a"
+    },
+    {
+      "file": "chase_profit_report.json",
+      "source": "chase_profit_report.json",
+      "size": 624,
+      "sha256": "8fad78977bce81e967a3e79f2d17012610837f18dfd0cb175c4959b6232e78d3"
+    },
+    {
+      "file": "chase_threshold_report.json",
+      "source": "chase_threshold_report.json",
+      "size": 1059,
+      "sha256": "8cc783deccb9398785ac00c274b97e6bf4e7e6dae8c1255675e8da6cc265705f"
+    },
+    {
+      "file": "confidence_band_cross_report.json",
+      "source": "confidence_band_cross_report.json",
+      "size": 8123,
+      "sha256": "5352b4980bc968abc29cf36830bfb7e3f279ac3865c1f83ea1bc3de8a0691cab"
+    },
+    {
+      "file": "confidence_band_report.json",
+      "source": "confidence_band_report.json",
+      "size": 2427,
+      "sha256": "828bc005c069a10d2731730508dfc3a148799f7dac4091123784ab1cf5d8e4fd"
+    },
+    {
+      "file": "direction_report.json",
+      "source": "direction_report.json",
+      "size": 1896,
+      "sha256": "bcdefee64d052afebbb120a13056da770e2e4e052ca0a14d1088e738ec99025c"
+    },
+    {
+      "file": "edge_incremental_value_report.json",
+      "source": "edge_incremental_value_report.json",
+      "size": 329,
+      "sha256": "2e89d9c00f1e9256c429a816e976fa80126c7b5a99a36dae868f4d45b5cba47b"
+    },
+    {
+      "file": "edge_predictiveness_report.json",
+      "source": "edge_predictiveness_report.json",
+      "size": 1972,
+      "sha256": "7827cc317f9a2b0dd860a03a534772d5e6fe902b214662b390222e08b39c3afc"
+    },
+    {
+      "file": "edge_score_decile_report.json",
+      "source": "edge_score_decile_report.json",
+      "size": 1527,
+      "sha256": "0aa0fdd167adc8c56d18e8b59fdc9ae09a6c518d4dff4ca7fe5f9f525cd4397d"
+    },
+    {
+      "file": "edge_validation_report.json",
+      "source": "edge_validation_report.json",
+      "size": 651,
+      "sha256": "b4428ea20e6184e0d6262daa98ee716e3b420c4cdf6f43e0bf1fedc6335ddbe9"
+    },
+    {
+      "file": "executive_summary.txt",
+      "source": "executive_summary.txt",
+      "size": 960,
+      "sha256": "872620653cc102c39a9c6946ce90d4e78f4158a95592813828526d180e81e7a2"
+    },
+    {
+      "file": "exit_combinations_report.json",
+      "source": "exit_combinations_report.json",
+      "size": 20323,
+      "sha256": "a6ba0c897a9b2f41dd9b2f7fa5b71261a7484e4087305a1cc34fd4e0ea61118c"
+    },
+    {
+      "file": "exit_ladder_simulator_report.json",
+      "source": "exit_ladder_simulator_report.json",
+      "size": 5109,
+      "sha256": "0818e66178139c9d2ee30ec18d71dca41684d21ef87141e68fb76dada9fdd051"
+    },
+    {
+      "file": "exit_leakage_by_reason_report.json",
+      "source": "exit_leakage_by_reason_report.json",
+      "size": 2164,
+      "sha256": "853d614fa9a0caafb521d7405e74b59a7e2b2f826dde706f42360e2e2ed326ca"
+    },
+    {
+      "file": "exit_reports_validation.json",
+      "source": "exit_reports_validation.json",
+      "size": 842,
+      "sha256": "a26a73015a9b05b3df6feaa09d3b37c721026cab71fd29b1cc8715a7bc23c6e1"
+    },
+    {
+      "file": "fast_cut_survivor_report.json",
+      "source": "fast_cut_survivor_report.json",
+      "size": 15090,
+      "sha256": "879e99e434f576b85817766ca0370bd8c2f3c8cf20efca6fc2d5f2113ebef5e8"
+    },
+    {
+      "file": "fast_cut_sweep_report.json",
+      "source": "fast_cut_sweep_report.json",
+      "size": 1327,
+      "sha256": "0049abb44e10ce2d9527ba6a99b94b5ecf9b21a4809109480ae491cab6fa867f"
+    },
+    {
+      "file": "feature_importance_report.json",
+      "source": "feature_importance_report.json",
+      "size": 1821,
+      "sha256": "34a98ea755204443d18fc31038084014322fd534e810f36950809ad798fd78ec"
+    },
+    {
+      "file": "fill_delay_report.json",
+      "source": "fill_delay_report.json",
+      "size": 3126,
+      "sha256": "0baf14e0ace5c1e62967d917dfb856403e70ecb8662f5806176f89299d8a90dc"
+    },
+    {
+      "file": "first_15m_outcome_report.json",
+      "source": "first_15m_outcome_report.json",
+      "size": 356,
+      "sha256": "64e9381c292a0f4eac56810d29200e5816539625f1e02dd7e0adf3be7a364f06"
+    },
+    {
+      "file": "horizon_profitability_report.json",
+      "source": "horizon_profitability_report.json",
+      "size": 21715,
+      "sha256": "4d16fc3d517d2a235e7d228f77e4a50ece4cc28e1bf06609322ab6148a9d7379"
+    },
+    {
+      "file": "lane_chase_isolation_report.json",
+      "source": "lane_chase_isolation_report.json",
+      "size": 6162,
+      "sha256": "1c3065bc7d11c30796808aa8f25ded102dbb3b32c94c3ee03b080857c31ea5e3"
+    },
+    {
+      "file": "lane_definition_report.json",
+      "source": "lane_definition_report.json",
+      "size": 14087,
+      "sha256": "bca1c3ed79ba97e9afb9450016cb25873b4963b93ae395fa0fc102198dbdaf41"
+    },
+    {
+      "file": "lane_opportunity_capture.json",
+      "source": "lane_opportunity_capture.json",
+      "size": 8980,
+      "sha256": "c955c76304a02f46440c7131493230d775b6f874ef9dc2eeb55b45e48b434e86"
+    },
+    {
+      "file": "lane_overlap_report.json",
+      "source": "lane_overlap_report.json",
+      "size": 398,
+      "sha256": "c3acf6cb39acf3414f3ca910fc34b8f393b45355ceb42af210bde02d135c2285"
+    },
+    {
+      "file": "lane_retirement_report.json",
+      "source": "lane_retirement_report.json",
+      "size": 8478,
+      "sha256": "4cdd2119df84f4417fde129cb6f4d3e3dfe9a6343b75870a61d510a68b7a07c5"
+    },
+    {
+      "file": "pathway_lane_specs.json",
+      "source": "pathway_lane_specs.json",
+      "size": 34361,
+      "sha256": "37b791f90aa150a189f97fea5ff902136268ba1ae9152462c5fdecfdb22b6f33"
+    },
+    {
+      "file": "pathway_survival_report.json",
+      "source": "pathway_survival_report.json",
+      "size": 8499,
+      "sha256": "af7081612b88bdc373f4602d7040a5d7d82c42567b5e36fec34b9d29db556b0b"
+    },
+    {
+      "file": "pipeline_events_3factor.csv",
+      "source": "pipeline_events_3factor.csv",
+      "size": 1208,
+      "sha256": "2c68f1f7ec25bcdef3b97afebcb3aa100db7f167b4129c58e4763ceb0d0c4e0d"
+    },
+    {
+      "file": "regime_stability_report.json",
+      "source": "regime_stability_report.json",
+      "size": 8217,
+      "sha256": "822b7963549fc6e0f84f2521a01e7b71c2b882f50fff5c5cc85bd836d0b72d0e"
+    },
+    {
+      "file": "repo_version_sync.json",
+      "source": "repo_version_sync.json",
+      "size": 763,
+      "sha256": "e4b68aaa736d0aa8236fe132c9f9333a9217033520a04be8a0e2229c56d072d6"
+    },
+    {
+      "file": "report_manifest.json",
+      "source": "report_manifest.json",
+      "size": 14942,
+      "sha256": "00a4e07d0eebae586244c6c33ecbe80df042d9e8286b4901b7cafc0d6f88aac9"
+    },
+    {
+      "file": "ai_calibration_report_47.json",
+      "source": "ai_calibration_report.json",
+      "size": 1660,
+      "sha256": "a309c46f2a1ce017a6795c97830a5986bb4b8e6f228910e135a62bb31a0b5383"
+    },
+    {
+      "file": "ai_decision_fingerprint_report_48.json",
+      "source": "ai_decision_fingerprint_report.json",
+      "size": 346,
+      "sha256": "b627e6064eea9d6e878a8df4c021af4335784a53ba05dab05e8e69b2f3b58c64"
+    },
+    {
+      "file": "ai_direction_bias_report_49.json",
+      "source": "ai_direction_bias_report.json",
+      "size": 1480,
+      "sha256": "0c963284b07ed81de3af539f6a952ef02dd41ddc928492b83da6945ffdf83e90"
+    },
+    {
+      "file": "ai_funnel_report_50.json",
+      "source": "ai_funnel_report.json",
+      "size": 8918,
+      "sha256": "a67e13d2fbcc1056fb7dbce9195e9cece5f75ad006ed480e28eec8bd07a67ea2"
+    },
+    {
+      "file": "ai_scan_independence_report_51.json",
+      "source": "ai_scan_independence_report.json",
+      "size": 2213,
+      "sha256": "de318085a73eccf7e71b5c126c3173113187503d70392a626e8ff2d212899af5"
+    },
+    {
+      "file": "approve_outcome_confidence_direction_52.json",
+      "source": "approve_outcome_confidence_direction.json",
+      "size": 1740,
+      "sha256": "4fcf3307ee13c67e637d65b2aa747af379f273f9fe728b429e1120b51a520403"
+    },
+    {
+      "file": "benchmark_contribution_report_53.json",
+      "source": "benchmark_contribution_report.json",
+      "size": 460,
+      "sha256": "1090174151f33197466d43838169486c1b724a6e07679bf18ec78137969ed890"
+    },
+    {
+      "file": "benchmark_relative_scorecard_54.json",
+      "source": "benchmark_relative_scorecard.json",
+      "size": 188,
+      "sha256": "e1390a9279b53a9e185e2404cf9b57d628f223e78506608781ca86fe39afd16f"
+    },
+    {
+      "file": "chase_attribution_report_55.json",
+      "source": "chase_attribution_report.json",
+      "size": 804,
+      "sha256": "5f93d9cc0d4cf3a579a96060c528d5df3cca920ccfd197fd0e2445a89c93bb3a"
+    },
+    {
+      "file": "chase_delay_report_56.json",
+      "source": "chase_delay_report.json",
+      "size": 1676,
+      "sha256": "e685ef07163b794bc30356a4e8d4014717dd2dd8ab1eb230c063ee2e568bf6b6"
+    },
+    {
+      "file": "chase_effectiveness_report_57.json",
+      "source": "chase_effectiveness_report.json",
+      "size": 1054,
+      "sha256": "fde9c2622145b64c2f006278893fa9823b5a490ce0a5ec3d76cb92a0dd49a263"
+    },
+    {
+      "file": "chase_efficiency_matrix_report_58.json",
+      "source": "chase_efficiency_matrix_report.json",
+      "size": 377,
+      "sha256": "6981503ed5a723521f70cfd6551321fd0abf9a0074f9d2b97d0e75ad0ac6f20a"
+    },
+    {
+      "file": "chase_profit_report_59.json",
+      "source": "chase_profit_report.json",
+      "size": 624,
+      "sha256": "8fad78977bce81e967a3e79f2d17012610837f18dfd0cb175c4959b6232e78d3"
+    },
+    {
+      "file": "chase_threshold_report_60.json",
+      "source": "chase_threshold_report.json",
+      "size": 1059,
+      "sha256": "8cc783deccb9398785ac00c274b97e6bf4e7e6dae8c1255675e8da6cc265705f"
+    },
+    {
+      "file": "confidence_band_cross_report_61.json",
+      "source": "confidence_band_cross_report.json",
+      "size": 8123,
+      "sha256": "5352b4980bc968abc29cf36830bfb7e3f279ac3865c1f83ea1bc3de8a0691cab"
+    },
+    {
+      "file": "confidence_band_report_62.json",
+      "source": "confidence_band_report.json",
+      "size": 2427,
+      "sha256": "828bc005c069a10d2731730508dfc3a148799f7dac4091123784ab1cf5d8e4fd"
+    },
+    {
+      "file": "direction_report_63.json",
+      "source": "direction_report.json",
+      "size": 1896,
+      "sha256": "bcdefee64d052afebbb120a13056da770e2e4e052ca0a14d1088e738ec99025c"
+    },
+    {
+      "file": "edge_incremental_value_report_64.json",
+      "source": "edge_incremental_value_report.json",
+      "size": 329,
+      "sha256": "2e89d9c00f1e9256c429a816e976fa80126c7b5a99a36dae868f4d45b5cba47b"
+    },
+    {
+      "file": "edge_predictiveness_report_65.json",
+      "source": "edge_predictiveness_report.json",
+      "size": 1972,
+      "sha256": "7827cc317f9a2b0dd860a03a534772d5e6fe902b214662b390222e08b39c3afc"
+    },
+    {
+      "file": "edge_score_decile_report_66.json",
+      "source": "edge_score_decile_report.json",
+      "size": 1527,
+      "sha256": "0aa0fdd167adc8c56d18e8b59fdc9ae09a6c518d4dff4ca7fe5f9f525cd4397d"
+    },
+    {
+      "file": "edge_validation_report_67.json",
+      "source": "edge_validation_report.json",
+      "size": 651,
+      "sha256": "b4428ea20e6184e0d6262daa98ee716e3b420c4cdf6f43e0bf1fedc6335ddbe9"
+    },
+    {
+      "file": "exit_combinations_report_68.json",
+      "source": "exit_combinations_report.json",
+      "size": 20323,
+      "sha256": "a6ba0c897a9b2f41dd9b2f7fa5b71261a7484e4087305a1cc34fd4e0ea61118c"
+    },
+    {
+      "file": "exit_ladder_simulator_report_69.json",
+      "source": "exit_ladder_simulator_report.json",
+      "size": 5109,
+      "sha256": "0818e66178139c9d2ee30ec18d71dca41684d21ef87141e68fb76dada9fdd051"
+    },
+    {
+      "file": "exit_leakage_by_reason_report_70.json",
+      "source": "exit_leakage_by_reason_report.json",
+      "size": 2164,
+      "sha256": "853d614fa9a0caafb521d7405e74b59a7e2b2f826dde706f42360e2e2ed326ca"
+    },
+    {
+      "file": "exit_reports_validation_71.json",
+      "source": "exit_reports_validation.json",
+      "size": 842,
+      "sha256": "a26a73015a9b05b3df6feaa09d3b37c721026cab71fd29b1cc8715a7bc23c6e1"
+    },
+    {
+      "file": "fast_cut_survivor_report_72.json",
+      "source": "fast_cut_survivor_report.json",
+      "size": 15090,
+      "sha256": "879e99e434f576b85817766ca0370bd8c2f3c8cf20efca6fc2d5f2113ebef5e8"
+    },
+    {
+      "file": "fast_cut_sweep_report_73.json",
+      "source": "fast_cut_sweep_report.json",
+      "size": 1327,
+      "sha256": "0049abb44e10ce2d9527ba6a99b94b5ecf9b21a4809109480ae491cab6fa867f"
+    },
+    {
+      "file": "feature_importance_report_74.json",
+      "source": "feature_importance_report.json",
+      "size": 1821,
+      "sha256": "34a98ea755204443d18fc31038084014322fd534e810f36950809ad798fd78ec"
+    },
+    {
+      "file": "fill_delay_report_75.json",
+      "source": "fill_delay_report.json",
+      "size": 3126,
+      "sha256": "0baf14e0ace5c1e62967d917dfb856403e70ecb8662f5806176f89299d8a90dc"
+    },
+    {
+      "file": "first_15m_outcome_report_76.json",
+      "source": "first_15m_outcome_report.json",
+      "size": 356,
+      "sha256": "64e9381c292a0f4eac56810d29200e5816539625f1e02dd7e0adf3be7a364f06"
+    },
+    {
+      "file": "ai_calibration_report_77.json",
+      "source": "ai_calibration_report.json",
+      "size": 1660,
+      "sha256": "a309c46f2a1ce017a6795c97830a5986bb4b8e6f228910e135a62bb31a0b5383"
+    },
+    {
+      "file": "ai_decision_fingerprint_report_78.json",
+      "source": "ai_decision_fingerprint_report.json",
+      "size": 346,
+      "sha256": "b627e6064eea9d6e878a8df4c021af4335784a53ba05dab05e8e69b2f3b58c64"
+    },
+    {
+      "file": "ai_direction_bias_report_79.json",
+      "source": "ai_direction_bias_report.json",
+      "size": 1480,
+      "sha256": "0c963284b07ed81de3af539f6a952ef02dd41ddc928492b83da6945ffdf83e90"
+    },
+    {
+      "file": "ai_funnel_report_80.json",
+      "source": "ai_funnel_report.json",
+      "size": 8918,
+      "sha256": "a67e13d2fbcc1056fb7dbce9195e9cece5f75ad006ed480e28eec8bd07a67ea2"
+    },
+    {
+      "file": "approve_outcome_confidence_direction_81.json",
+      "source": "approve_outcome_confidence_direction.json",
+      "size": 1740,
+      "sha256": "4fcf3307ee13c67e637d65b2aa747af379f273f9fe728b429e1120b51a520403"
+    },
+    {
+      "file": "benchmark_contribution_report_82.json",
+      "source": "benchmark_contribution_report.json",
+      "size": 460,
+      "sha256": "1090174151f33197466d43838169486c1b724a6e07679bf18ec78137969ed890"
+    },
+    {
+      "file": "benchmark_relative_scorecard_83.json",
+      "source": "benchmark_relative_scorecard.json",
+      "size": 188,
+      "sha256": "e1390a9279b53a9e185e2404cf9b57d628f223e78506608781ca86fe39afd16f"
+    },
+    {
+      "file": "chase_attribution_report_84.json",
+      "source": "chase_attribution_report.json",
+      "size": 804,
+      "sha256": "5f93d9cc0d4cf3a579a96060c528d5df3cca920ccfd197fd0e2445a89c93bb3a"
+    },
+    {
+      "file": "chase_delay_report_85.json",
+      "source": "chase_delay_report.json",
+      "size": 1676,
+      "sha256": "e685ef07163b794bc30356a4e8d4014717dd2dd8ab1eb230c063ee2e568bf6b6"
+    },
+    {
+      "file": "chase_effectiveness_report_86.json",
+      "source": "chase_effectiveness_report.json",
+      "size": 1054,
+      "sha256": "fde9c2622145b64c2f006278893fa9823b5a490ce0a5ec3d76cb92a0dd49a263"
+    },
+    {
+      "file": "chase_efficiency_matrix_report_87.json",
+      "source": "chase_efficiency_matrix_report.json",
+      "size": 377,
+      "sha256": "6981503ed5a723521f70cfd6551321fd0abf9a0074f9d2b97d0e75ad0ac6f20a"
+    },
+    {
+      "file": "chase_profit_report_88.json",
+      "source": "chase_profit_report.json",
+      "size": 624,
+      "sha256": "8fad78977bce81e967a3e79f2d17012610837f18dfd0cb175c4959b6232e78d3"
+    },
+    {
+      "file": "chase_threshold_report_89.json",
+      "source": "chase_threshold_report.json",
+      "size": 1059,
+      "sha256": "8cc783deccb9398785ac00c274b97e6bf4e7e6dae8c1255675e8da6cc265705f"
+    },
+    {
+      "file": "confidence_band_cross_report_90.json",
+      "source": "confidence_band_cross_report.json",
+      "size": 8123,
+      "sha256": "5352b4980bc968abc29cf36830bfb7e3f279ac3865c1f83ea1bc3de8a0691cab"
+    },
+    {
+      "file": "confidence_band_report_91.json",
+      "source": "confidence_band_report.json",
+      "size": 2427,
+      "sha256": "828bc005c069a10d2731730508dfc3a148799f7dac4091123784ab1cf5d8e4fd"
+    },
+    {
+      "file": "direction_report_92.json",
+      "source": "direction_report.json",
+      "size": 1896,
+      "sha256": "bcdefee64d052afebbb120a13056da770e2e4e052ca0a14d1088e738ec99025c"
+    },
+    {
+      "file": "edge_incremental_value_report_93.json",
+      "source": "edge_incremental_value_report.json",
+      "size": 329,
+      "sha256": "2e89d9c00f1e9256c429a816e976fa80126c7b5a99a36dae868f4d45b5cba47b"
+    },
+    {
+      "file": "edge_predictiveness_report_94.json",
+      "source": "edge_predictiveness_report.json",
+      "size": 1972,
+      "sha256": "7827cc317f9a2b0dd860a03a534772d5e6fe902b214662b390222e08b39c3afc"
+    },
+    {
+      "file": "edge_score_decile_report_95.json",
+      "source": "edge_score_decile_report.json",
+      "size": 1527,
+      "sha256": "0aa0fdd167adc8c56d18e8b59fdc9ae09a6c518d4dff4ca7fe5f9f525cd4397d"
+    },
+    {
+      "file": "edge_validation_report_96.json",
+      "source": "edge_validation_report.json",
+      "size": 651,
+      "sha256": "b4428ea20e6184e0d6262daa98ee716e3b420c4cdf6f43e0bf1fedc6335ddbe9"
+    },
+    {
+      "file": "executive_summary_97.txt",
+      "source": "executive_summary.txt",
+      "size": 960,
+      "sha256": "872620653cc102c39a9c6946ce90d4e78f4158a95592813828526d180e81e7a2"
+    },
+    {
+      "file": "exit_combinations_report_98.json",
+      "source": "exit_combinations_report.json",
+      "size": 20323,
+      "sha256": "a6ba0c897a9b2f41dd9b2f7fa5b71261a7484e4087305a1cc34fd4e0ea61118c"
+    },
+    {
+      "file": "exit_ladder_simulator_report_99.json",
+      "source": "exit_ladder_simulator_report.json",
+      "size": 5109,
+      "sha256": "0818e66178139c9d2ee30ec18d71dca41684d21ef87141e68fb76dada9fdd051"
+    },
+    {
+      "file": "exit_leakage_by_reason_report_100.json",
+      "source": "exit_leakage_by_reason_report.json",
+      "size": 2164,
+      "sha256": "853d614fa9a0caafb521d7405e74b59a7e2b2f826dde706f42360e2e2ed326ca"
+    },
+    {
+      "file": "fast_cut_survivor_report_101.json",
+      "source": "fast_cut_survivor_report.json",
+      "size": 15090,
+      "sha256": "879e99e434f576b85817766ca0370bd8c2f3c8cf20efca6fc2d5f2113ebef5e8"
+    },
+    {
+      "file": "fast_cut_sweep_report_102.json",
+      "source": "fast_cut_sweep_report.json",
+      "size": 1327,
+      "sha256": "0049abb44e10ce2d9527ba6a99b94b5ecf9b21a4809109480ae491cab6fa867f"
+    },
+    {
+      "file": "feature_importance_report_103.json",
+      "source": "feature_importance_report.json",
+      "size": 1821,
+      "sha256": "34a98ea755204443d18fc31038084014322fd534e810f36950809ad798fd78ec"
+    },
+    {
+      "file": "first_15m_outcome_report_104.json",
+      "source": "first_15m_outcome_report.json",
+      "size": 356,
+      "sha256": "64e9381c292a0f4eac56810d29200e5816539625f1e02dd7e0adf3be7a364f06"
+    },
+    {
+      "file": "horizon_profitability_report_105.json",
+      "source": "horizon_profitability_report.json",
+      "size": 21715,
+      "sha256": "4d16fc3d517d2a235e7d228f77e4a50ece4cc28e1bf06609322ab6148a9d7379"
+    },
+    {
+      "file": "lane_chase_isolation_report_106.json",
+      "source": "lane_chase_isolation_report.json",
+      "size": 6162,
+      "sha256": "1c3065bc7d11c30796808aa8f25ded102dbb3b32c94c3ee03b080857c31ea5e3"
+    },
+    {
+      "file": "lane_definition_report_107.json",
+      "source": "lane_definition_report.json",
+      "size": 14087,
+      "sha256": "bca1c3ed79ba97e9afb9450016cb25873b4963b93ae395fa0fc102198dbdaf41"
+    },
+    {
+      "file": "lane_opportunity_capture_108.json",
+      "source": "lane_opportunity_capture.json",
+      "size": 8980,
+      "sha256": "c955c76304a02f46440c7131493230d775b6f874ef9dc2eeb55b45e48b434e86"
+    },
+    {
+      "file": "lane_overlap_report_109.json",
+      "source": "lane_overlap_report.json",
+      "size": 398,
+      "sha256": "c3acf6cb39acf3414f3ca910fc34b8f393b45355ceb42af210bde02d135c2285"
+    },
+    {
+      "file": "lane_retirement_report_110.json",
+      "source": "lane_retirement_report.json",
+      "size": 8478,
+      "sha256": "4cdd2119df84f4417fde129cb6f4d3e3dfe9a6343b75870a61d510a68b7a07c5"
+    },
+    {
+      "file": "missed_opportunity_heatmap.json",
+      "source": "missed_opportunity_heatmap.json",
+      "size": 482,
+      "sha256": "a2a542ac37086eff74f3cbcfb2dba95b14106d3e5ef8121a1cbbdd6724f75c8b"
+    },
+    {
+      "file": "pathway_survival_report_112.json",
+      "source": "pathway_survival_report.json",
+      "size": 8499,
+      "sha256": "af7081612b88bdc373f4602d7040a5d7d82c42567b5e36fec34b9d29db556b0b"
+    },
+    {
+      "file": "regime_leaderboard.json",
+      "source": "regime_leaderboard.json",
+      "size": 18813,
+      "sha256": "3359c9485ddcf1b737d29c5fc0e435ea6eeadb9d9a65e52a11e77934d8ebed4a"
+    },
+    {
+      "file": "report_manifest_114.json",
+      "source": "report_manifest.json",
+      "size": 14942,
+      "sha256": "00a4e07d0eebae586244c6c33ecbe80df042d9e8286b4901b7cafc0d6f88aac9"
+    },
+    {
+      "file": "ai_calibration_report_115.json",
+      "source": "ai_calibration_report.json",
+      "size": 1660,
+      "sha256": "a309c46f2a1ce017a6795c97830a5986bb4b8e6f228910e135a62bb31a0b5383"
+    },
+    {
+      "file": "ai_decision_fingerprint_report_116.json",
+      "source": "ai_decision_fingerprint_report.json",
+      "size": 346,
+      "sha256": "b627e6064eea9d6e878a8df4c021af4335784a53ba05dab05e8e69b2f3b58c64"
+    },
+    {
+      "file": "ai_direction_bias_report_117.json",
+      "source": "ai_direction_bias_report.json",
+      "size": 1480,
+      "sha256": "0c963284b07ed81de3af539f6a952ef02dd41ddc928492b83da6945ffdf83e90"
+    },
+    {
+      "file": "ai_funnel_report_118.json",
+      "source": "ai_funnel_report.json",
+      "size": 8918,
+      "sha256": "a67e13d2fbcc1056fb7dbce9195e9cece5f75ad006ed480e28eec8bd07a67ea2"
+    },
+    {
+      "file": "ai_scan_independence_report_119.json",
+      "source": "ai_scan_independence_report.json",
+      "size": 2213,
+      "sha256": "de318085a73eccf7e71b5c126c3173113187503d70392a626e8ff2d212899af5"
+    },
+    {
+      "file": "approve_outcome_confidence_direction_120.json",
+      "source": "approve_outcome_confidence_direction.json",
+      "size": 1740,
+      "sha256": "4fcf3307ee13c67e637d65b2aa747af379f273f9fe728b429e1120b51a520403"
+    },
+    {
+      "file": "benchmark_contribution_report_121.json",
+      "source": "benchmark_contribution_report.json",
+      "size": 460,
+      "sha256": "1090174151f33197466d43838169486c1b724a6e07679bf18ec78137969ed890"
+    },
+    {
+      "file": "benchmark_relative_scorecard_122.json",
+      "source": "benchmark_relative_scorecard.json",
+      "size": 188,
+      "sha256": "e1390a9279b53a9e185e2404cf9b57d628f223e78506608781ca86fe39afd16f"
+    },
+    {
+      "file": "chase_attribution_report_123.json",
+      "source": "chase_attribution_report.json",
+      "size": 804,
+      "sha256": "5f93d9cc0d4cf3a579a96060c528d5df3cca920ccfd197fd0e2445a89c93bb3a"
+    },
+    {
+      "file": "chase_delay_report_124.json",
+      "source": "chase_delay_report.json",
+      "size": 1676,
+      "sha256": "e685ef07163b794bc30356a4e8d4014717dd2dd8ab1eb230c063ee2e568bf6b6"
+    },
+    {
+      "file": "chase_effectiveness_report_125.json",
+      "source": "chase_effectiveness_report.json",
+      "size": 1054,
+      "sha256": "fde9c2622145b64c2f006278893fa9823b5a490ce0a5ec3d76cb92a0dd49a263"
+    },
+    {
+      "file": "chase_efficiency_matrix_report_126.json",
+      "source": "chase_efficiency_matrix_report.json",
+      "size": 377,
+      "sha256": "6981503ed5a723521f70cfd6551321fd0abf9a0074f9d2b97d0e75ad0ac6f20a"
+    },
+    {
+      "file": "chase_profit_report_127.json",
+      "source": "chase_profit_report.json",
+      "size": 624,
+      "sha256": "8fad78977bce81e967a3e79f2d17012610837f18dfd0cb175c4959b6232e78d3"
+    },
+    {
+      "file": "chase_threshold_report_128.json",
+      "source": "chase_threshold_report.json",
+      "size": 1059,
+      "sha256": "8cc783deccb9398785ac00c274b97e6bf4e7e6dae8c1255675e8da6cc265705f"
+    },
+    {
+      "file": "confidence_band_cross_report_129.json",
+      "source": "confidence_band_cross_report.json",
+      "size": 8123,
+      "sha256": "5352b4980bc968abc29cf36830bfb7e3f279ac3865c1f83ea1bc3de8a0691cab"
+    },
+    {
+      "file": "confidence_band_report_130.json",
+      "source": "confidence_band_report.json",
+      "size": 2427,
+      "sha256": "828bc005c069a10d2731730508dfc3a148799f7dac4091123784ab1cf5d8e4fd"
+    },
+    {
+      "file": "direction_report_131.json",
+      "source": "direction_report.json",
+      "size": 1896,
+      "sha256": "bcdefee64d052afebbb120a13056da770e2e4e052ca0a14d1088e738ec99025c"
+    },
+    {
+      "file": "edge_incremental_value_report_132.json",
+      "source": "edge_incremental_value_report.json",
+      "size": 329,
+      "sha256": "2e89d9c00f1e9256c429a816e976fa80126c7b5a99a36dae868f4d45b5cba47b"
+    },
+    {
+      "file": "edge_predictiveness_report_133.json",
+      "source": "edge_predictiveness_report.json",
+      "size": 1972,
+      "sha256": "7827cc317f9a2b0dd860a03a534772d5e6fe902b214662b390222e08b39c3afc"
+    },
+    {
+      "file": "edge_score_decile_report_134.json",
+      "source": "edge_score_decile_report.json",
+      "size": 1527,
+      "sha256": "0aa0fdd167adc8c56d18e8b59fdc9ae09a6c518d4dff4ca7fe5f9f525cd4397d"
+    },
+    {
+      "file": "edge_validation_report_135.json",
+      "source": "edge_validation_report.json",
+      "size": 651,
+      "sha256": "b4428ea20e6184e0d6262daa98ee716e3b420c4cdf6f43e0bf1fedc6335ddbe9"
+    },
+    {
+      "file": "exit_combinations_report_136.json",
+      "source": "exit_combinations_report.json",
+      "size": 20323,
+      "sha256": "a6ba0c897a9b2f41dd9b2f7fa5b71261a7484e4087305a1cc34fd4e0ea61118c"
+    },
+    {
+      "file": "exit_ladder_simulator_report_137.json",
+      "source": "exit_ladder_simulator_report.json",
+      "size": 5109,
+      "sha256": "0818e66178139c9d2ee30ec18d71dca41684d21ef87141e68fb76dada9fdd051"
+    },
+    {
+      "file": "exit_leakage_by_reason_report_138.json",
+      "source": "exit_leakage_by_reason_report.json",
+      "size": 2164,
+      "sha256": "853d614fa9a0caafb521d7405e74b59a7e2b2f826dde706f42360e2e2ed326ca"
+    },
+    {
+      "file": "exit_reports_validation_139.json",
+      "source": "exit_reports_validation.json",
+      "size": 842,
+      "sha256": "a26a73015a9b05b3df6feaa09d3b37c721026cab71fd29b1cc8715a7bc23c6e1"
+    },
+    {
+      "file": "fast_cut_survivor_report_140.json",
+      "source": "fast_cut_survivor_report.json",
+      "size": 15090,
+      "sha256": "879e99e434f576b85817766ca0370bd8c2f3c8cf20efca6fc2d5f2113ebef5e8"
+    },
+    {
+      "file": "fast_cut_sweep_report_141.json",
+      "source": "fast_cut_sweep_report.json",
+      "size": 1327,
+      "sha256": "0049abb44e10ce2d9527ba6a99b94b5ecf9b21a4809109480ae491cab6fa867f"
+    },
+    {
+      "file": "feature_importance_report_142.json",
+      "source": "feature_importance_report.json",
+      "size": 1821,
+      "sha256": "34a98ea755204443d18fc31038084014322fd534e810f36950809ad798fd78ec"
+    },
+    {
+      "file": "fill_delay_report_143.json",
+      "source": "fill_delay_report.json",
+      "size": 3126,
+      "sha256": "0baf14e0ace5c1e62967d917dfb856403e70ecb8662f5806176f89299d8a90dc"
+    },
+    {
+      "file": "first_15m_outcome_report_144.json",
+      "source": "first_15m_outcome_report.json",
+      "size": 356,
+      "sha256": "64e9381c292a0f4eac56810d29200e5816539625f1e02dd7e0adf3be7a364f06"
+    },
+    {
+      "file": "horizon_profitability_report_145.json",
+      "source": "horizon_profitability_report.json",
+      "size": 21715,
+      "sha256": "4d16fc3d517d2a235e7d228f77e4a50ece4cc28e1bf06609322ab6148a9d7379"
+    },
+    {
+      "file": "lane_chase_isolation_report_146.json",
+      "source": "lane_chase_isolation_report.json",
+      "size": 6162,
+      "sha256": "1c3065bc7d11c30796808aa8f25ded102dbb3b32c94c3ee03b080857c31ea5e3"
+    },
+    {
+      "file": "lane_definition_report_147.json",
+      "source": "lane_definition_report.json",
+      "size": 14087,
+      "sha256": "bca1c3ed79ba97e9afb9450016cb25873b4963b93ae395fa0fc102198dbdaf41"
+    },
+    {
+      "file": "lane_opportunity_capture_148.json",
+      "source": "lane_opportunity_capture.json",
+      "size": 8980,
+      "sha256": "c955c76304a02f46440c7131493230d775b6f874ef9dc2eeb55b45e48b434e86"
+    },
+    {
+      "file": "lane_overlap_report_149.json",
+      "source": "lane_overlap_report.json",
+      "size": 398,
+      "sha256": "c3acf6cb39acf3414f3ca910fc34b8f393b45355ceb42af210bde02d135c2285"
+    },
+    {
+      "file": "lane_retirement_report_150.json",
+      "source": "lane_retirement_report.json",
+      "size": 8478,
+      "sha256": "4cdd2119df84f4417fde129cb6f4d3e3dfe9a6343b75870a61d510a68b7a07c5"
+    },
+    {
+      "file": "missed_opportunity_heatmap_151.json",
+      "source": "missed_opportunity_heatmap.json",
+      "size": 482,
+      "sha256": "a2a542ac37086eff74f3cbcfb2dba95b14106d3e5ef8121a1cbbdd6724f75c8b"
+    },
+    {
+      "file": "pathway_survival_report_152.json",
+      "source": "pathway_survival_report.json",
+      "size": 8499,
+      "sha256": "af7081612b88bdc373f4602d7040a5d7d82c42567b5e36fec34b9d29db556b0b"
+    },
+    {
+      "file": "regime_confidence_matrix.json",
+      "source": "regime_confidence_matrix.json",
+      "size": 35086,
+      "sha256": "e09c1058fff72778acc01653fe571e4039ce30abc652b1092524c87feeb3d0f4"
+    },
+    {
+      "file": "regime_leaderboard_154.json",
+      "source": "regime_leaderboard.json",
+      "size": 18813,
+      "sha256": "3359c9485ddcf1b737d29c5fc0e435ea6eeadb9d9a65e52a11e77934d8ebed4a"
+    },
+    {
+      "file": "regime_stability_report_155.json",
+      "source": "regime_stability_report.json",
+      "size": 8217,
+      "sha256": "822b7963549fc6e0f84f2521a01e7b71c2b882f50fff5c5cc85bd836d0b72d0e"
+    },
+    {
+      "file": "scenario_c_capture_ratio.json",
+      "source": "scenario_c_capture_ratio.json",
+      "size": 2486,
+      "sha256": "40c5ddfa19eca8a0daa2b329c5e48bcd52a99fafade9fcd21d2abd83fa542522"
+    },
+    {
+      "file": "scenario_c_leakage_report.json",
+      "source": "scenario_c_leakage_report.json",
+      "size": 1272,
+      "sha256": "640657f24d86e2c9d57f33f4b1ab7bc2bb93263da6e4c91954e4c066d08cf424"
+    },
+    {
+      "file": "top_combinations_report.json",
+      "source": "top_combinations_report.json",
+      "size": 3572,
+      "sha256": "17450635211f761c7770e62b92d40c5b071a1f49055bb1a6cf25eb96db7dd629"
+    },
+    {
+      "file": "top_conditional_edges.json",
+      "source": "top_conditional_edges.json",
+      "size": 12074,
+      "sha256": "5276524b7c75925ae2990969f9660703f5caefbab118e638ea7b831fbb68c1f7"
+    },
+    {
+      "file": "top_leakage_report.json",
+      "source": "top_leakage_report.json",
+      "size": 20027,
+      "sha256": "9508f9d2618717d72e26d78cf3110ddcdd50bbcb2d4975629926f42bb9e9cd72"
+    },
+    {
+      "file": "type_b_execution_audit.json",
+      "source": "type_b_execution_audit.json",
+      "size": 874,
+      "sha256": "23a007694fd3625ccf8826c50181fddd3a95ed83635f0629ab4f7dd372ba23eb"
+    },
+    {
+      "file": "type_b_predictor_report.json",
+      "source": "type_b_predictor_report.json",
+      "size": 5165,
+      "sha256": "d95a4e80818ec7f6178af69722fab58bbdbe6be0da8c43a05e6dc0f6bbe6ef50"
+    },
+    {
+      "file": "urgent_chase_report.json",
+      "source": "urgent_chase_report.json",
+      "size": 1531,
+      "sha256": "ab11af0cb30769359c12bc24527c62540041fb9438528a4e283d97b6c82fbf8a"
+    },
+    {
+      "file": "research_compact_summary.json",
+      "source": "research_compact_summary.json",
+      "size": 74389,
+      "sha256": "d9f01ffedc80dfa95d8a5dcc6e9e992afcce036e51f467ec88e50a23d457ba9c"
+    },
+    {
+      "file": "research_findings.txt",
+      "source": "research_findings.txt",
+      "size": 1339,
+      "sha256": "404cb5c78165699b91ed4f7618d2df1311163925d4950ccddeeb074ab8e90b87"
+    },
+    {
+      "file": "roster_policy.json",
+      "source": "roster_policy.json",
+      "size": 784,
+      "sha256": "be46b3f5a0200b38e881c1eaf4f458ea854e592c92501cf3ce72945ba93f286e"
+    },
+    {
+      "file": "scenario_c_capture_ratio_167.json",
+      "source": "scenario_c_capture_ratio.json",
+      "size": 2486,
+      "sha256": "40c5ddfa19eca8a0daa2b329c5e48bcd52a99fafade9fcd21d2abd83fa542522"
+    },
+    {
+      "file": "scenario_c_leakage_report_168.json",
+      "source": "scenario_c_leakage_report.json",
+      "size": 1272,
+      "sha256": "640657f24d86e2c9d57f33f4b1ab7bc2bb93263da6e4c91954e4c066d08cf424"
+    },
+    {
+      "file": "snapshot_meta.json",
+      "source": "snapshot_meta.json",
+      "size": 80,
+      "sha256": "3ac7a9c2b058ec1a762f3921da8b18fae710e9f49c98b7b92515a749e3c1b030"
+    },
+    {
+      "file": "top_combinations_report_170.json",
+      "source": "top_combinations_report.json",
+      "size": 3572,
+      "sha256": "17450635211f761c7770e62b92d40c5b071a1f49055bb1a6cf25eb96db7dd629"
+    },
+    {
+      "file": "top_leakage_report_171.json",
+      "source": "top_leakage_report.json",
+      "size": 20027,
+      "sha256": "9508f9d2618717d72e26d78cf3110ddcdd50bbcb2d4975629926f42bb9e9cd72"
+    },
+    {
+      "file": "type_b_predictor_report_172.json",
+      "source": "type_b_predictor_report.json",
+      "size": 5165,
+      "sha256": "d95a4e80818ec7f6178af69722fab58bbdbe6be0da8c43a05e6dc0f6bbe6ef50"
+    },
+    {
+      "file": "urgent_chase_report_173.json",
+      "source": "urgent_chase_report.json",
+      "size": 1531,
+      "sha256": "ab11af0cb30769359c12bc24527c62540041fb9438528a4e283d97b6c82fbf8a"
+    },
+    {
+      "file": "horizon_profitability_report_174.json",
+      "source": "horizon_profitability_report.json",
+      "size": 21715,
+      "sha256": "4d16fc3d517d2a235e7d228f77e4a50ece4cc28e1bf06609322ab6148a9d7379"
+    },
+    {
+      "file": "lane_chase_isolation_report_175.json",
+      "source": "lane_chase_isolation_report.json",
+      "size": 6162,
+      "sha256": "1c3065bc7d11c30796808aa8f25ded102dbb3b32c94c3ee03b080857c31ea5e3"
+    },
+    {
+      "file": "lane_definition_report_176.json",
+      "source": "lane_definition_report.json",
+      "size": 14087,
+      "sha256": "bca1c3ed79ba97e9afb9450016cb25873b4963b93ae395fa0fc102198dbdaf41"
+    },
+    {
+      "file": "lane_opportunity_capture_177.json",
+      "source": "lane_opportunity_capture.json",
+      "size": 8980,
+      "sha256": "c955c76304a02f46440c7131493230d775b6f874ef9dc2eeb55b45e48b434e86"
+    },
+    {
+      "file": "lane_overlap_report_178.json",
+      "source": "lane_overlap_report.json",
+      "size": 398,
+      "sha256": "c3acf6cb39acf3414f3ca910fc34b8f393b45355ceb42af210bde02d135c2285"
+    },
+    {
+      "file": "lane_retirement_report_179.json",
+      "source": "lane_retirement_report.json",
+      "size": 8478,
+      "sha256": "4cdd2119df84f4417fde129cb6f4d3e3dfe9a6343b75870a61d510a68b7a07c5"
+    },
+    {
+      "file": "missed_opportunity_heatmap_180.json",
+      "source": "missed_opportunity_heatmap.json",
+      "size": 482,
+      "sha256": "a2a542ac37086eff74f3cbcfb2dba95b14106d3e5ef8121a1cbbdd6724f75c8b"
+    },
+    {
+      "file": "pathway_survival_report_181.json",
+      "source": "pathway_survival_report.json",
+      "size": 8499,
+      "sha256": "af7081612b88bdc373f4602d7040a5d7d82c42567b5e36fec34b9d29db556b0b"
+    },
+    {
+      "file": "regime_confidence_matrix_182.json",
+      "source": "regime_confidence_matrix.json",
+      "size": 35086,
+      "sha256": "e09c1058fff72778acc01653fe571e4039ce30abc652b1092524c87feeb3d0f4"
+    },
+    {
+      "file": "regime_leaderboard_183.json",
+      "source": "regime_leaderboard.json",
+      "size": 18813,
+      "sha256": "3359c9485ddcf1b737d29c5fc0e435ea6eeadb9d9a65e52a11e77934d8ebed4a"
+    },
+    {
+      "file": "regime_stability_report_184.json",
+      "source": "regime_stability_report.json",
+      "size": 8217,
+      "sha256": "822b7963549fc6e0f84f2521a01e7b71c2b882f50fff5c5cc85bd836d0b72d0e"
+    },
+    {
+      "file": "scenario_c_capture_ratio_185.json",
+      "source": "scenario_c_capture_ratio.json",
+      "size": 2486,
+      "sha256": "40c5ddfa19eca8a0daa2b329c5e48bcd52a99fafade9fcd21d2abd83fa542522"
+    },
+    {
+      "file": "scenario_c_leakage_report_186.json",
+      "source": "scenario_c_leakage_report.json",
+      "size": 1272,
+      "sha256": "640657f24d86e2c9d57f33f4b1ab7bc2bb93263da6e4c91954e4c066d08cf424"
+    },
+    {
+      "file": "top_combinations_report_187.json",
+      "source": "top_combinations_report.json",
+      "size": 3572,
+      "sha256": "17450635211f761c7770e62b92d40c5b071a1f49055bb1a6cf25eb96db7dd629"
+    },
+    {
+      "file": "top_conditional_edges_188.json",
+      "source": "top_conditional_edges.json",
+      "size": 12074,
+      "sha256": "5276524b7c75925ae2990969f9660703f5caefbab118e638ea7b831fbb68c1f7"
+    },
+    {
+      "file": "top_leakage_report_189.json",
+      "source": "top_leakage_report.json",
+      "size": 20027,
+      "sha256": "9508f9d2618717d72e26d78cf3110ddcdd50bbcb2d4975629926f42bb9e9cd72"
+    },
+    {
+      "file": "type_b_execution_audit_190.json",
+      "source": "type_b_execution_audit.json",
+      "size": 874,
+      "sha256": "23a007694fd3625ccf8826c50181fddd3a95ed83635f0629ab4f7dd372ba23eb"
+    },
+    {
+      "file": "type_b_predictor_report_191.json",
+      "source": "type_b_predictor_report.json",
+      "size": 5165,
+      "sha256": "d95a4e80818ec7f6178af69722fab58bbdbe6be0da8c43a05e6dc0f6bbe6ef50"
+    },
+    {
+      "file": "urgent_chase_report_192.json",
+      "source": "urgent_chase_report.json",
+      "size": 1531,
+      "sha256": "ab11af0cb30769359c12bc24527c62540041fb9438528a4e283d97b6c82fbf8a"
+    },
+    {
+      "file": "research_compact_summary_193.json",
+      "source": "research_compact_summary.json",
+      "size": 74389,
+      "sha256": "d9f01ffedc80dfa95d8a5dcc6e9e992afcce036e51f467ec88e50a23d457ba9c"
+    },
+    {
+      "file": "research_coverage.txt",
+      "source": "research_coverage.txt",
+      "size": 865,
+      "sha256": "e6edd2ac83cec2999036fe7bc1875e806740eb738f9c63939504b55272ea3aee"
+    },
+    {
+      "file": "research_deep_dive_index.txt",
+      "source": "research_deep_dive_index.txt",
+      "size": 12042,
+      "sha256": "49818f6f5b42e90a18c1862d09198aa9c0ea064b36c24d80b1a1f596229baf53"
+    },
+    {
+      "file": "research_findings_196.txt",
+      "source": "research_findings.txt",
+      "size": 1339,
+      "sha256": "404cb5c78165699b91ed4f7618d2df1311163925d4950ccddeeb074ab8e90b87"
+    },
+    {
+      "file": "research_highlights.txt",
+      "source": "research_highlights.txt",
+      "size": 2294,
+      "sha256": "91da327761461fc035c0686efbd2310d0d9ee28b10378950e20ac37da555c206"
+    },
+    {
+      "file": "research_session_index.json",
+      "source": "research_session_index.json",
+      "size": 371,
+      "sha256": "fcb1b9c9940b8307a50c9ebdf8a0cbb5e7abb330e6294639105f7028fc3d6913"
+    },
+    {
+      "file": "scenario_c_capture_ratio_199.json",
+      "source": "scenario_c_capture_ratio.json",
+      "size": 2486,
+      "sha256": "40c5ddfa19eca8a0daa2b329c5e48bcd52a99fafade9fcd21d2abd83fa542522"
+    },
+    {
+      "file": "scenario_c_leakage_report_200.json",
+      "source": "scenario_c_leakage_report.json",
+      "size": 1272,
+      "sha256": "640657f24d86e2c9d57f33f4b1ab7bc2bb93263da6e4c91954e4c066d08cf424"
+    },
+    {
+      "file": "tile_independence_report.json",
+      "source": "tile_independence_report.json",
+      "size": 4468,
+      "sha256": "24a3f0cfd57fb7ed8fd9cf5154e77a666dec0cc1be5a42399a305eed2731fcc3"
+    },
+    {
+      "file": "top_combinations_report_202.json",
+      "source": "top_combinations_report.json",
+      "size": 3572,
+      "sha256": "17450635211f761c7770e62b92d40c5b071a1f49055bb1a6cf25eb96db7dd629"
+    },
+    {
+      "file": "top_leakage_report_203.json",
+      "source": "top_leakage_report.json",
+      "size": 20027,
+      "sha256": "9508f9d2618717d72e26d78cf3110ddcdd50bbcb2d4975629926f42bb9e9cd72"
+    },
+    {
+      "file": "trend_health.csv",
+      "source": "trend_health.csv",
+      "size": 378,
+      "sha256": "6f8185d1c1bf3994bc5c83d932c70665ad53361f7b101badfdbadb329f2860d3"
+    },
+    {
+      "file": "type_b_execution_audit_205.json",
+      "source": "type_b_execution_audit.json",
+      "size": 874,
+      "sha256": "23a007694fd3625ccf8826c50181fddd3a95ed83635f0629ab4f7dd372ba23eb"
+    },
+    {
+      "file": "type_b_predictor_report_206.json",
+      "source": "type_b_predictor_report.json",
+      "size": 5165,
+      "sha256": "d95a4e80818ec7f6178af69722fab58bbdbe6be0da8c43a05e6dc0f6bbe6ef50"
+    },
+    {
+      "file": "urgent_chase_report_207.json",
+      "source": "urgent_chase_report.json",
+      "size": 1531,
+      "sha256": "ab11af0cb30769359c12bc24527c62540041fb9438528a4e283d97b6c82fbf8a"
+    }
+  ],
+  "integrity": {
+    "verified": true,
+    "method": "sha256",
+    "file_count": 208,
+    "total_bytes": 1481389
+  }
+}

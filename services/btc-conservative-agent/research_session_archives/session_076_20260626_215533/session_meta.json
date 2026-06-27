@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_076_20260626_215533",
+  "generated_at": "2026-06-26T21:55:27.082766+00:00",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "data_scope": "session",
+  "trades": 383,
+  "net_pnl_usd": 285.35,
+  "win_rate_pct": 74.7
+}

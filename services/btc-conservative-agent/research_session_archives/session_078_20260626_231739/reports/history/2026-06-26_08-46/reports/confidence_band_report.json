@@ -1,0 +1,107 @@
+{
+  "schema": "confidence_band_report_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T08:43:42.855712+00:00",
+  "filled_trades_by_band": [
+    {
+      "bucket": "0-45",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "45-50",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "50-55",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    },
+    {
+      "bucket": "55-60",
+      "source": "filled_trades",
+      "trades": 2,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": -2.42,
+      "ev_usd": -2.42,
+      "sum_pnl_usd": -4.85,
+      "avg_edge": 1.85,
+      "avg_ai_confidence": 58.0
+    },
+    {
+      "bucket": "60-65",
+      "source": "filled_trades",
+      "trades": 187,
+      "win_rate_pct": 78.1,
+      "avg_pnl_usd": 0.99,
+      "ev_usd": 0.99,
+      "sum_pnl_usd": 185.12,
+      "avg_edge": 2.57,
+      "avg_ai_confidence": 62.0
+    },
+    {
+      "bucket": "65+",
+      "source": "filled_trades",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_edge": 0.0,
+      "avg_ai_confidence": 0.0
+    }
+  ],
+  "ai_decisions_by_band": [
+    {
+      "bucket": "0-45",
+      "source": "ai_decisions",
+      "count": 650
+    },
+    {
+      "bucket": "45-50",
+      "source": "ai_decisions",
+      "count": 22
+    },
+    {
+      "bucket": "50-55",
+      "source": "ai_decisions",
+      "count": 0
+    },
+    {
+      "bucket": "55-60",
+      "source": "ai_decisions",
+      "count": 12
+    },
+    {
+      "bucket": "60-65",
+      "source": "ai_decisions",
+      "count": 1254
+    },
+    {
+      "bucket": "65+",
+      "source": "ai_decisions",
+      "count": 0
+    }
+  ]
+}

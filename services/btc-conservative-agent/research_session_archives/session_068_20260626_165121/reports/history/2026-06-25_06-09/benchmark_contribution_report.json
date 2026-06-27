@@ -1,0 +1,59 @@
+{
+  "schema": "benchmark_contribution_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T06:08:03.701228+00:00",
+  "total_pnl_usd": 214.24,
+  "lanes": [
+    {
+      "lane": "URGENT_CHASE_ALPHA",
+      "label": "Urgent Chase Alpha",
+      "fills": 242,
+      "pnl_usd": 93.54,
+      "pnl_pct_of_total": 43.7
+    },
+    {
+      "lane": "CHASE_3PLUS_ALPHA",
+      "label": "Chase 3+ Alpha",
+      "fills": 242,
+      "pnl_usd": 93.54,
+      "pnl_pct_of_total": 43.7
+    },
+    {
+      "lane": "CONTINUOUS",
+      "label": "Continuous AI Research",
+      "fills": 97,
+      "pnl_usd": 44.37,
+      "pnl_pct_of_total": 20.7
+    },
+    {
+      "lane": "AI_60_65_ALPHA",
+      "label": "AI 60-65 Alpha",
+      "fills": 55,
+      "pnl_usd": -24.0,
+      "pnl_pct_of_total": -11.2
+    },
+    {
+      "lane": "COMBO_604_SP4_CHASE_3PLUS",
+      "label": "AI60-65 \u00b7 Spread4 \u00b7 Chase 3+",
+      "fills": 34,
+      "pnl_usd": 19.69,
+      "pnl_pct_of_total": 9.2
+    },
+    {
+      "lane": "HIGH_EDGE_RUNNER",
+      "label": "High Edge Runner",
+      "fills": 14,
+      "pnl_usd": -14.4,
+      "pnl_pct_of_total": -6.7
+    },
+    {
+      "lane": "COMBO_65_SP5_CHASE_3PLUS",
+      "label": "AI65+ \u00b7 Spread5+ \u00b7 Chase 3+",
+      "fills": 50,
+      "pnl_usd": 1.5,
+      "pnl_pct_of_total": 0.7
+    }
+  ]
+}

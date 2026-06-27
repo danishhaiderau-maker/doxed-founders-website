@@ -1,0 +1,52 @@
+{
+  "schema": "fast_cut_sweep_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T20:38:44.464717+00:00",
+  "current_cut_pct": -12.0,
+  "replay_coverage_pct": 16.2,
+  "booked": {
+    "trades": 253,
+    "sum_pnl_usd": 237.22
+  },
+  "sweep_levels": [
+    {
+      "cut_pct": -12.0,
+      "is_current": true,
+      "trades": 41,
+      "sum_pnl_usd": 53.25,
+      "avg_pnl_usd": 1.3,
+      "win_rate_pct": 63.4,
+      "delta_vs_booked_usd": -183.97
+    },
+    {
+      "cut_pct": -10.0,
+      "is_current": false,
+      "trades": 41,
+      "sum_pnl_usd": 57.85,
+      "avg_pnl_usd": 1.41,
+      "win_rate_pct": 63.4,
+      "delta_vs_booked_usd": -179.37
+    },
+    {
+      "cut_pct": -8.0,
+      "is_current": false,
+      "trades": 41,
+      "sum_pnl_usd": 43.45,
+      "avg_pnl_usd": 1.06,
+      "win_rate_pct": 53.7,
+      "delta_vs_booked_usd": -193.77
+    },
+    {
+      "cut_pct": -6.0,
+      "is_current": false,
+      "trades": 41,
+      "sum_pnl_usd": 45.75,
+      "avg_pnl_usd": 1.12,
+      "win_rate_pct": 51.2,
+      "delta_vs_booked_usd": -191.47
+    }
+  ],
+  "note": "Counterfactual replay sim \u2014 not for auto-tuning until post-exit replay coverage is high."
+}

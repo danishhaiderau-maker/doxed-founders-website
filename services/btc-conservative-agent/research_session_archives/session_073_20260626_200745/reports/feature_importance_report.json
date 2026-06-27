@@ -1,0 +1,74 @@
+{
+  "schema": "feature_importance_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T20:07:22.490984+00:00",
+  "method": "Pearson correlation with net_pnl_usd \u2014 validation only, not for auto-tuning",
+  "trades": 368,
+  "features": [
+    {
+      "feature": "confidence",
+      "column": "ai_win_prob",
+      "correlation_with_pnl": -0.0859,
+      "abs_correlation": 0.0859,
+      "n": 368
+    },
+    {
+      "feature": "structure",
+      "column": "structure_score_at_entry",
+      "correlation_with_pnl": 0.0773,
+      "abs_correlation": 0.0773,
+      "n": 368
+    },
+    {
+      "feature": "edge",
+      "column": "edge_score",
+      "correlation_with_pnl": -0.0684,
+      "abs_correlation": 0.0684,
+      "n": 368
+    },
+    {
+      "feature": "momentum",
+      "column": "momentum",
+      "correlation_with_pnl": 0.0376,
+      "abs_correlation": 0.0376,
+      "n": 368
+    },
+    {
+      "feature": "participation",
+      "column": "features_volume_ratio",
+      "correlation_with_pnl": -0.0163,
+      "abs_correlation": 0.0163,
+      "n": 368
+    },
+    {
+      "feature": "adx",
+      "column": "adx_at_entry",
+      "correlation_with_pnl": -0.0087,
+      "abs_correlation": 0.0087,
+      "n": 368
+    },
+    {
+      "feature": "velocity",
+      "column": "features_velocity",
+      "correlation_with_pnl": -0.0071,
+      "abs_correlation": 0.0071,
+      "n": 368
+    },
+    {
+      "feature": "volatility",
+      "column": "volatility",
+      "correlation_with_pnl": 0.0012,
+      "abs_correlation": 0.0012,
+      "n": 368
+    }
+  ],
+  "weak_signals": [
+    "momentum",
+    "participation",
+    "adx",
+    "velocity",
+    "volatility"
+  ]
+}

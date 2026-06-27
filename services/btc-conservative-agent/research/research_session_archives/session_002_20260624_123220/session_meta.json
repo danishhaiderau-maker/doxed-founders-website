@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_002_20260624_123220",
+  "generated_at": "2026-06-24T12:32:20.171924+00:00",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "data_scope": "all",
+  "trades": 0,
+  "net_pnl_usd": null,
+  "win_rate_pct": null
+}

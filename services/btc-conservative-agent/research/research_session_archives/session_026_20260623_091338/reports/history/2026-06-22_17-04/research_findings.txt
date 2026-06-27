@@ -1,0 +1,18 @@
+========================================================================
+=== KEY FINDINGS ===
+========================================================================
+
+1. CONTINUOUS lane accounts for 54% of net profit ($+2.51).
+2. Lowest lane: COMBO_65_SP5_CHASE_3PLUS at $+0.00 (0 fills) — review if sample grows.
+3. Best confidence band 60-65: 64.0% WR over 25 trades.
+4. Fast-cut exits: 4 trades, $-8.47 booked — not a major leak.
+5. Dominant exit: PROFIT_LOCK_LADDER (16 trades, $+35.54).
+6. Gate damage $+0.00 — post-AI gates are not the main PnL leak.
+7. Scenario C left $62.0 on table vs peak — exit timing is the bigger lever than entry gates.
+8. Edge filter: insufficient_data (sample POOR — Only 26 trades / 137 approves — treat calibration, edge, and lane verdicts as noisy.).
+9. Edge score correlation with PnL: -0.045.
+10. Blocked shadow opportunity (heuristic): $+0.00.
+11. Top leakage: $62 left on table across 26 ranked trades — see top_leakage_report.json.
+12. Biggest leak by exit type: STOP_LOSS ($26 left).
+
+========================================================================

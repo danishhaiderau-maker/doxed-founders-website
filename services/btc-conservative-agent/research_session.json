@@ -1,0 +1,14 @@
+{
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "bot_start_time": 1782304712.2158246,
+  "bot_start_iso": "2026-06-24 22:38:32 AEST",
+  "bot_start_iso_utc": "2026-06-24 12:38:32 UTC",
+  "display_timezone": "Australia/Melbourne",
+  "fresh_collection_mode": true,
+  "fresh_collection_start_time": 1782304712.2158246,
+  "fresh_collection_start_iso": "2026-06-24 22:38:32 AEST",
+  "fresh_collection_start_iso_utc": "2026-06-24 12:38:32 UTC",
+  "cwd": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent",
+  "launcher": "15minu_bot.py"
+}

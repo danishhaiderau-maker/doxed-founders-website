@@ -1,0 +1,13 @@
+{
+  "cwd": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent",
+  "generated_at": "2026-06-22T11:35:59.353013+00:00",
+  "buckets": {
+    "FILLED": 1
+  },
+  "avg_distance_from_market_pct": 0.1882,
+  "avg_missed_by_pct": 0,
+  "ttl_expired_count": 0,
+  "capacity_rejected_count": 0,
+  "queue_replaced_count": 0,
+  "filled_count": 1
+}

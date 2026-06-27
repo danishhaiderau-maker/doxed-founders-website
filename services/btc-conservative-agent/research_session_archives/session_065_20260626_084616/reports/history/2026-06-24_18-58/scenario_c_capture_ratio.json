@@ -1,0 +1,85 @@
+{
+  "schema": "scenario_c_capture_ratio_v1",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "expected_bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-24T18:57:50.165091+00:00",
+  "method": "capture_pct = net_pnl_usd / (max_profit_margin_pct * margin_usdt / 100) per trade",
+  "overall_mfe_positive": {
+    "trades": 56,
+    "available_mfe_usd": 135.64,
+    "captured_usd": 31.1,
+    "mean_capture_pct": -264.4,
+    "median_capture_pct": 51.2,
+    "aggregate_capture_pct": 22.9
+  },
+  "winners_only": {
+    "trades": 42,
+    "available_mfe_usd": 127.2,
+    "captured_usd": 74.22,
+    "mean_capture_pct": 56.1,
+    "median_capture_pct": 58.6,
+    "aggregate_capture_pct": 58.4
+  },
+  "ladder_exits_only": {
+    "trades": 42,
+    "available_mfe_usd": 127.2,
+    "captured_usd": 74.22,
+    "mean_capture_pct": 56.1,
+    "median_capture_pct": 58.6,
+    "aggregate_capture_pct": 58.4
+  },
+  "capture_distribution": [
+    {
+      "bucket": "0-30%",
+      "trades": 4
+    },
+    {
+      "bucket": "30-50%",
+      "trades": 9
+    },
+    {
+      "bucket": "50-70%",
+      "trades": 21
+    },
+    {
+      "bucket": "70-90%",
+      "trades": 8
+    },
+    {
+      "bucket": "90%+",
+      "trades": 0
+    }
+  ],
+  "by_exit_reason": {
+    "EARLY_FAIL": {
+      "trades": 3,
+      "available_mfe_usd": 3.5,
+      "captured_usd": -16.55,
+      "mean_capture_pct": -479.7,
+      "median_capture_pct": -455.8
+    },
+    "PROFIT_LOCK_LADDER": {
+      "trades": 42,
+      "available_mfe_usd": 127.2,
+      "captured_usd": 74.22,
+      "mean_capture_pct": 56.1,
+      "median_capture_pct": 58.6
+    },
+    "STOP_LOSS": {
+      "trades": 4,
+      "available_mfe_usd": 3.98,
+      "captured_usd": -16.85,
+      "mean_capture_pct": -562.9,
+      "median_capture_pct": -454.6
+    },
+    "THESIS_FAST_CUT": {
+      "trades": 8,
+      "available_mfe_usd": 0.96,
+      "captured_usd": -10.01,
+      "mean_capture_pct": -1924.4,
+      "median_capture_pct": -949.8
+    }
+  },
+  "note": "Use mean/median capture_pct \u2014 not sum(booked)/sum(peak) across losers (scenario_c_leakage aggregate can go negative when fast-cut/stop booked USD is negative)."
+}

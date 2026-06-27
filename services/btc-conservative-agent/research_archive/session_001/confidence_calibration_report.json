@@ -1,0 +1,97 @@
+{
+  "cwd": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent",
+  "total_samples": 365,
+  "buckets": [
+    {
+      "bucket": "0-5",
+      "n": 37,
+      "win_rate_pct": 40.5,
+      "sum_pnl_usd": 3.52,
+      "avg_pnl_usd": 0.095,
+      "sources": {
+        "shadow_reject": 37
+      }
+    },
+    {
+      "bucket": "30-35",
+      "n": 4,
+      "win_rate_pct": 50.0,
+      "sum_pnl_usd": 2.16,
+      "avg_pnl_usd": 0.54,
+      "sources": {
+        "shadow_reject": 4
+      }
+    },
+    {
+      "bucket": "35-40",
+      "n": 42,
+      "win_rate_pct": 33.3,
+      "sum_pnl_usd": 3.02,
+      "avg_pnl_usd": 0.072,
+      "sources": {
+        "shadow_reject": 42
+      }
+    },
+    {
+      "bucket": "40-45",
+      "n": 128,
+      "win_rate_pct": 38.3,
+      "sum_pnl_usd": 24.99,
+      "avg_pnl_usd": 0.195,
+      "sources": {
+        "executed": 1,
+        "shadow_reject": 127
+      }
+    },
+    {
+      "bucket": "45-50",
+      "n": 3,
+      "win_rate_pct": 33.3,
+      "sum_pnl_usd": -3.2,
+      "avg_pnl_usd": -1.067,
+      "sources": {
+        "shadow_reject": 3
+      }
+    },
+    {
+      "bucket": "55-60",
+      "n": 2,
+      "win_rate_pct": 100.0,
+      "sum_pnl_usd": 1.7,
+      "avg_pnl_usd": 0.852,
+      "sources": {
+        "executed": 2
+      }
+    },
+    {
+      "bucket": "60-65",
+      "n": 83,
+      "win_rate_pct": 61.4,
+      "sum_pnl_usd": 12.08,
+      "avg_pnl_usd": 0.145,
+      "sources": {
+        "executed": 83
+      }
+    },
+    {
+      "bucket": "65-70",
+      "n": 47,
+      "win_rate_pct": 70.2,
+      "sum_pnl_usd": 15.85,
+      "avg_pnl_usd": 0.337,
+      "sources": {
+        "executed": 47
+      }
+    },
+    {
+      "bucket": "70-75",
+      "n": 19,
+      "win_rate_pct": 73.7,
+      "sum_pnl_usd": 2.31,
+      "avg_pnl_usd": 0.122,
+      "sources": {
+        "executed": 19
+      }
+    }
+  ]
+}

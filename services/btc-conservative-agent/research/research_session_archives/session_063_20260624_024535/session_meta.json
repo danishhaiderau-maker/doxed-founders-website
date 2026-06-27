@@ -1,0 +1,10 @@
+{
+  "schema": "research_session_archive_v1",
+  "session_id": "session_063_20260624_024535",
+  "generated_at": "2026-06-24T02:45:35.396552+00:00",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "data_scope": "session",
+  "trades": 0,
+  "net_pnl_usd": null,
+  "win_rate_pct": null
+}

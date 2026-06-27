@@ -1,0 +1,250 @@
+{
+  "schema": "exit_ladder_simulator_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-26T20:43:05.402225+00:00",
+  "thesis_fast_cut_pct": -12.0,
+  "thesis_exit_above_pct": 8.0,
+  "actual_realized_usd": 277.68,
+  "actual_trades": 401,
+  "replays_available": 668,
+  "profiles": [
+    {
+      "profile_id": "profile_50",
+      "label": "50\u219235 \u00b7 75\u219250 \u00b7 100\u219270",
+      "ladder": [
+        [
+          50,
+          35
+        ],
+        [
+          75,
+          50
+        ],
+        [
+          100,
+          70
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 179.43,
+      "avg_pnl_usd": 4.72,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 55.3,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -98.25
+    },
+    {
+      "profile_id": "profile_30",
+      "label": "30\u219220 \u00b7 40\u219230 \u00b7 50\u219240 \u00b7 60\u219250",
+      "ladder": [
+        [
+          30,
+          20
+        ],
+        [
+          40,
+          30
+        ],
+        [
+          50,
+          40
+        ],
+        [
+          60,
+          50
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 138.37,
+      "avg_pnl_usd": 3.64,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 76.3,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -139.31
+    },
+    {
+      "profile_id": "profile_40",
+      "label": "40\u219225 \u00b7 60\u219240 \u00b7 80\u219260",
+      "ladder": [
+        [
+          40,
+          25
+        ],
+        [
+          60,
+          40
+        ],
+        [
+          80,
+          60
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 127.55,
+      "avg_pnl_usd": 3.36,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 50.0,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -150.13
+    },
+    {
+      "profile_id": "extended_upper",
+      "label": "Legacy early + extended upper (12\u21928 \u2026 150\u2192120)",
+      "ladder": [
+        [
+          12,
+          8
+        ],
+        [
+          15,
+          10
+        ],
+        [
+          25,
+          18
+        ],
+        [
+          40,
+          28
+        ],
+        [
+          60,
+          45
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          100,
+          75
+        ],
+        [
+          150,
+          120
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 94.2,
+      "avg_pnl_usd": 2.48,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 78.9,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -183.48
+    },
+    {
+      "profile_id": "current_live",
+      "label": "Current Scenario C (10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120)",
+      "ladder": [
+        [
+          10,
+          6
+        ],
+        [
+          19,
+          17
+        ],
+        [
+          40,
+          28
+        ],
+        [
+          60,
+          45
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          100,
+          75
+        ],
+        [
+          150,
+          120
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 79.2,
+      "avg_pnl_usd": 2.08,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 78.9,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -198.48
+    },
+    {
+      "profile_id": "relaxed_early_extended",
+      "label": "Relaxed early + extended (10\u21926, 19\u219217, 40\u219228, 60\u219245, 80\u219260, 100\u219275, 150\u2192120)",
+      "ladder": [
+        [
+          10,
+          6
+        ],
+        [
+          19,
+          17
+        ],
+        [
+          40,
+          28
+        ],
+        [
+          60,
+          45
+        ],
+        [
+          80,
+          60
+        ],
+        [
+          100,
+          75
+        ],
+        [
+          150,
+          120
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 79.2,
+      "avg_pnl_usd": 2.08,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 78.9,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -198.48
+    },
+    {
+      "profile_id": "legacy_12_8",
+      "label": "Legacy Scenario C (12\u21928 \u00b7 15\u219210 \u00b7 25\u219218 \u00b7 40\u219228)",
+      "ladder": [
+        [
+          12,
+          8
+        ],
+        [
+          15,
+          10
+        ],
+        [
+          25,
+          18
+        ],
+        [
+          40,
+          28
+        ]
+      ],
+      "trades_simulated": 38,
+      "sum_pnl_usd": 71.2,
+      "avg_pnl_usd": 1.87,
+      "wr_pct": 78.9,
+      "ladder_exit_pct": 78.9,
+      "thesis_cut_pct": 21.1,
+      "delta_vs_actual_usd": -206.48
+    }
+  ],
+  "best_profile_id": "profile_50"
+}

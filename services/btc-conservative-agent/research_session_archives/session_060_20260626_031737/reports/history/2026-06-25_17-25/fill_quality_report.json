@@ -1,0 +1,85 @@
+{
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-25T17:24:34.844105+00:00",
+  "trade_count": 215,
+  "era_breakdown": [
+    {
+      "sim_era": "LEGACY_LAST_PRICE",
+      "label": "Pre v1.1.16 \u2014 last-trade sim (optimistic PnL)",
+      "trades": 215,
+      "win_rate_pct": 75.3,
+      "sum_net_usd": 162.59,
+      "avg_net_usd": 0.76
+    }
+  ],
+  "book_slippage": {
+    "entry_avg_usd": 0.0027,
+    "exit_avg_usd": 0.0923,
+    "total_avg_usd": 0.0949,
+    "total_sum_usd": 20.41,
+    "buckets": [
+      {
+        "bucket": "0",
+        "trades": 131,
+        "win_rate_pct": 73.3,
+        "sum_net_usd": 85.38,
+        "avg_book_slip_usd": 0.0
+      },
+      {
+        "bucket": "0.01-0.50",
+        "trades": 79,
+        "win_rate_pct": 81.0,
+        "sum_net_usd": 91.84,
+        "avg_book_slip_usd": 0.1587
+      },
+      {
+        "bucket": "0.50-2",
+        "trades": 3,
+        "win_rate_pct": 66.7,
+        "sum_net_usd": -1.56,
+        "avg_book_slip_usd": 0.5308
+      },
+      {
+        "bucket": "2+",
+        "trades": 2,
+        "win_rate_pct": 0.0,
+        "sum_net_usd": -13.07,
+        "avg_book_slip_usd": 3.1409
+      }
+    ]
+  },
+  "execution_types": {
+    "entry": [
+      {
+        "execution_entry_type": "MAKER",
+        "n": 215,
+        "wr": 75.35,
+        "sum_net": 162.59
+      }
+    ],
+    "exit": [
+      {
+        "execution_exit_type": "MAKER",
+        "n": 1,
+        "wr": 100.0,
+        "sum_net": 22.51
+      },
+      {
+        "execution_exit_type": "TAKER",
+        "n": 214,
+        "wr": 75.23,
+        "sum_net": 140.08
+      }
+    ]
+  },
+  "partial_fills": 0,
+  "replay_note": "signal_replay ticks from v1.1.18+ use executable depth marks; legacy replay used last-trade unreal \u2014 counterfactual sweeps may differ.",
+  "ladder_exit_audit": {
+    "ladder_trades": 155,
+    "suspicious_tp_booking": 0,
+    "note": "net\u226525 with peak MFE<20% implies pre-v1.1.19 maker/TP booking bug"
+  },
+  "signal_slippage_mean": 44.961488,
+  "execution_slippage_mean": 44.961488
+}

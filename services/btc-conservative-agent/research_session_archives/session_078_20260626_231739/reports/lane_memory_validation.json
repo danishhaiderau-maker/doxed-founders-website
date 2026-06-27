@@ -1,0 +1,22 @@
+{
+  "schema": "lane_memory_validation_v2",
+  "generated_at": "2026-06-26T23:14:18.446653+00:00",
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "retired_lanes_checked": [
+    "COMBO_65_SP5_CHASE_3PLUS",
+    "COMBO_65_SP5_DIRECT",
+    "COMBO_604_SP4_CHASE_3PLUS",
+    "COMBO_604_SP4_DIRECT",
+    "EXTREME_EDGE",
+    "EDGE_PLUS_STACK",
+    "TYPE_B_PREDICTOR_V1",
+    "RECOVERY_MONSTER_V1",
+    "AI_DISAGREEMENT_ALPHA",
+    "AI_DISAGREEMENT_REPLAY"
+  ],
+  "max_bucket": 500,
+  "critical_issues": [],
+  "warn_issues": [],
+  "issues": [],
+  "verdict": "PASS"
+}

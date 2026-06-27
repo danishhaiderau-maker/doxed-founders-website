@@ -1,0 +1,50 @@
+{
+  "schema": "ai_confidence_expectancy_v1",
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "expected_bot_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-27T00:51:55.272262+00:00",
+  "note": "Filled-trade expectancy by AI confidence band \u2014 discover profitable confidence zones.",
+  "buckets": [
+    {
+      "bucket": "45-50",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0
+    },
+    {
+      "bucket": "50-55",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0
+    },
+    {
+      "bucket": "55-60",
+      "trades": 4,
+      "win_rate_pct": 50.0,
+      "sum_pnl_usd": -1.18,
+      "avg_pnl_usd": -0.3,
+      "ev_usd": -0.3
+    },
+    {
+      "bucket": "60-65",
+      "trades": 284,
+      "win_rate_pct": 75.7,
+      "sum_pnl_usd": 249.0,
+      "avg_pnl_usd": 0.88,
+      "ev_usd": 0.88
+    },
+    {
+      "bucket": "65+",
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "sum_pnl_usd": 0.0,
+      "avg_pnl_usd": 0.0,
+      "ev_usd": 0.0
+    }
+  ]
+}

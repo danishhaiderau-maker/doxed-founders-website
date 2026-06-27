@@ -1,0 +1,19 @@
+{
+  "schema": "edge_validation_v1",
+  "analyzer_sync_id": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "expected_bot_version": "v9.83-quality-roster-4-tiles-2026-06-21",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-22T17:04:08.926408+00:00",
+  "edge_validation_status": "DEPRECATED",
+  "status_labels": [
+    "ACTIVE",
+    "WATCHLIST",
+    "DEPRECATED"
+  ],
+  "edge_correlation_with_pnl": -0.0455,
+  "incremental_verdict": "insufficient_data",
+  "reasons": [
+    "corr(edge,pnl)=-0.0455"
+  ],
+  "usage_note": "Validation only \u2014 do not auto-remove edge from bot based on this report alone."
+}

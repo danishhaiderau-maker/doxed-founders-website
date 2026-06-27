@@ -1,0 +1,216 @@
+{
+  "analyzer_sync_id": "v11.1-virtual-chase-known-combos-v1",
+  "analyzer_version": "v11.1-virtual-chase-known-combos-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-27T02:15:17.880584+00:00",
+  "shadow_cohort": 1316,
+  "shadow_filled": 1008,
+  "counts": {
+    "Shadow fill + real fill": 0,
+    "Shadow fill + TTL expired": 522,
+    "Shadow fill + missed by <$5": 0,
+    "Shadow fill + missed by <$10": 0,
+    "Shadow fill + missed by <$20": 0,
+    "Shadow fill + missed by >=$20": 0,
+    "Shadow fill + blocked (capacity)": 7,
+    "Shadow fill + blocked (gates)": 319,
+    "Shadow fill + other": 160,
+    "Shadow NO_FILL": 308
+  },
+  "counts_pct": {
+    "Shadow fill + real fill": 0.0,
+    "Shadow fill + TTL expired": 39.7,
+    "Shadow fill + missed by <$5": 0.0,
+    "Shadow fill + missed by <$10": 0.0,
+    "Shadow fill + missed by <$20": 0.0,
+    "Shadow fill + missed by >=$20": 0.0,
+    "Shadow fill + blocked (capacity)": 0.5,
+    "Shadow fill + blocked (gates)": 24.2,
+    "Shadow fill + other": 12.2,
+    "Shadow NO_FILL": 23.4
+  },
+  "missed_winner_usd": 1559.23,
+  "good_block_saved": 1029.66,
+  "by_lane": {
+    "AI60_SP3_VIRTUAL_CHASE": {
+      "shadow_cohort": 81,
+      "shadow_filled": 63,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 9,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 0,
+        "Shadow fill + blocked (gates)": 54,
+        "Shadow fill + other": 0,
+        "Shadow NO_FILL": 18
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 11.1,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 0.0,
+        "Shadow fill + blocked (gates)": 66.7,
+        "Shadow fill + other": 0.0,
+        "Shadow NO_FILL": 22.2
+      },
+      "missed_winner_usd": 60.2,
+      "good_block_saved": 79.2
+    },
+    "AI_SCAN": {
+      "shadow_cohort": 461,
+      "shadow_filled": 357,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 357,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 0,
+        "Shadow fill + blocked (gates)": 0,
+        "Shadow fill + other": 0,
+        "Shadow NO_FILL": 104
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 77.4,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 0.0,
+        "Shadow fill + blocked (gates)": 0.0,
+        "Shadow fill + other": 0.0,
+        "Shadow NO_FILL": 22.6
+      },
+      "missed_winner_usd": 511.01,
+      "good_block_saved": 370.98
+    },
+    "COMBO_604_SP4_CHASE_3PLUS": {
+      "shadow_cohort": 56,
+      "shadow_filled": 44,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 0,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 0,
+        "Shadow fill + blocked (gates)": 44,
+        "Shadow fill + other": 0,
+        "Shadow NO_FILL": 12
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 0.0,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 0.0,
+        "Shadow fill + blocked (gates)": 78.6,
+        "Shadow fill + other": 0.0,
+        "Shadow NO_FILL": 21.4
+      },
+      "missed_winner_usd": 61.62,
+      "good_block_saved": 33.6
+    },
+    "COMBO_65_SP5_CHASE_3PLUS": {
+      "shadow_cohort": 39,
+      "shadow_filled": 25,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 4,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 1,
+        "Shadow fill + blocked (gates)": 20,
+        "Shadow fill + other": 0,
+        "Shadow NO_FILL": 14
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 10.3,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 2.6,
+        "Shadow fill + blocked (gates)": 51.3,
+        "Shadow fill + other": 0.0,
+        "Shadow NO_FILL": 35.9
+      },
+      "missed_winner_usd": 71.95,
+      "good_block_saved": 19.2
+    },
+    "CONTINUOUS": {
+      "shadow_cohort": 278,
+      "shadow_filled": 213,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 6,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 6,
+        "Shadow fill + blocked (gates)": 201,
+        "Shadow fill + other": 0,
+        "Shadow NO_FILL": 65
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 2.2,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 2.2,
+        "Shadow fill + blocked (gates)": 72.3,
+        "Shadow fill + other": 0.0,
+        "Shadow NO_FILL": 23.4
+      },
+      "missed_winner_usd": 305.35,
+      "good_block_saved": 231.02
+    },
+    "UNKNOWN": {
+      "shadow_cohort": 401,
+      "shadow_filled": 306,
+      "counts": {
+        "Shadow fill + real fill": 0,
+        "Shadow fill + TTL expired": 146,
+        "Shadow fill + missed by <$5": 0,
+        "Shadow fill + missed by <$10": 0,
+        "Shadow fill + missed by <$20": 0,
+        "Shadow fill + missed by >=$20": 0,
+        "Shadow fill + blocked (capacity)": 0,
+        "Shadow fill + blocked (gates)": 0,
+        "Shadow fill + other": 160,
+        "Shadow NO_FILL": 95
+      },
+      "counts_pct": {
+        "Shadow fill + real fill": 0.0,
+        "Shadow fill + TTL expired": 36.4,
+        "Shadow fill + missed by <$5": 0.0,
+        "Shadow fill + missed by <$10": 0.0,
+        "Shadow fill + missed by <$20": 0.0,
+        "Shadow fill + missed by >=$20": 0.0,
+        "Shadow fill + blocked (capacity)": 0.0,
+        "Shadow fill + blocked (gates)": 0.0,
+        "Shadow fill + other": 39.9,
+        "Shadow NO_FILL": 23.7
+      },
+      "missed_winner_usd": 549.1,
+      "good_block_saved": 295.66
+    }
+  }
+}

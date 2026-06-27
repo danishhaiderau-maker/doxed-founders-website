@@ -1,0 +1,9 @@
+{
+  "schema": "top_leakage_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T08:59:44.503571+00:00",
+  "top_n": 50,
+  "overall_left_usd": 0.0,
+  "trades": []
+}

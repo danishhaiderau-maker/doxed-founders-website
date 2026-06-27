@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — ALL-TIME (full CSV history) | v10.2-ai-chase-bands-desk-2026-06-23 ===
+========================================================================
+Data scope: SESSION | CSV trades: 0 | Analyzed fills: 0
+Trades 0 | WR None% | PnL n/a | EV None/trade | MFE capture 14.6%
+APPROVE 137 → executed 25 | Gate damage $+0.00 | Edge: insufficient_data
+Sample confidence: POOR — Only 0 trades / 137 approves — treat calibration, edge, and lane verdicts as noisy.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — ALL-DATA (full CSV history) | v10.3-dashboard-ultimate-gate-2026-06-23 ===
+========================================================================
+Data scope: ALL | CSV trades: 152 | Analyzed fills: 118
+Trades 118 | WR 66.1% | PnL +24.27 | EV 0.21/trade | MFE capture 21.3%
+APPROVE 638 → executed 81 | Gate damage $+107.35 | Edge: edge_no_incremental_value
+Sample confidence: MODERATE — 118 trades — directional only; prefer ≥200 trades before strong edge/lane claims.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

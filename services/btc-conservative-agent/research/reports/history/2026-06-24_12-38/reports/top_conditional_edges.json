@@ -1,0 +1,96 @@
+{
+  "schema": "top_conditional_edges_v1",
+  "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-24T12:38:56.692115+00:00",
+  "min_trades_per_combo": 3,
+  "edges": [
+    {
+      "combo": {
+        "confidence_band": "60-65",
+        "spread_bucket": "5+",
+        "adx_bucket": "adx_low",
+        "session": "LONDON",
+        "research_lane": "CONTINUOUS"
+      },
+      "trades": 5,
+      "wins": 5,
+      "wr_pct": 100.0,
+      "pnl_usd": 9.57,
+      "ev_usd": 1.91,
+      "score": 4.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "combo": {
+        "confidence_band": "60-65",
+        "spread_bucket": "5+",
+        "adx_bucket": "adx_high",
+        "session": "OVERLAP",
+        "research_lane": "CONTINUOUS"
+      },
+      "trades": 11,
+      "wins": 4,
+      "wr_pct": 36.4,
+      "pnl_usd": -14.27,
+      "ev_usd": -1.3,
+      "score": 2.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "combo": {
+        "confidence_band": "60-65",
+        "spread_bucket": "5+",
+        "adx_bucket": "adx_mid",
+        "session": "OVERLAP",
+        "research_lane": "CONTINUOUS"
+      },
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 4.11,
+      "ev_usd": 2.06,
+      "score": 2.0,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "combo": {
+        "confidence_band": "60-65",
+        "spread_bucket": "5+",
+        "adx_bucket": "adx_mid",
+        "session": "LONDON",
+        "research_lane": "CONTINUOUS"
+      },
+      "trades": 2,
+      "wins": 2,
+      "wr_pct": 100.0,
+      "pnl_usd": 3.1,
+      "ev_usd": 1.55,
+      "score": 1.9,
+      "tier": "LOW",
+      "recommend_ok": false
+    },
+    {
+      "combo": {
+        "confidence_band": "0-45",
+        "spread_bucket": "0-1",
+        "adx_bucket": "adx_low",
+        "session": "LONDON",
+        "research_lane": "AI_DISAGREEMENT_REPLAY"
+      },
+      "trades": 1,
+      "wins": 1,
+      "wr_pct": 100.0,
+      "pnl_usd": 1.09,
+      "ev_usd": 1.09,
+      "score": 0.0,
+      "tier": "INSUFFICIENT",
+      "recommend_ok": false
+    }
+  ],
+  "top_recommendable": [],
+  "usage_note": "Require \u2265100 trades + positive EV before auto roster changes"
+}

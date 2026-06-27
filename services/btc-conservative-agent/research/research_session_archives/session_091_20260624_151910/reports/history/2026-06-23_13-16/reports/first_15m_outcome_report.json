@@ -1,0 +1,11 @@
+{
+  "schema": "first_15m_outcome_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T13:16:17.457417+00:00",
+  "sample_replays_with_trades": 0,
+  "early_tags": {},
+  "fast_cut_early_tags": {},
+  "trades": []
+}

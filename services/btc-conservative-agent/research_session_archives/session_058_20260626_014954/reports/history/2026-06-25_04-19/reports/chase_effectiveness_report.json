@@ -1,0 +1,45 @@
+{
+  "schema": "chase_effectiveness_v1",
+  "analyzer_sync_id": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "expected_bot_version": "v10.7-fresh-scope-relay-audit-2026-06-25",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T04:19:28.263032+00:00",
+  "question": "Are heavily chased trades profitable or rescue fills?",
+  "buckets": {
+    "0_chases": {
+      "trades": 158,
+      "wins": 114,
+      "sum_pnl_usd": 68.89,
+      "win_rate_pct": 72.2,
+      "ev_usd": 0.44
+    },
+    "1_chase": {
+      "trades": 0,
+      "wins": 0,
+      "sum_pnl_usd": 0.0,
+      "win_rate_pct": 0.0,
+      "ev_usd": 0.0
+    },
+    "2_chases": {
+      "trades": 0,
+      "wins": 0,
+      "sum_pnl_usd": 0.0,
+      "win_rate_pct": 0.0,
+      "ev_usd": 0.0
+    },
+    "3-5_chases": {
+      "trades": 0,
+      "wins": 0,
+      "sum_pnl_usd": 0.0,
+      "win_rate_pct": 0.0,
+      "ev_usd": 0.0
+    },
+    "6+_chases": {
+      "trades": 0,
+      "wins": 0,
+      "sum_pnl_usd": 0.0,
+      "win_rate_pct": 0.0,
+      "ev_usd": 0.0
+    }
+  }
+}

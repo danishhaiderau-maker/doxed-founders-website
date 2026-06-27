@@ -1,0 +1,14 @@
+{
+  "schema": "real_edge_summary_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-26T07:39:02.629990+00:00",
+  "approve_attempts": 1138,
+  "executed": 306,
+  "blocked": 832,
+  "executed_pnl_usd": 217.15,
+  "blocked_shadow_pnl_usd": 177.09,
+  "counterfactual_all_approve_usd": 394.24,
+  "gate_damage_usd": 177.09,
+  "per_approve_ev_executed": 0.71,
+  "per_approve_ev_counterfactual": 0.35
+}

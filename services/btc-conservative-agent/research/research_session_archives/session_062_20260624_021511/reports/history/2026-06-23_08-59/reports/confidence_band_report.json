@@ -1,0 +1,9 @@
+{
+  "schema": "confidence_band_report_v1",
+  "analyzer_sync_id": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "expected_bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "session_scope": "ALL-TIME",
+  "generated_at": "2026-06-23T08:59:51.309707+00:00",
+  "filled_trades_by_band": [],
+  "ai_decisions_by_band": []
+}

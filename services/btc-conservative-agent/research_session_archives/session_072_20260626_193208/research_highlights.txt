@@ -1,0 +1,98 @@
+================================================================================================================
+=== RESEARCH HIGHLIGHTS — FRESH-COLLECTION | v11.1-virtual-chase-known-combos-v1 ===
+================================================================================================================
+
+=== RESEARCH HIGHLIGHTS (at-a-glance) ===
+Top Lane:     CONTINUOUS  $+187.04
+Worst Lane:   AI_60_65_ALPHA  $-25.20
+Best Conf:    60-65  75.5% WR
+Worst Conf:   55-60  25.0% WR
+Fast-Cut PnL: $-75.31
+Blocked Opp:  $+769.98
+Edge corr:    -0.0642
+Best Exit:    PROFIT_LOCK_LADDER  $+488.30
+
+--- APPROVE funnel ---
+APPROVE     Executed    Exec PnL      All-APPROVE CF    Gate damage   
+1519        387         +265.65       +429.54           +163.89       
+
+--- Lanes (profile: PRIMARY_PRODUCTION_v1) ---
+Lane                    Appr    Fill    Fill%    PnL         EV/appr   
+AI60_SP3_VIRTUAL_CHASE  107     31      29.0%    +16.46      +0.15     
+CONTINUOUS              594     234     39.0%    +187.04     +0.47     
+COMBO_604_SP4_CHASE_3…  146     68      47.0%    +56.64      +0.58     
+COMBO_65_SP5_CHASE_3P…  90      54      60.0%    +5.51       +0.65     
+COMBO_604_SP4_DIRECT    0       0       0.0%     +0.00       +0.00     
+COMBO_65_SP5_DIRECT     0       0       0.0%     +0.00       +0.00     
+AI_DISAGREEMENT_REPLAY  0       0       0.0%     +0.00       +0.00     
+RECOVERY_MONSTER_V1     0       0       0.0%     +0.00       +0.00     
+TYPE_B_PREDICTOR_V1     0       0       0.0%     +0.00       +0.00     
+AI_DISAGREEMENT_ALPHA   0       0       0.0%     +0.00       +0.00     
+EXTREME_EDGE            0       0       0.0%     +0.00       +0.00     
+EDGE_PLUS_STACK         0       0       0.0%     +0.00       +0.00     
+AI_SCAN                 586     0       0.0%     +0.00       +0.28     
+HIGH_EDGE_RUNNER        19      19      100.0%   -21.20      -1.12     
+SHADOW_RUNNER           0       0       0.0%     +0.00       +0.00     
+EDGE_ALPHA_4            0       0       0.0%     +0.00       +0.00     
+TYPE_B_HUNTER           0       0       0.0%     +0.00       +0.00     
+SHORT_BEAR_ALPHA        0       0       0.0%     +0.00       +0.00     
+AI_60_65_ALPHA          108     108     100.0%   -25.20      -0.23     
+URGENT_CHASE_ALPHA      408     408     100.0%   +164.51     +0.40     
+CHASE_3PLUS_ALPHA       408     408     100.0%   +164.51     +0.40     
+  Best: CONTINUOUS $+187.04 | Worst: AI_60_65_ALPHA $-25.20
+
+--- Exit mix ---
+Exit reason                   N       WR%       PnL         
+PROFIT_LOCK_LADDER            257     100.0%    +488.30     
+THESIS_FAST_CUT               39      2.6%      -75.31      
+THESIS_INVALIDATED            36      27.8%     -33.02      
+STOP_LOSS                     19      0.0%      -86.67      
+EARLY_FAIL                    9       0.0%      -46.46      
+TAKE_PROFIT                   1       100.0%    +22.51      
+
+--- AI calibration (over-confident (actual 47.0% vs AI 64.0% implied)) ---
+Band        N       WR%       PnL         
+55-60       8       25.0%     -5.41       
+60-65       804     55.2%     +338.08     
+65+         317     54.3%     +270.37     
+  Best: 60-65 WR 75.5% | Worst: 55-60 WR 25.0%
+
+--- Confidence bands (executed) ---
+Band        N       WR%       PnL         
+55-60       3       33.3%     -4.21       
+60-65       257     75.5%     +229.25     
+
+--- Chase ---
+Assisted: 0/420 fills | Saved: 0 | TTL expired: 0
+Chase bucket    N       WR%       PnL           EV        
+0_chases        361     74.5%     +269.35       +0.75     
+
+--- Scenario C / exits ---
+Leakage left on table: $729.75 | MFE capture: 31.1% | Fast-cut trades: 39
+  Capture distribution: 0-30%: n=29, 30-50%: n=84, 50-70%: n=102, 70-90%: n=45, 90%+: n=9
+  Fast-cut: n=39 saved=$0.00 missed=$0.00
+
+--- Horizon (losers → green later?) ---
+  5m: green=5 still_red=4 unknown=83 (55.6% of known)
+  10m: green=5 still_red=4 unknown=83 (55.6% of known)
+  15m: green=5 still_red=4 unknown=83 (55.6% of known)
+  30m: green=9 still_red=0 unknown=83 (100.0% of known)
+
+--- Top missed opportunities ---
+  POST_AI_GATE  +$363.36  (n=1738)
+  OTHER  +$312.08  (n=1000)
+  EDGE_GATE  +$94.54  (n=452)
+
+--- Direction ---
+  SHORT: n=361 WR=74.5% PnL=$+269.35
+
+--- Edge validation ---
+Incremental: edge_no_incremental_value
+  Decile corr(edge,PnL)=-0.0642 verdict=edge_non_predictive
+Edge decile   N       WR%       EV        
+0-1           9       66.7%     +0.73     
+1-2           70      82.9%     +1.29     
+2-3           98      71.4%     +0.59     
+3-4           69      73.9%     +0.85     
+4+            115     73.0%     +0.49     
+================================================================================================================

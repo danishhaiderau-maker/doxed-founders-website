@@ -1,0 +1,46 @@
+{
+  "schema": "research_accumulator_status_v1",
+  "schema_version": "v983_week_collection_v1",
+  "generated_at": "2026-06-26T22:22:24.713579+00:00",
+  "epoch_start_iso": "2026-06-22T11:19:45.897548199+00:00",
+  "backfill_policy": "none \u2014 only trades after epoch",
+  "sync_interval_minutes": 30,
+  "total_trades": 21,
+  "last_sync": {
+    "synced_at": "2026-06-22T14:38:35.733888+00:00",
+    "new_rows": 7,
+    "total_rows": 21
+  },
+  "by_lane": {
+    "CONTINUOUS": {
+      "n": 20,
+      "pnl": 2.51
+    },
+    "AI_DISAGREEMENT_REPLAY": {
+      "n": 1,
+      "pnl": 1.09
+    }
+  },
+  "top_regime_cells": [
+    {
+      "regime": "weekday|OVERLAP|adx_high|vol_high|funding_positive|liquidity_mid",
+      "n": 11
+    },
+    {
+      "regime": "weekday|LONDON|adx_low|vol_high|funding_positive|liquidity_mid",
+      "n": 6
+    },
+    {
+      "regime": "weekday|OVERLAP|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 2
+    },
+    {
+      "regime": "weekday|LONDON|adx_mid|vol_high|funding_positive|liquidity_mid",
+      "n": 2
+    }
+  ],
+  "db_path": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_accumulator\\research_trades_v983.db",
+  "export_csv": "C:\\Users\\user\\Desktop\\Final Bots\\doxedcryptofounder\\services\\btc-conservative-agent\\research\\research_accumulator\\trades_accumulated.csv",
+  "target_trades_for_roster": 200,
+  "collection_goal_days": 7
+}

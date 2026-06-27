@@ -1,11 +1,11 @@
 {
   "schema": "tile_independence_v1",
-  "generated_at": "2026-06-25T13:36:55.394542+00:00",
-  "bot_version": "v11.0-genome-architecture-v1",
+  "generated_at": "2026-06-27T01:44:27.933516+00:00",
+  "bot_version": "v11.1-virtual-chase-known-combos-v1",
   "benchmark_lane": "CONTINUOUS",
   "benchmark_role": "BENCHMARK",
   "combo_tiles": [
-    "COMBO_604_SP4_CHASE_3PLUS"
+    "AI60_SP3_VIRTUAL_CHASE"
   ],
   "verdict": "PASS",
   "tests": [
@@ -15,14 +15,14 @@
       "detail": "any_combo_execution_enabled(all combo ON, continuous OFF) == True"
     },
     {
-      "test": "only COMBO_604_SP4_CHASE_3PLUS ON \u2192 orders allowed for that tile only",
+      "test": "only AI60_SP3_VIRTUAL_CHASE ON \u2192 orders allowed for that tile only",
       "passed": true,
       "detail": "self=True others_blocked=True"
     },
     {
       "test": "benchmark OFF \u2192 other combo tiles still allowed",
       "passed": true,
-      "detail": "benchmark=CONTINUOUS OFF; others=['COMBO_604_SP4_CHASE_3PLUS']"
+      "detail": "benchmark=CONTINUOUS OFF; others=['AI60_SP3_VIRTUAL_CHASE']"
     },
     {
       "test": "all combo OFF + experimental OFF \u2192 no pathway execution",

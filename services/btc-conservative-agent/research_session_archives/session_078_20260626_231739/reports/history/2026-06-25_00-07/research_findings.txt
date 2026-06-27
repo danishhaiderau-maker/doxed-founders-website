@@ -1,0 +1,21 @@
+========================================================================
+=== KEY FINDINGS ===
+========================================================================
+
+1. CONTINUOUS lane accounts for 92% of net profit ($+31.55).
+2. Lowest lane: AI_60_65_ALPHA at $-23.20 (52 fills) — review if sample grows.
+3. Best confidence band 60-65: 76.6% WR over 47 trades.
+4. AI calibration: over-confident (actual 40.6% vs AI 65.9% implied).
+5. Fast-cut exits: 13 trades, $-16.65 booked — review thesis cut threshold.
+6. Dominant exit: PROFIT_LOCK_LADDER (82 trades, $+143.60).
+7. Gate damage $+64.79 — investigate blocked APPROVEs.
+8. Scenario C left $241.2 on table vs peak — exit timing is the bigger lever than entry gates.
+9. Edge filter: edge_no_incremental_value (sample MODERATE — 116 trades — directional only; prefer ≥200 trades before strong edge/lane claims.).
+10. Edge score correlation with PnL: -0.005.
+11. Chase assisted 0/143 fills — 3-5 chase bucket historically strongest EV in this run.
+12. Blocked shadow opportunity (heuristic): $+292.54.
+13. Top leakage: $241 left on table across 50 ranked trades — see top_leakage_report.json.
+14. Biggest leak by exit type: PROFIT_LOCK_LADDER ($107 left).
+15. Strongest PnL predictor: confidence (r=-0.108).
+
+========================================================================

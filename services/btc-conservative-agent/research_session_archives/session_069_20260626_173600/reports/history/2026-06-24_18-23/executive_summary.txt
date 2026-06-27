@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — FRESH-COLLECTION (~5.7h bot session) | v10.6-melbourne-unified-2026-06-24 ===
+========================================================================
+Data scope: SESSION | CSV trades: 69 | Analyzed fills: 48
+Trades 48 | WR 72.9% | PnL +35.36 | EV 0.74/trade | MFE capture 30.9%
+APPROVE 270 → executed 69 | Gate damage $+88.53 | Edge: edge_no_incremental_value
+Sample confidence: POOR — Only 48 trades / 270 approves — treat calibration, edge, and lane verdicts as noisy.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 48 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

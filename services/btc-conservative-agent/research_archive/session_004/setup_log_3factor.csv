@@ -1,0 +1,15 @@
+ts,trade_id,price,ai_win_prob,regime,direction,event,edge_score,exchange,data_symbol,bot_version,fee_profile,analyzer_sync_id,research_lane,research_model
+2026-06-24T12:12:56.191311+00:00,cont-2a0fce94a0bd,,62,,,BUILD,1.7,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,CONTINUOUS,Continuous AI Research
+2026-06-24T12:12:56.547525+00:00,scan-21c86c912577,,62,,,BUILD,1.7,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,AI_SCAN,AI Scan (no orders)
+2026-06-24T12:12:56.807384+00:00,c604c-4e5a1f075ac3,,62,,,BUILD,1.7,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,COMBO_604_SP4_CHASE_3PLUS,AI60-65 · Spread4 · Chase 3+
+2026-06-24T12:16:13.134239+00:00,cont-1b6ae856e46c,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,CONTINUOUS,Continuous AI Research
+2026-06-24T12:16:15.592598+00:00,scan-27cb7b77893e,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,AI_SCAN,AI Scan (no orders)
+2026-06-24T12:16:16.089858+00:00,c604c-d0884c0e9c4f,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,COMBO_604_SP4_CHASE_3PLUS,AI60-65 · Spread4 · Chase 3+
+2026-06-24T12:19:42.290274+00:00,cont-338c39ae538b,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,CONTINUOUS,Continuous AI Research
+2026-06-24T12:19:44.746123+00:00,scan-aa8cc459c61b,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,AI_SCAN,AI Scan (no orders)
+2026-06-24T12:19:45.088625+00:00,c604c-bb69041b3c5b,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,COMBO_604_SP4_CHASE_3PLUS,AI60-65 · Spread4 · Chase 3+
+2026-06-24T12:22:51.702169+00:00,cont-1b77e922999d,,62,,,BUILD,1.1,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,CONTINUOUS,Continuous AI Research
+2026-06-24T12:22:55.701437+00:00,scan-e35ab72aa28b,,62,,,BUILD,1.1,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,AI_SCAN,AI Scan (no orders)
+2026-06-24T12:22:56.924671+00:00,c604c-ea14c2894a7f,,62,,,BUILD,1.1,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,COMBO_604_SP4_CHASE_3PLUS,AI60-65 · Spread4 · Chase 3+
+2026-06-24T12:27:21.463855+00:00,cont-56237eb6274d,,62,,,BUILD,2.0,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,CONTINUOUS,Continuous AI Research
+2026-06-24T12:27:28.077241+00:00,scan-fbf84ef79e43,,62,,,BUILD,1.1,bitfinex,tBTCF0:USTF0,v10.6-melbourne-unified-2026-06-24,BITFINEX_ZERO,v10.6-melbourne-unified-2026-06-24,AI_SCAN,AI Scan (no orders)

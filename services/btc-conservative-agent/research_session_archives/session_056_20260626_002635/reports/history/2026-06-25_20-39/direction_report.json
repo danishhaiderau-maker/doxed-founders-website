@@ -1,0 +1,62 @@
+{
+  "schema": "direction_report_v1",
+  "analyzer_sync_id": "v11.0-genome-architecture-v1",
+  "expected_bot_version": "v11.0-genome-architecture-v1",
+  "session_scope": "FRESH-COLLECTION",
+  "generated_at": "2026-06-25T20:38:55.113652+00:00",
+  "long": {
+    "trades": 0,
+    "win_rate_pct": 0.0,
+    "avg_pnl_usd": 0.0,
+    "ev_usd": 0.0,
+    "sum_pnl_usd": 0.0,
+    "avg_edge": 0.0,
+    "avg_ai_confidence": 0.0
+  },
+  "short": {
+    "trades": 253,
+    "win_rate_pct": 78.3,
+    "avg_pnl_usd": 0.94,
+    "ev_usd": 0.94,
+    "sum_pnl_usd": 237.22,
+    "avg_edge": 3.32,
+    "avg_ai_confidence": 65.0
+  },
+  "long_calls": 1,
+  "short_calls": 427,
+  "no_trade_calls": 140,
+  "total_ai_calls": 568,
+  "long_wr": 0.0,
+  "short_wr": 78.3,
+  "long_pnl": 0.0,
+  "short_pnl": 237.22,
+  "by_regime_direction": [
+    {
+      "regime": "BEAR",
+      "direction": "SHORT",
+      "trades": 253,
+      "win_rate_pct": 78.3,
+      "avg_pnl_usd": 0.94,
+      "ev_usd": 0.94,
+      "sum_pnl_usd": 237.22,
+      "avg_edge": 3.32,
+      "avg_ai_confidence": 65.0
+    }
+  ],
+  "ai_recommendations": {
+    "long": {
+      "approved": 0,
+      "filled": 0
+    },
+    "short": {
+      "approved": 0,
+      "filled": 253
+    }
+  },
+  "ai_call_stats": {
+    "long_calls": 1,
+    "short_calls": 427,
+    "no_trade_calls": 140,
+    "total_calls": 568
+  }
+}

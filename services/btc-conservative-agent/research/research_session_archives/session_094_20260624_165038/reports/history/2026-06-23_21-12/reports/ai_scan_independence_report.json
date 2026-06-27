@@ -1,0 +1,59 @@
+{
+  "schema": "ai_scan_independence_v1",
+  "generated_at": "2026-06-23T21:12:24.831258+00:00",
+  "bot_version": "v10.3-dashboard-ultimate-gate-2026-06-23",
+  "policy": "AI_SCAN is not an order lane. Pipeline runs when any_combo_execution_enabled. There is no separate AI_SCAN OFF toggle that blocks an ON production tile.",
+  "verdict": "PASS",
+  "tests": [
+    {
+      "test": "AI_SCAN never places orders (pipeline label only)",
+      "passed": true,
+      "detail": "lane_orders_allowed(AI_SCAN) == False"
+    },
+    {
+      "test": "only COMBO_65_SP5_CHASE_3PLUS ON \u2192 AI pipeline enabled (AI_SCAN path)",
+      "passed": true,
+      "detail": "ai_scan=True invoke=True"
+    },
+    {
+      "test": "only COMBO_65_SP5_CHASE_3PLUS ON \u2192 combo tile orders allowed",
+      "passed": true,
+      "detail": "orders=True"
+    },
+    {
+      "test": "only COMBO_65_SP5_CHASE_3PLUS ON \u2192 APPROVE fans out to enabled matching tile",
+      "passed": true,
+      "detail": "spawn_targets=['COMBO_65_SP5_CHASE_3PLUS']"
+    },
+    {
+      "test": "invariant: COMBO_65_SP5_CHASE_3PLUS ON \u21d2 AI pipeline ON (cannot have AI_SCAN OFF)",
+      "passed": true,
+      "detail": "tile ON with AI pipeline OFF would block AI\u2192ENTRY\u2192ORDER"
+    },
+    {
+      "test": "only COMBO_604_SP4_CHASE_3PLUS ON \u2192 AI pipeline enabled (AI_SCAN path)",
+      "passed": true,
+      "detail": "ai_scan=True invoke=True"
+    },
+    {
+      "test": "only COMBO_604_SP4_CHASE_3PLUS ON \u2192 combo tile orders allowed",
+      "passed": true,
+      "detail": "orders=True"
+    },
+    {
+      "test": "only COMBO_604_SP4_CHASE_3PLUS ON \u2192 APPROVE fans out to enabled matching tile",
+      "passed": true,
+      "detail": "spawn_targets=['COMBO_604_SP4_CHASE_3PLUS']"
+    },
+    {
+      "test": "invariant: COMBO_604_SP4_CHASE_3PLUS ON \u21d2 AI pipeline ON (cannot have AI_SCAN OFF)",
+      "passed": true,
+      "detail": "tile ON with AI pipeline OFF would block AI\u2192ENTRY\u2192ORDER"
+    },
+    {
+      "test": "all combo + experimental OFF \u2192 AI pipeline OFF",
+      "passed": true,
+      "detail": "no production tiles \u2192 no periodic AI"
+    }
+  ]
+}

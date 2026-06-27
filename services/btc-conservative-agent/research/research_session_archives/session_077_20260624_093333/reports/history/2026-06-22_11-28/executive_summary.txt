@@ -1,0 +1,15 @@
+========================================================================
+=== EXECUTIVE SUMMARY — ALL-TIME (full CSV history) | v9.83-quality-roster-4-tiles-2026-06-21 ===
+========================================================================
+Data scope: SESSION | CSV trades: 0 | Analyzed fills: 0
+Trades 0 | WR None% | PnL n/a | EV None/trade | MFE capture None%
+APPROVE n/a → executed n/a | Gate damage $n/a | Edge: insufficient_data
+Sample confidence: POOR — Only 0 trades / 0 approves — treat calibration, edge, and lane verdicts as noisy.
+
+Next layers (same run):
+  • research_highlights.txt — detailed tables
+  • research_findings.txt — auto conclusions
+  • research_coverage.txt — bucket counts & statistical health
+  • research_deep_dive_index.txt — all 41 JSON reports
+  • analysis_dashboard.html | analyzer_run.log (full verbose)
+========================================================================

@@ -1,0 +1,22 @@
+{
+  "schema": "repo_version_sync_v1",
+  "generated_at": "2026-06-24T17:21:08.517835+00:00",
+  "expected_bot_version": "v10.6-melbourne-unified-2026-06-24",
+  "expected_analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+  "research_dashboard_version": "v10.6-melbourne-unified-2026-06-24",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "component": "combo_pathway_config",
+      "bot_version": "v10.6-melbourne-unified-2026-06-24",
+      "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+      "passed": true
+    },
+    {
+      "component": "analyzer_research_engine_v62",
+      "bot_version": "v10.6-melbourne-unified-2026-06-24",
+      "analyzer_sync_id": "v10.6-melbourne-unified-2026-06-24",
+      "passed": true
+    }
+  ]
+}

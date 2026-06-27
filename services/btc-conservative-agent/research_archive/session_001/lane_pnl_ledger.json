@@ -1,0 +1,20 @@
+{
+  "schema": "lane_pnl_ledger_v1",
+  "ts": "2026-06-24T12:05:05.774868+00:00",
+  "lanes": {
+    "CONTINUOUS": {
+      "lane": "CONTINUOUS",
+      "net_pnl_usd": 1.21,
+      "gross_wins_usd": 1.21,
+      "gross_losses_usd": 0.0,
+      "wins": 1,
+      "losses": 0,
+      "closes": 1,
+      "long_closes": 0,
+      "short_closes": 1,
+      "long_pnl_usd": 0.0,
+      "short_pnl_usd": 1.21,
+      "equity_usd": 501.21
+    }
+  }
+}
