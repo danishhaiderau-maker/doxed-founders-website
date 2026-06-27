@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Redesign landing page around BTC agent and Founder OS with live highlights
+Fix Cursor agent panel URL from agentId for Vercel build
 
 ## Last Activity
 
