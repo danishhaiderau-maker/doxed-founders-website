@@ -19,8 +19,8 @@ export function CursorAgentSessionsPanel({
   onFollowUp,
 }: Props) {
   const agentUrl =
-    activeRun?.agentUrl ??
     cursorAgentUrl ??
+    (activeRun?.agentId ? `https://cursor.com/agents/${activeRun.agentId}` : null) ??
     (cursorAgentId ? `https://cursor.com/agents/${cursorAgentId}` : null);
 
   if (!agentUrl && !activeRun) {
