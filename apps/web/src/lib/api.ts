@@ -2703,6 +2703,12 @@ export interface FounderOnboardingStatus {
   projectName: string | null;
 }
 
+export function fetchPublicFounderPromo() {
+  return apiFetch<{ enabled: boolean; message: string | null; windowDays?: number }>(
+    '/founder-os/promo/public',
+  );
+}
+
 export function fetchFounderOnboardingStatus(token: string) {
   return apiFetch<FounderOnboardingStatus>('/founder-os/onboarding', undefined, token);
 }

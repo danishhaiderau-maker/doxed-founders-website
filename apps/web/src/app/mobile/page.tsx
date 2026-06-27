@@ -38,6 +38,12 @@ export default function MobileDownloadPage() {
           <div className="mt-6">
             <AndroidAppDownloads variant="hero" showInstallGuide />
           </div>
+          <Link
+            href="/founder-den?onboard=byo"
+            className="mt-4 inline-flex rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
+          >
+            Start Founder OS on phone →
+          </Link>
         </section>
 
         <section className="rounded-2xl border border-violet-500/25 bg-violet-950/15 p-6">
