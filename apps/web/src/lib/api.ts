@@ -2687,6 +2687,16 @@ export interface FounderOnboardingStatus {
   githubConnected?: boolean;
   llmConnected?: boolean;
   builderConnected?: boolean;
+  remoteBuildReady?: boolean;
+  promo?: {
+    enabled: boolean;
+    eligible: boolean;
+    message: string | null;
+    daysRemaining: number | null;
+    tokensRemaining: number;
+    hasLlm: boolean;
+    hasCursor: boolean;
+  };
   requiredComplete: boolean;
   allComplete: boolean;
   githubLastSyncedAt: string | null;

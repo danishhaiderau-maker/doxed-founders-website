@@ -102,6 +102,24 @@ export default function FounderDenPageClient() {
   const setupIncomplete = Boolean(onboardingStatus && !onboardingStatus.requiredComplete);
   const currentStage = room?.lifecycleStage ?? dashboard?.currentStage ?? 'IDEA';
 
+  const showOnboardingWizard =
+    session?.accessToken &&
+    (!hasFounder || setupIncomplete || (onboardingStatus?.requiredComplete && !wizardDismissed));
+
+  function launchMissionControlPrompt(prompt: string) {
+    setCopilotPrompt(prompt);
+    setTab('activity');
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', 'activity');
+      url.searchParams.set('prompt', prompt);
+      window.history.replaceState({}, '', url.toString());
+      window.requestAnimationFrame(() => {
+        document.getElementById('founder-mission-control')?.scrollIntoView({ behavior: 'smooth' });
+      });
+    }
+  }
+
   const load = useCallback(async () => {
     if (!session?.accessToken) return;
     try {
@@ -232,19 +250,30 @@ export default function FounderDenPageClient() {
         {session?.accessToken && hasFounder && setupIncomplete && onboardingStatus && wizardDismissed && (
           <FounderSetupRail
             status={onboardingStatus}
+            onTestBrain={
+              onboardingStatus.brainReady
+                ? () =>
+                    launchMissionControlPrompt(
+                      "What's my setup status? Summarize what's connected and what I should do next.",
+                    )
+                : undefined
+            }
             onResumeWizard={() => {
               clearFounderOnboardingDismiss();
+              setWizardDismissed(false);
               setWizardKey((k) => k + 1);
             }}
           />
         )}
 
-        {session?.accessToken && (!hasFounder || setupIncomplete) && (
+        {session?.accessToken && showOnboardingWizard && (
           <FounderOnboardingWizard
             key={wizardKey}
             accessToken={session.accessToken}
             initialPath={initialPath as OnboardingPathId | null}
             onRefresh={load}
+            onLaunchPrompt={launchMissionControlPrompt}
+            onDismiss={() => setWizardDismissed(true)}
             onMessage={(msg) => {
               setMessage(msg);
               load();
@@ -252,7 +281,7 @@ export default function FounderDenPageClient() {
           />
         )}
 
-        {session?.accessToken && (!hasFounder || setupIncomplete) && wizardDismissed && (
+        {showOnboardingWizard && wizardDismissed && setupIncomplete && (
           <button
             type="button"
             onClick={() => {
