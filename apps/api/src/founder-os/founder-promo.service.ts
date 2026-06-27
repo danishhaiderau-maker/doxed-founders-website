@@ -17,29 +17,31 @@ export type FounderPromoStatus = {
   providers: string[];
 };
 
-export type PromoCredentialProvider = 'gemini' | 'deepseek' | 'cursor' | 'openai' | 'anthropic';
+/**
+ * Promo LLM providers — cost-optimized for onboarding new founders.
+ * GLM 5.2 (ZhipuAI) is the default: cheapest $/token with strong coding ability.
+ * DeepSeek + Gemini kept as cheap fallbacks. Cursor/OpenAI/Anthropic removed
+ * from promo to protect margins — founders can still BYOK those in Settings.
+ */
+export type PromoCredentialProvider = 'glm' | 'gemini' | 'deepseek';
 
 export type PromoCredentialsMap = Partial<Record<PromoCredentialProvider, string>>;
 
 export type PromoCredentialsStatus = Record<PromoCredentialProvider, boolean>;
 
-const PROMO_PROVIDERS = ['GEMINI', 'DEEPSEEK', 'CURSOR', 'OLLAMA_LOCAL', 'OPENAI', 'ANTHROPIC'] as const;
+const PROMO_PROVIDERS = ['GLM', 'DEEPSEEK', 'GEMINI', 'OLLAMA_LOCAL'] as const;
 
-const PROMO_CREDENTIAL_KEYS: PromoCredentialProvider[] = [
-  'gemini',
-  'deepseek',
-  'cursor',
-  'openai',
-  'anthropic',
-];
+const PROMO_CREDENTIAL_KEYS: PromoCredentialProvider[] = ['glm', 'gemini', 'deepseek'];
 
 const PROMO_PROVIDER_LABELS: Record<PromoCredentialProvider, string> = {
+  glm: 'GLM 5.2 (ZhipuAI)',
   gemini: 'Google Gemini',
   deepseek: 'DeepSeek',
-  cursor: 'Cursor',
-  openai: 'OpenAI',
-  anthropic: 'Anthropic',
 };
+
+/** GLM (ZhipuAI) OpenAI-compatible endpoint + default model for promo Brain calls. */
+export const GLM_PROMO_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+export const GLM_PROMO_DEFAULT_MODEL = 'glm-5.2';
 
 @Injectable()
 export class FounderPromoService {
@@ -57,7 +59,7 @@ export class FounderPromoService {
       windowDays: row?.founderPromoWindowDays ?? 30,
       message:
         row?.founderPromoMessage?.trim() ||
-        'Join as a founder — get 1 month free access to Cursor, Gemini, DeepSeek & more on Founder OS.',
+        'Join as a founder — get 1 month free GLM 5.2, Gemini & DeepSeek on Founder OS (cheap & best).',
       credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
@@ -265,11 +267,9 @@ export class FounderPromoService {
   private credentialsStatusFromRow(enc: string | null | undefined): PromoCredentialsStatus {
     const map = this.decryptCredentialsMap(enc);
     return {
+      glm: Boolean(map.glm),
       gemini: Boolean(map.gemini),
       deepseek: Boolean(map.deepseek),
-      cursor: Boolean(map.cursor),
-      openai: Boolean(map.openai),
-      anthropic: Boolean(map.anthropic),
     };
   }
 

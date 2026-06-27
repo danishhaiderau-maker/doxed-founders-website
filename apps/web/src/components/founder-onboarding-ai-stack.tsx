@@ -21,16 +21,22 @@ type Props = {
 
 const QUICK_LLM = [
   {
+    provider: 'glm',
+    label: 'GLM 5.2 (ZhipuAI)',
+    hint: 'Recommended — cheapest coding LLM, OpenAI-compatible',
+    keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
+  },
+  {
     provider: 'deepseek',
     label: 'DeepSeek',
-    hint: 'Recommended — low cost, strong for planning',
+    hint: 'Low cost, strong for planning',
     keyUrl: 'https://platform.deepseek.com/api_keys',
   },
   {
-    provider: 'openai',
-    label: 'OpenAI',
-    hint: 'GPT-4o mini for fast chat',
-    keyUrl: 'https://platform.openai.com/api-keys',
+    provider: 'gemini',
+    label: 'Google Gemini',
+    hint: 'Fast & free-tier friendly',
+    keyUrl: 'https://aistudio.google.com/apikey',
   },
 ] as const;
 
@@ -104,7 +110,7 @@ export function FounderOnboardingAiStack({
   }
 
   const defaultProvider = settings?.defaultProvider ?? 'RULE_BASED';
-  const promoActive = promo?.eligible && (promo.hasLlm || promo.hasCursor);
+  const promoActive = promo?.eligible && promo.hasLlm;
 
   return (
     <div className="space-y-5">
@@ -114,7 +120,7 @@ export function FounderOnboardingAiStack({
           {promo.daysRemaining != null && (
             <span className="mt-1 block text-amber-200/80">
               {promo.daysRemaining} days · {(promo.tokensRemaining / 1_000_000).toFixed(1)}M tokens left
-              — Cursor, DeepSeek, Gemini & more billed to the platform. Add your own keys anytime.
+              — GLM 5.2, DeepSeek & Gemini billed to the platform. Add your own keys anytime.
             </span>
           )}
         </div>
@@ -203,13 +209,7 @@ export function FounderOnboardingAiStack({
           .
         </p>
         {builderConnected ? (
-          <p className="mt-2 text-sm text-emerald-300">
-            Cursor Cloud connected{promo?.hasCursor ? ' (platform promo)' : ''}.
-          </p>
-        ) : promo?.hasCursor ? (
-          <p className="mt-2 text-sm text-emerald-300">
-            Cursor covered by founder promo — connect GitHub, then dispatch a build from Mission Control.
-          </p>
+          <p className="mt-2 text-sm text-emerald-300">Cursor Cloud connected.</p>
         ) : (
           <div className="mt-2 flex flex-col gap-2 sm:flex-row">
             <input

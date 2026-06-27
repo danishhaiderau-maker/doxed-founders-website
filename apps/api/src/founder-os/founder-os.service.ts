@@ -473,11 +473,11 @@ export class FounderOsService {
     const promoHasLlm =
       promoEligible &&
       (await Promise.all(
-        (['deepseek', 'gemini', 'openai', 'anthropic'] as const).map((p) =>
+        (['glm', 'deepseek', 'gemini'] as const).map((p) =>
           this.founderPromo.hasPromoProvider(userId, p),
         ),
       ).then((flags) => flags.some(Boolean)));
-    const promoHasCursor = promoEligible && (await this.founderPromo.hasPromoProvider(userId, 'cursor'));
+    const promoHasCursor = false;
     const llmConnected = llmConnectedByok || promoHasLlm;
     const cursorConnected = cursorConnectedByok || promoHasCursor;
     const githubConnected = Boolean(
