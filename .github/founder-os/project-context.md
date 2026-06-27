@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-fix(relay): heal stale orphan sync drag + stop home bot CPU starvation
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
