@@ -12,74 +12,40 @@ const PATH_LINKS: Record<string, string> = {
 };
 
 function computeBadge(mode: string) {
-  if (mode === 'LOCAL') return { label: 'Local · $0 AI', className: 'text-emerald-400 bg-emerald-950/50 border-emerald-500/30' };
-  if (mode === 'HYBRID') return { label: 'Hybrid', className: 'text-sky-400 bg-sky-950/50 border-sky-500/30' };
-  return { label: 'Cloud starter', className: 'text-amber-400 bg-amber-950/50 border-amber-500/30' };
+  if (mode === 'LOCAL') return { label: '$0 AI', className: 'text-emerald-400 border-emerald-500/30' };
+  if (mode === 'HYBRID') return { label: 'Hybrid', className: 'text-sky-400 border-sky-500/30' };
+  return { label: 'Cloud', className: 'text-amber-400 border-amber-500/30' };
 }
 
+/** Single Founder OS block — paths only; no duplicate CTAs (hero + header cover actions). */
 export function LandingFounderSpotlight() {
   return (
-    <section className="overflow-hidden rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/25 to-zinc-950/80">
-      <div className="border-b border-violet-500/15 px-4 py-4 sm:px-6">
-        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-violet-400">Build without the cloud bill</p>
-        <h2 className="mt-1 text-lg font-bold text-white sm:text-xl">
-          Founder OS — control plane on the web, compute on your machine
-        </h2>
-        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-          Not one signup flow — pick an infrastructure path. Sovereign founders keep memory in Founder Vault and run
-          Ollama locally. BYO Cloud connects what you already pay for. Free Starter gets you live in minutes on Render.
+    <section className="overflow-hidden rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-950/80">
+      <div className="border-b border-violet-500/10 px-4 py-3 sm:px-5">
+        <h2 className="text-sm font-bold text-white sm:text-base">Founder OS — pick your infrastructure path</h2>
+        <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-zinc-500">
+          Sovereign · local vault + Ollama. BYO Cloud · connect Vercel/Railway. Free Starter · live URL in minutes.
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Link
-            href="/founder-den?onboard=sovereign"
-            className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500"
-          >
-            Start Sovereign path
-          </Link>
-          <Link
-            href="/founder-node"
-            className="rounded-lg border border-violet-500/40 px-4 py-2 text-xs font-semibold text-violet-200 hover:border-violet-400"
-          >
-            Download Founder Node
-          </Link>
-          <Link
-            href="/settings/builder"
-            className="rounded-lg border border-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-300 hover:border-zinc-500"
-          >
-            Connect AI providers
-          </Link>
-        </div>
       </div>
-
-      <div className="grid gap-2 p-3 sm:grid-cols-2 sm:p-4 lg:grid-cols-3 xl:grid-cols-5">
+      <div className="grid gap-2 p-3 sm:grid-cols-2 sm:p-4 lg:grid-cols-5">
         {ONBOARDING_PATHS.map((path) => {
           const badge = computeBadge(path.computePlane);
           return (
             <Link
               key={path.id}
               href={PATH_LINKS[path.id] ?? '/founder-den'}
-              className="group flex flex-col rounded-xl border border-zinc-800/80 bg-black/30 p-3 transition hover:border-violet-500/40 hover:bg-violet-950/20"
+              className="group rounded-xl border border-zinc-800/80 bg-black/30 p-3 transition hover:border-violet-500/35 hover:bg-violet-950/15"
             >
-              <span className="text-xl" aria-hidden>
-                {path.icon}
-              </span>
-              <p className="mt-2 text-sm font-bold text-white group-hover:text-violet-50">{path.title}</p>
-              <p className="mt-1 flex-1 text-[10px] leading-relaxed text-zinc-500">{path.tagline}</p>
-              <div className="mt-3 space-y-1 border-t border-zinc-800/60 pt-2 text-[9px] text-zinc-500">
-                <p>
-                  <span className="text-zinc-600">Memory · </span>
-                  {path.topology.memory}
-                </p>
-                <p>
-                  <span className="text-zinc-600">Compute · </span>
-                  {path.topology.compute}
-                </p>
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-lg" aria-hidden>
+                  {path.icon}
+                </span>
+                <span className={`rounded border px-1 py-0.5 text-[7px] font-bold uppercase ${badge.className}`}>
+                  {badge.label}
+                </span>
               </div>
-              <span
-                className={`mt-2 inline-flex w-fit rounded-md border px-1.5 py-0.5 text-[8px] font-bold uppercase ${badge.className}`}
-              >
-                {badge.label}
-              </span>
+              <p className="mt-2 text-xs font-bold text-white group-hover:text-violet-50">{path.title}</p>
+              <p className="mt-1 line-clamp-2 text-[10px] text-zinc-500">{path.tagline}</p>
             </Link>
           );
         })}

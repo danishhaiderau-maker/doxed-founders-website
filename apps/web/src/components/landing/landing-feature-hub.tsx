@@ -119,12 +119,16 @@ export function LandingHubNavTable({ scoutPending = 0 }: { scoutPending?: number
   );
 }
 
-/** Feed · DDollar · Trust · Founder OS preview widgets. */
-export function LandingHubPreviews({ scoutPending = 0, platformStats = null }: HubProps) {
+/** Feed · Trust · DDollar previews (compact on landing). */
+export function LandingHubPreviews({ scoutPending = 0, platformStats = null, compact = false }: HubProps & { compact?: boolean }) {
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="border-b border-zinc-800/70 px-4 py-3 sm:px-5">
+        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500">Platform activity</p>
+        <p className="mt-0.5 text-sm text-zinc-400">Live feed, trust signals, and DDollar — not marketing copy</p>
+      </div>
       <div className="bg-black/30 p-2 sm:p-3">
-        <LandingHubPreviewWidgets scoutPending={scoutPending} platformStats={platformStats} />
+        <LandingHubPreviewWidgets scoutPending={scoutPending} platformStats={platformStats} compact={compact} />
       </div>
     </section>
   );
