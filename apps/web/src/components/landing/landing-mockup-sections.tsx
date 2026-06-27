@@ -5,9 +5,11 @@ import { formatUsd, STARTING_CASH_USD } from '@dcf/utils';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { LandingHubNavTable, LandingHubPreviews } from '@/components/landing/landing-feature-hub';
 import { LandingPlatformAdoption } from '@/components/landing/landing-platform-adoption';
-import { LandingValueGrid } from '@/components/landing/landing-value-grid';
+import { LandingFunFactBar } from '@/components/landing/landing-fun-fact-bar';
+import { LandingHero } from '@/components/landing/landing-hero';
+import { LandingLiveHighlights, type LandingHighlights } from '@/components/landing/landing-live-highlights';
+import { LandingFounderSpotlight } from '@/components/landing/landing-founder-spotlight';
 import type { PlatformStats } from '@/lib/api';
-import { AndroidAppDownloads } from '@/components/android-app-downloads';
 
 function formatStat(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -33,20 +35,11 @@ const WHY_DOXXED = [
   {
     title: 'What we do',
     body:
-      'Curate doxxed & build-in-public founders. Proof of conviction for traders. Founder OS + Founder Node with bring-your-own keys. Fund shippers, not spectacles.',
+      'Curate doxxed & build-in-public founders. Live BTC agent with verified PnL. Founder OS + Founder Node — your laptop is the compute. Fund shippers, not spectacles.',
     border: 'border-emerald-500/35',
     accent: 'text-emerald-300',
   },
 ] as const;
-
-const NODE_ORBIT = [
-  { label: 'GitHub', sub: 'Commits & updates', angle: -58 },
-  { label: 'Phala TEE', sub: 'Hardware encryption', angle: -8 },
-  { label: 'Your Data', sub: 'Encrypted locally', angle: 48 },
-  { label: 'AI Models', sub: 'Models you trust', angle: 118 },
-  { label: 'Community', sub: 'Proof & conviction', angle: 178 },
-  { label: 'Founder OS', sub: 'Plan · ship · launch', angle: 238 },
-];
 
 const PIPELINE = [
   { step: 'Build', tag: 'Transparency', desc: 'Connect GitHub. Ship in public.', border: 'border-violet-500/40', tagColor: 'text-violet-300' },
@@ -75,13 +68,13 @@ const DDOLLAR_USES = [
 
 const NETWORK_RULES = [
   { icon: '🚫', title: 'No scams', sub: 'Proof over hype' },
-  { icon: '🔨', title: 'Build in public', sub: '100% community' },
-  { icon: '🔒', title: 'Private by default', sub: 'Paper first' },
+  { icon: '🔨', title: 'Build in public', sub: 'Doxxed founders' },
+  { icon: '👤', title: 'Face in public', sub: 'Verified identity' },
   { icon: '🛡', title: 'Verified humans', sub: 'Transparency first' },
   { icon: '📊', title: 'Proof over hype', sub: 'No paid shilling' },
   { icon: '👥', title: '100% community', sub: 'Closed system' },
   { icon: '💵', title: 'Paper first', sub: 'No outside money' },
-  { icon: '✓', title: 'Transparency first', sub: 'Fair game' },
+  { icon: '✓', title: 'Fair game', sub: 'Skill over capital' },
 ];
 
 const AI_PROVIDERS = ['DeepSeek', 'OpenAI', 'Claude', 'Gemini', 'OpenRouter', 'Ollama', 'Cursor', 'OpenHands'];
@@ -110,54 +103,6 @@ export function LandingHeader() {
         <SiteNav />
       </div>
     </header>
-  );
-}
-
-function FounderNodeVisual() {
-  return (
-    <div className="relative mx-auto flex aspect-square w-full max-w-[340px] items-center justify-center">
-      <div className="pointer-events-none absolute inset-[6%] rounded-full border border-violet-500/30 shadow-[0_0_60px_rgba(139,92,246,0.25)]" />
-      <div className="pointer-events-none absolute inset-[14%] rounded-full border border-violet-400/15" />
-      <div className="pointer-events-none absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.35),transparent_70%)]" />
-      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 320 320" aria-hidden>
-        {NODE_ORBIT.map((node) => {
-          const rad = (node.angle * Math.PI) / 180;
-          return (
-            <line
-              key={node.label}
-              x1="160"
-              y1="160"
-              x2={160 + Math.cos(rad) * 118}
-              y2={160 + Math.sin(rad) * 118}
-              stroke="rgba(139,92,246,0.45)"
-              strokeWidth="1.5"
-            />
-          );
-        })}
-      </svg>
-      <div className="relative z-10 flex h-[5.5rem] w-[5.5rem] flex-col items-center justify-center rounded-2xl border border-violet-400/70 bg-gradient-to-br from-zinc-900 via-violet-950 to-indigo-950 shadow-[0_0_64px_rgba(99,102,241,0.55)]">
-        <span className="text-[8px] font-bold uppercase tracking-[0.25em] text-violet-200">Founder</span>
-        <span className="text-lg font-bold text-white">NODE</span>
-        <span className="text-sm" aria-hidden>
-          🔒
-        </span>
-      </div>
-      {NODE_ORBIT.map((node) => {
-        const rad = (node.angle * Math.PI) / 180;
-        const left = 50 + Math.cos(rad) * 39;
-        const top = 50 + Math.sin(rad) * 39;
-        return (
-          <div
-            key={node.label}
-            className="absolute z-10 w-[86px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-zinc-700/90 bg-[#0a0a12]/95 px-1.5 py-1.5 text-center shadow-lg"
-            style={{ left: `${left}%`, top: `${top}%` }}
-          >
-            <p className="text-[9px] font-semibold text-white">{node.label}</p>
-            <p className="text-[7px] leading-tight text-zinc-500">{node.sub}</p>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -196,15 +141,8 @@ function FounderNodeProductCard() {
     <div className="grid gap-3 sm:grid-cols-2">
       <Card className="border-emerald-500/20 bg-gradient-to-br from-emerald-950/20 to-zinc-950/80 p-3">
         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-400">Android app</p>
-        <div className="mt-2 flex h-[4.5rem] items-center justify-center rounded-xl border border-zinc-800 bg-black/50">
-          <div className="flex h-12 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 shadow-inner">
-            <span className="text-2xl" aria-hidden>
-              📱
-            </span>
-          </div>
-        </div>
         <ul className="mt-2.5 space-y-1 text-[11px] text-zinc-300">
-          {['Discover & trading on phone', 'Agents & Founder OS', 'Same login as the website'].map((line) => (
+          {['Agents & trading on phone', 'Founder OS Mission Control', 'Same login as the website'].map((line) => (
             <li key={line} className="flex gap-2">
               <span className="text-emerald-400">✓</span>
               {line}
@@ -217,18 +155,11 @@ function FounderNodeProductCard() {
       </Card>
       <Card className="border-violet-500/20 bg-gradient-to-br from-violet-950/20 to-zinc-950/80 p-3">
         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">Founder Node</p>
-        <div className="mt-2 flex h-[4.5rem] items-center justify-center rounded-xl border border-zinc-800 bg-black/50">
-          <div className="flex h-12 w-16 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 shadow-inner">
-            <span className="text-2xl" aria-hidden>
-              🖥
-            </span>
-          </div>
-        </div>
         <ul className="mt-2.5 space-y-1 text-[11px] text-zinc-300">
           {[
             'Self-custody vault on your PC',
-            'Encrypted relay — server cannot read notes',
-            'Phala TEE or Ollama for private AI',
+            'Ollama at localhost — $0 inference',
+            'Founder OS syncs when you opt in',
           ].map((line) => (
             <li key={line} className="flex gap-2">
               <span className="text-violet-400">✓</span>
@@ -236,7 +167,7 @@ function FounderNodeProductCard() {
             </li>
           ))}
         </ul>
-        <Link href="/settings/builder" className="mt-2 inline-block text-xs font-semibold text-violet-300 hover:underline">
+        <Link href="/founder-node" className="mt-2 inline-block text-xs font-semibold text-violet-300 hover:underline">
           Download Founder Node →
         </Link>
         <p className="mt-0.5 text-[9px] text-zinc-600">Windows, macOS, Linux</p>
@@ -245,88 +176,44 @@ function FounderNodeProductCard() {
   );
 }
 
-export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
+export function LandingSinglePage({
+  stats,
+  highlights,
+}: {
+  stats: PlatformStats | null;
+  highlights: LandingHighlights | null;
+}) {
   const pendingReviews = stats?.projectsAwaitingReview ?? 12;
 
   return (
-    <div className="mx-auto w-full max-w-[88rem] space-y-3 px-4 py-3 sm:px-6 lg:space-y-3.5 lg:px-8 lg:py-4">
-      {/* Primary CTAs */}
-      <section className="flex flex-wrap gap-2">
-        <Link
-          href="/paper-trading"
-          className="rounded-xl border border-amber-500/50 bg-amber-950/35 px-5 py-2.5 text-sm font-semibold text-amber-50 shadow-lg shadow-amber-950/30 hover:bg-amber-900/40"
-        >
-          Trading Alpha
-          <span className="mt-0.5 block text-[10px] font-normal text-amber-200/70">Paper desk · verified rank</span>
-        </Link>
-        <Link
-          href="/predict?tab=rules"
-          className="rounded-xl border border-indigo-500/50 bg-indigo-950/40 px-5 py-2.5 text-sm font-semibold text-indigo-50 shadow-lg shadow-indigo-950/30 hover:bg-indigo-900/40"
-        >
-          Predictions
-          <span className="mt-0.5 block text-[10px] font-normal text-indigo-200/70">Constitution · Oracle rank</span>
-        </Link>
-        <Link
-          href="/founder-den?onboard=byo"
-          className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500"
-        >
-          Start Founder OS
-          <span className="mt-0.5 block text-[10px] font-normal text-violet-200/80">
-            Free month AI promo · Mission Control
-          </span>
-        </Link>
-        <Link
-          href="/founder-den"
-          className="rounded-xl border border-violet-500/40 px-5 py-2.5 text-sm font-semibold text-violet-100 hover:border-violet-400"
-        >
-          Open Mission Control →
-        </Link>
-        <AndroidAppDownloads variant="landing-cta" />
-        <Link
-          href="/list-your-project"
-          className="rounded-xl border border-zinc-600 px-5 py-2.5 text-sm font-semibold text-white hover:border-zinc-500"
-        >
-          Apply for listing
-          <span className="mt-0.5 block text-[10px] font-normal text-zinc-500">Doxxed founders only</span>
-        </Link>
-        <Link
-          href="/trust-center?tab=scout-voting"
-          className="rounded-xl border border-amber-500/40 bg-amber-950/25 px-5 py-2.5 text-sm font-semibold text-amber-100 hover:border-amber-400/60"
-        >
-          Scout voting ({pendingReviews})
-          <span className="mt-0.5 block text-[10px] font-normal text-amber-200/70">
-            {pendingReviews} project{pendingReviews === 1 ? '' : 's'} awaiting review
-          </span>
-        </Link>
-      </section>
+    <div className="mx-auto w-full max-w-[88rem] space-y-4 px-4 py-4 sm:px-6 lg:space-y-5 lg:px-8 lg:py-5">
+      <LandingHero scoutPending={pendingReviews} topAgent={highlights?.topAgent ?? null} />
 
-      {/* Navigation hub — 3-row table directly under CTAs */}
+      <LandingLiveHighlights data={highlights} />
+
+      <LandingFunFactBar />
+
       <LandingHubNavTable scoutPending={pendingReviews} />
 
-      {/* Value grid (4 panels) + fun fact */}
-      <LandingValueGrid />
+      <LandingFounderSpotlight />
 
-      {/* Platform stats — above Feed / preview widgets */}
-      <section>
+      <section className="grid gap-3 lg:grid-cols-[1fr_0.85fr]">
         <PlatformStatsPanel stats={stats} />
+        <FounderNodeProductCard />
       </section>
 
-      {/* Feed · DDollar · Trust · Founder OS previews */}
       <LandingHubPreviews scoutPending={pendingReviews} platformStats={stats} />
 
-      {/* Row 4: Why Doxxed exists */}
       <section>
         <Card className="p-4 lg:p-5">
           <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-zinc-500">Why DoxxedCrypto.digital exists</p>
           <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">
-            We are here for tech, HODL conviction, and founders who ship in public — making crypto investing relevant again by backing builders who deliver, not influencers who pump.
+            We are here for tech, HODL conviction, and founders who ship in public — making crypto investing relevant
+            again by backing builders who deliver, not influencers who pump.
           </p>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             {WHY_DOXXED.map((card) => (
-              <div
-                key={card.title}
-                className={`rounded-xl border bg-black/30 p-4 ${card.border}`}
-              >
+              <div key={card.title} className={`rounded-xl border bg-black/30 p-4 ${card.border}`}>
                 <p className={`text-xs font-bold uppercase tracking-wider ${card.accent}`}>{card.title}</p>
                 <p className="mt-2 text-sm leading-relaxed text-zinc-300">{card.body}</p>
               </div>
@@ -335,21 +222,6 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Card>
       </section>
 
-      {/* Row 3: Founder Node — how it works */}
-      <section className="grid gap-3 lg:grid-cols-[1.15fr_0.85fr]">
-        <Card className="flex flex-col items-center justify-center border-violet-500/15 bg-gradient-to-b from-violet-950/20 to-transparent p-4">
-          <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">
-            How Founder Node works
-          </p>
-          <FounderNodeVisual />
-          <p className="mt-3 max-w-sm text-center text-[11px] leading-relaxed text-zinc-500">
-            Your vault stays on your machine. Bring your own AI keys. Founder OS coordinates build feed, scouts, and launch — you keep memory and inference under your control.
-          </p>
-        </Card>
-        <FounderNodeProductCard />
-      </section>
-
-      {/* Row 4: Pipeline */}
       <section>
         <Card className="p-3">
           <p className="text-center text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400">
@@ -367,7 +239,6 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Card>
       </section>
 
-      {/* Row 5: Shrimp | DDollar */}
       <section className="grid gap-3 lg:grid-cols-2">
         <Card className="border-amber-500/15 bg-gradient-to-br from-amber-950/15 to-transparent p-3">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white">Built for shrimps, not whales</h2>
@@ -389,17 +260,6 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
                 )}
               </div>
             ))}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 border-t border-zinc-800/60 pt-2 text-[9px] text-zinc-500">
-            <span>No scams</span>
-            <span>·</span>
-            <span>No pump & dumps</span>
-            <span>·</span>
-            <span>No extractors</span>
-            <span>·</span>
-            <span>No outside money</span>
-            <span>·</span>
-            <span>Closed system · Fair game</span>
           </div>
         </Card>
 
@@ -433,7 +293,6 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
         </Card>
       </section>
 
-      {/* Row 4: Rules 2×4 */}
       <Card className="p-3">
         <p className="text-center text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
           Rules of the network
@@ -452,13 +311,10 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
             </div>
           ))}
         </div>
-        <p className="mt-2 text-center text-[10px] text-zinc-600">🛡 No bots allowed</p>
       </Card>
 
-      {/* Platform adoption — AI tokens + project traction */}
       <LandingPlatformAdoption />
 
-      {/* Row 5: Footer modules */}
       <section className="grid gap-2 sm:grid-cols-3">
         <Card className="border-violet-500/20 bg-violet-950/20 p-3">
           <p className="text-3xl font-bold text-white">80%</p>
@@ -470,8 +326,8 @@ export function LandingSinglePage({ stats }: { stats: PlatformStats | null }) {
           </ul>
         </Card>
         <Card className="flex flex-col justify-center p-3 text-center">
-          <p className="text-[9px] uppercase tracking-wider text-zinc-500">Built on Phala Network TEE</p>
-          <p className="mt-1 text-sm font-semibold text-emerald-300">Enterprise-grade privacy</p>
+          <p className="text-[9px] uppercase tracking-wider text-zinc-500">Local compute first</p>
+          <p className="mt-1 text-sm font-semibold text-emerald-300">Ollama · Founder Node · you own the bill</p>
         </Card>
         <Card className="p-3">
           <p className="text-[9px] uppercase tracking-wider text-zinc-500">Use the AI you trust</p>
