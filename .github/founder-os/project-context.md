@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix onboarding AI stack JSX ternary for Vercel build
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
