@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Fix Cursor agent panel URL from agentId for Vercel build
+Restore landing page layout after autostash revert
 
 ## Last Activity
 
