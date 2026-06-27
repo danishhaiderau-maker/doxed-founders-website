@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Restore landing page layout after autostash revert
+Add glm to founder promo credentialsStatus type for Vercel build
 
 ## Last Activity
 
