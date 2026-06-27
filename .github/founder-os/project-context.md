@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Restore two-card hero, add ranked Projects section with bubble map, filter Feed, drop DDollar box on landing
 
 ## Last Activity
 
