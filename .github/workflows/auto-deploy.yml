@@ -1,0 +1,99 @@
+name: Auto-Deploy Production
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      # Don't trigger on bot research artifacts, local snapshots, or docs-only changes
+      - 'services/btc-conservative-agent/**'
+      - 'services/btc-signal-engine/**'
+      - '.edge-analysis/**'
+      - 'docs/**'
+      - '**/*.md'
+      - '**/.cursor/rules/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for schema changes
+        id: schema
+        run: |
+          git fetch origin master --depth=2
+          if git diff --name-only HEAD~1 HEAD | grep -q '^prisma/schema.prisma$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Prisma schema changed — will push to Neon"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No schema changes — skipping Neon push"
+          fi
+
+      - name: Push Prisma schema to Neon
+        if: steps.schema.outputs.changed == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: node scripts/ci-neon-schema-push.mjs
+
+      - name: Generate Prisma client
+        run: npx prisma@6.8.2 generate --schema prisma/schema.prisma
+
+      - name: Build utils package
+        run: npm run build:utils
+
+      - name: Type-check API
+        run: npm run build --workspace=@dcf/api
+
+      - name: Build web (catch Vercel build errors before Vercel does)
+        run: npm run build --workspace=@dcf/web
+        env:
+          NEXTAUTH_URL: https://doxxedcrypto.digital
+          PUBLIC_SITE_URL: https://doxxedcrypto.digital
+
+      - name: Trigger Railway redeploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: node scripts/ci-railway-redeploy.mjs
+
+      - name: Wait for Vercel + Railway to settle
+        run: |
+          echo "Waiting 120s for Vercel auto-deploy + Railway rebuild to start..."
+          sleep 120
+
+      - name: Smoke test production
+        env:
+          API_URL: https://doxxedcrypto.digital
+        run: node scripts/smoke-test.mjs
+
+      - name: Report status
+        if: always()
+        run: |
+          echo "### Auto-Deploy Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site:** https://doxxedcrypto.digital" >> $GITHUB_STEP_SUMMARY
+          echo "- **API:** https://doxed-founders-website-production.up.railway.app/api/health" >> $GITHUB_STEP_SUMMARY
+          echo "- **Schema push:** ${{ steps.schema.outputs.changed == 'true' && 'applied' || 'skipped (no changes)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vercel:** auto-deployed from GitHub (check Vercel dashboard)" >> $GITHUB_STEP_SUMMARY
