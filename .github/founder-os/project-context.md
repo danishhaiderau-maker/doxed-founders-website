@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Stop button kills every home-stack process across all terminals; auto-restart bridge
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
