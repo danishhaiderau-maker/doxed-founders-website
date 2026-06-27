@@ -13,11 +13,9 @@ type Props = {
 };
 
 const PROMO_KEY_FIELDS = [
+  { key: 'glm' as const, label: 'GLM 5.2 API key (ZhipuAI)', placeholder: 'xxx.xxx' },
   { key: 'gemini' as const, label: 'Google Gemini API key', placeholder: 'AIza…' },
   { key: 'deepseek' as const, label: 'DeepSeek API key', placeholder: 'sk-…' },
-  { key: 'cursor' as const, label: 'Cursor API key', placeholder: 'key_…' },
-  { key: 'openai' as const, label: 'OpenAI API key', placeholder: 'sk-…' },
-  { key: 'anthropic' as const, label: 'Anthropic API key', placeholder: 'sk-ant-…' },
 ];
 
 export function AdminFounderPromoPanel({ accessToken }: Props) {
@@ -93,7 +91,7 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
           <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Admin only</p>
           <h3 className="mt-1 text-lg font-semibold text-white">Founder AI promo</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Offer new founders 1 month of platform-billed AI (Gemini, DeepSeek, Cursor, OpenAI, Anthropic). Timer
+            Offer new founders 1 month of platform-billed AI (GLM 5.2, Gemini, DeepSeek — cheap &amp; best). Timer
             starts at founder registration. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
             tokens — founders must connect their own keys to continue.
           </p>
@@ -156,7 +154,7 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
           }}
           rows={2}
           className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
-          placeholder="Join now — 1 month free Cursor, Gemini & DeepSeek on Founder OS"
+          placeholder="Join now — 1 month free GLM 5.2, Gemini & DeepSeek on Founder OS"
         />
       </label>
 

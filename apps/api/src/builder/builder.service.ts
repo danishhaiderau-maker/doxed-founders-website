@@ -69,6 +69,8 @@ import { AgentRuntimeService } from './agent-runtime.service';
 import { isAgentRunActive } from '@dcf/utils';
 import {
   FounderPromoService,
+  GLM_PROMO_BASE_URL,
+  GLM_PROMO_DEFAULT_MODEL,
   type PromoCredentialProvider,
 } from '../founder-os/founder-promo.service';
 
@@ -1324,6 +1326,8 @@ export class BuilderService {
     switch (provider) {
       case AiProvider.OPENAI:
         return this.callOpenAi(apiKey, system, userPrompt, model);
+      case AiProvider.GLM:
+        return this.callGlm(apiKey, system, userPrompt, model);
       case AiProvider.ANTHROPIC:
         return this.callAnthropic(apiKey, system, userPrompt, model);
       case AiProvider.GEMINI:
@@ -1533,7 +1537,7 @@ export class BuilderService {
       } else if (key === AiProvider.OLLAMA_LOCAL) {
         if (ollamaReady) ready.push(key);
       } else if (key === AiProvider.CURSOR) {
-        if (connected.has('cursor') || promoKeys.has('cursor')) ready.push(key);
+        if (connected.has('cursor')) ready.push(key);
       } else if (
         cfg.credentialProvider &&
         (connected.has(cfg.credentialProvider) || promoKeys.has(cfg.credentialProvider))
@@ -1548,7 +1552,7 @@ export class BuilderService {
     const status = await this.founderPromo.getUserPromoStatus(userId);
     if (!status.eligible) return new Set();
     const out = new Set<string>();
-    for (const p of ['gemini', 'deepseek', 'cursor', 'openai', 'anthropic'] as const) {
+    for (const p of ['glm', 'gemini', 'deepseek'] as const) {
       if (await this.founderPromo.hasPromoProvider(userId, p)) out.add(p);
     }
     return out;
@@ -1624,10 +1628,11 @@ export class BuilderService {
     return new Set(creds.map((c) => c.provider));
   }
 
-  /** User BYOK first; platform promo keys only while eligible (1-month window + token cap). */
+  /** User BYOK first; platform promo keys only while eligible (1-month window + token cap).
+   *  Accepts promo providers (glm/gemini/deepseek) plus 'cursor' which is BYOK-only. */
   private async resolveLlmApiKey(
     userId: string,
-    credentialProvider: PromoCredentialProvider,
+    credentialProvider: PromoCredentialProvider | 'cursor',
   ): Promise<{ apiKey: string; billingSource: 'byok' | 'platform_promo' } | null> {
     let userKey: string | null = null;
     if (credentialProvider === 'cursor') {
@@ -1641,6 +1646,7 @@ export class BuilderService {
       return { apiKey: userKey.trim(), billingSource: 'byok' };
     }
 
+    if (credentialProvider === 'cursor') return null;
     const promoKey = await this.founderPromo.resolvePromoApiKey(userId, credentialProvider);
     if (promoKey) {
       return { apiKey: promoKey, billingSource: 'platform_promo' };
@@ -1665,12 +1671,7 @@ export class BuilderService {
       if (c.token?.trim()) out.add(c.provider);
     }
 
-    const promoProviders: PromoCredentialProvider[] = [
-      'gemini',
-      'deepseek',
-      'openai',
-      'anthropic',
-    ];
+    const promoProviders: PromoCredentialProvider[] = ['glm', 'gemini', 'deepseek'];
     for (const p of promoProviders) {
       if (await this.founderPromo.hasPromoProvider(userId, p)) {
         out.add(p);
@@ -1688,6 +1689,13 @@ export class BuilderService {
         });
         if (!res.ok) throw new BadRequestException('Invalid OpenAI API key');
         return { accountName: 'OpenAI account' };
+      }
+      case 'glm': {
+        const res = await fetch(`${GLM_PROMO_BASE_URL}/models?limit=1`, {
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (!res.ok) throw new BadRequestException('Invalid GLM (ZhipuAI) API key');
+        return { accountName: 'GLM 5.2 (ZhipuAI)' };
       }
       case 'anthropic': {
         const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1769,6 +1777,31 @@ export class BuilderService {
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: model ?? 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        temperature: 0.4,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) return null;
+    const usage = parseOpenAiStyleUsage(data);
+    return { text, usage };
+  }
+
+  /** GLM 5.2 (ZhipuAI) — OpenAI-compatible endpoint, cheapest promo LLM. */
+  private async callGlm(key: string, system: string, user: string, model?: string) {
+    const res = await fetch(`${GLM_PROMO_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model ?? GLM_PROMO_DEFAULT_MODEL,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

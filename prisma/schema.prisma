@@ -274,6 +274,7 @@ enum AiProvider {
   CODEX
   WINDSURF
   OPENCLAW
+  GLM
 }
 
 enum FounderNodeInferenceStatus {
