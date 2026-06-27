@@ -3298,11 +3298,7 @@ export type FounderPromoPlatformSettings = {
   windowDays: number;
   message: string;
   credentialsConfigured: boolean;
-  credentialsStatus?: {
-    glm: boolean;
-    gemini: boolean;
-    deepseek: boolean;
-  };
+  credentialsStatus?: Record<string, boolean>;
   credentialsUpdatedAt?: string | null;
 };
 
