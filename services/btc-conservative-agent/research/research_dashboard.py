@@ -40,7 +40,7 @@ def format_melbourne_dt(value) -> str:
         return str(value)[:19] if value else "—"
 
 
-from flask import Flask, jsonify, render_template_string, send_file, abort, request
+from flask import Flask, jsonify, render_template_string, send_file, abort, request, Response
 
 try:
     from combo_pathway_config import (
@@ -141,6 +141,7 @@ REPORT_NAV = (
     ("horizon", "Recovery", "horizon_profitability_report.json"),
     ("ai", "AI Lab", "ai_calibration_report.json"),
     ("genome", "Genome", "research/genome/genome_analysis_report.json"),
+    ("evolution", "🧬 Evolution", None),
     ("edge", "Edge & Features", "feature_importance_report.json"),
     ("explorer", "Report Explorer", None),
     ("archives", "Archives", None),
@@ -1039,6 +1040,52 @@ def api_genome():
     return jsonify(_genome_payload())
 
 
+def _genome_evolution_payload():
+    """Genome Evolution Engine — counterfactual single-parameter sweep over
+    closed trades. Computed live from trades_3factor.csv so it always reflects
+    the latest data; never touches execution."""
+    try:
+        from research.genome.evolution import build_report
+        return build_report()
+    except Exception as exc:
+        return {"status": "ERROR", "message": str(exc)}
+
+
+@app.route("/api/genome-evolution")
+def api_genome_evolution():
+    return jsonify(_genome_evolution_payload())
+
+
+def _last_run_bug_report():
+    """Capture errors from the last bot/analyzer run so the AI can fix them."""
+    try:
+        from research.bug_report import build_report
+        return build_report()
+    except Exception as exc:
+        return {"status": "ERROR", "message": str(exc)}
+
+
+@app.route("/api/last-run-bug-report")
+def api_last_run_bug_report():
+    return jsonify(_last_run_bug_report())
+
+
+@app.route("/download/last-run-bug-report")
+def download_last_run_bug_report():
+    """Self-contained HTML bug report — feed to the AI so it knows last-run errors."""
+    try:
+        from research.bug_report import build_html
+        html = build_html()
+    except Exception as exc:
+        html = f"<html><body><h1>Bug report error</h1><pre>{exc}</pre></body></html>"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        html,
+        mimetype="text/html",
+        headers={"Content-Disposition": f'attachment; filename="last_run_bug_report_{stamp}.html"'},
+    )
+
+
 @app.route("/api/features")
 def api_features():
     return jsonify(_feature_payload())
@@ -1707,6 +1754,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Replay capabilities</h2>
     <pre id="genome-replay"></pre>
   </section>
+  <section id="sec-evolution">
+    <h2>🧬 Genome Evolution Engine</h2>
+    <p class="note" id="evo-note">Counterfactual single-parameter sweep over closed trades — answers "how could the CURRENT strategy improve?" Advisory only; never modifies execution. Computed live from <code>trades_3factor.csv</code>.</p>
+    <div class="kpis" id="evo-kpis"></div>
+    <h2>Strategy Score</h2>
+    <pre id="evo-score"></pre>
+    <h2>Strategy Improvement Center</h2>
+    <table><thead><tr><th>Pillar</th><th>Stars</th><th>Best gain/trade</th><th>Candidates</th></tr></thead><tbody id="evo-pillars"></tbody></table>
+    <h2>💡 One Change I'd Make</h2>
+    <pre id="evo-one"></pre>
+    <h2>🚀 Top Improvements</h2>
+    <table><thead><tr><th>Engine</th><th>Change</th><th>Gain/trade</th><th>Est. EV</th><th>Sample</th><th>Conf.</th><th>Drift</th><th>Status</th></tr></thead><tbody id="evo-top"></tbody></table>
+    <h2>❄ Frozen Components (DO NOT TOUCH)</h2>
+    <table><thead><tr><th>Component</th><th>Sample</th><th>EV</th><th>Conf.</th><th>Reason</th></tr></thead><tbody id="evo-frozen"></tbody></table>
+    <h2>🧪 Research Queue (hypotheses)</h2>
+    <table><thead><tr><th>Engine</th><th>Change</th><th>Status</th><th>Sample</th><th>Reason</th></tr></thead><tbody id="evo-queue"></tbody></table>
+    <h2>🔬 Fast-cut Threshold Sweep</h2>
+    <table><thead><tr><th>Change</th><th>Gain/trade</th><th>Sample</th><th>Conf.</th><th>Status</th><th>Reason</th></tr></thead><tbody id="evo-fastcut"></tbody></table>
+    <h2>Exit Profile EV (observed)</h2>
+    <table><thead><tr><th>Exit reason</th><th>N</th><th>EV</th><th>PnL</th><th>Conf.</th></tr></thead><tbody id="evo-exit"></tbody></table>
+    <pre id="evo-disclaimer"></pre>
+  </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
     <p class="note">Pearson correlation with PnL — validation only, not for auto-tuning.</p>
@@ -1728,7 +1797,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-download">
     <h2>Download Center</h2>
     <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
-    <p><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
+    <p><b>🐛 Last-run bug report</b> — scans bot/analyzer/supervisor logs + crash dump + port states, extracts every Traceback/CRITICAL/ERROR, and flags stale logs (processes that died). Feed this HTML to the AI so it knows exactly what broke in the last run. Also available as <a href="/api/last-run-bug-report" target="_blank">JSON</a>.</p>
+    <a class="btn" href="/download/last-run-bug-report" id="dl-bug-report" style="background:#b5470d">⬇ Last-Run Bug Report (HTML, AI-ready)</a>
+    <p style="margin-top:16px"><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
     <a class="btn" href="/download/research-pack" id="dl-research-pack" style="background:#2a6e2a">⬇ Research Pack (one file, all 6 merged)</a>
     <p style="margin-top:16px"><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
     <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
@@ -2230,6 +2301,50 @@ async function loadGenome() {
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
+async function loadEvolution() {
+  const r = await fetch('/api/genome-evolution');
+  const d = await r.json();
+  const note = document.getElementById('evo-note');
+  if (!d || d.status === 'NO_DATA') {
+    if (note) note.textContent = d?.message || 'No closed trades yet — Genome Evolution needs trades_3factor.csv.';
+    return;
+  }
+  if (d.status === 'ERROR') {
+    if (note) note.textContent = 'Evolution engine error: ' + (d.message || 'unknown');
+    return;
+  }
+  const cs = d.current_strategy || {};
+  const ss = d.strategy_score || {};
+  document.getElementById('evo-kpis').innerHTML = [
+    ['Trades', d.trades_loaded ?? 0],
+    ['EV/trade', '$' + fmtUsd(cs.ev_per_trade)],
+    ['Win rate', ((cs.win_rate ?? 0) * 100).toFixed(1) + '%'],
+    ['PnL total', '$' + fmtUsd(cs.pnl_total)],
+    ['Strategy score', (ss.score ?? 0) + '/100'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('evo-score').textContent = JSON.stringify(ss, null, 2);
+  const stars = n => '★'.repeat(n) + '☆'.repeat(Math.max(0,5-n));
+  const pillars = d.pillar_scores || {};
+  document.getElementById('evo-pillars').innerHTML = Object.keys(pillars).map(p => {
+    const x = pillars[p];
+    return `<tr><td>${p.toUpperCase()}</td><td>${stars(x.stars||0)}</td><td>+$${fmtUsd(x.best_gain_per_trade)}</td><td>${x.candidates||0}</td></tr>`;
+  }).join('');
+  const one = d.one_change;
+  document.getElementById('evo-one').textContent = one ? JSON.stringify(one, null, 2) : 'No high-confidence single change yet — keep collecting data.';
+  const stCls = s => s === 'RESEARCH_CANDIDATE' ? 'green' : (s === 'REJECT' || s === 'RESEARCH_GAP' ? 'amber' : '');
+  document.getElementById('evo-top').innerHTML = (d.top_improvements || []).map(s =>
+    `<tr><td>${s.engine}</td><td>${s.change}</td><td>+$${fmtUsd(s.expected_gain)}</td><td>$${fmtUsd(s.estimated_ev)}</td><td>${s.n_remaining ?? s.sample}</td><td>${s.confidence}</td><td>${s.drift}</td><td class="${stCls(s.status)}">${s.status}</td></tr>`).join('') || '<tr><td colspan="8" class="note">No positive candidates yet.</td></tr>';
+  document.getElementById('evo-frozen').innerHTML = (d.frozen_components || []).map(f =>
+    `<tr><td>${f.component}</td><td>${f.sample}</td><td>$${fmtUsd(f.ev)}</td><td>${f.confidence}</td><td>${f.reason}</td></tr>`).join('') || '<tr><td colspan="5" class="note">Nothing frozen yet — keep collecting.</td></tr>';
+  document.getElementById('evo-queue').innerHTML = (d.research_queue || []).map(q =>
+    `<tr><td>${q.engine}</td><td>${q.change}</td><td class="${stCls(q.status)}">${q.status}</td><td>${q.sample}</td><td>${q.reason}</td></tr>`).join('') || '<tr><td colspan="5" class="note">Queue empty.</td></tr>';
+  document.getElementById('evo-fastcut').innerHTML = ((d.engines || {}).fastcut || []).map(s =>
+    `<tr><td>${s.change}</td><td>${s.expected_gain == null ? '—' : (s.expected_gain >= 0 ? '+$' : '-$') + fmtUsd(Math.abs(s.expected_gain||0))}</td><td>${s.sample}</td><td>${s.confidence}</td><td class="${stCls(s.status)}">${s.status}</td><td>${s.reason}</td></tr>`).join('');
+  document.getElementById('evo-exit').innerHTML = ((d.engines || {}).exit || []).map(s =>
+    `<tr><td>${s.change}</td><td>${s.sample}</td><td>$${fmtUsd(s.ev)}</td><td>$${fmtUsd(s.pnl_total)}</td><td>${s.confidence}</td></tr>`).join('');
+  document.getElementById('evo-disclaimer').textContent = d.disclaimer || '';
+}
+
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
@@ -2317,6 +2432,7 @@ async function refreshAll() {
   await loadFeatures();
   await loadAI();
   await loadGenome();
+  await loadEvolution();
   await loadGptAuditNote();
   await loadExplorer();
   await loadArchives();
