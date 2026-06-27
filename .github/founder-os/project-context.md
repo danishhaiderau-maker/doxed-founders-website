@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(vercel): exclude local-only research data from web deploy upload
 
 ## Last Activity
 
