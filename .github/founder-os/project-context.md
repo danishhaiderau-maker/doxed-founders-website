@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bot): retry load_markets() at startup so transient Bitfinex SSL errors don't crash the bot
 
 ## Last Activity
 
