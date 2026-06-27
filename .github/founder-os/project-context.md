@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-fix(paper-trading): auto-create session when portfolio fetch 403s
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
