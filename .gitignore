@@ -55,6 +55,11 @@ prisma/dev.db-journal
 prisma/*.db
 prisma/*.db-journal
 
+# Local research snapshots — HARD RULE: never publish to GitHub/Vercel/Railway/Neon.
+# These are local-only analytics artifacts (5k+ files). They bloat git, slow deploys,
+# and have zero value in any cloud environment. Keep them on the laptop only.
+.edge-analysis/
+
 # Local logs / agent artifacts (never publish)
 *.log
 agent-restart-report*.txt
