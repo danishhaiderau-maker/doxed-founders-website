@@ -359,7 +359,7 @@ function MobileNavDrawer({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] lg:hidden">
+    <div className="fixed inset-0 z-[70] md:hidden">
       <button
         type="button"
         aria-label="Close menu"
@@ -559,8 +559,8 @@ function SiteNavInner() {
   return (
     <>
       <nav ref={navRef} className="flex items-center gap-1 text-sm">
-        {/* Desktop dropdowns */}
-        <div className="hidden items-center gap-0.5 lg:flex">
+        {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
+        <div className="hidden items-center gap-0.5 md:flex">
           {HUB_NAV_ROWS.map((row) => (
             <NavDropdown
               key={row.id}
@@ -575,7 +575,7 @@ function SiteNavInner() {
         </div>
 
         {/* Desktop actions */}
-        <div className="hidden items-center gap-2 pl-2 lg:flex">
+        <div className="hidden items-center gap-2 pl-2 md:flex">
           <div className="h-5 w-px bg-zinc-800" aria-hidden />
           <PlatformMessagesBell />
           <NotificationBell />
@@ -604,7 +604,7 @@ function SiteNavInner() {
         <button
           type="button"
           onClick={() => setMobileOpen(true)}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm font-medium text-zinc-200 lg:hidden"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm font-medium text-zinc-200 md:hidden"
           aria-label="Open menu"
         >
           <Menu className="h-4 w-4" />
