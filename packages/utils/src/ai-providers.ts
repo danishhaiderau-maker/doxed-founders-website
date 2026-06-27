@@ -6,6 +6,7 @@ export type AiProviderKey =
   | 'ANTHROPIC'
   | 'GEMINI'
   | 'DEEPSEEK'
+  | 'GLM'
   | 'OPENROUTER'
   | 'JATEVO'
   | 'SURPLUS'
@@ -54,6 +55,16 @@ export const AI_PROVIDERS: AiProviderConfig[] = [
     defaultModel: null,
     billTip: 'Founder OS generates specs locally — zero AI API cost.',
     credentialProvider: null,
+  },
+  {
+    key: 'GLM',
+    label: 'GLM 5.2 (ZhipuAI)',
+    connectMode: 'api_key',
+    needsApiKey: true,
+    defaultModel: 'glm-5.2',
+    billTip:
+      'Cheapest coding LLM — OpenAI-compatible. Free for new founders via promo. Best $/token for Founder Brain.',
+    credentialProvider: 'glm',
   },
   {
     key: 'OPENAI',
