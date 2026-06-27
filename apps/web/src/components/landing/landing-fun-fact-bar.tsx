@@ -75,15 +75,18 @@ export function LandingFunFactBar() {
         </div>
 
         <div className="min-w-0 flex-1">
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Fun fact</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">Fair warning</p>
           <p className="mt-1.5 text-sm font-bold leading-snug text-white sm:text-base">
             <span className="text-red-400">{LOST_PCT}%</span> of Pump.fun traders have not realized over{' '}
             <span className="text-white">$10,000</span> in profits — data shows.
           </p>
           <p className="mt-2 text-xs leading-relaxed text-zinc-400">
             Out of 13.55M wallet addresses on Pump.fun, only ~55k crossed $10k in realized gains (Dune Analytics,
-            reported Jan 2025). We came to crypto for the tech — let&apos;s build HODL culture and bring conviction to
-            the space.
+            reported Jan 2025). We came to crypto for the tech — not another anonymous pump cycle.
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-emerald-300/90">
+            DoxxedCrypto backs founders who show their face in public: verified identity, documented shipping, and
+            community conviction before capital moves. Support builders, not spectacles.
           </p>
         </div>
 
