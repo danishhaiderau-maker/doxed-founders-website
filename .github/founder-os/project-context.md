@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix bridge dying on first request (Task.Run overload + runspace-pool scope)
 
 ## Last Activity
 
