@@ -8,6 +8,8 @@ import { FounderImportWizard } from '@/components/founder-import-wizard';
 import { FounderCloudPanel } from '@/components/founder-cloud-panel';
 import { FounderPathSelector } from '@/components/founder-path-selector';
 import { FounderStarterPackPicker } from '@/components/founder-starter-pack-picker';
+import { FounderOnboardingAiStack } from '@/components/founder-onboarding-ai-stack';
+import { FounderOnboardingComplete } from '@/components/founder-onboarding-complete';
 import {
   connectGitHubRepo,
   connectGitHubToken,
@@ -28,6 +30,8 @@ type Props = {
   accessToken: string;
   onRefresh?: () => void;
   onMessage?: (msg: string) => void;
+  onLaunchPrompt?: (prompt: string) => void;
+  onDismiss?: () => void;
   initialPath?: OnboardingPathId | null;
 };
 
@@ -35,7 +39,14 @@ function stepById(status: FounderOnboardingStatus | null, id: string) {
   return status?.steps.find((s) => s.id === id);
 }
 
-export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, initialPath }: Props) {
+export function FounderOnboardingWizard({
+  accessToken,
+  onRefresh,
+  onMessage,
+  onLaunchPrompt,
+  onDismiss: onDismissProp,
+  initialPath,
+}: Props) {
   const [status, setStatus] = useState<FounderOnboardingStatus | null>(null);
   const [dismissed, setDismissed] = useState(true);
   const [stepIndex, setStepIndex] = useState(0);
@@ -124,11 +135,25 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, ini
     if (target >= 0) setStepIndex(target);
   }, [status]);
 
-  if (dismissed || requiredComplete) return null;
+  if (dismissed) return null;
+
+  if (requiredComplete && status) {
+    return (
+      <FounderOnboardingComplete
+        status={status}
+        onLaunchPrompt={(prompt) => {
+          onLaunchPrompt?.(prompt);
+          onRefresh?.();
+        }}
+        onDismiss={dismiss}
+      />
+    );
+  }
 
   function dismiss() {
     if (typeof window !== 'undefined') window.localStorage.setItem(DISMISS_KEY, '1');
     setDismissed(true);
+    onDismissProp?.();
   }
 
   async function savePath(path: OnboardingPathId) {
@@ -345,6 +370,11 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, ini
               <p className="mt-1 text-sm text-zinc-500">
                 Sovereign, your cloud, migrate in, a free starter pack, or full Founder Cloud on your PC.
               </p>
+              <div className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-950/15 p-3 text-xs text-cyan-100/85">
+                <strong className="text-cyan-300">Save on cloud bills.</strong> Run bots and heavy compute
+                on your home PC + tunnel (we cut Railway from ~$10/day to $0). Founder OS stays the control
+                plane — Vercel + Neon for sync, your keys for AI.
+              </div>
               <div className="mt-4">
                 <FounderPathSelector
                   selectedPath={selectedPath ?? (status?.onboardingPath as OnboardingPathId | null) ?? null}
@@ -495,24 +525,18 @@ export function FounderOnboardingWizard({ accessToken, onRefresh, onMessage, ini
             <>
               <h3 className="font-semibold text-white">Connect AI Stack</h3>
               <p className="mt-1 text-sm text-zinc-500">
-                Founder Brain routes internally — you never pick GPT vs Claude in chat. Connect at least one
-                provider.
+                Founder Brain routes internally — connect once here, no tab-hopping.
               </p>
-              {currentStep?.complete ? (
-                <p className="mt-4 text-sm text-emerald-300">AI Stack connected.</p>
-              ) : (
-                <ul className="mt-4 list-inside list-disc space-y-1 text-sm text-zinc-400">
-                  <li>DeepSeek, OpenAI, Claude, Gemini, OpenRouter, Jatevo</li>
-                  <li>Cursor or OpenHands for remote builds</li>
-                  <li>Ollama via Founder Node for local/private</li>
-                </ul>
-              )}
-              <Link
-                href="/settings/builder"
-                className="mt-4 inline-flex rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
-              >
-                Open connect hub →
-              </Link>
+              <div className="mt-4">
+                <FounderOnboardingAiStack
+                  accessToken={accessToken}
+                  llmConnected={status?.llmConnected ?? false}
+                  builderConnected={status?.builderConnected ?? false}
+                  promo={status?.promo}
+                  onConnected={() => void load()}
+                  onMessage={onMessage}
+                />
+              </div>
             </>
           )}
 

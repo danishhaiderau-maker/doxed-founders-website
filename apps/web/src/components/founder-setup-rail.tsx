@@ -6,9 +6,10 @@ import type { FounderOnboardingStatus } from '@/lib/api';
 type Props = {
   status: FounderOnboardingStatus;
   onResumeWizard?: () => void;
+  onTestBrain?: () => void;
 };
 
-export function FounderSetupRail({ status, onResumeWizard }: Props) {
+export function FounderSetupRail({ status, onResumeWizard, onTestBrain }: Props) {
   const required = status.steps.filter((s) => !s.optional);
   const done = required.filter((s) => s.complete).length;
   const pct = required.length ? Math.round((done / required.length) * 100) : 0;
@@ -24,22 +25,46 @@ export function FounderSetupRail({ status, onResumeWizard }: Props) {
                 {status.pathLabel}
               </span>
             )}
+            {status.brainReady && (
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">
+                Brain ready
+              </span>
+            )}
+            {status.remoteBuildReady && (
+              <span className="rounded-full border border-indigo-500/30 bg-indigo-950/40 px-2 py-0.5 text-[10px] text-indigo-200">
+                Remote build ready
+              </span>
+            )}
           </div>
-          {status.topology && (
+          {status.brainHint && (
+            <p className="mt-1 text-[11px] text-amber-200/80">{status.brainHint}</p>
+          )}
+          {status.topology && !status.brainHint && (
             <p className="mt-1 text-[11px] text-zinc-500">
               Memory · {status.topology.memory} · Compute · {status.topology.compute}
             </p>
           )}
         </div>
-        {onResumeWizard && (
-          <button
-            type="button"
-            onClick={onResumeWizard}
-            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:text-white"
-          >
-            Continue setup
-          </button>
-        )}
+        <div className="flex flex-wrap gap-2">
+          {status.brainReady && onTestBrain && (
+            <button
+              type="button"
+              onClick={onTestBrain}
+              className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+            >
+              Test Brain
+            </button>
+          )}
+          {onResumeWizard && (
+            <button
+              type="button"
+              onClick={onResumeWizard}
+              className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:text-white"
+            >
+              Continue setup
+            </button>
+          )}
+        </div>
       </div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-800">
         <div

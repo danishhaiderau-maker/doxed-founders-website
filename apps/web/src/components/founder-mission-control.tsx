@@ -73,18 +73,20 @@ export function FounderMissionControl({
   }
 
   return (
-    <FounderOsDashboardLayout
-      accessToken={session.accessToken}
-      dashboard={dashboard}
-      room={room}
-      activeTab={activeTab}
-      onTabChange={onTabChange}
-      onRefresh={onRefresh}
-      onMessage={onMessage}
-      tabContent={tabContent}
-      initialCopilotPrompt={initialCopilotPrompt}
-      onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
-      activeAgentTemplate={activeAgentTemplate}
-    />
+    <section id="founder-mission-control" className="scroll-mt-24">
+      <FounderOsDashboardLayout
+        accessToken={session.accessToken}
+        dashboard={dashboard}
+        room={room}
+        activeTab={activeTab}
+        onTabChange={onTabChange}
+        onRefresh={onRefresh}
+        onMessage={onMessage}
+        tabContent={tabContent}
+        initialCopilotPrompt={initialCopilotPrompt}
+        onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
+        activeAgentTemplate={activeAgentTemplate}
+      />
+    </section>
   );
 }

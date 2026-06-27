@@ -50,6 +50,7 @@ import { GitHubApiService } from '../github/github-api.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
 import { PlatformConnectionsService } from './platform-connections.service';
 import { FounderCloudService } from './founder-cloud.service';
+import { FounderPromoService } from './founder-promo.service';
 
 @Injectable()
 export class FounderOsService {
@@ -65,6 +66,7 @@ export class FounderOsService {
     private readonly githubAutoSync: GithubAutoSyncService,
     private readonly platformConnections: PlatformConnectionsService,
     private readonly founderCloud: FounderCloudService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   async grantLaunchCredits(userId: string, founderId: string, projectId: string, projectName: string) {
@@ -449,14 +451,26 @@ export class FounderOsService {
       orderBy: { lastSeenAt: 'desc' },
     });
 
-    const llmConnected = creds.some(
+    const llmConnectedByok = creds.some(
       (c) =>
         c.verifiedAt &&
         ['openai', 'anthropic', 'gemini', 'deepseek', 'openrouter', 'phala', 'jatevo'].includes(
           c.provider,
         ),
     );
-    const cursorConnected = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
+    const cursorConnectedByok = creds.some((c) => c.provider === 'cursor' && c.verifiedAt);
+    const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+    const promoEligible = promoStatus.eligible;
+    const promoHasLlm =
+      promoEligible &&
+      (await Promise.all(
+        (['deepseek', 'gemini', 'openai', 'anthropic'] as const).map((p) =>
+          this.founderPromo.hasPromoProvider(userId, p),
+        ),
+      ).then((flags) => flags.some(Boolean)));
+    const promoHasCursor = promoEligible && (await this.founderPromo.hasPromoProvider(userId, 'cursor'));
+    const llmConnected = llmConnectedByok || promoHasLlm;
+    const cursorConnected = cursorConnectedByok || promoHasCursor;
     const githubConnected = Boolean(
       (gh?.repoFullName ?? founder?.githubRepoFullName) &&
         !String(gh?.repoFullName ?? founder?.githubRepoFullName).endsWith('/pending-setup'),
@@ -519,7 +533,13 @@ export class FounderOsService {
       ai_stack: {
         label: 'Connect AI Stack (required for Founder Brain)',
         href: '/settings/builder',
-        detail: llmConnected ? 'Tailored answers enabled' : 'Without an LLM, Brain uses rule-based replies',
+        detail: llmConnected
+          ? promoHasLlm && !llmConnectedByok
+            ? 'Platform AI promo active'
+            : 'Tailored answers enabled'
+          : promoStatus.enabled && promoStatus.message
+            ? promoStatus.message.slice(0, 80)
+            : 'Without an LLM, Brain uses rule-based replies',
       },
       goal: {
         label: 'Set your current goal',
@@ -568,6 +588,8 @@ export class FounderOsService {
           ? platformConnected
           : githubConnected && llmConnected);
 
+    const remoteBuildReady = githubConnected && cursorConnected;
+
     return {
       steps,
       onboardingPath: storedPath,
@@ -583,6 +605,16 @@ export class FounderOsService {
       githubConnected,
       llmConnected,
       builderConnected: cursorConnected,
+      remoteBuildReady,
+      promo: {
+        enabled: promoStatus.enabled,
+        eligible: promoEligible,
+        message: promoStatus.message,
+        daysRemaining: promoStatus.daysRemaining,
+        tokensRemaining: promoStatus.tokensRemaining,
+        hasLlm: promoHasLlm,
+        hasCursor: promoHasCursor,
+      },
       githubLastSyncedAt: gh?.lastSyncedAt?.toISOString() ?? null,
       projectName: founder?.projects[0]?.name ?? null,
       brainHint: brainReady
