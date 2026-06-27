@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-Use real Discover bubble map + top projects table on landing; remove dump traction table; shrimps message in hero paragraph
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
