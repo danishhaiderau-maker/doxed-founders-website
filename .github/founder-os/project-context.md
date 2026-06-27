@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix tunnel status cache + dedupe duplicate position render; add Research Pack download
 
 ## Last Activity
 
