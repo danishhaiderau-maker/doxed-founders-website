@@ -136,10 +136,10 @@ export function AgentRelaySimPanel({
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-300">
             {exchange} · relay simulation
           </p>
-          <h2 className="mt-1 text-lg font-bold text-white">Option B paper relay</h2>
+          <h2 className="mt-1 text-lg font-bold text-white">Bitfinex API relay test</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
-            Virtual $20 lots on merged BTC-PERP — same relay logic as live copy, no real exchange
-            orders. Paper book only on this tab; showcase signals come from global bot :7002 (not local lab :7800).
+            Real Bitfinex API orders, tightly capped — 1 position at a time · $20 margin · 100x
+            leverage. Showcase signals come from global bot :7002 (not local lab :7800).
           </p>
         </div>
         {signedIn ? (
@@ -200,6 +200,25 @@ export function AgentRelaySimPanel({
       </div>
 
       <div className="mt-4 space-y-4">
+        {/* Why relay sim exists — explicit explainer for the trader */}
+        <div className="rounded-xl border border-sky-500/35 bg-sky-950/15 px-4 py-3 text-xs leading-relaxed text-sky-100/90">
+          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-sky-300">
+            Why this tab exists
+          </p>
+          <p className="mt-1.5">
+            Relay sim is the live-API dress rehearsal before real trading. It places a{' '}
+            <strong className="text-white">single $20 order at 100x leverage</strong> on your real
+            Bitfinex account — one order at a time, no stacking — so you can watch a complete trade
+            lifecycle (entry → fill → manage → exit) and confirm the exchange API can place,
+            cancel, and fill orders correctly.
+          </p>
+          <p className="mt-1.5 text-sky-200/80">
+            Once you have seen a full lifecycle and are confident the API pipeline works, stop sim
+            and resume live copy for real trading. This replaces the old copy-trade path, which is
+            retired.
+          </p>
+        </div>
+
         {!signedIn ? (
           <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
             Sign in and connect {exchange} (hire live copy) to run relay simulation beside the
@@ -209,13 +228,15 @@ export function AgentRelaySimPanel({
 
         {active ? (
           <p className="rounded-lg border border-sky-500/30 bg-sky-950/15 px-3 py-2 text-xs text-sky-100/90">
-            Relay sim active — live orders blocked (instance {instanceStatus ?? 'PAUSED'}). Paper
-            book mirrors Option B virtual lots; merged-position exits tracked per lot in ledger.
+            Relay sim active — real Bitfinex API testing mode (instance{' '}
+            {instanceStatus ?? 'PAUSED'}). Capped at 1 order · $20 · 100x. The next showcase signal
+            opens one real position; no new entries until it closes.
           </p>
         ) : signedIn ? (
           <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-500">
-            Start sim to mirror showcase signals on a $500 paper book. Live relay stays paused until
-            you stop sim and resume live copy.
+            Start sim to place a single capped $20 / 100x order on the real Bitfinex API and watch
+            the full lifecycle. Live relay stays paused while sim runs; stop sim to resume real
+            trading.
           </p>
         ) : null}
 
@@ -301,17 +322,17 @@ export function AgentRelaySimPanel({
 
         <div>
           <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.15em] text-sky-300">
-            Sim paper book — signals · positions · orders · trades
+            Bitfinex API — signals · positions · orders · trades
           </p>
           {!active ? (
             <p className="mb-3 text-xs text-zinc-500">
-              Start relay simulation to populate the paper book. Tables show structure even when
-              flat.
+              Start relay sim to place a single capped $20 / 100x order on the real Bitfinex API.
+              Tables show structure even when flat.
             </p>
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
-              Sim is running but no lots yet — waiting for the next mirrored showcase signal from :7002.
-              Reset ledger ($500) clears the paper book; it does not sync from the showcase bot.
+              Sim is running but no order yet — waiting for the next showcase signal from :7002. One
+              real $20 / 100x order will be placed; no new entries until it closes.
             </p>
           ) : null}
           <AgentTransparencyTables liveBook={simBook} maxRows={10} />

@@ -179,16 +179,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
               where: { id: instance.id },
               data: {
                 status: TradingAgentInstanceStatus.PAUSED,
-                lastError: 'Relay simulation active — live orders blocked.',
+                lastError: 'Relay sim active — real Bitfinex API testing mode (1 order · $20 · 100x cap).',
               },
             });
           }
           try {
-            this.activeTrading = this.relaySim.getSimClient(
-              instance.userId,
-              readCopyRelaySimState(instance.dashboardState).ledger,
-            );
-            await (this.activeTrading as BitfinexSimTradingClient).processFillsOnMark();
+            // Sim mode = REAL Bitfinex API, not a paper book. Purpose: prove the live order
+            // pipeline (place / cancel / fill / merge) end-to-end with real money but tightly
+            // capped — max 1 concurrent position, $20 margin, 100x leverage (the subscriber
+            // defaults). Once the trader has seen a full lifecycle, they stop sim and resume
+            // live copy for real trading. The real exchange position is the source of truth;
+            // reconcileLotLedger reads it directly via this.activeTrading.
+            this.activeTrading = this.bitfinex;
             await this.processInstance(agent.id, instance, true);
             await this.persistSimTickState(agent.id, instance);
           } catch (err) {
@@ -425,7 +427,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     await this.cleanupOrphanCopyOrders(instance.userId, creds, managedOrderIds);
 
-    const maxConcurrent = await this.resolveMaxConcurrentSignals();
+    const maxConcurrent = simActive ? 1 : await this.resolveMaxConcurrentSignals();
     const botStateForCap = this.botBridge.isEnabled()
       ? await this.botBridge.fetchStateForExecution(true)
       : null;
