@@ -143,7 +143,8 @@ try {
 } finally {
   if ($exitCode -ne 0) {
     Write-Host "Bot exited with code $exitCode" -ForegroundColor Yellow
-    Write-CrashReport -Code $exitCode -Message ($crashMsg ?? "non-zero exit")
+    $msg = if ($crashMsg) { $crashMsg } else { "non-zero exit" }
+    Write-CrashReport -Code $exitCode -Message $msg
   } else {
     Write-Host "Bot process ended." -ForegroundColor Yellow
   }
