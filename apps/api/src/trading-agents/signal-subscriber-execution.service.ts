@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   SignalCycleStatus,
   TradingAgentInstanceStatus,
@@ -118,6 +119,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     private readonly botBridge: BotBridgeService,
     private readonly relaySim: CopyRelaySimService,
     private readonly cycleAudit: TradeCycleAuditService,
+    private readonly config: ConfigService,
   ) {
     this.activeTrading = this.bitfinex;
   }
@@ -2296,9 +2298,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     managedOrderIds: Set<number>,
   ) {
+    // REAL-MONEY SAFETY: never blanket-cancel every unmanaged order on the symbol.
+    // The previous behavior cancelled a user's MANUAL orders/stops each tick because
+    // they were not in `managedOrderIds` (which only tracks copy-relay orders placed
+    // this session). Now we only cancel when aggressive cleanup is explicitly opted-in
+    // (RELAY_AGGRESSIVE_ORPHAN_CLEANUP=1) — default is to LOG orphans and leave them,
+    // so a real user's manual orders are never touched by the relay.
+    const aggressive =
+      (this.config.get<string>('RELAY_AGGRESSIVE_ORPHAN_CLEANUP') ?? '').trim() === '1';
     const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     for (const order of orders) {
       if (managedOrderIds.has(order.id)) continue;
+      if (!aggressive) {
+        // Log only; do NOT cancel — could be a user's own manual order.
+        this.logger.debug(
+          `Unmanaged order ${order.id} (${order.orderType}) present for ${userId}; leaving untouched (aggressive cleanup off)`,
+        );
+        continue;
+      }
       try {
         await this.activeTrading.cancelOrder(creds, order.id);
         this.logger.warn(

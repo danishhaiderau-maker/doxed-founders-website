@@ -35,7 +35,16 @@ export class ShowcaseRelayEventsService {
     if (!expected) {
       throw new UnauthorizedException('Showcase relay webhook not configured');
     }
-    if (secretHeader?.trim() !== expected) {
+    const provided = (secretHeader ?? '').trim();
+    // Timing-safe compare to avoid leaking the secret via response-time side channels.
+    if (provided.length !== expected.length) {
+      throw new UnauthorizedException('Invalid bot control secret');
+    }
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) {
+      diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+    }
+    if (diff !== 0) {
       throw new UnauthorizedException('Invalid bot control secret');
     }
   }

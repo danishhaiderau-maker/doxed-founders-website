@@ -14866,6 +14866,7 @@ def close_position(pos: dict, exit_reason: str):
         pos["_close_in_progress"] = True
         trade_id = pos.get("trade_id")
         if not trade_id:
+            pos["_close_in_progress"] = False
             return
         _emit_genome_execution_event("EXIT_TRIGGERED", {
             "trade_id": trade_id,
@@ -14899,6 +14900,9 @@ def close_position(pos: dict, exit_reason: str):
 
         if net_pnl <= 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
+            # CRITICAL: clear the in-progress flag so this position is not frozen
+            # OPEN forever (stop-loss/ladder exits must still be able to run on it).
+            pos["_close_in_progress"] = False
             return
 
         entry_ts = float(pos.get("entry_ts") or 0)

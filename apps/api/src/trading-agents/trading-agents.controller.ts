@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { TradingAgentKind } from '@prisma/client';
 import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -119,6 +120,7 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
   @Post(':slug/showcase-relay-event')
   showcaseRelayEvent(
     @Param('slug') slug: string,

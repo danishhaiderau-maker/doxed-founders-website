@@ -1,6 +1,17 @@
-import { Body, Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Headers,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
-import { SkipThrottle } from '@nestjs/throttler';
+import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { GitHubOAuthService } from '../github/github-oauth.service';
 import { Verify2FaLoginDto } from '../security/dto/security.dto';
 import { SecurityService } from '../security/security.service';
@@ -12,14 +23,36 @@ import { OAuthLoginDto } from './dto/oauth.dto';
 import { JwtAuthGuard } from './guards';
 import { Public } from './public.decorator';
 
-@SkipThrottle()
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly securityService: SecurityService,
     private readonly githubOAuth: GitHubOAuthService,
+    private readonly config: ConfigService,
   ) {}
+
+  /**
+   * Block public account-takeover via /auth/oauth. The OAuth endpoint must only be
+   * callable server-to-server from NextAuth (which verifies the provider token).
+   * When INTERNAL_AUTH_SECRET is configured (production), require a matching header.
+   * Timing-safe compare avoids leaking the secret via response-time side channels.
+   */
+  private assertInternalAuthSecret(header: string | undefined) {
+    const expected = this.config.get<string>('INTERNAL_AUTH_SECRET')?.trim();
+    if (!expected) return; // dev/local: no shared secret configured
+    const provided = (header ?? '').trim();
+    if (provided.length !== expected.length) {
+      throw new ForbiddenException('Internal auth required for OAuth linking');
+    }
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) {
+      diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+    }
+    if (diff !== 0) {
+      throw new ForbiddenException('Internal auth required for OAuth linking');
+    }
+  }
 
   @Get('github/status')
   @UseGuards(JwtAuthGuard)
@@ -49,20 +82,29 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('register')
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('oauth')
-  oauth(@Body() dto: OAuthLoginDto) {
+  oauth(
+    @Body() dto: OAuthLoginDto,
+    @Headers('x-internal-auth-secret') internalSecret: string | undefined,
+  ) {
+    // Block the public account-takeover path: only NextAuth (server-to-server)
+    // may link OAuth identities to existing users.
+    this.assertInternalAuthSecret(internalSecret);
     return this.authService.oauthLogin(dto);
   }
 
