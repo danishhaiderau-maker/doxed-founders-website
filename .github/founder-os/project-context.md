@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(workspace): full IDE-like workspace redesign matching Development OS vision
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
