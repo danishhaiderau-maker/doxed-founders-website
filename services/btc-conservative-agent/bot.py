@@ -18644,8 +18644,10 @@ def api_relay_state():
     """Fast subset for Railway relay / Agent Hub — no heavy research KPIs."""
     try:
         now_ts = time.time()
+        session_start = _showcase_trade_session_start()
         with state_lock:
             price = state.get("price")
+            debug_state = state.get("debug_state") or {}
             snapshot = {
                 "price": price,
                 "bot_version": EXECUTION_FIX_VERSION,
@@ -18657,10 +18659,22 @@ def api_relay_state():
                 "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
                 "strategy_mode": state.get("strategy_mode"),
                 "dashboard_port": DASHBOARD_PORT,
+                # Relay execution path (pollBotForIntents + buildIntentEnvelope) needs these.
+                # Without last_approve_outcome the relay never creates INTENT cycles => sim
+                # mirrors nothing. /api/state carries them but is 108KB and times out through
+                # the Cloudflare tunnel; relay-state is 48KB and reliable, so include them here.
+                "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
+                "last_ai": copy.deepcopy(state.get("last_ai")),
+                "pullback_threshold": state.get("pullback_threshold"),
+                "last_edge": state.get("last_edge"),
+                "leverage": state.get("leverage"),
+                "regime": state.get("regime"),
+                "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
             }
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
+            trades_for_relay = _snapshot_trades_for_api(session_start)
             active_list, _exposure = _collect_dashboard_active_signals(
                 pending_orders_copy,
                 positions_copy,
@@ -18679,6 +18693,7 @@ def api_relay_state():
             expired_orders_copy = copy.deepcopy(expired_orders)
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
+        snapshot["trades"] = trades_for_relay
         snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,
