@@ -87,6 +87,7 @@ export class SignalCyclesService implements OnModuleInit {
   private readonly logger = new Logger(SignalCyclesService.name);
   private lastSeenTradeId: string | null = null;
   private pollingIntents = false;
+  private backfilling = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -99,6 +100,11 @@ export class SignalCyclesService implements OnModuleInit {
     this.logger.log(`Signal cycle bridge polling every ${SIGNAL_POLL_MS / 1000}s`);
     setInterval(() => void this.pollBotForIntents(), SIGNAL_POLL_MS);
     setInterval(() => void this.syncShowcaseCycleClosures(), SIGNAL_POLL_MS);
+    // C4 fix: periodic reconnect-backfill — catches signals missed while the bot was
+    // briefly unreachable (a poll failed during a trade's lao window and the bot
+    // advanced past it). Scans session trades for still-OPEN showcase positions with
+    // no cycle row and creates INTENT cycles so the relay can still copy them.
+    setInterval(() => void this.backfillMissedIntents(), 30_000);
     setTimeout(() => void this.pollBotForIntents(), 1_000);
   }
 
@@ -280,6 +286,79 @@ export class SignalCyclesService implements OnModuleInit {
     return true;
   }
 
+  /**
+   * C4 reconnect-backfill: scan the showcase bot's session trades for still-OPEN
+   * positions that have no signalCycle row (missed because a poll failed during the
+   * trade's last_approve_outcome window and the bot advanced past it). Creates INTENT
+   * cycles so the relay can still copy them. Already-closed showcase trades are skipped
+   * (handled by syncShowcaseCycleClosures + the cycle-close-cancel path).
+   */
+  async backfillMissedIntents(): Promise<boolean> {
+    if (this.backfilling) return false;
+    this.backfilling = true;
+    try {
+      if (!this.botBridge.isEnabled()) return false;
+      const agent = await this.prisma.tradingAgent.findUnique({
+        where: { slug: 'conservative-btc' },
+      });
+      if (!agent) return false;
+      const bot = await this.botBridge.fetchStateForExecution(true);
+      if (!bot) return false;
+
+      const sessionTrades = normalizeBotSessionTrades(bot).filter(
+        (t) => t.trade_id && t.exit == null,
+      );
+      if (!sessionTrades.length) return false;
+
+      const existing = await this.prisma.signalCycle.findMany({
+        where: { agentId: agent.id },
+        orderBy: { createdAt: 'desc' },
+        take: 300,
+        select: { tradeId: true },
+      });
+      const existingIds = existing.map((c) => c.tradeId);
+
+      const maxMarginUsd = await loadSubscriberMaxMarginUsd(this.prisma);
+      let created = 0;
+      for (const t of sessionTrades) {
+        const tid = String(t.trade_id);
+        const showcaseMatch = resolveShowcaseTradeDetails(bot, tid);
+        const canonical = pickCanonicalTradeId(tid, showcaseMatch?.matchedTradeId ?? tid);
+        if (existingIds.some((e) => tradeIdsMatch(e, canonical))) continue;
+
+        const cycleId = `cyc_${randomBytes(8).toString('hex')}`;
+        const envelope = buildIntentEnvelope(cycleId, canonical, bot, { maxMarginUsd });
+        if (!envelope) continue;
+        const ttlSec = envelope.entry.ttl_sec;
+        try {
+          await this.prisma.signalCycle.create({
+            data: {
+              id: cycleId,
+              agentId: agent.id,
+              tradeId: canonical,
+              status: SignalCycleStatus.INTENT,
+              botVersion: bot.bot_version ?? null,
+              intentEnvelope: envelope as unknown as Prisma.InputJsonValue,
+              researchVenue: 'bitfinex',
+              expiresAt: new Date(Date.now() + ttlSec * 1000),
+            },
+          });
+          existingIds.push(canonical);
+          created++;
+          this.logger.log(
+            `Signal cycle BACKFILL ${cycleId} trade=${canonical} (missed-during-outage)`,
+          );
+        } catch (err) {
+          if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') continue;
+          throw err;
+        }
+      }
+      return created > 0;
+    } finally {
+      this.backfilling = false;
+    }
+  }
+
   /** Push wake from showcase bot — returns true when a new INTENT was created. */
   async wakeFromShowcase(opts?: { intents?: boolean; closures?: boolean }) {
     const intents = opts?.intents !== false;
@@ -287,6 +366,9 @@ export class SignalCyclesService implements OnModuleInit {
     let created = false;
     if (intents) {
       created = await this.pollBotForIntents();
+      // Also run the missed-signal backfill on wake so signals dropped during a brief
+      // bot outage are recovered when the showcase pushes its next event.
+      if (await this.backfillMissedIntents()) created = true;
     }
     if (closures) {
       await this.syncShowcaseCycleClosures(true);
@@ -306,7 +388,7 @@ export class SignalCyclesService implements OnModuleInit {
         agentId: agent.id,
         status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
       },
-      take: 20,
+      take: 200,
     });
     if (!openCycles.length) return;
 
