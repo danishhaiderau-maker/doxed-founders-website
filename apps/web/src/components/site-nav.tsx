@@ -329,7 +329,9 @@ function MobileNavDrawer({
   fallbackRole: ReturnType<typeof resolveGamifiedRole>;
 }) {
   const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState<string | null>('trade');
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(HUB_NAV_ROWS.map((r) => r.id)),
+  );
 
   useEffect(() => {
     if (!open) {
@@ -366,7 +368,7 @@ function MobileNavDrawer({
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
         onClick={onClose}
       />
-      <aside className="absolute inset-y-0 right-0 flex w-full max-w-sm flex-col border-l border-zinc-800 bg-[#07070c] shadow-2xl">
+      <aside className="absolute inset-y-0 right-0 flex w-full flex-col border-l border-zinc-800 bg-[#07070c] shadow-2xl sm:max-w-sm">
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
           <p className="text-sm font-bold text-white">Menu</p>
           <button
@@ -395,12 +397,19 @@ function MobileNavDrawer({
         <div className="flex-1 overflow-y-auto px-3 py-3">
           {filteredRows.map((row) => {
             const accent = sectionAccent(row.id);
-            const isExpanded = expanded === row.id || query.length > 0;
+            const isExpanded = expanded.has(row.id) || query.length > 0;
             return (
               <div key={row.id} className="mb-2 overflow-hidden rounded-xl border border-zinc-800/80">
                 <button
                   type="button"
-                  onClick={() => setExpanded(isExpanded && !query ? null : row.id)}
+                  onClick={() =>
+                    setExpanded((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(row.id)) next.delete(row.id);
+                      else next.add(row.id);
+                      return next;
+                    })
+                  }
                   className={cn(
                     'flex w-full items-center justify-between px-3 py-3 text-left text-sm font-semibold',
                     sectionHasActive(pathname, row, (item) => resolveHref(item) ?? '')
@@ -408,7 +417,18 @@ function MobileNavDrawer({
                       : 'text-zinc-200',
                   )}
                 >
-                  <span>{row.label}</span>
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        'inline-block h-2 w-2 rounded-full',
+                        row.id === 'trade' && 'bg-emerald-400',
+                        row.id === 'community' && 'bg-amber-400',
+                        row.id === 'build' && 'bg-violet-400',
+                      )}
+                      aria-hidden
+                    />
+                    {row.label}
+                  </span>
                   <ChevronDown className={cn('h-4 w-4 opacity-60 transition', isExpanded && 'rotate-180')} />
                 </button>
                 {isExpanded && (
@@ -558,7 +578,8 @@ function SiteNavInner() {
 
   return (
     <>
-      <nav ref={navRef} className="flex items-center gap-1 text-sm">
+      <div className="flex flex-col items-end gap-1">
+        <nav ref={navRef} className="flex items-center gap-1 text-sm">
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
         <div className="hidden items-center gap-0.5 md:flex">
           {HUB_NAV_ROWS.map((row) => (
@@ -611,6 +632,39 @@ function SiteNavInner() {
           Menu
         </button>
       </nav>
+
+      {/* Mobile section tabs — always visible so Trade / Community / Build never disappear */}
+      <div className="flex items-center gap-1.5 md:hidden" aria-label="Sections">
+        {HUB_NAV_ROWS.map((row) => {
+          const accent = sectionAccent(row.id);
+          const active = sectionHasActive(pathname, row, (item) => resolveHref(item) ?? '');
+          return (
+            <button
+              key={row.id}
+              type="button"
+              onClick={() => setMobileOpen(true)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition',
+                active
+                  ? cn(accent.triggerActive, accent.panel)
+                  : cn('text-zinc-300 border-zinc-700/70 bg-zinc-900/60', accent.itemHover),
+              )}
+            >
+              <span
+                className={cn(
+                  'inline-block h-1.5 w-1.5 rounded-full',
+                  row.id === 'trade' && 'bg-emerald-400',
+                  row.id === 'community' && 'bg-amber-400',
+                  row.id === 'build' && 'bg-violet-400',
+                )}
+                aria-hidden
+              />
+              {row.id === 'trade' ? 'Trade' : row.id === 'community' ? 'Community' : 'Build'}
+            </button>
+          );
+        })}
+      </div>
+      </div>
 
       <MobileNavDrawer
         open={mobileOpen}
