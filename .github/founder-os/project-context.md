@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(monitor): stack-wide health monitor (local + Railway + Neon + Vercel + GitHub CI)
 
 ## Last Activity
 
