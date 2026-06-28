@@ -62,23 +62,11 @@ function FounderOsTease() {
       <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Founder OS</p>
       <p className="mt-1 text-lg font-bold text-white group-hover:text-violet-50">Your laptop is the compute</p>
       <p className="mt-2 text-[11px] leading-relaxed text-zinc-400">
-        Control plane on the web. Memory in Founder Vault. Inference via Ollama on your PC —{' '}
-        <span className="text-violet-300">$0 cloud AI bill</span>. Cloud is optional glue for DB, auth, and sync.
+        Brainstorm, research, and prototype on your own hardware first —{' '}
+        <span className="text-violet-300">$0 cloud AI bill</span> with Ollama. Cloud is optional, not required.
       </p>
-      <ul className="mt-4 space-y-1.5 text-[11px] text-zinc-300">
-        {[
-          'Start building without upfront cloud spend',
-          'Founder Node + Ollama — you own the bill',
-          'Five paths: Sovereign, BYO Cloud, Migrate, Starter, Founder Cloud',
-        ].map((line) => (
-          <li key={line} className="flex gap-2">
-            <span className="text-violet-400">✓</span>
-            {line}
-          </li>
-        ))}
-      </ul>
       <p className="mt-3 text-xs font-semibold text-violet-300/90 group-hover:text-violet-200">
-        Pick your infrastructure path →
+        See the full offer ↓
       </p>
     </Link>
   );
