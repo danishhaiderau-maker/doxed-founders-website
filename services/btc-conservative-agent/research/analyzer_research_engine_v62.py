@@ -13180,8 +13180,12 @@ def exit_ladder_simulator_report(trades=None, session=None):
     if replays:
         for tid, replay in replays.items():
             tid = str(tid)
-            if executed_ids and tid not in executed_ids:
-                continue
+            # NOTE: do NOT filter replays by executed_ids. Replays accumulate
+            # all-time while `trades` is the fresh-collection session, so their
+            # trade_ids almost never overlap — filtering here zeros the whole
+            # table (the bug that made the Ladder Simulator show 589 replays but
+            # 0 results per profile). Simulate every replay that has tick data;
+            # the entry/ticks guard below skips invalid/non-executed scans.
             entry = _replay_entry_price(replay)
             ticks = replay.get("ticks") or []
             if not entry or not ticks:
