@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix mobile nav: always-visible Trade/Community/Build tabs + all sections expanded in drawer
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
