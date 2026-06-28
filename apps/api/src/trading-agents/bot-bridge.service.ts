@@ -165,7 +165,7 @@ export class BotBridgeService {
 
     const paths =
       mode === 'full' || mode === 'live'
-        ? ['/api/state', '/api/relay-state']
+        ? ['/api/relay-state', '/api/state']
         : ['/api/relay-state', '/api/state'];
 
     for (const path of paths) {
