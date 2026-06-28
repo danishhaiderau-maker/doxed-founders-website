@@ -18,6 +18,7 @@ import {
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
+import { copilotAsk } from '@/lib/api';
 
 type Props = {
   accessToken: string;
@@ -88,7 +89,9 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [activeNav, setActiveNav] = useState<string>('workspace');
   const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'agent'; text: string; model?: string }[]>([]);
+  const [chatMessages, setChatMessages] = useState<
+    { role: 'user' | 'agent'; text: string; model?: string; attachments?: { name: string }[] }[]
+  >([]);
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -110,7 +113,6 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     listening,
     starting,
     waitingNetwork,
-    phase,
     supported: voiceSupported,
     audioLevel,
     voiceError,
@@ -211,20 +213,92 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const savedVsCloud = 31.90;
   const usingLocal = selectedModel?.local || selectedModel?.promo;
 
-  function sendChat() {
+  const [thinking, setThinking] = useState(false);
+  const [thinkingStep, setThinkingStep] = useState(0);
+  const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Stabilize the mic button: once listening starts, keep "Stop" shown through
+  // brief recognition restarts / network blips so the button doesn't flicker.
+  const [stableRecording, setStableRecording] = useState(false);
+  useEffect(() => {
+    if (listening || starting) {
+      setStableRecording(true);
+    } else if (!listening && !starting && !waitingNetwork) {
+      setStableRecording(false);
+    }
+  }, [listening, starting, waitingNetwork]);
+
+  const THINKING_STEPS = [
+    'Reading workspace context…',
+    'Scanning repository & branch…',
+    'Checking active agents & deploys…',
+    'Reasoning with ' + (selectedModel?.label ?? 'AI') + '…',
+    'Composing response…',
+  ];
+
+  async function sendChat() {
     const text = chatInput.trim();
-    if (!text) return;
-    setChatMessages((prev) => [...prev, { role: 'user', text, model: selectedModel?.label }]);
+    if (!text || thinking) return;
+    const userMsg: { role: 'user' | 'agent'; text: string; model?: string; attachments?: { name: string }[] } = {
+      role: 'user',
+      text,
+      model: selectedModel?.label,
+    };
+    if (attachments.length > 0) userMsg.attachments = attachments.map((a) => ({ name: a.name }));
+    setChatMessages((prev) => [...prev, userMsg]);
     setChatInput('');
-    const repoInfo = repo ? ` in ${repo}` : '';
-    const agentStatus = runActive ? 'An agent is already running — I will queue this after it completes.' : 'Ready to dispatch.';
-    setTimeout(() => {
-      setChatMessages((prev) => [...prev, {
-        role: 'agent',
-        text: `Analyzing with ${selectedModel?.label ?? 'AI'}… You are on branch ${branch}${repoInfo}. ${agentStatus}`,
-        model: selectedModel?.label,
-      }]);
-    }, 700);
+    setAttachments([]);
+    setThinking(true);
+    setThinkingStep(0);
+
+    const stepTimer = setInterval(() => {
+      setThinkingStep((s) => Math.min(s + 1, THINKING_STEPS.length - 1));
+    }, 900);
+
+    try {
+      const result = await copilotAsk(text, accessToken);
+      clearInterval(stepTimer);
+      const answer =
+        result.answer?.trim() ||
+        result.founderBrain?.task ||
+        'No response — try rephrasing or connect an AI provider in Settings.';
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'agent',
+          text: answer,
+          model: result.answerProvider ? `${result.answerProvider}` : selectedModel?.label,
+        },
+      ]);
+    } catch {
+      clearInterval(stepTimer);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'agent',
+          text: 'Could not reach Founder Brain — check your connection or AI provider in Settings, then try again.',
+          model: selectedModel?.label,
+        },
+      ]);
+    } finally {
+      setThinking(false);
+      setThinkingStep(0);
+    }
+  }
+
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+    Array.from(files).slice(0, 4).forEach((file) => {
+      if (!file.type.startsWith('image/')) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [...prev, { name: file.name, dataUrl: String(reader.result) }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
   }
 
   return (
@@ -419,7 +493,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           {/* Founder Brain Chat — the product, large */}
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              {chatMessages.length === 0 ? (
+              {chatMessages.length === 0 && !thinking ? (
                 <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
               ) : (
                 <div className="space-y-3">
@@ -427,16 +501,44 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                     <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div className={`max-w-[80%] rounded-lg px-3 py-2 text-xs ${msg.role === 'user' ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-200'}`}>
                         {msg.model && <p className="mb-1 text-[9px] font-semibold opacity-60">{msg.model}</p>}
-                        <p>{msg.text}</p>
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="mb-1.5 flex flex-wrap gap-1">
+                            {msg.attachments.map((a, j) => (
+                              <span key={j} className="rounded bg-white/15 px-1.5 py-0.5 text-[9px]">📎 {a.name}</span>
+                            ))}
+                          </div>
+                        )}
+                        <p className="whitespace-pre-wrap">{msg.text}</p>
                       </div>
                     </div>
                   ))}
+                  {thinking && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[80%] rounded-lg bg-zinc-800 px-3 py-2.5 text-xs text-zinc-200">
+                        <div className="mb-1.5 flex items-center gap-1.5">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+                          <span className="text-[9px] font-semibold text-violet-300">{selectedModel?.label ?? 'AI'} is thinking</span>
+                        </div>
+                        <div className="space-y-1">
+                          {THINKING_STEPS.map((s, j) => (
+                            <div key={j} className="flex items-center gap-1.5">
+                              <span className={`h-1 w-1 rounded-full ${j < thinkingStep ? 'bg-emerald-400' : j === thinkingStep ? 'bg-violet-400 animate-pulse' : 'bg-zinc-700'}`} />
+                              <span className={j <= thinkingStep ? 'text-zinc-300' : 'text-zinc-600'}>{s}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-zinc-700">
+                          <div className="h-full rounded-full bg-violet-500 transition-all duration-700" style={{ width: `${((thinkingStep + 1) / THINKING_STEPS.length) * 100}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <div ref={chatEndRef} />
                 </div>
               )}
             </div>
 
-            {/* Chat input — with voice mic button */}
+            {/* Chat input — with voice mic button + attachments */}
             <div className="shrink-0 border-t border-zinc-800/60 p-3">
               {voiceError && (
                 <p className="mb-1.5 rounded-md border border-amber-500/30 bg-amber-950/20 px-2 py-1 text-[10px] text-amber-200">
@@ -444,7 +546,25 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                   <button onClick={clearVoiceError} className="ml-1.5 underline">dismiss</button>
                 </p>
               )}
+              {attachments.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {attachments.map((a, i) => (
+                    <div key={i} className="relative">
+                      <img src={a.dataUrl} alt={a.name} className="h-12 w-12 rounded-md border border-zinc-700 object-cover" />
+                      <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                        className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[8px] text-white">✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="flex items-end gap-2">
+                <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileSelect} />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-300 hover:border-violet-500/50 hover:text-white"
+                  title="Attach photos — stored locally in your Founder Vault"
+                >📎</button>
                 <textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
                   placeholder="Ask Founder Brain… it knows your repo, branch, files, agents, and deploys"
@@ -454,44 +574,33 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                   type="button"
                   onClick={() => {
                     clearVoiceError();
-                    if (!voiceSupported) {
-                      setChatInput((prev) => prev);
-                      return;
-                    }
+                    if (!voiceSupported) return;
                     toggleVoice(chatInput);
                   }}
                   className={`flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition ${
-                    listening
+                    stableRecording
                       ? 'bg-red-600 text-white ring-2 ring-red-500/50'
-                      : waitingNetwork
-                        ? 'bg-sky-700/90 text-white ring-2 ring-sky-500/40'
-                        : starting
-                          ? 'bg-amber-600/90 text-white ring-2 ring-amber-500/40'
-                          : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-violet-500/50 hover:text-white'
+                      : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-violet-500/50 hover:text-white'
                   }`}
                   title={
                     !voiceSupported
-                      ? 'Voice needs Chrome or Edge on desktop with microphone permission (HTTPS). You can still type.'
-                      : listening
+                      ? 'Voice needs Chrome or Edge with microphone permission (HTTPS). You can still type.'
+                      : stableRecording
                         ? 'Stop recording'
-                        : waitingNetwork
-                          ? 'Waiting for internet — transcript kept, retrying…'
-                          : starting
-                            ? 'Starting microphone… allow if prompted'
-                            : 'Talk to Founder — speech to text'
+                        : 'Talk to Founder — speech to text'
                   }
                 >
-                  {listening ? '⏹ Stop' : waitingNetwork ? '⏳ Waiting…' : starting ? 'Starting…' : '🎤'}
-                  <VoiceWaveform phase={phase} level={audioLevel} />
+                  {stableRecording ? '⏹ Stop' : '🎤'}
+                  {stableRecording && <VoiceWaveform phase="listening" level={audioLevel} />}
                 </button>
-                <button onClick={sendChat} disabled={!chatInput.trim()}
-                  className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-30">Send</button>
+                <button onClick={sendChat} disabled={!chatInput.trim() || thinking}
+                  className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-30">
+                  {thinking ? '…' : 'Send'}
+                </button>
               </div>
-              {(starting || waitingNetwork || listening) && (
-                <p className="mt-1.5 text-[10px] font-medium text-zinc-400">
-                  {starting && <span className="text-amber-200 animate-pulse">Allow microphone when your browser asks…</span>}
-                  {waitingNetwork && <span className="text-sky-200">Offline — keeping your words; will transcribe when connection returns</span>}
-                  {listening && <span className="text-red-200">Listening — speak now; words appear in the box above</span>}
+              {stableRecording && (
+                <p className="mt-1.5 text-[10px] font-medium text-red-200">
+                  Listening — speak now; words appear in the box above
                 </p>
               )}
             </div>
