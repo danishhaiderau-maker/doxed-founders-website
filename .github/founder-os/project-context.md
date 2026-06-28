@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ci): mirror bot.py -> engine.py in production gate to stop parity failures
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
