@@ -142,6 +142,7 @@ async function main() {
   const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
   const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
   const internalAuthSecret = vercelCheck.INTERNAL_AUTH_SECRET?.trim();
+  const credentialEncryptionKey = vercelCheck.CREDENTIAL_ENCRYPTION_KEY?.trim();
   const googleId = vercelCheck.GOOGLE_CLIENT_ID?.trim() || localEnv.GOOGLE_CLIENT_ID?.trim();
   const googleSecret = vercelCheck.GOOGLE_CLIENT_SECRET?.trim() || localEnv.GOOGLE_CLIENT_SECRET?.trim() || '';
 
@@ -247,6 +248,10 @@ async function main() {
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
       ...(internalAuthSecret ? { INTERNAL_AUTH_SECRET: internalAuthSecret } : {}),
+      // Dedicated key for encrypting stored exchange/API credentials (Bitfinex keys, GitHub
+      // tokens). Falls back to JWT_SECRET-derived key for decrypting legacy ciphertext, so
+      // setting this is non-breaking — but new credentials encrypt with this key only.
+      ...(credentialEncryptionKey ? { CREDENTIAL_ENCRYPTION_KEY: credentialEncryptionKey } : {}),
       SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
       SUBSCRIBER_EXECUTION_ENABLED: 'true',
       SUBSCRIBER_EXECUTION_POLL_MS: '250',
