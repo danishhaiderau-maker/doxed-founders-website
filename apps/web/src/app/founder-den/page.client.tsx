@@ -23,7 +23,7 @@ import {
   submitFounderApplication,
 } from '@/lib/api';
 
-const PRIMARY_TABS: WorkspaceTab[] = ['activity', 'social', 'analytics'];
+const PRIMARY_TABS: WorkspaceTab[] = ['workspace', 'activity', 'social', 'analytics'];
 
 const TAB_ALIASES: Record<string, WorkspaceTab> = {
   build: 'activity',
@@ -34,12 +34,13 @@ const TAB_ALIASES: Record<string, WorkspaceTab> = {
   notifications: 'activity',
   copilot: 'activity',
   agents: 'activity',
+  mission: 'activity',
 };
 
 function parseTab(value: string | null): WorkspaceTab {
   if (value && TAB_ALIASES[value]) return TAB_ALIASES[value];
   if (value && PRIMARY_TABS.includes(value as WorkspaceTab)) return value as WorkspaceTab;
-  return 'activity';
+  return 'workspace';
 }
 
 export default function FounderDenPageClient() {
@@ -215,9 +216,9 @@ export default function FounderDenPageClient() {
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
+            <h1 className="mt-1 text-2xl font-bold">Development OS</h1>
             <p className="text-sm text-zinc-500">
-              Founder Brain + Cursor — vault-first or GitHub when you are ready
+              Repository · Branch · Agents · Deploys — your AI-powered dev workspace
             </p>
             {onboardingStatus?.pathLabel && hasFounder && (
               <span className="mt-2 inline-flex rounded-full border border-violet-500/30 bg-violet-950/40 px-2.5 py-0.5 text-[10px] text-violet-200">

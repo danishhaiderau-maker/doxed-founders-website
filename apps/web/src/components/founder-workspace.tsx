@@ -7,6 +7,7 @@ import { FounderSocialHub } from '@/components/founder-social-hub';
 import { FounderMissionControl } from '@/components/founder-mission-control';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
 import { DiscoverMyVisibilityPanel } from '@/components/discover/discover-my-visibility-panel';
+import { DevWorkspace } from '@/components/dev-workspace';
 import {
   FounderDashboard,
   ProjectRoom,
@@ -18,6 +19,7 @@ import type { BuildRoomData } from '@/lib/api';
 const FOUNDER_STAGES = ['IDEA', 'BRAINSTORMING', 'PROTOTYPE', 'MVP', 'BETA', 'DEMAND_VALIDATION'];
 
 export type WorkspaceTab =
+  | 'workspace'
   | 'activity'
   | 'social'
   | 'agents'
@@ -30,7 +32,8 @@ export type WorkspaceTab =
   | 'notifications';
 
 const TABS: { id: WorkspaceTab; label: string }[] = [
-  { id: 'activity', label: 'Mission Control' },
+  { id: 'workspace', label: 'Workspace' },
+  { id: 'activity', label: 'Brain' },
   { id: 'social', label: 'Social Hub' },
   { id: 'analytics', label: 'Settings' },
 ];
@@ -136,6 +139,10 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
 
   const tabPanels = (
     <>
+      {tab === 'workspace' && session && (
+        <DevWorkspace accessToken={session.accessToken} />
+      )}
+
       {tab === 'social' && session && (
         <FounderSocialHub
           accessToken={session.accessToken}
