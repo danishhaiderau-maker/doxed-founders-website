@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(security+home-stack): separate credential encryption key, shorter JWT TTL, parallel bridge pings, watchdog registration
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
