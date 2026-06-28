@@ -16,9 +16,11 @@ import type { PlatformStats } from '@/lib/api';
 export function LandingHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#050508]/90 backdrop-blur-xl">
-      <div className="mx-auto flex w-full max-w-[88rem] items-center justify-between gap-4 px-4 py-2.5 lg:px-8">
-        <SiteBrand className="shrink-0 text-sm font-bold tracking-tight uppercase" />
-        <SiteNav />
+      <div className="mx-auto flex w-full max-w-[88rem] flex-col gap-1 px-4 py-2.5 lg:px-8">
+        <div className="flex items-center justify-between gap-4">
+          <SiteBrand className="shrink-0 text-sm font-bold tracking-tight uppercase" />
+          <SiteNav />
+        </div>
       </div>
     </header>
   );
