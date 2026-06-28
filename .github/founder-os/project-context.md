@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (11 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(sync+launcher): wire INTERNAL_AUTH_SECRET into prod sync; PS5.1 null-coalescing fix
 
 ## Last Activity
 
