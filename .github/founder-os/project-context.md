@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(home-stack): STA-safe parallel HTTP pings (WaitAll throws on STA threads)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
