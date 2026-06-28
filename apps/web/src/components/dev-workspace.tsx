@@ -19,7 +19,13 @@ import {
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
-type Props = { accessToken: string };
+type Props = {
+  accessToken: string;
+  socialPanel?: React.ReactNode;
+  settingsPanel?: React.ReactNode;
+  initialCopilotPrompt?: string | null;
+  onInitialCopilotPromptConsumed?: () => void;
+};
 
 type WorkerStatus = {
   buildWorker: string;
@@ -65,10 +71,11 @@ const NAV_ITEMS = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'deployments', label: 'Deployments' },
   { id: 'infrastructure', label: 'Infrastructure' },
+  { id: 'social', label: 'Social Hub' },
   { id: 'settings', label: 'Settings' },
 ] as const;
 
-export function DevWorkspace({ accessToken }: Props) {
+export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialCopilotPrompt, onInitialCopilotPromptConsumed }: Props) {
   const [activity, setActivity] = useState<WorkspaceActivity | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [settings, setSettings] = useState<BuilderSettings | null>(null);
@@ -85,6 +92,14 @@ export function DevWorkspace({ accessToken }: Props) {
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Pre-fill chat from URL prompt (e.g. /founder-den?prompt=fix+it)
+  useEffect(() => {
+    if (initialCopilotPrompt?.trim()) {
+      setChatInput(initialCopilotPrompt);
+      onInitialCopilotPromptConsumed?.();
+    }
+  }, [initialCopilotPrompt, onInitialCopilotPromptConsumed]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
@@ -255,18 +270,18 @@ export function DevWorkspace({ accessToken }: Props) {
       </header>
 
       {/* ═══ Commit Timeline (prominent, first-class) ═══ */}
-      <div className="flex h-9 shrink-0 items-center gap-3 overflow-x-auto border-b border-zinc-800/80 bg-[#0d0d14] px-4">
+      <div className="flex h-12 shrink-0 items-center gap-3 overflow-x-auto overflow-y-visible border-b border-zinc-800/80 bg-[#0d0d14] px-4 py-1.5">
         <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Git Timeline</span>
         {recentCommits.length > 0 ? (
-          <div className="flex flex-1 items-center gap-0.5 overflow-x-auto">
+          <div className="flex flex-1 items-center gap-0.5 overflow-x-auto overflow-y-visible py-1">
             {recentCommits.map((c, i) => (
               <div key={c.sha} className="group relative flex shrink-0 items-center">
-                {i > 0 && <div className="h-px w-5 bg-zinc-700" />}
-                <button className="flex shrink-0 flex-col items-center" title={c.message}>
-                  <span className="h-2.5 w-2.5 rounded-full bg-violet-500 ring-2 ring-violet-500/20 transition hover:ring-violet-400/50" />
-                  <span className="mt-0.5 max-w-[80px] truncate text-[8px] text-zinc-500 group-hover:text-zinc-300">{c.message.split('\n')[0].slice(0, 20)}</span>
+                {i > 0 && <div className="h-0.5 w-5 rounded-full bg-zinc-700" />}
+                <button className="flex shrink-0 flex-col items-center gap-1" title={c.message}>
+                  <span className="h-3 w-3 rounded-full border-2 border-[#0d0d14] bg-violet-500 shadow-[0_0_0_2px_rgba(139,92,246,0.25)] transition hover:bg-violet-400 hover:shadow-[0_0_0_3px_rgba(139,92,246,0.4)]" />
+                  <span className="max-w-[72px] truncate text-[8px] leading-none text-zinc-500 group-hover:text-zinc-300">{c.message.split('\n')[0].slice(0, 18)}</span>
                 </button>
-                <div className="pointer-events-none absolute bottom-12 left-1/2 z-30 hidden -translate-x-1/2 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 shadow-xl group-hover:block">
+                <div className="pointer-events-none absolute bottom-14 left-1/2 z-30 hidden -translate-x-1/2 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300 shadow-xl group-hover:block">
                   <span className="font-mono text-violet-400">{c.sha.slice(0, 7)}</span> · {c.message.split('\n')[0].slice(0, 60)}
                 </div>
               </div>
@@ -325,6 +340,28 @@ export function DevWorkspace({ accessToken }: Props) {
 
         {/* ═══ Center: Founder Brain (~70%) + Terminal ═══ */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Non-workspace nav panels */}
+          {activeNav === 'social' && (
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f]">{socialPanel}</div>
+          )}
+          {activeNav === 'settings' && (
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f]">{settingsPanel}</div>
+          )}
+          {activeNav !== 'workspace' && activeNav !== 'social' && activeNav !== 'settings' && (
+            <NavContentPanel
+              nav={activeNav}
+              recentCommits={recentCommits}
+              lastDeploy={lastDeploy}
+              runActive={runActive ?? false}
+              openFiles={openFiles}
+              worker={worker}
+              repo={repo}
+              branch={branch}
+              onBack={() => setActiveNav('workspace')}
+            />
+          )}
+          {activeNav === 'workspace' && (
+          <>
           {/* Model selector bar */}
           <div className="relative flex shrink-0 items-center justify-between border-b border-zinc-800/60 px-3 py-1.5">
             <button onClick={() => setModelDropdownOpen((v) => !v)}
@@ -495,6 +532,8 @@ export function DevWorkspace({ accessToken }: Props) {
               Show Terminal
             </button>
           )}
+          </>
+          )}
         </main>
 
         {/* ═══ Right: Live Integrations + Activity Feed ═══ */}
@@ -546,6 +585,129 @@ export function DevWorkspace({ accessToken }: Props) {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+/* ───── Nav Content Panel (repositories/agents/git/timeline/deployments/infrastructure) ───── */
+function NavContentPanel({
+  nav,
+  recentCommits,
+  lastDeploy,
+  runActive,
+  openFiles,
+  worker,
+  repo,
+  branch,
+  onBack,
+}: {
+  nav: string;
+  recentCommits: WorkspaceActivity['commitsLast24h'];
+  lastDeploy: DeployIntelligenceResponse['cards'][number] | null;
+  runActive: FounderAgentRunRecord | false;
+  openFiles: string[];
+  worker: WorkerStatus | null;
+  repo: string | null;
+  branch: string;
+  onBack: () => void;
+}) {
+  const titles: Record<string, string> = {
+    repositories: 'Repositories',
+    agents: 'AI Agents',
+    git: 'Git',
+    timeline: 'Timeline',
+    deployments: 'Deployments',
+    infrastructure: 'Infrastructure',
+  };
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f] p-6">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold text-white">{titles[nav] ?? nav}</h2>
+          <button onClick={onBack} className="text-[11px] text-violet-400 hover:underline">← Back to Workspace</button>
+        </div>
+
+        {nav === 'repositories' && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <p className="text-xs text-zinc-400">Connected repository</p>
+            <p className="mt-1 font-mono text-sm text-violet-300">{repo ?? 'Not connected — link GitHub in Settings'}</p>
+            <p className="mt-2 text-xs text-zinc-500">Default branch: <span className="font-mono text-zinc-300">{branch}</span></p>
+            {openFiles.length > 0 && (
+              <>
+                <p className="mt-3 text-[10px] uppercase tracking-wider text-zinc-600">Open files ({openFiles.length})</p>
+                <div className="mt-1 space-y-0.5">
+                  {openFiles.slice(0, 12).map((f) => (
+                    <p key={f} className="font-mono text-[11px] text-zinc-400">📄 {f}</p>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {nav === 'agents' && (
+          <div className="space-y-2">
+            {runActive ? (
+              <div className="rounded-xl border border-violet-500/20 bg-violet-950/10 p-4">
+                <p className="text-xs font-semibold text-violet-200">{runActive.worker ?? 'Agent'} — {runActive.status}</p>
+                <p className="mt-1 text-xs text-zinc-400">{runActive.task}</p>
+                <p className="mt-1 text-[10px] text-violet-400/60">{runActive.adapterLabel}</p>
+              </div>
+            ) : (
+              <p className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-xs text-zinc-500">No agents running. Click "+ New Agent" in the top bar to dispatch one.</p>
+            )}
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+              <p className="text-[10px] uppercase tracking-wider text-zinc-600">Available agent templates</p>
+              <p className="mt-2 text-xs text-zinc-400">Hire Agent coming soon — Researcher, Frontend, Backend, Trading Analyst, Security Auditor, DevOps.</p>
+            </div>
+          </div>
+        )}
+
+        {(nav === 'git' || nav === 'timeline') && (
+          <div className="space-y-2">
+            {recentCommits.length > 0 ? recentCommits.map((c) => (
+              <div key={c.sha} className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-violet-500" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs text-zinc-200">{c.message.split('\n')[0]}</p>
+                  <p className="mt-0.5 font-mono text-[10px] text-zinc-500">{c.sha.slice(0, 7)} · {new Date(c.date).toLocaleString()}</p>
+                </div>
+              </div>
+            )) : <p className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-xs text-zinc-500">No commits yet — connect GitHub in Settings.</p>}
+          </div>
+        )}
+
+        {nav === 'deployments' && (
+          <div className="space-y-2">
+            {lastDeploy ? (
+              <div className="rounded-xl border border-emerald-500/20 bg-emerald-950/10 p-4">
+                <p className="text-xs font-semibold text-emerald-200">{lastDeploy.title}</p>
+                <p className="mt-1 text-[10px] text-zinc-500">{new Date(lastDeploy.at).toLocaleString()}</p>
+              </div>
+            ) : <p className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-xs text-zinc-500">No deployments detected.</p>}
+          </div>
+        )}
+
+        {nav === 'infrastructure' && (
+          <div className="grid grid-cols-2 gap-2">
+            <InfraRow label="GitHub" ok={worker?.githubConnected ?? false} />
+            <InfraRow label="Cursor" ok={worker?.connections?.cursor ?? false} />
+            <InfraRow label="Founder Node" ok={worker?.connections?.founderNode ?? false} />
+            <InfraRow label="Neon DB" ok={worker?.llmConnected ?? false} />
+            <InfraRow label="Railway" ok={Boolean(lastDeploy)} />
+            <InfraRow label="Vercel" ok={Boolean(lastDeploy)} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InfraRow({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <div className={`flex items-center justify-between rounded-lg border px-3 py-2 ${ok ? 'border-emerald-500/20 bg-emerald-950/10' : 'border-zinc-800 bg-zinc-900/30'}`}>
+      <span className="text-xs text-zinc-300">{label}</span>
+      <span className={`text-[10px] font-medium ${ok ? 'text-emerald-300' : 'text-zinc-600'}`}>{ok ? 'Healthy' : 'Offline'}</span>
     </div>
   );
 }

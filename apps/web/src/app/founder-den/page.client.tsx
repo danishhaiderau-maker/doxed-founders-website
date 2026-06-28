@@ -48,7 +48,6 @@ export default function FounderDenPageClient() {
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<WorkspaceTab>(() => parseTab(searchParams.get('tab')));
   const [copilotPrompt, setCopilotPrompt] = useState<string | null>(() => searchParams.get('prompt'));
-  const [agentTemplate, setAgentTemplate] = useState<string | null>(() => searchParams.get('agent'));
   const [dashboard, setDashboard] = useState<FounderDashboard | null>(null);
   const [room, setRoom] = useState<ProjectRoom | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -86,12 +85,10 @@ export default function FounderDenPageClient() {
   useEffect(() => {
     setTab(parseTab(searchParams.get('tab')));
     setCopilotPrompt(searchParams.get('prompt'));
-    setAgentTemplate(searchParams.get('agent'));
   }, [searchParams]);
 
   function clearCopilotUrlParams() {
     setCopilotPrompt(null);
-    setAgentTemplate(null);
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
     url.searchParams.delete('prompt');
@@ -319,7 +316,6 @@ export default function FounderDenPageClient() {
           onLaunchRaise={launchRaise}
           initialCopilotPrompt={copilotPrompt}
           onInitialCopilotPromptConsumed={clearCopilotUrlParams}
-          activeAgentTemplate={agentTemplate}
         />
       </div>
     </main>

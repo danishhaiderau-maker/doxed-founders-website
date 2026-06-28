@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { formatDdollar, LIFECYCLE_STAGES } from '@dcf/utils';
 import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { FounderSocialHub } from '@/components/founder-social-hub';
-import { FounderMissionControl } from '@/components/founder-mission-control';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
 import { DiscoverMyVisibilityPanel } from '@/components/discover/discover-my-visibility-panel';
 import { DevWorkspace } from '@/components/dev-workspace';
@@ -74,7 +73,6 @@ export type FounderWorkspaceProps = {
   onLaunchRaise: () => void;
   initialCopilotPrompt?: string | null;
   onInitialCopilotPromptConsumed?: () => void;
-  activeAgentTemplate?: string | null;
 };
 
 function OsSection({
@@ -118,7 +116,6 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     onSubmitApplication,
     initialCopilotPrompt,
     onInitialCopilotPromptConsumed,
-    activeAgentTemplate,
   } = props;
 
   const useDashboardShell = Boolean(session && hasFounder);
@@ -137,186 +134,154 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
     void loadBuildRoom();
   }, [loadBuildRoom]);
 
-  const tabPanels = (
-    <>
-      {tab === 'workspace' && session && (
-        <DevWorkspace accessToken={session.accessToken} />
-      )}
-
-      {tab === 'social' && session && (
-        <FounderSocialHub
-          accessToken={session.accessToken}
-          room={room}
-          buildRoom={buildRoom}
-          onRefresh={() => {
-            void loadBuildRoom();
-            onRefresh();
-          }}
-          onMessage={onWorkspaceMessage}
-        />
-      )}
-
-      {tab === 'agents' && session && (
-        <section className="mx-auto max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 text-center text-sm text-zinc-400">
-          <p>Agent workforce is paused — focus is <strong className="text-zinc-200">Founder Brain</strong> + <strong className="text-zinc-200">Cursor</strong>.</p>
-          <p className="mt-2">
-            Live trading agent:{' '}
-            <Link href="/agent-hub" className="text-violet-400 underline">
-              BTC Conservative Bot
-            </Link>
-          </p>
-          <button
-            type="button"
-            onClick={() => onTabChange('activity')}
-            className="mt-4 text-xs text-violet-400 underline"
-          >
-            ← Back to Mission Control
-          </button>
-        </section>
-      )}
-
-      {tab === 'agents' && !session && (
-        <section className="rounded-2xl border border-dashed border-purple-500/40 bg-purple-950/10 p-8 text-center">
-          <p className="text-sm text-zinc-400">
-            <Link href="/login?callbackUrl=/founder-den?tab=agents" className="text-purple-300 underline">
-              Sign in
-            </Link>{' '}
-            to view your agent workforce.
-          </p>
-        </section>
-      )}
-
-      {tab === 'analytics' && session && (
-        <div className="mx-auto max-w-3xl space-y-6">
-          {!hasFounder && (
-            <OsSection title="Activate founder profile" subtitle="Unlock Mission Control and agents">
-              <input
-                value={appForm.projectName}
-                onChange={(e) => setAppForm({ ...appForm, projectName: e.target.value })}
-                placeholder="Project name"
-                className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-              />
-              <textarea
-                value={appForm.ideaDescription}
-                onChange={(e) => setAppForm({ ...appForm, ideaDescription: e.target.value })}
-                placeholder="What are you building?"
-                rows={3}
-                className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-              />
-              <select
-                value={appForm.lifecycleStage}
-                onChange={(e) => setAppForm({ ...appForm, lifecycleStage: e.target.value })}
-                className="mb-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-              >
-                {FOUNDER_STAGES.map((s) => (
-                  <option key={s} value={s}>
-                    {LIFECYCLE_STAGES.find((x) => x.key === s)?.label ?? s}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={onSubmitApplication}
-                className="w-full rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white"
-              >
-                Activate founder profile
-              </button>
-            </OsSection>
-          )}
-
-          {hasFounder && (
-            <>
-              <header>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">
-                  Settings
-                </p>
-                <h1 className="mt-1 text-2xl font-bold text-white">Integrations & AI stack</h1>
-                <p className="mt-1 text-sm text-zinc-500">
-                  GitHub, Jatevo ($JTVO), OpenRouter, DeepSeek, Cursor, OpenHands, Founder Node — all
-                  configuration lives here.
-                </p>
-              </header>
-              <BuilderSettingsPanel accessToken={session.accessToken} />
-              <DiscoverMyVisibilityPanel />
-              {dashboard && (
-                <OsSection title="Account stats" subtitle="Ddollar and readiness">
-                  <dl className="grid gap-2 text-sm">
-                    <div className="flex justify-between">
-                      <dt className="text-zinc-500">Followers</dt>
-                      <dd className="text-white">{dashboard.followers ?? 0}</dd>
-                    </div>
-                    <div className="flex justify-between">
-                      <dt className="text-zinc-500">Founder Ddollar</dt>
-                      <dd className="text-emerald-300">
-                        {formatDdollar(dashboard.founderCredits ?? 0, 0)}
-                      </dd>
-                    </div>
-                    <div className="flex justify-between">
-                      <dt className="text-zinc-500">Launch readiness</dt>
-                      <dd className="text-white">
-                        {room?.launchReadiness ?? dashboard.launchReadiness ?? 0}%
-                      </dd>
-                    </div>
-                    <div className="flex justify-between">
-                      <dt className="text-zinc-500">Paper trading Ddollar</dt>
-                      <dd className="text-white">{formatDdollar(dashboard.cashBalance, 0)}</dd>
-                    </div>
-                  </dl>
-                </OsSection>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </>
+  const socialPanel = session && (
+    <FounderSocialHub
+      accessToken={session.accessToken}
+      room={room}
+      buildRoom={buildRoom}
+      onRefresh={() => {
+        void loadBuildRoom();
+        onRefresh();
+      }}
+      onMessage={onWorkspaceMessage}
+    />
   );
 
-  return (
-    <div className={useDashboardShell ? '' : 'space-y-6'}>
-      {!useDashboardShell && (
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-white">Founder OS</h2>
-            <p className="text-sm text-zinc-500">Mission control · build in public · ship</p>
-          </div>
-          {session && (
-            <Link
-              href="/settings/security"
-              className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
-            >
-              Security →
-            </Link>
+  const settingsPanel = session && (
+    <div className="mx-auto max-w-3xl space-y-6 p-6">
+      {!hasFounder && (
+        <OsSection title="Activate founder profile" subtitle="Unlock the full workspace">
+          <input
+            value={appForm.projectName}
+            onChange={(e) => setAppForm({ ...appForm, projectName: e.target.value })}
+            placeholder="Project name"
+            className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+          />
+          <textarea
+            value={appForm.ideaDescription}
+            onChange={(e) => setAppForm({ ...appForm, ideaDescription: e.target.value })}
+            placeholder="What are you building?"
+            rows={3}
+            className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+          />
+          <select
+            value={appForm.lifecycleStage}
+            onChange={(e) => setAppForm({ ...appForm, lifecycleStage: e.target.value })}
+            className="mb-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+          >
+            {FOUNDER_STAGES.map((s) => (
+              <option key={s} value={s}>
+                {LIFECYCLE_STAGES.find((x) => x.key === s)?.label ?? s}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={onSubmitApplication}
+            className="w-full rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white"
+          >
+            Activate founder profile
+          </button>
+        </OsSection>
+      )}
+      {hasFounder && (
+        <>
+          <header>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400">
+              Settings
+            </p>
+            <h1 className="mt-1 text-2xl font-bold text-white">Integrations & AI stack</h1>
+            <p className="mt-1 text-sm text-zinc-500">
+              GitHub, Cursor, GLM, OpenRouter, DeepSeek, Founder Node — all configuration lives here.
+            </p>
+          </header>
+          <BuilderSettingsPanel accessToken={session.accessToken} />
+          <DiscoverMyVisibilityPanel />
+          {dashboard && (
+            <OsSection title="Account stats" subtitle="Ddollar and readiness">
+              <dl className="grid gap-2 text-sm">
+                <div className="flex justify-between">
+                  <dt className="text-zinc-500">Followers</dt>
+                  <dd className="text-white">{dashboard.followers ?? 0}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-zinc-500">Founder Ddollar</dt>
+                  <dd className="text-emerald-300">
+                    {formatDdollar(dashboard.founderCredits ?? 0, 0)}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-zinc-500">Launch readiness</dt>
+                  <dd className="text-white">
+                    {room?.launchReadiness ?? dashboard.launchReadiness ?? 0}%
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-zinc-500">Paper trading Ddollar</dt>
+                  <dd className="text-white">{formatDdollar(dashboard.cashBalance, 0)}</dd>
+                </div>
+              </dl>
+            </OsSection>
           )}
+        </>
+      )}
+    </div>
+  );
+
+  // Dashboard shell: single DevWorkspace with embedded social + settings panels
+  if (useDashboardShell && session) {
+    return (
+      <DevWorkspace
+        accessToken={session.accessToken}
+        socialPanel={socialPanel}
+        settingsPanel={settingsPanel}
+        initialCopilotPrompt={initialCopilotPrompt}
+        onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
+      />
+    );
+  }
+
+  // Non-founder fallback: simple tabbed layout
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-white">Founder OS</h2>
+          <p className="text-sm text-zinc-500">AI Development Workspace · build in public · ship</p>
         </div>
-      )}
+        {session && (
+          <Link
+            href="/settings/security"
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:text-white"
+          >
+            Security →
+          </Link>
+        )}
+      </div>
 
-      {!useDashboardShell && tab !== 'activity' && (
-        <FounderJourneyProgress
-          currentStage={currentStage}
-          label={hasFounder ? 'Project stage' : 'The founder journey'}
-        />
-      )}
+      <FounderJourneyProgress
+        currentStage={currentStage}
+        label={hasFounder ? 'Project stage' : 'The founder journey'}
+      />
 
-      {!useDashboardShell && (
-        <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => onTabChange(t.id)}
-              className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
-                tab === t.id
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-      )}
+      <nav className="flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/50 p-1">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onTabChange(t.id)}
+            className={`rounded-lg px-3 py-2 text-xs font-medium transition sm:text-sm ${
+              tab === t.id
+                ? 'bg-emerald-600 text-white'
+                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
 
-      {!session && !useDashboardShell && (
+      {!session && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
           <Link href="/login?callbackUrl=/founder-den" className="font-semibold underline">
             Sign in
@@ -325,32 +290,21 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
         </div>
       )}
 
-      {session && !hasFounder && !useDashboardShell && tab !== 'activity' && (
+      {session && !hasFounder && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          Activate your founder profile in Settings to unlock Mission Control.
+          Activate your founder profile in Settings to unlock the workspace.
         </div>
       )}
 
-      {(useDashboardShell || tab === 'activity') && (
-        <FounderMissionControl
-          session={session}
-          hasFounder={hasFounder}
-          dashboard={dashboard}
-          room={room}
-          activeTab={tab}
-          onTabChange={onTabChange}
-          onRefresh={onRefresh}
-          onMessage={onWorkspaceMessage}
-          tabContent={
-            useDashboardShell && tab !== 'activity' ? tabPanels : undefined
-          }
-          initialCopilotPrompt={initialCopilotPrompt}
-          onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
-          activeAgentTemplate={activeAgentTemplate}
+      {tab === 'workspace' && session && (
+        <DevWorkspace
+          accessToken={session.accessToken}
+          socialPanel={socialPanel}
+          settingsPanel={settingsPanel}
         />
       )}
-
-      {!useDashboardShell && tab !== 'activity' && tabPanels}
+      {tab === 'social' && socialPanel}
+      {tab === 'analytics' && settingsPanel}
     </div>
   );
 }
