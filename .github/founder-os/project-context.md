@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(ci): retry transient smoke-test failures during deploy switchover (3x 15s)
 
 ## Last Activity
 
