@@ -494,6 +494,75 @@ function MobileNavDrawer({
   );
 }
 
+function MobileSectionDropdown({
+  row,
+  pathname,
+  resolveHref,
+  itemBadge,
+  onClose,
+}: {
+  row: HubNavRow | null;
+  pathname: string;
+  resolveHref: (item: HubNavItem) => string | null;
+  itemBadge: (item: HubNavItem) => string | undefined;
+  onClose: () => void;
+}) {
+  if (!row) return null;
+  const accent = sectionAccent(row.id);
+
+  return (
+    <div
+      className={cn(
+        'absolute right-0 top-full z-[65] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md md:hidden',
+        accent.panel,
+      )}
+      role="menu"
+      aria-label={`${row.label} menu`}
+    >
+      <div className="border-b border-zinc-800/80 px-4 py-3">
+        <p
+          className={cn(
+            'text-[10px] font-bold uppercase tracking-[0.18em]',
+            row.id === 'trade' && 'text-emerald-300',
+            row.id === 'community' && 'text-amber-300',
+            row.id === 'build' && 'text-violet-300',
+          )}
+        >
+          {row.label}
+        </p>
+        <p className="mt-0.5 text-[11px] text-zinc-500">{row.subtitle}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-1 p-2">
+        {row.items.map((item) => {
+          const href = resolveHref(item);
+          if (!href) return null;
+          const active = navActive(pathname, href);
+          const badge = itemBadge(item);
+          return (
+            <Link
+              key={`${item.label}-${item.href}`}
+              href={href}
+              onClick={onClose}
+              className={cn(
+                'flex items-center gap-2 rounded-lg border border-transparent px-3 py-2.5 text-sm transition',
+                active ? accent.itemActive : cn('text-zinc-200', accent.itemHover),
+              )}
+            >
+              <span className="text-base leading-none" aria-hidden>{item.icon}</span>
+              <span className="flex-1 font-medium">{item.label}</span>
+              {badge ? (
+                <span className="rounded-full bg-violet-500 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                  {badge}
+                </span>
+              ) : null}
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SiteNavInner() {
   const pathname = usePathname();
   const { data: session } = useSession();
@@ -578,8 +647,8 @@ function SiteNavInner() {
 
   return (
     <>
-      <div className="flex flex-col items-end gap-1">
-        <nav ref={navRef} className="flex items-center gap-1 text-sm">
+      <div ref={navRef} className="relative flex flex-col items-end gap-1">
+        <nav className="flex items-center gap-1 text-sm">
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
         <div className="hidden items-center gap-0.5 md:flex">
           {HUB_NAV_ROWS.map((row) => (
@@ -633,19 +702,21 @@ function SiteNavInner() {
         </button>
       </nav>
 
-      {/* Mobile section tabs — always visible so Trade / Community / Build never disappear */}
+      {/* Mobile section tabs — each opens its own dropdown, always visible */}
       <div className="flex items-center gap-1.5 md:hidden" aria-label="Sections">
         {HUB_NAV_ROWS.map((row) => {
           const accent = sectionAccent(row.id);
           const active = sectionHasActive(pathname, row, (item) => resolveHref(item) ?? '');
+          const isOpen = openDropdown === row.id;
           return (
             <button
               key={row.id}
               type="button"
-              onClick={() => setMobileOpen(true)}
+              aria-expanded={isOpen}
+              onClick={() => setOpenDropdown(isOpen ? null : row.id)}
               className={cn(
                 'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition',
-                active
+                isOpen || active
                   ? cn(accent.triggerActive, accent.panel)
                   : cn('text-zinc-300 border-zinc-700/70 bg-zinc-900/60', accent.itemHover),
               )}
@@ -660,10 +731,22 @@ function SiteNavInner() {
                 aria-hidden
               />
               {row.id === 'trade' ? 'Trade' : row.id === 'community' ? 'Community' : 'Build'}
+              <ChevronDown className={cn('h-3 w-3 opacity-60 transition', isOpen && 'rotate-180')} />
             </button>
           );
         })}
       </div>
+
+      {/* Mobile section dropdown panel */}
+      {openDropdown && (
+        <MobileSectionDropdown
+          row={HUB_NAV_ROWS.find((r) => r.id === openDropdown) ?? null}
+          pathname={pathname}
+          resolveHref={resolveHref}
+          itemBadge={itemBadge}
+          onClose={() => setOpenDropdown(null)}
+        />
+      )}
       </div>
 
       <MobileNavDrawer
