@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(bot): persist open position immediately on fill (C3) — crash no longer orphans positions
+Re-lock Bitfinex policy after upstream atomic order claim fix (7a73b0e5d)
 
 ## Last Activity
 
