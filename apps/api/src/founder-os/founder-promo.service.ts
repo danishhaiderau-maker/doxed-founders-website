@@ -55,11 +55,11 @@ export class FounderPromoService {
     const credentialsStatus = this.credentialsStatusFromRow(row?.founderPromoAiCredentialsEnc);
     return {
       enabled: row?.founderPromoAiEnabled ?? false,
-      tokenCap: row?.founderPromoTokenCap ?? 10_000_000,
-      windowDays: row?.founderPromoWindowDays ?? 30,
+      tokenCap: row?.founderPromoTokenCap ?? 30_000_000,
+      windowDays: row?.founderPromoWindowDays ?? 90,
       message:
         row?.founderPromoMessage?.trim() ||
-        'Join as a founder — get 1 month free GLM 5.2, Gemini & DeepSeek on Founder OS (cheap & best).',
+        'Sign up — get 3 months free GLM 5.2, Gemini & DeepSeek on Founder OS. No credit card needed.',
       credentialsConfigured: Object.values(credentialsStatus).some(Boolean),
       credentialsStatus,
       credentialsUpdatedAt: row?.updatedAt?.toISOString() ?? null,
@@ -159,18 +159,22 @@ export class FounderPromoService {
     if (status.exhausted) {
       return `You've used your free ${(status.tokenCap / 1_000_000).toFixed(0)}M token promo. Connect your own API keys in Settings → Builder (Step 3) to continue.`;
     }
-    return 'Your 1-month founder AI promo has ended. Connect your own API keys in Settings → Builder (Step 3) to keep using Founder Brain.';
+    return `Your 3-month AI promo has ended. Connect your own API keys in Settings → Builder (Step 3) to keep building.`;
   }
 
   async getUserPromoStatus(userId: string): Promise<FounderPromoStatus> {
-    const [settings, founder, usageAgg] = await Promise.all([
+    const [settings, founder, user, usageAgg] = await Promise.all([
       this.getPlatformPromoSettings(),
       this.prisma.founder.findUnique({ where: { userId }, select: { createdAt: true } }),
+      this.prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } }),
       this.prisma.aiTokenUsageLog.aggregate({
         where: { userId, billingSource: 'platform_promo' },
         _sum: { promptTokens: true, completionTokens: true },
       }),
     ]);
+
+    // Promo is available to ALL signed-up users — use founder.createdAt OR user.createdAt
+    const registeredAt = founder?.createdAt ?? user?.createdAt ?? null;
 
     const tokenCap = settings.tokenCap;
     const tokensUsed =
@@ -182,7 +186,7 @@ export class FounderPromoService {
       return {
         enabled: false,
         eligible: false,
-        founderRegistered: Boolean(founder),
+        founderRegistered: Boolean(registeredAt),
         promoStartedAt: null,
         expiresAt: null,
         daysRemaining: null,
@@ -195,7 +199,7 @@ export class FounderPromoService {
       };
     }
 
-    if (!founder) {
+    if (!registeredAt) {
       return {
         enabled: true,
         eligible: false,
@@ -212,7 +216,7 @@ export class FounderPromoService {
       };
     }
 
-    const startedAt = founder.createdAt;
+    const startedAt = registeredAt;
     const expiresAt = new Date(startedAt);
     expiresAt.setUTCDate(expiresAt.getUTCDate() + settings.windowDays);
     const now = Date.now();
@@ -225,7 +229,7 @@ export class FounderPromoService {
     const baseStatus: FounderPromoStatus = {
       enabled: true,
       eligible,
-      founderRegistered: true,
+      founderRegistered: Boolean(registeredAt),
       promoStartedAt: startedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       daysRemaining: withinWindow ? daysRemaining : 0,
@@ -244,7 +248,7 @@ export class FounderPromoService {
 
     if (!settings.credentialsConfigured) {
       baseStatus.message =
-        'Founder AI promo is enabled but platform API keys are not configured yet. Ask your admin to add keys in Connected Accounts.';
+        'AI promo is enabled but platform API keys are not configured yet. Ask your admin to add keys in Connected Accounts.';
       return baseStatus;
     }
 

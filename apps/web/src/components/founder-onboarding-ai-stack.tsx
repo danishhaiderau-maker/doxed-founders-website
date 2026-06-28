@@ -116,7 +116,7 @@ export function FounderOnboardingAiStack({
     <div className="space-y-5">
       {promoActive && promo?.message && (
         <div className="rounded-lg border border-amber-500/35 bg-amber-950/25 p-3 text-xs text-amber-100">
-          <strong className="text-amber-300">Founder AI promo active.</strong> {promo.message}
+          <strong className="text-amber-300">AI promo active.</strong> {promo.message}
           {promo.daysRemaining != null && (
             <span className="mt-1 block text-amber-200/80">
               {promo.daysRemaining} days · {(promo.tokensRemaining / 1_000_000).toFixed(1)}M tokens left
@@ -144,7 +144,7 @@ export function FounderOnboardingAiStack({
           </p>
         ) : promo?.eligible && promo?.hasLlm ? (
           <p className="mt-2 text-sm text-emerald-300">
-            Covered by founder promo — ask Brain a question to verify it works.
+            Covered by AI promo — ask Brain a question to verify it works.
           </p>
         ) : (
           <div className="mt-3 space-y-3">

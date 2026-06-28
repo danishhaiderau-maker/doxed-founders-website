@@ -23,7 +23,7 @@ export function FounderPromoSignupBanner({ className = '' }: Props) {
     <div
       className={`rounded-lg border border-amber-500/35 bg-gradient-to-r from-amber-950/40 to-violet-950/30 px-4 py-3 ${className}`}
     >
-      <p className="text-xs font-semibold text-amber-200">Founder OS — free month for new founders</p>
+      <p className="text-xs font-semibold text-amber-200">Founder OS — 3 months free AI for all new accounts</p>
       <p className="mt-1 text-xs text-amber-100/90">{promo.message}</p>
       <Link
         href="/founder-den?onboard=byo"

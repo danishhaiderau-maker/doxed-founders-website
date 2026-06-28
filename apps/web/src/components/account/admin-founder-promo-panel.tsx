@@ -91,9 +91,9 @@ export function AdminFounderPromoPanel({ accessToken }: Props) {
           <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Admin only</p>
           <h3 className="mt-1 text-lg font-semibold text-white">Founder AI promo</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Offer new founders 1 month of platform-billed AI (GLM 5.2, Gemini, DeepSeek — cheap &amp; best). Timer
-            starts at founder registration. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
-            tokens — founders must connect their own keys to continue.
+            Offer all signed-up users 3 months of platform-billed AI (GLM 5.2, Gemini, DeepSeek — cheap &amp; best). Timer
+            starts at signup. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
+            tokens — users must connect their own keys to continue.
           </p>
         </div>
         <button
