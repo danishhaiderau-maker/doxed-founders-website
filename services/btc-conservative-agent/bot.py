@@ -12728,6 +12728,13 @@ def fill_order(order):
     if order["signal_dir"] not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     with trade_lock:
+        # C4 guard: never open a second position for the same trade_id. A race or double
+        # touch could otherwise append 2x exposure for one signal; /api/state dedupes in
+        # the response but the relay may already have copied both.
+        _ftid = order.get("trade_id")
+        if _ftid and any(p.get("trade_id") == _ftid and p.get("status") != "CLOSED" for p in open_positions):
+            logger.warning(f"[FILL GUARD] Duplicate fill suppressed for trade_id={_ftid} — position already open")
+            return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")

@@ -658,7 +658,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const terminal =
       st === 'EXPIRED' ||
       st === 'BLOCKED' ||
-      /CHASE_BUCKET|EXPIRED|BLOCKED|TTL/.test(outcome);
+      st === 'CLOSED' ||
+      /CHASE_BUCKET|EXPIRED|BLOCKED|TTL|CLOSED/.test(outcome);
     if (terminal) {
       return { abandoned: true, reason: sig.exit_reason ?? sig.outcome ?? st };
     }
@@ -1232,6 +1233,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (participant.status === SignalCycleStatus.OPEN) {
       await this.ensureProtectiveStop(agentId, userId, cycle.id, participant.id, meta, creds, intent);
+      return;
+    }
+
+    // C2 fix: showcase cycle already CLOSED/EXPIRED (syncShowcaseCycleClosures marked it
+    // because the showcase position exited). A relay still in PENDING_ENTRY must drop its
+    // resting limit — otherwise it can chase/fill up to 30m TTL AFTER the showcase exited,
+    // creating an orphan position with no showcase to mirror the exit on.
+    if (cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED) {
+      try {
+        await this.activeTrading.cancelOrder(creds, orderId);
+      } catch {
+        /* may already be gone */
+      }
+      this.logger.log(
+        `Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status} — cancelled relay limit`,
+      );
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+        venue: 'bitfinex',
+        pnl_usd: 0,
+        source: 'hire',
+        event: 'SHOWCASE_CYCLE_CLOSED',
+        reason: cycle.status,
+      });
       return;
     }
 

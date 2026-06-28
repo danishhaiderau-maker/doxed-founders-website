@@ -118,6 +118,14 @@ async function bitfinexAuthPostOnce<T>(
   timeoutMs: number,
   nonce: string,
 ): Promise<T> {
+  // C6 safety guard: a testnet-flagged account must NEVER place/cancel real orders on
+  // the production Bitfinex API. Read paths (wallets/positions) are allowed so validation
+  // still works; only order-mutation is blocked.
+  if (creds.testnet === true && /\/w\/order\//.test(apiPath)) {
+    throw new Error(
+      'Bitfinex testnet credentials routed to production order API — refusing to place/cancel live orders',
+    );
+  }
   const bodyStr = JSON.stringify(body);
   const payload = `/api/${apiPath}${nonce}${bodyStr}`;
   const signature = signBitfinex(creds.apiSecret, payload);
