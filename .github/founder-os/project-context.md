@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(sync+launcher): wire INTERNAL_AUTH_SECRET into prod sync; PS5.1 null-coalescing fix
+feat(workspace): full IDE-like workspace redesign matching Development OS vision
 
 ## Last Activity
 
