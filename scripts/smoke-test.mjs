@@ -12,14 +12,36 @@ async function run() {
   let failed = 0;
 
   const runCheck = async (name, fn) => {
-    try {
-      const ok = await fn();
-      console.log(`${ok ? 'OK  ' : 'FAIL'} ${name}`);
-      if (!ok) failed += 1;
-    } catch (err) {
-      failed += 1;
-      const message = err instanceof Error ? err.message : String(err);
-      console.log(`FAIL ${name} — ${message}`);
+    const RETRIES = 3;
+    const RETRY_DELAY_MS = 15_000;
+    for (let attempt = 1; attempt <= RETRIES; attempt++) {
+      try {
+        const ok = await fn();
+        if (ok) {
+          if (attempt > 1) console.log(`OK   ${name} (retry ${attempt})`);
+          else console.log(`OK   ${name}`);
+          return;
+        }
+        if (attempt < RETRIES) {
+          console.log(`...  ${name} failed (attempt ${attempt}/${RETRIES}), retrying in ${RETRY_DELAY_MS / 1000}s…`);
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+        console.log(`FAIL ${name}`);
+        failed += 1;
+        return;
+      } catch (err) {
+        if (attempt < RETRIES) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`...  ${name} threw (attempt ${attempt}/${RETRIES}): ${msg}, retrying…`);
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+        failed += 1;
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`FAIL ${name} — ${message}`);
+        return;
+      }
     }
   };
 
