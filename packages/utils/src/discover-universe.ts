@@ -14,9 +14,9 @@ export const DISCOVER_UNIVERSE_COLORS: Record<
   DiscoverUniverseStage,
   { color: string; border: string; glow: string; label: string }
 > = {
-  building: { color: '#3b82f6', border: '#60a5fa', glow: '#3b82f655', label: 'Building' },
-  validation: { color: '#f97316', border: '#fb923c', glow: '#f9731655', label: 'Validation' },
-  live: { color: '#22c55e', border: '#4ade80', glow: '#22c55e55', label: 'Live' },
+  building: { color: '#3b82f6', border: '#93c5fd', glow: '#3b82f644', label: 'Building' },
+  validation: { color: '#f97316', border: '#fdba74', glow: '#f9731644', label: 'Validation' },
+  live: { color: '#22c55e', border: '#86efac', glow: '#22c55e44', label: 'Live' },
 };
 
 export const DISCOVER_RECENTLY_LISTED_FILTER_LABEL = 'Recently Listed';
@@ -99,10 +99,10 @@ export function computeDiscoverConvictionScore(input: DiscoverConvictionInput): 
 
 /** Bubble diameter in px from activity score */
 export function bubbleRadiusFromActivityScore(score: number): number {
-  if (score <= 25) return 56;
-  if (score <= 50) return 72;
-  if (score <= 75) return 96;
-  return 120;
+  if (score <= 25) return 72;
+  if (score <= 50) return 88;
+  if (score <= 75) return 112;
+  return 140;
 }
 
 /** Golden-angle layout — spread bubbles across the canvas (not stacked at center). */

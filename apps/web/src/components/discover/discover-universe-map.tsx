@@ -9,7 +9,7 @@ import {
   type DiscoverUniverseStage,
 } from '@dcf/utils';
 import type { DiscoverUniverseProject, DiscoverUniverseStageFilter } from '@/lib/api';
-import { DiscoverUniverseBubble } from './discover-universe-bubble';
+import { DiscoverUniverseBubble, type BubbleScamLevel } from './discover-universe-bubble';
 
 const STAGE_FILTERS: { key: DiscoverUniverseStageFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -30,6 +30,7 @@ export function DiscoverUniverseMap({
   onStageFilter,
   onChainSlug,
   onTimeframe,
+  scamMap,
 }: {
   projects: DiscoverUniverseProject[];
   chains: { slug: string; name: string }[];
@@ -39,6 +40,7 @@ export function DiscoverUniverseMap({
   onStageFilter: (v: DiscoverUniverseStageFilter) => void;
   onChainSlug: (v: string) => void;
   onTimeframe: (v: DiscoverTimeframe) => void;
+  scamMap?: Record<string, BubbleScamLevel>;
 }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ w: 960, h: 560 });
@@ -217,6 +219,7 @@ export function DiscoverUniverseMap({
               isDragging={draggingSlug === p.slug}
               onDragStart={() => setDraggingSlug(p.slug)}
               onDragEnd={(delta) => handleDragEnd(p.slug, delta)}
+              scamLevel={scamMap?.[p.slug] ?? 0}
             />
           ))
         )}
