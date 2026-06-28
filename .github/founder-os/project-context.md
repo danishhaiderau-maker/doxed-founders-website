@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bot): persist open position immediately on fill (C3) — crash no longer orphans positions
 
 ## Last Activity
 
