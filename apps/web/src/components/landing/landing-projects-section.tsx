@@ -1,14 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { DiscoverUniverseMap } from '@/components/discover/discover-universe-map';
 import { DiscoverTopProjectsTable } from '@/components/discover/discover-top-table';
+import type { BubbleScamLevel } from '@/components/discover/discover-universe-bubble';
 import {
   fetchDiscoverUniverse,
+  fetchTrustInvestigations,
   type DiscoverTimeframe,
   type DiscoverUniverseResponse,
   type DiscoverUniverseStageFilter,
+  type TrustInvestigation,
 } from '@/lib/api';
 
 /**
@@ -17,19 +20,43 @@ import {
  * activity-score system (0–100, weighted across build posts, GitHub,
  * DDollar inflow, trade volume, followers, scout stakes, community
  * threads, and long-term bubble score) — not a custom one.
+ *
+ * Bubbles are tinted red when the Trust Center has scam allegations:
+ *   level 1 — under review (rim turns red)
+ *   level 2 — high alert (>10% of voters marked scam → light red fill)
  */
+function buildScamMap(investigations: TrustInvestigation[]): Record<string, BubbleScamLevel> {
+  const map: Record<string, BubbleScamLevel> = {};
+  for (const inv of investigations) {
+    const slug = inv.project?.slug;
+    if (!slug) continue;
+    const scamPct = inv.tally?.scamPercent ?? 0;
+    if (scamPct > 10) {
+      map[slug] = 2;
+    } else if (inv.scamScore > 0 || scamPct > 0) {
+      map[slug] = 1;
+    }
+  }
+  return map;
+}
+
 export function LandingProjectsSection() {
   const [stageFilter, setStageFilter] = useState<DiscoverUniverseStageFilter>('all');
   const [chainSlug, setChainSlug] = useState('');
   const [timeframe, setTimeframe] = useState<DiscoverTimeframe>('24h');
   const [data, setData] = useState<DiscoverUniverseResponse | null>(null);
+  const [scamMap, setScamMap] = useState<Record<string, BubbleScamLevel>>({});
   const [loading, setLoading] = useState(true);
 
   const loadUniverse = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetchDiscoverUniverse({ stageFilter, chainSlug: chainSlug || undefined, timeframe });
+      const [res, investigations] = await Promise.all([
+        fetchDiscoverUniverse({ stageFilter, chainSlug: chainSlug || undefined, timeframe }),
+        fetchTrustInvestigations().catch(() => [] as TrustInvestigation[]),
+      ]);
       setData(res);
+      setScamMap(buildScamMap(investigations));
     } catch {
       setData(null);
     } finally {
@@ -40,6 +67,8 @@ export function LandingProjectsSection() {
   useEffect(() => {
     void loadUniverse();
   }, [loadUniverse]);
+
+  const scamCount = useMemo(() => Object.values(scamMap).filter((v) => v > 0).length, [scamMap]);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#07070c]">
@@ -57,6 +86,20 @@ export function LandingProjectsSection() {
           >
             Open full Discover →
           </Link>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-zinc-500">
+          <span className="inline-flex items-center gap-1">
+            <span className="text-amber-300">⭐</span> Hot — high activity / trending up
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-full border border-red-400" /> Under review
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-full bg-red-400/70" /> Scam alert (&gt;10% voters)
+          </span>
+          {scamCount > 0 && (
+            <span className="font-semibold text-red-300/80">{scamCount} flagged</span>
+          )}
         </div>
       </div>
 
@@ -85,6 +128,7 @@ export function LandingProjectsSection() {
               onStageFilter={setStageFilter}
               onChainSlug={setChainSlug}
               onTimeframe={setTimeframe}
+              scamMap={scamMap}
             />
             {data.projects.length > 0 && (
               <div>

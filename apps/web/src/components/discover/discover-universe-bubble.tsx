@@ -18,6 +18,12 @@ function formatDd(amount: number) {
 
 const DRAG_CLICK_THRESHOLD_PX = 6;
 
+/** CSS clip-path for a 5-point star shape. */
+const STAR_CLIP = 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%)';
+
+/** Scam allegation tinting — 0=clean, 1=rim alert (1-2 reports), 2=high alert (>10%). */
+export type BubbleScamLevel = 0 | 1 | 2;
+
 export function DiscoverUniverseBubble({
   project,
   x,
@@ -28,6 +34,7 @@ export function DiscoverUniverseBubble({
   isDragging,
   onDragStart,
   onDragEnd,
+  scamLevel = 0,
 }: {
   project: DiscoverUniverseProject;
   x: number;
@@ -38,6 +45,7 @@ export function DiscoverUniverseBubble({
   isDragging: boolean;
   onDragStart: () => void;
   onDragEnd: (delta: { x: number; y: number }) => void;
+  scamLevel?: BubbleScamLevel;
 }) {
   const router = useRouter();
   const didDragRef = useRef(false);
@@ -45,9 +53,15 @@ export function DiscoverUniverseBubble({
   const stage = project.universeStage as DiscoverUniverseStage;
   const colors = DISCOVER_UNIVERSE_COLORS[stage] ?? DISCOVER_UNIVERSE_COLORS.building;
   const isLive = stage === 'live';
-  const borderPx = isLive ? 4 : 3;
-  const outerRingPx = isLive ? 3 : 2;
+  const isHot = project.activityScore >= 76 || (project.trendDirection === 'up' && project.convictionScore >= 70);
+  const borderPx = isLive ? 3 : 2;
+  const outerRingPx = isLive ? 2 : 1;
   const floatDuration = 4 + (index % 5) * 0.6;
+
+  // Scam tinting colors
+  const scamBorder = scamLevel === 2 ? '#ef4444' : scamLevel === 1 ? '#f87171' : colors.border;
+  const scamGlow = scamLevel === 2 ? '#ef444466' : scamLevel === 1 ? '#f8717155' : colors.glow;
+  const scamFill = scamLevel === 2 ? '#fca5a530' : scamLevel === 1 ? '#fca5a515' : 'transparent';
 
   return (
     <motion.div
@@ -107,7 +121,7 @@ export function DiscoverUniverseBubble({
       >
         <button
           type="button"
-          className="group relative block h-full w-full rounded-full border-0 bg-transparent p-0 text-left"
+          className="group relative block h-full w-full border-0 bg-transparent p-0 text-left"
           title={`${project.name} — drag to move, click to open`}
           aria-label={`Open ${project.name}`}
           onClick={() => {
@@ -116,18 +130,33 @@ export function DiscoverUniverseBubble({
             }
           }}
         >
+          {/* Star-shaped aura for hot projects — sits behind the round bubble */}
+          {isHot && (
+            <div
+              className="absolute -inset-[18%] animate-spin opacity-50 blur-sm transition group-hover:opacity-80 group-hover:rotate-12 [animation-duration:20s]"
+              style={{
+                background: `conic-gradient(from 0deg, ${colors.color}, ${colors.glow}, ${colors.color})`,
+                clipPath: STAR_CLIP,
+              }}
+            />
+          )}
+
+          {/* Outer glow */}
           <div
-            className="absolute inset-0 rounded-full opacity-60 blur-md transition group-hover:opacity-90"
-            style={{ background: colors.glow }}
+            className="absolute inset-0 rounded-full opacity-40 blur-lg transition group-hover:opacity-70"
+            style={{ background: scamGlow }}
           />
+
+          {/* Main bubble — lighter background so logos are visible */}
           <div
             className="relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-full transition group-hover:scale-105"
             style={{
               borderWidth: borderPx,
               borderStyle: 'solid',
-              borderColor: colors.border,
-              background: `radial-gradient(circle at 35% 30%, ${colors.color}55, #0a0a0f 70%)`,
-              boxShadow: `0 0 0 ${outerRingPx}px ${colors.border}, 0 0 ${isLive ? 40 : 28}px ${colors.glow}, inset 0 0 20px ${colors.color}22`,
+              borderColor: scamBorder,
+              background: `radial-gradient(circle at 35% 30%, ${colors.color}22, ${scamFill || '#0d0d14cc'} 60%, #0a0a0f 90%)`,
+              boxShadow: `0 0 0 ${outerRingPx}px ${scamBorder}33, 0 0 ${isLive ? 32 : 22}px ${scamGlow}, inset 0 0 16px ${colors.color}11`,
+              backdropFilter: 'blur(2px)',
             }}
           >
             {project.logoUrl ? (
@@ -135,7 +164,7 @@ export function DiscoverUniverseBubble({
               <img
                 src={project.logoUrl}
                 alt=""
-                className="h-[52%] w-[52%] rounded-full object-cover"
+                className="h-[58%] w-[58%] rounded-full object-cover ring-1 ring-white/10"
                 draggable={false}
               />
             ) : (
@@ -150,13 +179,28 @@ export function DiscoverUniverseBubble({
               </span>
             )}
           </div>
+
+          {/* Activity score badge */}
           <span
             className="pointer-events-none absolute -bottom-0.5 left-1/2 flex h-5 min-w-5 -translate-x-1/2 items-center justify-center rounded-full px-1 text-[9px] font-bold text-white shadow-lg"
-            style={{ background: colors.color }}
+            style={{ background: scamLevel === 2 ? '#ef4444' : colors.color }}
           >
             {project.activityScore}
           </span>
-          {project.recentlyListed && (
+
+          {/* Hot star badge — top right for trending projects */}
+          {isHot && (
+            <span
+              className="pointer-events-none absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center text-[11px]"
+              style={{ filter: 'drop-shadow(0 0 4px rgba(250,204,21,0.6))' }}
+              aria-label="Hot project"
+            >
+              ⭐
+            </span>
+          )}
+
+          {/* Recently listed tag */}
+          {project.recentlyListed && !isHot && (
             <span
               className="pointer-events-none absolute -right-0.5 -top-0.5 rounded-full border border-violet-400/60 bg-violet-950 px-1 py-0.5 text-[7px] font-bold uppercase tracking-wide text-violet-200"
               title="Listed on platform within the last 14 days"
@@ -165,6 +209,18 @@ export function DiscoverUniverseBubble({
             </span>
           )}
 
+          {/* Scam allegation indicator */}
+          {scamLevel > 0 && (
+            <span
+              className="pointer-events-none absolute -left-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold text-white shadow-lg"
+              style={{ background: scamLevel === 2 ? '#ef4444' : '#f87171' }}
+              title={scamLevel === 2 ? 'High alert — >10% marked scam' : `${scamLevel} scam report${scamLevel > 1 ? 's' : ''}`}
+            >
+              !
+            </span>
+          )}
+
+          {/* Hover tooltip */}
           <div className="pointer-events-none absolute left-1/2 top-full z-[2100] mt-3 w-52 -translate-x-1/2 scale-95 rounded-xl border border-zinc-700/80 bg-zinc-950/95 p-3 opacity-0 shadow-2xl backdrop-blur-md transition group-hover:scale-100 group-hover:opacity-100">
             <p className="font-semibold text-white">{project.name}</p>
             {project.lastActivityPreview && (
@@ -177,6 +233,9 @@ export function DiscoverUniverseBubble({
                 <span className="text-emerald-400">+{formatUsd(project.ddInflow24h, 0)}</span>
               )}
               <span className="text-zinc-500">{project.convictionScore} conviction</span>
+              {isHot && <span className="text-amber-300">⭐ Hot</span>}
+              {scamLevel === 2 && <span className="text-red-400">⚠ Scam alert</span>}
+              {scamLevel === 1 && <span className="text-orange-400">⚠ Under review</span>}
             </div>
             <p className="mt-2 text-[9px] text-zinc-600">Drag to separate · click to open</p>
           </div>
