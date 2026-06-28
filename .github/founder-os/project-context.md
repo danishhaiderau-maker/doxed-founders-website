@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(relay-fidelity): use shared 3s poll defaults instead of hardcoded 250ms
 
 ## Last Activity
 
