@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(policy): re-lock Bitfinex policy for sim->real-API execution change
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
