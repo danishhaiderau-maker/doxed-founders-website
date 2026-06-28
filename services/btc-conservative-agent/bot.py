@@ -12765,6 +12765,10 @@ def fill_order(order):
         })
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
+    # C3 fix: persist the newly-opened position to disk immediately so a crash between
+    # this fill and the next save never loses an open position (was only saved on close
+    # or graceful shutdown — a non-graceful crash orphaned every open position).
+    save_positions()
     _relay_mirror(
         "FILLED",
         {
