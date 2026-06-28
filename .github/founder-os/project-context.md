@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-fix(analyzer): ladder simulator showed 0 results per profile — stop over-filtering replays by executed_ids
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
