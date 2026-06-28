@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(workspace): restore voice/mic button in Founder Brain chat with waveform + states
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
