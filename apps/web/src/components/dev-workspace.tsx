@@ -16,6 +16,8 @@ import {
   type FounderAgentRunRecord,
   type FounderOnboardingStatus,
 } from '@/lib/api';
+import { useVoiceInput } from '@/hooks/use-voice-input';
+import { VoiceWaveform } from '@/components/voice-waveform';
 
 type Props = { accessToken: string };
 
@@ -85,6 +87,25 @@ export function DevWorkspace({ accessToken }: Props) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const onTranscript = useCallback((text: string) => {
+    setChatInput(text);
+  }, []);
+  const {
+    listening,
+    starting,
+    waitingNetwork,
+    phase,
+    supported: voiceSupported,
+    audioLevel,
+    voiceError,
+    clearVoiceError,
+    toggle: toggleVoice,
+  } = useVoiceInput(onTranscript);
+
+  useEffect(() => {
+    if (voiceError) setChatInput((prev) => prev);
+  }, [voiceError]);
 
   const load = useCallback(async () => {
     const results = await Promise.allSettled([
@@ -378,17 +399,64 @@ export function DevWorkspace({ accessToken }: Props) {
               )}
             </div>
 
-            {/* Chat input */}
+            {/* Chat input — with voice mic button */}
             <div className="shrink-0 border-t border-zinc-800/60 p-3">
+              {voiceError && (
+                <p className="mb-1.5 rounded-md border border-amber-500/30 bg-amber-950/20 px-2 py-1 text-[10px] text-amber-200">
+                  {voiceError}
+                  <button onClick={clearVoiceError} className="ml-1.5 underline">dismiss</button>
+                </p>
+              )}
               <div className="flex items-end gap-2">
                 <textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
                   placeholder="Ask Founder Brain… it knows your repo, branch, files, agents, and deploys"
                   rows={1}
                   className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearVoiceError();
+                    if (!voiceSupported) {
+                      setChatInput((prev) => prev);
+                      return;
+                    }
+                    toggleVoice(chatInput);
+                  }}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+                    listening
+                      ? 'bg-red-600 text-white ring-2 ring-red-500/50'
+                      : waitingNetwork
+                        ? 'bg-sky-700/90 text-white ring-2 ring-sky-500/40'
+                        : starting
+                          ? 'bg-amber-600/90 text-white ring-2 ring-amber-500/40'
+                          : 'border border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-violet-500/50 hover:text-white'
+                  }`}
+                  title={
+                    !voiceSupported
+                      ? 'Voice needs Chrome or Edge on desktop with microphone permission (HTTPS). You can still type.'
+                      : listening
+                        ? 'Stop recording'
+                        : waitingNetwork
+                          ? 'Waiting for internet — transcript kept, retrying…'
+                          : starting
+                            ? 'Starting microphone… allow if prompted'
+                            : 'Talk to Founder — speech to text'
+                  }
+                >
+                  {listening ? '⏹ Stop' : waitingNetwork ? '⏳ Waiting…' : starting ? 'Starting…' : '🎤'}
+                  <VoiceWaveform phase={phase} level={audioLevel} />
+                </button>
                 <button onClick={sendChat} disabled={!chatInput.trim()}
                   className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-30">Send</button>
               </div>
+              {(starting || waitingNetwork || listening) && (
+                <p className="mt-1.5 text-[10px] font-medium text-zinc-400">
+                  {starting && <span className="text-amber-200 animate-pulse">Allow microphone when your browser asks…</span>}
+                  {waitingNetwork && <span className="text-sky-200">Offline — keeping your words; will transcribe when connection returns</span>}
+                  {listening && <span className="text-red-200">Listening — speak now; words appear in the box above</span>}
+                </p>
+              )}
             </div>
           </div>
 
