@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(relay-sim): include last_approve_outcome + envelope fields in /api/relay-state
 
 ## Last Activity
 
