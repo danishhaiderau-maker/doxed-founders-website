@@ -43,6 +43,18 @@ function Test-PortOpen([int]$P) {
   }
 }
 
+# HTTP liveness check — confirms the server actually answers (not just that the port
+# is bound). Replaces the 400ms TCP-only check that produced false "offline" flicker
+# on the Agent Hub when the listening socket was momentarily slow under load.
+function Test-HttpAlive([string]$Url, [int]$TimeoutMs = 1500) {
+  try {
+    $code = curl.exe -s --max-time ([math]::Max(1, [int]($TimeoutMs / 1000))) -o NUL -w "%{http_code}" $Url 2>$null
+    return ([int]$code -ge 200 -and [int]$code -lt 500)
+  } catch {
+    return $false
+  }
+}
+
 function Test-MultiPortOpen([int[]]$Ports, [int]$TimeoutMs = 400) {
   $pending = @{}
   foreach ($p in $Ports) {

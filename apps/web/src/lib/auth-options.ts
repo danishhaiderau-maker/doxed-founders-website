@@ -33,7 +33,14 @@ async function syncOAuthWithApi(input: {
 
   const res = await fetch(apiUrl('/auth/oauth', true), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      // Server-to-server proof: blocks public account-takeover via /auth/oauth.
+      // Only set when INTERNAL_AUTH_SECRET is configured (production).
+      ...(process.env.INTERNAL_AUTH_SECRET
+        ? { 'x-internal-auth-secret': process.env.INTERNAL_AUTH_SECRET }
+        : {}),
+    },
     body: JSON.stringify(payload),
   });
 

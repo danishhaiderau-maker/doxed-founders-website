@@ -1,6 +1,6 @@
 import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
@@ -51,6 +51,7 @@ export class PaperTradingController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('session')
   createSession(@Body() dto: CreatePaperSessionDto) {
     return this.paperTrading.createSession(dto.displayName);

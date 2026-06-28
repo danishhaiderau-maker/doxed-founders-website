@@ -55,15 +55,18 @@ function Send-Json {
 }
 
 function Get-FullStatus {
-  # Port-only checks — keep this under ~500ms so the listener thread never freezes buttons.
+  # HTTP liveness for bot/analyzer (was 400ms TCP-only, which produced false "offline"
+  # flicker when the listening socket was momentarily slow to handshake under load).
+  # HTTP /api/ping confirms the server actually answers, not just that the port is bound.
+  # Timeouts are tight (1.5s) so the single-threaded listener never blocks long; the
+  # 4s status cache means this runs at most every 4s.
   $now = Get-Date
   if ($script:StatusCache.payload -and ($now - $script:StatusCache.at).TotalSeconds -lt 4) {
     return $script:StatusCache.payload
   }
 
-  $portMap = Test-MultiPortOpen @($BotPort, $AnalyzerPort) 400
-  $botPortOpen = [bool]$portMap[$BotPort]
-  $analyzerRunning = [bool]$portMap[$AnalyzerPort]
+  $botOnline = Test-HttpAlive "http://127.0.0.1:$BotPort/api/ping" 1500
+  $analyzerRunning = Test-HttpAlive "http://127.0.0.1:$AnalyzerPort/" 1500
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
@@ -92,7 +95,7 @@ function Get-FullStatus {
       launcher = $Port
     }
     bot = @{
-      online = $botPortOpen
+      online = $botOnline
       dashboard = "http://127.0.0.1:$BotPort"
       lan = "http://10.0.0.102:$BotPort"
       dataDir = $agentDir
