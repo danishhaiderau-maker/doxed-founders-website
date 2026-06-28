@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Redesign bubble map: bigger bubbles, lighter green, star aura for hot projects, scam tinting
 
 ## Last Activity
 
