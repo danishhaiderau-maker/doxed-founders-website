@@ -74,18 +74,29 @@ function Test-HttpAliveParallel([string[]]$Urls, [int]$TimeoutMs = 1500) {
     }
   }
   if ($pending.Count -gt 0) {
-    $handles = $pending | ForEach-Object { $_.Ar.AsyncWaitHandle }
-    [System.Threading.WaitHandle]::WaitAll($handles, $TimeoutMs) | Out-Null
-    foreach ($p in $pending) {
-      try {
-        $resp = $p.Req.EndGetResponse($p.Ar)
-        $code = [int]$resp.StatusCode
-        $resp.Close()
-        $out[$p.Url] = ($code -ge 200 -and $code -lt 500)
-      } catch {
-        # false (timeout / connection refused / >=500)
+    # Poll each AsyncWaitHandle with WaitOne (STA-safe; WaitAll for multiple handles
+    # throws on a single-threaded apartment thread, which is the PowerShell default).
+    $deadline = [datetime]::Now.AddMilliseconds($TimeoutMs)
+    $remaining = [System.Collections.ArrayList]@($pending)
+    while ($remaining.Count -gt 0 -and [datetime]::Now -lt $deadline) {
+      $stillPending = [System.Collections.ArrayList]@()
+      foreach ($p in $remaining) {
+        if ($p.Ar.AsyncWaitHandle.WaitOne(50)) {
+          try {
+            $resp = $p.Req.EndGetResponse($p.Ar)
+            $code = [int]$resp.StatusCode
+            $resp.Close()
+            $out[$p.Url] = ($code -ge 200 -and $code -lt 500)
+          } catch {
+            # false (timeout / connection refused / >=500)
+          }
+        } else {
+          [void]$stillPending.Add($p)
+        }
       }
+      $remaining = $stillPending
     }
+    # Anything still pending after the deadline: leave false (EndGetResponse would throw).
   }
   return $out
 }
