@@ -216,9 +216,9 @@ export default function FounderDenPageClient() {
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 sm:py-5 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />
-            <h1 className="mt-1 text-2xl font-bold">Development OS</h1>
+            <h1 className="mt-1 text-2xl font-bold">Founder OS</h1>
             <p className="text-sm text-zinc-500">
-              Repository · Branch · Agents · Deploys — your AI-powered dev workspace
+              AI Development Workspace — your AI engineering control plane
             </p>
             {onboardingStatus?.pathLabel && hasFounder && (
               <span className="mt-2 inline-flex rounded-full border border-violet-500/30 bg-violet-950/40 px-2.5 py-0.5 text-[10px] text-violet-200">
