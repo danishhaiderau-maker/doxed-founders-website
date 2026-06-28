@@ -12,7 +12,7 @@ Product & platform (11 recent commits)
 
 ## Last Commit
 
-feat(home-stack): crash feedback loop + self-healing watchdog
+fix(analyzer): ladder simulator showed 0 results per profile — stop over-filtering replays by executed_ids
 
 ## Last Activity
 
