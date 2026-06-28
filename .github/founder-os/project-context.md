@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(workspace): cast Prisma client for FounderVaultItem so CI build typecheck passes
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
