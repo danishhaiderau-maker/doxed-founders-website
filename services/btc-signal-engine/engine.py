@@ -3575,6 +3575,18 @@ FUNDING_REFRESH_SEC = 60
 BBO_REFRESH_SEC = 3
 BOOK_REFRESH_SEC = 3
 BOOK_STALE_SEC = 10
+# Cap raw P0 book depth we parse/store. Bitfinex P0 can return 1000+ levels;
+# for ~$5-margin sim fills we only walk the top of book, so parsing/sorting/
+# storing the full raw book burns CPU under the state_lock and starves the
+# Flask HTTP thread. 100 levels per side is far more than enough depth.
+MAX_BOOK_LEVELS = 100
+# Hard floor between any two REST book fetches, including force=True callers.
+# Without this, multiple hot loops (process_pending_orders, process_positions,
+# dashboard refresh, stale-book path) each force a full P0 fetch when the book
+# goes stale, serialized under _book_refresh_lock — that is the CPU-starvation
+# root cause. force=True now means "refresh if older than this floor", not
+# "refresh no matter what".
+BOOK_FORCE_MIN_SEC = 1.5
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
@@ -3755,18 +3767,31 @@ def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = 
             asks.append([price, count, abs(amount)])
     bids.sort(key=lambda x: -x[0])
     asks.sort(key=lambda x: x[0])
-    return {"bids": bids, "asks": asks, "level_count": len(rows)}
+    # Cap depth — top-of-book is all sim fills ever walk; storing the full raw
+    # P0 book (1000+ levels) wastes CPU and memory under the state_lock.
+    if MAX_BOOK_LEVELS > 0:
+        bids = bids[:MAX_BOOK_LEVELS]
+        asks = asks[:MAX_BOOK_LEVELS]
+    return {"bids": bids, "asks": asks, "level_count": len(bids) + len(asks)}
 
 
 def refresh_order_book_state(force: bool = False):
-    """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence)."""
+    """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence).
+
+    ``force=True`` coalesces to ``BOOK_FORCE_MIN_SEC`` so multiple hot loops
+    (pending orders, positions, dashboard, stale-book path) demanding a refresh
+    at the same time only trigger ONE REST fetch, not one per caller. That
+    coalescing is what keeps the Flask HTTP thread from being CPU-starved.
+    """
     global _last_book_refresh_ts
     now = time.time()
-    if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+    min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
+    if (now - _last_book_refresh_ts) < min_interval:
         return
     with _book_refresh_lock:
         now = time.time()
-        if not force and (now - _last_book_refresh_ts) < BOOK_REFRESH_SEC:
+        min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
+        if (now - _last_book_refresh_ts) < min_interval:
             return
         try:
             book = fetch_bitfinex_book_rest()
@@ -12703,6 +12728,13 @@ def fill_order(order):
     if order["signal_dir"] not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     with trade_lock:
+        # C4 guard: never open a second position for the same trade_id. A race or double
+        # touch could otherwise append 2x exposure for one signal; /api/state dedupes in
+        # the response but the relay may already have copied both.
+        _ftid = order.get("trade_id")
+        if _ftid and any(p.get("trade_id") == _ftid and p.get("status") != "CLOSED" for p in open_positions):
+            logger.warning(f"[FILL GUARD] Duplicate fill suppressed for trade_id={_ftid} — position already open")
+            return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
@@ -12733,6 +12765,10 @@ def fill_order(order):
         })
     persist_signal(master or signal, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
+    # C3 fix: persist the newly-opened position to disk immediately so a crash between
+    # this fill and the next save never loses an open position (was only saved on close
+    # or graceful shutdown — a non-graceful crash orphaned every open position).
+    save_positions()
     _relay_mirror(
         "FILLED",
         {
@@ -14841,6 +14877,7 @@ def close_position(pos: dict, exit_reason: str):
         pos["_close_in_progress"] = True
         trade_id = pos.get("trade_id")
         if not trade_id:
+            pos["_close_in_progress"] = False
             return
         _emit_genome_execution_event("EXIT_TRIGGERED", {
             "trade_id": trade_id,
@@ -14874,6 +14911,9 @@ def close_position(pos: dict, exit_reason: str):
 
         if net_pnl <= 0 and ("TP" in exit_reason or "PROFIT" in exit_reason):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
+            # CRITICAL: clear the in-progress flag so this position is not frozen
+            # OPEN forever (stop-loss/ladder exits must still be able to run on it).
+            pos["_close_in_progress"] = False
             return
 
         entry_ts = float(pos.get("entry_ts") or 0)
@@ -15318,7 +15358,25 @@ POSITIONS_FILE = "open_positions.json"
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
-MARKETS = bitfinex_public.load_markets()
+
+
+def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.0):
+    """load_markets() at import time is fragile — a single transient SSL/network
+    hiccup to api-pub.bitfinex.com (SSLEOFError, ConnectionReset, timeout) would
+    crash the bot with exit 1 before main() runs. Retry with backoff instead so
+    the bot survives transient Bitfinex/ISP/Python-3.14 TLS quirks at boot."""
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            return exchange.load_markets()
+        except Exception as e:
+            last_err = e
+            print(f"[STARTUP] load_markets attempt {i + 1}/{attempts} failed: {e}", flush=True)
+            time.sleep(base_delay * (i + 1))
+    raise last_err
+
+
+MARKETS = _load_markets_with_retry(bitfinex_public)
 bitfinex_private = ccxt.bitfinex({
     "apiKey": api_key,
     "secret": api_secret,
@@ -18586,8 +18644,10 @@ def api_relay_state():
     """Fast subset for Railway relay / Agent Hub — no heavy research KPIs."""
     try:
         now_ts = time.time()
+        session_start = _showcase_trade_session_start()
         with state_lock:
             price = state.get("price")
+            debug_state = state.get("debug_state") or {}
             snapshot = {
                 "price": price,
                 "bot_version": EXECUTION_FIX_VERSION,
@@ -18599,10 +18659,22 @@ def api_relay_state():
                 "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
                 "strategy_mode": state.get("strategy_mode"),
                 "dashboard_port": DASHBOARD_PORT,
+                # Relay execution path (pollBotForIntents + buildIntentEnvelope) needs these.
+                # Without last_approve_outcome the relay never creates INTENT cycles => sim
+                # mirrors nothing. /api/state carries them but is 108KB and times out through
+                # the Cloudflare tunnel; relay-state is 48KB and reliable, so include them here.
+                "last_approve_outcome": copy.deepcopy(state.get("last_approve_outcome")),
+                "last_ai": copy.deepcopy(state.get("last_ai")),
+                "pullback_threshold": state.get("pullback_threshold"),
+                "last_edge": state.get("last_edge"),
+                "leverage": state.get("leverage"),
+                "regime": state.get("regime"),
+                "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
             }
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
+            trades_for_relay = _snapshot_trades_for_api(session_start)
             active_list, _exposure = _collect_dashboard_active_signals(
                 pending_orders_copy,
                 positions_copy,
@@ -18621,6 +18693,7 @@ def api_relay_state():
             expired_orders_copy = copy.deepcopy(expired_orders)
         snapshot["orders"] = orders
         snapshot["positions"] = positions_copy
+        snapshot["trades"] = trades_for_relay
         snapshot["expired_orders"] = [_expired_order_api_row(e) for e in expired_orders_copy if isinstance(e, dict)]
         snapshot["signal_info"] = {
             "active": len(active_list) > 0,

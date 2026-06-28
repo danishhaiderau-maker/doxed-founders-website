@@ -1,9 +1,9 @@
 {
-  "engine_version": "v11.1-virtual-chase-known-combos-v1",
-  "combo_version": "2026-06-26",
-  "exit_version": "scenario-c-v4",
-  "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "3f1244d5b6ba",
-  "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-06-26T23:53:06.636Z"
+    "benchmark_lane":  "CONTINUOUS",
+    "signal_hash":  "a9aa200935a9",
+    "source":  "services/btc-conservative-agent/bot.py",
+    "exit_version":  "scenario-c-v4",
+    "combo_version":  "2026-06-26",
+    "engine_version":  "v11.1-virtual-chase-known-combos-v1",
+    "updated_at":  "2026-06-29T04:38:51.7229138+10:00"
 }

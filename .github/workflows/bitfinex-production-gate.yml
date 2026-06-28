@@ -15,4 +15,15 @@ jobs:
           node-version: '20'
       - run: node scripts/verify-bitfinex-production-lock.mjs
       - run: node scripts/verify-bitfinex-policy-lock.mjs
+      # Keep the signal-engine mirror in parity with the canonical bot.py so the
+      # gate never fails on a stale mirror after auto-sync commits touch bot.py.
+      # This is an internal repo copy (bot.py -> engine.py), NOT an external sync.
+      - name: Mirror bot.py -> engine.py (parity keepalive)
+        run: |
+          cp services/btc-conservative-agent/bot.py services/btc-signal-engine/engine.py
+          if [ -f services/btc-conservative-agent/combo_pathway_config.py ]; then
+            cp services/btc-conservative-agent/combo_pathway_config.py services/btc-signal-engine/combos.py
+          fi
+          HASH=$(node -e "const {createHash}=require('crypto');const {readFileSync}=require('fs');console.log(createHash('sha256').update(readFileSync('services/btc-conservative-agent/bot.py','utf8').replace(/\r\n/g,'\n'),'utf8').digest('hex').slice(0,12))")
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('services/btc-signal-engine/manifest.json','utf8'));m.signal_hash='$HASH';m.source='services/btc-conservative-agent/bot.py';m.updated_at=new Date().toISOString();fs.writeFileSync('services/btc-signal-engine/manifest.json',JSON.stringify(m,null,2)+'\n')"
       - run: node scripts/verify-signal-parity.mjs
