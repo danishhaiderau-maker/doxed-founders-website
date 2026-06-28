@@ -49,6 +49,7 @@ export default function FounderDenPageClient() {
   const [tab, setTab] = useState<WorkspaceTab>(() => parseTab(searchParams.get('tab')));
   const [copilotPrompt, setCopilotPrompt] = useState<string | null>(() => searchParams.get('prompt'));
   const [dashboard, setDashboard] = useState<FounderDashboard | null>(null);
+  const [dashboardLoaded, setDashboardLoaded] = useState(false);
   const [room, setRoom] = useState<ProjectRoom | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +137,8 @@ export default function FounderDenPageClient() {
     } catch {
       setDashboard(null);
       setOnboardingStatus(null);
+    } finally {
+      setDashboardLoaded(true);
     }
   }, [session?.accessToken]);
 
@@ -227,6 +230,14 @@ export default function FounderDenPageClient() {
         </div>
       </header>
 
+      {session?.accessToken && !dashboardLoaded ? (
+        <div className="flex min-h-[60vh] items-center justify-center">
+          <div className="flex flex-col items-center gap-3">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-zinc-700 border-t-violet-500" />
+            <p className="text-xs text-zinc-500">Loading workspace…</p>
+          </div>
+        </div>
+      ) : (
       <div
         className={`mx-auto w-full ${
           session?.accessToken && hasFounder
@@ -318,6 +329,7 @@ export default function FounderDenPageClient() {
           onInitialCopilotPromptConsumed={clearCopilotUrlParams}
         />
       </div>
+      )}
     </main>
   );
 }
