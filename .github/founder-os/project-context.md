@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Re-lock Bitfinex policy after upstream atomic order claim fix (7a73b0e5d)
+fix(workspace): restore voice/mic button in Founder Brain chat with waveform + states
 
 ## Last Activity
 
