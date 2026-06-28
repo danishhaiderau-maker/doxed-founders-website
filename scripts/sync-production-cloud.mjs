@@ -141,6 +141,7 @@ async function main() {
   const botControlSecret = vercelCheck.BOT_CONTROL_SECRET?.trim();
   const metricsSyncSecret = vercelCheck.METRICS_SYNC_SECRET?.trim();
   const githubWebhookSecret = vercelCheck.GITHUB_WEBHOOK_SECRET?.trim();
+  const internalAuthSecret = vercelCheck.INTERNAL_AUTH_SECRET?.trim();
   const googleId = vercelCheck.GOOGLE_CLIENT_ID?.trim() || localEnv.GOOGLE_CLIENT_ID?.trim();
   const googleSecret = vercelCheck.GOOGLE_CLIENT_SECRET?.trim() || localEnv.GOOGLE_CLIENT_SECRET?.trim() || '';
 
@@ -184,8 +185,11 @@ async function main() {
   };
   if (googleId) vercelVars.GOOGLE_CLIENT_ID = googleId;
   if (googleSecret) vercelVars.GOOGLE_CLIENT_SECRET = googleSecret;
+  // Web (NextAuth) sends this header to prove server-to-server origin on /auth/oauth,
+  // blocking the public account-takeover path. Must match the Railway API var.
+  if (internalAuthSecret) vercelVars.INTERNAL_AUTH_SECRET = internalAuthSecret;
 
-  const sensitiveVercel = new Set(['NEXTAUTH_SECRET', 'GOOGLE_CLIENT_SECRET']);
+  const sensitiveVercel = new Set(['NEXTAUTH_SECRET', 'GOOGLE_CLIENT_SECRET', 'INTERNAL_AUTH_SECRET']);
   for (const [name, value] of Object.entries(vercelVars)) {
     if (value?.trim()) upsertVercelEnv(name, value.trim(), ['production'], sensitiveVercel.has(name));
   }
@@ -242,6 +246,7 @@ async function main() {
       ...(botControlSecret ? { BOT_CONTROL_SECRET: botControlSecret } : {}),
       ...(metricsSyncSecret ? { METRICS_SYNC_SECRET: metricsSyncSecret } : {}),
       ...(githubWebhookSecret ? { GITHUB_WEBHOOK_SECRET: githubWebhookSecret } : {}),
+      ...(internalAuthSecret ? { INTERNAL_AUTH_SECRET: internalAuthSecret } : {}),
       SUBSCRIBER_SHOWCASE_MIRROR_ONLY: 'true',
       SUBSCRIBER_EXECUTION_ENABLED: 'true',
       SUBSCRIBER_EXECUTION_POLL_MS: '250',
