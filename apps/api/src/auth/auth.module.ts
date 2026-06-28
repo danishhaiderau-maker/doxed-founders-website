@@ -19,7 +19,10 @@ import { JwtStrategy } from './jwt.strategy';
     JwtModule.register({
       secret: process.env.JWT_SECRET ?? 'dev-secret-change-in-production',
       signOptions: {
-        expiresIn: (process.env.JWT_EXPIRES_IN ?? '7d') as `${number}d`,
+        // Shorter access-token TTL (was 7d) limits the window for a stolen token to be
+        // replayed. validatePayload still does a per-request DB lookup + banned check, so
+        // banning a user revokes all their tokens immediately. Override via JWT_EXPIRES_IN.
+        expiresIn: (process.env.JWT_EXPIRES_IN ?? '24h') as import('ms').StringValue,
       },
     }),
   ],

@@ -5,10 +5,29 @@ import { ConfigService } from '@nestjs/config';
 @Injectable()
 export class CredentialCryptoService {
   private readonly key: Buffer;
+  // Legacy key derived from JWT_SECRET — kept ONLY for decrypting credentials that were
+  // encrypted before CREDENTIAL_ENCRYPTION_KEY was introduced. New encryptions always use
+  // `key` (the dedicated credential key) so a JWT_SECRET leak alone cannot decrypt stored
+  // exchange API keys.
+  private readonly legacyKey: Buffer | null;
 
   constructor(config: ConfigService) {
-    const secret = config.get<string>('JWT_SECRET') ?? 'dev-credential-key-change-me';
-    this.key = createHash('sha256').update(secret).digest();
+    const credSecret = config.get<string>('CREDENTIAL_ENCRYPTION_KEY')?.trim();
+    const jwtSecret = config.get<string>('JWT_SECRET')?.trim();
+    if (!credSecret && !jwtSecret) {
+      // Dev-only fallback. In production both CREDENTIAL_ENCRYPTION_KEY and JWT_SECRET
+      // must be set — exchange credentials are real-money-sensitive.
+      this.key = createHash('sha256').update('dev-credential-key-change-me').digest();
+      this.legacyKey = null;
+      return;
+    }
+    this.key = createHash('sha256').update(credSecret ?? jwtSecret ?? '').digest();
+    // If a dedicated credential key is set AND it differs from the JWT secret, keep the
+    // JWT-derived key as a legacy decrypt fallback for already-stored credentials.
+    this.legacyKey =
+      credSecret && jwtSecret && credSecret !== jwtSecret
+        ? createHash('sha256').update(jwtSecret).digest()
+        : null;
   }
 
   encrypt(plain: string): string {
@@ -25,7 +44,20 @@ export class CredentialCryptoService {
     const iv = Buffer.from(ivB64, 'base64');
     const tag = Buffer.from(tagB64, 'base64');
     const data = Buffer.from(dataB64, 'base64');
-    const decipher = createDecipheriv('aes-256-gcm', this.key, iv);
+    // Try the primary (dedicated) key first; fall back to the legacy JWT-derived key for
+    // credentials encrypted before the split. GCM auth tag mismatch throws — catch and retry.
+    try {
+      return this.decryptWith(this.key, iv, tag, data);
+    } catch (err) {
+      if (this.legacyKey) {
+        return this.decryptWith(this.legacyKey, iv, tag, data);
+      }
+      throw err;
+    }
+  }
+
+  private decryptWith(key: Buffer, iv: Buffer, tag: Buffer, data: Buffer): string {
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
   }

@@ -55,6 +55,41 @@ function Test-HttpAlive([string]$Url, [int]$TimeoutMs = 1500) {
   }
 }
 
+<# Probe several URLs in parallel with async HttpWebRequest so the bridge listener never
+blocks for sum(url timeouts) — runs in max(timeoutMs). Returns hashtable url -> bool. #>
+function Test-HttpAliveParallel([string[]]$Urls, [int]$TimeoutMs = 1500) {
+  $out = @{}
+  $pending = @()
+  foreach ($u in $Urls) {
+    $out[$u] = $false
+    try {
+      $req = [System.Net.HttpWebRequest]::Create($u)
+      $req.Method = "GET"
+      $req.Timeout = 5000
+      $req.ReadWriteTimeout = $TimeoutMs
+      $iar = $req.BeginGetResponse($null, $req)
+      $pending += @{ Url = $u; Req = $req; Ar = $iar }
+    } catch {
+      # leave false
+    }
+  }
+  if ($pending.Count -gt 0) {
+    $handles = $pending | ForEach-Object { $_.Ar.AsyncWaitHandle }
+    [System.Threading.WaitHandle]::WaitAll($handles, $TimeoutMs) | Out-Null
+    foreach ($p in $pending) {
+      try {
+        $resp = $p.Req.EndGetResponse($p.Ar)
+        $code = [int]$resp.StatusCode
+        $resp.Close()
+        $out[$p.Url] = ($code -ge 200 -and $code -lt 500)
+      } catch {
+        # false (timeout / connection refused / >=500)
+      }
+    }
+  }
+  return $out
+}
+
 function Test-MultiPortOpen([int[]]$Ports, [int]$TimeoutMs = 400) {
   $pending = @{}
   foreach ($p in $Ports) {

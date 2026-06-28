@@ -65,8 +65,13 @@ function Get-FullStatus {
     return $script:StatusCache.payload
   }
 
-  $botOnline = Test-HttpAlive "http://127.0.0.1:$BotPort/api/ping" 1500
-  $analyzerRunning = Test-HttpAlive "http://127.0.0.1:$AnalyzerPort/" 1500
+  $botUrl = "http://127.0.0.1:$BotPort/api/ping"
+  $anUrl = "http://127.0.0.1:$AnalyzerPort/"
+  # Parallel HTTP probes (async) so the two local pings complete in ~1.5s instead of ~3s
+  # — halves the window during which the single-threaded listener could delay a /health.
+  $live = Test-HttpAliveParallel @($botUrl, $anUrl) 1500
+  $botOnline = $live[$botUrl]
+  $analyzerRunning = $live[$anUrl]
   $tunnelUrl = Get-TunnelUrl
   if (-not $tunnelUrl) { $tunnelUrl = "https://bot.doxxedcrypto.digital" }
   $cloudflaredRunning = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
