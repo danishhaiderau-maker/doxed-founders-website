@@ -4,11 +4,16 @@ export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 /** Matches showcase bot DEFAULT_RESEARCH_LEVERAGE (100x on Bitfinex derivatives). */
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
 
-/** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS. */
-export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 250;
+/** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS.
+ *  Kept at 3s — 250ms flooded the Cloudflare tunnel (~250KB/s continuous /api/relay-state fetches)
+ *  and caused the 502 + "context canceled" flaps that dropped signal cycles. A showcase signal
+ *  stays in the bot's last_approve_outcome for 30+ seconds (entry TTL 1800s), so 3s catches every
+ *  signal with a 12x tunnel load reduction. */
+export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 3000;
 
-/** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS. */
-export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 250;
+/** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS.
+ *  Same rationale as above — 3s is fast enough for signal capture and stops tunnel flooding. */
+export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 3000;
 
 /** Minimum allowed poll interval (ms) — 100ms for instant showcase relay wake. */
 export const MIN_SUBSCRIBER_POLL_MS = 100;

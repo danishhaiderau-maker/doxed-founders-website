@@ -12,6 +12,7 @@ import { SignalCycleStatus, TradingAgentInstanceStatus, Prisma } from '@prisma/c
 import { PrismaService } from '../prisma/prisma.service';
 import { BitfinexTradingClient } from '../exchanges/bitfinex-api.client';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
+import { ExchangesService } from '../exchanges/exchanges.service';
 import { BotBridgeService } from './bot-bridge.service';
 import { mapBotStateToAgentStats, type BotApiState } from './bot-state.mapper';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
@@ -28,6 +29,7 @@ export class CopyRelaySimService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly botBridge: BotBridgeService,
+    private readonly exchanges: ExchangesService,
   ) {}
 
   getSimClient(userId: string, ledger: CopyRelaySimState['ledger']): BitfinexSimTradingClient {
@@ -282,11 +284,29 @@ export class CopyRelaySimService {
     sim: CopyRelaySimState,
     markPrice: number | null,
   ) {
-    const client = this.getSimClient(userId, sim.ledger);
-    const creds = { apiKey: 'sim', apiSecret: 'sim' };
-    await client.processFillsOnMark(markPrice ?? undefined);
-    const orders = await client.listActiveOrders(creds);
-    const position = await client.getOpenPositionDetail(creds);
+    // Sim mode now places REAL orders on the Bitfinex API (1 position · $20 · 100x cap),
+    // so the live book must read the real exchange, not the paper ledger.
+    let orders: Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>> = [];
+    let position: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>> = null;
+    try {
+      const instance = await this.prisma.tradingAgentInstance.findFirst({
+        where: { userId, agentId },
+        select: { id: true, exchangeProvider: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      if (instance) {
+        const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+        if (creds) {
+          orders = await this.bitfinex.listActiveOrders(creds).catch(() => []);
+          position = await this.bitfinex.getOpenPositionDetail(creds).catch(() => null);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `buildSimLiveBook: could not read real Bitfinex position for ${userId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
     const startedAt = sim.startedAt ? new Date(sim.startedAt) : new Date(0);
 
     const participants = await this.prisma.signalCycleParticipant.findMany({
