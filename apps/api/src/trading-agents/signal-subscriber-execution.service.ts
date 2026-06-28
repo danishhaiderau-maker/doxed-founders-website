@@ -6,6 +6,7 @@ import {
   type TradingAgentInstance,
   Prisma,
 } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   resolveSubscriberExecutionPollMs,
@@ -481,7 +482,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const existing = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId: cycle.id, userId: instance.userId } },
       });
-      if (existing) continue;
+      if (existing) {
+        // C5 stale-claim reclaim: an INTENT claim older than 120s with no transition is a
+        // crashed replica's orphan (placeEntry should complete in seconds). Reclaim it so
+        // the cycle isn't blocked forever. A fresh INTENT claim (<120s) is respected as
+        // "another replica is placing this order" — do not touch.
+        if (
+          existing.status === SignalCycleStatus.INTENT &&
+          existing.createdAt.getTime() < Date.now() - 120_000
+        ) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: existing.id } })
+            .catch(() => {
+              /* may have been transitioned concurrently */
+            });
+          this.logger.log(
+            `Hire reclaim ${instance.userId} cycle=${cycle.id}: stale INTENT claim (age>120s) cleared`,
+          );
+        } else {
+          continue;
+        }
+      }
       if (!this.botBridge.isEnabled()) continue;
       if (!(await this.botBridge.isReachable(true))) continue;
 
@@ -1089,7 +1110,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return false;
     }
 
+    // C5 multi-replica atomic claim: declared outside the try so the catch can release it
+    // if order placement fails (otherwise the cycle gets stuck on an INTENT claim with no
+    // order, blocking all future retries for this user/cycle).
+    let claimParticipantId: string | null = null;
+
     try {
+    // C5 multi-replica atomic claim: create the participant row with INTENT status BEFORE
+    // placing the order. If a second API replica is running placeEntry for the same
+    // cycle/user concurrently, its create hits the (cycleId, userId) unique constraint
+    // (P2002) and it bails out — preventing a DUPLICATE order on Bitfinex. The claim is
+    // released (deleted) if order placement fails, so a future tick can retry.
+    const existingClaim = await this.prisma.signalCycleParticipant.findUnique({
+      where: { cycleId_userId: { cycleId, userId: instance.userId } },
+    });
+    if (existingClaim) {
+      // A participant already exists (race with another replica, or a prior claim) — do
+      // NOT place another order; the existing claim/participant owns this cycle.
+      this.logger.log(
+        `Hire skip ${instance.userId} cycle=${cycleId}: participant already exists (status=${existingClaim.status})`,
+      );
+      return false;
+    }
+    try {
+      const claimed = await this.prisma.signalCycleParticipant.create({
+        data: {
+          cycleId,
+          userId: instance.userId,
+          venue,
+          status: SignalCycleStatus.INTENT,
+        },
+      });
+      claimParticipantId = claimed.id;
+    } catch (err) {
+      if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
+        this.logger.log(
+          `Hire claim-lost ${instance.userId} cycle=${cycleId} — another replica is placing it`,
+        );
+        return false;
+      }
+      throw err;
+    }
     const mark = await this.activeTrading.getMarkPrice();
       const rawLimit = computeLimitFromMark(mark, intent.entry.offset_pct);
       let limitPrice = sanitizeLimitPrice(mark, rawLimit, intent.direction);
@@ -1193,6 +1254,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
       return true;
     } catch (err) {
+      // C5: order placement (or pre-order checks) failed — release the atomic claim so a
+      // future tick can retry this cycle instead of being permanently blocked.
+      if (claimParticipantId) {
+        await this.prisma.signalCycleParticipant
+          .delete({ where: { id: claimParticipantId } })
+          .catch(() => {
+            /* claim may already be gone (e.g. concurrently transitioned) */
+          });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const lowMargin =
         /insufficient|balance|margin|not enough|funds/i.test(msg) ||
