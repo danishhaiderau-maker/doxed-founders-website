@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(cursor-bridge): fix GLM promo fallback + add Resume Desktop home screen
 
 ## Last Activity
 
