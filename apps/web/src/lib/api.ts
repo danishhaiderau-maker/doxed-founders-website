@@ -4756,6 +4756,52 @@ export function copilotHandsFree(prompt: string, token: string) {
   );
 }
 
+export type WorkspaceConversationMessage = {
+  role: 'user' | 'agent';
+  text: string;
+  model?: string;
+  ts?: string;
+  attachments?: { name: string }[];
+};
+
+export type WorkspaceTerminalLine = {
+  ts: string;
+  line: string;
+  stream?: string;
+};
+
+export type WorkspacePanelState = {
+  terminalOpen?: boolean;
+  terminalHeight?: number;
+  sidebarOpen?: boolean;
+};
+
+export type WorkspaceSessionData = {
+  selectedAiProvider: string | null;
+  selectedModelKey: string | null;
+  conversation: WorkspaceConversationMessage[];
+  terminalScrollback: WorkspaceTerminalLine[];
+  openFiles: string[];
+  activeNav: string | null;
+  panelState: WorkspacePanelState;
+  updatedAt: string | null;
+};
+
+export function loadWorkspaceSession(token: string) {
+  return apiFetch<WorkspaceSessionData>('/workspace-session', {}, token);
+}
+
+export function saveWorkspaceSessionPatch(
+  token: string,
+  patch: Partial<WorkspaceSessionData>,
+) {
+  return apiFetch<WorkspaceSessionData>(
+    '/workspace-session',
+    { method: 'PUT', body: JSON.stringify(patch) },
+    token,
+  );
+}
+
 export type FounderMemoryGraph = import('@dcf/utils').FounderMemoryGraph;
 export type FounderMemoryGraphPatch = import('@dcf/utils').FounderMemoryGraphPatch;
 

@@ -228,7 +228,7 @@ export function resolveSmartQuickPrompts(conn: BrainConnectionSnapshot): SmartQu
 }
 
 export function isRecapOrHistoryPrompt(prompt: string): boolean {
-  return /post.*(last|our|entire).*chat|last full conversation|recap|conversation history|what did we (discuss|talk)|repeat our chat/i.test(
+  return /post.*(last|our|entire).*chat|last full conversation|recap|conversation history|what did we (discuss|talk)|repeat our chat|what did i (ship|shipped|do|build) (this week|last week|yesterday|today)|weekly recap|session history/i.test(
     prompt,
   );
 }

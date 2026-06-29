@@ -20,6 +20,14 @@ import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { copilotAsk } from '@/lib/api';
 import {
+  loadWorkspaceSession,
+  type WorkspaceConversationMessage,
+  type WorkspacePanelState,
+  type WorkspaceSessionData,
+  type WorkspaceTerminalLine,
+} from '@/lib/api';
+import { useDebouncedWorkspaceSessionSave, trimTerminalScrollback } from '@/lib/workspace-session';
+import {
   emitEvent,
   advanceStream,
   clearStream,
@@ -106,9 +114,14 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [activeStream, setActiveStream] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
   const [stableRecording, setStableRecording] = useState(false);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const [restoredSession, setRestoredSession] = useState<WorkspaceSessionData | null>(null);
+  const [resumeDismissed, setResumeDismissed] = useState(false);
+  const [terminalScrollback, setTerminalScrollback] = useState<WorkspaceTerminalLine[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const announcedCommitsRef = useRef<Set<string>>(new Set());
   const announcedRunIdRef = useRef<string | null>(null);
+  const sessionAppliedRef = useRef(false);
 
   // Pre-fill chat from URL prompt (e.g. /founder-den?prompt=fix+it)
   useEffect(() => {
@@ -163,6 +176,42 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     const i = setInterval(load, 15_000);
     return () => clearInterval(i);
   }, [load]);
+
+  const { savePatch } = useDebouncedWorkspaceSessionSave(accessToken);
+
+  // Load persisted workspace session once on mount → restore UI state.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!accessToken) return;
+      try {
+        const session = await loadWorkspaceSession(accessToken);
+        if (cancelled || !session) return;
+        setRestoredSession(session);
+      } catch {
+        // best-effort — fall through to default cold-start
+      } finally {
+        if (!cancelled) setSessionLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken]);
+
+  // After the session load completes: mark the session "applied" so save effects
+  // can fire, and auto-dismiss the Resume panel on cold-start (no saved conversation).
+  // When a session with messages exists, keep the panel visible until the user
+  // clicks "Resume Workspace" below.
+  useEffect(() => {
+    if (!sessionLoaded) return;
+    if (sessionAppliedRef.current) return;
+    sessionAppliedRef.current = true;
+    const hasConversation = Boolean(restoredSession?.conversation?.length);
+    if (!hasConversation) {
+      setResumeDismissed(true);
+    }
+  }, [sessionLoaded, restoredSession]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -220,6 +269,96 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const openFiles = bridge?.latest?.openFilePaths ?? [];
   const runActive = activeRun?.active && activeRun.run ? activeRun.run : null;
   const promoActive = onboarding?.promo?.eligible && onboarding?.promo?.hasLlm;
+
+  function resumeWorkspace() {
+    if (!restoredSession) {
+      setResumeDismissed(true);
+      return;
+    }
+    const s = restoredSession;
+    if (s.selectedModelKey) {
+      const matched = models.find((m) => m.key === s.selectedModelKey);
+      if (matched) setSelectedModel(matched);
+    }
+    if (s.activeNav) setActiveNav(s.activeNav);
+    if (s.panelState) {
+      if (typeof s.panelState.terminalOpen === 'boolean') setTerminalOpen(s.panelState.terminalOpen);
+      if (typeof s.panelState.terminalHeight === 'number') setTerminalHeight(s.panelState.terminalHeight);
+      if (typeof s.panelState.sidebarOpen === 'boolean') setSidebarOpen(s.panelState.sidebarOpen);
+    }
+    if (Array.isArray(s.conversation) && s.conversation.length > 0) {
+      setChatMessages(s.conversation as typeof chatMessages);
+    }
+    if (Array.isArray(s.terminalScrollback)) {
+      setTerminalScrollback(s.terminalScrollback);
+    }
+    setResumeDismissed(true);
+  }
+
+  // Debounced save on state changes (only after the session has been applied/dismissed).
+  useEffect(() => {
+    if (!sessionAppliedRef.current) return;
+    if (!resumeDismissed) return;
+    if (!selectedModel) return;
+    const patch: Partial<WorkspaceSessionData> = {
+      selectedAiProvider: selectedModel.provider ?? null,
+      selectedModelKey: selectedModel.key ?? null,
+      activeNav,
+      panelState: {
+        terminalOpen,
+        terminalHeight,
+        sidebarOpen,
+      } as WorkspacePanelState,
+      conversation: chatMessages as WorkspaceConversationMessage[],
+    };
+    savePatch(patch);
+  }, [
+    selectedModel,
+    activeNav,
+    terminalOpen,
+    terminalHeight,
+    sidebarOpen,
+    chatMessages,
+    savePatch,
+    resumeDismissed,
+  ]);
+
+  // Save terminal scrollback every Nth line (avoid DB thrash on every line).
+  useEffect(() => {
+    if (!sessionAppliedRef.current) return;
+    if (!resumeDismissed) return;
+    if (terminalScrollback.length === 0) return;
+    if (terminalScrollback.length % 10 !== 0) return; // every 10th line
+    savePatch({ terminalScrollback: trimTerminalScrollback(terminalScrollback, 200) });
+  }, [terminalScrollback, savePatch, resumeDismissed]);
+
+  // Capture terminal lines as commits / agent runs arrive (best-effort scrollback).
+  useEffect(() => {
+    if (!activity) return;
+    const head = recentCommits[0];
+    if (!head?.sha) return;
+    setTerminalScrollback((prev) => {
+      if (prev.some((l) => l.line.includes(head.sha.slice(0, 7)))) return prev;
+      const line: WorkspaceTerminalLine = {
+        ts: new Date().toISOString(),
+        line: `$ git log -1 — ${head.sha.slice(0, 7)} ${(head.message ?? '').split('\n')[0].slice(0, 50)}`,
+        stream: 'git',
+      };
+      return trimTerminalScrollback([...prev, line], 200);
+    });
+  }, [recentCommits, activity]);
+
+  useEffect(() => {
+    if (!runActive) return;
+    setTerminalScrollback((prev) => {
+      const line: WorkspaceTerminalLine = {
+        ts: new Date().toISOString(),
+        line: `$ agent: ${runActive.status} — ${(runActive.task ?? '').slice(0, 40)}`,
+        stream: 'agent',
+      };
+      return trimTerminalScrollback([...prev, line], 200);
+    });
+  }, [runActive?.runId, runActive?.agentId, runActive?.startedAt]);
 
   const streamEvents = useFounderEvents(activeStream ? { stream: activeStream } : undefined);
   const latestStreamEvent = streamEvents[streamEvents.length - 1];
@@ -671,7 +810,20 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && !thinking ? (
-                <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
+                sessionLoaded &&
+                restoredSession &&
+                (restoredSession.conversation?.length ?? 0) > 0 &&
+                !resumeDismissed ? (
+                  <ResumeWorkspacePanel
+                    session={restoredSession}
+                    repo={repo}
+                    branch={branch}
+                    worker={worker}
+                    onResume={resumeWorkspace}
+                  />
+                ) : (
+                  <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
+                )
               ) : (
                 <div className="space-y-3">
                   {chatMessages.map((msg, i) => (
@@ -1023,6 +1175,86 @@ function InfraRow({ label, ok }: { label: string; ok: boolean }) {
       <span className={`text-[10px] font-medium ${ok ? 'text-emerald-300' : 'text-zinc-600'}`}>{ok ? 'Healthy' : 'Offline'}</span>
     </div>
   );
+}
+
+/* ───── Resume Workspace Panel (replaces cold-start empty state when session exists) ───── */
+function ResumeWorkspacePanel({
+  session,
+  repo,
+  branch,
+  worker,
+  onResume,
+}: {
+  session: WorkspaceSessionData;
+  repo: string | null;
+  branch: string;
+  worker: WorkerStatus | null;
+  onResume: () => void;
+}) {
+  const messageCount = session.conversation?.length ?? 0;
+  const lastActive = session.updatedAt ? formatRelativeTimeShort(session.updatedAt) : 'recently';
+  const cursorOk = Boolean(worker?.connections?.cursor);
+  const nodeOk = Boolean(worker?.connections?.founderNode);
+  const repoOk = Boolean(repo);
+
+  return (
+    <div className="mx-auto max-w-xl space-y-4">
+      <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Founder OS</p>
+        <h2 className="mt-1 text-xl font-bold text-white">Workspace restored.</h2>
+        <p className="mt-1 text-xs text-zinc-400">
+          Your laptop stayed working while you were away.
+        </p>
+
+        <div className="mt-5 space-y-1.5 text-xs">
+          <ResumeRow label="Repository" value={repo ?? 'Not linked'} ok={repoOk} />
+          <ResumeRow label="Branch" value={branch} ok={repoOk} />
+          <ResumeRow label="Cursor" value={cursorOk ? 'Connected' : 'Offline'} ok={cursorOk} />
+          <ResumeRow label="Founder Node" value={nodeOk ? 'Online' : 'Offline'} ok={nodeOk} />
+          <ResumeRow label="Terminal" value={session.terminalScrollback?.length ? `Recovered (${session.terminalScrollback.length} lines)` : 'Empty'} ok={Boolean(session.terminalScrollback?.length)} />
+          <ResumeRow label="Conversation" value={`${messageCount} message${messageCount === 1 ? '' : 's'} recovered`} ok={messageCount > 0} />
+          <ResumeRow label="Last active" value={lastActive} ok={false} />
+        </div>
+
+        <button
+          type="button"
+          onClick={onResume}
+          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
+        >
+          Resume Workspace →
+        </button>
+      </div>
+      <p className="text-center text-[10px] text-zinc-600">
+        Or start fresh by typing a question below — your saved session stays in the background.
+      </p>
+    </div>
+  );
+}
+
+function ResumeRow({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-zinc-800/60 bg-zinc-900/40 px-3 py-1.5">
+      <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>
+      <span className="flex items-center gap-1.5 text-zinc-200">
+        <span className={ok ? 'text-emerald-400' : 'text-zinc-500'}>{ok ? '✓' : '·'}</span>
+        <span className="truncate text-zinc-300">{value}</span>
+      </span>
+    </div>
+  );
+}
+
+function formatRelativeTimeShort(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return 'recently';
+  const diff = Date.now() - then;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 /* ───── Context Panel (replaces placeholder — always live info) ───── */
