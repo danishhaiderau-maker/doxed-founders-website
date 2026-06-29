@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-os): live-first brain + workspace session persistence + resume screen
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
