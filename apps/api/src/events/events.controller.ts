@@ -145,8 +145,14 @@ export class EventsController {
   }
 
   @Post('copilot/ask')
-  ask(@CurrentUser() user: AuthUser, @Body() body: { prompt: string; agentTemplate?: string }) {
-    return this.copilot.ask(user.id, body.prompt, { agentTemplate: body.agentTemplate });
+  ask(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
+  ) {
+    return this.copilot.ask(user.id, body.prompt, {
+      agentTemplate: body.agentTemplate,
+      provider: body.provider,
+    });
   }
 
   @Post('copilot/social-draft')

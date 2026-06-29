@@ -699,7 +699,7 @@ export function FounderCopilotChat({
             },
           ]);
 
-          const result = await copilotAsk(q, accessToken, agentTemplate);
+          const result = await copilotAsk(q, accessToken, { agentTemplate });
           const providerKey = result.answerProvider ?? activeChatProvider;
           const brainRouteLabel = result.routedAgent?.label ?? result.founderBrain?.label;
           const cursorDispatched =

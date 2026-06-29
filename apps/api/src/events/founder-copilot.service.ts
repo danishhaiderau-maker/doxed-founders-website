@@ -78,6 +78,10 @@ import {
   buildDeployIntelligenceCard,
   formatDeployIntelligenceExcerpt,
   formatDesktopBridgeForPrompt,
+  buildLiveFounderContextSnapshot,
+  buildContextCollectionSteps,
+  formatLiveContextGroundTruthBlock,
+  formatContextEvidenceFooter,
   parseFounderDecisionLog,
   appendFounderDecision,
   formatDecisionLogExcerpt,
@@ -681,6 +685,8 @@ export class FounderCopilotService {
       timelineExcerpt: formatProjectTimelineExcerpt(timelineRes.entries, 14),
       deployIntelligenceExcerpt: formatDeployIntelligenceExcerpt(deployRes.cards, 4),
       desktopBridgeBlock: formatDesktopBridgeForPrompt(desktopLatest),
+      desktopSnapshot: desktopLatest,
+      deployCardCount: deployRes.cards.length,
       decisionLogExcerpt: formatDecisionLogExcerpt(decisionLog, 8),
       marketIntelligenceExcerpt: market ? formatMarketIntelligenceForPrompt(market) : null,
       outcomeIntelligenceExcerpt,
@@ -1389,7 +1395,7 @@ export class FounderCopilotService {
     }
   }
 
-  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null }) {
+  async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null; provider?: string | null }) {
     const text = prompt.trim();
     if (!text) throw new BadRequestException('Prompt required');
 
@@ -1569,27 +1575,51 @@ export class FounderCopilotService {
       currentInitiative: intelligence.currentInitiative,
     });
     brainInput.founderGraphExcerpt = this.founderGraph.formatForBrain(graph);
+
+    const liveSnapshot = buildLiveFounderContextSnapshot({
+      repoFullName: refreshedMemory.repoFullName,
+      commits: brainInput.commits,
+      desktop: extras.desktopSnapshot ?? null,
+      deployCardCount: extras.deployCardCount ?? 0,
+      founderNodeOnline: Boolean(refreshedMemory.vaultRelay?.nodeOnline),
+      cursorConnected: Boolean(
+        await this.prisma.integrationCredential.findFirst({
+          where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+          select: { id: true },
+        }),
+      ),
+      vaultSynced: Boolean(refreshedMemory.vaultRelay?.lastSyncedAt),
+    });
+    const contextCollection = buildContextCollectionSteps(liveSnapshot);
+    const liveGroundTruth = formatLiveContextGroundTruthBlock(liveSnapshot);
+
     const contextBlock =
+      `${liveGroundTruth}\n\n` +
       formatFounderBrainContextForPrompt(brainInput, intelligence) +
-      (!refreshedMemory.repoFullName
+      (!refreshedMemory.repoFullName && !liveSnapshot.branch && liveSnapshot.openFileCount === 0
         ? '\n\n## Onboarding coach (required)\nRepository is NOT linked. Follow expert PM rules: offer Sovereign (Founder Vault local), Hybrid (GitHub+Cursor), or Production (full cloud). Ask ONE clarifying question. Do NOT invent specific code (e.g. Solidity functions) until the user picks a pathway and describes the product.\n'
         : '');
+
     const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
 
-    const systemPrompt = `${memoryPrefix}${FOUNDER_BRAIN_EXPERT_PM_RULES}\n\nYou are Founder Brain — the command center for crypto founders. Use the assembled context below (commits, PRs, deployments, initiatives, mission graph). Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
+    const systemPrompt = `${memoryPrefix}${FOUNDER_BRAIN_EXPERT_PM_RULES}\n\nYou are Founder Brain — the command center for crypto founders. Use the LIVE PROJECT SNAPSHOT first, then assembled context below (commits, PRs, deployments, initiatives, mission graph). Never contradict live GitHub/IDE state with stale vault blockers. Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
 
     const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
     const preferGrounded =
       shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
       isRecapOrHistoryPrompt(text);
 
+    const forcedProvider = this.resolveRequestedAiProvider(options?.provider);
     const aiResult = preferGrounded
       ? ({ ok: false as const, llmErrors: ['github_grounded_status'] })
       : await this.builder.tryCopilotChatCompletion(
           userId,
           systemPrompt,
           `${prompt}\n\n---\n${contextBlock}`,
-          { founderBrainTask: brainTask },
+          {
+            founderBrainTask: brainTask,
+            ...(forcedProvider ? { forceProvider: forcedProvider } : {}),
+          },
         );
 
     await this.events.emit({
@@ -1605,16 +1635,17 @@ export class FounderCopilotService {
     let answer = ruleBased;
     let answerProvider: string = 'RULE_BASED';
     let llmErrors: string[] | undefined;
+    const requestedProviderLabel = options?.provider?.trim() || null;
 
     if (preferGrounded) {
-      answer = ruleBased;
+      answer = ruleBased + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = 'FOUNDER_BRAIN';
     } else if (aiResult.ok) {
-      answer = aiResult.text;
-      answerProvider = 'FOUNDER_BRAIN';
+      answer = aiResult.text + formatContextEvidenceFooter(liveSnapshot);
+      answerProvider = aiResult.provider;
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
-      answer = ruleBased;
+      answer = ruleBased + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = preferGrounded ? 'FOUNDER_BRAIN' : 'RULE_BASED';
     }
 
@@ -1632,6 +1663,16 @@ export class FounderCopilotService {
     return {
       answer,
       answerProvider,
+      requestedProvider: requestedProviderLabel,
+      contextCollection,
+      liveSnapshot: {
+        repoFullName: liveSnapshot.repoFullName,
+        githubLinked: liveSnapshot.githubLinked,
+        branch: liveSnapshot.branch,
+        recentCommitCount: liveSnapshot.recentCommitCount,
+        openFileCount: liveSnapshot.openFileCount,
+        sourcesConsulted: liveSnapshot.sourcesConsulted,
+      },
       llmErrors,
       summary,
       routedAgent: aiResult.ok
@@ -1788,6 +1829,24 @@ export class FounderCopilotService {
 
     lines.push('', 'Weekly summary:', input.summaryBody);
     return lines.join('\n');
+  }
+
+  private resolveRequestedAiProvider(providerKey: string | null | undefined): AiProvider | null {
+    if (!providerKey?.trim()) return null;
+    const key = providerKey.trim().toUpperCase();
+    const map: Record<string, AiProvider> = {
+      GLM: AiProvider.GLM,
+      OLLAMA: AiProvider.OLLAMA_LOCAL,
+      ANTHROPIC: AiProvider.ANTHROPIC,
+      OPENAI: AiProvider.OPENAI,
+      OPENAI_THINKING: AiProvider.OPENAI,
+      GEMINI: AiProvider.GEMINI,
+      DEEPSEEK: AiProvider.DEEPSEEK,
+      GROK: AiProvider.OPENROUTER,
+      CURSOR: AiProvider.CURSOR,
+      OPENROUTER: AiProvider.OPENROUTER,
+    };
+    return map[key] ?? null;
   }
 
   private buildVaultContextLines(
