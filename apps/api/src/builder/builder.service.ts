@@ -76,6 +76,27 @@ import {
 
 type LlmUsage = { promptTokens: number; completionTokens: number };
 
+/** Map an AiProvider to its promo credential provider key, or null if not a promo provider. */
+function promoProviderForAi(provider: AiProvider): PromoCredentialProvider | null {
+  switch (provider) {
+    case AiProvider.GLM:
+      return 'glm';
+    case AiProvider.GEMINI:
+      return 'gemini';
+    case AiProvider.DEEPSEEK:
+      return 'deepseek';
+    default:
+      return null;
+  }
+}
+
+/** Inverse of `promoProviderForAi` — promo credential key back to AiProvider. */
+function aiProviderForPromoProvider(p: PromoCredentialProvider): AiProvider {
+  if (p === 'glm') return AiProvider.GLM;
+  if (p === 'gemini') return AiProvider.GEMINI;
+  return AiProvider.DEEPSEEK;
+}
+
 @Injectable()
 export class BuilderService {
   constructor(
@@ -1278,6 +1299,20 @@ export class BuilderService {
 
     const resolved = await this.resolveLlmApiKey(userId, cfg.credentialProvider as PromoCredentialProvider);
     if (!resolved) {
+      // Promo fallback: when the user explicitly selected a promo provider (e.g. GLM)
+      // but has no BYOK key for it, honor the onboarding promo badge ("Doxxed Crypto Promo")
+      // by routing through the platform's shared promo keys. The badge is shown whenever
+      // ANY promo LLM key is configured, so we may need to fall across to another
+      // promo provider (deepseek/gemini) when the selected one has no platform key.
+      const promoFallback = await this.tryPromoFallbackForcedCompletion(
+        userId,
+        system,
+        userPrompt,
+        forceProvider,
+        settings,
+      );
+      if (promoFallback) return promoFallback;
+
       const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
       if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
         return { ok: false, llmErrors: [this.founderPromo.promoEndedMessage(promoStatus)] };
@@ -1314,6 +1349,68 @@ export class BuilderService {
         llmErrors: [`${forceProvider}: ${err instanceof Error ? err.message : 'request failed'}`],
       };
     }
+  }
+
+  /** Promo fallback for the forced path.
+   *
+   * When a user picks a promo provider (GLM/Gemini/DeepSeek) from the model dropdown
+   * but has no BYOK key for that exact provider, the onboarding promo badge promises
+   * them free LLM access. Honor that promise by routing through the platform's shared
+   * promo keys: try the selected provider first, then fall across to the other promo
+   * providers (glm → deepseek → gemini) so the call still succeeds when the platform
+   * only configured a subset. Returns null when no promo path applies so the caller
+   * emits its standard missing-key error. */
+  private async tryPromoFallbackForcedCompletion(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    forcedProvider: AiProvider,
+    settings: { preferredModel?: string | null; defaultProvider?: AiProvider | null },
+  ): Promise<{ ok: true; text: string; provider: AiProvider } | { ok: false; llmErrors: string[] } | null> {
+    const forcedPromoProvider = promoProviderForAi(forcedProvider);
+    if (!forcedPromoProvider) return null; // non-promo provider (OpenAI/Anthropic/etc.) — no fallback
+
+    const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
+    if (!promoStatus.eligible) return null;
+
+    const order: PromoCredentialProvider[] = [];
+    order.push(forcedPromoProvider);
+    for (const p of ['glm', 'deepseek', 'gemini'] as const) {
+      if (!order.includes(p)) order.push(p);
+    }
+
+    const llmErrors: string[] = [];
+    for (const p of order) {
+      const promoKey = await this.founderPromo.resolvePromoApiKey(userId, p);
+      if (!promoKey) continue;
+      const actualProvider = aiProviderForPromoProvider(p);
+      const cfg = aiProviderConfig(actualProvider);
+      const model =
+        settings.defaultProvider === actualProvider
+          ? settings.preferredModel ?? cfg?.defaultModel ?? undefined
+          : cfg?.defaultModel ?? undefined;
+      try {
+        const result = await this.completionWithProvider(actualProvider, promoKey, system, userPrompt, model);
+        if (result?.text?.trim()) {
+          await this.logAiTokenUsage(
+            userId,
+            actualProvider,
+            system,
+            userPrompt,
+            result.text.trim(),
+            'copilot_forced_promo',
+            result.usage,
+            'platform_promo',
+          );
+          // Surface the provider the user selected so the UI reads "GLM" (not RULE_BASED).
+          return { ok: true, text: result.text.trim(), provider: forcedProvider };
+        }
+        llmErrors.push(`${actualProvider}: empty response`);
+      } catch (err) {
+        llmErrors.push(`${actualProvider}: ${err instanceof Error ? err.message : 'request failed'}`);
+      }
+    }
+    return llmErrors.length > 0 ? { ok: false, llmErrors } : null;
   }
 
   private async completionWithProvider(

@@ -4802,6 +4802,44 @@ export function saveWorkspaceSessionPatch(
   );
 }
 
+export type RecentAgentMessage = {
+  role: 'user' | 'assistant';
+  text: string;
+  at: string | null;
+};
+
+export type RecentAgent = {
+  id: string;
+  label: string;
+  source: 'live_desktop' | 'dispatched_run' | 'cursor_history';
+  status: string;
+  repository: string | null;
+  branch: string | null;
+  agentId: string | null;
+  runId: string | null;
+  lastActivityAt: string | null;
+  lastUserPrompt: string | null;
+  lastAssistantSnippet: string | null;
+  recentMessages: RecentAgentMessage[];
+};
+
+export type RecentAgentsResponse = {
+  agents: RecentAgent[];
+  desktopOnline: boolean;
+  cursorConnected: boolean;
+  founderNodeOnline: boolean;
+  liveCursorAgentsAvailable: boolean;
+  generatedAt: string;
+};
+
+export function fetchRecentAgents(token: string) {
+  return apiFetch<RecentAgentsResponse>(
+    '/cursor-bridge/recent-agents',
+    undefined,
+    token,
+  );
+}
+
 export type FounderMemoryGraph = import('@dcf/utils').FounderMemoryGraph;
 export type FounderMemoryGraphPatch = import('@dcf/utils').FounderMemoryGraphPatch;
 
