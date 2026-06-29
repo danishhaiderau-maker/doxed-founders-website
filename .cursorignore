@@ -1,0 +1,47 @@
+﻿# Ignore heavy/generated/binary paths from Cursor indexing to keep the IDE fast.
+# Bot runtime artifacts (logs, rotated jsonl, report JSONs, pycache)
+services/btc-conservative-agent/__pycache__/
+services/btc-conservative-agent/**/*.pyc
+services/btc-conservative-agent/*.log
+services/btc-conservative-agent/*.log.*
+services/btc-conservative-agent/bot_runtime.log*
+services/btc-conservative-agent/signal_replay.jsonl*
+services/btc-conservative-agent/signal_snapshot.jsonl*
+services/btc-conservative-agent/*.jsonl
+services/btc-conservative-agent/*.jsonl.*
+services/btc-conservative-agent/*.tmp
+services/btc-conservative-agent/*_report.json
+services/btc-conservative-agent/*_scorecard.json
+services/btc-conservative-agent/research/
+services/btc-conservative-agent/research_accumulator/
+services/btc-conservative-agent/research_archive/
+services/btc-conservative-agent/reports/
+services/btc-conservative-agent/research_session_archives/
+services/btc-conservative-agent/config-*.json
+services/btc-conservative-agent/open_positions.json
+services/btc-conservative-agent/crash_dump.json
+services/btc-conservative-agent/bitfinex_live_state.json
+services/btc-signal-engine/__pycache__/
+
+# Build outputs
+.next/
+dist/
+build/
+out/
+.turbo/
+**/dist/
+**/build/
+**/.next/
+
+# Node / deps
+node_modules/
+**/node_modules/
+
+# Home-stack runtime lock/pid files
+.home-*
+logs/
+
+# Vercel / env
+.env
+.env.*
+.vercel/

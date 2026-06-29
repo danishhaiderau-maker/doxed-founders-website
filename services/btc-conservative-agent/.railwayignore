@@ -1,0 +1,37 @@
+# Railway bot deploy — keep upload lean. The cloud bot only needs Python code + config.
+# HARD RULE: no local research data, logs, or archives in the Railway deploy.
+
+# Research data / archives (regenerated locally, huge, not needed in cloud)
+research_session_archives/
+research/downloads/
+data/
+research/genome/*.json
+research/genome/*.jsonl
+research/*.json
+research/*.csv
+
+# Trade / signal data files (thousands of files — local only)
+*.csv
+*.jsonl
+*.db
+*.db-journal
+
+# Logs (never deploy)
+*.log
+bot_runtime.log*
+analyzer_run.log
+near_edge.log
+signal_persist.log
+
+# Crash dumps / runtime markers
+crash_dump.json
+*.lock
+.home-*
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Local-only edge analysis
+.edge-analysis/

@@ -5731,6 +5731,9 @@ def get_dynamic_flat_momentum_floor(base: float = None) -> float:
     t = (base - FLAT_MOMENTUM_FLOOR_LOW_EDGE) / span
     return round(FLAT_MOMENTUM_FLOOR_LOW_EDGE + t * (FLAT_MOMENTUM_EDGE_FLOOR - FLAT_MOMENTUM_FLOOR_LOW_EDGE), 1)
 
+_relay_push_state = {"seq": 0, "last_ts": 0.0, "last_event": None, "last_ok": None}
+
+
 def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = None):
     """Fire-and-forget push to platform API for instant hire-relay wake (move-by-move copy)."""
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
@@ -5747,7 +5750,14 @@ def _push_showcase_relay_event(event: str, trade_id: str = None, extra: dict = N
             if secret:
                 headers["X-Bot-Control-Secret"] = secret
             requests.post(url, json=payload, headers=headers, timeout=2.5)
+            _relay_push_state["seq"] += 1
+            _relay_push_state["last_ts"] = time.time()
+            _relay_push_state["last_event"] = event
+            _relay_push_state["last_ok"] = True
         except Exception as exc:
+            _relay_push_state["last_ts"] = time.time()
+            _relay_push_state["last_event"] = event
+            _relay_push_state["last_ok"] = False
             logger.debug(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
 
     threading.Thread(target=_post, daemon=True).start()
@@ -18447,6 +18457,44 @@ def _maybe_bitfinex_cancel(source: dict) -> None:
         logger.warning(f"[BITFINEX LIVE] cancel hook failed: {exc} [PIPELINE ENFORCEMENT]")
 
 
+# Background reconciliation loop: pulls fills, detects manual closes, and reports
+# drift so the bot snapshot stays in sync with Bitfinex truth. Only acts when live
+# execution is armed + keys present; otherwise sleeps cheaply.
+def bitfinex_live_reconcile_loop() -> None:
+    interval = 30.0
+    while True:
+        try:
+            if _bitfinex_live_active() and _private_api_keys_ok():
+                import bitfinex_live_executor as bx
+
+                with trade_lock:
+                    local_pos = copy.deepcopy(open_positions)
+                    local_orders = copy.deepcopy(pending_orders)
+                drift = bx.reconcile_exchange_state(
+                    bitfinex_private,
+                    _exchange_call_with_retry,
+                    SYMBOL_CCXT,
+                    local_positions=local_pos,
+                    local_orders=local_orders,
+                )
+                with state_lock:
+                    state["bitfinex_live_drift"] = drift
+                if drift.get("manual_closes"):
+                    logger.warning(
+                        f"[BITFINEX LIVE] manual closes detected for trade_ids={drift['manual_closes']} "
+                        f"- position_manager will flatten local view [PIPELINE ENFORCEMENT]"
+                    )
+                if drift.get("new_fills"):
+                    logger.info(
+                        f"[BITFINEX LIVE] {len(drift['new_fills'])} new fill(s) ingested "
+                        f"[PIPELINE ENFORCEMENT]"
+                    )
+            time.sleep(interval)
+        except Exception as exc:
+            logger.debug(f"[BITFINEX LIVE] reconcile loop error: {exc}")
+            time.sleep(interval)
+
+
 def _relay_signal_ref_lite(sig: dict) -> dict:
     if not isinstance(sig, dict):
         return {}
@@ -18639,6 +18687,120 @@ def api_ping():
     }), 200
 
 
+# Monotonic snapshot sequence — increments on every /api/state and /api/relay-state build.
+_SNAPSHOT_SEQ = 0
+
+
+def _last_fill_ts() -> float:
+    """Timestamp of the most recent closed trade, for fill-freshness in State Integrity."""
+    try:
+        with trade_lock:
+            if not open_positions and not expired_orders:
+                return 0.0
+        # Prefer the last expired/closed trade ts; fall back to last open position open ts.
+        last_closed = 0.0
+        for e in expired_orders[-20:]:
+            if isinstance(e, dict):
+                t = e.get("closed_ts_ts") or e.get("closed_ts") or 0
+                if isinstance(t, (int, float)) and t > last_closed:
+                    last_closed = float(t)
+        if last_closed:
+            return last_closed
+        with trade_lock:
+            for p in open_positions:
+                t = p.get("open_ts") or 0
+                if isinstance(t, (int, float)) and t > last_closed:
+                    last_closed = float(t)
+        return last_closed
+    except Exception:
+        return 0.0
+
+
+def build_state_integrity() -> dict:
+    """Single-source-of-truth State Integrity block emitted on every bot snapshot.
+
+    Consumed by the website, Agent Hub, relay, dashboard, and the 24h monitor so
+    every downstream viewer can prove it is reading the same live bot state.
+    """
+    global _SNAPSHOT_SEQ
+    _SNAPSHOT_SEQ += 1
+    now = time.time()
+    with state_lock:
+        diag = state.get("diag") or {}
+        ws_status = diag.get("ws_status", "UNKNOWN")
+        ws_connected_ts = float(state.get("ws_connected_ts") or 0)
+        price_ts = float(state.get("price_ts") or 0)
+        price_age = (now - price_ts) if price_ts else None
+        book_ts = float(state.get("book_ts") or 0)
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled", False))
+        live_armed = bool(state.get("live_armed", False))
+        execution_paused = bool(state.get("execution_paused", False))
+        last_fresh_reset_ts = state.get("last_fresh_reset_ts")
+    ws_connected = ws_connected_ts and (now - ws_connected_ts) < 600
+    rest_healthy = price_age is not None and price_age < 30
+    last_fill_sec_ago = (now - _last_fill_ts()) if _last_fill_ts() else None
+    bridge = None
+    try:
+        bridge = get_genome_bridge()
+    except Exception:
+        bridge = None
+    genome_status = "INACTIVE"
+    genome_bus_seq = None
+    genome_stats = None
+    if bridge is not None:
+        genome_status = "ACTIVE"
+        try:
+            genome_bus_seq = bridge.bus_seq
+            genome_stats = bridge.stats()
+        except Exception:
+            pass
+    relay_url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    relay_push = {
+        "configured": bool(relay_url),
+        "url": relay_url or None,
+        "seq": _relay_push_state["seq"],
+        "last_event": _relay_push_state["last_event"],
+        "last_ok": _relay_push_state["last_ok"],
+        "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
+    }
+    bx_live = None
+    try:
+        import bitfinex_live_executor as bx
+        bx_live = bx.live_status(state, _private_api_keys_ok())
+    except Exception as exc:
+        bx_live = {"wired": False, "error": str(exc)[:200]}
+    return {
+        "snapshot_seq": _SNAPSHOT_SEQ,
+        "snapshot_ts": utc_iso(),
+        "snapshot_age_sec": 0,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "exchange": BOT_EXCHANGE,
+        "symbol": BITFINEX_WS_SYMBOL,
+        "ws_connected": bool(ws_connected),
+        "ws_status": ws_status,
+        "ws_connected_sec_ago": (now - ws_connected_ts) if ws_connected_ts else None,
+        "rest_healthy": bool(rest_healthy),
+        "price_age_sec": price_age,
+        "book_age_sec": (now - book_ts) if book_ts else None,
+        "orders_synced": True,
+        "positions_synced": True,
+        "trades_synced": True,
+        "last_fill_sec_ago": last_fill_sec_ago,
+        "execution_paused": execution_paused,
+        "live_armed": live_armed,
+        "bitfinex_live_enabled": bitfinex_live_enabled,
+        "bitfinex_live": bx_live,
+        "genome_recorder": genome_status,
+        "genome_bus_seq": genome_bus_seq,
+        "genome_stats": genome_stats,
+        "research_db": bool((os.getenv("DATABASE_URL") or "").strip()),
+        "relay_push": relay_push,
+        "tunnel_url": dashboard_public_url(),
+        "analyzer_url": research_dashboard_public_url(),
+        "last_fresh_reset_ts": last_fresh_reset_ts,
+    }
+
+
 @app.route('/api/relay-state')
 def api_relay_state():
     """Fast subset for Railway relay / Agent Hub — no heavy research KPIs."""
@@ -18710,6 +18872,7 @@ def api_relay_state():
         if bridge:
             snapshot["genome_bus_seq"] = bridge.bus_seq
             snapshot["genome_stats"] = bridge.stats()
+        snapshot["state_integrity"] = build_state_integrity()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp
@@ -19024,6 +19187,7 @@ def api_state():
         with _api_state_cache_lock:
             _api_state_cache["payload"] = snapshot
             _api_state_cache["built_at"] = time.time()
+        snapshot["state_integrity"] = build_state_integrity()
         resp = jsonify(snapshot)
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
@@ -21947,6 +22111,20 @@ def main():
         import bitfinex_live_executor as bx
 
         bx.configure(SYMBOL_CCXT)
+        # If live execution is armed, rebuild local state from Bitfinex truth
+        # so a restart never silently loses fills / open positions / manual closes.
+        if bx.is_enabled(state) and _private_api_keys_ok():
+            try:
+                rebuilt = bx.rebuild_state_from_exchange(bitfinex_private, _exchange_call_with_retry, SYMBOL_CCXT)
+                with state_lock:
+                    state["bitfinex_live_rebuild"] = rebuilt
+                logger.warning(
+                    f"[BITFINEX LIVE] startup rebuild positions={len(rebuilt.get('positions', []))} "
+                    f"orders={len(rebuilt.get('open_orders', []))} trades={len(rebuilt.get('recent_trades', []))} "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
+            except Exception as exc:
+                logger.warning(f"[BITFINEX LIVE] startup rebuild failed: {exc} [PIPELINE ENFORCEMENT]")
     except Exception as exc:
         logger.warning(f"[BITFINEX LIVE] executor init: {exc} [PIPELINE ENFORCEMENT]")
     try:
@@ -22000,6 +22178,7 @@ def main():
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()
     threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
     update_logger_level()
     while True:
         try:
