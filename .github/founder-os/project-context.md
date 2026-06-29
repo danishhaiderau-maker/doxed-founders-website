@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(founder-den): stop client crash from hooks order + live event bus
+feat(agent-hub): remove Global showcase desk, add recent trades+AI strip, fix follower -1
 
 ## Last Activity
 
