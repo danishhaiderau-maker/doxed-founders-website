@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(workspace-session): use unchecked Prisma create input for userId scalar
 
 ## Last Activity
 
