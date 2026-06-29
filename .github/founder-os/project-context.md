@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(agent-hub): remove Global showcase desk, add recent trades+AI strip, fix follower -1
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
