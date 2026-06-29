@@ -35,7 +35,7 @@ const deskStorageKey = (slug: string) => `agent-hub-desk-${slug}`;
 function readStoredDesk(slug: string): AgentDeskId | null {
   if (typeof window === 'undefined') return null;
   const raw = localStorage.getItem(deskStorageKey(slug));
-  if (raw === 'showcase' || raw === 'live' || raw === 'relay-sim') return raw;
+  if (raw === 'live' || raw === 'relay-sim') return raw;
   return null;
 }
 import type {
@@ -56,6 +56,139 @@ function MetricPill({ label, value, accent }: { label: string; value: string; ac
     <div className="rounded-xl border border-zinc-800/80 bg-black/30 px-3 py-2.5 text-center">
       <p className="text-[10px] uppercase tracking-widest text-zinc-500">{label}</p>
       <p className={`mt-0.5 text-base font-bold ${accent ?? 'text-white'}`}>{value}</p>
+    </div>
+  );
+}
+
+function timeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/** Compact top-of-page strip: last 5 closed trades + last 5 AI decisions.
+ *  Rendered from data already fetched for the dashboard (no extra round-trip), so it shows
+ *  real recent activity immediately and reduces perceived load time. */
+function RecentActivityStrip({
+  trades,
+  activity,
+}: {
+  trades: TradingAgentDashboardState['recentTrades'];
+  activity: TradingAgentActivityEntry[];
+}) {
+  const closedTrades = (trades ?? [])
+    .slice()
+    .sort((a, b) => new Date(b.closedAt ?? 0).getTime() - new Date(a.closedAt ?? 0).getTime())
+    .slice(0, 5);
+  const aiHistory = (activity ?? [])
+    .filter((a) => /TRADE|APPROVE|REJECT|AI|DECISION|SIGNAL|OPEN|CLOSE|EXIT/i.test(a.type))
+    .slice(0, 5);
+
+  if (closedTrades.length === 0 && aiHistory.length === 0) return null;
+
+  return (
+    <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-300">
+            Last 5 closed trades
+          </h3>
+          <span className="text-[10px] text-zinc-600">session</span>
+        </div>
+        {closedTrades.length === 0 ? (
+          <p className="mt-3 text-xs text-zinc-600">No closed trades yet this session.</p>
+        ) : (
+          <ul className="mt-3 space-y-1.5">
+            {closedTrades.map((t, i) => {
+              const profit = t.profitPct ?? 0;
+              const side = (t.side ?? '').toUpperCase();
+              return (
+                <li
+                  key={`${t.closedAt ?? i}-${i}`}
+                  className="flex items-center justify-between rounded-lg border border-zinc-800/60 bg-black/25 px-3 py-2 text-xs"
+                >
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                        side === 'LONG'
+                          ? 'bg-emerald-500/15 text-emerald-300'
+                          : side === 'SHORT'
+                            ? 'bg-red-500/15 text-red-300'
+                            : 'bg-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      {side || '—'}
+                    </span>
+                    <span className="text-zinc-400">
+                      {(t.entryPrice ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} →{' '}
+                      {(t.exitPrice ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`font-semibold ${profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                    >
+                      {profit >= 0 ? '+' : ''}
+                      {profit.toFixed(2)}%
+                    </span>
+                    <span className="text-[10px] text-zinc-600">
+                      {t.closedAt ? timeAgo(t.closedAt) : ''}
+                    </span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-[10px] font-bold uppercase tracking-[0.18em] text-violet-300">
+            Last 5 AI decisions
+          </h3>
+          <span className="text-[10px] text-zinc-600">showcase</span>
+        </div>
+        {aiHistory.length === 0 ? (
+          <p className="mt-3 text-xs text-zinc-600">No AI decisions yet.</p>
+        ) : (
+          <ul className="mt-3 space-y-1.5">
+            {aiHistory.map((a, i) => {
+              const isApprove = /APPROVE|TRADE|OPEN|CLOSE|EXIT/i.test(a.type);
+              return (
+                <li
+                  key={a.id ?? i}
+                  className="rounded-lg border border-zinc-800/60 bg-black/25 px-3 py-2 text-xs"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                          isApprove
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-zinc-700 text-zinc-400'
+                        }`}
+                      >
+                        {a.type.replace(/_/g, ' ').slice(0, 14)}
+                      </span>
+                      <span className="text-zinc-300">{a.title}</span>
+                    </span>
+                    <span className="text-[10px] text-zinc-600">{timeAgo(a.createdAt)}</span>
+                  </div>
+                  {a.reason ? (
+                    <p className="mt-1 line-clamp-2 text-[11px] text-zinc-500">{a.reason}</p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -277,20 +410,6 @@ function HireSidebar({
   const isLiveHired = hired && instanceMode === 'live';
   const rentalExpired =
     rentalExpiresAt != null && new Date(rentalExpiresAt).getTime() <= Date.now();
-
-  if (activeDesk === 'showcase') {
-    return (
-      <aside className="space-y-4 xl:sticky xl:top-28">
-        <div className="rounded-2xl border border-violet-500/30 bg-violet-950/15 p-5">
-          <p className="text-xs font-bold uppercase text-violet-400">Global showcase bot</p>
-          <p className="mt-2 text-xs text-zinc-400">
-            Admin research on :7002 — observe signals here. Switch to Live Copy or Relay Sim to
-            trade on your exchange.
-          </p>
-        </div>
-      </aside>
-    );
-  }
 
   if (activeDesk === 'relay-sim') {
     const simActive = Boolean(copyRelaySim?.active);
@@ -787,7 +906,6 @@ export function AgentPublicProfile({
                 type="button"
                 onClick={() => {
                   setTab('Overview');
-                  setActiveDesk('showcase');
                 }}
                 className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:border-violet-500/50"
               >
@@ -847,6 +965,10 @@ export function AgentPublicProfile({
               ))}
             </div>
           </div>
+
+          {/* Last 5 closed trades + last 5 AI decisions — pinned at the top so the trader sees
+              real recent activity immediately (no need to wait for lower sections to load). */}
+          <RecentActivityStrip trades={dashboard.recentTrades} activity={_activity} />
 
           {tab === 'Overview' && showExecutionPublic && (
             <div className="mt-6">

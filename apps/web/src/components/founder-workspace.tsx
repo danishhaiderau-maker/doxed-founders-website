@@ -7,6 +7,7 @@ import { FounderSocialHub } from '@/components/founder-social-hub';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
 import { DiscoverMyVisibilityPanel } from '@/components/discover/discover-my-visibility-panel';
 import { DevWorkspace } from '@/components/dev-workspace';
+import { WorkspaceErrorBoundary } from '@/components/workspace-error-boundary';
 import {
   FounderDashboard,
   ProjectRoom,
@@ -231,13 +232,15 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
   // Dashboard shell: single DevWorkspace with embedded social + settings panels
   if (useDashboardShell && session) {
     return (
-      <DevWorkspace
-        accessToken={session.accessToken}
-        socialPanel={socialPanel}
-        settingsPanel={settingsPanel}
-        initialCopilotPrompt={initialCopilotPrompt}
-        onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
-      />
+      <WorkspaceErrorBoundary>
+        <DevWorkspace
+          accessToken={session.accessToken}
+          socialPanel={socialPanel}
+          settingsPanel={settingsPanel}
+          initialCopilotPrompt={initialCopilotPrompt}
+          onInitialCopilotPromptConsumed={onInitialCopilotPromptConsumed}
+        />
+      </WorkspaceErrorBoundary>
     );
   }
 
@@ -297,11 +300,13 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
       )}
 
       {tab === 'workspace' && session && (
-        <DevWorkspace
-          accessToken={session.accessToken}
-          socialPanel={socialPanel}
-          settingsPanel={settingsPanel}
-        />
+        <WorkspaceErrorBoundary>
+          <DevWorkspace
+            accessToken={session.accessToken}
+            socialPanel={socialPanel}
+            settingsPanel={settingsPanel}
+          />
+        </WorkspaceErrorBoundary>
       )}
       {tab === 'social' && socialPanel}
       {tab === 'analytics' && settingsPanel}

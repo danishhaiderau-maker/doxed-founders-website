@@ -19,6 +19,13 @@ import {
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { copilotAsk } from '@/lib/api';
+import {
+  emitEvent,
+  advanceStream,
+  clearStream,
+  useFounderEvents,
+} from '@/lib/founder-event-bus';
+import { AgentEventTimeline } from '@/components/agent-event-timeline';
 
 type Props = {
   accessToken: string;
@@ -95,6 +102,13 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [thinking, setThinking] = useState(false);
+  const [activeStream, setActiveStream] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
+  const [stableRecording, setStableRecording] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const announcedCommitsRef = useRef<Set<string>>(new Set());
+  const announcedRunIdRef = useRef<string | null>(null);
 
   // Pre-fill chat from URL prompt (e.g. /founder-den?prompt=fix+it)
   useEffect(() => {
@@ -196,31 +210,20 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
   }, [models, selectedModel]);
 
-  if (loading) {
-    return <div className="flex h-full items-center justify-center text-sm text-zinc-500">Loading workspace…</div>;
-  }
-
   const repo = activity?.repoFullName ?? settings?.repoFullName ?? null;
   const branch = bridge?.latest?.branch ?? activity?.defaultBranch ?? 'main';
-  const recentCommits = (activity?.commitsLast2h ?? activity?.commitsLast24h ?? []).slice(0, 10);
+  const recentCommits = useMemo(
+    () => (activity?.commitsLast2h ?? activity?.commitsLast24h ?? []).slice(0, 10),
+    [activity],
+  );
   const lastDeploy = deploys?.cards?.[0] ?? null;
   const openFiles = bridge?.latest?.openFilePaths ?? [];
-  const runActive = activeRun?.active && activeRun.run;
+  const runActive = activeRun?.active && activeRun.run ? activeRun.run : null;
   const promoActive = onboarding?.promo?.eligible && onboarding?.promo?.hasLlm;
 
-  // Cost estimate (approximate differentiator)
-  const todayCost = 0.82;
-  const savedVsCloud = 31.90;
-  const usingLocal = selectedModel?.local || selectedModel?.promo;
+  const streamEvents = useFounderEvents(activeStream ? { stream: activeStream } : undefined);
+  const latestStreamEvent = streamEvents[streamEvents.length - 1];
 
-  const [thinking, setThinking] = useState(false);
-  const [thinkingStep, setThinkingStep] = useState(0);
-  const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Stabilize the mic button: once listening starts, keep "Stop" shown through
-  // brief recognition restarts / network blips so the button doesn't flicker.
-  const [stableRecording, setStableRecording] = useState(false);
   useEffect(() => {
     if (listening || starting) {
       setStableRecording(true);
@@ -229,13 +232,59 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
   }, [listening, starting, waitingNetwork]);
 
-  const THINKING_STEPS = [
-    'Reading workspace context…',
-    'Scanning repository & branch…',
-    'Checking active agents & deploys…',
-    'Reasoning with ' + (selectedModel?.label ?? 'AI') + '…',
-    'Composing response…',
-  ];
+  useEffect(() => {
+    if (!activity) return;
+    for (const c of recentCommits) {
+      const sha = c.sha ?? '';
+      const headline = (c.message ?? 'commit').split('\n')[0].slice(0, 70);
+      if (!sha || announcedCommitsRef.current.has(sha)) continue;
+      announcedCommitsRef.current.add(sha);
+      emitEvent('GIT', 'commit', `Commit landed: ${headline}`, {
+        level: 'success',
+        stream: 'workspace',
+        meta: { sha, repo },
+      });
+    }
+  }, [recentCommits, activity, repo]);
+
+  useEffect(() => {
+    const active = activeRun?.active ? activeRun.run : null;
+    const curKey = active ? (active.runId ?? active.agentId ?? active.startedAt) : null;
+    if (active && curKey && curKey !== announcedRunIdRef.current) {
+      announcedRunIdRef.current = curKey;
+      const task = (active.task ?? 'task').slice(0, 60);
+      emitEvent('AGENT', 'run_started', `Agent ${active.worker ?? 'Agent'} started: ${task}`, {
+        level: 'info',
+        stream: `agent:${curKey}`,
+        meta: { worker: active.worker, task: active.task },
+      });
+    } else if (!active && announcedRunIdRef.current) {
+      emitEvent('AGENT', 'run_finished', `Agent finished`, {
+        level: 'success',
+        stream: `agent:${announcedRunIdRef.current}`,
+      });
+      announcedRunIdRef.current = null;
+    }
+  }, [activeRun]);
+
+  useEffect(() => {
+    if (lastDeploy?.title) {
+      emitEvent('DEPLOY', 'status', `Deploy: ${lastDeploy.title.slice(0, 50)}`, {
+        level: 'success',
+        stream: 'workspace',
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastDeploy?.at]);
+
+  if (loading) {
+    return <div className="flex h-full items-center justify-center text-sm text-zinc-500">Loading workspace…</div>;
+  }
+
+  // Cost estimate (approximate differentiator)
+  const todayCost = 0.82;
+  const savedVsCloud = 31.90;
+  const usingLocal = selectedModel?.local || selectedModel?.promo;
 
   async function sendChat() {
     const text = chatInput.trim();
@@ -248,42 +297,124 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (attachments.length > 0) userMsg.attachments = attachments.map((a) => ({ name: a.name }));
     setChatMessages((prev) => [...prev, userMsg]);
     setChatInput('');
+    const pendingAttachments = attachments;
     setAttachments([]);
     setThinking(true);
-    setThinkingStep(0);
 
-    const stepTimer = setInterval(() => {
-      setThinkingStep((s) => Math.min(s + 1, THINKING_STEPS.length - 1));
-    }, 900);
+    const stream = `ai:${Date.now().toString(36)}`;
+    setActiveStream(stream);
+    const modelLabel = selectedModel?.label ?? 'AI';
+    const modelKey = selectedModel?.key ?? 'GLM';
+
+    // Stage 1 — real context load. These numbers come from actual workspace state.
+    emitEvent('AI', 'request_started', `Founder Brain invoked with ${modelLabel}`, {
+      stream,
+      level: 'info',
+      progress: 0.05,
+      meta: { model: modelKey, prompt: text.slice(0, 120) },
+    });
+    const fileCount = openFiles.length;
+    const commitCount = recentCommits.length;
+    emitEvent('AI', 'context_load', `Loading project context…`, { stream, progress: 0.15 });
+    await new Promise((r) => setTimeout(r, 120));
+    emitEvent('AI', 'context_loaded', `Loaded workspace — ${fileCount} open file(s), ${commitCount} recent commit(s), branch ${branch}`, {
+      stream,
+      progress: 0.3,
+      meta: { fileCount, commitCount, branch },
+    });
+    if (pendingAttachments.length > 0) {
+      emitEvent('VAULT', 'attached', `${pendingAttachments.length} attachment(s) queued for Founder Vault`, {
+        stream,
+        progress: 0.35,
+        meta: { names: pendingAttachments.map((a) => a.name) },
+      });
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    emitEvent('AI', 'model_send', `Sending prompt to ${modelLabel}…`, { stream, progress: 0.45 });
+    advanceStream(stream, 0.55, `Awaiting ${modelLabel} response…`);
 
     try {
       const result = await copilotAsk(text, accessToken);
-      clearInterval(stepTimer);
+      advanceStream(stream, 0.85, `Response received from ${result.answerProvider ?? modelLabel}`);
       const answer =
         result.answer?.trim() ||
         result.founderBrain?.task ||
         'No response — try rephrasing or connect an AI provider in Settings.';
+      emitEvent('AI', 'response_complete', `Answer delivered (${answer.length} chars)`, {
+        stream,
+        level: 'success',
+        progress: 1,
+        meta: {
+          provider: result.answerProvider,
+          toolsUsed: result.runtime?.toolsUsed,
+          cursorDispatched: result.runtime?.cursorDispatched,
+        },
+      });
+      if (result.runtime?.cursorDispatched) {
+        emitEvent('CURSOR', 'dispatched', `Cursor agent dispatched — ${result.runtime.cursorAgentUrl ?? 'url pending'}`, {
+          stream,
+          level: 'success',
+          meta: { url: result.runtime.cursorAgentUrl },
+        });
+      }
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'agent',
           text: answer,
-          model: result.answerProvider ? `${result.answerProvider}` : selectedModel?.label,
+          model: result.answerProvider ? `${result.answerProvider}` : modelLabel,
         },
       ]);
-    } catch {
-      clearInterval(stepTimer);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      emitEvent('AI', 'request_failed', `Founder Brain error: ${msg}`, {
+        stream,
+        level: 'error',
+        progress: 1,
+      });
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'agent',
           text: 'Could not reach Founder Brain — check your connection or AI provider in Settings, then try again.',
-          model: selectedModel?.label,
+          model: modelLabel,
         },
       ]);
     } finally {
       setThinking(false);
-      setThinkingStep(0);
+      // Keep the stream visible briefly so the user reads the final stage, then clear.
+      setTimeout(() => {
+        clearStream(stream);
+        setActiveStream((cur) => (cur === stream ? null : cur));
+      }, 4000);
+    }
+  }
+
+  async function uploadToVault(file: File): Promise<void> {
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      emitEvent('VAULT', 'upload_start', `Uploading ${file.name} to Founder Vault…`, {
+        stream: 'vault',
+        progress: 0.2,
+      });
+      const res = await fetch('/api/founder-vault/upload', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        emitEvent('VAULT', 'upload_failed', `Upload failed: ${body.message ?? res.statusText}`, {
+          stream: 'vault',
+          level: 'error',
+        });
+        return;
+      }
+      emitEvent('VAULT', 'upload_complete', `Stored ${file.name} in Founder Vault — indexed for AI`, {
+        stream: 'vault',
+        level: 'success',
+        progress: 1,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'network error';
+      emitEvent('VAULT', 'upload_failed', `Upload error: ${msg}`, { stream: 'vault', level: 'error' });
     }
   }
 
@@ -295,6 +426,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       const reader = new FileReader();
       reader.onload = () => {
         setAttachments((prev) => [...prev, { name: file.name, dataUrl: String(reader.result) }]);
+        void uploadToVault(file);
       };
       reader.readAsDataURL(file);
     });
@@ -512,23 +644,45 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                       </div>
                     </div>
                   ))}
-                  {thinking && (
+                  {thinking && activeStream && (
                     <div className="flex justify-start">
-                      <div className="max-w-[80%] rounded-lg bg-zinc-800 px-3 py-2.5 text-xs text-zinc-200">
+                      <div className="max-w-[85%] rounded-lg bg-zinc-800 px-3 py-2.5 text-xs text-zinc-200">
                         <div className="mb-1.5 flex items-center gap-1.5">
                           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-                          <span className="text-[9px] font-semibold text-violet-300">{selectedModel?.label ?? 'AI'} is thinking</span>
+                          <span className="text-[9px] font-semibold text-violet-300">
+                            {selectedModel?.label ?? 'AI'} · live
+                          </span>
+                          <span className="ml-auto font-mono text-[8px] text-zinc-500">
+                            {latestStreamEvent ? new Date(latestStreamEvent.ts).toLocaleTimeString() : ''}
+                          </span>
                         </div>
-                        <div className="space-y-1">
-                          {THINKING_STEPS.map((s, j) => (
-                            <div key={j} className="flex items-center gap-1.5">
-                              <span className={`h-1 w-1 rounded-full ${j < thinkingStep ? 'bg-emerald-400' : j === thinkingStep ? 'bg-violet-400 animate-pulse' : 'bg-zinc-700'}`} />
-                              <span className={j <= thinkingStep ? 'text-zinc-300' : 'text-zinc-600'}>{s}</span>
+                        <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
+                          {streamEvents.map((ev) => (
+                            <div key={ev.id} className="flex items-start gap-1.5">
+                              <span
+                                className={`mt-1 h-1 w-1 shrink-0 rounded-full ${
+                                  ev.level === 'error'
+                                    ? 'bg-red-400'
+                                    : ev.level === 'success'
+                                      ? 'bg-emerald-400'
+                                      : 'bg-violet-400'
+                                }`}
+                              />
+                              <span className="font-mono text-[8px] text-zinc-600">
+                                {new Date(ev.ts).toLocaleTimeString([], { hour12: false })}
+                              </span>
+                              <span className="flex-1 text-[11px] text-zinc-300">{ev.message}</span>
                             </div>
                           ))}
+                          {streamEvents.length === 0 && (
+                            <span className="text-[10px] text-zinc-600">Connecting to {selectedModel?.label ?? 'AI'}…</span>
+                          )}
                         </div>
                         <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-zinc-700">
-                          <div className="h-full rounded-full bg-violet-500 transition-all duration-700" style={{ width: `${((thinkingStep + 1) / THINKING_STEPS.length) * 100}%` }} />
+                          <div
+                            className="h-full rounded-full bg-violet-500 transition-all duration-500"
+                            style={{ width: `${Math.round((latestStreamEvent?.progress ?? 0) * 100)}%` }}
+                          />
                         </div>
                       </div>
                     </div>
@@ -627,7 +781,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                     <p className="text-zinc-500">On branch {branch}</p>
                     <p className="text-zinc-500">nothing to commit, working tree clean</p>
                     {recentCommits[0] && <p className="text-violet-400/70">$ git log -1 — {recentCommits[0].message.split('\n')[0].slice(0, 50)}</p>}
-                    {runActive && <p className="text-violet-400">$ agent: {runActive.status} — {runActive.task.slice(0, 40)}</p>}
+                    {runActive && <p className="text-violet-400">$ agent: {runActive.status} — {(runActive.task ?? '').slice(0, 40)}</p>}
                     <p className="text-zinc-500">$ <span className="animate-pulse">█</span></p>
                   </div>
                 </div>
@@ -678,17 +832,22 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             </div>
           </div>
 
-          {/* Activity Feed */}
+          {/* Activity Feed — live from the Founder Event Bus */}
           <div className="flex min-h-0 flex-1 flex-col">
-            <p className="shrink-0 border-b border-zinc-800/60 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Activity Feed</p>
-            <div className="min-h-0 flex-1 overflow-y-auto p-3">
-              <div className="space-y-2">
-                {recentCommits.slice(0, 6).map((c) => (
-                  <ActivityItem key={c.sha} time={c.date} icon="◆" color="text-violet-400" title="GitHub" body={c.message.split('\n')[0].slice(0, 45)} />
-                ))}
-                {lastDeploy && <ActivityItem time={lastDeploy.at} icon="↑" color="text-emerald-400" title="Railway" body={lastDeploy.title.slice(0, 45)} />}
-                {runActive && <ActivityItem time={runActive.startedAt} icon="◉" color="text-violet-400" title={runActive.worker ?? 'Agent'} body={runActive.task.slice(0, 45)} />}
-                {recentCommits.length === 0 && !lastDeploy && !runActive && <p className="text-[10px] text-zinc-600">No recent activity</p>}
+            <p className="shrink-0 border-b border-zinc-800/60 px-3 py-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
+              Live Events
+            </p>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <AgentEventTimeline />
+              <div className="border-t border-zinc-900/70 px-3 py-2">
+                <p className="mb-1 text-[8px] font-semibold uppercase tracking-wider text-zinc-700">From GitHub · Deploy · Agent</p>
+                <div className="space-y-1.5">
+                  {recentCommits.slice(0, 3).map((c) => (
+                    <ActivityItem key={c.sha} time={c.date} icon="◆" color="text-violet-400" title="GitHub" body={c.message.split('\n')[0].slice(0, 42)} />
+                  ))}
+                  {lastDeploy && <ActivityItem time={lastDeploy.at} icon="↑" color="text-emerald-400" title="Deploy" body={lastDeploy.title.slice(0, 42)} />}
+                  {runActive && <ActivityItem time={runActive.startedAt} icon="◉" color="text-violet-400" title={runActive.worker ?? 'Agent'} body={(runActive.task ?? '').slice(0, 42)} />}
+                </div>
               </div>
             </div>
           </div>
