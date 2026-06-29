@@ -7,8 +7,7 @@ import {
   type CommitSignal,
   type InitiativeTheme,
 } from './commit-intelligence';
-import { formatRecapCoachAnswer, formatVaultCapacityAnswer, isRecapOrHistoryPrompt } from './founder-brain-coach';
-import { isFounderRepoStatusPrompt } from './founder-brain-router';
+import { formatRecapCoachAnswer, isRecapOrHistoryPrompt } from './founder-brain-coach';
 
 export type MissionIntelligence = {
   currentInitiative: string;
@@ -174,18 +173,6 @@ export function formatFounderBrainContextForPrompt(
     `Recommended next step: ${intelligence.recommendedNextStep}`,
     `Confidence: ${intelligence.confidence}`,
     '',
-    '## Static mission graph',
-    input.memoryGraph
-      ? [
-          `Active goal: ${input.memoryGraph.active_goal}`,
-          input.memoryGraph.current_sprint ? `Sprint: ${input.memoryGraph.current_sprint}` : '',
-          input.memoryGraph.current_task ? `Current task: ${input.memoryGraph.current_task}` : '',
-          input.memoryGraph.next_action ? `Next action: ${input.memoryGraph.next_action}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n')
-      : 'Mission graph: not initialized',
-    '',
     '## Initiative themes (from recent commits)',
     intelligence.themes.length > 0
       ? intelligence.themes
@@ -224,13 +211,15 @@ export function formatFounderBrainContextForPrompt(
   ];
 
   if (input.projectContextExcerpt) {
-    sections.push('', '## project-context.md (excerpt)', input.projectContextExcerpt.slice(0, 1500));
+    // Live-first architecture: stale FOUNDER_OS_MEMORY files (project-context.md,
+    // roadmap.md, tasks.json) are NO LONGER injected. The Live Snapshot block is
+    // the single source of truth for project state.
   }
   if (input.roadmapExcerpt) {
-    sections.push('', '## roadmap.md (excerpt)', input.roadmapExcerpt.slice(0, 1000));
+    // intentionally omitted — roadmap.md is stale; live snapshot supersedes it.
   }
   if (input.repoTasks?.length) {
-    sections.push('', '## Repo tasks.json', input.repoTasks.map((t) => `- ${t}`).join('\n'));
+    // intentionally omitted — tasks.json is stale; live open tasks list is enough.
   }
   if (input.workspaceActivityBlock) {
     sections.push('', '## Workspace activity', input.workspaceActivityBlock);
@@ -263,85 +252,60 @@ export function formatFounderBrainContextForPrompt(
   return sections.filter(Boolean).join('\n');
 }
 
+/**
+ * Live-first system prompt for Founder Brain. Replaces the old
+ * FOUNDER_BRAIN_EXPERT_PM_RULES block which hardcoded "define milestone" /
+ * "STEM goal" language. The Live Snapshot block is the single source of truth.
+ */
+export const FOUNDER_BRAIN_LIVE_FIRST_SYSTEM_PROMPT = [
+  'You are Founder Brain, an engineering co-pilot for crypto founders.',
+  'Use the LIVE PROJECT SNAPSHOT below as ground truth for repository, branch, commits, open files, deploys, and connection state.',
+  'Answer the user\'s question directly and concretely.',
+  'Do not invent blockers that contradict the live snapshot.',
+  'Do not output "define milestone", "STEM goal", "clone the repo", or other stale templates when the user asked a real question.',
+  'Structure answers as: direct answer · relevant context from the snapshot · one concrete next step (only if useful).',
+  'Reply in plain markdown. Never ask users to paste API keys — keys stay server-side.',
+].join('\n');
+
+/**
+ * HARD fallback only — used when NO AI provider is connected at all.
+ * Never returns the stale STEM template. Clearly labels that the user needs to
+ * connect a provider so they know this is not a real AI answer.
+ */
 export function formatRuleBasedBrainAnswer(
-  intelligence: MissionIntelligence,
+  _intelligence: MissionIntelligence,
   input: FounderBrainContextInput,
   prompt: string,
 ): string {
-  const q = prompt.toLowerCase();
-
   if (isRecapOrHistoryPrompt(prompt)) {
     return formatRecapCoachAnswer({
       projectName: input.projectName,
-      currentInitiative: intelligence.currentInitiative,
-      recommendedNextStep: intelligence.recommendedNextStep,
-      blocker: intelligence.blocker,
-      confidence: intelligence.confidence,
+      currentInitiative: input.currentGoal,
+      recommendedNextStep: input.suggestedNextStep,
+      blocker: null,
+      confidence: 'low',
       repoFullName: input.repoFullName,
       conn: {
         githubConnected: Boolean(input.repoFullName),
         cursorConnected: false,
-        llmConnected: true,
+        llmConnected: false,
       },
     });
   }
 
-  const capacityOrStatus =
-    isFounderRepoStatusPrompt(prompt) ||
-    /real capacity|saved anything|instead of github|option a|use my (space|vault)/i.test(prompt);
-
-  if (!input.repoFullName && capacityOrStatus) {
-    return formatVaultCapacityAnswer({
-      projectName: input.projectName,
-      vaultNote: input.vaultNote,
-      openTaskCount: input.openTasks.filter((t) => !isStaleBoilerplateMissionTask(t)).length,
-      conn: {
-        githubConnected: false,
-        cursorConnected: false,
-        llmConnected: true,
-        repoFullName: null,
-      },
-    });
-  }
-
-  const workingOn =
-    /what.*(working|building|focus)|what am i|what should i ship|status|left off/i.test(q);
-
-  if (workingOn) {
-    return [
-      `**Current initiative:** ${intelligence.currentInitiative}`,
-      '',
-      `**Progress:** ${intelligence.progressPercent}% · Launch readiness ${input.launchReadiness}%`,
-      '',
-      intelligence.shippedRecently.length > 0
-        ? `**What shipped recently:**\n${intelligence.shippedRecently.map((s) => `• ${s}`).join('\n')}`
-        : '**What shipped recently:** Sync GitHub to pull commit outcomes.',
-      '',
-      intelligence.themes.length > 0
-        ? `**Active workstreams:** ${intelligence.themes.slice(0, 4).map((t) => t.label).join(' · ')}`
-        : '',
-      '',
-      intelligence.blocker ? `**Blocker:** ${intelligence.blocker}` : '',
-      '',
-      `**Why it matters:** ${intelligence.impact}`,
-      '',
-      `**Recommended next step:** ${intelligence.recommendedNextStep}`,
-      '',
-      `_Confidence: ${intelligence.confidence} · from ${input.commits.length} commits, ${input.pullRequests.length} PRs, mission memory_`,
-      '',
-      input.repoFullName ? `Repo: \`${input.repoFullName}\`` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
-  }
-
+  const repoLine = input.repoFullName ? `Repository: \`${input.repoFullName}\`` : 'Repository: not linked';
   return [
-    `**${input.projectName}** — ${intelligence.currentInitiative}`,
+    '> No AI provider connected — this is a deterministic fallback, not a model answer.',
     '',
-    intelligence.shippedRecently.slice(0, 4).map((s) => `• ${s}`).join('\n') || '• Sync GitHub for recent work',
+    'To get real answers from Founder Brain, connect an LLM in **Settings \u2192 AI Stack**:',
+    '- GLM 5.2 (cheapest coding model, promo eligible)',
+    '- Claude / OpenAI / Gemini / DeepSeek / OpenRouter (bring your own API key)',
+    '- Local Ollama (free, offline \u2014 run on your machine)',
     '',
-    `**Next:** ${intelligence.recommendedNextStep}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+    'Then pick the model in the dropdown above and ask again.',
+    '',
+    `**Your question:** ${prompt.trim().slice(0, 400)}`,
+    '',
+    `**Live context I do have:** ${input.projectName} \u00b7 ${repoLine} \u00b7 ${input.commits.length} recent commit(s) \u00b7 launch readiness ${input.launchReadiness}%`,
+  ].join('\n');
 }

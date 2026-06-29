@@ -452,6 +452,7 @@ model User {
   signalCycleParticipants SignalCycleParticipant[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
+  workspaceSession     WorkspaceSession?
   founderNodes              FounderNode[]
   founderNodePairings       FounderNodePairingCode[]
   founderNodeVaultRelays    FounderNodeVaultRelay[]
@@ -1699,6 +1700,27 @@ model ProjectMemoryDeviceSync {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
+/**
+ * WorkspaceSession — survives refresh on /founder-den. Stores the IDE-style workspace
+ * state (selected model, nav, terminal, conversation, open files, panel toggles) so the
+ * laptop-while-away UX works. One row per user (upserted).
+ */
+model WorkspaceSession {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  selectedAiProvider  String?
+  selectedModelKey    String?
+  conversation        Json?
+  terminalScrollback  Json?
+  openFiles           Json?
+  activeNav           String?
+  panelState          Json?
+  updatedAt           DateTime @updatedAt
+  createdAt           DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 /** Paired Founder Node (desktop vault) — control plane metadata only. */
 model FounderNode {
   id            String   @id @default(cuid())
@@ -2445,4 +2467,24 @@ model ApiCache {
   createdAt DateTime @default(now())
 
   @@index([expiresAt])
+}
+
+/// Uploaded project knowledge (screenshots, logs, contracts, pdfs, voice notes)
+/// stored for AI context. Content is kept as base64 so it works on serverless
+/// hosts without a persistent filesystem; a Founder Node can later mirror/sync.
+model FounderVaultItem {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  mime        String
+  sizeBytes   Int
+  category    String   @default("screenshot")
+  dataUrl     String   @db.Text
+  width       Int?
+  height      Int?
+  indexedForAi Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, createdAt])
 }

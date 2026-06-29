@@ -1,5 +1,6 @@
 import type { AiProviderKey } from './ai-providers';
 import { isFounderNodeAiProvider, isRemoteAgentProvider } from './ai-providers';
+import { isRecapOrHistoryPrompt } from './founder-brain-coach';
 
 export type FounderBrainTask = 'research' | 'writing' | 'strategy' | 'code' | 'general';
 
@@ -95,13 +96,18 @@ export function isFounderRepoStatusPrompt(prompt: string): boolean {
   );
 }
 
-/** Prefer deterministic answers over LLM paraphrase of stale tasks.json boilerplate. */
+/**
+ * Prefer deterministic rule-based answer ONLY for literal recap / history prompts.
+ * Normal questions (tools, URLs, comparisons, architecture, "what does X do") MUST
+ * route to the LLM. The user's explicit model selection (forceProvider) is honored
+ * before this check in the caller, so this only matters when no provider was forced.
+ */
 export function shouldPreferGithubGroundedBrainAnswer(
   prompt: string,
   _commitsWithSignal: number,
 ): boolean {
-  // Status / vault / capacity questions always use rule-based coach — never invent Solidity tasks.
-  return isFounderRepoStatusPrompt(prompt);
+  // Delegate to the narrow recap/history matcher — never the broad status matcher.
+  return isRecapOrHistoryPrompt(prompt);
 }
 
 const TASK_PROVIDER_PREFERENCE: Record<Exclude<FounderBrainTask, 'general'>, AiProviderKey[]> = {

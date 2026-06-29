@@ -71,7 +71,7 @@ import {
   deriveMissionIntelligence,
   formatFounderBrainContextForPrompt,
   formatRuleBasedBrainAnswer,
-  FOUNDER_BRAIN_EXPERT_PM_RULES,
+  FOUNDER_BRAIN_LIVE_FIRST_SYSTEM_PROMPT,
   isRecapOrHistoryPrompt,
   buildProjectTimeline,
   formatProjectTimelineExcerpt,
@@ -1600,17 +1600,24 @@ export class FounderCopilotService {
         ? '\n\n## Onboarding coach (required)\nRepository is NOT linked. Follow expert PM rules: offer Sovereign (Founder Vault local), Hybrid (GitHub+Cursor), or Production (full cloud). Ask ONE clarifying question. Do NOT invent specific code (e.g. Solidity functions) until the user picks a pathway and describes the product.\n'
         : '');
 
-    const memoryPrefix = this.memoryGraph.getPrefix(memoryGraph);
+    const memoryPrefix = ''; // Live-first architecture: do NOT prepend memoryGraph prefix (stale).
 
-    const systemPrompt = `${memoryPrefix}${FOUNDER_BRAIN_EXPERT_PM_RULES}\n\nYou are Founder Brain — the command center for crypto founders. Use the LIVE PROJECT SNAPSHOT first, then assembled context below (commits, PRs, deployments, initiatives, mission graph). Never contradict live GitHub/IDE state with stale vault blockers. Summarize outcomes and initiatives, not raw task records. Structure answers: current initiative · what shipped · why it matters · blockers · next step. Never reply with only "define milestone" or task.json titles when GitHub context exists. Reply in plain markdown. API keys stay server-side — never ask users to paste secrets.`;
+    const systemPrompt = `${memoryPrefix}${FOUNDER_BRAIN_LIVE_FIRST_SYSTEM_PROMPT}`;
 
     const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
+    // Narrow recap/history guard — only triggers when no explicit model was selected.
     const preferGrounded =
       shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
       isRecapOrHistoryPrompt(text);
 
     const forcedProvider = this.resolveRequestedAiProvider(options?.provider);
-    const aiResult = preferGrounded
+
+    // When the user explicitly selected a model (forceProvider), the LLM MUST be called.
+    // Never bypass the LLM based on preferGrounded when a model is selected — the user's
+    // explicit choice wins. Only fall back to rule-based if the forced provider errors.
+    const skipLlmForGrounded = preferGrounded && !forcedProvider;
+
+    const aiResult = skipLlmForGrounded
       ? ({ ok: false as const, llmErrors: ['github_grounded_status'] })
       : await this.builder.tryCopilotChatCompletion(
           userId,
@@ -1636,17 +1643,33 @@ export class FounderCopilotService {
     let answerProvider: string = 'RULE_BASED';
     let llmErrors: string[] | undefined;
     const requestedProviderLabel = options?.provider?.trim() || null;
+    const forcedProviderMissingKey =
+      forcedProvider && !aiResult.ok && (aiResult.llmErrors ?? []).some((e) =>
+        /connect API key|not connected|not available as chat provider/i.test(e),
+      );
 
-    if (preferGrounded) {
+    if (skipLlmForGrounded && !forcedProvider) {
+      // Narrow recap/history path (no model selected) — deterministic grounded answer.
       answer = ruleBased + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = 'FOUNDER_BRAIN';
     } else if (aiResult.ok) {
       answer = aiResult.text + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = aiResult.provider;
+    } else if (forcedProviderMissingKey) {
+      // User picked a model but no API key for that provider is connected.
+      // Return a CLEAR error message — never silently fall back to the STEM template.
+      const providerLabel = requestedProviderLabel ?? String(forcedProvider);
+      const missingKeyError =
+        `**${providerLabel} selected but no ${providerLabel} API key connected.**\n\n` +
+        `Connect a ${providerLabel} key in **Settings \u2192 AI Stack** (or pick a different model in the dropdown) to get a real answer.\n\n` +
+        `If you meant to use the platform promo (GLM 5.2 free month), make sure the promo is active on your account.`;
+      answer = missingKeyError + formatContextEvidenceFooter(liveSnapshot);
+      answerProvider = 'NO_PROVIDER_KEY';
+      llmErrors = aiResult.llmErrors;
     } else if (aiResult.llmErrors.length > 0) {
       llmErrors = aiResult.llmErrors;
       answer = ruleBased + formatContextEvidenceFooter(liveSnapshot);
-      answerProvider = preferGrounded ? 'FOUNDER_BRAIN' : 'RULE_BASED';
+      answerProvider = 'RULE_BASED';
     }
 
     const routeLabel = getFounderBrainRouteLabel(brainTask);

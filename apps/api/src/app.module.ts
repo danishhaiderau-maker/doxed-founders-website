@@ -40,6 +40,7 @@ import { CredentialsModule } from './credentials/credentials.module';
 import { PrivacyModule } from './privacy/privacy.module';
 import { VaultModule } from './vault/vault.module';
 import { AirdropModule } from './airdrop/airdrop.module';
+import { WorkspaceSessionModule } from './workspace-session/workspace-session.module';
 
 @Module({
   imports: [
@@ -85,6 +86,7 @@ import { AirdropModule } from './airdrop/airdrop.module';
     WatchlistModule,
     ReputationModule,
     AirdropModule,
+    WorkspaceSessionModule,
   ],
   providers: [
     {
