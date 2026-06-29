@@ -12,7 +12,7 @@ if (-not (Test-Path $monitor)) { throw "stack-monitor.ps1 not found at $monitor"
 # Detect powershell.exe (PS 5.1) vs pwsh.exe (PS7+) — prefer pwsh if present.
 $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
 $exe  = if ($pwsh) { $pwsh.Source } else { (Get-Command powershell.exe).Source }
-$arg  = if ($pwsh) { '-NoProfile -ExecutionPolicy Bypass -File' } else { '-NoProfile -ExecutionPolicy Bypass -File' }
+$arg  = if ($pwsh) { '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File' } else { '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File' }
 $action = New-ScheduledTaskAction -Execute $exe -Argument "$arg `"$monitor`" -Quiet"
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
@@ -31,5 +31,5 @@ if ($existing) {
 
 # Run once immediately so logs/stack_health.json is fresh.
 Write-Host "Running stack-monitor once now..." -ForegroundColor Cyan
-& $exe -NoProfile -ExecutionPolicy Bypass -File $monitor -Quiet
+& $exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $monitor -Quiet
 Write-Host "Done. Health snapshot: $repoRoot\logs\stack_health.json" -ForegroundColor Green

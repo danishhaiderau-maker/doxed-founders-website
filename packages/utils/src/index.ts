@@ -82,6 +82,7 @@ export * from './founder-brain-router';
 export * from './commit-intelligence';
 export * from './founder-brain-coach';
 export * from './founder-brain-context';
+export * from './founder-live-context';
 export * from './agent-runtime';
 export * from './founder-queue';
 export * from './attention-center';

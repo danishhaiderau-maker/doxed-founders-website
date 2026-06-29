@@ -306,36 +306,81 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     const modelLabel = selectedModel?.label ?? 'AI';
     const modelKey = selectedModel?.key ?? 'GLM';
 
-    // Stage 1 — real context load. These numbers come from actual workspace state.
-    emitEvent('AI', 'request_started', `Founder Brain invoked with ${modelLabel}`, {
+    emitEvent('AI', 'request_started', `${modelLabel} connected — collecting live context`, {
       stream,
       level: 'info',
       progress: 0.05,
       meta: { model: modelKey, prompt: text.slice(0, 120) },
     });
-    const fileCount = openFiles.length;
-    const commitCount = recentCommits.length;
-    emitEvent('AI', 'context_load', `Loading project context…`, { stream, progress: 0.15 });
-    await new Promise((r) => setTimeout(r, 120));
-    emitEvent('AI', 'context_loaded', `Loaded workspace — ${fileCount} open file(s), ${commitCount} recent commit(s), branch ${branch}`, {
+
+    if (repo) {
+      emitEvent('GITHUB', 'repo', `Repository: ${repo}`, { stream, progress: 0.12 });
+    } else {
+      emitEvent('GITHUB', 'repo', 'Repository not linked in Builder settings', { stream, level: 'warn', progress: 0.12 });
+    }
+
+    emitEvent('GIT', 'status', `Branch ${branch} · ${recentCommits.length} recent commit(s)`, {
       stream,
-      progress: 0.3,
-      meta: { fileCount, commitCount, branch },
+      progress: 0.2,
+      meta: { branch, commitCount: recentCommits.length },
     });
+    if (recentCommits[0]?.message) {
+      const head = (recentCommits[0].message ?? '').split('\n')[0].slice(0, 70);
+      emitEvent('GIT', 'log', `Latest: ${head}`, { stream, progress: 0.25 });
+    }
+
+    if (openFiles.length > 0) {
+      emitEvent('FILE', 'open', `Reading ${openFiles.length} open file(s) via Desktop bridge`, {
+        stream,
+        progress: 0.32,
+        meta: { files: openFiles.slice(0, 6) },
+      });
+    }
+
+    if (worker?.connections?.founderNode) {
+      emitEvent('SYSTEM', 'node', 'Founder Node: connected', { stream, progress: 0.38 });
+    }
+    if (worker?.connections?.cursor) {
+      emitEvent('CURSOR', 'connected', 'Cursor: connected', { stream, progress: 0.42 });
+    }
+    if (lastDeploy?.title) {
+      emitEvent('DEPLOY', 'status', `Deploy: ${lastDeploy.title.slice(0, 50)}`, { stream, progress: 0.48 });
+    }
+
     if (pendingAttachments.length > 0) {
       emitEvent('VAULT', 'attached', `${pendingAttachments.length} attachment(s) queued for Founder Vault`, {
         stream,
-        progress: 0.35,
+        progress: 0.52,
         meta: { names: pendingAttachments.map((a) => a.name) },
       });
     }
-    await new Promise((r) => setTimeout(r, 80));
-    emitEvent('AI', 'model_send', `Sending prompt to ${modelLabel}…`, { stream, progress: 0.45 });
-    advanceStream(stream, 0.55, `Awaiting ${modelLabel} response…`);
+
+    emitEvent('AI', 'model_send', `Sending live snapshot + prompt to ${modelLabel}…`, { stream, progress: 0.58 });
+    advanceStream(stream, 0.65, `Awaiting ${modelLabel} response…`);
 
     try {
-      const result = await copilotAsk(text, accessToken);
-      advanceStream(stream, 0.85, `Response received from ${result.answerProvider ?? modelLabel}`);
+      const result = await copilotAsk(text, accessToken, { provider: modelKey });
+
+      for (const step of result.contextCollection ?? []) {
+        emitEvent(
+          step.status === 'done' ? 'SYSTEM' : 'SYSTEM',
+          step.id,
+          step.label,
+          { stream, level: step.status === 'done' ? 'success' : 'info', progress: 0.72 },
+        );
+      }
+
+      const usedProvider = result.answerProvider ?? modelLabel;
+      if (result.llmErrors?.length && usedProvider === 'RULE_BASED') {
+        emitEvent('AI', 'fallback', `LLM unavailable (${result.llmErrors.join(', ')}) — rule-based answer`, {
+          stream,
+          level: 'warn',
+          progress: 0.78,
+        });
+      } else {
+        advanceStream(stream, 0.85, `Response from ${usedProvider}${result.requestedProvider ? ` (requested ${result.requestedProvider})` : ''}`);
+      }
+
       const answer =
         result.answer?.trim() ||
         result.founderBrain?.task ||
@@ -345,9 +390,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         level: 'success',
         progress: 1,
         meta: {
-          provider: result.answerProvider,
+          provider: usedProvider,
           toolsUsed: result.runtime?.toolsUsed,
           cursorDispatched: result.runtime?.cursorDispatched,
+          sources: result.liveSnapshot?.sourcesConsulted,
         },
       });
       if (result.runtime?.cursorDispatched) {
@@ -362,7 +408,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         {
           role: 'agent',
           text: answer,
-          model: result.answerProvider ? `${result.answerProvider}` : modelLabel,
+          model: usedProvider,
         },
       ]);
     } catch (err) {
@@ -382,11 +428,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       ]);
     } finally {
       setThinking(false);
-      // Keep the stream visible briefly so the user reads the final stage, then clear.
       setTimeout(() => {
         clearStream(stream);
         setActiveStream((cur) => (cur === stream ? null : cur));
-      }, 4000);
+      }, 12000);
     }
   }
 
@@ -644,7 +689,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                       </div>
                     </div>
                   ))}
-                  {thinking && activeStream && (
+                  {activeStream && (thinking || streamEvents.length > 0) && (
                     <div className="flex justify-start">
                       <div className="max-w-[85%] rounded-lg bg-zinc-800 px-3 py-2.5 text-xs text-zinc-200">
                         <div className="mb-1.5 flex items-center gap-1.5">

@@ -4699,10 +4699,24 @@ export function fetchCopilotSocialDraft(
   );
 }
 
-export function copilotAsk(prompt: string, token: string, agentTemplate?: string | null) {
+export function copilotAsk(
+  prompt: string,
+  token: string,
+  options?: { agentTemplate?: string | null; provider?: string | null },
+) {
   return apiFetch<{
     answer: string;
     answerProvider?: string;
+    requestedProvider?: string | null;
+    contextCollection?: { id: string; label: string; status: 'done' | 'skipped' }[];
+    liveSnapshot?: {
+      repoFullName: string | null;
+      githubLinked: boolean;
+      branch: string | null;
+      recentCommitCount: number;
+      openFileCount: number;
+      sourcesConsulted: string[];
+    };
     llmErrors?: string[];
     founderBrain?: { task: string; label: string };
     routedAgent?: { template: string; label: string };
@@ -4722,7 +4736,14 @@ export function copilotAsk(prompt: string, token: string, agentTemplate?: string
     stats: Record<string, number>;
   }>(
     '/copilot/ask',
-    { method: 'POST', body: JSON.stringify({ prompt, agentTemplate: agentTemplate ?? undefined }) },
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt,
+        agentTemplate: options?.agentTemplate ?? undefined,
+        provider: options?.provider ?? undefined,
+      }),
+    },
     token,
   );
 }
