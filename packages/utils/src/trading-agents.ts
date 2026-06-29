@@ -134,6 +134,55 @@ export type TradingAgentDashboardState = {
     expiredOrders: AgentLiveExpiredOrderRow[];
     trades: AgentLiveTradeRow[];
   };
+  /** Single-source-of-truth integrity block emitted by the showcase bot snapshot.
+   * Present when the dashboard was built from a live bot `/api/state` or
+   * `/api/relay-state` payload. Absent for pure DB-fallback dashboards. */
+  stateIntegrity?: BotStateIntegrity;
+  /** "Data from last N hours" window label, derived from the bot session start. */
+  dataWindowHours?: number;
+  /** Seconds the bot process has been running (uptime). */
+  botUptimeHours?: number;
+  /** Where this dashboard snapshot came from: 'live_bot' | 'railway_cache' | 'db_fallback'. */
+  snapshotSource?: string;
+};
+
+/** State Integrity block — proves a downstream viewer is reading the same live bot. */
+export type BotStateIntegrity = {
+  snapshot_seq: number;
+  snapshot_ts: string;
+  snapshot_age_sec: number;
+  bot_version: string;
+  exchange: string;
+  symbol: string;
+  ws_connected: boolean;
+  ws_status: string;
+  ws_connected_sec_ago: number | null;
+  rest_healthy: boolean;
+  price_age_sec: number | null;
+  book_age_sec: number | null;
+  orders_synced: boolean;
+  positions_synced: boolean;
+  trades_synced: boolean;
+  last_fill_sec_ago: number | null;
+  execution_paused: boolean;
+  live_armed: boolean;
+  bitfinex_live_enabled: boolean;
+  bitfinex_live?: Record<string, unknown> | null;
+  genome_recorder: string;
+  genome_bus_seq?: number | null;
+  genome_stats?: Record<string, unknown> | null;
+  research_db: boolean;
+  relay_push?: {
+    configured: boolean;
+    url?: string | null;
+    seq?: number;
+    last_event?: string | null;
+    last_ok?: boolean | null;
+    last_sec_ago?: number | null;
+  };
+  tunnel_url?: string | null;
+  analyzer_url?: string | null;
+  last_fresh_reset_ts?: number | string | null;
 };
 
 export const TRADING_AGENT_KIND_LABELS: Record<string, string> = {

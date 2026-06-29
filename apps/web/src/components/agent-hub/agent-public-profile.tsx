@@ -515,6 +515,48 @@ function HireSidebar({
   );
 }
 
+function StateIntegrityHeader({ dashboard }: { dashboard: TradingAgentDashboardState }) {
+  const si = dashboard.stateIntegrity;
+  if (!si) {
+    return (
+      <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs text-amber-200/90">
+        <strong>Live bot snapshot unavailable.</strong> Showing cached/database numbers.
+        Start the home bot and refresh, or click Start in the command center.
+      </div>
+    );
+  }
+  const uptimeH = dashboard.botUptimeHours ?? 0;
+  const windowH = dashboard.dataWindowHours ?? uptimeH;
+  const ageSec = si.snapshot_age_sec ?? 0;
+  const source = dashboard.snapshotSource ?? 'live_bot';
+  const wsOk = si.ws_connected && si.rest_healthy;
+  const dot = wsOk ? 'bg-emerald-400' : si.ws_connected ? 'bg-amber-400' : 'bg-rose-400';
+  return (
+    <div className="mb-4 rounded-xl border border-zinc-700/60 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-300">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="flex items-center gap-1.5 font-semibold text-zinc-100">
+          <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+          {wsOk ? 'Live bot connected' : si.ws_connected ? 'Bot up · REST stale' : 'Bot offline'}
+        </span>
+        <span>Data from last {windowH > 0 ? `${windowH.toFixed(1)}h` : '—'}</span>
+        <span>Running for {uptimeH > 0 ? `${uptimeH.toFixed(1)}h` : '—'}</span>
+        <span>source: <span className="text-zinc-100">{source}</span></span>
+        <span>seq: <span className="text-zinc-100">{si.snapshot_seq}</span></span>
+        <span>age: <span className="text-zinc-100">{Math.round(ageSec)}s</span></span>
+        <span>exchange: <span className="text-zinc-100">{si.exchange}</span></span>
+        <span>genome: <span className="text-zinc-100">{si.genome_recorder}</span></span>
+        <span>relay: <span className="text-zinc-100">{si.relay_push?.configured ? `on (${si.relay_push.seq ?? 0})` : 'off'}</span></span>
+        <span>live: <span className="text-zinc-100">{si.bitfinex_live_enabled ? 'armed' : 'sim'}</span></span>
+      </div>
+      <div className="mt-1 text-[10px] text-zinc-500">
+        generated_at: {si.snapshot_ts} · ws {si.ws_status} · price_age {si.price_age_sec ?? '—'}s ·
+        last_fill {si.last_fill_sec_ago != null ? `${Math.round(si.last_fill_sec_ago)}s ago` : '—'} ·
+        v{si.bot_version}
+      </div>
+    </div>
+  );
+}
+
 export function AgentPublicProfile({
   slug,
   agent,
@@ -796,6 +838,8 @@ export function AgentPublicProfile({
           {showcaseNote}
         </p>
       )}
+
+      <StateIntegrityHeader dashboard={dashboard} />
 
       <AgentMarketplaceStats agents={allAgents ?? [deskShowcaseAgent]} builderCount={14} />
 

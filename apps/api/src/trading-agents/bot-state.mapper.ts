@@ -1,4 +1,4 @@
-import type { TradingAgentDashboardState } from '@dcf/utils';
+import type { TradingAgentDashboardState, BotStateIntegrity } from '@dcf/utils';
 import { formatMelbourneDateTime } from '@dcf/utils';
 
 /** Shape returned by the Python bot GET /api/state (subset we use). */
@@ -172,6 +172,44 @@ export type BotApiState = {
     last_exit_reason?: string;
     trades_since_last_loss?: number;
     approve_index?: number;
+  };
+  /** State Integrity block emitted by bot /api/state + /api/relay-state (single source of truth). */
+  state_integrity?: {
+    snapshot_seq?: number;
+    snapshot_ts?: string;
+    snapshot_age_sec?: number;
+    bot_version?: string;
+    exchange?: string;
+    symbol?: string;
+    ws_connected?: boolean;
+    ws_status?: string;
+    ws_connected_sec_ago?: number | null;
+    rest_healthy?: boolean;
+    price_age_sec?: number | null;
+    book_age_sec?: number | null;
+    orders_synced?: boolean;
+    positions_synced?: boolean;
+    trades_synced?: boolean;
+    last_fill_sec_ago?: number | null;
+    execution_paused?: boolean;
+    live_armed?: boolean;
+    bitfinex_live_enabled?: boolean;
+    bitfinex_live?: Record<string, unknown> | null;
+    genome_recorder?: string;
+    genome_bus_seq?: number | null;
+    genome_stats?: Record<string, unknown> | null;
+    research_db?: boolean;
+    relay_push?: {
+      configured?: boolean;
+      url?: string | null;
+      seq?: number;
+      last_event?: string | null;
+      last_ok?: boolean | null;
+      last_sec_ago?: number | null;
+    };
+    tunnel_url?: string | null;
+    analyzer_url?: string | null;
+    last_fresh_reset_ts?: number | string | null;
   };
 };
 
@@ -552,7 +590,9 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
   const dailyPnlPct = (dailyPnl / STARTING_BALANCE) * 100;
 
   const wsHealth =
-    bot.diag?.ws_status === 'OK' || bot.ws_ready
+    bot.diag?.ws_status === 'OK' ||
+    bot.state_integrity?.ws_status === 'OK' ||
+    bot.ws_ready
       ? 'HEALTHY'
       : bot.execution_paused
         ? 'DEGRADED'
@@ -612,7 +652,7 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
     latestAiVerdict,
     riskStatus: bot.execution_paused ? 'PAUSED' : 'NORMAL',
     fundingStatus: bot.funding?.interpretation ?? bot.funding?.source ?? 'Bitfinex sim',
-    dataSource: bot.data_source ?? bot.price_source ?? 'Bybit WS',
+    dataSource: bot.data_source ?? bot.price_source ?? 'Bitfinex',
     wsHealth,
     dataQuality:
       (bot.data_quality ?? 0) >= 0.7 ? 'GOOD' : (bot.data_quality ?? 0) >= 0.5 ? 'FAIR' : 'LOW',
@@ -622,6 +662,14 @@ export function mapBotStateToDashboard(bot: BotApiState): TradingAgentDashboardS
     },
     leverage: bot.leverage ?? 100,
     liveBook: mapLiveBook(bot),
+    stateIntegrity: (bot.state_integrity ?? undefined) as BotStateIntegrity | undefined,
+    snapshotSource: bot.snapshot_source ?? 'live_bot',
+    botUptimeHours: bot.bot_start_time
+      ? Math.max(0, (Date.now() / 1000 - bot.bot_start_time) / 3600)
+      : undefined,
+    dataWindowHours: bot.bot_start_time
+      ? Math.max(0, (Date.now() / 1000 - bot.bot_start_time) / 3600)
+      : undefined,
   };
 }
 

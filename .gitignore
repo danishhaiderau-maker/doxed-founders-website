@@ -118,3 +118,10 @@ docs/exports/*.zip
 .home-tunnel.log
 .home-wire.log
 .chrome-railway-profile/
+# Runtime pid/lock/mode + watchdog artifacts (local only)
+.home-*.pid
+.home-*.lock
+.home-production-mode
+.home-use-named-tunnel
+logs/
+.probe-*.ps1
