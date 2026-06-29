@@ -99,19 +99,22 @@ export class WorkspaceSessionService {
     patch: Record<string, unknown>,
   ): Promise<WorkspaceSessionShape> {
     const data = coercePatch(patch);
+    const createData: Prisma.WorkspaceSessionUncheckedCreateInput = {
+      ...this.createUncheckedPayloadFromPatch(patch),
+      userId,
+    };
     const row = await this.prisma.workspaceSession.upsert({
       where: { userId },
-      create: {
-        userId,
-        ...this.createPayloadFromPatch(patch),
-      },
+      create: createData,
       update: data,
     });
     return this.mapRow(row);
   }
 
-  private createPayloadFromPatch(patch: Record<string, unknown>): Prisma.WorkspaceSessionCreateInput {
-    const payload: Prisma.WorkspaceSessionCreateInput = { userId };
+  private createUncheckedPayloadFromPatch(
+    patch: Record<string, unknown>,
+  ): Partial<Prisma.WorkspaceSessionUncheckedCreateInput> {
+    const payload: Partial<Prisma.WorkspaceSessionUncheckedCreateInput> = {};
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       if (SCALAR_KEYS.has(key)) {
@@ -140,8 +143,8 @@ export class WorkspaceSessionService {
     return {
       selectedAiProvider: row.selectedAiProvider,
       selectedModelKey: row.selectedModelKey,
-      conversation: asArray(row.conversation),
-      terminalScrollback: asArray(row.terminalScrollback),
+      conversation: asTypedArray<WorkspaceConversationMessage>(row.conversation),
+      terminalScrollback: asTypedArray<WorkspaceTerminalLine>(row.terminalScrollback),
       openFiles: asArray(row.openFiles).filter((v): v is string => typeof v === 'string'),
       activeNav: row.activeNav,
       panelState: asPanelState(row.panelState),
@@ -152,6 +155,11 @@ export class WorkspaceSessionService {
 
 function asArray(value: Prisma.JsonValue): unknown[] {
   if (Array.isArray(value)) return value as unknown[];
+  return [];
+}
+
+function asTypedArray<T>(value: Prisma.JsonValue): T[] {
+  if (Array.isArray(value)) return value as T[];
   return [];
 }
 
