@@ -10,11 +10,14 @@ import {
   fetchDesktopBridge,
   fetchActiveAgentRun,
   fetchFounderOnboardingStatus,
+  fetchRecentAgents,
   type BuilderSettings,
   type DeployIntelligenceResponse,
   type DesktopBridgeResponse,
   type FounderAgentRunRecord,
   type FounderOnboardingStatus,
+  type RecentAgentsResponse,
+  type RecentAgent,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
@@ -34,6 +37,7 @@ import {
   useFounderEvents,
 } from '@/lib/founder-event-bus';
 import { AgentEventTimeline } from '@/components/agent-event-timeline';
+import { RecentAgentsPanel } from '@/components/recent-agents-panel';
 
 type Props = {
   accessToken: string;
@@ -117,6 +121,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [restoredSession, setRestoredSession] = useState<WorkspaceSessionData | null>(null);
   const [resumeDismissed, setResumeDismissed] = useState(false);
+  const [recentAgents, setRecentAgents] = useState<RecentAgentsResponse | null>(null);
   const [terminalScrollback, setTerminalScrollback] = useState<WorkspaceTerminalLine[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const announcedCommitsRef = useRef<Set<string>>(new Set());
@@ -160,6 +165,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       fetchDesktopBridge(accessToken),
       fetchActiveAgentRun(accessToken),
       fetchFounderOnboardingStatus(accessToken),
+      fetchRecentAgents(accessToken),
     ]);
     if (results[0].status === 'fulfilled') setActivity(results[0].value);
     if (results[1].status === 'fulfilled') setWorker(results[1].value);
@@ -168,6 +174,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (results[4].status === 'fulfilled') setBridge(results[4].value);
     if (results[5].status === 'fulfilled') setActiveRun(results[5].value);
     if (results[6].status === 'fulfilled') setOnboarding(results[6].value);
+    if (results[7].status === 'fulfilled') setRecentAgents(results[7].value);
     setLoading(false);
   }, [accessToken]);
 
@@ -200,18 +207,22 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   }, [accessToken]);
 
   // After the session load completes: mark the session "applied" so save effects
-  // can fire, and auto-dismiss the Resume panel on cold-start (no saved conversation).
-  // When a session with messages exists, keep the panel visible until the user
-  // clicks "Resume Workspace" below.
+  // can fire, and auto-dismiss the Resume panel only on a true cold-start — no
+  // saved conversation AND no live desktop bridge AND no recent agents. When the
+  // desktop is still working (bridge connected or agents running), keep the
+  // "Resume Desktop" panel visible even without a saved conversation.
   useEffect(() => {
     if (!sessionLoaded) return;
     if (sessionAppliedRef.current) return;
     sessionAppliedRef.current = true;
     const hasConversation = Boolean(restoredSession?.conversation?.length);
-    if (!hasConversation) {
+    const desktopConnected = Boolean(bridge?.latest);
+    const hasAgents = Boolean(recentAgents?.agents?.length);
+    if (!hasConversation && !desktopConnected && !hasAgents) {
       setResumeDismissed(true);
     }
-  }, [sessionLoaded, restoredSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionLoaded, restoredSession, bridge, recentAgents]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -425,8 +436,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const savedVsCloud = 31.90;
   const usingLocal = selectedModel?.local || selectedModel?.promo;
 
-  async function sendChat() {
-    const text = chatInput.trim();
+  async function sendChat(overrideText?: string) {
+    const text = (overrideText ?? chatInput).trim();
     if (!text || thinking) return;
     const userMsg: { role: 'user' | 'agent'; text: string; model?: string; attachments?: { name: string }[] } = {
       role: 'user',
@@ -811,15 +822,20 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && !thinking ? (
                 sessionLoaded &&
-                restoredSession &&
-                (restoredSession.conversation?.length ?? 0) > 0 &&
-                !resumeDismissed ? (
+                !resumeDismissed &&
+                ((restoredSession && (restoredSession.conversation?.length ?? 0) > 0) ||
+                  Boolean(bridge?.latest) ||
+                  Boolean(recentAgents?.agents?.length)) ? (
                   <ResumeWorkspacePanel
                     session={restoredSession}
                     repo={repo}
                     branch={branch}
                     worker={worker}
+                    recentAgents={recentAgents}
                     onResume={resumeWorkspace}
+                    onContinueAgent={(_agent, prompt) =>
+                      sendChat(`command cursor: ${prompt}`)
+                    }
                   />
                 ) : (
                   <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
@@ -944,7 +960,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                   {stableRecording ? '⏹ Stop' : '🎤'}
                   {stableRecording && <VoiceWaveform phase="listening" level={audioLevel} />}
                 </button>
-                <button onClick={sendChat} disabled={!chatInput.trim() || thinking}
+                <button onClick={() => sendChat()} disabled={!chatInput.trim() || thinking}
                   className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-30">
                   {thinking ? '…' : 'Send'}
                 </button>
@@ -1183,27 +1199,37 @@ function ResumeWorkspacePanel({
   repo,
   branch,
   worker,
+  recentAgents,
   onResume,
+  onContinueAgent,
 }: {
-  session: WorkspaceSessionData;
+  session: WorkspaceSessionData | null;
   repo: string | null;
   branch: string;
   worker: WorkerStatus | null;
+  recentAgents: RecentAgentsResponse | null;
   onResume: () => void;
+  onContinueAgent: (agent: RecentAgent, prompt: string) => void;
 }) {
-  const messageCount = session.conversation?.length ?? 0;
-  const lastActive = session.updatedAt ? formatRelativeTimeShort(session.updatedAt) : 'recently';
+  const messageCount = session?.conversation?.length ?? 0;
+  const lastActive = session?.updatedAt ? formatRelativeTimeShort(session.updatedAt) : 'recently';
   const cursorOk = Boolean(worker?.connections?.cursor);
   const nodeOk = Boolean(worker?.connections?.founderNode);
   const repoOk = Boolean(repo);
+  const agentCount = recentAgents?.agents?.length ?? 0;
+  const hasSession = Boolean(session);
 
   return (
     <div className="mx-auto max-w-xl space-y-4">
       <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6">
         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Founder OS</p>
-        <h2 className="mt-1 text-xl font-bold text-white">Workspace restored.</h2>
+        <h2 className="mt-1 text-xl font-bold text-white">
+          {hasSession ? 'Workspace restored.' : 'Desktop is live.'}
+        </h2>
         <p className="mt-1 text-xs text-zinc-400">
-          Your laptop stayed working while you were away.
+          {hasSession
+            ? 'Your laptop stayed working while you were away.'
+            : 'Your desktop is connected. Pick up where you left off.'}
         </p>
 
         <div className="mt-5 space-y-1.5 text-xs">
@@ -1211,8 +1237,9 @@ function ResumeWorkspacePanel({
           <ResumeRow label="Branch" value={branch} ok={repoOk} />
           <ResumeRow label="Cursor" value={cursorOk ? 'Connected' : 'Offline'} ok={cursorOk} />
           <ResumeRow label="Founder Node" value={nodeOk ? 'Online' : 'Offline'} ok={nodeOk} />
-          <ResumeRow label="Terminal" value={session.terminalScrollback?.length ? `Recovered (${session.terminalScrollback.length} lines)` : 'Empty'} ok={Boolean(session.terminalScrollback?.length)} />
+          <ResumeRow label="Terminal" value={session?.terminalScrollback?.length ? `Recovered (${session.terminalScrollback.length} lines)` : 'Empty'} ok={Boolean(session?.terminalScrollback?.length)} />
           <ResumeRow label="Conversation" value={`${messageCount} message${messageCount === 1 ? '' : 's'} recovered`} ok={messageCount > 0} />
+          {agentCount > 0 && <ResumeRow label="Active Agents" value={`${agentCount} recent agent${agentCount === 1 ? '' : 's'}`} ok={true} />}
           <ResumeRow label="Last active" value={lastActive} ok={false} />
         </div>
 
@@ -1224,6 +1251,13 @@ function ResumeWorkspacePanel({
           Resume Workspace →
         </button>
       </div>
+
+      {agentCount > 0 && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-4">
+          <RecentAgentsPanel data={recentAgents} onContinueAgent={onContinueAgent} compact />
+        </div>
+      )}
+
       <p className="text-center text-[10px] text-zinc-600">
         Or start fresh by typing a question below — your saved session stays in the background.
       </p>

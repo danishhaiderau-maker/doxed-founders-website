@@ -41,6 +41,7 @@ import { PrivacyModule } from './privacy/privacy.module';
 import { VaultModule } from './vault/vault.module';
 import { AirdropModule } from './airdrop/airdrop.module';
 import { WorkspaceSessionModule } from './workspace-session/workspace-session.module';
+import { CursorBridgeModule } from './cursor-bridge/cursor-bridge.module';
 
 @Module({
   imports: [
@@ -87,6 +88,7 @@ import { WorkspaceSessionModule } from './workspace-session/workspace-session.mo
     ReputationModule,
     AirdropModule,
     WorkspaceSessionModule,
+    CursorBridgeModule,
   ],
   providers: [
     {
