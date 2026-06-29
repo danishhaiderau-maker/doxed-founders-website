@@ -216,7 +216,7 @@ function serializeAgent(
     liveSinceDays:
       live?.liveSinceDays ??
       Math.max(1, Math.floor((Date.now() - agent.liveSince.getTime()) / (1000 * 60 * 60 * 24))),
-    followerCount: agent.followerCount,
+    followerCount: Math.max(0, agent.followerCount),
     isExperimental: agent.isExperimental,
     following: extra?.following ?? false,
     hired: extra?.hired ?? false,
@@ -1337,10 +1337,8 @@ export class TradingAgentsService implements OnModuleInit {
       where: { agentId, userId },
     });
     if (deleted.count > 0) {
-      await this.prisma.tradingAgent.update({
-        where: { id: agentId },
-        data: { followerCount: { decrement: 1 } },
-      });
+      // Clamp at 0 — a previous race/manual edit left some agents at followerCount = -1.
+      await this.prisma.$executeRaw`UPDATE "TradingAgent" SET "followerCount" = GREATEST("followerCount" - 1, 0) WHERE "id" = ${agentId}::text`;
     }
     return { following: false };
   }

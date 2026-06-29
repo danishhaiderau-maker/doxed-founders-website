@@ -2,7 +2,11 @@
 
 export type AgentDeskId = 'showcase' | 'live' | 'relay-sim';
 
-/** Compact desk tabs — primary navigation lives in CopyTradeHub; these mirror the active desk. */
+/** Compact desk tabs — primary navigation lives in CopyTradeHub; these mirror the active desk.
+ *  The "Global showcase bot" desk tab was removed: the showcase stats already live in the page
+ *  header, so a 3rd showcase desk was redundant beside live copy + relay sim. The 'showcase'
+ *  type value is retained only so legacy desk branches keep compiling; it is no longer
+ *  selectable and readStoredDesk() no longer restores it. */
 export function AgentDeskSwitcher({
   activeDesk,
   onChange,
@@ -25,7 +29,6 @@ export function AgentDeskSwitcher({
   const tabs: { id: AgentDeskId; label: string; short: string; color: string }[] = [
     { id: 'live', label: `${exchange} live copy`, short: 'Live', color: 'emerald' },
     { id: 'relay-sim', label: `${exchange} relay sim`, short: 'Sim', color: 'sky' },
-    { id: 'showcase', label: 'Global showcase bot', short: 'Showcase', color: 'violet' },
   ];
 
   return (
@@ -40,9 +43,6 @@ export function AgentDeskSwitcher({
           sky: active
             ? 'bg-sky-600 text-white shadow-sky-900/30'
             : 'text-sky-300/80 hover:bg-sky-950/40',
-          violet: active
-            ? 'bg-violet-600 text-white shadow-violet-900/30'
-            : 'text-violet-300/80 hover:bg-violet-950/40',
         }[t.color];
 
         return (

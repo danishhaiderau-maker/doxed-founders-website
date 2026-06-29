@@ -152,20 +152,13 @@ function deskHeader(
   instanceStatus: string | null | undefined,
   simActive: boolean,
 ): { eyebrow: string; title: string; hint: string } {
-  if (activeDesk === 'showcase') {
-    return {
-      eyebrow: 'Global showcase bot',
-      title: 'Conservative BTC · admin :7002',
-      hint: 'Public research bot — signals, positions, and trades from the home showcase stack. Not your copy session.',
-    };
-  }
   if (activeDesk === 'relay-sim') {
     return {
       eyebrow: `${exchange} relay simulation`,
       title: `Your ${exchange} relay sim session`,
       hint: simActive
-        ? 'Paper book with real BTC prices — test sync with showcase before risking real USDT.'
-        : 'Connect API once, then start simulation to mirror showcase signals without spending real money.',
+        ? 'Real Bitfinex API, 1 order at a time · $20 · 100x — test the full order lifecycle, then resume live copy.'
+        : 'Connect API once, then start simulation to place a single capped $20 / 100x order and test the API lifecycle.',
     };
   }
   if (isLive) {
@@ -222,17 +215,11 @@ export function CopyTradeHub({
   const canSim = isLive && exchangeProvider === 'bitfinex';
   const header = deskHeader(activeDesk, exchange, isLive, instanceStatus, simActive);
   const borderAccent =
-    activeDesk === 'showcase'
-      ? 'border-violet-500/25 from-violet-950/20'
-      : activeDesk === 'relay-sim'
-        ? 'border-sky-500/25 from-sky-950/20'
-        : 'border-emerald-500/25 from-emerald-950/20';
+    activeDesk === 'relay-sim'
+      ? 'border-sky-500/25 from-sky-950/20'
+      : 'border-emerald-500/25 from-emerald-950/20';
   const eyebrowAccent =
-    activeDesk === 'showcase'
-      ? 'text-violet-400'
-      : activeDesk === 'relay-sim'
-        ? 'text-sky-400'
-        : 'text-emerald-400';
+    activeDesk === 'relay-sim' ? 'text-sky-400' : 'text-emerald-400';
 
   return (
     <section className="space-y-3">
