@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-brain): live context engine + model routing + visible tool steps
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
