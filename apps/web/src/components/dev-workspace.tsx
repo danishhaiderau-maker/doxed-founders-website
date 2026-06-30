@@ -709,6 +709,44 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             ))}
           </nav>
 
+          {/* Work Sessions — last 5 active agents */}
+          <div className="flex min-h-0 shrink-0 flex-col border-t border-zinc-800/80">
+            <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Work Sessions</span>
+              {recentAgents && recentAgents.agents.length > 0 && (
+                <span className="rounded bg-zinc-800/60 px-1.5 text-[8px] font-semibold text-zinc-500">{recentAgents.agents.length}</span>
+              )}
+            </div>
+            <div className="min-h-0 max-h-48 overflow-y-auto px-1.5 pb-1.5">
+              {(recentAgents?.agents ?? []).length === 0 ? (
+                <p className="px-2 py-1 text-[9px] text-zinc-700">No active sessions</p>
+              ) : (
+                (recentAgents?.agents ?? []).slice(0, 5).map((agent) => (
+                  <button
+                    key={agent.id}
+                    onClick={() => sendChat(`command cursor: continue ${agent.label}`)}
+                    className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-zinc-800/50"
+                  >
+                    <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
+                      agent.status.toLowerCase().includes('run') ? 'bg-violet-400' :
+                      agent.status.toLowerCase().includes('wait') ? 'bg-amber-400' :
+                      agent.status.toLowerCase().includes('idle') ? 'bg-emerald-400' :
+                      agent.status.toLowerCase().includes('complete') ? 'bg-zinc-600' :
+                      'bg-zinc-600'
+                    }`} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[10px] font-medium text-zinc-300">{agent.label}</p>
+                      <p className="truncate text-[8px] text-zinc-600">
+                        {agent.branch ?? agent.repository ?? '—'}
+                        {agent.lastActivityAt ? ` · ${formatRelativeTimeShort(agent.lastActivityAt)}` : ''}
+                      </p>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+
           {/* File Explorer */}
           <div className="flex min-h-0 flex-1 flex-col border-t border-zinc-800/80">
             <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
