@@ -113,6 +113,11 @@ services/btc-conservative-agent/research_session*.json
 services/btc-conservative-agent/bot_analyzer_sync.json
 services/btc-conservative-agent/repo_version_sync.json
 services/btc-conservative-agent/bitfinex_live_state.json
+# Broad catch for all remaining runtime output (source .py files NOT affected)
+services/btc-conservative-agent/*.json
+services/btc-conservative-agent/*.csv
+services/btc-conservative-agent/*.html
+services/btc-conservative-agent/*.txt
 services/btc-conservative-agent/research_accumulator/
 services/btc-conservative-agent/research_archive/
 services/btc-conservative-agent/research_session_archives/
