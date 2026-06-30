@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(founder-den): add Work Sessions sidebar + clarify Cursor API key error
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
