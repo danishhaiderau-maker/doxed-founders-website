@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(fly): add Fly.io deploy artifacts + wire Start/Stop to remote Fly bot
 
 ## Last Activity
 
