@@ -27,7 +27,7 @@ import {
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
-import { copilotAsk } from '@/lib/api';
+import { copilotAsk, copilotAskStream, type ContextCollectionStep } from '@/lib/api';
 import {
   loadWorkspaceSession,
   saveWorkspaceSessionPatch,
@@ -152,8 +152,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [activeNav, setActiveNav] = useState<string>('workspace');
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<
-    { role: 'user' | 'agent'; text: string; model?: string; attachments?: { name: string }[] }[]
+    { role: 'user' | 'agent'; text: string; model?: string; provider?: string; attachments?: { name: string }[] }[]
   >([]);
+  const [liveContextSteps, setLiveContextSteps] = useState<ContextCollectionStep[] | null>(null);
+  const [showContextPanel, setShowContextPanel] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -696,6 +698,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     const pendingAttachments = attachments;
     setAttachments([]);
     setThinking(true);
+    setLiveContextSteps(null);
+    setShowContextPanel(false);
 
     const stream = `ai:${Date.now().toString(36)}`;
     setActiveStream(stream);
@@ -709,6 +713,90 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       meta: { model: modelKey, prompt: text.slice(0, 120) },
     });
 
+    // Try SSE streaming first — real context events + chunk streaming.
+    // Falls back to the legacy POST path below if SSE is unavailable.
+    try {
+      let fullAnswer = '';
+      let attributionProvider: string | undefined;
+      let attributionModel: string | undefined;
+      let contextSteps: ContextCollectionStep[] | undefined;
+
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'agent', text: '', model: modelLabel },
+      ]);
+
+      for await (const event of copilotAskStream(accessToken, { prompt: text, provider: modelKey })) {
+        if (event.type === 'context') {
+          contextSteps = event.steps;
+          setLiveContextSteps(event.steps);
+          let progress = 0.12;
+          for (const step of event.steps) {
+            emitEvent(
+              'SYSTEM',
+              step.id,
+              step.label,
+              { stream, level: step.status === 'done' ? 'success' : 'info', progress },
+            );
+            progress = Math.min(progress + 0.08, 0.6);
+          }
+          advanceStream(stream, 0.6, `Context collected (${event.steps.length} steps)`);
+        } else if (event.type === 'chunk') {
+          fullAnswer += event.text;
+          setChatMessages((prev) =>
+            prev.map((m, idx) =>
+              idx === prev.length - 1 && m.role === 'agent' ? { ...m, text: fullAnswer } : m,
+            ),
+          );
+        } else if (event.type === 'attribution') {
+          attributionProvider = event.provider;
+          attributionModel = event.model ?? undefined;
+        } else if (event.type === 'done') {
+          fullAnswer = event.answer;
+          const finalProvider = attributionProvider ?? event.answerProvider;
+          const finalModel = attributionModel ?? finalProvider ?? modelLabel;
+          setChatMessages((prev) =>
+            prev.map((m, idx) =>
+              idx === prev.length - 1 && m.role === 'agent'
+                ? { ...m, text: fullAnswer, model: finalModel, provider: attributionProvider }
+                : m,
+            ),
+          );
+          emitEvent('AI', 'response_complete', `Answer delivered (${fullAnswer.length} chars)`, {
+            stream,
+            level: 'success',
+            progress: 1,
+            meta: { provider: finalProvider, sources: contextSteps?.map((s) => s.label) },
+          });
+          break;
+        } else if (event.type === 'error') {
+          throw new Error(event.message);
+        }
+      }
+
+      if (!fullAnswer.trim()) {
+        throw new Error('Empty SSE response');
+      }
+      setThinking(false);
+      setTimeout(() => {
+        clearStream(stream);
+        setActiveStream((cur) => (cur === stream ? null : cur));
+      }, 12000);
+      return;
+    } catch (sseError) {
+      // SSE failed — remove the placeholder agent message and fall back to POST.
+      setChatMessages((prev) => {
+        if (prev.length > 0 && prev[prev.length - 1].role === 'agent' && !prev[prev.length - 1].text) {
+          return prev.slice(0, -1);
+        }
+        return prev;
+      });
+      setLiveContextSteps(null);
+      // Continue to legacy POST path below.
+      void sseError;
+    }
+
+    // ---- Legacy POST fallback (fake context events + single-shot answer) ----
     if (repo) {
       emitEvent('GITHUB', 'repo', `Repository: ${repo}`, { stream, progress: 0.12 });
     } else {
@@ -764,6 +852,9 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           step.label,
           { stream, level: step.status === 'done' ? 'success' : 'info', progress: 0.72 },
         );
+      }
+      if (result.contextCollection?.length) {
+        setLiveContextSteps(result.contextCollection);
       }
 
       const usedProvider = result.answerProvider ?? modelLabel;
@@ -1238,10 +1329,38 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                 )
               ) : (
                 <div className="space-y-3">
-                  {chatMessages.map((msg, i) => (
+                  {chatMessages.map((msg, i) => {
+                    const isLastAgent =
+                      msg.role === 'agent' &&
+                      i === chatMessages.length - 1;
+                    const showPanelHere = isLastAgent && liveContextSteps && liveContextSteps.length > 0;
+                    return (
                     <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div className={`max-w-[80%] rounded-lg px-3 py-2 text-xs ${msg.role === 'user' ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-200'}`}>
                         {msg.model && <p className="mb-1 text-[9px] font-semibold opacity-60">{msg.model}</p>}
+                        {showPanelHere && (
+                          <div className="mb-2 rounded-md border border-zinc-700/60 bg-zinc-900/40">
+                            <button
+                              onClick={() => setShowContextPanel(!showContextPanel)}
+                              className="flex w-full items-center gap-1.5 px-2 py-1 text-[9px] text-zinc-400 hover:text-zinc-200"
+                            >
+                              <span>{showContextPanel ? '▾' : '▸'}</span>
+                              <span>Live scan ({liveContextSteps!.length} steps)</span>
+                            </button>
+                            {showContextPanel && (
+                              <div className="px-2 pb-1.5">
+                                {liveContextSteps!.map((step, si) => (
+                                  <div key={si} className="flex items-center gap-1.5 py-0.5 text-[9px] text-zinc-500">
+                                    <span className={step.status === 'done' ? 'text-emerald-500/70' : 'text-zinc-600'}>
+                                      {step.status === 'done' ? '✓' : '○'}
+                                    </span>
+                                    <span>{step.label}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {msg.attachments && msg.attachments.length > 0 && (
                           <div className="mb-1.5 flex flex-wrap gap-1">
                             {msg.attachments.map((a, j) => (
@@ -1250,9 +1369,18 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                           </div>
                         )}
                         <p className="whitespace-pre-wrap">{msg.text}</p>
+                        {msg.role === 'agent' && (msg.provider || msg.model) && msg.text && (
+                          <div className="mt-1 flex items-center gap-1 text-[9px] text-zinc-500">
+                            <span>🧠</span>
+                            {msg.model && <span>{msg.model}</span>}
+                            {msg.provider && msg.model && <span className="text-zinc-700">·</span>}
+                            {msg.provider && <span>{msg.provider}</span>}
+                          </div>
+                        )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                   {activeStream && (thinking || streamEvents.length > 0) && (
                     <div className="flex justify-start">
                       <div className="max-w-[85%] rounded-lg bg-zinc-800 px-3 py-2.5 text-xs text-zinc-200">

@@ -4818,6 +4818,76 @@ export function copilotAsk(
   );
 }
 
+export type ContextCollectionStep = {
+  id: string;
+  label: string;
+  status: 'done' | 'skipped';
+};
+
+export type LiveFounderContextSnapshot = {
+  collectedAt?: string;
+  repoFullName: string | null;
+  githubLinked: boolean;
+  branch: string | null;
+  recentCommitCount: number;
+  latestCommitMessage?: string | null;
+  openFileCount: number;
+  openFileNames?: string[];
+  founderNodeOnline?: boolean;
+  cursorConnected?: boolean;
+  deployCardCount?: number;
+  vaultSynced?: boolean;
+  sourcesConsulted: string[];
+};
+
+export type CopilotStreamEvent =
+  | { type: 'context'; steps: ContextCollectionStep[] }
+  | { type: 'chunk'; text: string }
+  | { type: 'attribution'; provider: string; model?: string | null; routedAgent?: string | null }
+  | { type: 'liveSnapshot'; snapshot: LiveFounderContextSnapshot }
+  | { type: 'done'; answer: string; answerProvider: string }
+  | { type: 'error'; message: string };
+
+export async function* copilotAskStream(
+  token: string,
+  body: { prompt: string; provider?: string | null; agentTemplate?: string | null },
+): AsyncGenerator<CopilotStreamEvent> {
+  const res = await fetch(apiUrl('/copilot/ask/stream'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      prompt: body.prompt,
+      agentTemplate: body.agentTemplate ?? undefined,
+      provider: body.provider ?? undefined,
+    }),
+  });
+  if (!res.ok || !res.body) throw new Error(`copilotAskStream: ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          yield JSON.parse(line.slice(6)) as CopilotStreamEvent;
+        } catch {
+          /* skip malformed */
+        }
+      }
+    }
+  }
+}
+
 export function copilotHandsFree(prompt: string, token: string) {
   return apiFetch<{ action: string; answer: string; cursorCopy?: string }>(
     '/copilot/hands-free',
@@ -4830,6 +4900,7 @@ export type WorkspaceConversationMessage = {
   role: 'user' | 'agent';
   text: string;
   model?: string;
+  provider?: string;
   ts?: string;
   attachments?: { name: string }[];
 };
