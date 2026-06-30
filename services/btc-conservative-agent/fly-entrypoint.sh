@@ -23,10 +23,15 @@ for d in research research_accumulator research_archive; do
   fi
 done
 
-# Analyzer :9001 — read-only research dashboard the bot proxies /api/analyzer/* to.
-# Boots slowly; let it warm up while the bot comes up. Logs to /tmp/analyzer.log.
-echo "[fly-entrypoint] starting analyzer_research_engine_v62.py on :9001 (background)..."
-python analyzer_research_engine_v62.py > /tmp/analyzer.log 2>&1 &
+# Analyzer :9001 is OFF on Fly by default — Fly is a pure trading host (100% uptime,
+# no heavy data collection/analysis). The local bot owns data collection + Genome analysis.
+# Set ANALYZER_ENABLED=true to run the analyzer here too (heavier; needs more memory).
+if [ "${ANALYZER_ENABLED:-false}" = "true" ]; then
+  echo "[fly-entrypoint] starting analyzer_research_engine_v62.py on :9001 (background)..."
+  python analyzer_research_engine_v62.py > /tmp/analyzer.log 2>&1 &
+else
+  echo "[fly-entrypoint] ANALYZER_ENABLED!=true -> trading-only mode (no analyzer)."
+fi
 
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground)..."
 exec python btc_conservative_agent.py

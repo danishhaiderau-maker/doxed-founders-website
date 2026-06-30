@@ -3,7 +3,7 @@
 # DO NOT run `fly deploy` until secrets + volume are set — see the guide.
 
 app = "doxed-btc-bot"
-primary_region = "syd"   # Sydney — closest to AEST + Bitfinex low latency
+primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested syd host (mem_overcommit)
 
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]
@@ -15,7 +15,8 @@ primary_region = "syd"   # Sydney — closest to AEST + Bitfinex low latency
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = 512        # If the analyzer engine OOMs on warm-up, bump to 1024 (see migration guide).
+  memory = 256        # Trading-only (no analyzer on Fly) -> 256MB is enough.
+                      # If you enable ANALYZER_ENABLED=true, bump to 1024.
 
 # Persistent volume for research/ + runtime JSON/JSONL/CSV.
 # Created once: `fly volumes create bot_data --region syd --size 1`

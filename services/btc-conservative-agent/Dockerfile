@@ -32,7 +32,8 @@ RUN mkdir -p /app/data
 EXPOSE 7002
 
 # Entrypoint: wire writable dirs to the volume, start analyzer :9001 in background, then bot :7002.
+# sed strips any CRLF (file may be authored on Windows) so the #!/bin/sh shebang stays valid.
 COPY fly-entrypoint.sh /fly-entrypoint.sh
-RUN chmod +x /fly-entrypoint.sh
+RUN sed -i 's/\r$//' /fly-entrypoint.sh && chmod +x /fly-entrypoint.sh
 
 CMD ["/fly-entrypoint.sh"]
