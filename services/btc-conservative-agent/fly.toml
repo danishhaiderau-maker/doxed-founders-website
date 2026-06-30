@@ -1,0 +1,24 @@
+# Fly.io app config for the doxxedcrypto.digital showcase BTC bot.
+# App + machine are created by the user (see docs/fly-migration-guide.md).
+# DO NOT run `fly deploy` until secrets + volume are set — see the guide.
+
+app = "doxed-btc-bot"
+primary_region = "syd"   # Sydney — closest to AEST + Bitfinex low latency
+
+# Trading bot must stay up 24/7 — never auto-stop.
+[http_service]
+  internal_port = 7002
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = 512        # If the analyzer engine OOMs on warm-up, bump to 1024 (see migration guide).
+
+# Persistent volume for research/ + runtime JSON/JSONL/CSV.
+# Created once: `fly volumes create bot_data --region syd --size 1`
+[mounts]
+  source = "bot_data"
+  destination = "/app/data"

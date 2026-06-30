@@ -6,7 +6,9 @@ import { AuthUser } from '../auth/auth.types';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Public } from '../auth/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt.guard';
+import { AdminGuard } from '../auth/guards';
 import { CopyRelaySimService } from './copy-relay-sim.service';
+import { FlyControlService, type FlyControlAction, type FlyControlResult } from './fly-control.service';
 import { ShowcaseRelayEventsService, type ShowcaseRelayEventBody } from './showcase-relay-events.service';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
@@ -20,6 +22,7 @@ export class TradingAgentsController {
     private readonly relaySim: CopyRelaySimService,
     private readonly showcaseRelay: ShowcaseRelayEventsService,
     private readonly execution: SignalSubscriberExecutionService,
+    private readonly flyControlService: FlyControlService,
   ) {}
 
   @Public()
@@ -44,6 +47,13 @@ export class TradingAgentsController {
   @Get('bot/status')
   botStatus() {
     return this.tradingAgents.getBotBridgeStatus();
+  }
+
+  @Public()
+  @Get('showcase-host')
+  showcaseHost() {
+    const host = (process.env.SHOWCASE_HOST ?? 'local').trim().toLowerCase();
+    return { host: host === 'fly' ? 'fly' : 'local' };
   }
 
   @Public()
@@ -141,6 +151,18 @@ export class TradingAgentsController {
   ) {
     this.showcaseRelay.assertAuthorized(secret);
     return this.showcaseRelay.ingest(slug, body);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post(':slug/fly-control')
+  flyControl(@Param('slug') slug: string, @Body() body: { action: FlyControlAction }): Promise<FlyControlResult> {
+    return this.flyControlService.control(body.action);
+  }
+
+  @UseGuards(AdminGuard)
+  @Get(':slug/fly-control')
+  flyControlStatus(@Param('slug') slug: string): Promise<{ status: string; machineState: string }> {
+    return this.flyControlService.getMachineState().then((state) => ({ status: state, machineState: state }));
   }
 
   @Post(':slug/relay-sim/start')

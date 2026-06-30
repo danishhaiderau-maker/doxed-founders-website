@@ -1,0 +1,38 @@
+# Fly.io image for the doxxedcrypto.digital showcase BTC bot.
+# Canonical in-repo bot — see .cursor/rules/no-blunt-bot-sync.mdc (DO NOT sync from bybit_bot.py).
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=7002 \
+    DASHBOARD_BIND_HOST=0.0.0.0 \
+    DASHBOARD_PUBLIC_HOST=0.0.0.0 \
+    RESEARCH_DASHBOARD_PORT=9001 \
+    RESEARCH_DASHBOARD_BIND_HOST=0.0.0.0 \
+    BOT_DATA_DIR=/app/data
+
+WORKDIR /app
+
+# System deps: gcc for any wheels (numpy/pandas), curl for health probes, tzdata for AEST logs.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the whole agent dir (bot.py, btc_conservative_agent.py, analyzer_research_engine_v62.py,
+# research_dashboard.py, showcase_ui.py, early_boot.py, pathway_*.py, etc.).
+COPY . /app
+
+# Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
+RUN mkdir -p /app/data
+
+EXPOSE 7002
+
+# Entrypoint: wire writable dirs to the volume, start analyzer :9001 in background, then bot :7002.
+COPY fly-entrypoint.sh /fly-entrypoint.sh
+RUN chmod +x /fly-entrypoint.sh
+
+CMD ["/fly-entrypoint.sh"]
