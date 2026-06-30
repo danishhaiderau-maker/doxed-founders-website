@@ -452,7 +452,8 @@ model User {
   signalCycleParticipants SignalCycleParticipant[]
   builderSettings      FounderBuilderSettings?
   projectMemorySync    ProjectMemoryDeviceSync?
-  workspaceSession     WorkspaceSession?
+  workspaceSessions    WorkspaceSession[]
+  connectedWorkspaces  ConnectedWorkspace[]
   founderNodes              FounderNode[]
   founderNodePairings       FounderNodePairingCode[]
   founderNodeVaultRelays    FounderNodeVaultRelay[]
@@ -1701,13 +1702,38 @@ model ProjectMemoryDeviceSync {
 }
 
 /**
+ * ConnectedWorkspace — project-scoped work session (Cursor-style left sidebar).
+ * Each workspace carries its own label, repo, branch, IDE/AI provider, and a
+ * WorkspaceSession row. A null-workspaceId session preserves the legacy
+ * single-session-per-user behaviour.
+ */
+model ConnectedWorkspace {
+  id           String   @id @default(cuid())
+  userId       String
+  label        String
+  repository   String?
+  branch       String?
+  ideProvider  String?
+  aiProvider   String?
+  lastActiveAt DateTime @updatedAt
+  createdAt    DateTime @default(now())
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions WorkspaceSession[]
+
+  @@index([userId, lastActiveAt])
+}
+
+/**
  * WorkspaceSession — survives refresh on /founder-den. Stores the IDE-style workspace
  * state (selected model, nav, terminal, conversation, open files, panel toggles) so the
- * laptop-while-away UX works. One row per user (upserted).
+ * laptop-while-away UX works. Multiple sessions per user are keyed by workspaceId; a
+ * null workspaceId preserves the legacy default session.
  */
 model WorkspaceSession {
   id                  String   @id @default(cuid())
-  userId              String   @unique
+  userId              String
+  workspaceId         String?
   selectedAiProvider  String?
   selectedModelKey    String?
   conversation        Json?
@@ -1718,7 +1744,11 @@ model WorkspaceSession {
   updatedAt           DateTime @updatedAt
   createdAt           DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace ConnectedWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([workspaceId])
 }
 
 /** Paired Founder Node (desktop vault) — control plane metadata only. */

@@ -5334,3 +5334,37 @@ export function askFounderBrain(slug: string, question: string) {
     { method: 'POST', body: JSON.stringify({ question }) },
   );
 }
+
+export type ConnectedWorkspace = {
+  id: string;
+  label: string;
+  repository: string | null;
+  branch: string | null;
+  ideProvider: string | null;
+  aiProvider: string | null;
+  lastActiveAt: string;
+  createdAt: string;
+};
+
+export function fetchConnectedWorkspaces(token: string) {
+  return apiFetch<ConnectedWorkspace[]>('/connected-workspace', undefined, token);
+}
+
+export function createConnectedWorkspace(
+  token: string,
+  data: { label: string; repository?: string; branch?: string },
+) {
+  return apiFetch<ConnectedWorkspace>(
+    '/connected-workspace',
+    { method: 'POST', body: JSON.stringify(data) },
+    token,
+  );
+}
+
+export function deleteConnectedWorkspace(token: string, id: string) {
+  return apiFetch<{ ok: boolean }>(
+    `/connected-workspace/${id}`,
+    { method: 'DELETE' },
+    token,
+  );
+}
