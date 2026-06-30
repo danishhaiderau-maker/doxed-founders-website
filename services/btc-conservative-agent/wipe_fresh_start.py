@@ -55,11 +55,17 @@ WIPE_DIRS = (
     "debug_session_63",
 )
 
+# research/ holds the bulk accumulated raw data (~27GB / 478k files) AND the Genome
+# analysis store. Wipe research/ contents completely BUT preserve the Genome subdirs
+# (the accumulated analysis that must survive a fresh collection).
+PRESERVE_INSIDE_RESEARCH = frozenset({"genome"})
+
 # Root-level runtime globs (not directories)
 ROOT_GLOBS = (
     "*.csv",
     "*.jsonl",
     "*.log",
+    "*.db",
     "*_report.json",
     "*_scorecard.json",
     "research_compact_summary.json",
@@ -119,6 +125,23 @@ def wipe_location(base: Path, label: str) -> dict:
         elif not ok:
             errors.append(f"{label}/{name}: {msg}")
 
+    # research/: wipe EVERYTHING inside except preserved subdirs (genome = Genome store).
+    # This is the bulk (~27GB / 478k files). Without this, fresh-collection never cleared
+    # the accumulated raw data — which was the root cause of "fresh collection not working".
+    research_dir = base / "research"
+    if research_dir.is_dir():
+        for child in research_dir.iterdir():
+            if child.name in PRESERVE_INSIDE_RESEARCH:
+                continue
+            if child.is_dir():
+                ok, msg = _rm_dir(child)
+            else:
+                ok, msg = _rm_file(child)
+            if ok and msg == "removed":
+                removed_dirs.append(f"research/{child.name}")
+            elif not ok:
+                errors.append(f"{label}/research/{child.name}: {msg}")
+
     for pattern in ROOT_GLOBS:
         for p in base.glob(pattern):
             if p.name in KEEP_ROOT_FILES:
@@ -169,8 +192,30 @@ def init_accumulator(base: Path) -> dict:
         return {"error": str(e)}
 
 
+def _has_open_live_positions(base: Path) -> bool:
+    """Refuse a fresh wipe if live Bitfinex trading is armed AND there are open positions
+    (wiping would orphan real exchange positions)."""
+    if (os.environ.get("BITFINEX_LIVE_ENABLED") or "").strip().lower() != "true":
+        return False
+    op = base / "open_positions.json"
+    if not op.is_file():
+        return False
+    try:
+        data = json.loads(op.read_text(encoding="utf-8"))
+        positions = data.get("positions") if isinstance(data, dict) else data
+        return bool(positions)
+    except Exception:
+        return False
+
+
 def main():
     print("=== FRESH START WIPE — v9.83 week collection ===\n")
+    # Safety gate: never wipe while live Bitfinex trades are open (would orphan real positions).
+    for base, label in ((ROOT, "Final Bots"),):
+        if base.is_dir() and _has_open_live_positions(base):
+            print(f"ABORT: BITFINEX_LIVE_ENABLED=true and open positions exist in {label}.")
+            print("       Close all live positions / disarm live trading before fresh collection.")
+            return
     results = {}
     for base, label in ((ROOT, "Final Bots"), (AGENT, "agent")):
         if base.is_dir():

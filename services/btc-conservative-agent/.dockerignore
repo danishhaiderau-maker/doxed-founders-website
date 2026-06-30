@@ -1,39 +1,31 @@
-# Build artifacts
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Whitelist: ship ONLY source the bot needs to run.
+# All runtime/research data regenerates on the persistent volume
+# (fly-entrypoint.sh recreates research*/ dirs as volume symlinks on first boot).
+# This keeps the build context tiny (~MB, not 440MB).
 
-# Local runtime / logs
-logs/
-*.log
+# 1. Exclude everything by default.
+*
 
-# Home-stack markers + local tunnel creds (must never ship to Fly)
-.home-*
-home-bot.env
-*-home.env
+# 2. Re-include Python source at the repo root (bot, analyzer, pathways, executors).
+!*.py
 
-# Runtime artifacts with secrets / local state
-*.jsonl.*
-signal_replay.jsonl
-.openai_*
-.anthropic_*
+# 3. Re-include the research_genome package (imported by the bot at runtime).
+!research_genome/
+!research_genome/**
 
-# Git + editor
-.git/
-.gitignore
-.cursor/
-.vscode/
+# 4. Re-include deploy + Python dependency manifests.
+!requirements.txt
+!fly-entrypoint.sh
 
-# Local node/web artifacts (the bot image doesn't need any of the monorepo JS)
-node_modules/
-.next/
-dist/
-.turbo/
+# 5. Re-include root config/manifest JSON + text files.
+#    (Small — some are source config the bot reads at startup, e.g. pathway_lane_specs.json,
+#     roster_policy.json. Runtime state .json files here are tiny and harmless to ship.)
+!*.json
+!*.txt
+!*.toml
+!*.yaml
+!*.yml
 
-# Already-generated research outputs — volume is the source of truth on Fly.
-# Keep the dirs (entrypoint symlinks them) but don't bake stale copies into the image.
-research/*
-research_accumulator/*
-research_archive/*
-!research/.gitkeep
+# Explicitly keep excluded (do NOT re-include): research/, research_accumulator/,
+# research_archive/, logs/, .git/, node_modules/, .next/, dist/, .turbo/, .cursor/,
+# and any home-stack markers / local secrets (.home-*, *-home.env, .openai_*, .anthropic_*).
