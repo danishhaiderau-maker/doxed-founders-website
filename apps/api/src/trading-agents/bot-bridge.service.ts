@@ -203,8 +203,9 @@ export class BotBridgeService {
     return null;
   }
 
-  /** Try each candidate bot URL (Fly first, Cloudflare fallback) for each path.
-   *  Returns the first valid 200 JSON state — marks the bot online if EITHER endpoint responds. */
+  /** Race all candidate bot URLs in parallel for each path.
+   *  Returns the first valid 200 JSON state — online if EITHER endpoint responds.
+   *  Parallel racing avoids slow Fly-down latency (first responder wins). */
   private async fetchStateFromCandidates(
     paths: string[],
     opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
@@ -213,7 +214,7 @@ export class BotBridgeService {
     if (bases.length === 0) return null;
     for (const path of paths) {
       const timeoutMs = path.includes('relay-state') ? opts.relayTimeout : opts.stateTimeout;
-      for (const base of bases) {
+      const attempts = bases.map(async (base): Promise<BotApiState | null> => {
         try {
           const res = await fetch(`${base}${path}`, {
             signal: AbortSignal.timeout(timeoutMs),
@@ -224,10 +225,10 @@ export class BotBridgeService {
           });
           if (!res.ok) {
             this.logger.warn(`Bot ${base}${path} HTTP ${res.status}`);
-            continue;
+            return null;
           }
           const data = (await res.json()) as BotApiState;
-          if (!data || typeof data !== 'object') continue;
+          if (!data || typeof data !== 'object') return null;
           if (bases.length > 1) {
             this.logger.log(`Bot state fetched from ${base}${path}`);
           }
@@ -235,7 +236,13 @@ export class BotBridgeService {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`Bot ${base}${path} fetch failed: ${msg}`);
+          return null;
         }
+      });
+      // First valid state wins; ignore rejections/empty results from the other endpoint.
+      const settled = await Promise.allSettled(attempts);
+      for (const r of settled) {
+        if (r.status === 'fulfilled' && r.value) return r.value;
       }
     }
     return null;
@@ -310,22 +317,32 @@ export class BotBridgeService {
     return { ok: false, error: 'All bot endpoints unreachable' };
   }
 
-  /** Health probe — try Fly first, then Cloudflare. Online if either responds 200. */
+  /** Health probe — race Fly + Cloudflare in parallel; online if either responds 200.
+   *  Parallel racing avoids waiting on a dead endpoint (first 200 wins). */
   async fetchHealth() {
     const bases = await this.resolveBotUrls();
+    const probes: Promise<Record<string, unknown> | null>[] = [];
     for (const base of bases) {
       for (const path of ['/api/ping', '/health']) {
-        try {
-          const res = await fetch(`${base}${path}`, {
-            signal: AbortSignal.timeout(8_000),
-            headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
-          });
-          if (!res.ok) continue;
-          return (await res.json()) as Record<string, unknown>;
-        } catch {
-          /* try next path/endpoint */
-        }
+        probes.push(
+          (async () => {
+            try {
+              const res = await fetch(`${base}${path}`, {
+                signal: AbortSignal.timeout(8_000),
+                headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+              });
+              if (!res.ok) return null;
+              return (await res.json()) as Record<string, unknown>;
+            } catch {
+              return null;
+            }
+          })(),
+        );
       }
+    }
+    const settled = await Promise.allSettled(probes);
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value) return r.value;
     }
     return null;
   }
