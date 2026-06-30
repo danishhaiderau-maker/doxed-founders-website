@@ -1,6 +1,10 @@
 # Fly.io image for the doxxedcrypto.digital showcase BTC bot.
 # Canonical in-repo bot — see .cursor/rules/no-blunt-bot-sync.mdc (DO NOT sync from bybit_bot.py).
-FROM python:3.11-slim
+FROM python:3.12-slim
+# 3.12 (not 3.11): the analyzer module has f-strings with backslashes in the
+# expression part (e.g. analyzer_research_engine_v62.py:9101). Python 3.11 rejects
+# those with SyntaxError -> "SYSTEM_NOT_READY: cannot import analyzer" -> bot exit
+# loop every ~7-10min. 3.12 lifted that restriction (matches the local bot's Python).
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
