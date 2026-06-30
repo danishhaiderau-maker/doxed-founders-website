@@ -13,6 +13,15 @@ export type BotApiState = {
   trade_count_session?: number;
   bot_version?: string;
   daily_pnl_usd?: number;
+  /** Cumulative session analytics from the bot's research analyzer aggregate (since last fresh-collection wipeout). */
+  analytics?: {
+    total_trades?: number;
+    win_rate?: number;
+    by_regime?: Record<string, unknown>;
+    by_strategy?: Record<string, unknown>;
+    exit_reasons?: Record<string, unknown>;
+  };
+  analytics_ts?: number;
   regime?: string;
   strategy_mode?: string;
   execution_paused?: boolean;

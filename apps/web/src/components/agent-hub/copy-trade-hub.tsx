@@ -304,15 +304,19 @@ export function CopyTradeHub({
         <ShowcaseReferenceBar showcaseAgent={showcaseAgent} botConnected={botConnected} />
       )}
 
-      <AgentDeskMetricsBar
-        activeDesk={activeDesk}
-        userAgent={agent}
-        showcaseAgent={showcaseAgent}
-        copyRelaySim={copyRelaySim}
-        exchangeLabel={exchangeLabel}
-        isLiveSession={isLive}
-        instanceStatus={instanceStatus}
-      />
+      {/* The conservative-btc showcase desk surfaces cumulative full-session metrics via
+          AgentAnalyzerPanel instead of this per-restart equity bar (avoid the $500 reset look). */}
+      {!(slug === 'conservative-btc' && activeDesk === 'showcase') && (
+        <AgentDeskMetricsBar
+          activeDesk={activeDesk}
+          userAgent={agent}
+          showcaseAgent={showcaseAgent}
+          copyRelaySim={copyRelaySim}
+          exchangeLabel={exchangeLabel}
+          isLiveSession={isLive}
+          instanceStatus={instanceStatus}
+        />
+      )}
     </section>
   );
 }
