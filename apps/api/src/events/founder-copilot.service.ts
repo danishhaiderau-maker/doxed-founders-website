@@ -111,6 +111,22 @@ import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.s
 import { FounderGraphService } from '../founder-graph/founder-graph.service';
 import type { FounderMemoryGraphPatch } from '@dcf/utils';
 
+export type CopilotStreamEvent =
+  | { type: 'context'; steps: unknown[] }
+  | { type: 'liveSnapshot'; snapshot: unknown }
+  | { type: 'attribution'; provider: string; model: string | null; routedAgent: string | null }
+  | { type: 'chunk'; text: string }
+  | { type: 'done'; answer: string; answerProvider: string }
+  | { type: 'error'; message: string };
+
+export type CopilotAskResult = {
+  answer?: string;
+  answerProvider?: string;
+  contextCollection?: unknown[];
+  liveSnapshot?: unknown;
+  routedAgent?: { template?: string; label?: string } | undefined;
+};
+
 @Injectable()
 export class FounderCopilotService {
   constructor(
@@ -1393,6 +1409,52 @@ export class FounderCopilotService {
         },
       };
     }
+  }
+
+  /**
+   * SSE streaming variant of ask().
+   *
+   * Reuses the full ask() pipeline, then wraps the result in ordered events:
+   *   context -> liveSnapshot -> attribution -> chunk* -> done
+   *
+   * This is intentionally not real provider-native token streaming — it chunks the
+   * fully-resolved answer so the endpoint contract exists and works today. Real
+   * token-by-token streaming can swap in later by replacing the chunk loop below.
+   */
+  async askStream(
+    userId: string,
+    prompt: string,
+    options: { agentTemplate?: string | null; provider?: string | null } | undefined,
+    emit: (event: CopilotStreamEvent) => void,
+  ): Promise<void> {
+    const result = (await this.ask(userId, prompt, options)) as CopilotAskResult;
+
+    if (result.contextCollection) {
+      emit({ type: 'context', steps: result.contextCollection });
+    }
+    if (result.liveSnapshot) {
+      emit({ type: 'liveSnapshot', snapshot: result.liveSnapshot });
+    }
+
+    emit({
+      type: 'attribution',
+      provider: result.answerProvider ?? 'RULE_BASED',
+      model: options?.provider ?? null,
+      routedAgent: result.routedAgent?.label ?? null,
+    });
+
+    const text = result.answer ?? '';
+    const chunkSize = 50;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      emit({ type: 'chunk', text: text.slice(i, i + chunkSize) });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    emit({
+      type: 'done',
+      answer: text,
+      answerProvider: result.answerProvider ?? 'RULE_BASED',
+    });
   }
 
   async ask(userId: string, prompt: string, options?: { agentTemplate?: string | null; provider?: string | null }) {

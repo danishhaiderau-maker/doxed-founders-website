@@ -47,7 +47,7 @@ function snippet(text: string | null | undefined): string | null {
 }
 
 @Injectable()
-export class CursorBridgeService {
+export class IdeBridgeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly desktopBridge: DesktopBridgeService,
