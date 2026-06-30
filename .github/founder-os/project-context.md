@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(fly): wrap bot in auto-restart loop + tee traceback to volume log
+fix(fly): bump to Python 3.12 + fix backslash-in-fstring (root cause of bot crash loop)
 
 ## Last Activity
 
