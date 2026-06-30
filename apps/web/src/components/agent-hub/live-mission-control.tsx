@@ -211,7 +211,7 @@ export function LiveMissionControl({
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Live Mission Control</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-violet-400">Live Development Workspace</p>
           <h1 className="mt-1 text-2xl font-bold text-white">{agent.name}</h1>
           <p className="text-sm text-zinc-500">
             {agent.assetSymbol} · {agent.status} ·{' '}

@@ -1,4 +1,4 @@
-/** Progressive reveal for LLM answers in Mission Control (server returns full text). */
+/** Progressive reveal for LLM answers in Development Workspace (server returns full text). */
 export async function revealTextInChat(
   text: string,
   onUpdate: (partial: string) => void,

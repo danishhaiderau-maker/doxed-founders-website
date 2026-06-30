@@ -52,7 +52,7 @@ import {
 type NavItem = { id: WorkspaceTab; label: string; icon: string };
 
 const SIDEBAR_NAV: NavItem[] = [
-  { id: 'activity', label: 'Mission Control', icon: '◆' },
+  { id: 'activity', label: 'Development Workspace', icon: '◆' },
   { id: 'social', label: 'Social Hub', icon: '📡' },
   { id: 'analytics', label: 'Settings', icon: '⚙' },
 ];

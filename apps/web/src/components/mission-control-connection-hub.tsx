@@ -28,7 +28,7 @@ type Props = {
   contentDraftReady?: boolean;
   promo?: FounderPromoUserStatus | null;
   compact?: boolean;
-  /** Hide Research/Builder/Content workforce strip — Cursor-first Mission Control */
+  /** Hide Research/Builder/Content workforce strip — Cursor-first Development Workspace */
   hideWorkforceAgents?: boolean;
   onRefresh?: () => void;
 };

@@ -38,7 +38,7 @@ export function FounderMissionControl({
   if (!session) {
     return (
       <section className="rounded-2xl border border-dashed border-zinc-700 bg-zinc-900/30 p-10 text-center">
-        <p className="text-lg font-semibold text-white">Founder OS Mission Control</p>
+        <p className="text-lg font-semibold text-white">Founder OS Development Workspace</p>
         <p className="mt-2 text-sm text-zinc-400">
           Your current project, build queue, copilot memory, and raise room — one screen.
         </p>
@@ -58,7 +58,7 @@ export function FounderMissionControl({
         <p className="text-xs font-semibold uppercase tracking-widest text-amber-400">Activate</p>
         <h2 className="mt-2 text-xl font-bold text-white">Start your founder profile</h2>
         <p className="mt-2 max-w-lg text-sm text-amber-100/80">
-          Mission control unlocks after you activate — then you get project memory, GitHub sync, Raise
+          Development Workspace unlocks after you activate — then you get project memory, GitHub sync, Raise
           Room, and Copilot resume work.
         </p>
         <button

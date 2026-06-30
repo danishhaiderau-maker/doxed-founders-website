@@ -97,7 +97,7 @@ export function DiscoverRankingRules() {
             href="/founder-den"
             className="mt-3 inline-block text-xs font-semibold text-violet-300 hover:text-violet-200"
           >
-            Grow your score in Mission Control →
+            Grow your score in Development Workspace →
           </Link>
         </div>
       </div>

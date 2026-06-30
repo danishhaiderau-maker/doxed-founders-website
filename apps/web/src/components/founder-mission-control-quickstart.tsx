@@ -9,7 +9,7 @@ type Props = {
   compact?: boolean;
 };
 
-/** Onboarding strip for new builders at /founder-den Mission Control. */
+/** Onboarding strip for new builders at /founder-den Development Workspace. */
 export function FounderMissionControlQuickstart({
   onTakeFullControl,
   onBuildWithCursor,

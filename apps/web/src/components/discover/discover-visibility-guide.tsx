@@ -88,7 +88,7 @@ export function DiscoverVisibilityGuide() {
           href="/founder-den"
           className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500"
         >
-          Open Mission Control
+          Open Development Workspace
         </Link>
         <Link
           href="/list-your-project"
