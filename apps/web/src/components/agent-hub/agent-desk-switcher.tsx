@@ -2,11 +2,9 @@
 
 export type AgentDeskId = 'showcase' | 'live' | 'relay-sim';
 
-/** Compact desk tabs — primary navigation lives in CopyTradeHub; these mirror the active desk.
- *  The "Global showcase bot" desk tab was removed: the showcase stats already live in the page
- *  header, so a 3rd showcase desk was redundant beside live copy + relay sim. The 'showcase'
- *  type value is retained only so legacy desk branches keep compiling; it is no longer
- *  selectable and readStoredDesk() no longer restores it. */
+/** Compact desk tabs — 3-tab switcher: Showcase Bot | Bitfinex relay sim | Bitfinex live copy.
+ *  Showcase Bot surfaces the live :7002 admin bot snapshot (signals, orders, positions, trades).
+ *  The other two tabs drive the visitor's own Bitfinex copy session. */
 export function AgentDeskSwitcher({
   activeDesk,
   onChange,
@@ -14,6 +12,7 @@ export function AgentDeskSwitcher({
   liveAvailable,
   relaySimAvailable,
   relaySimActive,
+  showcaseAvailable,
 }: {
   activeDesk: AgentDeskId;
   onChange: (desk: AgentDeskId) => void;
@@ -22,21 +21,31 @@ export function AgentDeskSwitcher({
   liveHired?: boolean;
   relaySimAvailable?: boolean;
   relaySimActive?: boolean;
+  showcaseAvailable?: boolean;
 }) {
   const exchange = exchangeLabel ?? 'Bitfinex';
   const simDeskOn = relaySimAvailable ?? liveAvailable;
 
   const tabs: { id: AgentDeskId; label: string; short: string; color: string }[] = [
-    { id: 'live', label: `${exchange} live copy`, short: 'Live', color: 'emerald' },
+    { id: 'showcase', label: 'Showcase Bot', short: 'Showcase', color: 'violet' },
     { id: 'relay-sim', label: `${exchange} relay sim`, short: 'Sim', color: 'sky' },
+    { id: 'live', label: `${exchange} live copy`, short: 'Live', color: 'emerald' },
   ];
 
   return (
     <div className="flex flex-wrap gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-1.5">
       {tabs.map((t) => {
-        const disabled = t.id === 'live' && !liveAvailable ? true : t.id === 'relay-sim' && !simDeskOn;
+        const disabled =
+          t.id === 'live' && !liveAvailable
+            ? true
+            : t.id === 'relay-sim' && !simDeskOn
+              ? true
+              : false;
         const active = activeDesk === t.id;
         const colorMap = {
+          violet: active
+            ? 'bg-violet-600 text-white shadow-violet-900/30'
+            : 'text-violet-300/80 hover:bg-violet-950/40',
           emerald: active
             ? 'bg-emerald-600 text-white shadow-emerald-900/30'
             : 'text-emerald-300/80 hover:bg-emerald-950/40',
@@ -57,6 +66,9 @@ export function AgentDeskSwitcher({
             <span className="sm:hidden">{t.short}</span>
             {t.id === 'relay-sim' && relaySimActive ? (
               <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+            ) : null}
+            {t.id === 'showcase' && showcaseAvailable ? (
+              <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             ) : null}
           </button>
         );

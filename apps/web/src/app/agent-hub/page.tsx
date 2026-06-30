@@ -1,5 +1,5 @@
-import AgentHubPageClient from './page.client';
+import { redirect } from 'next/navigation';
 
 export default function AgentHubPage() {
-  return <AgentHubPageClient />;
+  redirect('/agent-hub/conservative-btc');
 }

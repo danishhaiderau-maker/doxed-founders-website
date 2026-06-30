@@ -34,7 +34,7 @@ const deskStorageKey = (slug: string) => `agent-hub-desk-${slug}`;
 function readStoredDesk(slug: string): AgentDeskId | null {
   if (typeof window === 'undefined') return null;
   const raw = localStorage.getItem(deskStorageKey(slug));
-  if (raw === 'live' || raw === 'relay-sim') return raw;
+  if (raw === 'showcase' || raw === 'live' || raw === 'relay-sim') return raw;
   return null;
 }
 import type {
@@ -614,7 +614,7 @@ export function AgentPublicProfile({
   const isLiveSession = hired && instanceMode === 'live';
   const relaySimActive = Boolean(copyRelaySim?.active);
   const relaySimDeskAvailable = isLiveSession && exchangeProvider === 'bitfinex';
-  const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() => readStoredDesk(slug) ?? 'live');
+  const [activeDesk, setActiveDesk] = useState<AgentDeskId>(() => readStoredDesk(slug) ?? 'showcase');
 
   useEffect(() => {
     localStorage.setItem(deskStorageKey(slug), activeDesk);
