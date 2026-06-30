@@ -89,7 +89,9 @@ export class WorkspaceSessionService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getForUser(userId: string): Promise<WorkspaceSessionShape> {
-    const row = await this.prisma.workspaceSession.findUnique({ where: { userId } });
+    const row = await this.prisma.workspaceSession.findFirst({
+      where: { userId, workspaceId: null },
+    });
     if (!row) return { ...EMPTY_WORKSPACE_SESSION };
     return this.mapRow(row);
   }
@@ -102,11 +104,21 @@ export class WorkspaceSessionService {
     const createData: Prisma.WorkspaceSessionUncheckedCreateInput = {
       ...this.createUncheckedPayloadFromPatch(patch),
       userId,
+      workspaceId: null,
     };
-    const row = await this.prisma.workspaceSession.upsert({
-      where: { userId },
-      create: createData,
-      update: data,
+    // No @unique on userId any more (multi-workspace schema). Find-or-create the
+    // legacy null-workspace session, then update it.
+    const existing = await this.prisma.workspaceSession.findFirst({
+      where: { userId, workspaceId: null },
+      select: { id: true },
+    });
+    if (!existing) {
+      const row = await this.prisma.workspaceSession.create({ data: createData });
+      return this.mapRow(row);
+    }
+    const row = await this.prisma.workspaceSession.update({
+      where: { id: existing.id },
+      data,
     });
     return this.mapRow(row);
   }
