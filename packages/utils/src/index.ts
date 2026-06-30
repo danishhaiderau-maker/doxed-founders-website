@@ -146,3 +146,5 @@ export * from './founder-graph';
 export * from './founder-publish-pipeline';
 export * from './founder-import-wizard';
 export * from './founder-cloud-runtime';
+export * from './ide-adapters';
+export * from './founder-identity';

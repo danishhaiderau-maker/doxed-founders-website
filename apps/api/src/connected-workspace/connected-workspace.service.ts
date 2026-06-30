@@ -20,6 +20,8 @@ export type ConnectedWorkspaceCreateInput = {
 
 export type ConnectedWorkspaceUpdateInput = Partial<ConnectedWorkspaceCreateInput>;
 
+export type UpdateWorkspaceSessionInput = Record<string, unknown>;
+
 const ALLOWED_PATCH_KEYS: ReadonlySet<string> = new Set([
   'label',
   'repository',
@@ -124,8 +126,8 @@ export class ConnectedWorkspaceService {
 
   /**
    * Find or create the WorkspaceSession row for a given workspace. A workspace always
-   * has at most one session row; we find-first then create if missing (no @unique on
-   * (userId, workspaceId) so upsert-by-key is not available).
+   * has at most one session row (@@unique([userId, workspaceId]) now enforces this),
+   * so we can findUnique by compound key and upsert cleanly.
    */
   async getOrCreateSession(
     userId: string,
@@ -137,8 +139,8 @@ export class ConnectedWorkspaceService {
     });
     if (!workspace) throw new NotFoundException('Workspace not found');
 
-    const existing = await this.prisma.workspaceSession.findFirst({
-      where: { workspaceId, userId },
+    const existing = await this.prisma.workspaceSession.findUnique({
+      where: { userId_workspaceId: { userId, workspaceId } },
     });
     if (existing) return this.mapSessionRow(existing);
 
@@ -148,21 +150,84 @@ export class ConnectedWorkspaceService {
     return this.mapSessionRow(row);
   }
 
+  /**
+   * Update (or create) the WorkspaceSession row for a given workspace with a
+   * patch of updatable fields. Uses the @@unique([userId, workspaceId]) key.
+   */
+  async updateSession(
+    userId: string,
+    workspaceId: string,
+    patch: UpdateWorkspaceSessionInput,
+  ): Promise<WorkspaceSessionShape> {
+    const workspace = await this.prisma.connectedWorkspace.findFirst({
+      where: { id: workspaceId, userId },
+      select: { id: true },
+    });
+    if (!workspace) throw new NotFoundException('Workspace not found');
+
+    const updateData = coerceSessionPatch(patch);
+
+    const existing = await this.prisma.workspaceSession.findUnique({
+      where: { userId_workspaceId: { userId, workspaceId } },
+      select: { id: true },
+    });
+
+    if (!existing) {
+      const createData: Prisma.WorkspaceSessionUncheckedCreateInput = {
+        userId,
+        workspaceId,
+        ...this.createUncheckedPayloadFromPatch(patch),
+      };
+      const row = await this.prisma.workspaceSession.create({ data: createData });
+      return this.mapSessionRow(row);
+    }
+
+    const row = await this.prisma.workspaceSession.update({
+      where: { id: existing.id },
+      data: updateData,
+    });
+    return this.mapSessionRow(row);
+  }
+
+  private createUncheckedPayloadFromPatch(
+    patch: UpdateWorkspaceSessionInput,
+  ): Partial<Prisma.WorkspaceSessionUncheckedCreateInput> {
+    const payload: Partial<Prisma.WorkspaceSessionUncheckedCreateInput> = {};
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      if (SESSION_SCALAR_KEYS.has(key)) {
+        if (value === null) {
+          (payload as Record<string, unknown>)[key] = null;
+        } else if (typeof value === 'string') {
+          (payload as Record<string, unknown>)[key] = value;
+        }
+      } else if (SESSION_JSON_KEYS.has(key) && typeof value === 'object' && value !== null) {
+        (payload as Record<string, unknown>)[key] = value as Prisma.InputJsonValue;
+      } else if (SESSION_JSON_KEYS.has(key) && value === null) {
+        (payload as Record<string, unknown>)[key] = Prisma.DbNull;
+      }
+    }
+    return payload;
+  }
+
   private mapSessionRow(row: {
     selectedAiProvider: string | null;
     selectedModelKey: string | null;
+    selectedIdeProvider: string | null;
     conversation: Prisma.JsonValue;
     terminalScrollback: Prisma.JsonValue;
     openFiles: Prisma.JsonValue;
     activeNav: string | null;
     panelState: Prisma.JsonValue;
+    publishDraft: Prisma.JsonValue;
+    eventLog: Prisma.JsonValue;
     updatedAt: Date;
   }): WorkspaceSessionShape {
-    // Reuse the existing mapper shape contract.
     const empty = { ...EMPTY_WORKSPACE_SESSION };
     return {
       selectedAiProvider: row.selectedAiProvider ?? empty.selectedAiProvider,
       selectedModelKey: row.selectedModelKey ?? empty.selectedModelKey,
+      selectedIdeProvider: row.selectedIdeProvider ?? empty.selectedIdeProvider,
       conversation: arrayFromJson(row.conversation) as never,
       terminalScrollback: arrayFromJson(row.terminalScrollback) as never,
       openFiles: arrayFromJson(row.openFiles).filter(
@@ -170,9 +235,55 @@ export class ConnectedWorkspaceService {
       ),
       activeNav: row.activeNav ?? empty.activeNav,
       panelState: empty.panelState,
+      publishDraft: row.publishDraft ?? null,
+      eventLog: Array.isArray(row.eventLog) ? row.eventLog : [],
       updatedAt: row.updatedAt.toISOString(),
     };
   }
+}
+
+const SESSION_SCALAR_KEYS = new Set([
+  'selectedAiProvider',
+  'selectedModelKey',
+  'selectedIdeProvider',
+  'activeNav',
+]);
+
+const SESSION_JSON_KEYS = new Set([
+  'conversation',
+  'terminalScrollback',
+  'openFiles',
+  'panelState',
+  'publishDraft',
+  'eventLog',
+]);
+
+function coerceSessionPatch(
+  patch: UpdateWorkspaceSessionInput,
+): Prisma.WorkspaceSessionUpdateInput {
+  const data: Prisma.WorkspaceSessionUpdateInput = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    if (SESSION_SCALAR_KEYS.has(key)) {
+      if (value === null) {
+        (data as Record<string, unknown>)[key] = null;
+      } else if (typeof value === 'string') {
+        (data as Record<string, unknown>)[key] = value;
+      } else {
+        throw new BadRequestException(`${key} must be a string or null`);
+      }
+    } else if (SESSION_JSON_KEYS.has(key)) {
+      if (value === null) {
+        (data as Record<string, unknown>)[key] = Prisma.DbNull;
+      } else if (typeof value === 'object') {
+        (data as Record<string, unknown>)[key] = value as Prisma.InputJsonValue;
+      } else {
+        throw new BadRequestException(`${key} must be a JSON object or null`);
+      }
+    }
+    // Ignore unknown keys — never overwrite unrelated fields.
+  }
+  return data;
 }
 
 function arrayFromJson(value: Prisma.JsonValue): unknown[] {
