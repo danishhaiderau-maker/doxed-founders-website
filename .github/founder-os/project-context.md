@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-refactor(web): remove Mission Control branding → Development Workspace
+feat(web): SSE chat streaming + context panel + attribution chips
 
 ## Last Activity
 
