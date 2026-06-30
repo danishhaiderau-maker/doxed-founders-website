@@ -25,17 +25,21 @@ export type WorkspacePanelState = {
 export type WorkspaceSessionShape = {
   selectedAiProvider: string | null;
   selectedModelKey: string | null;
+  selectedIdeProvider: string | null;
   conversation: WorkspaceConversationMessage[];
   terminalScrollback: WorkspaceTerminalLine[];
   openFiles: string[];
   activeNav: string | null;
   panelState: WorkspacePanelState;
+  publishDraft: Prisma.JsonValue;
+  eventLog: Prisma.JsonValue;
   updatedAt: string | null;
 };
 
 export const EMPTY_WORKSPACE_SESSION: WorkspaceSessionShape = {
   selectedAiProvider: null,
   selectedModelKey: null,
+  selectedIdeProvider: null,
   conversation: [],
   terminalScrollback: [],
   openFiles: [],
@@ -45,16 +49,26 @@ export const EMPTY_WORKSPACE_SESSION: WorkspaceSessionShape = {
     terminalHeight: 180,
     sidebarOpen: true,
   },
+  publishDraft: null,
+  eventLog: [],
   updatedAt: null,
 };
 
 const SCALAR_KEYS = new Set([
   'selectedAiProvider',
   'selectedModelKey',
+  'selectedIdeProvider',
   'activeNav',
 ]);
 
-const JSON_KEYS = new Set(['conversation', 'terminalScrollback', 'openFiles', 'panelState']);
+const JSON_KEYS = new Set([
+  'conversation',
+  'terminalScrollback',
+  'openFiles',
+  'panelState',
+  'publishDraft',
+  'eventLog',
+]);
 
 function coercePatch(patch: Record<string, unknown>): Prisma.WorkspaceSessionUpdateInput {
   const data: Prisma.WorkspaceSessionUpdateInput = {};
@@ -145,21 +159,27 @@ export class WorkspaceSessionService {
   private mapRow(row: {
     selectedAiProvider: string | null;
     selectedModelKey: string | null;
+    selectedIdeProvider: string | null;
     conversation: Prisma.JsonValue;
     terminalScrollback: Prisma.JsonValue;
     openFiles: Prisma.JsonValue;
     activeNav: string | null;
     panelState: Prisma.JsonValue;
+    publishDraft: Prisma.JsonValue;
+    eventLog: Prisma.JsonValue;
     updatedAt: Date;
   }): WorkspaceSessionShape {
     return {
       selectedAiProvider: row.selectedAiProvider,
       selectedModelKey: row.selectedModelKey,
+      selectedIdeProvider: row.selectedIdeProvider,
       conversation: asTypedArray<WorkspaceConversationMessage>(row.conversation),
       terminalScrollback: asTypedArray<WorkspaceTerminalLine>(row.terminalScrollback),
       openFiles: asArray(row.openFiles).filter((v): v is string => typeof v === 'string'),
       activeNav: row.activeNav,
       panelState: asPanelState(row.panelState),
+      publishDraft: row.publishDraft ?? null,
+      eventLog: Array.isArray(row.eventLog) ? row.eventLog : [],
       updatedAt: row.updatedAt.toISOString(),
     };
   }
