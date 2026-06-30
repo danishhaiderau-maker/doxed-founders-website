@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(dev-workspace): add Workspace Switcher to left sidebar
+feat(fly): add Fly.io deploy artifacts + wire Start/Stop to remote Fly bot
 
 ## Last Activity
 
