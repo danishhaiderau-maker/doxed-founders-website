@@ -11,11 +11,13 @@ import {
   fetchActiveAgentRun,
   fetchFounderOnboardingStatus,
   fetchRecentAgents,
+  fetchFounderPlatformConnectionsHub,
   type BuilderSettings,
   type DeployIntelligenceResponse,
   type DesktopBridgeResponse,
   type FounderAgentRunRecord,
   type FounderOnboardingStatus,
+  type PlatformConnectionsHub,
   type RecentAgentsResponse,
   type RecentAgent,
 } from '@/lib/api';
@@ -106,6 +108,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [bridge, setBridge] = useState<DesktopBridgeResponse | null>(null);
   const [activeRun, setActiveRun] = useState<{ run: FounderAgentRunRecord | null; active: boolean } | null>(null);
   const [onboarding, setOnboarding] = useState<FounderOnboardingStatus | null>(null);
+  const [connectionsHub, setConnectionsHub] = useState<PlatformConnectionsHub | null>(null);
   const [loading, setLoading] = useState(true);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
@@ -169,6 +172,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       fetchActiveAgentRun(accessToken),
       fetchFounderOnboardingStatus(accessToken),
       fetchRecentAgents(accessToken),
+      fetchFounderPlatformConnectionsHub(accessToken),
     ]);
     if (results[0].status === 'fulfilled') setActivity(results[0].value);
     if (results[1].status === 'fulfilled') setWorker(results[1].value);
@@ -178,6 +182,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (results[5].status === 'fulfilled') setActiveRun(results[5].value);
     if (results[6].status === 'fulfilled') setOnboarding(results[6].value);
     if (results[7].status === 'fulfilled') setRecentAgents(results[7].value);
+    if (results[8].status === 'fulfilled') setConnectionsHub(results[8].value);
     setLoading(false);
   }, [accessToken]);
 
@@ -291,6 +296,13 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const openFiles = bridge?.latest?.openFilePaths ?? [];
   const runActive = activeRun?.active && activeRun.run ? activeRun.run : null;
   const promoActive = onboarding?.promo?.eligible && onboarding?.promo?.hasLlm;
+
+  // Per-provider connection status from the Infrastructure Hub (real data, not proxies).
+  const platformProvider = (key: string) => connectionsHub?.providers.find((p) => p.key === key) ?? null;
+  const neonProvider = platformProvider('neon');
+  const railwayProvider = platformProvider('railway');
+  const vercelProvider = platformProvider('vercel');
+  const ollamaReady = Boolean(settings?.founderNodeAi?.ollamaReady);
 
   function resumeWorkspace() {
     if (!restoredSession) {
@@ -1070,11 +1082,26 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
               <IntegrationCard label="GitHub" status={worker?.githubConnected ? 'Connected' : 'Offline'} ok={worker?.githubConnected ?? false} />
               <IntegrationCard label="Cursor" status={worker?.connections?.cursor ? 'Connected' : 'Offline'} ok={worker?.connections?.cursor ?? false} />
               <IntegrationCard label="Node" status={worker?.connections?.founderNode ? 'Running' : 'Offline'} ok={worker?.connections?.founderNode ?? false} />
-              <IntegrationCard label="Neon" status={worker?.llmConnected ? 'Healthy' : 'Offline'} ok={worker?.llmConnected ?? false} />
-              <IntegrationCard label="Railway" status={lastDeploy ? 'Healthy' : 'Offline'} ok={Boolean(lastDeploy)} />
-              <IntegrationCard label="Vercel" status={lastDeploy ? 'Healthy' : 'Offline'} ok={Boolean(lastDeploy)} />
-              <IntegrationCard label="Docker" status="—" ok={false} />
-              <IntegrationCard label="Ollama" status={selectedModel?.local ? 'Running' : 'Off'} ok={selectedModel?.local ?? false} />
+              <IntegrationCard
+                label="Neon"
+                status={neonProvider ? (neonProvider.connected ? 'Connected' : 'Not connected') : '—'}
+                ok={Boolean(neonProvider?.connected)}
+              />
+              <IntegrationCard
+                label="Railway"
+                status={railwayProvider ? (railwayProvider.connected ? 'Connected' : 'Not connected') : '—'}
+                ok={Boolean(railwayProvider?.connected)}
+              />
+              <IntegrationCard
+                label="Vercel"
+                status={vercelProvider ? (vercelProvider.connected ? 'Connected' : 'Not connected') : '—'}
+                ok={Boolean(vercelProvider?.connected)}
+              />
+              <IntegrationCard
+                label="Ollama"
+                status={ollamaReady ? 'Running' : 'Off'}
+                ok={ollamaReady}
+              />
             </div>
           </div>
 
