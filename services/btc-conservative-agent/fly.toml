@@ -15,9 +15,11 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = 512        # Trading-only (no analyzer on Fly) but the bot still imports
-                      # pandas+numpy+ccxt+flask (~300MB resident) -> 256MB OOM-killed it.
-                      # If you enable ANALYZER_ENABLED=true, bump to 1024.
+  memory = 1024       # Trading-only (no analyzer on Fly) but the bot still imports
+                      # pandas+numpy+ccxt+flask (~300MB resident) AND accumulates trade/
+                      # signal state in memory. 256MB OOM-killed immediately; 512MB died
+                      # after ~17min (slow memory growth). 1024MB gives headroom.
+                      # If you enable ANALYZER_ENABLED=true, bump to 2048.
 
 # Persistent volume for research/ + runtime JSON/JSONL/CSV.
 # Created once: `fly volumes create bot_data --region syd --size 1`
