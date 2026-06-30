@@ -728,6 +728,53 @@ def _private_api_keys_ok() -> bool:
     s = os.getenv("BITFINEX_API_SECRET", "").strip()
     return bool(k and len(k) >= 10 and s and len(s) >= 10)
 
+
+def _apply_env_live_gating() -> None:
+    """Authoritative env-gated arming of Bitfinex live execution.
+
+    The dashboard toggle (`/api/bitfinex_live` -> state['bitfinex_live_enabled'])
+    is persisted across restarts by `save_persistent_config`. That is convenient
+    for a dashboard operator but it makes "go live" a single button press with
+    no out-of-band confirmation. To make flipping to real funds an explicit,
+    reviewable action, the env var `BITFINEX_LIVE_ENABLED` is honored at startup:
+
+      - "true" / "1" / "yes" (case-insensitive)  -> arm live (requires keys OK)
+      - "false" / "0" / "no"                     -> disarm live, override persisted
+      - unset / empty                            -> keep persisted value (back-compat)
+
+    When env says arm but keys are missing, we log an error and stay disarmed
+    rather than crash. The persisted flag is then re-saved so the dashboard
+    reflects the env-driven state.
+    """
+    raw = (os.getenv("BITFINEX_LIVE_ENABLED") or "").strip().lower()
+    if not raw:
+        return
+    wants_on = raw in ("true", "1", "yes", "on")
+    with state_lock:
+        prev = bool(state.get("bitfinex_live_enabled", False))
+        if wants_on:
+            if not _private_api_keys_ok():
+                logger.error(
+                    "[BITFINEX LIVE] BITFINEX_LIVE_ENABLED=true but BITFINEX_API_KEY/"
+                    "BITFINEX_API_SECRET missing or too short - staying disarmed "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+                state["bitfinex_live_enabled"] = False
+            else:
+                state["bitfinex_live_enabled"] = True
+        else:
+            state["bitfinex_live_enabled"] = False
+        new = bool(state["bitfinex_live_enabled"])
+    if new != prev:
+        logger.warning(
+            f"[BITFINEX LIVE] env gate BITFINEX_LIVE_ENABLED={raw!r} -> "
+            f"bitfinex_live_enabled {prev} -> {new} [PIPELINE ENFORCEMENT]"
+        )
+    try:
+        save_persistent_config()
+    except Exception as exc:
+        logger.warning(f"[BITFINEX LIVE] env gate persist failed: {exc}")
+
 def _compute_volatility_metric(features: dict) -> float:
     return round(abs(float(features.get("candle_range") or features.get("volatility") or 0)), 6)
 
@@ -5249,7 +5296,9 @@ def research_dashboard_public_url() -> str:
     custom = (os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
         return custom if custom.endswith("/") else custom + "/"
-    return "http://127.0.0.1:9500/"
+    # Analyzer dashboard (research_dashboard.py) binds :9001 by default.
+    # Previous default :9500 was wrong — nothing listens there.
+    return "http://127.0.0.1:9001/"
 
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 MAX_DAILY_LOSS = DAILY_DRAWDOWN_PAUSE_USD
@@ -18716,6 +18765,129 @@ def _last_fill_ts() -> float:
         return 0.0
 
 
+def build_paper_order_book() -> dict:
+    """Per-leg paper order book — the accounting ledger that Bitfinex live cannot
+    give us once it merges multiple small orders into one netted position.
+
+    Each $20 order is its own "leg" in the bot's local book (open_positions for
+    OPEN legs, trades ledger for CLOSED legs). Bitfinex collapses 4 x $20 into a
+    single $80 position; this paper book remembers each $20 entry so closes can
+    be matched against the leg's own entry price and every dollar is accounted
+    for. This is the foundation for both SIM and live Bitfinex trading.
+
+    Exposed on /api/relay-state as `paper_book` so the website Positions/Orders/
+    Trades tables can render per-leg data without walking the full positions array.
+    """
+    legs = []
+    now = time.time()
+    price = float(state.get("price") or 0)
+    with trade_lock:
+        open_copy = copy.deepcopy(open_positions)
+        pending_copy = copy.deepcopy(pending_orders)
+        closed_recent = list(reversed(trades))[:50]
+    for p in open_copy:
+        if not isinstance(p, dict):
+            continue
+        entry = float(p.get("entry") or 0)
+        qty = float(p.get("qty") or 0)
+        lev = int(p.get("leverage") or state.get("leverage") or 20)
+        direction = p.get("dir")
+        mark = price
+        if direction == "LONG" and entry > 0:
+            unreal_pct = ((mark - entry) / entry) * 100 * lev if mark else 0.0
+        elif direction == "SHORT" and entry > 0:
+            unreal_pct = ((entry - mark) / entry) * 100 * lev if mark else 0.0
+        else:
+            unreal_pct = 0.0
+        legs.append({
+            "leg_id": p.get("trade_id"),
+            "trade_id": p.get("trade_id"),
+            "status": "OPEN",
+            "direction": direction,
+            "qty": qty,
+            "entry_price": entry,
+            "current_price": mark,
+            "sl": p.get("sl"),
+            "tp": p.get("tp"),
+            "leverage": lev,
+            "entry_ts": p.get("entry_ts"),
+            "entry_age_sec": round(now - float(p.get("entry_ts") or 0), 1) if p.get("entry_ts") else None,
+            "unrealized_pnl_usd": round((unreal_pct / 100.0) * (entry * qty) / lev, 4) if entry and qty else None,
+            "unrealized_pnl_pct": round(unreal_pct, 3),
+            "exit_price": None,
+            "realized_pnl_usd": None,
+            "exit_reason": None,
+            "research_lane": p.get("research_lane"),
+            "research_model": p.get("research_model"),
+            "bitfinex_order_id": p.get("bitfinex_order_id"),
+        })
+    for o in pending_copy:
+        if not isinstance(o, dict):
+            continue
+        legs.append({
+            "leg_id": o.get("trade_id"),
+            "trade_id": o.get("trade_id"),
+            "status": "PENDING",
+            "direction": o.get("signal_dir") or o.get("dir"),
+            "qty": float(o.get("qty") or 0),
+            "entry_price": None,
+            "current_price": price,
+            "sl": o.get("sl"),
+            "tp": o.get("tp"),
+            "leverage": int(o.get("leverage") or state.get("leverage") or 20),
+            "entry_ts": None,
+            "entry_age_sec": None,
+            "unrealized_pnl_usd": None,
+            "unrealized_pnl_pct": None,
+            "exit_price": None,
+            "realized_pnl_usd": None,
+            "exit_reason": None,
+            "limit_price": float(o.get("limit_price") or 0) or None,
+            "research_lane": o.get("research_lane"),
+            "research_model": o.get("research_model"),
+            "bitfinex_order_id": o.get("bitfinex_order_id"),
+        })
+    for t in closed_recent:
+        if not isinstance(t, dict):
+            continue
+        legs.append({
+            "leg_id": t.get("trade_id"),
+            "trade_id": t.get("trade_id"),
+            "status": "CLOSED",
+            "direction": t.get("dir") or t.get("final_direction"),
+            "qty": float(t.get("qty") or 0),
+            "entry_price": float(t.get("entry") or 0) or None,
+            "current_price": None,
+            "sl": None,
+            "tp": None,
+            "leverage": int(t.get("leverage") or state.get("leverage") or 20),
+            "entry_ts": t.get("entry_ts"),
+            "entry_age_sec": None,
+            "unrealized_pnl_usd": None,
+            "unrealized_pnl_pct": None,
+            "exit_price": float(t.get("exit") or 0) or None,
+            "realized_pnl_usd": float(t.get("net_pnl_usd") or t.get("net") or 0) or None,
+            "exit_reason": t.get("exit_reason"),
+            "research_lane": t.get("research_lane"),
+            "research_model": t.get("research_model"),
+        })
+    open_count = sum(1 for l in legs if l["status"] == "OPEN")
+    pending_count = sum(1 for l in legs if l["status"] == "PENDING")
+    closed_count = sum(1 for l in legs if l["status"] == "CLOSED")
+    realized_session = round(sum(float(l.get("realized_pnl_usd") or 0) for l in legs if l["status"] == "CLOSED"), 2)
+    unreal_session = round(sum(float(l.get("unrealized_pnl_usd") or 0) for l in legs if l["status"] == "OPEN"), 2)
+    return {
+        "purpose": "Per-$20-leg ledger. Bitfinex merges 4x$20 into one $80 position; this book remembers each leg's own entry so closes match per-leg.",
+        "max_concurrent_legs": int(state.get("max_active_signals") or MAX_CONCURRENT_POSITIONS_DEFAULT),
+        "open_count": open_count,
+        "pending_count": pending_count,
+        "closed_count_sample": closed_count,
+        "realized_pnl_usd": realized_session,
+        "unrealized_pnl_usd": unreal_session,
+        "legs": legs,
+    }
+
+
 def build_state_integrity() -> dict:
     """Single-source-of-truth State Integrity block emitted on every bot snapshot.
 
@@ -18737,6 +18909,12 @@ def build_state_integrity() -> dict:
         execution_paused = bool(state.get("execution_paused", False))
         last_fresh_reset_ts = state.get("last_fresh_reset_ts")
     ws_connected = ws_connected_ts and (now - ws_connected_ts) < 600
+    # Truthful alignment: if the WS subscription is not live, ws_status must not
+    # claim OK even if REST price is fresh. REST_FALLBACK covers the case where
+    # we still have a price but the socket itself is down. This fixes the
+    # contradictory "ws_status=OK, ws_connected=false" the audit flagged.
+    if not ws_connected:
+        ws_status = "REST_FALLBACK" if (price_age is not None and price_age < 30) else "DISCONNECTED"
     rest_healthy = price_age is not None and price_age < 30
     last_fill_sec_ago = (now - _last_fill_ts()) if _last_fill_ts() else None
     bridge = None
@@ -18867,6 +19045,7 @@ def api_relay_state():
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         _enrich_orders_for_relay(snapshot)
         snapshot["trades_map"] = _relay_trades_map_lite()
+        snapshot["paper_book"] = build_paper_order_book()
         snapshot["server_ts"] = utc_iso()
         bridge = get_genome_bridge()
         if bridge:
@@ -18895,6 +19074,45 @@ def api_build():
         "features": RESEARCH_STACK_FEATURES,
         "server_ts": utc_iso(),
     }), 200
+
+
+# ---- Read-only analyzer proxy (exposes :9001 research dashboard through the
+#      bot's public Cloudflare tunnel so Vercel/Railway can reach it). The
+#      analyzer itself is not publicly tunneled; the bot is. These routes only
+#      forward GETs to localhost:9001 — no writes, no bot state mutation.
+def _analyzer_proxy_fetch(path: str, timeout: float = 6.0):
+    base = research_dashboard_public_url().rstrip("/")
+    url = f"{base}{path}"
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read()
+            return resp.status, body
+    except Exception as exc:
+        logger.warning(f"analyzer proxy {url} failed: {exc}")
+        return None, None
+
+
+@app.route('/api/analyzer/summary')
+def api_analyzer_summary():
+    """Proxy to research dashboard /api/summary — full-session PnL/WR/trade count."""
+    status, body = _analyzer_proxy_fetch("/api/summary")
+    if status is None:
+        return jsonify({"ok": False, "error": "analyzer unreachable on :9001"}), 502
+    resp = jsonify(json.loads(body))
+    resp.headers["Cache-Control"] = "public, max-age=15"
+    return resp
+
+
+@app.route('/api/analyzer/genome')
+def api_analyzer_genome():
+    """Proxy to research dashboard /api/genome — decision genome library/discoveries."""
+    status, body = _analyzer_proxy_fetch("/api/genome", timeout=10.0)
+    if status is None:
+        return jsonify({"ok": False, "error": "analyzer unreachable on :9001"}), 502
+    resp = jsonify(json.loads(body))
+    resp.headers["Cache-Control"] = "public, max-age=30"
+    return resp
 
 
 _DASHBOARD_TRADE_API_KEYS = (
@@ -21918,6 +22136,7 @@ def main():
         )
     _wipe_research_on_startup_if_needed()
     load_persistent_config()
+    _apply_env_live_gating()
     reset_transient_runtime_state()
     update_logger_level()
     validate_startup()
