@@ -141,6 +141,12 @@ export function AgentDeskView({
 
   if (activeDesk === 'showcase' || mode === 'showcase') {
     const book = showcaseLiveBook ?? EMPTY_LIVE_BOOK;
+    const hasLiveData =
+      botConnected ||
+      (book.activeSignals && book.activeSignals.length > 0) ||
+      (book.positions && book.positions.length > 0) ||
+      (book.pendingOrders && book.pendingOrders.length > 0) ||
+      (book.trades && book.trades.length > 0);
     return (
       <DeskPanel
         badge="Global showcase"
@@ -153,6 +159,12 @@ export function AgentDeskView({
             : 'Admin view — full pipeline tables from the global showcase bot on :7002.'
         }
       >
+        {!hasLiveData ? (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs text-amber-100/90">
+            Showcase bot reachable on local network only — public tunnel down. Live signals, orders,
+            and trades will appear here once the bot + tunnel are back online.
+          </div>
+        ) : null}
         <AgentTransparencyTables liveBook={book} maxRows={10} executionOnly={executionOnly} />
         <AgentTradeJourney
           activity={showcaseActivity}

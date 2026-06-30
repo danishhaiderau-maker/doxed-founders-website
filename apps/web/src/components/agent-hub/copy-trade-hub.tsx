@@ -151,7 +151,17 @@ function deskHeader(
   isLive: boolean,
   instanceStatus: string | null | undefined,
   simActive: boolean,
+  botConnected: boolean | undefined,
 ): { eyebrow: string; title: string; hint: string } {
+  if (activeDesk === 'showcase') {
+    return {
+      eyebrow: 'Showcase bot · live',
+      title: 'Conservative BTC Agent · live action',
+      hint: botConnected
+        ? 'Real-time signals, limit orders, positions, and closed trades from the admin showcase bot on :7002. Observe only — not your exchange.'
+        : 'Showcase bot reachable on local network only — public tunnel down. Refresh once the bot + tunnel are back online.',
+    };
+  }
   if (activeDesk === 'relay-sim') {
     return {
       eyebrow: `${exchange} relay simulation`,
@@ -213,13 +223,19 @@ export function CopyTradeHub({
   const isLive = hired && instanceMode === 'live';
   const simActive = Boolean(copyRelaySim?.active);
   const canSim = isLive && exchangeProvider === 'bitfinex';
-  const header = deskHeader(activeDesk, exchange, isLive, instanceStatus, simActive);
+  const header = deskHeader(activeDesk, exchange, isLive, instanceStatus, simActive, botConnected);
   const borderAccent =
-    activeDesk === 'relay-sim'
-      ? 'border-sky-500/25 from-sky-950/20'
-      : 'border-emerald-500/25 from-emerald-950/20';
+    activeDesk === 'showcase'
+      ? 'border-violet-500/25 from-violet-950/20'
+      : activeDesk === 'relay-sim'
+        ? 'border-sky-500/25 from-sky-950/20'
+        : 'border-emerald-500/25 from-emerald-950/20';
   const eyebrowAccent =
-    activeDesk === 'relay-sim' ? 'text-sky-400' : 'text-emerald-400';
+    activeDesk === 'showcase'
+      ? 'text-violet-400'
+      : activeDesk === 'relay-sim'
+        ? 'text-sky-400'
+        : 'text-emerald-400';
 
   return (
     <section className="space-y-3">
@@ -262,6 +278,14 @@ export function CopyTradeHub({
               <p className="mt-0.5 text-sm font-bold text-white">Connected</p>
               <p className="text-[10px] text-zinc-500">no rental · paper only</p>
             </div>
+          ) : activeDesk === 'showcase' ? (
+            <div className="shrink-0 text-right">
+              <p className="text-[10px] uppercase tracking-widest text-violet-400">Showcase</p>
+              <p className="mt-0.5 text-sm font-bold text-white">
+                {botConnected ? 'Live · :7002' : 'Tunnel down'}
+              </p>
+              <p className="text-[10px] text-zinc-500">observe only</p>
+            </div>
           ) : null}
         </div>
       </div>
@@ -273,6 +297,7 @@ export function CopyTradeHub({
         liveAvailable={slug === 'conservative-btc' || !slug}
         relaySimAvailable={canSim}
         relaySimActive={simActive}
+        showcaseAvailable={Boolean(botConnected)}
       />
 
       {(activeDesk === 'live' || activeDesk === 'relay-sim') && (
