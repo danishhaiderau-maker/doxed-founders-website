@@ -51,6 +51,12 @@ type Props = {
   memoryMode: MemoryStorageModeKey;
   onMemoryModeChange: (mode: MemoryStorageModeKey) => void;
   aiSection: AiSectionProps;
+  /**
+   * When false, Step 3 (AI providers) is hidden and the remaining steps are
+   * renumbered 1–4. Used by the tabbed Settings page, which surfaces AI
+   * providers in their own hub.
+   */
+  showAiSection?: boolean;
 };
 
 export function FounderNodeHubPanel({
@@ -60,10 +66,16 @@ export function FounderNodeHubPanel({
   memoryMode,
   onMemoryModeChange,
   aiSection,
+  showAiSection = true,
 }: Props) {
   const v2 = settings.founderNodeV2;
   const paired = v2?.paired ?? false;
   const online = v2?.online ?? false;
+
+  // When the AI section is surfaced elsewhere (tabbed Settings), drop Step 3
+  // and renumber the remaining steps: 1 Download, 2 Vault, 3 Sync, 4 Privacy.
+  const syncStep = showAiSection ? 4 : 3;
+  const privacyStep = showAiSection ? 5 : 4;
 
   return (
     <section className="rounded-2xl border border-cyan-500/40 bg-gradient-to-b from-cyan-950/20 to-zinc-950/30 p-6 shadow-lg shadow-cyan-950/20">
@@ -113,17 +125,19 @@ export function FounderNodeHubPanel({
           />
         </HubStep>
 
-        <HubStep
-          step={3}
-          id="connect-ai"
-          title="AI on your stack"
-          summary="Connect cloud keys (Surplus, OpenRouter, OpenAI, Anthropic, Gemini…) or local Ollama — all providers in one place below."
-        >
-          <FounderNodeAiSection {...aiSection} settings={settings} />
-        </HubStep>
+        {showAiSection && (
+          <HubStep
+            step={3}
+            id="connect-ai"
+            title="AI on your stack"
+            summary="Connect cloud keys (Surplus, OpenRouter, OpenAI, Anthropic, Gemini…) or local Ollama — all providers in one place below."
+          >
+            <FounderNodeAiSection {...aiSection} settings={settings} />
+          </HubStep>
+        )}
 
         <HubStep
-          step={4}
+          step={syncStep}
           title="Sync, index & search"
           summary="Rebuild your local vector index and search vault files on your machine."
         >
@@ -131,7 +145,7 @@ export function FounderNodeHubPanel({
         </HubStep>
 
         <HubStep
-          step={5}
+          step={privacyStep}
           title="Privacy attestation"
           summary="Cryptographic proof of vault integrity, sealed API keys, and Phala TEE inference receipts."
           id="founder-attestation"

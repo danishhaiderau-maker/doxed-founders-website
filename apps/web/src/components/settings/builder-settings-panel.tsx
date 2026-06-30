@@ -15,6 +15,7 @@ import {
   updateBuilderSettings,
 } from '@/lib/api';
 import { FounderNodeHubPanel } from '@/components/settings/founder-node-hub-panel';
+import { FounderNodeAiSection } from '@/components/settings/founder-node-ai-section';
 import { GitHubPatConnectGuide } from '@/components/settings/github-pat-connect-guide';
 import { HybridControlPlane } from '@/components/hybrid-control-plane';
 import { InfrastructureConnectHub } from '@/components/infrastructure-connect-hub';
@@ -23,6 +24,83 @@ import type { MemoryStorageModeKey } from '@dcf/utils';
 type BuilderSettingsPanelProps = {
   accessToken: string;
 };
+
+type SettingsTabId = 'ides' | 'ai' | 'infra' | 'founder-node' | 'security';
+
+const SETTINGS_TABS: { id: SettingsTabId; label: string; icon: string }[] = [
+  { id: 'ides', label: 'IDEs', icon: '🛠' },
+  { id: 'ai', label: 'AI Providers', icon: '🧠' },
+  { id: 'infra', label: 'Infrastructure', icon: '🏗' },
+  { id: 'founder-node', label: 'Founder Node', icon: '🖥' },
+  { id: 'security', label: 'Security', icon: '🔐' },
+];
+
+const COMING_SOON_IDES = [
+  {
+    name: 'Claude Code',
+    blurb: 'Anthropic’s terminal coding agent — dispatch Quick Build specs to a Claude-powered CLI.',
+  },
+  {
+    name: 'Windsurf',
+    blurb: 'Codeium’s agentic IDE — Cascade runs multi-file edits from a single prompt.',
+  },
+  {
+    name: 'VS Code',
+    blurb: 'Microsoft’s editor with GitHub Copilot, Continue, and Cline agent integrations.',
+  },
+];
+
+function SecuritySummaryCard() {
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Security</h2>
+          <p className="mt-1 max-w-2xl text-sm text-zinc-500">
+            Account security lives on the Account page. This hub gives you quick links and an at-a-glance
+            status. Use the full Security panel for password, 2FA, passkeys, and wallet management.
+          </p>
+        </div>
+        <span className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-200">
+          Review on Account page
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        {[
+          { label: 'Password', href: '/account?tab=security#password' },
+          { label: 'Two-factor (2FA)', href: '/account?tab=security#2fa' },
+          { label: 'Passkeys', href: '/account?tab=security#passkeys' },
+          { label: 'Wallet', href: '/account?tab=security#wallet' },
+        ].map((item) => (
+          <a
+            key={item.label}
+            href={item.href}
+            className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-200 transition hover:border-violet-500/40 hover:bg-violet-950/10 hover:text-white"
+          >
+            <span>{item.label}</span>
+            <span className="text-zinc-500">→</span>
+          </a>
+        ))}
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3">
+        <a
+          href="/account?tab=security"
+          className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500"
+        >
+          Open full Security panel
+        </a>
+        <a
+          href="/privacy"
+          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white"
+        >
+          Privacy page
+        </a>
+      </div>
+    </section>
+  );
+}
 
 export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps) {
   const [settings, setSettings] = useState<BuilderSettings | null>(null);
@@ -39,6 +117,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const [phalaKey, setPhalaKey] = useState('');
   const [phalaUrl, setPhalaUrl] = useState('https://api.redpill.ai/v1');
   const [phalaModel, setPhalaModel] = useState('phala/deepseek-chat-v3-0324');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabId>('ides');
 
   const load = useCallback(async () => {
     try {
@@ -227,270 +306,329 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
   const openHandsProvider = settings.providers.find((p) => p.key === 'OPENHANDS');
   const cursorProvider = settings.providers.find((p) => p.key === 'CURSOR');
 
+  const aiSectionProps = {
+    settings,
+    apiKeyInput,
+    setApiKeyInput,
+    ollamaUrl,
+    setOllamaUrl,
+    ollamaModel,
+    setOllamaModel,
+    phalaKey,
+    setPhalaKey,
+    phalaUrl,
+    setPhalaUrl,
+    phalaModel,
+    setPhalaModel,
+    connecting,
+    onConnectProvider: (cred: string) => handleConnectProvider(cred),
+    onConnectOllama: handleConnectOllamaDirect,
+    onConnectPhala: handleConnectPhala,
+    onDisconnectProvider: (cred: string) => handleDisconnect(cred),
+    onSaveSettings: saveSettings,
+  };
+
   return (
-    <div className="space-y-8">
-      <FounderNodeHubPanel
-        accessToken={accessToken}
-        settings={settings}
-        onRefresh={load}
-        memoryMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
-        onMemoryModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
-        aiSection={{
-          settings,
-          apiKeyInput,
-          setApiKeyInput,
-          ollamaUrl,
-          setOllamaUrl,
-          ollamaModel,
-          setOllamaModel,
-          phalaKey,
-          setPhalaKey,
-          phalaUrl,
-          setPhalaUrl,
-          phalaModel,
-          setPhalaModel,
-          connecting,
-          onConnectProvider: (cred) => handleConnectProvider(cred),
-          onConnectOllama: handleConnectOllamaDirect,
-          onConnectPhala: handleConnectPhala,
-          onDisconnectProvider: (cred) => handleDisconnect(cred),
-          onSaveSettings: saveSettings,
-        }}
-      />
+    <div className="space-y-6">
+      <div className="sticky top-0 z-10 flex gap-1 overflow-x-auto border-b border-zinc-800 bg-[#0a0a0f] px-2 py-1.5">
+        {SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveSettingsTab(tab.id)}
+            className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              activeSettingsTab === tab.id
+                ? 'bg-violet-600/15 text-violet-300'
+                : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
+            }`}
+          >
+            <span className="text-sm">{tab.icon}</span>
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-      <InfrastructureConnectHub accessToken={accessToken} onMessage={setMsg} />
-
-      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="text-lg font-semibold text-white">Autopilot & production sync</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Push schema to Neon, redeploy Vercel and Railway, and sync GitHub — without cluttering Mission
-          Control.
-        </p>
-        <div className="mt-4">
-          <HybridControlPlane
-            accessToken={accessToken}
-            onMessage={setMsg}
-            onRefresh={load}
-            autoRunWhenAutopilot={false}
-          />
-        </div>
-      </section>
-
-      <section id="remote-builder" className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 scroll-mt-24">
-        <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys for Copilot live in{' '}
-          <a href="#connect-ai" className="text-violet-300 underline">
-            Step 3 — AI on your stack
-          </a>{' '}
-          above (OpenAI, Anthropic, Surplus, etc.).
-        </p>
-
-        <div className="mt-4 space-y-3 rounded-xl border border-indigo-500/25 bg-indigo-950/10 p-4">
-          <h3 className="text-sm font-semibold text-indigo-100">Control plane mode</h3>
-          <div className="flex flex-wrap gap-2">
-            {(['CURSOR_FIRST', 'FULL_STACK'] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => saveSettings({ controlPlaneMode: mode })}
-                className={`rounded-lg border px-3 py-2 text-xs ${
-                  (settings.controlPlaneMode ?? 'FULL_STACK') === mode
-                    ? 'border-indigo-400 bg-indigo-950/50 text-white'
-                    : 'border-zinc-700 text-zinc-500'
-                }`}
-              >
-                {mode === 'CURSOR_FIRST' ? 'Cursor for code' : 'Full stack'}
-              </button>
-            ))}
+      {activeSettingsTab === 'ides' && (
+        <section id="remote-builder" className="space-y-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 scroll-mt-24">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Remote builder agents</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Cloud coding agents — Cursor and OpenHands dispatch Quick Build tasks. LLM keys for Copilot live
+              in the <button type="button" onClick={() => setActiveSettingsTab('ai')} className="text-violet-300 underline">AI Providers</button> tab
+              (OpenAI, Anthropic, Surplus, etc.).
+            </p>
           </div>
-        </div>
 
-        <div className="mt-4 space-y-3 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
-          <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
-          <p className="text-xs text-zinc-500">
-            When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
-            connected), and resume your builder agent. Say &quot;take full control&quot; in Mission Control.
-          </p>
-          <div className="flex flex-col gap-2 text-sm text-zinc-300">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.autopilotEnabled ?? false}
-                onChange={(e) => saveSettings({ autopilotEnabled: e.target.checked })}
-              />
-              Enable Autopilot (sync + publish + builder resume)
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.autopilotRedeployHosts ?? false}
-                onChange={(e) => saveSettings({ autopilotRedeployHosts: e.target.checked })}
-              />
-              Redeploy Vercel + Railway on Autopilot (requires tokens in Stack hub)
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.autoPublishOnEvent}
-                onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
-              />
-              Auto-publish on deploy webhooks
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.autoCreateGitHubIssues}
-                onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
-              />
-              Auto-create GitHub issues from Quick Build
-            </label>
+          <div className="space-y-3 rounded-xl border border-indigo-500/25 bg-indigo-950/10 p-4">
+            <h3 className="text-sm font-semibold text-indigo-100">Control plane mode</h3>
+            <div className="flex flex-wrap gap-2">
+              {(['CURSOR_FIRST', 'FULL_STACK'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => saveSettings({ controlPlaneMode: mode })}
+                  className={`rounded-lg border px-3 py-2 text-xs ${
+                    (settings.controlPlaneMode ?? 'FULL_STACK') === mode
+                      ? 'border-indigo-400 bg-indigo-950/50 text-white'
+                      : 'border-zinc-700 text-zinc-500'
+                  }`}
+                >
+                  {mode === 'CURSOR_FIRST' ? 'Cursor for code' : 'Full stack'}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
 
-        <div className="mt-6 space-y-6">
-        <div className="rounded-xl border border-sky-500/30 bg-sky-950/10 p-4">
-        <h3 className="font-semibold text-white">Cursor Cloud Agents</h3>
-        <p className="mt-1 text-sm text-zinc-500">
-          Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an API key
-          in{' '}
-          <a href="https://cursor.com/dashboard" className="text-sky-300 underline" target="_blank" rel="noreferrer">
-            Cursor Dashboard → Integrations
-          </a>
-          .
-        </p>
-        {cursorProvider?.connected && (
-          <p className="mt-2 text-xs text-emerald-300">
-            Connected — Quick Build and Continue dispatch remotely
-            {settings.cursorAgentUrl ? (
-              <>
-                {' '}
-                ·{' '}
-                <a href={settings.cursorAgentUrl} className="underline" target="_blank" rel="noreferrer">
-                  Open agent
+          <div className="space-y-3 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-4">
+            <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
+            <p className="text-xs text-zinc-500">
+              When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
+              connected), and resume your builder agent. Say &quot;take full control&quot; in Mission Control.
+            </p>
+            <div className="flex flex-col gap-2 text-sm text-zinc-300">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={settings.autopilotEnabled ?? false}
+                  onChange={(e) => saveSettings({ autopilotEnabled: e.target.checked })}
+                />
+                Enable Autopilot (sync + publish + builder resume)
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={settings.autopilotRedeployHosts ?? false}
+                  onChange={(e) => saveSettings({ autopilotRedeployHosts: e.target.checked })}
+                />
+                Redeploy Vercel + Railway on Autopilot (requires tokens in Stack hub)
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={settings.autoPublishOnEvent}
+                  onChange={(e) => saveSettings({ autoPublishOnEvent: e.target.checked })}
+                />
+                Auto-publish on deploy webhooks
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={settings.autoCreateGitHubIssues}
+                  onChange={(e) => saveSettings({ autoCreateGitHubIssues: e.target.checked })}
+                />
+                Auto-create GitHub issues from Quick Build
+              </label>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="rounded-xl border border-sky-500/30 bg-sky-950/10 p-4">
+              <h3 className="font-semibold text-white">Cursor Cloud Agents</h3>
+              <p className="mt-1 text-sm text-zinc-500">
+                Cursor Cloud Agents API — Founder OS creates and resumes cloud agents on your GitHub repo. Generate an API key
+                in{' '}
+                <a href="https://cursor.com/dashboard" className="text-sky-300 underline" target="_blank" rel="noreferrer">
+                  Cursor Dashboard → Integrations
                 </a>
-              </>
-            ) : null}
-          </p>
-        )}
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-          <input
-            type="password"
-            value={cursorKey}
-            onChange={(e) => setCursorKey(e.target.value)}
-            placeholder="Cursor API key"
-            className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-          />
-          <button
-            type="button"
-            disabled={connecting === 'cursor'}
-            onClick={handleConnectCursor}
-            className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {cursorProvider?.connected ? 'Update connection' : 'Connect Cursor'}
-          </button>
-          {cursorProvider?.connected && (
-            <button
-              type="button"
-              onClick={() => handleDisconnect('cursor')}
-              className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
-            >
-              Disconnect
-            </button>
-          )}
-        </div>
-        </div>
+                .
+              </p>
+              {cursorProvider?.connected && (
+                <p className="mt-2 text-xs text-emerald-300">
+                  Connected — Quick Build and Continue dispatch remotely
+                  {settings.cursorAgentUrl ? (
+                    <>
+                      {' '}
+                      ·{' '}
+                      <a href={settings.cursorAgentUrl} className="underline" target="_blank" rel="noreferrer">
+                        Open agent
+                      </a>
+                    </>
+                  ) : null}
+                </p>
+              )}
+              <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="password"
+                  value={cursorKey}
+                  onChange={(e) => setCursorKey(e.target.value)}
+                  placeholder="Cursor API key"
+                  className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  disabled={connecting === 'cursor'}
+                  onClick={handleConnectCursor}
+                  className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {cursorProvider?.connected ? 'Update connection' : 'Connect Cursor'}
+                </button>
+                {cursorProvider?.connected && (
+                  <button
+                    type="button"
+                    onClick={() => handleDisconnect('cursor')}
+                    className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+            </div>
 
-        <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/10 p-4">
-        <h3 className="font-semibold text-white">OpenHands — remote coding agent</h3>
-        <p className="mt-1 text-sm text-zinc-500">
-          Self-hosted OpenHands or{' '}
-          <a href="https://app.all-hands.dev" className="text-indigo-300 underline" target="_blank" rel="noreferrer">
-            OpenHands Cloud
-          </a>
-          . When set as default, Quick Build dispatches specs directly — Cursor-like, no copy-paste.
-        </p>
-        {openHandsProvider?.connected && (
-          <p className="mt-2 text-xs text-emerald-300">Connected — tasks dispatch on Quick Build</p>
-        )}
-        <div className="mt-4 space-y-3">
-          <input
-            type="url"
-            value={openhandsUrl}
-            onChange={(e) => setOpenhandsUrl(e.target.value)}
-            placeholder="https://app.all-hands.dev or https://your-openhands.example.com"
-            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
-          />
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              type="password"
-              value={openhandsKey}
-              onChange={(e) => setOpenhandsKey(e.target.value)}
-              placeholder="OpenHands API key"
-              className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-            />
-            <button
-              type="button"
-              disabled={connecting === 'openhands'}
-              onClick={handleConnectOpenHands}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {openHandsProvider?.connected ? 'Update connection' : 'Connect OpenHands'}
-            </button>
-            {openHandsProvider?.connected && (
-              <button
-                type="button"
-                onClick={() => handleDisconnect('openhands')}
-                className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
-              >
-                Disconnect
-              </button>
-            )}
+            <div className="rounded-xl border border-indigo-500/30 bg-indigo-950/10 p-4">
+              <h3 className="font-semibold text-white">OpenHands — remote coding agent</h3>
+              <p className="mt-1 text-sm text-zinc-500">
+                Self-hosted OpenHands or{' '}
+                <a href="https://app.all-hands.dev" className="text-indigo-300 underline" target="_blank" rel="noreferrer">
+                  OpenHands Cloud
+                </a>
+                . When set as default, Quick Build dispatches specs directly — Cursor-like, no copy-paste.
+              </p>
+              {openHandsProvider?.connected && (
+                <p className="mt-2 text-xs text-emerald-300">Connected — tasks dispatch on Quick Build</p>
+              )}
+              <div className="mt-4 space-y-3">
+                <input
+                  type="url"
+                  value={openhandsUrl}
+                  onChange={(e) => setOpenhandsUrl(e.target.value)}
+                  placeholder="https://app.all-hands.dev or https://your-openhands.example.com"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                />
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="password"
+                    value={openhandsKey}
+                    onChange={(e) => setOpenhandsKey(e.target.value)}
+                    placeholder="OpenHands API key"
+                    className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+                  />
+                  <button
+                    type="button"
+                    disabled={connecting === 'openhands'}
+                    onClick={handleConnectOpenHands}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {openHandsProvider?.connected ? 'Update connection' : 'Connect OpenHands'}
+                  </button>
+                  {openHandsProvider?.connected && (
+                    <button
+                      type="button"
+                      onClick={() => handleDisconnect('openhands')}
+                      className="rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 hover:border-red-400/60"
+                    >
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 p-4">
+              <h3 className="font-semibold text-white">GitHub personal access token</h3>
+              <p className="mt-1 text-sm text-zinc-500">
+                Optional for public repos; <strong className="text-zinc-300">required for private repos</strong> so Founder
+                OS can sync commits, list PRs, publish issues, and update{' '}
+                <code className="text-violet-300/90">.github/founder-os/</code> memory files.
+              </p>
+
+              <GitHubPatConnectGuide
+                githubTokenConnected={settings.githubTokenConnected}
+                repoLinked={settings.repoFullName ?? null}
+              />
+
+              <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="password"
+                  value={githubToken}
+                  onChange={(e) => setGithubToken(e.target.value)}
+                  placeholder="ghp_… (repo scope)"
+                  className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={handleGitHubToken}
+                  className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
+                >
+                  {settings.githubTokenConnected ? 'Update token' : 'Save token'}
+                </button>
+                {settings.githubTokenConnected && (
+                  <button
+                    type="button"
+                    onClick={() => disconnectGitHubToken(accessToken).then(load)}
+                    className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              {COMING_SOON_IDES.map((ide) => (
+                <div
+                  key={ide.name}
+                  className="relative rounded-xl border border-dashed border-zinc-700 bg-zinc-950/40 p-4"
+                >
+                  <span className="absolute right-3 top-3 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-semibold text-zinc-400">
+                    Coming soon
+                  </span>
+                  <h4 className="font-semibold text-white">{ide.name}</h4>
+                  <p className="mt-1 text-xs text-zinc-500">{ide.blurb}</p>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-        </div>
+        </section>
+      )}
 
-        <div className="rounded-xl border border-zinc-800 p-4">
-        <h3 className="font-semibold text-white">GitHub personal access token</h3>
-        <p className="mt-1 text-sm text-zinc-500">
-          Optional for public repos; <strong className="text-zinc-300">required for private repos</strong> so Founder
-          OS can sync commits, list PRs, publish issues, and update{' '}
-          <code className="text-violet-300/90">.github/founder-os/</code> memory files.
-        </p>
+      {activeSettingsTab === 'ai' && (
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+          <h2 className="text-lg font-semibold text-white">AI Providers</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            Connect the LLM brain behind Copilot, Founder Brain, and project agents — marketplace gateways,
+            direct vendor APIs, or local Ollama. Set a default brain to choose which model powers chat & drafts.
+          </p>
+          <div className="mt-5">
+            <FounderNodeAiSection {...aiSectionProps} settings={settings} />
+          </div>
+        </section>
+      )}
 
-        <GitHubPatConnectGuide
-          githubTokenConnected={settings.githubTokenConnected}
-          repoLinked={settings.repoFullName ?? null}
+      {activeSettingsTab === 'infra' && (
+        <div className="space-y-8">
+          <InfrastructureConnectHub accessToken={accessToken} onMessage={setMsg} />
+
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+            <h2 className="text-lg font-semibold text-white">Autopilot & production sync</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Push schema to Neon, redeploy Vercel and Railway, and sync GitHub — without cluttering Mission
+              Control.
+            </p>
+            <div className="mt-4">
+              <HybridControlPlane
+                accessToken={accessToken}
+                onMessage={setMsg}
+                onRefresh={load}
+                autoRunWhenAutopilot={false}
+              />
+            </div>
+          </section>
+        </div>
+      )}
+
+      {activeSettingsTab === 'founder-node' && (
+        <FounderNodeHubPanel
+          accessToken={accessToken}
+          settings={settings}
+          onRefresh={load}
+          memoryMode={(settings.memoryStorageMode as MemoryStorageModeKey) ?? 'PLATFORM'}
+          onMemoryModeChange={(mode) => setSettings((s) => (s ? { ...s, memoryStorageMode: mode } : s))}
+          aiSection={aiSectionProps}
+          showAiSection={false}
         />
+      )}
 
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-          <input
-            type="password"
-            value={githubToken}
-            onChange={(e) => setGithubToken(e.target.value)}
-            placeholder="ghp_… (repo scope)"
-            className="flex-1 rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm"
-          />
-          <button
-            type="button"
-            onClick={handleGitHubToken}
-            className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-black"
-          >
-            {settings.githubTokenConnected ? 'Update token' : 'Save token'}
-          </button>
-          {settings.githubTokenConnected && (
-            <button
-              type="button"
-              onClick={() => disconnectGitHubToken(accessToken).then(load)}
-              className="rounded-lg border border-zinc-600 px-4 py-2 text-sm text-zinc-400"
-            >
-              Remove
-            </button>
-          )}
-        </div>
-        </div>
-        </div>
-      </section>
+      {activeSettingsTab === 'security' && <SecuritySummaryCard />}
 
       {msg && (
         <p className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-4 py-2 text-sm text-emerald-200">
