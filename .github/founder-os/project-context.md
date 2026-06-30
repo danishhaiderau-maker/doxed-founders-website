@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(api+utils): per-workspace session PUT, IDE adapter layer, identity constants
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
