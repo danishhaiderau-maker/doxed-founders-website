@@ -3938,6 +3938,26 @@ export function restartTradingAgent(token: string) {
   );
 }
 
+export function flyControlBot(token: string, action: 'start' | 'stop') {
+  return apiFetch<{ ok: boolean; status: string; machineState: string; message?: string; polled?: boolean }>(
+    '/trading-agents/conservative-btc/fly-control',
+    { method: 'POST', body: JSON.stringify({ action }) },
+    token,
+  );
+}
+
+export function flyControlBotStatus(token: string) {
+  return apiFetch<{ ok: boolean; status: string; machineState: string }>(
+    '/trading-agents/conservative-btc/fly-control',
+    undefined,
+    token,
+  );
+}
+
+export function getShowcaseHost() {
+  return apiFetch<{ host: 'fly' | 'local' }>('/trading-agents/showcase-host');
+}
+
 export function resetShowcaseSimulation(token: string) {
   return apiFetch<{ ok: boolean; message?: string }>(
     '/admin-control/agent/reset-simulation',
@@ -4824,6 +4844,7 @@ export type WorkspacePanelState = {
   terminalOpen?: boolean;
   terminalHeight?: number;
   sidebarOpen?: boolean;
+  activeWorkspaceId?: string | null;
 };
 
 export type WorkspaceSessionData = {

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
+import { flyControlBot, getShowcaseHost, pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
@@ -194,6 +194,8 @@ export function AgentAdminShowcaseControl({
   const [status, setStatus] = useState<HomeStatus | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
+  const [showcaseHost, setShowcaseHost] = useState<'fly' | 'local'>('local');
+  const isFly = showcaseHost === 'fly';
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
@@ -230,6 +232,21 @@ export function AgentAdminShowcaseControl({
     const t = setInterval(() => void refreshStatus(), 60_000);
     return () => clearInterval(t);
   }, [refreshStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const json = await getShowcaseHost();
+        if (!cancelled && json.host) setShowcaseHost(json.host);
+      } catch {
+        // default to local
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function runLocal(path: string, id: string) {
     setBusy(id);
@@ -287,6 +304,30 @@ export function AgentAdminShowcaseControl({
     }
   }
 
+  async function runFly(action: 'start' | 'stop', id: string) {
+    setBusy(id);
+    setMsg(null);
+    setStartSteps(
+      action === 'start'
+        ? 'Starting remote Fly bot — scaling the Fly machine up. Polling until /api/ping is healthy (up to ~90s)...'
+        : 'Stopping remote Fly bot — gracefully stopping the Fly machine (preserved, not destroyed)...',
+    );
+    try {
+      const res = await flyControlBot(token, action);
+      setMsg(res.message ?? (res.ok ? `Fly bot ${action}ed.` : `Fly ${action} did not confirm.`));
+      if (res.ok) {
+        onUpdated?.();
+        setTimeout(() => onUpdated?.(), 5000);
+        setTimeout(() => onUpdated?.(), 15000);
+      }
+      if (action === 'stop') setStartSteps(null);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : `Fly ${action} failed`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function toggleExecution() {
     setExecBusy(true);
     setMsg(null);
@@ -330,6 +371,9 @@ export function AgentAdminShowcaseControl({
     <div className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
         Home PC command center
+        {isFly && (
+          <span className="ml-2 rounded bg-sky-500/20 px-1.5 py-0.5 text-sky-300">Fly remote mode</span>
+        )}
       </p>
       <p className="mt-1 text-xs text-zinc-400">
         Runs the <strong>doxxedcrypto.digital</strong> showcase stack on this PC: conservative BTC signals
@@ -381,8 +425,8 @@ export function AgentAdminShowcaseControl({
         <button
           type="button"
           disabled={busy === START_SHOWCASE.id}
-          title={START_SHOWCASE.hint}
-          onClick={() => void runLocal(START_SHOWCASE.path, START_SHOWCASE.id)}
+          title={isFly ? 'Start the remote Fly.io bot machine (scale up)' : START_SHOWCASE.hint}
+          onClick={() => void (isFly ? runFly('start', START_SHOWCASE.id) : runLocal(START_SHOWCASE.path, START_SHOWCASE.id))}
           className="min-w-[160px] flex-1 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white hover:bg-emerald-500 disabled:opacity-50 sm:flex-none"
         >
           {busy === START_SHOWCASE.id ? 'Starting…' : START_SHOWCASE.label}
@@ -390,8 +434,8 @@ export function AgentAdminShowcaseControl({
         <button
           type="button"
           disabled={busy === STOP_SHOWCASE.id}
-          title={STOP_SHOWCASE.hint}
-          onClick={() => void runLocal(STOP_SHOWCASE.path, STOP_SHOWCASE.id)}
+          title={isFly ? 'Stop the remote Fly.io bot machine (graceful, preserved)' : STOP_SHOWCASE.hint}
+          onClick={() => void (isFly ? runFly('stop', STOP_SHOWCASE.id) : runLocal(STOP_SHOWCASE.path, STOP_SHOWCASE.id))}
           className="min-w-[160px] flex-1 rounded-xl bg-red-700 px-5 py-3 text-sm font-bold text-white hover:bg-red-600 disabled:opacity-50 sm:flex-none"
         >
           {busy === STOP_SHOWCASE.id ? 'Stopping…' : STOP_SHOWCASE.label}
