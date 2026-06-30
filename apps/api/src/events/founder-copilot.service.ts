@@ -1660,9 +1660,9 @@ export class FounderCopilotService {
       // Return a CLEAR error message — never silently fall back to the STEM template.
       const providerLabel = requestedProviderLabel ?? String(forcedProvider);
       const missingKeyError =
-        `**${providerLabel} selected but no ${providerLabel} API key connected.**\n\n` +
-        `Connect a ${providerLabel} key in **Settings \u2192 AI Stack** (or pick a different model in the dropdown) to get a real answer.\n\n` +
-        `If you meant to use the platform promo (GLM 5.2 free month), make sure the promo is active on your account.`;
+        `**${providerLabel} AI API key not configured.**\n\n` +
+        `Your ${providerLabel} desktop app may show as "Connected" in the Integrations panel, but the AI API key used for chat completions is configured separately in **Settings \u2192 AI Stack**.\n\n` +
+        `To fix: connect a ${providerLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (GLM 5.2 is free during the promo and requires no key from you).`;
       answer = missingKeyError + formatContextEvidenceFooter(liveSnapshot);
       answerProvider = 'NO_PROVIDER_KEY';
       llmErrors = aiResult.llmErrors;
