@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(ai-providers): add GLM to direct category + brain priority, wire Jatevo/Surplus/Phala
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
