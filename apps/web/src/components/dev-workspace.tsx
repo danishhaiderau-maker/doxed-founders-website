@@ -70,6 +70,7 @@ type ModelInfo = {
   promo: boolean;
   promoLabel?: string;
   local?: boolean;
+  isIDE?: boolean;
 };
 
 const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
@@ -81,11 +82,17 @@ const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
   { key: 'GEMINI', label: 'Gemini 2.5 Pro', provider: 'Google', model: 'gemini-2.5-pro', contextWindow: '1M', costPerMtokens: '$1.25', strengths: 'Long context · Multimodal' },
   { key: 'DEEPSEEK', label: 'DeepSeek V3', provider: 'DeepSeek', model: 'deepseek-chat', contextWindow: '64K', costPerMtokens: '$0.14', strengths: 'Coding · Planning · Cheap' },
   { key: 'GROK', label: 'Grok 4', provider: 'xAI', model: 'grok-4', contextWindow: '128K', costPerMtokens: '$5.00', strengths: 'Real-time · Coding' },
-  { key: 'CURSOR', label: 'Cursor Agent', provider: 'Cursor', model: 'cursor-agent', contextWindow: '200K', costPerMtokens: '$20/mo', strengths: 'Autonomous coding · PR creation' },
   { key: 'OPENROUTER', label: 'OpenRouter', provider: 'OpenRouter', model: 'auto', contextWindow: 'varies', costPerMtokens: 'varies', strengths: 'Multi-model routing' },
   { key: 'SURPLUS', label: 'Surplus Intelligence', provider: 'Surplus', model: 'claude-opus-4.8', contextWindow: '200K', costPerMtokens: '$15', strengths: 'Premium reasoning · multi-agent' },
   { key: 'JATEVO', label: 'Jatevo Gateway', provider: 'Jatevo', model: 'auto', contextWindow: '128K', costPerMtokens: '$5', strengths: 'Cost-efficient gateway' },
   { key: 'PHALA', label: 'Phala TEE', provider: 'Phala', model: 'phala/deepseek-chat-v3-0324', contextWindow: '64K', costPerMtokens: '$2', strengths: 'Private inference · TEE attested' },
+];
+
+// IDEs & Build Agents — execution environments (not chat LLMs).
+// These need their own API/connection key, separate from AI provider keys.
+const IDE_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
+  { key: 'CURSOR', label: 'Cursor Agent', provider: 'Cursor', model: 'cursor-agent', contextWindow: '200K', costPerMtokens: '$20/mo', strengths: 'Autonomous coding · PR creation · Cloud agent', isIDE: true },
+  { key: 'OPENHANDS', label: 'OpenHands', provider: 'OpenHands', model: 'openhands', contextWindow: '—', costPerMtokens: '—', strengths: 'Self-hosted build agent · Open source', isIDE: true },
 ];
 
 const NAV_ITEMS = [
@@ -142,6 +149,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
   }, [initialCopilotPrompt, onInitialCopilotPromptConsumed]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
   const onTranscript = useCallback((text: string) => {
@@ -255,7 +263,6 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (settings?.secretsStatus?.credentials) {
       for (const c of settings.secretsStatus.credentials) if (c.connected) connected.add(c.provider.toUpperCase());
     }
-    if (worker?.connections?.cursor) connected.add('CURSOR');
     const promoEligible = onboarding?.promo?.eligible && onboarding?.promo?.hasLlm;
     const PROMO_KEYS = new Set(['GLM', 'GEMINI', 'DEEPSEEK']);
     return ALL_MODELS.map((m) => {
@@ -278,13 +285,31 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       if (a.local && !b.local) return -1;
       return 0;
     });
-  }, [settings, worker, onboarding]);
+  }, [settings, onboarding]);
+
+  // IDEs & Build Agents — connection state comes from worker.connections
+  // (Cursor desktop bridge) and worker.connections.openHands for OpenHands.
+  const ideModels = useMemo<ModelInfo[]>(() => {
+    return IDE_MODELS.map((m): ModelInfo => ({
+      ...m,
+      connected:
+        m.key === 'CURSOR'
+          ? Boolean(worker?.connections?.cursor)
+          : m.key === 'OPENHANDS'
+            ? Boolean(worker?.connections?.openHands)
+            : false,
+      promo: false,
+    }));
+  }, [worker]);
 
   useEffect(() => {
-    if (!selectedModel && models.length > 0) {
-      setSelectedModel(models.find((m) => m.promo || m.connected) ?? models[0]);
+    if (!selectedModel) {
+      const all = [...models, ...ideModels];
+      if (all.length > 0) {
+        setSelectedModel(models.find((m) => m.promo || m.connected) ?? models[0] ?? all[0]);
+      }
     }
-  }, [models, selectedModel]);
+  }, [models, ideModels, selectedModel]);
 
   const repo = activity?.repoFullName ?? settings?.repoFullName ?? null;
   const branch = bridge?.latest?.branch ?? activity?.defaultBranch ?? 'main';
@@ -311,7 +336,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
     const s = restoredSession;
     if (s.selectedModelKey) {
-      const matched = models.find((m) => m.key === s.selectedModelKey);
+      const matched = [...models, ...ideModels].find((m) => m.key === s.selectedModelKey);
       if (matched) setSelectedModel(matched);
     }
     if (s.activeNav) setActiveNav(s.activeNav);
@@ -689,7 +714,22 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             </div>
             <span className="text-[8px] text-zinc-600">{usingLocal ? 'local/promo' : 'cloud'}</span>
           </div>
-          <button className="rounded-md bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500">+ New Agent</button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveNav('workspace');
+              setChatInput('Build: ');
+              setTimeout(() => {
+                chatInputRef.current?.focus();
+                chatInputRef.current?.setSelectionRange(6, 6);
+              }, 0);
+              emitEvent('AGENT', 'new_agent', 'New agent ready — type your task below to dispatch it.', {
+                stream: 'workspace',
+                level: 'info',
+              });
+            }}
+            className="rounded-md bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500"
+          >+ New Agent</button>
         </div>
       </header>
 
@@ -840,9 +880,13 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                 <div className="fixed inset-0 z-30" onClick={() => setModelDropdownOpen(false)} />
                 <div className="absolute left-3 top-11 z-40 w-80 rounded-xl border border-zinc-700 bg-[#12121a] shadow-2xl">
                   <div className="border-b border-zinc-800 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    AI Models — Connected & Promo first
+                    Select Brain or Build Agent
                   </div>
                   <div className="max-h-80 overflow-y-auto py-1">
+                    {/* Section 1: AI Providers (brains) */}
+                    <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
+                      AI Providers <span className="font-normal normal-case text-zinc-700">· the brain · needs AI API key</span>
+                    </div>
                     {models.map((m) => (
                       <button key={m.key} onClick={() => { setSelectedModel(m); setModelDropdownOpen(false); }}
                         className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition hover:bg-zinc-800/50 ${selectedModel?.key === m.key ? 'bg-violet-600/10' : ''}`}>
@@ -862,9 +906,34 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                         </div>
                       </button>
                     ))}
+
+                    {/* Section 2: IDEs & Build Agents (execution) */}
+                    <div className="mt-2 border-t border-zinc-800 px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
+                      IDEs &amp; Build Agents <span className="font-normal normal-case text-zinc-700">· execution · needs IDE key</span>
+                    </div>
+                    {ideModels.map((m) => (
+                      <button key={m.key} onClick={() => { setSelectedModel(m); setModelDropdownOpen(false); }}
+                        className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition hover:bg-zinc-800/50 ${selectedModel?.key === m.key ? 'bg-violet-600/10' : ''}`}>
+                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${m.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-medium text-zinc-200">{m.label}</span>
+                            <span className="rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-300">IDE</span>
+                            {m.connected
+                              ? <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Connected</span>
+                              : <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Connect in Settings</span>}
+                            {selectedModel?.key === m.key && <span className="ml-auto text-violet-400">✓</span>}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-2 text-[9px] text-zinc-500">
+                            <span>{m.provider}</span><span>·</span><span>{m.contextWindow} ctx</span><span>·</span><span>{m.costPerMtokens}</span>
+                          </div>
+                          <p className="mt-0.5 text-[9px] text-zinc-600">{m.strengths}</p>
+                        </div>
+                      </button>
+                    ))}
                   </div>
                   <div className="border-t border-zinc-800 px-3 py-2 text-[9px] text-zinc-600">
-                    Connect your own API keys in Settings → Builder · Run Ollama locally for zero-cost AI
+                    AI Providers need an AI API key · IDEs need their own IDE key — connect either in Settings → Builder
                   </div>
                 </div>
               </>
@@ -993,7 +1062,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                   className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-300 hover:border-violet-500/50 hover:text-white"
                   title="Attach photos — stored locally in your Founder Vault"
                 >📎</button>
-                <textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+                <textarea ref={chatInputRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
                   placeholder="Ask Founder Brain… it knows your repo, branch, files, agents, and deploys"
                   rows={1}
