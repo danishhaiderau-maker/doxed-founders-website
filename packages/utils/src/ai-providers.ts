@@ -285,7 +285,7 @@ export function listBrainProvidersByCategory(): {
     {
       category: 'direct',
       label: 'Direct vendor APIs',
-      keys: ['OPENAI', 'ANTHROPIC', 'GEMINI', 'DEEPSEEK'],
+      keys: ['OPENAI', 'ANTHROPIC', 'GEMINI', 'DEEPSEEK', 'GLM'],
     },
     {
       category: 'local',

@@ -81,6 +81,9 @@ const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
   { key: 'GROK', label: 'Grok 4', provider: 'xAI', model: 'grok-4', contextWindow: '128K', costPerMtokens: '$5.00', strengths: 'Real-time · Coding' },
   { key: 'CURSOR', label: 'Cursor Agent', provider: 'Cursor', model: 'cursor-agent', contextWindow: '200K', costPerMtokens: '$20/mo', strengths: 'Autonomous coding · PR creation' },
   { key: 'OPENROUTER', label: 'OpenRouter', provider: 'OpenRouter', model: 'auto', contextWindow: 'varies', costPerMtokens: 'varies', strengths: 'Multi-model routing' },
+  { key: 'SURPLUS', label: 'Surplus Intelligence', provider: 'Surplus', model: 'claude-opus-4.8', contextWindow: '200K', costPerMtokens: '$15', strengths: 'Premium reasoning · multi-agent' },
+  { key: 'JATEVO', label: 'Jatevo Gateway', provider: 'Jatevo', model: 'auto', contextWindow: '128K', costPerMtokens: '$5', strengths: 'Cost-efficient gateway' },
+  { key: 'PHALA', label: 'Phala TEE', provider: 'Phala', model: 'phala/deepseek-chat-v3-0324', contextWindow: '64K', costPerMtokens: '$2', strengths: 'Private inference · TEE attested' },
 ];
 
 const NAV_ITEMS = [
@@ -249,12 +252,20 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
     if (worker?.connections?.cursor) connected.add('CURSOR');
     const promoEligible = onboarding?.promo?.eligible && onboarding?.promo?.hasLlm;
-    return ALL_MODELS.map((m) => ({
-      ...m,
-      connected: connected.has(m.key),
-      promo: Boolean(m.key === 'GLM' && promoEligible),
-      promoLabel: m.key === 'GLM' && promoEligible ? 'Doxxed Crypto Promo' : undefined,
-    })).sort((a, b) => {
+    const PROMO_KEYS = new Set(['GLM', 'GEMINI', 'DEEPSEEK']);
+    return ALL_MODELS.map((m) => {
+      const isPromo = Boolean(PROMO_KEYS.has(m.key) && promoEligible);
+      return {
+        ...m,
+        connected: connected.has(m.key),
+        promo: isPromo,
+        promoLabel: isPromo
+          ? m.key === 'GLM'
+            ? 'Doxxed Crypto Promo'
+            : 'Promo'
+          : undefined,
+      };
+    }).sort((a, b) => {
       if (a.promo && !b.promo) return -1;
       if (!a.promo && b.promo) return 1;
       if (a.connected && !b.connected) return -1;

@@ -1613,6 +1613,7 @@ export class BuilderService {
     AiProvider.JATEVO,
     AiProvider.OPENROUTER,
     AiProvider.DEEPSEEK,
+    AiProvider.GLM,
     AiProvider.OPENAI,
     AiProvider.ANTHROPIC,
     AiProvider.GEMINI,
