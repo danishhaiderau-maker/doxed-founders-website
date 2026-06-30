@@ -3621,6 +3621,56 @@ export function fetchTradingAgentActivity(slug: string, limit = 30, token?: stri
   );
 }
 
+export type AnalyzerSessionSummary = {
+  ok: boolean;
+  source?: string;
+  session_start?: string | null;
+  session_hours?: number;
+  starting_balance?: number;
+  current_balance?: number;
+  total_pnl_usd?: number;
+  total_pnl_pct?: number;
+  trade_count?: number;
+  win_rate?: number;
+  approve_count?: number;
+  executed_count?: number;
+  coverage_status?: string;
+  data_scope?: string;
+  executive_text?: string;
+  analyzer_sync_id?: string;
+  generated_at?: string;
+  error?: string;
+};
+
+export type AnalyzerGenome = {
+  ok: boolean;
+  source?: string;
+  analyzer_mode?: string;
+  architecture_frozen?: string;
+  genome_stats?: Record<string, unknown> | null;
+  benchmark_reference?: Record<string, unknown> | null;
+  discoveries_count?: number;
+  library_count?: number;
+  raw?: Record<string, unknown> | null;
+  error?: string;
+};
+
+export function fetchAnalyzerSessionSummary(slug: string, token?: string) {
+  return apiFetch<AnalyzerSessionSummary>(
+    `/trading-agents/${slug}/analyzer-summary`,
+    {},
+    token,
+  );
+}
+
+export function fetchAnalyzerGenome(slug: string, token?: string) {
+  return apiFetch<AnalyzerGenome>(
+    `/trading-agents/${slug}/analyzer-genome`,
+    {},
+    token,
+  );
+}
+
 export async function downloadLiveTradeExport(
   slug: string,
   token: string,

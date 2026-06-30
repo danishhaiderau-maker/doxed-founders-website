@@ -501,8 +501,7 @@ export class TradingAgentsService implements OnModuleInit {
         label: 'Agent offline (bot URL not wired)',
         botUrl,
       };
-    }
-    const reachable = await this.botBridge.isReachable(true);
+    }    const reachable = await this.botBridge.isReachable(true);
     if (!reachable) {
       return {
         status: 'offline' as const,
@@ -529,6 +528,120 @@ export class TradingAgentsService implements OnModuleInit {
             ? 'Agent updating'
             : 'Showcase bot offline',
       botUrl,
+    };
+  }
+
+  /** Full-session analytics from the research analyzer (:9001), proxied through the bot tunnel.
+   *  Returns a normalized envelope the Agent Hub Conservative BTC block renders. */
+  async getAnalyzerSummary(slug: string): Promise<{
+    ok: boolean;
+    source?: string;
+    session_start?: string | null;
+    session_hours?: number;
+    starting_balance?: number;
+    current_balance?: number;
+    total_pnl_usd?: number;
+    total_pnl_pct?: number;
+    trade_count?: number;
+    win_rate?: number;
+    approve_count?: number;
+    executed_count?: number;
+    coverage_status?: string;
+    data_scope?: string;
+    executive_text?: string;
+    analyzer_sync_id?: string;
+    generated_at?: string;
+    error?: string;
+  }> {
+    if (slug !== 'conservative-btc') {
+      return { ok: false, error: 'analyzer summary only available for conservative-btc' };
+    }
+    const raw = await this.botBridge.fetchAnalyzerSummary();
+    if (!raw) {
+      return {
+        ok: false,
+        source: 'analyzer :9001 via bot proxy',
+        error: 'analyzer proxy unavailable — bot may not have /api/analyzer/summary yet (restart bot)',
+      };
+    }
+    const STARTING = 500;
+    const perf = (raw.performance as Record<string, number> | undefined) ?? {};
+    const realEdge = (raw.real_edge as Record<string, unknown> | undefined) ?? {};
+    const stale = (raw.stale as Record<string, unknown> | undefined) ?? {};
+    const netPnlUsd = Number(perf.net_pnl_usd ?? 0);
+    const winRate = Number(perf.win_rate_pct ?? 0);
+    const trades = Number(perf.trades ?? 0);
+    const approveAttempts = Number(realEdge.approve_attempts ?? 0);
+    const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
+    const freshStartIso = typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
+    const sessionStart = freshStartIso ?? botStartIso ?? null;
+    let sessionHours: number | undefined;
+    if (sessionStart) {
+      const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
+      if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
+    } else if (typeof raw.executive_text === 'string') {
+      const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
+      if (m) sessionHours = Number(m[1]);
+    }
+    return {
+      ok: true,
+      source: 'analyzer :9001 via bot proxy',
+      session_start: sessionStart,
+      session_hours: sessionHours,
+      starting_balance: STARTING,
+      current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
+      total_pnl_usd: Number(netPnlUsd.toFixed(2)),
+      total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
+      trade_count: trades,
+      win_rate: Number(winRate.toFixed(1)),
+      approve_count: approveAttempts,
+      executed_count: trades,
+      coverage_status: String(raw.coverage_status ?? '—'),
+      data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
+      executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
+      analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
+      generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
+    };
+  }
+
+  /** Decision genome from the analyzer (:9001) via bot proxy. */
+  async getAnalyzerGenome(slug: string): Promise<{
+    ok: boolean;
+    source?: string;
+    analyzer_mode?: string;
+    architecture_frozen?: string;
+    genome_stats?: Record<string, unknown> | null;
+    discoveries_count?: number;
+    library_count?: number;
+    error?: string;
+  }> {
+    if (slug !== 'conservative-btc') {
+      return { ok: false, error: 'genome only available for conservative-btc' };
+    }
+    const raw = await this.botBridge.fetchAnalyzerGenome();
+    if (!raw) {
+      return {
+        ok: false,
+        source: 'analyzer :9001 via bot proxy',
+        error: 'analyzer genome unavailable — bot may not have /api/analyzer/genome yet (restart bot)',
+      };
+    }
+    const stats = (raw.genome_stats as Record<string, unknown> | undefined) ?? null;
+    const discoveries = raw.discoveries as unknown[] | undefined;
+    const library = raw.library as unknown[] | Record<string, unknown> | undefined;
+    const libraryCount = Array.isArray(library)
+      ? library.length
+      : library && typeof library === 'object'
+        ? Object.keys(library).length
+        : 0;
+    return {
+      ok: true,
+      source: 'analyzer :9001 via bot proxy',
+      analyzer_mode: typeof raw.analyzer_mode === 'string' ? raw.analyzer_mode : undefined,
+      architecture_frozen: typeof raw.architecture_frozen === 'string' ? raw.architecture_frozen : undefined,
+      genome_stats: stats,
+      discoveries_count: Array.isArray(discoveries) ? discoveries.length : 0,
+      library_count: libraryCount,
     };
   }
 
