@@ -4856,6 +4856,20 @@ export type WorkspaceSessionData = {
   activeNav: string | null;
   panelState: WorkspacePanelState;
   updatedAt: string | null;
+  /** Per-workspace session: persisted selected IDE provider (Cursor/OpenHands). */
+  selectedIdeProvider?: string | null;
+  /** Per-workspace session: rolling buffer of founder event bus events. */
+  eventLog?: Array<{
+    id: string;
+    ts: number;
+    category: string;
+    kind: string;
+    message: string;
+    level: string;
+    stream?: string;
+    progress?: number;
+    meta?: Record<string, unknown>;
+  }>;
 };
 
 export function loadWorkspaceSession(token: string) {
@@ -5386,6 +5400,29 @@ export function deleteConnectedWorkspace(token: string, id: string) {
   return apiFetch<{ ok: boolean }>(
     `/connected-workspace/${id}`,
     { method: 'DELETE' },
+    token,
+  );
+}
+
+export function fetchConnectedWorkspaceSession(
+  token: string,
+  workspaceId: string,
+): Promise<WorkspaceSessionData> {
+  return apiFetch<WorkspaceSessionData>(
+    `/connected-workspace/${workspaceId}/session`,
+    undefined,
+    token,
+  );
+}
+
+export function updateConnectedWorkspaceSession(
+  token: string,
+  workspaceId: string,
+  patch: Partial<WorkspaceSessionData>,
+): Promise<WorkspaceSessionData> {
+  return apiFetch<WorkspaceSessionData>(
+    `/connected-workspace/${workspaceId}/session`,
+    { method: 'PUT', body: JSON.stringify(patch) },
     token,
   );
 }

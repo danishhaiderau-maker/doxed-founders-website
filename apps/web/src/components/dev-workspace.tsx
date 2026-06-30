@@ -30,17 +30,24 @@ import { VoiceWaveform } from '@/components/voice-waveform';
 import { copilotAsk } from '@/lib/api';
 import {
   loadWorkspaceSession,
+  saveWorkspaceSessionPatch,
+  fetchConnectedWorkspaceSession,
+  updateConnectedWorkspaceSession,
   type WorkspaceConversationMessage,
   type WorkspacePanelState,
   type WorkspaceSessionData,
   type WorkspaceTerminalLine,
 } from '@/lib/api';
-import { useDebouncedWorkspaceSessionSave, trimTerminalScrollback } from '@/lib/workspace-session';
+import { trimTerminalScrollback } from '@/lib/workspace-session';
 import {
   emitEvent,
   advanceStream,
   clearStream,
+  getEvents,
+  resetFounderEventBus,
   useFounderEvents,
+  type FounderEvent,
+  type FounderEventCategory,
 } from '@/lib/founder-event-bus';
 import { AgentEventTimeline } from '@/components/agent-event-timeline';
 import { RecentAgentsPanel } from '@/components/recent-agents-panel';
@@ -227,17 +234,113 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     return () => clearInterval(i);
   }, [load]);
 
-  const { savePatch } = useDebouncedWorkspaceSessionSave(accessToken);
+  // Debounced session persistence. Routes to the per-workspace session endpoint
+  // (PUT /connected-workspace/:id/session) when an active workspace is selected,
+  // and falls back to the legacy /workspace-session endpoint otherwise. The
+  // eventLog (rolling 50 founder events) is folded into every flush so the
+  // workspace timeline survives reloads.
+  const pendingSessionPatchRef = useRef<Partial<WorkspaceSessionData>>({});
+  const sessionSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionTokenRef = useRef(accessToken);
+  sessionTokenRef.current = accessToken;
+  const sessionWorkspaceRef = useRef(activeWorkspaceId);
+  sessionWorkspaceRef.current = activeWorkspaceId;
 
-  // Load persisted workspace session once on mount → restore UI state.
+  const flushSessionSave = useCallback(async () => {
+    if (sessionSaveTimerRef.current) {
+      clearTimeout(sessionSaveTimerRef.current);
+      sessionSaveTimerRef.current = null;
+    }
+    const patch = pendingSessionPatchRef.current;
+    pendingSessionPatchRef.current = {};
+    if (!patch || Object.keys(patch).length === 0) return;
+    const token = sessionTokenRef.current;
+    if (!token) return;
+    try {
+      const wsId = sessionWorkspaceRef.current;
+      const patchWithEvents = { ...patch, eventLog: getEvents().slice(-50) };
+      if (wsId) {
+        await updateConnectedWorkspaceSession(token, wsId, patchWithEvents);
+      } else {
+        await saveWorkspaceSessionPatch(token, patchWithEvents);
+      }
+    } catch {
+      // best-effort — session save is fire-and-forget; UI still works offline
+    }
+  }, []);
+
+  const saveSession = useCallback(
+    (patch: Partial<WorkspaceSessionData>) => {
+      pendingSessionPatchRef.current = { ...pendingSessionPatchRef.current, ...patch };
+      if (sessionSaveTimerRef.current) clearTimeout(sessionSaveTimerRef.current);
+      sessionSaveTimerRef.current = setTimeout(() => {
+        void flushSessionSave();
+      }, 500);
+    },
+    [flushSessionSave],
+  );
+
+  // Flush on unmount / page hide so the last patch isn't lost.
+  useEffect(() => {
+    const onHide = () => {
+      void flushSessionSave();
+    };
+    window.addEventListener('beforeunload', onHide);
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      window.removeEventListener('beforeunload', onHide);
+      window.removeEventListener('pagehide', onHide);
+      void flushSessionSave();
+    };
+  }, [flushSessionSave]);
+
+  // Load persisted workspace session once on mount → restore UI state. When an
+  // active workspace was selected in a previous session (mirrored to localStorage
+  // because the legacy session schema has no activeWorkspaceId column), load the
+  // per-workspace session via GET /connected-workspace/:id/session; otherwise
+  // fall back to the legacy /workspace-session endpoint.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!accessToken) return;
+      let workspaceId: string | null = null;
       try {
-        const session = await loadWorkspaceSession(accessToken);
+        workspaceId = window.localStorage.getItem('dcf:active-workspace-id');
+        if (workspaceId) setActiveWorkspaceId(workspaceId);
+      } catch {
+        // ignore storage errors
+      }
+      try {
+        const session = workspaceId
+          ? await fetchConnectedWorkspaceSession(accessToken, workspaceId)
+          : await loadWorkspaceSession(accessToken);
         if (cancelled || !session) return;
         setRestoredSession(session);
+        // Hydrate the founder event bus from the persisted rolling event log so
+        // the Agent Event Timeline survives reloads. The bus has no setEvents()
+        // helper, so we replay each event via emitEvent (best-effort).
+        if (Array.isArray(session.eventLog) && session.eventLog.length > 0) {
+          resetFounderEventBus();
+          for (const ev of session.eventLog) {
+            emitEvent(
+              (ev.category as FounderEventCategory) ?? 'SYSTEM',
+              ev.kind ?? 'restored',
+              ev.message ?? '',
+              {
+                level: (ev.level as FounderEvent['level']) ?? 'info',
+                stream: ev.stream,
+                progress: ev.progress,
+                meta: ev.meta,
+              },
+            );
+          }
+        }
+        // Auto-restore conversation without a blocking resume modal when the
+        // persisted session has one — set state directly and skip the panel.
+        if (Array.isArray(session.conversation) && session.conversation.length > 0) {
+          setChatMessages(session.conversation as typeof chatMessages);
+          setResumeDismissed(true);
+        }
       } catch {
         // best-effort — fall through to default cold-start
       } finally {
@@ -267,19 +370,9 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionLoaded, restoredSession, bridge, recentAgents]);
 
-  // Persist + restore the active workspace selection. The backend session shape
-  // is locked (no activeWorkspaceId column), so we mirror it to localStorage to
-  // survive reloads, and also include it in the panelState patch so the session
-  // save carries it forward when the schema later grows.
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem('dcf:active-workspace-id');
-      if (stored) setActiveWorkspaceId(stored);
-    } catch {
-      // ignore storage errors
-    }
-  }, []);
-
+  // Persist the active workspace selection to localStorage so it survives
+  // reloads (the legacy session schema has no activeWorkspaceId column). The
+  // initial restore from localStorage happens in the session-load effect above.
   useEffect(() => {
     try {
       if (activeWorkspaceId) {
@@ -320,8 +413,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     return ALL_MODELS.map((m) => {
       const isPromo = Boolean(PROMO_KEYS.has(m.key) && promoEligible);
       return {
-        ...m,
-        connected: connected.has(m.key),
+      ...m,
+      connected: connected.has(m.key),
         promo: isPromo,
         promoLabel: isPromo
           ? m.key === 'GLM'
@@ -474,7 +567,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       } as WorkspacePanelState,
       conversation: chatMessages as WorkspaceConversationMessage[],
     };
-    savePatch(patch);
+    saveSession(patch);
   }, [
     selectedModel,
     activeNav,
@@ -482,7 +575,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     terminalHeight,
     sidebarOpen,
     chatMessages,
-    savePatch,
+    saveSession,
     resumeDismissed,
     activeWorkspaceId,
   ]);
@@ -493,8 +586,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (!resumeDismissed) return;
     if (terminalScrollback.length === 0) return;
     if (terminalScrollback.length % 10 !== 0) return; // every 10th line
-    savePatch({ terminalScrollback: trimTerminalScrollback(terminalScrollback, 200) });
-  }, [terminalScrollback, savePatch, resumeDismissed]);
+    saveSession({ terminalScrollback: trimTerminalScrollback(terminalScrollback, 200) });
+  }, [terminalScrollback, saveSession, resumeDismissed]);
 
   // Capture terminal lines as commits / agent runs arrive (best-effort scrollback).
   useEffect(() => {
@@ -543,10 +636,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       if (!sha || announcedCommitsRef.current.has(sha)) continue;
       announcedCommitsRef.current.add(sha);
       emitEvent('GIT', 'commit', `Commit landed: ${headline}`, {
-        level: 'success',
-        stream: 'workspace',
+          level: 'success',
+          stream: 'workspace',
         meta: { sha, repo },
-      });
+        });
     }
   }, [recentCommits, activity, repo]);
 
@@ -998,6 +1091,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
 
           {/* Mini system status */}
           <div className="shrink-0 border-t border-zinc-800/80 p-2">
+            <div className="flex items-center gap-1.5 px-1 py-0.5 text-[9px] text-zinc-600">
+              <span className="text-violet-500/80">●</span>
+              <span>build in public</span>
+            </div>
             <div className="flex items-center gap-1.5 text-[10px] text-emerald-400">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> All Systems Operational
             </div>
@@ -1137,7 +1234,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                     }
                   />
                 ) : (
-                  <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
+                <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
                 )
               ) : (
                 <div className="space-y-3">
