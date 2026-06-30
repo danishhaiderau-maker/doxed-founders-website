@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(dev-workspace): redesign Recent Workspaces sidebar + 5-section runtime dropdown
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
