@@ -205,7 +205,7 @@ export class BotBridgeService {
 
   /** Race all candidate bot URLs in parallel for each path.
    *  Returns the first valid 200 JSON state — online if EITHER endpoint responds.
-   *  Parallel racing avoids slow Fly-down latency (first responder wins). */
+   *  Uses Promise.any so the first 200 wins without waiting on dead endpoints. */
   private async fetchStateFromCandidates(
     paths: string[],
     opts: { relayTimeout: number; stateTimeout: number; userAgent: string },
@@ -214,35 +214,45 @@ export class BotBridgeService {
     if (bases.length === 0) return null;
     for (const path of paths) {
       const timeoutMs = path.includes('relay-state') ? opts.relayTimeout : opts.stateTimeout;
-      const attempts = bases.map(async (base): Promise<BotApiState | null> => {
-        try {
-          const res = await fetch(`${base}${path}`, {
-            signal: AbortSignal.timeout(timeoutMs),
-            headers: {
-              Accept: 'application/json',
-              'User-Agent': opts.userAgent,
-            },
-          });
-          if (!res.ok) {
-            this.logger.warn(`Bot ${base}${path} HTTP ${res.status}`);
-            return null;
-          }
-          const data = (await res.json()) as BotApiState;
-          if (!data || typeof data !== 'object') return null;
-          if (bases.length > 1) {
-            this.logger.log(`Bot state fetched from ${base}${path}`);
-          }
-          return data;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`Bot ${base}${path} fetch failed: ${msg}`);
-          return null;
-        }
-      });
-      // First valid state wins; ignore rejections/empty results from the other endpoint.
-      const settled = await Promise.allSettled(attempts);
-      for (const r of settled) {
-        if (r.status === 'fulfilled' && r.value) return r.value;
+      // Each probe rejects on failure/null so Promise.any only resolves on a real hit.
+      const probes = bases.map(
+        (base) =>
+          new Promise<BotApiState>((resolve, reject) => {
+            fetch(`${base}${path}`, {
+              signal: AbortSignal.timeout(timeoutMs),
+              headers: {
+                Accept: 'application/json',
+                'User-Agent': opts.userAgent,
+              },
+            })
+              .then(async (res) => {
+                if (!res.ok) {
+                  this.logger.warn(`Bot ${base}${path} HTTP ${res.status}`);
+                  reject(new Error(`HTTP ${res.status}`));
+                  return;
+                }
+                const data = (await res.json()) as BotApiState;
+                if (!data || typeof data !== 'object') {
+                  reject(new Error('invalid state body'));
+                  return;
+                }
+                if (bases.length > 1) {
+                  this.logger.log(`Bot state fetched from ${base}${path}`);
+                }
+                resolve(data);
+              })
+              .catch((err: unknown) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.logger.warn(`Bot ${base}${path} fetch failed: ${msg}`);
+                reject(err instanceof Error ? err : new Error(msg));
+              });
+          }),
+      );
+      try {
+        // First valid state wins; remaining probes are abandoned.
+        return await Promise.any(probes);
+      } catch {
+        // All probes for this path failed — try the next path.
       }
     }
     return null;
@@ -318,33 +328,37 @@ export class BotBridgeService {
   }
 
   /** Health probe — race Fly + Cloudflare in parallel; online if either responds 200.
-   *  Parallel racing avoids waiting on a dead endpoint (first 200 wins). */
+   *  Promise.any returns on the first 200 without waiting on dead endpoints. */
   async fetchHealth() {
     const bases = await this.resolveBotUrls();
-    const probes: Promise<Record<string, unknown> | null>[] = [];
+    const probes: Promise<Record<string, unknown>>[] = [];
     for (const base of bases) {
       for (const path of ['/api/ping', '/health']) {
         probes.push(
-          (async () => {
-            try {
-              const res = await fetch(`${base}${path}`, {
-                signal: AbortSignal.timeout(8_000),
-                headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+          new Promise<Record<string, unknown>>((resolve, reject) => {
+            fetch(`${base}${path}`, {
+              signal: AbortSignal.timeout(8_000),
+              headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+            })
+              .then(async (res) => {
+                if (!res.ok) {
+                  reject(new Error(`HTTP ${res.status}`));
+                  return;
+                }
+                resolve((await res.json()) as Record<string, unknown>);
+              })
+              .catch((err: unknown) => {
+                reject(err instanceof Error ? err : new Error(String(err)));
               });
-              if (!res.ok) return null;
-              return (await res.json()) as Record<string, unknown>;
-            } catch {
-              return null;
-            }
-          })(),
+          }),
         );
       }
     }
-    const settled = await Promise.allSettled(probes);
-    for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value) return r.value;
+    try {
+      return await Promise.any(probes);
+    } catch {
+      return null;
     }
-    return null;
   }
 
   /** Read-only proxy to the research analyzer (:9001) via the bot's public tunnel.
