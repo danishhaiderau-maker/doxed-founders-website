@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(web): tabbed Settings hubs (IDEs, AI, Infra, Founder Node, Security)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
