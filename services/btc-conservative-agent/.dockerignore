@@ -1,9 +1,39 @@
-research/
-analyzer_research_engine_v62.py
-research_dashboard.py
-execution_insight_report.py
+# Build artifacts
 __pycache__/
 *.pyc
-.env
-exports/
+*.pyo
+*.pyd
+
+# Local runtime / logs
 logs/
+*.log
+
+# Home-stack markers + local tunnel creds (must never ship to Fly)
+.home-*
+home-bot.env
+*-home.env
+
+# Runtime artifacts with secrets / local state
+*.jsonl.*
+signal_replay.jsonl
+.openai_*
+.anthropic_*
+
+# Git + editor
+.git/
+.gitignore
+.cursor/
+.vscode/
+
+# Local node/web artifacts (the bot image doesn't need any of the monorepo JS)
+node_modules/
+.next/
+dist/
+.turbo/
+
+# Already-generated research outputs — volume is the source of truth on Fly.
+# Keep the dirs (entrypoint symlinks them) but don't bake stale copies into the image.
+research/*
+research_accumulator/*
+research_archive/*
+!research/.gitkeep
