@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Merge Agent Hub pages + add Showcase Bot tab
+feat(dev-workspace): add Workspace Switcher to left sidebar
 
 ## Last Activity
 
