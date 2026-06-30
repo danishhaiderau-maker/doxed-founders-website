@@ -75,6 +75,7 @@ type ModelInfo = {
   promoLabel?: string;
   local?: boolean;
   isIDE?: boolean;
+  comingSoon?: boolean;
 };
 
 const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
@@ -95,9 +96,27 @@ const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
 // IDEs & Build Agents — execution environments (not chat LLMs).
 // These need their own API/connection key, separate from AI provider keys.
 const IDE_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
-  { key: 'CURSOR', label: 'Cursor Agent', provider: 'Cursor', model: 'cursor-agent', contextWindow: '200K', costPerMtokens: '$20/mo', strengths: 'Autonomous coding · PR creation · Cloud agent', isIDE: true },
+  { key: 'CURSOR', label: 'Cursor', provider: 'Cursor', model: 'cursor-agent', contextWindow: '200K', costPerMtokens: '$20/mo', strengths: 'Autonomous coding · PR creation · Cloud agent', isIDE: true },
   { key: 'OPENHANDS', label: 'OpenHands', provider: 'OpenHands', model: 'openhands', contextWindow: '—', costPerMtokens: '—', strengths: 'Self-hosted build agent · Open source', isIDE: true },
 ];
+
+// Coming Soon IDEs/build agents — disabled, non-clickable placeholders.
+const COMING_SOON_IDES: Omit<ModelInfo, 'connected' | 'promo'>[] = [
+  { key: 'CLAUDE_CODE', label: 'Claude Code', provider: 'Anthropic', model: 'claude-code', contextWindow: '200K', costPerMtokens: '—', strengths: 'Terminal-native coding agent · Coming soon', isIDE: true, comingSoon: true },
+  { key: 'VS_CODE', label: 'VS Code', provider: 'Microsoft', model: 'vscode', contextWindow: '—', costPerMtokens: '—', strengths: 'Editor-integrated build agent · Coming soon', isIDE: true, comingSoon: true },
+  { key: 'WINDSURF', label: 'Windsurf', provider: 'Codeium', model: 'windsurf', contextWindow: '—', costPerMtokens: '—', strengths: 'Cascade agent · Coming soon', isIDE: true, comingSoon: true },
+];
+
+// Private / local inference — Founder Vault Memory is a placeholder for the
+// in-progress on-device memory store.
+const PRIVATE_EXTRA: Omit<ModelInfo, 'connected' | 'promo'>[] = [
+  { key: 'VAULT_MEMORY', label: 'Founder Vault Memory', provider: 'Founder OS', model: 'vault-memory', contextWindow: 'varies', costPerMtokens: 'Free', strengths: 'On-device memory · Private recall', local: true, comingSoon: true },
+];
+
+// Category buckets for the runtime dropdown. Keys reference ALL_MODELS.
+const BRAIN_KEYS = new Set(['OPENAI', 'OPENAI_THINKING', 'ANTHROPIC', 'GEMINI', 'GLM', 'DEEPSEEK', 'GROK']);
+const MARKETPLACE_KEYS = new Set(['OPENROUTER', 'SURPLUS', 'JATEVO']);
+const PRIVATE_KEYS = new Set(['OLLAMA', 'PHALA']);
 
 const NAV_ITEMS = [
   { id: 'workspace', label: 'Workspace' },
@@ -343,6 +362,15 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       }
     }
   }, [models, ideModels, selectedModel]);
+
+  // When an IDE/build agent is the selected runtime, the second line of the
+  // selector button shows the brain that will actually answer prompts.
+  const activeBrain = useMemo<ModelInfo | null>(() => {
+    if (selectedModel?.isIDE) {
+      return models.find((m) => m.promo || m.connected) ?? models[0] ?? null;
+    }
+    return selectedModel ?? null;
+  }, [selectedModel, models]);
 
   const repo = activity?.repoFullName ?? settings?.repoFullName ?? null;
   const branch = bridge?.latest?.branch ?? activity?.defaultBranch ?? 'main';
@@ -849,42 +877,54 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             ))}
           </nav>
 
-          {/* Workspace Switcher */}
+          {/* Recent Workspaces — rich two-line entries mirroring desktop work */}
           <div className="flex min-h-0 shrink-0 flex-col border-t border-zinc-800/80">
             <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Workspaces</span>
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Recent Workspaces</span>
               <button
                 onClick={() => handleCreateWorkspace()}
                 className="text-[9px] text-violet-400/80 hover:text-violet-300"
                 title="New workspace"
               >+ New</button>
             </div>
-            <div className="min-h-0 max-h-32 overflow-y-auto px-1.5 pb-1.5">
+            <div className="min-h-0 max-h-56 overflow-y-auto px-1.5 pb-1.5">
               {connectedWorkspaces.length === 0 ? (
-                <p className="px-2 py-1 text-[9px] text-zinc-700">No workspaces yet</p>
+                <p className="px-2 py-2 text-[10px] leading-relaxed text-zinc-600">
+                  No workspaces yet — click <span className="text-violet-400">+ New</span> to create one
+                </p>
               ) : (
-                connectedWorkspaces.map((ws) => (
-                  <div
-                    key={ws.id}
-                    className={`group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition ${
-                      activeWorkspaceId === ws.id ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800/50'
-                    }`}
-                  >
-                    <button
-                      onClick={() => handleSwitchWorkspace(ws.id)}
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      title={ws.repository ?? ws.label}
+                connectedWorkspaces.slice(0, 10).map((ws) => {
+                  const status = workspaceStatus(ws.lastActiveAt);
+                  const ide = ws.ideProvider ?? 'Unknown IDE';
+                  const metaParts = [ide, ws.branch ?? '—', formatRelativeTime(ws.lastActiveAt)];
+                  return (
+                    <div
+                      key={ws.id}
+                      className={`group flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition ${
+                        activeWorkspaceId === ws.id ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800/50'
+                      }`}
                     >
-                      <span className="truncate text-[10px] font-medium">{ws.label}</span>
-                      {ws.branch && <span className="ml-auto shrink-0 text-[8px] text-zinc-600">{ws.branch}</span>}
-                    </button>
-                    <button
-                      onClick={() => handleDeleteWorkspace(ws.id)}
-                      className="shrink-0 text-[9px] text-zinc-700 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
-                      title="Delete workspace"
-                    >✕</button>
-                  </div>
-                ))
+                      <button
+                        onClick={() => handleSwitchWorkspace(ws.id)}
+                        className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                        title={ws.repository ?? ws.label}
+                      >
+                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${status.dot}`} title={status.label} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[11px] font-medium text-zinc-300">{ws.label}</p>
+                          <p className="truncate text-[9px] text-zinc-600">
+                            {metaParts.join(' · ')}
+                          </p>
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteWorkspace(ws.id)}
+                        className="shrink-0 text-[9px] text-zinc-700 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                        title="Delete workspace"
+                      >✕</button>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
@@ -991,73 +1031,78 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           {/* Model selector bar */}
           <div className="relative flex shrink-0 items-center justify-between border-b border-zinc-800/60 px-3 py-1.5">
             <button onClick={() => setModelDropdownOpen((v) => !v)}
-              className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-violet-500/50">
-              <span className={`h-2 w-2 rounded-full ${selectedModel?.promo ? 'bg-amber-400' : selectedModel?.local ? 'bg-emerald-400' : selectedModel?.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-              {selectedModel?.label ?? 'Select AI'}
-              <span className="text-[9px] text-zinc-500">{selectedModel?.provider}</span>
+              className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-left text-zinc-200 hover:border-violet-500/50">
+              <span className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${selectedModel?.promo ? 'bg-amber-400' : selectedModel?.local ? 'bg-emerald-400' : selectedModel?.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+              <div className="min-w-0 flex flex-col leading-tight">
+                <span className="truncate text-xs font-medium text-zinc-100">
+                  {selectedModel?.label ?? 'Select runtime'}
+                </span>
+                <span className="truncate text-[9px] text-zinc-500">
+                  {selectedModel
+                    ? selectedModel.isIDE
+                      ? `${activeBrain?.label ?? 'No brain'} · ${activeBrain?.local ? 'Local' : 'Cloud'}`
+                      : `${selectedModel.local ? 'Local' : 'Cloud'} · ${selectedModel.promo ? 'Promo' : selectedModel.connected ? 'Connected' : selectedModel.comingSoon ? 'Coming Soon' : 'Not connected'}`
+                    : 'No runtime selected'}
+                </span>
+              </div>
               <ChevronIcon />
             </button>
 
-            {/* AI Model Dropdown */}
+            {/* AI Model Dropdown — 5 sections: Execution · Brains · Marketplace · Private · Admin Promo */}
             {modelDropdownOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setModelDropdownOpen(false)} />
-                <div className="absolute left-3 top-11 z-40 w-80 rounded-xl border border-zinc-700 bg-[#12121a] shadow-2xl">
-                  <div className="border-b border-zinc-800 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    Select Brain or Build Agent
-                  </div>
-                  <div className="max-h-80 overflow-y-auto py-1">
-                    {/* Section 1: AI Providers (brains) */}
-                    <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
-                      AI Providers <span className="font-normal normal-case text-zinc-700">· the brain · needs AI API key</span>
-                    </div>
-                    {models.map((m) => (
-                      <button key={m.key} onClick={() => { setSelectedModel(m); setModelDropdownOpen(false); }}
-                        className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition hover:bg-zinc-800/50 ${selectedModel?.key === m.key ? 'bg-violet-600/10' : ''}`}>
-                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${m.promo ? 'bg-amber-400' : m.local ? 'bg-emerald-400' : m.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium text-zinc-200">{m.label}</span>
-                            {m.promo && <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[8px] font-semibold text-amber-300">{m.promoLabel}</span>}
-                            {m.local && <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Free · Local</span>}
-                            {m.connected && !m.promo && !m.local && <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Connected</span>}
-                            {selectedModel?.key === m.key && <span className="ml-auto text-violet-400">✓</span>}
-                          </div>
-                          <div className="mt-0.5 flex items-center gap-2 text-[9px] text-zinc-500">
-                            <span>{m.provider}</span><span>·</span><span>{m.contextWindow} ctx</span><span>·</span><span>{m.costPerMtokens}/M</span>
-                          </div>
-                          <p className="mt-0.5 text-[9px] text-zinc-600">{m.strengths}</p>
-                        </div>
-                      </button>
+                <div className="absolute left-3 top-12 z-40 w-80 rounded-xl border border-zinc-700 bg-[#12121a] shadow-2xl">
+                  <div className="max-h-[400px] overflow-y-auto py-1">
+                    {/* ── Section 1: EXECUTION (IDEs / build agents) ── */}
+                    <DropdownSectionHeader label="Execution" hint="IDEs · build agents" />
+                    {ideModels.map((m) => (
+                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                    ))}
+                    {COMING_SOON_IDES.map((m) => (
+                      <DropdownModelRow key={m.key} m={m as ModelInfo} selectedKey={selectedModel?.key} onSelect={() => {}} disabled />
                     ))}
 
-                    {/* Section 2: IDEs & Build Agents (execution) */}
-                    <div className="mt-2 border-t border-zinc-800 px-3 py-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
-                      IDEs &amp; Build Agents <span className="font-normal normal-case text-zinc-700">· execution · needs IDE key</span>
-                    </div>
-                    {ideModels.map((m) => (
-                      <button key={m.key} onClick={() => { setSelectedModel(m); setModelDropdownOpen(false); }}
-                        className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition hover:bg-zinc-800/50 ${selectedModel?.key === m.key ? 'bg-violet-600/10' : ''}`}>
-                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${m.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium text-zinc-200">{m.label}</span>
-                            <span className="rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-300">IDE</span>
-                            {m.connected
-                              ? <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Connected</span>
-                              : <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Connect in Settings</span>}
-                            {selectedModel?.key === m.key && <span className="ml-auto text-violet-400">✓</span>}
-                          </div>
-                          <div className="mt-0.5 flex items-center gap-2 text-[9px] text-zinc-500">
-                            <span>{m.provider}</span><span>·</span><span>{m.contextWindow} ctx</span><span>·</span><span>{m.costPerMtokens}</span>
-                          </div>
-                          <p className="mt-0.5 text-[9px] text-zinc-600">{m.strengths}</p>
-                        </div>
-                      </button>
+                    {/* ── Section 2: BRAINS (cloud LLM providers) ── */}
+                    <DropdownDivider />
+                    <DropdownSectionHeader label="Brains" hint="cloud LLM providers" />
+                    {models.filter((m) => BRAIN_KEYS.has(m.key)).map((m) => (
+                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
                     ))}
+
+                    {/* ── Section 3: MARKETPLACE (third-party aggregators) ── */}
+                    <DropdownDivider />
+                    <DropdownSectionHeader label="Marketplace" hint="aggregators · routing" />
+                    {models.filter((m) => MARKETPLACE_KEYS.has(m.key)).map((m) => (
+                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                    ))}
+
+                    {/* ── Section 4: PRIVATE (local / private inference) ── */}
+                    <DropdownDivider />
+                    <DropdownSectionHeader label="Private" hint="local · TEE · on-device" />
+                    {models.filter((m) => PRIVATE_KEYS.has(m.key)).map((m) => (
+                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                    ))}
+                    {PRIVATE_EXTRA.map((m) => (
+                      <DropdownModelRow key={m.key} m={m as ModelInfo} selectedKey={selectedModel?.key} onSelect={() => {}} disabled />
+                    ))}
+
+                    {/* ── Section 5: ADMIN PROMO (always visible) ── */}
+                    <DropdownDivider />
+                    <DropdownSectionHeader label="Admin Promo" hint="always on · founder benefit" />
+                    <AdminPromoRow
+                      glmModel={models.find((m) => m.key === 'GLM') ?? null}
+                      daysRemaining={onboarding?.promo?.daysRemaining ?? null}
+                      eligible={Boolean(onboarding?.promo?.eligible)}
+                      selected={selectedModel?.key === 'GLM'}
+                      onSelect={() => {
+                        const glm = models.find((m) => m.key === 'GLM');
+                        if (glm) { setSelectedModel(glm); setModelDropdownOpen(false); }
+                      }}
+                    />
                   </div>
                   <div className="border-t border-zinc-800 px-3 py-2 text-[9px] text-zinc-600">
-                    AI Providers need an AI API key · IDEs need their own IDE key — connect either in Settings → Builder
+                    Brains need an AI API key · Execution needs its own IDE key — connect either in Settings → Builder
                   </div>
                 </div>
               </>
@@ -1560,6 +1605,40 @@ function formatRelativeTimeShort(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+// Richer relative time for the Recent Workspaces sidebar — produces strings
+// like "2 min ago", "1 hour ago", "3 days ago".
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '—';
+  const diff = Date.now() - then;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'just now';
+  if (min === 1) return '1 min ago';
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr === 1) return '1 hour ago';
+  if (hr < 24) return `${hr} hours ago`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return '1 day ago';
+  if (day < 30) return `${day} days ago`;
+  const mo = Math.floor(day / 30);
+  if (mo === 1) return '1 month ago';
+  if (mo < 12) return `${mo} months ago`;
+  const yr = Math.floor(day / 365);
+  return yr === 1 ? '1 year ago' : `${yr} years ago`;
+}
+
+// Workspace status dot color based on lastActiveAt.
+// green = Running (<5 min), yellow = Waiting (<1 hr), gray = Dormant (older).
+function workspaceStatus(lastActiveAt: string): { dot: string; label: string } {
+  const then = new Date(lastActiveAt).getTime();
+  if (Number.isNaN(then)) return { dot: 'bg-zinc-600', label: 'Dormant' };
+  const diffMs = Date.now() - then;
+  if (diffMs < 5 * 60_000) return { dot: 'bg-emerald-400', label: 'Running' };
+  if (diffMs < 60 * 60_000) return { dot: 'bg-amber-400', label: 'Waiting' };
+  return { dot: 'bg-zinc-600', label: 'Dormant' };
+}
+
 /* ───── Context Panel (replaces placeholder — always live info) ───── */
 function ContextPanel({ repo, branch, runActive, lastDeploy, openFiles, recentCommits, selectedModel }: {
   repo: string | null; branch: string; runActive: FounderAgentRunRecord | false; lastDeploy: DeployIntelligenceResponse['cards'][number] | null;
@@ -1713,4 +1792,121 @@ function BranchIcon() {
 
 function ChevronIcon() {
   return <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>;
+}
+
+/* ───── Runtime dropdown helpers ───── */
+function DropdownSectionHeader({ label, hint }: { label: string; hint?: string }) {
+  return (
+    <div className="px-3 py-1 text-[8px] font-semibold uppercase tracking-wider text-zinc-600">
+      {label}
+      {hint && <span className="ml-1.5 font-normal normal-case text-zinc-700">· {hint}</span>}
+    </div>
+  );
+}
+
+function DropdownDivider() {
+  return <div className="mx-3 my-1 border-t border-zinc-800/60" />;
+}
+
+function DropdownModelRow({
+  m,
+  selectedKey,
+  onSelect,
+  disabled,
+}: {
+  m: ModelInfo;
+  selectedKey?: string;
+  onSelect: (m: ModelInfo) => void;
+  disabled?: boolean;
+}) {
+  const selected = selectedKey === m.key;
+  const isIDE = Boolean(m.isIDE);
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => { if (!disabled) onSelect(m); }}
+      className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition ${
+        disabled
+          ? 'cursor-not-allowed opacity-50'
+          : selected
+            ? 'bg-violet-600/10 hover:bg-violet-600/15'
+            : 'hover:bg-zinc-800/50'
+      }`}
+    >
+      <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+        m.comingSoon
+          ? 'bg-zinc-700'
+          : m.promo
+            ? 'bg-amber-400'
+            : m.local
+              ? 'bg-emerald-400'
+              : m.connected
+                ? 'bg-emerald-400'
+                : 'bg-zinc-600'
+      }`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className={`text-xs font-medium ${disabled ? 'text-zinc-500' : 'text-zinc-200'}`}>{m.label}</span>
+          {isIDE && <span className="rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-300">IDE</span>}
+          {m.promo && <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[8px] font-semibold text-amber-300">{m.promoLabel ?? 'Promo'}</span>}
+          {m.local && <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Free · Local</span>}
+          {!m.comingSoon && m.connected && !m.promo && !m.local && (
+            <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Connected</span>
+          )}
+          {!m.comingSoon && !m.connected && !isIDE && !m.local && !m.promo && (
+            <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Missing key</span>
+          )}
+          {!m.comingSoon && isIDE && !m.connected && (
+            <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Connect in Settings</span>
+          )}
+          {m.comingSoon && (
+            <span className="rounded bg-zinc-800 px-1 py-0.5 text-[8px] font-semibold text-zinc-500">Coming Soon</span>
+          )}
+          {selected && <span className="ml-auto text-violet-400">✓</span>}
+        </div>
+        <div className="mt-0.5 flex items-center gap-2 text-[9px] text-zinc-500">
+          <span>{m.provider}</span><span>·</span><span>{m.contextWindow} ctx</span><span>·</span><span>{m.costPerMtokens}{!isIDE && !m.local ? '/M' : ''}</span>
+        </div>
+        <p className="mt-0.5 text-[9px] text-zinc-600">{m.strengths}</p>
+      </div>
+    </button>
+  );
+}
+
+function AdminPromoRow({
+  glmModel,
+  daysRemaining,
+  eligible,
+  selected,
+  onSelect,
+}: {
+  glmModel: ModelInfo | null;
+  daysRemaining: number | null;
+  eligible: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const label = glmModel?.label ?? 'GLM 5.2';
+  const daysLabel = daysRemaining != null ? `${daysRemaining} days remaining` : eligible ? 'Active' : 'Activate promo';
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition ${
+        selected ? 'bg-amber-500/10 hover:bg-amber-500/15' : 'hover:bg-zinc-800/50'
+      }`}
+    >
+      <span className="mt-1 text-[11px] text-amber-400">⭐</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-zinc-200">{label}</span>
+          <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[8px] font-semibold text-amber-300">Admin Promo</span>
+          {selected && <span className="ml-auto text-amber-400">✓</span>}
+        </div>
+        <p className="mt-0.5 text-[9px] text-amber-300/70">{daysLabel}</p>
+        <p className="mt-0.5 text-[9px] text-zinc-600">Founder benefit · always visible regardless of provider config</p>
+      </div>
+    </button>
+  );
 }
