@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(fly): add Fly.io deploy artifacts + wire Start/Stop to remote Fly bot
+refactor(web): remove Mission Control branding → Development Workspace
 
 ## Last Activity
 
