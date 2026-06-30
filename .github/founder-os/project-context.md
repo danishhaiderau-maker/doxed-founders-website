@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(fly): bump bot memory 512MB -> 1024MB (512MB died after ~17min, slow memory growth)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
