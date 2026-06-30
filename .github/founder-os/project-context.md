@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-agent-hub(conservative-btc): rework page data wiring — full-session analyzer + live :7002 sections
+feat(web): tabbed Settings hubs (IDEs, AI, Infra, Founder Node, Security)
 
 ## Last Activity
 
