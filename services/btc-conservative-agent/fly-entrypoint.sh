@@ -33,5 +33,23 @@ else
   echo "[fly-entrypoint] ANALYZER_ENABLED!=true -> trading-only mode (no analyzer)."
 fi
 
-echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground)..."
-exec python btc_conservative_agent.py
+echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
+export PYTHONUNBUFFERED=1
+BOT_LOG="$DATA_DIR/bot.log"
+# Trading bot must stay up 24/7. Run it in an auto-restart loop so a code-level
+# crash/exit (unhandled exception, missing-credential bail, exchange hiccup) does NOT
+# stop the Fly machine — PID 1 (this loop) keeps running and relaunches the bot within
+# seconds. Every run's stdout/stderr (incl. Python tracebacks) is tee'd to the persistent
+# volume so the crash cause is readable after the fact via `fly ssh console`.
+set +e
+while true; do
+  # Cap the log so a crash loop can't fill the volume.
+  if [ -f "$BOT_LOG" ] && [ "$(wc -c < "$BOT_LOG" 2>/dev/null || echo 0)" -gt 52428800 ]; then
+    : > "$BOT_LOG"
+  fi
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [fly-entrypoint] bot starting -> $BOT_LOG" | tee -a "$BOT_LOG"
+  python btc_conservative_agent.py 2>&1 | tee -a "$BOT_LOG"
+  rc=${PIPESTATUS[0]}
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [fly-entrypoint] bot exited rc=$rc -> restarting in 3s" | tee -a "$BOT_LOG"
+  sleep 3
+done
