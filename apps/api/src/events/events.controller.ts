@@ -1,11 +1,15 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
+import type { Response } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
+import { JwtAuthGuard } from '../auth/guards';
 import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
+
+type CopilotAskDto = { prompt: string; agentTemplate?: string; provider?: string };
 
 @Controller()
 export class EventsController {
@@ -153,6 +157,36 @@ export class EventsController {
       agentTemplate: body.agentTemplate,
       provider: body.provider,
     });
+  }
+
+  @Post('copilot/ask/stream')
+  @UseGuards(JwtAuthGuard)
+  async askStream(
+    @CurrentUser() user: AuthUser,
+    @Body() body: CopilotAskDto,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    try {
+      await this.copilot.askStream(
+        user.id,
+        body.prompt,
+        { agentTemplate: body.agentTemplate, provider: body.provider },
+        (event) => {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        },
+      );
+      res.end();
+    } catch (err) {
+      res.write(
+        `data: ${JSON.stringify({ type: 'error', message: err instanceof Error ? err.message : String(err) })}\n\n`,
+      );
+      res.end();
+    }
   }
 
   @Post('copilot/social-draft')
