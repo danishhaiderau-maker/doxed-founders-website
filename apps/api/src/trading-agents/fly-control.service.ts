@@ -5,16 +5,18 @@ import { ConfigService } from '@nestjs/config';
  * Remote control for the showcase BTC bot running on Fly.io.
  *
  * The Home Command Center Start/Stop buttons call this when SHOWCASE_HOST=fly.
- * It speaks the Fly Machines REST API directly (no flyctl in the Railway container):
- *   POST https://api.machinery-fly.dev/v1/apps/{app}/machines/{id}/start
- *   POST https://api.machinery-fly.dev/v1/apps/{app}/machines/{id}/stop
- *   GET  https://api.machinery-fly.dev/v1/apps/{app}/machines/{id}
+ * It speaks the Fly Machines REST API directly (no flyctl in the Railway container —
+ * flyctl intermittently fails with a token-discharge error when routed to syd):
+ *   POST https://api.machines.dev/v1/apps/{app}/machines/{id}/start
+ *   POST https://api.machines.dev/v1/apps/{app}/machines/{id}/stop
+ *   GET  https://api.machines.dev/v1/apps/{app}/machines/{id}
  * Auth: `Authorization: Bearer <FLY_API_TOKEN>`.
  *
- * Env required on Railway:
- *   FLY_API_TOKEN   — token from `flyctl auth token` (scoped to the bot app).
- *   FLY_APP_NAME    — e.g. "doxed-btc-bot".
- *   FLY_MACHINE_ID  — the bot machine id (from `fly machines list`).
+ * Env (Railway secrets):
+ *   FLY_API_TOKEN   — token from `fly tokens create` (scoped to the bot app). REQUIRED.
+ *   FLY_APP         — e.g. "doxed-btc-bot". Defaults to "doxed-btc-bot".
+ *                     (FLY_APP_NAME is accepted as a legacy alias.)
+ *   FLY_MACHINE_ID  — the bot machine id. Defaults to "48e1403c073038".
  *   FLY_BOT_URL     — optional public bot URL for /api/ping health probe
  *                     (defaults to https://bot.doxxedcrypto.digital).
  */
@@ -38,9 +40,12 @@ export interface FlyControlResult {
   polled?: boolean;
 }
 
-const FLY_API_BASE = 'https://api.machinery-fly.dev/v1';
+const FLY_API_BASE = 'https://api.machines.dev/v1';
+const DEFAULT_FLY_APP = 'doxed-btc-bot';
+const DEFAULT_FLY_MACHINE_ID = '48e1403c073038';
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 90000;
+const PER_CALL_TIMEOUT_MS = 10000;
 
 @Injectable()
 export class FlyControlService {
@@ -55,13 +60,21 @@ export class FlyControlService {
     botUrl: string;
   } {
     const token = this.config.get<string>('FLY_API_TOKEN')?.trim();
-    const app = this.config.get<string>('FLY_APP_NAME')?.trim();
-    const machineId = this.config.get<string>('FLY_MACHINE_ID')?.trim();
+    // FLY_APP is the canonical name; FLY_APP_NAME kept as a legacy alias.
+    const app = (
+      this.config.get<string>('FLY_APP')?.trim() ||
+      this.config.get<string>('FLY_APP_NAME')?.trim() ||
+      DEFAULT_FLY_APP
+    );
+    const machineId = (
+      this.config.get<string>('FLY_MACHINE_ID')?.trim() ||
+      DEFAULT_FLY_MACHINE_ID
+    );
     const botUrl = (this.config.get<string>('FLY_BOT_URL')?.trim() ||
       'https://bot.doxxedcrypto.digital').replace(/\/$/, '');
-    if (!token || !app || !machineId) {
+    if (!token) {
       throw new ServiceUnavailableException(
-        'Fly control not configured — set FLY_API_TOKEN, FLY_APP_NAME, FLY_MACHINE_ID on Railway.',
+        'Fly control not configured — set FLY_API_TOKEN on Railway.',
       );
     }
     return { token, app, machineId, botUrl };
@@ -76,7 +89,7 @@ export class FlyControlService {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
     });
     const text = await res.text();
     if (!res.ok) {
