@@ -60,7 +60,7 @@ const WAYS_TO_SPEND = [
 ] as const;
 
 const FOUNDER_OS_ITEMS = [
-  { label: 'Mission Control', href: '/founder-den', icon: '◆' },
+  { label: 'Development Workspace', href: '/founder-den', icon: '◆' },
   { label: 'Tasks', href: '/founder-den?tab=activity', icon: '☑' },
   { label: 'Agents', href: '/founder-den?tab=agents', icon: '🤖' },
   { label: 'Copilot', href: '/founder-den', icon: '✦' },
@@ -366,10 +366,10 @@ export function LandingHubPreviewWidgets({
         <>
       <WidgetShell
         title="Founder OS"
-        subtitle="The cockpit — mission control for builders."
+        subtitle="The cockpit — development workspace for builders."
         headerClass="bg-violet-950/40"
         href="/founder-den"
-        footerLabel="Open Mission Control →"
+        footerLabel="Open Development Workspace →"
       >
         <ul className="space-y-0.5">
           {FOUNDER_OS_ITEMS.map((tool) => (

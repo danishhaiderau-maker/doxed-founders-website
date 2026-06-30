@@ -34,7 +34,7 @@ export function FounderCloudPanel({ accessToken, showImport }: Props) {
     <section className="rounded-xl border border-violet-500/20 bg-violet-950/10 p-4">
       <p className="text-xs font-semibold uppercase tracking-wider text-violet-300">Founder Cloud</p>
       <p className="mt-1 text-sm text-zinc-400">
-        Personal stack on your PC via Founder Node tray — localhost Mission Control, optional GitHub later.
+        Personal stack on your PC via Founder Node tray — localhost Development Workspace, optional GitHub later.
       </p>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -57,7 +57,7 @@ export function FounderCloudPanel({ accessToken, showImport }: Props) {
           rel="noreferrer"
           className="mt-3 inline-flex text-xs font-medium text-violet-300 hover:underline"
         >
-          Open local Mission Control →
+          Open local Development Workspace →
         </a>
       ) : (
         <p className="mt-3 text-xs text-zinc-500">

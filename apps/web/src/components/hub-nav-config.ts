@@ -128,7 +128,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     rowNumber: 'Row 3',
     label: 'Build',
     subtitle: 'Founder OS · Local compute · Ship',
-    sidebarDescription: 'Mission control, Founder Node on your PC, raise capital, list your project.',
+    sidebarDescription: 'Development Workspace, Founder Node on your PC, raise capital, list your project.',
     borderClass: 'border-violet-500/25',
     labelClass: 'text-violet-200',
     rowBgClass: 'bg-violet-950/20',

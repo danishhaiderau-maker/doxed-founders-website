@@ -80,7 +80,7 @@ export function FounderOnboardingComplete({ status, onLaunchPrompt, onDismiss }:
             onClick={() => onLaunchPrompt(FIRST_PROMPTS[0].prompt)}
             className="rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-black hover:bg-zinc-100"
           >
-            Open Mission Control →
+            Open Development Workspace →
           </button>
           {onDismiss && (
             <button

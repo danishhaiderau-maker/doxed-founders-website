@@ -7,7 +7,7 @@ export function PlatformSetupGuide() {
     <div className="rounded-xl border border-violet-500/30 bg-violet-950/15 p-5 text-sm text-zinc-300">
       <h3 className="text-base font-semibold text-white">How to use Doxxed Crypto without issues</h3>
       <p className="mt-1 text-xs text-zinc-500">
-        Follow this order once — then Mission Control, agents, and Copilot stay in sync.
+        Follow this order once — then Development Workspace, agents, and Copilot stay in sync.
       </p>
 
       <ol className="mt-4 space-y-4 list-none">
@@ -16,7 +16,7 @@ export function PlatformSetupGuide() {
           <p className="mt-1 text-xs text-zinc-400">
             In{' '}
             <Link href="/founder-den" className="text-emerald-400 underline">
-              Mission Control
+              Development Workspace
             </Link>{' '}
             link your repo. Founder OS reads public commits and build feed — not your private vault files.
           </p>
@@ -48,7 +48,7 @@ export function PlatformSetupGuide() {
           <p className="font-medium text-violet-200">4. Code agent (optional)</p>
           <p className="mt-1 text-xs text-zinc-400">
             <strong>Cursor</strong> or <strong>OpenHands</strong> is separate from the brain — it edits your
-            GitHub repo. In Copilot use <strong>Run in Cursor</strong>; output streams in Mission Control.
+            GitHub repo. In Copilot use <strong>Run in Cursor</strong>; output streams in Development Workspace.
           </p>
         </li>
         <li>

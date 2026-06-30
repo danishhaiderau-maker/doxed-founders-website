@@ -143,7 +143,7 @@ export function FounderAgentsWorkforce({
           onClick={() => onTabChange('activity')}
           className="w-full rounded-xl border border-zinc-700 py-3 text-sm text-zinc-300 hover:border-violet-500/50 hover:text-white"
         >
-          ← Back to Mission Control
+          ← Back to Development Workspace
         </button>
       )}
     </div>

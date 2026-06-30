@@ -390,7 +390,7 @@ export function BuilderSettingsPanel({ accessToken }: BuilderSettingsPanelProps)
               <h3 className="text-sm font-semibold text-emerald-100">Autopilot</h3>
               <p className="text-xs text-zinc-500">
                 When enabled, Copilot can sync GitHub, publish pending updates, redeploy Vercel/Railway (if
-                connected), and resume your builder agent. Say &quot;take full control&quot; in Mission Control.
+                connected), and resume your builder agent. Say &quot;take full control&quot; in Development Workspace.
               </p>
               <div className="flex flex-col gap-2 text-sm text-zinc-300">
                 <label className="flex items-center gap-2">

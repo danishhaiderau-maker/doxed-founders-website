@@ -56,7 +56,7 @@ export function LandingPlatformAdoption() {
             AI tokens & real traction — day by day
           </h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-zinc-500">
-            Input/output tokens are logged on every Mission Control AI call (Copilot, drafts, Quick
+            Input/output tokens are logged on every Development Workspace AI call (Copilot, drafts, Quick
             Build). DDollar volume, GitHub sync events, and build posts show trader-visible activity
             — not vanity metrics.
           </p>

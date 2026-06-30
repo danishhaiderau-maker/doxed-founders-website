@@ -316,7 +316,7 @@ export function resolveCopilotSendMode(
   return requested ?? defaultSendMode(stack);
 }
 
-/** Mission Control hero chat — auto-route build vs research without mode picker. */
+/** Development Workspace hero chat — auto-route build vs research without mode picker. */
 export function resolveHeroBrainSendMode(
   prompt: string,
   stack: CopilotStackSummary,

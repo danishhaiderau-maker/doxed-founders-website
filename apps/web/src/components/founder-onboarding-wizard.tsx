@@ -406,7 +406,7 @@ export function FounderOnboardingWizard({
           {currentStepId === 'founder' && (
             <>
               <h3 className="font-semibold text-white">Activate founder profile</h3>
-              <p className="mt-1 text-sm text-zinc-500">Unlocks Mission Control, Founder Brain, and agents.</p>
+              <p className="mt-1 text-sm text-zinc-500">Unlocks Development Workspace, Founder Brain, and agents.</p>
               {currentStep?.complete ? (
                 <p className="mt-4 text-sm text-emerald-300">
                   Profile active{status?.projectName ? `: ${status.projectName}` : ''}.
@@ -458,7 +458,7 @@ export function FounderOnboardingWizard({
               <p className="mt-1 text-sm text-zinc-500">
                 {currentStep?.optional
                   ? 'Optional on your path — connect when you want commits, PRs, and remote builds.'
-                  : 'We poll your repo every 15 minutes and when you open Mission Control.'}
+                  : 'We poll your repo every 15 minutes and when you open Development Workspace.'}
               </p>
               <div className="mt-3">
                 <button

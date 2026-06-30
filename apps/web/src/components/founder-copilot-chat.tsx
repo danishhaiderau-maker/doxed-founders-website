@@ -124,7 +124,7 @@ type FounderCopilotChatProps = {
   memory?: ProjectMemory | null;
   missionInitiative?: string | null;
   missionNextStep?: string | null;
-  /** Hero Mission Control defaults to Ask so status questions do not dispatch Builder. */
+  /** Hero Development Workspace defaults to Ask so status questions do not dispatch Builder. */
   defaultSendMode?: CopilotSendMode;
   initialPrompt?: string | null;
   onInitialPromptConsumed?: () => void;

@@ -40,7 +40,7 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
           <li>
             <strong className="text-cyan-50">Link your repository</strong> in{' '}
             <Link href="/founder-den?tab=build" className="font-medium text-emerald-400 underline hover:text-white">
-              Founder Copilot (Mission Control → Build)
+              Founder Copilot (Development Workspace → Build)
             </Link>
             : enter <code className="text-cyan-200">owner/repo</code> (e.g.{' '}
             <code className="text-cyan-200">you/my-startup</code>) and click connect, or use{' '}
