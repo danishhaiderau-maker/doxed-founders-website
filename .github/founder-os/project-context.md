@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(schema): add WorkspaceSession columns + unique constraint for vNext
+feat(api+utils): per-workspace session PUT, IDE adapter layer, identity constants
 
 ## Last Activity
 
