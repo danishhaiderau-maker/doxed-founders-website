@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(api): use Fly Machines API directly instead of flyctl
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
