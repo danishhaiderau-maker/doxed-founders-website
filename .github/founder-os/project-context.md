@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-_No commits synced yet_
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
