@@ -6,8 +6,9 @@ import { flyControlBot, getShowcaseHost, pauseTradingAgent, resumeTradingAgent }
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
-const DEFAULT_ANALYZER_PORT = 9500;
+const DEFAULT_ANALYZER_PORT = 9001; // :9500 was a phantom port — bot.py confirms nothing listens there
 const PUBLIC_BOT_URL = 'https://bot.doxxedcrypto.digital';
+const FLY_BOT_URL = 'https://doxed-btc-bot.fly.dev';
 
 type HomeStatus = {
   mode?: string;
@@ -16,6 +17,7 @@ type HomeStatus = {
   bot?: { online?: boolean; ok?: boolean; dashboard?: string; lan?: string; dataDir?: string };
   analyzer?: { online?: boolean; ok?: boolean; dashboard?: string; note?: string };
   tunnel?: { url?: string | null; live?: boolean; cloudflaredRunning?: boolean; enabled?: boolean };
+  fly?: { online?: boolean; url?: string };
 };
 
 function botPortFrom(status: HomeStatus | null): number {
@@ -44,10 +46,11 @@ async function probeLocalHealth(url: string): Promise<boolean> {
 async function probeDirectHomeStatus(): Promise<HomeStatus> {
   const botPort = DEFAULT_BOT_PORT;
   const analyzerPort = DEFAULT_ANALYZER_PORT;
-  const [botOk, analyzerOk, tunnelOk] = await Promise.all([
+  const [botOk, analyzerOk, tunnelOk, flyOk] = await Promise.all([
     probeLocalHealth(`http://127.0.0.1:${botPort}/api/ping`),
     probeLocalHealth(`http://127.0.0.1:${analyzerPort}/api/status`),
     probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`),
+    probeLocalHealth(`${FLY_BOT_URL}/api/ping`),
   ]);
   return {
     mode: 'production',
@@ -55,6 +58,7 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
     bot: { online: botOk, dashboard: `http://127.0.0.1:${botPort}` },
     analyzer: { online: analyzerOk, dashboard: `http://127.0.0.1:${analyzerPort}/` },
     tunnel: { live: tunnelOk, url: PUBLIC_BOT_URL, enabled: true, cloudflaredRunning: tunnelOk },
+    fly: { online: flyOk, url: FLY_BOT_URL },
   };
 }
 
@@ -65,10 +69,13 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
   const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
   if (raw.ok) {
-    const [tunnelProbe] = await Promise.all([
+    const [tunnelProbe, flyProbe] = await Promise.all([
       raw.tunnel?.live === undefined || raw.tunnel?.live === false
         ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`)
         : Promise.resolve(Boolean(raw.tunnel?.live)),
+      raw.fly?.online === undefined
+        ? probeLocalHealth(`${FLY_BOT_URL}/api/ping`)
+        : Promise.resolve(Boolean(raw.fly?.online)),
     ]);
     return {
       ...raw,
@@ -84,22 +91,26 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
         url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
         enabled: raw.tunnel?.enabled ?? true,
       },
+      fly: { online: Boolean(raw.fly?.online) || flyProbe, url: FLY_BOT_URL },
     };
   }
 
   const botOnline = isOnline(raw.bot);
   const analyzerOnline = isOnline(raw.analyzer);
   const tunnelLive = Boolean(raw.tunnel?.live);
+  const flyOnline = Boolean(raw.fly?.online);
 
   const needsBotProbe = !botOnline && raw.bot?.online === undefined && raw.bot?.ok === undefined;
   const needsAnalyzerProbe =
     !analyzerOnline && raw.analyzer?.online === undefined && raw.analyzer?.ok === undefined;
   const needsTunnelProbe = !tunnelLive && raw.tunnel?.live === undefined;
+  const needsFlyProbe = !flyOnline && raw.fly?.online === undefined;
 
-  const [botProbe, analyzerProbe, tunnelProbe] = await Promise.all([
+  const [botProbe, analyzerProbe, tunnelProbe, flyProbe] = await Promise.all([
     needsBotProbe ? probeLocalHealth(`${botDash}/api/ping`) : Promise.resolve(botOnline),
     needsAnalyzerProbe ? probeLocalHealth(`${analyzerDash}api/status`) : Promise.resolve(analyzerOnline),
     needsTunnelProbe ? probeLocalHealth(`${PUBLIC_BOT_URL}/api/ping`) : Promise.resolve(tunnelLive),
+    needsFlyProbe ? probeLocalHealth(`${FLY_BOT_URL}/api/ping`) : Promise.resolve(flyOnline),
   ]);
 
   return {
@@ -116,6 +127,7 @@ async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<
       url: raw.tunnel?.url ?? PUBLIC_BOT_URL,
       enabled: raw.tunnel?.enabled ?? true,
     },
+    fly: { online: flyOnline || flyProbe, url: FLY_BOT_URL },
   };
 }
 
@@ -140,7 +152,7 @@ function cmdTimeoutMs(id: string): number {
 const START_SHOWCASE: HomeCmd = {
   id: 'start-showcase',
   label: '▶ Start showcase',
-  hint: 'Bridge :7810 → bot :7002 → analyzer :9500 → tunnel → auto-wire (correct order, one click)',
+  hint: 'Bridge :7810 → bot :7002 → analyzer :9001 → tunnel → auto-wire (correct order, one click)',
   path: '/cmd/start-all-global',
   tone: 'primary',
 };
@@ -274,7 +286,7 @@ export function AgentAdminShowcaseControl({
         }
         if (id === 'start-showcase' || id === 'reset-home-stack') {
           setStartSteps(
-            'Starting in order: (1) bridge :7810 → (2) bot :7002 → (3) analyzer :9500 → (4) tunnel → (5) auto-wire. Four console windows should open — keep them open. Refresh this page at 30s, 60s, 90s.',
+            'Starting in order: (1) bridge :7810 → (2) bot :7002 → (3) analyzer :9001 → (4) tunnel → (5) auto-wire. Four console windows should open — keep them open. Refresh this page at 30s, 60s, 90s.',
           );
           setTimeout(() => onUpdated?.(), 20000);
           setTimeout(() => onUpdated?.(), 60000);
@@ -378,8 +390,9 @@ export function AgentAdminShowcaseControl({
       <p className="mt-1 text-xs text-zinc-400">
         Runs the <strong>doxxedcrypto.digital</strong> showcase stack on this PC: conservative BTC signals
         at <strong>:{botPort}</strong>, research at <strong>:{analyzerPort}</strong>, bridge at{' '}
-        <strong>:7810</strong>. The public site and Bitfinex relay reach your bot through the Cloudflare
-        tunnel. Open{' '}
+        <strong>:7810</strong>. The public site and Bitfinex relay reach your bot through{' '}
+        <strong className="text-sky-300">Fly.io</strong> (primary, stable) with the Cloudflare tunnel as a
+        fallback. Open{' '}
         <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
           Agent Hub
         </a>{' '}
@@ -417,6 +430,7 @@ export function AgentAdminShowcaseControl({
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
         <StatusChip label={`Showcase bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
         <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
+        <StatusChip label="Fly bot (sin)" ok={Boolean(status?.fly?.online)} sub={FLY_BOT_URL} />
         <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />
         <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
       </div>
@@ -504,6 +518,9 @@ export function AgentAdminShowcaseControl({
         </a>
         <a href={PUBLIC_BOT_URL} target="_blank" rel="noreferrer" className="text-violet-300 hover:underline">
           Public bot URL →
+        </a>
+        <a href={FLY_BOT_URL} target="_blank" rel="noreferrer" className="text-sky-300 hover:underline">
+          Fly bot (sin) →
         </a>
         <a
           href={`${botDash}/api/export_csv`}
