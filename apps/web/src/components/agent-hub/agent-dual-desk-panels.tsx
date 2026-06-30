@@ -165,7 +165,7 @@ export function AgentDeskView({
             and trades will appear here once the bot + tunnel are back online.
           </div>
         ) : null}
-        <AgentTransparencyTables liveBook={book} maxRows={10} executionOnly={executionOnly} />
+        <AgentTransparencyTables liveBook={book} maxRows={5} executionOnly={executionOnly} />
         <AgentTradeJourney
           activity={showcaseActivity}
           liveBook={book}
@@ -214,7 +214,7 @@ export function AgentDeskView({
           Tables below are your copy session book (empty until connected). Admin bot data is on the
           Research local bot tab only.
         </p>
-        <AgentTransparencyTables liveBook={EMPTY_LIVE_BOOK} maxRows={10} />
+        <AgentTransparencyTables liveBook={EMPTY_LIVE_BOOK} maxRows={5} />
       </DeskPanel>
     );
   }
@@ -241,7 +241,7 @@ export function AgentDeskView({
           within seconds once your first mirrored signal fires.
         </p>
       ) : null}
-      <AgentTransparencyTables liveBook={liveBook} maxRows={10} />
+      <AgentTransparencyTables liveBook={liveBook} maxRows={5} />
       <AgentTradeJourney
         activity={userActivity}
         liveBook={liveBook}

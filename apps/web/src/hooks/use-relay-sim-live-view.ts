@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 export const AGENT_HUB_POLL_SIM_MS = 20_000;
 /** Faster UI refresh when relay sim + Live view toggle (display only). */
 export const AGENT_HUB_POLL_SIM_LIVE_VIEW_MS = 8_000;
-export const AGENT_HUB_POLL_BOT_MS = 45_000;
+export const AGENT_HUB_POLL_BOT_MS = 20_000;
 export const AGENT_HUB_POLL_IDLE_MS = 90_000;
 
 const STORAGE_PREFIX = 'dcf-relay-sim-live-view';

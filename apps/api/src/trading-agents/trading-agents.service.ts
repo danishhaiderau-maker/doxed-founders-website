@@ -557,50 +557,81 @@ export class TradingAgentsService implements OnModuleInit {
       return { ok: false, error: 'analyzer summary only available for conservative-btc' };
     }
     const raw = await this.botBridge.fetchAnalyzerSummary();
-    if (!raw) {
+    if (raw) {
+      const STARTING = 500;
+      const perf = (raw.performance as Record<string, number> | undefined) ?? {};
+      const realEdge = (raw.real_edge as Record<string, unknown> | undefined) ?? {};
+      const stale = (raw.stale as Record<string, unknown> | undefined) ?? {};
+      const netPnlUsd = Number(perf.net_pnl_usd ?? 0);
+      const winRate = Number(perf.win_rate_pct ?? 0);
+      const trades = Number(perf.trades ?? 0);
+      const approveAttempts = Number(realEdge.approve_attempts ?? 0);
+      const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
+      const freshStartIso =
+        typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
+      const sessionStart = freshStartIso ?? botStartIso ?? null;
+      let sessionHours: number | undefined;
+      if (sessionStart) {
+        const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
+        if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
+      } else if (typeof raw.executive_text === 'string') {
+        const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
+        if (m) sessionHours = Number(m[1]);
+      }
       return {
-        ok: false,
+        ok: true,
         source: 'analyzer :9001 via bot proxy',
-        error: 'analyzer proxy unavailable — bot may not have /api/analyzer/summary yet (restart bot)',
+        session_start: sessionStart,
+        session_hours: sessionHours,
+        starting_balance: STARTING,
+        current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
+        total_pnl_usd: Number(netPnlUsd.toFixed(2)),
+        total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
+        trade_count: trades,
+        win_rate: Number(winRate.toFixed(1)),
+        approve_count: approveAttempts,
+        executed_count: trades,
+        coverage_status: String(raw.coverage_status ?? '—'),
+        data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
+        executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
+        analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
+        generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
       };
     }
-    const STARTING = 500;
-    const perf = (raw.performance as Record<string, number> | undefined) ?? {};
-    const realEdge = (raw.real_edge as Record<string, unknown> | undefined) ?? {};
-    const stale = (raw.stale as Record<string, unknown> | undefined) ?? {};
-    const netPnlUsd = Number(perf.net_pnl_usd ?? 0);
-    const winRate = Number(perf.win_rate_pct ?? 0);
-    const trades = Number(perf.trades ?? 0);
-    const approveAttempts = Number(realEdge.approve_attempts ?? 0);
-    const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
-    const freshStartIso = typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
-    const sessionStart = freshStartIso ?? botStartIso ?? null;
-    let sessionHours: number | undefined;
-    if (sessionStart) {
-      const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
-      if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
-    } else if (typeof raw.executive_text === 'string') {
-      const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
-      if (m) sessionHours = Number(m[1]);
+
+    // Fallback: the bot does not expose /api/analyzer/summary on the public tunnel.
+    // Derive cumulative full-session metrics from /api/state (cached 60s in BotBridgeService).
+    const metrics = await this.botBridge.fetchCumulativeSessionMetrics();
+    if (!metrics) {
+      return {
+        ok: false,
+        source: 'bot /api/state cumulative',
+        error: 'showcase bot unreachable — cannot read cumulative session metrics (Fly + Cloudflare both down)',
+      };
     }
     return {
       ok: true,
-      source: 'analyzer :9001 via bot proxy',
-      session_start: sessionStart,
-      session_hours: sessionHours,
-      starting_balance: STARTING,
-      current_balance: Number((STARTING + netPnlUsd).toFixed(2)),
-      total_pnl_usd: Number(netPnlUsd.toFixed(2)),
-      total_pnl_pct: Number(((netPnlUsd / STARTING) * 100).toFixed(2)),
-      trade_count: trades,
-      win_rate: Number(winRate.toFixed(1)),
-      approve_count: approveAttempts,
-      executed_count: trades,
-      coverage_status: String(raw.coverage_status ?? '—'),
-      data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
-      executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
-      analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
-      generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : undefined,
+      source: 'bot /api/state cumulative',
+      session_start: metrics.session_start,
+      session_hours: metrics.session_hours,
+      starting_balance: metrics.starting_balance,
+      current_balance: metrics.current_balance,
+      total_pnl_usd: metrics.total_pnl_usd,
+      total_pnl_pct: metrics.total_pnl_pct,
+      trade_count: metrics.trade_count,
+      win_rate: metrics.win_rate,
+      approve_count: metrics.trade_count,
+      executed_count: metrics.trade_count,
+      coverage_status: metrics.last_fresh_reset_ts && metrics.last_fresh_reset_ts > 0 ? 'since fresh wipeout' : 'since bot start',
+      data_scope: 'cumulative session',
+      executive_text:
+        `Cumulative since ${metrics.session_start ? new Date(metrics.session_start).toISOString() : 'bot start'}.\n` +
+        `Balance ${metrics.current_balance.toFixed(2)} USDT (start ${metrics.starting_balance}) · ` +
+        `P&L ${metrics.total_pnl_usd >= 0 ? '+' : ''}${metrics.total_pnl_usd.toFixed(2)} USD (${metrics.total_pnl_pct.toFixed(2)}%).\n` +
+        `${metrics.trade_count} trades · win rate ${metrics.win_rate.toFixed(1)}% · ` +
+        `today ${metrics.daily_pnl_usd >= 0 ? '+' : ''}${metrics.daily_pnl_usd.toFixed(2)} USD.`,
+      analyzer_sync_id: metrics.bot_version ?? undefined,
+      generated_at: metrics.generated_at,
     };
   }
 

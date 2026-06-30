@@ -335,7 +335,7 @@ export function AgentRelaySimPanel({
               real $20 / 100x order will be placed; no new entries until it closes.
             </p>
           ) : null}
-          <AgentTransparencyTables liveBook={simBook} maxRows={10} />
+          <AgentTransparencyTables liveBook={simBook} maxRows={5} />
           <div className="mt-4">
             <AgentTradeJourney
               activity={simActivity}
