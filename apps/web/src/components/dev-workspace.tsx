@@ -15,6 +15,9 @@ import {
   fetchConnectedWorkspaces,
   createConnectedWorkspace,
   deleteConnectedWorkspace,
+  fetchCopilotSocialDraft,
+  createBuildPost,
+  syncGitHubCommits,
   type BuilderSettings,
   type DeployIntelligenceResponse,
   type DesktopBridgeResponse,
@@ -25,6 +28,7 @@ import {
   type RecentAgent,
   type ConnectedWorkspace,
 } from '@/lib/api';
+import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { copilotAsk, copilotAskStream, type ContextCollectionStep } from '@/lib/api';
@@ -1208,7 +1212,15 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {/* Non-workspace nav panels */}
           {activeNav === 'social' && (
-            <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f]">{socialPanel}</div>
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f]">
+              <WorkspacePublishPanel
+                accessToken={accessToken}
+                activity={activity}
+                deploys={deploys}
+                onPublished={() => { void load(); }}
+              />
+              {socialPanel}
+            </div>
           )}
           {activeNav === 'settings' && (
             <div className="min-h-0 flex-1 overflow-y-auto bg-[#0a0a0f]">{settingsPanel}</div>
@@ -2205,4 +2217,228 @@ function StatusStrip({
     </div>
   );
 }
+
+/* ───── Workspace Publish Panel: compact build-in-public side panel ─────
+ * Sits at the top of the Social nav panel. Surfaces today's engineering
+ * activity (commits, deployments, issues closed) and wires the existing
+ * founder-social-hub publish infrastructure (fetchCopilotSocialDraft +
+ * createBuildPost + ShareOnX) so every workspace can build in public
+ * without leaving the IDE. Reuses API functions — no duplication. */
+function WorkspacePublishPanel({
+  accessToken,
+  activity,
+  deploys,
+  onPublished,
+}: {
+  accessToken: string;
+  activity: WorkspaceActivity | null;
+  deploys: DeployIntelligenceResponse | null;
+  onPublished: () => void;
+}) {
+  const origin = useShareOrigin();
+  const events = useFounderEvents();
+
+  const [headline, setHeadline] = useState('');
+  const [body, setBody] = useState('');
+  const [drafting, setDrafting] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [busyKind, setBusyKind] = useState<'x' | 'devlog' | 'changelog' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const commitsToday = activity?.commitsLast24h?.length ?? 0;
+  const deploysToday = useMemo(() => {
+    const cards = deploys?.cards ?? [];
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return cards.filter((c) => new Date(c.at).getTime() >= cutoff).length;
+  }, [deploys]);
+  const issuesClosedToday = useMemo(() => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const seen = new Set<string>();
+    let count = 0;
+    for (const e of events) {
+      if (e.ts < cutoff) continue;
+      if (e.category !== 'GITHUB' && e.category !== 'GIT') continue;
+      const hay = `${e.kind} ${e.message}`.toLowerCase();
+      if (!hay.includes('closed') && !hay.includes('issue-closed')) continue;
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      count += 1;
+    }
+    return count;
+  }, [events]);
+
+  const ready = commitsToday > 0 || deploysToday > 0 || issuesClosedToday > 0;
+  const canPublish = Boolean(headline.trim() && body.trim()) && !publishing;
+
+  async function generate(kind: 'x' | 'devlog' | 'changelog') {
+    if (!accessToken) return;
+    setDrafting(true);
+    setBusyKind(kind);
+    setError(null);
+    setNotice(null);
+    try {
+      await syncGitHubCommits(accessToken).catch(() => undefined);
+      const result = await fetchCopilotSocialDraft(undefined, accessToken, {
+        audience: kind === 'devlog' ? 'developer' : 'trader',
+      });
+      const h = result.headline || "Today's build update";
+      setHeadline(h);
+      if (kind === 'x') {
+        setBody(result.tweetVersion ?? result.xHook ?? h);
+      } else if (kind === 'devlog') {
+        setBody(result.developerSummary ?? result.displayBody ?? result.body);
+      } else {
+        const sections = [
+          result.whatShipped ? `## What shipped\n${result.whatShipped}` : '',
+          result.whyItMatters ? `## Why it matters\n${result.whyItMatters}` : '',
+          result.whatUsersNotice ? `## What users notice\n${result.whatUsersNotice}` : '',
+          result.whatsNext ? `## What's next\n${result.whatsNext}` : '',
+        ].filter(Boolean);
+        setBody(sections.length > 0 ? sections.join('\n\n') : (result.displayBody ?? result.body));
+      }
+      setNotice(
+        result.fallback
+          ? 'Drafted from project context (connect an LLM in AI Stack for richer output)'
+          : `${kind === 'x' ? 'X post' : kind === 'devlog' ? 'Dev log' : 'Changelog'} drafted — edit before publishing`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Draft failed');
+    } finally {
+      setDrafting(false);
+      setBusyKind(null);
+    }
+  }
+
+  async function publish() {
+    if (!canPublish) return;
+    setPublishing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await createBuildPost({ headline: headline.trim(), body: body.trim() }, accessToken);
+      setHeadline('');
+      setBody('');
+      setNotice('Published to feed');
+      onPublished();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Publish failed');
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  const shareUrl = origin;
+
+  return (
+    <div className="border-b border-zinc-800/80 bg-[#0a0a0f] px-4 py-4">
+      {/* Section 1: Today's Work Summary */}
+      <section>
+        <h2 className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
+          Today&apos;s Work
+        </h2>
+        <div className="mt-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-2.5">
+          {ready ? (
+            <div className="space-y-1 text-[10px] text-zinc-300">
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-500">commits</span>
+                <span className="font-medium text-zinc-200">{commitsToday}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-500">deployments</span>
+                <span className="font-medium text-zinc-200">{deploysToday}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-500">issues closed</span>
+                <span className="font-medium text-zinc-200">{issuesClosedToday}</span>
+              </div>
+              <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-violet-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+                Ready to publish
+              </div>
+            </div>
+          ) : (
+            <p className="text-[10px] text-zinc-600">No activity today yet.</p>
+          )}
+        </div>
+      </section>
+
+      {/* Section 2 + 3: Publish Actions + Draft preview */}
+      <section className="mt-4">
+        <h2 className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">
+          Publish
+        </h2>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={drafting}
+            onClick={() => void generate('x')}
+            className="rounded-md bg-zinc-800 px-3 py-1.5 text-[10px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            {busyKind === 'x' ? 'Generating…' : 'Generate X Post'}
+          </button>
+          <button
+            type="button"
+            disabled={drafting}
+            onClick={() => void generate('devlog')}
+            className="rounded-md bg-zinc-800 px-3 py-1.5 text-[10px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            {busyKind === 'devlog' ? 'Generating…' : 'Generate Dev Log'}
+          </button>
+          <button
+            type="button"
+            disabled={drafting}
+            onClick={() => void generate('changelog')}
+            className="rounded-md bg-zinc-800 px-3 py-1.5 text-[10px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            {busyKind === 'changelog' ? 'Generating…' : 'Generate Changelog'}
+          </button>
+          <button
+            type="button"
+            disabled={!canPublish}
+            onClick={() => void publish()}
+            className="rounded-md bg-violet-600/80 px-3 py-1.5 text-[10px] text-white hover:bg-violet-600 disabled:opacity-50"
+          >
+            {publishing ? 'Publishing…' : 'Publish'}
+          </button>
+        </div>
+
+        {(headline.trim() || body.trim()) && (
+          <div className="mt-3 space-y-2">
+            <input
+              value={headline}
+              onChange={(e) => setHeadline(e.target.value)}
+              placeholder="Headline — what shipped today?"
+              className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-violet-500/50"
+            />
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder="Edit your update before publishing…"
+              rows={5}
+              className="w-full resize-none rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-violet-500/50"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <ShareOnXButton
+                text={headline.trim() ? `${headline.trim()}\n${body.trim()}` : body.trim()}
+                url={shareUrl}
+                label="Share to X"
+                className={!canPublish ? 'pointer-events-none opacity-40' : ''}
+              />
+              {notice && <span className="text-[10px] text-emerald-300/90">{notice}</span>}
+            </div>
+          </div>
+        )}
+
+        {error && <p className="mt-2 text-[10px] text-red-300">{error}</p>}
+        {!headline.trim() && !body.trim() && !error && (
+          <p className="mt-2 text-[10px] text-zinc-600">
+            Tap a generate button to draft from today&apos;s commits and deploys, then publish.
+          </p>
+        )}
+      </section>
+    </div>
+  );
+}
+
 
