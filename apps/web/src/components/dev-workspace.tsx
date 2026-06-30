@@ -12,6 +12,9 @@ import {
   fetchFounderOnboardingStatus,
   fetchRecentAgents,
   fetchFounderPlatformConnectionsHub,
+  fetchConnectedWorkspaces,
+  createConnectedWorkspace,
+  deleteConnectedWorkspace,
   type BuilderSettings,
   type DeployIntelligenceResponse,
   type DesktopBridgeResponse,
@@ -20,6 +23,7 @@ import {
   type PlatformConnectionsHub,
   type RecentAgentsResponse,
   type RecentAgent,
+  type ConnectedWorkspace,
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
@@ -136,6 +140,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [resumeDismissed, setResumeDismissed] = useState(false);
   const [recentAgents, setRecentAgents] = useState<RecentAgentsResponse | null>(null);
   const [terminalScrollback, setTerminalScrollback] = useState<WorkspaceTerminalLine[]>([]);
+  const [connectedWorkspaces, setConnectedWorkspaces] = useState<ConnectedWorkspace[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const announcedCommitsRef = useRef<Set<string>>(new Set());
   const announcedRunIdRef = useRef<string | null>(null);
@@ -181,6 +187,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       fetchFounderOnboardingStatus(accessToken),
       fetchRecentAgents(accessToken),
       fetchFounderPlatformConnectionsHub(accessToken),
+      fetchConnectedWorkspaces(accessToken),
     ]);
     if (results[0].status === 'fulfilled') setActivity(results[0].value);
     if (results[1].status === 'fulfilled') setWorker(results[1].value);
@@ -191,6 +198,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (results[6].status === 'fulfilled') setOnboarding(results[6].value);
     if (results[7].status === 'fulfilled') setRecentAgents(results[7].value);
     if (results[8].status === 'fulfilled') setConnectionsHub(results[8].value);
+    if (results[9].status === 'fulfilled') setConnectedWorkspaces(results[9].value);
     setLoading(false);
   }, [accessToken]);
 
@@ -239,6 +247,31 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionLoaded, restoredSession, bridge, recentAgents]);
+
+  // Persist + restore the active workspace selection. The backend session shape
+  // is locked (no activeWorkspaceId column), so we mirror it to localStorage to
+  // survive reloads, and also include it in the panelState patch so the session
+  // save carries it forward when the schema later grows.
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('dcf:active-workspace-id');
+      if (stored) setActiveWorkspaceId(stored);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (activeWorkspaceId) {
+        window.localStorage.setItem('dcf:active-workspace-id', activeWorkspaceId);
+      } else {
+        window.localStorage.removeItem('dcf:active-workspace-id');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -354,6 +387,48 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     setResumeDismissed(true);
   }
 
+  async function handleCreateWorkspace() {
+    const label = window.prompt('Workspace name (e.g. "Founder OS redesign"):');
+    if (!label?.trim()) return;
+    try {
+      const ws = await createConnectedWorkspace(accessToken, {
+        label: label.trim(),
+        repository: repo ?? undefined,
+        branch: branch || undefined,
+      });
+      setConnectedWorkspaces((prev) => [ws, ...prev.filter((w) => w.id !== ws.id)]);
+      setActiveWorkspaceId(ws.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'agent', text: `Could not create workspace: ${msg}`, model: 'System' },
+      ]);
+    }
+  }
+
+  async function handleSwitchWorkspace(workspaceId: string) {
+    setActiveWorkspaceId(workspaceId);
+    // The session will be loaded/switched via the workspace session API.
+    // For now, just set the active workspace ID — the session persistence
+    // will use this when saving/loading.
+  }
+
+  async function handleDeleteWorkspace(workspaceId: string) {
+    if (!window.confirm('Delete this workspace?')) return;
+    try {
+      await deleteConnectedWorkspace(accessToken, workspaceId);
+      setConnectedWorkspaces((prev) => prev.filter((w) => w.id !== workspaceId));
+      setActiveWorkspaceId((cur) => (cur === workspaceId ? null : cur));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'agent', text: `Could not delete workspace: ${msg}`, model: 'System' },
+      ]);
+    }
+  }
+
   // Debounced save on state changes (only after the session has been applied/dismissed).
   useEffect(() => {
     if (!sessionAppliedRef.current) return;
@@ -367,6 +442,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         terminalOpen,
         terminalHeight,
         sidebarOpen,
+        activeWorkspaceId,
       } as WorkspacePanelState,
       conversation: chatMessages as WorkspaceConversationMessage[],
     };
@@ -380,6 +456,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     chatMessages,
     savePatch,
     resumeDismissed,
+    activeWorkspaceId,
   ]);
 
   // Save terminal scrollback every Nth line (avoid DB thrash on every line).
@@ -771,6 +848,53 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
               </button>
             ))}
           </nav>
+
+          {/* Workspace Switcher */}
+          <div className="flex min-h-0 shrink-0 flex-col border-t border-zinc-800/80">
+            <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Workspaces</span>
+              <button
+                onClick={() => handleCreateWorkspace()}
+                className="text-[9px] text-violet-400/80 hover:text-violet-300"
+                title="New workspace"
+              >+ New</button>
+            </div>
+            <div className="min-h-0 max-h-32 overflow-y-auto px-1.5 pb-1.5">
+              {connectedWorkspaces.length === 0 ? (
+                <p className="px-2 py-1 text-[9px] text-zinc-700">No workspaces yet</p>
+              ) : (
+                connectedWorkspaces.map((ws) => (
+                  <div
+                    key={ws.id}
+                    className={`group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition ${
+                      activeWorkspaceId === ws.id ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800/50'
+                    }`}
+                  >
+                    <button
+                      onClick={() => handleSwitchWorkspace(ws.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      title={ws.repository ?? ws.label}
+                    >
+                      <span className="truncate text-[10px] font-medium">{ws.label}</span>
+                      {ws.branch && <span className="ml-auto shrink-0 text-[8px] text-zinc-600">{ws.branch}</span>}
+                    </button>
+                    <button
+                      onClick={() => handleDeleteWorkspace(ws.id)}
+                      className="shrink-0 text-[9px] text-zinc-700 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                      title="Delete workspace"
+                    >✕</button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Active workspace indicator */}
+          {activeWorkspaceId && (
+            <div className="shrink-0 px-3 py-1 text-[9px] text-zinc-600">
+              Active: {connectedWorkspaces.find((w) => w.id === activeWorkspaceId)?.label ?? 'Unknown'}
+            </div>
+          )}
 
           {/* Work Sessions — last 5 active agents */}
           <div className="flex min-h-0 shrink-0 flex-col border-t border-zinc-800/80">
