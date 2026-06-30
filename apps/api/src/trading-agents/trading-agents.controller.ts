@@ -60,6 +60,18 @@ export class TradingAgentsController {
     return this.tradingAgents.getPublicDashboard(slug, user?.id, user?.role);
   }
 
+  @Public()
+  @Get(':slug/analyzer-summary')
+  analyzerSummary(@Param('slug') slug: string) {
+    return this.tradingAgents.getAnalyzerSummary(slug);
+  }
+
+  @Public()
+  @Get(':slug/analyzer-genome')
+  analyzerGenome(@Param('slug') slug: string) {
+    return this.tradingAgents.getAnalyzerGenome(slug);
+  }
+
   @Get(':slug/my-dashboard')
   myDashboard(@CurrentUser() user: AuthUser, @Param('slug') slug: string) {
     return this.instances.getMyDashboard(user.id, slug);

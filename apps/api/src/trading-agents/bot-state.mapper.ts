@@ -708,11 +708,14 @@ export function mapBotStateToPublicDashboard(bot: BotApiState): TradingAgentDash
     aiReasoning: '',
     latestAiVerdict: undefined,
     liveBook: {
-      activeSignals: [],
-      expiredOrders: [],
+      // Conservative BTC public hub shows the live :7002 execution book including
+      // active signals, expired orders, and AI band — owner requested these visible
+      // so visitors can see the full rolling snapshot, not just positions/trades.
+      activeSignals: book.activeSignals,
+      expiredOrders: book.expiredOrders,
       positions: book.positions,
       pendingOrders: book.pendingOrders,
-      trades: book.trades.map((t) => ({ ...t, aiBand: '' })),
+      trades: book.trades,
     },
   };
 }

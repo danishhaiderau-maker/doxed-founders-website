@@ -276,4 +276,31 @@ export class BotBridgeService {
     }
     return null;
   }
+
+  /** Read-only proxy to the research analyzer (:9001) via the bot's public tunnel.
+   *  The analyzer itself is not publicly reachable; the bot forwards /api/analyzer/* to localhost:9001. */
+  private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 8_000): Promise<T | null> {
+    const base = await this.resolveBotUrl();
+    if (!base) return null;
+    try {
+      const res = await fetch(`${base}${path}`, {
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-analyzer/1.0' },
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as T;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Analyzer proxy ${path} failed: ${msg}`);
+      return null;
+    }
+  }
+
+  async fetchAnalyzerSummary(): Promise<Record<string, unknown> | null> {
+    return this.fetchAnalyzerProxy<Record<string, unknown>>('/api/analyzer/summary');
+  }
+
+  async fetchAnalyzerGenome(): Promise<Record<string, unknown> | null> {
+    return this.fetchAnalyzerProxy<Record<string, unknown>>('/api/analyzer/genome', 12_000);
+  }
 }

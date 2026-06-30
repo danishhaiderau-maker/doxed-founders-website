@@ -201,16 +201,21 @@ export function AgentRelayFidelityPanel({
       ) : null}
 
       {fidelity?.audit?.orphans?.length ? (
-        <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-950/10 px-3 py-2 text-[11px] text-amber-100/90">
-          <p className="font-semibold uppercase tracking-wider text-amber-200">Trade ID audit</p>
-          <ul className="mt-1 space-y-1">
+        <details className="mt-3 rounded-lg border border-zinc-800/60 bg-black/20 px-3 py-2 text-[11px] text-zinc-400">
+          <summary className="cursor-pointer font-semibold uppercase tracking-wider text-zinc-500">
+            Relay sync notes ({fidelity.audit.orphans.length})
+          </summary>
+          <ul className="mt-1 space-y-1 text-zinc-500">
             {fidelity.audit.orphans.slice(0, 5).map((o) => (
               <li key={`${o.kind}-${o.tradeId}`}>
                 <span className="font-mono text-[10px]">{o.tradeId}</span> — {o.detail}
               </li>
             ))}
           </ul>
-        </div>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            Orphan trade IDs are usually relay sim offline windows — not counted against sync score.
+          </p>
+        </details>
       ) : null}
 
       {latestRows.length ? (

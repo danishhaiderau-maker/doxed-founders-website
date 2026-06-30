@@ -13,14 +13,13 @@ import {
   type RelaySimParticipantStats,
   type TradingAgentDashboardState,
 } from '@dcf/utils';
-import { AgentMarketplaceStats } from '@/components/agent-hub/agent-marketplace-stats';
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
 import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
-import { AgentExecutionChart } from '@/components/agent-hub/agent-execution-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
+import { AgentAnalyzerPanel } from '@/components/agent-hub/agent-analyzer-panel';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
@@ -44,11 +43,6 @@ import type {
   TradingAgentSummary,
 } from '@/lib/api';
 
-const PUBLIC_TABS = ['Overview', 'Live Trade', 'Trade Journey', 'Activity', 'Followers'] as const;
-const ADMIN_EXTRA_TABS = ['Performance', 'Reasoning'] as const;
-const HIGHLIGHT_TABS = ['Live Trade', 'Trade Journey', 'Activity'] as const;
-type Tab = (typeof PUBLIC_TABS)[number] | (typeof ADMIN_EXTRA_TABS)[number];
-
 const STRATEGY_TAGS = ['BTC Markets', 'Low Risk', 'Trend Following', 'Long Bias'];
 
 function MetricPill({ label, value, accent }: { label: string; value: string; accent?: string }) {
@@ -69,128 +63,6 @@ function timeAgo(iso: string): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
-}
-
-/** Compact top-of-page strip: last 5 closed trades + last 5 AI decisions.
- *  Rendered from data already fetched for the dashboard (no extra round-trip), so it shows
- *  real recent activity immediately and reduces perceived load time. */
-function RecentActivityStrip({
-  trades,
-  activity,
-}: {
-  trades: TradingAgentDashboardState['recentTrades'];
-  activity: TradingAgentActivityEntry[];
-}) {
-  const closedTrades = (trades ?? [])
-    .slice()
-    .sort((a, b) => new Date(b.closedAt ?? 0).getTime() - new Date(a.closedAt ?? 0).getTime())
-    .slice(0, 5);
-  const aiHistory = (activity ?? [])
-    .filter((a) => /TRADE|APPROVE|REJECT|AI|DECISION|SIGNAL|OPEN|CLOSE|EXIT/i.test(a.type))
-    .slice(0, 5);
-
-  if (closedTrades.length === 0 && aiHistory.length === 0) return null;
-
-  return (
-    <div className="mt-6 grid gap-4 lg:grid-cols-2">
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-300">
-            Last 5 closed trades
-          </h3>
-          <span className="text-[10px] text-zinc-600">session</span>
-        </div>
-        {closedTrades.length === 0 ? (
-          <p className="mt-3 text-xs text-zinc-600">No closed trades yet this session.</p>
-        ) : (
-          <ul className="mt-3 space-y-1.5">
-            {closedTrades.map((t, i) => {
-              const profit = t.profitPct ?? 0;
-              const side = (t.side ?? '').toUpperCase();
-              return (
-                <li
-                  key={`${t.closedAt ?? i}-${i}`}
-                  className="flex items-center justify-between rounded-lg border border-zinc-800/60 bg-black/25 px-3 py-2 text-xs"
-                >
-                  <span className="flex items-center gap-2">
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                        side === 'LONG'
-                          ? 'bg-emerald-500/15 text-emerald-300'
-                          : side === 'SHORT'
-                            ? 'bg-red-500/15 text-red-300'
-                            : 'bg-zinc-700 text-zinc-300'
-                      }`}
-                    >
-                      {side || '—'}
-                    </span>
-                    <span className="text-zinc-400">
-                      {(t.entryPrice ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} →{' '}
-                      {(t.exitPrice ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                    </span>
-                  </span>
-                  <span className="flex items-center gap-2">
-                    <span
-                      className={`font-semibold ${profit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
-                    >
-                      {profit >= 0 ? '+' : ''}
-                      {profit.toFixed(2)}%
-                    </span>
-                    <span className="text-[10px] text-zinc-600">
-                      {t.closedAt ? timeAgo(t.closedAt) : ''}
-                    </span>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-bold uppercase tracking-[0.18em] text-violet-300">
-            Last 5 AI decisions
-          </h3>
-          <span className="text-[10px] text-zinc-600">showcase</span>
-        </div>
-        {aiHistory.length === 0 ? (
-          <p className="mt-3 text-xs text-zinc-600">No AI decisions yet.</p>
-        ) : (
-          <ul className="mt-3 space-y-1.5">
-            {aiHistory.map((a, i) => {
-              const isApprove = /APPROVE|TRADE|OPEN|CLOSE|EXIT/i.test(a.type);
-              return (
-                <li
-                  key={a.id ?? i}
-                  className="rounded-lg border border-zinc-800/60 bg-black/25 px-3 py-2 text-xs"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-2">
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                          isApprove
-                            ? 'bg-emerald-500/15 text-emerald-300'
-                            : 'bg-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        {a.type.replace(/_/g, ' ').slice(0, 14)}
-                      </span>
-                      <span className="text-zinc-300">{a.title}</span>
-                    </span>
-                    <span className="text-[10px] text-zinc-600">{timeAgo(a.createdAt)}</span>
-                  </div>
-                  {a.reason ? (
-                    <p className="mt-1 line-clamp-2 text-[11px] text-zinc-500">{a.reason}</p>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function PublicReasoningPanel({
@@ -515,6 +387,83 @@ function HireSidebar({
   );
 }
 
+function AiHistoryDetail({ activity }: { activity: TradingAgentActivityEntry[] }) {
+  const aiItems = (activity ?? [])
+    .filter((a) => a.type === 'AI_APPROVED' || a.type === 'AI_REJECTED')
+    .slice(0, 5);
+
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-5">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-violet-300">
+          Last 5 AI decisions in detail
+        </h3>
+        <span className="text-[10px] text-zinc-600">showcase pipeline</span>
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        How the AI thinks: decision, direction, edge vs required, regime band, and the AI comment that
+        drove the call.
+      </p>
+      {aiItems.length === 0 ? (
+        <p className="mt-4 text-xs text-zinc-600">No AI decisions yet this session.</p>
+      ) : (
+        <ul className="mt-4 space-y-2">
+          {aiItems.map((a, i) => {
+            const approved = a.type === 'AI_APPROVED';
+            return (
+              <li
+                key={a.id ?? i}
+                className="rounded-xl border border-zinc-800/70 bg-black/25 px-3 py-2.5 text-xs"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                        approved
+                          ? 'bg-emerald-500/15 text-emerald-300'
+                          : 'bg-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      {approved ? 'APPROVE' : 'REJECT'}
+                    </span>
+                    <span className="text-zinc-200">{a.outcome ?? '—'}</span>
+                  </span>
+                  <span className="text-[10px] text-zinc-600">{timeAgo(a.createdAt)}</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zinc-500">
+                  <span>
+                    edge{' '}
+                    <span className="text-zinc-300">
+                      {a.edgeScore ?? '—'}/{a.edgeRequired ?? '—'}
+                    </span>
+                  </span>
+                  <span>
+                    band/regime <span className="text-zinc-300">{a.marketRegime ?? '—'}</span>
+                  </span>
+                  {a.profitPct != null && (
+                    <span>
+                      outcome{' '}
+                      <span className={a.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {a.profitPct >= 0 ? '+' : ''}
+                        {a.profitPct.toFixed(2)}%
+                      </span>
+                    </span>
+                  )}
+                </div>
+                {a.reason && (
+                  <p className="mt-1.5 line-clamp-3 text-[11px] leading-relaxed text-zinc-400">
+                    {a.reason}
+                  </p>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function StateIntegrityHeader({ dashboard }: { dashboard: TradingAgentDashboardState }) {
   const si = dashboard.stateIntegrity;
   if (!si) {
@@ -660,8 +609,6 @@ export function AgentPublicProfile({
   relaySimLiveView?: boolean;
   onRelaySimLiveViewChange?: (enabled: boolean) => void;
 }) {
-  const [tab, setTab] = useState<Tab>('Overview');
-  const tabs = isAdmin ? ([...PUBLIC_TABS, ...ADMIN_EXTRA_TABS] as Tab[]) : ([...PUBLIC_TABS] as Tab[]);
   const showExecutionPublic = slug === 'conservative-btc' && !isAdmin;
   const isCopySession = hired && instanceMode === 'copy';
   const isLiveSession = hired && instanceMode === 'live';
@@ -841,8 +788,6 @@ export function AgentPublicProfile({
 
       <StateIntegrityHeader dashboard={dashboard} />
 
-      <AgentMarketplaceStats agents={allAgents ?? [deskShowcaseAgent]} builderCount={14} />
-
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_300px]">
         <div className="min-w-0 space-y-6">
           <section className="overflow-hidden rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900/95 via-zinc-950 to-violet-950/25 p-6 sm:p-8">
@@ -948,9 +893,6 @@ export function AgentPublicProfile({
               ) : null}
               <button
                 type="button"
-                onClick={() => {
-                  setTab('Overview');
-                }}
                 className="inline-flex items-center gap-2 rounded-xl border border-zinc-600 bg-transparent px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:border-violet-500/50"
               >
                 Observe showcase
@@ -971,112 +913,57 @@ export function AgentPublicProfile({
             </div>
           </section>
 
-          <div className="sticky top-0 z-20 -mx-4 border-b border-zinc-800 bg-[#050508]/95 px-4 backdrop-blur-md sm:-mx-6 sm:px-6">
-            <div className="flex gap-1 overflow-x-auto">
-              {tabs.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTab(t)}
-                  className={`shrink-0 rounded-t-lg px-4 py-2.5 text-sm font-medium transition ${
-                    tab === t
-                      ? 'border-b-2 border-violet-500 bg-zinc-900/60 text-white'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}
-                >
-                  {t}
-                  {t === 'Followers' ? ` (${(agent.followerCount / 1000).toFixed(1)}K)` : ''}
-                  {t === 'Activity' && deskActivity.length ? ` (${deskActivity.length})` : ''}
-                </button>
-              ))}
+          {slug === 'conservative-btc' && (
+            <div className="mt-6">
+              <AgentAnalyzerPanel slug={slug} />
             </div>
-            <div className="flex gap-2 overflow-x-auto py-3">
-              {HIGHLIGHT_TABS.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTab(t)}
-                  className={`shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${
-                    tab === t
-                      ? 'bg-violet-600 text-white shadow-md shadow-violet-900/40'
-                      : tab === 'Overview'
-                        ? 'border border-zinc-700 bg-zinc-900/80 text-zinc-300 hover:border-violet-500/50 hover:text-white'
-                        : 'border border-zinc-800 text-zinc-500 hover:text-zinc-300'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
+          )}
+
+          <div className="mt-6">
+            <CopyTradeHub
+              slug={slug}
+              signedIn={signedIn}
+              agent={agent}
+              exchangeLabel={exchangeLabel}
+              exchangeProvider={exchangeProvider}
+              hired={hired}
+              instanceMode={instanceMode}
+              instanceStatus={instanceStatus}
+              copyRelaySim={copyRelaySim}
+              showcaseAgent={deskShowcaseAgent}
+              activeDesk={resolvedDesk}
+              onSelectDesk={setActiveDesk}
+              hireHref={hireHref}
+              botConnected={botConnected}
+            />
           </div>
 
-          {/* Last 5 closed trades + last 5 AI decisions — pinned at the top so the trader sees
-              real recent activity immediately (no need to wait for lower sections to load). */}
-          <RecentActivityStrip trades={dashboard.recentTrades} activity={_activity} />
-
-          {tab === 'Overview' && showExecutionPublic && (
-            <div className="mt-6">
-              <AgentExecutionChart
-                dashboard={dashboard}
-                agent={deskShowcaseAgent}
-                liveBook={showcaseBook}
-              />
-            </div>
-          )}
-
-          {tab === 'Overview' && (
-            <div className="mt-6">
-              <CopyTradeHub
-                slug={slug}
-                signedIn={signedIn}
+          <div className="space-y-4">
+            <AgentDeskView {...deskViewProps} executionOnly={false} />
+            {copyDetailsMode ? (
+              <CopyTradeDetailsStrip
                 agent={agent}
                 exchangeLabel={exchangeLabel}
-                exchangeProvider={exchangeProvider}
-                hired={hired}
-                instanceMode={instanceMode}
+                copyRelayReconcile={copyRelayReconcile}
+                copyRelayLimitChain={copyRelayLimitChain}
+                tradeLifecycleIntegrity={tradeLifecycleIntegrity}
                 instanceStatus={instanceStatus}
-                copyRelaySim={copyRelaySim}
-                showcaseAgent={deskShowcaseAgent}
-                activeDesk={resolvedDesk}
-                onSelectDesk={setActiveDesk}
-                hireHref={hireHref}
                 botConnected={botConnected}
               />
-            </div>
-          )}
-
-          {tab === 'Overview' && (
-            <div className="space-y-4">
-              <AgentDeskView {...deskViewProps} />
-              {copyDetailsMode ? (
-                <CopyTradeDetailsStrip
-                  agent={agent}
-                  exchangeLabel={exchangeLabel}
-                  copyRelayReconcile={copyRelayReconcile}
-                  copyRelayLimitChain={copyRelayLimitChain}
-                  tradeLifecycleIntegrity={tradeLifecycleIntegrity}
-                  instanceStatus={instanceStatus}
-                  botConnected={botConnected}
-                />
-              ) : null}
-              {resolvedDesk === 'relay-sim' ? null : resolvedDesk === 'live' && isLiveSession ? (
-                <LiveRelayReasoningPanel
-                  agent={agent}
-                  exchangeLabel={exchangeLabel}
-                  liveBook={exchangeLiveBook}
-                />
-              ) : resolvedDesk === 'showcase' ? (
-                showExecutionPublic ? (
-                  <AgentExecutionChart
-                    dashboard={dashboard}
-                    agent={deskShowcaseAgent}
-                    liveBook={showcaseBook}
-                  />
-                ) : (
-                  <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
-                )
-              ) : null}
-              {resolvedDesk !== 'relay-sim' && resolvedDesk !== 'showcase' ? (
+            ) : null}
+            {resolvedDesk === 'relay-sim' ? null : resolvedDesk === 'live' && isLiveSession ? (
+              <LiveRelayReasoningPanel
+                agent={agent}
+                exchangeLabel={exchangeLabel}
+                liveBook={exchangeLiveBook}
+              />
+            ) : resolvedDesk === 'showcase' ? (
+              isAdmin ? (
+                <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
+              ) : null
+            ) : null}
+            <AiHistoryDetail activity={deskActivity} />
+            {resolvedDesk !== 'relay-sim' && (
               <div className="grid gap-6 lg:grid-cols-2">
                 <AgentActivityFeed
                   items={deskActivity.slice(0, 12)}
@@ -1093,93 +980,12 @@ export function AgentPublicProfile({
                       : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
                   }
                   label={
-                    resolvedDesk === 'live' && isLiveSession
-                      ? 'Your session'
-                      : 'Showcase bot'
+                    resolvedDesk === 'live' && isLiveSession ? 'Your session' : 'Showcase bot'
                   }
                 />
               </div>
-              ) : resolvedDesk === 'showcase' ? (
-                showExecutionPublic ? (
-                  <AgentExecutionChart
-                    dashboard={dashboard}
-                    agent={deskShowcaseAgent}
-                    liveBook={showcaseBook}
-                  />
-                ) : (
-                  <AgentPerformanceChart
-                    agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
-                    label="Showcase bot"
-                  />
-                )
-              ) : null}
-            </div>
-          )}
-          {tab === 'Live Trade' && (
-            <AgentExecutionChart
-              dashboard={dashboard}
-              agent={
-                activeDesk === 'live' && isLiveSession
-                  ? agent
-                  : (deskShowcaseAgent ?? agent)
-              }
-              liveBook={
-                activeDesk === 'live' && isLiveSession
-                  ? (exchangeLiveBook ?? showcaseBook)
-                  : showcaseBook
-              }
-            />
-          )}
-          {tab === 'Performance' && isAdmin && (
-            <AgentPerformanceChart
-              agentReturnPct={
-                activeDesk === 'live' && isLiveSession
-                  ? agent.netReturnPct
-                  : (deskShowcaseAgent.netReturnPct ?? agent.netReturnPct)
-              }
-              label={
-                activeDesk === 'live' && isLiveSession ? 'Your session' : deskShowcaseAgent.name
-              }
-            />
-          )}
-          {tab === 'Trade Journey' && (
-            <AgentDeskView {...deskViewProps} />
-          )}
-          {tab === 'Reasoning' &&
-            isAdmin &&
-            activeDesk !== 'relay-sim' &&
-            (activeDesk === 'live' && isLiveSession ? (
-              <LiveRelayReasoningPanel
-                agent={agent}
-                exchangeLabel={exchangeLabel}
-                liveBook={exchangeLiveBook}
-              />
-            ) : (
-              <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
-            ))}
-          {tab === 'Activity' && activeDesk !== 'relay-sim' && (
-            <div className="space-y-6">
-              <AgentActivityFeed
-                items={deskActivity}
-                title={
-                  activeDesk === 'live' && isLiveSession
-                    ? `Your ${exchangeLabel ?? 'Bitfinex'} activity`
-                    : activeDesk === 'showcase'
-                      ? 'Research local bot activity'
-                      : 'Conservative BTC showcase activity'
-                }
-              />
-              <AgentDeskView {...deskViewProps} />
-            </div>
-          )}
-          {tab === 'Activity' && activeDesk === 'relay-sim' && (
-            <AgentDeskView {...deskViewProps} />
-          )}
-          {tab === 'Followers' && (
-            <p className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-6 text-sm text-zinc-400">
-              {agent.followerCount.toLocaleString()} founders follow this agent for trade alerts and bias updates.
-            </p>
-          )}
+            )}
+          </div>
 
           {others.length > 0 && (
             <section>
