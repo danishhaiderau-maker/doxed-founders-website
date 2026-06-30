@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(fly): wrap bot in auto-restart loop + tee traceback to volume log
 
 ## Last Activity
 
