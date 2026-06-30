@@ -9098,7 +9098,8 @@ def _build_confidence_edge_matrix(with_outcome):
 
 def _print_confidence_edge_matrix(matrix_payload):
     print("\n--- 8. AI Confidence × Edge Matrix ---")
-    header = f"{'edge \\\\ ai':<10}" + "".join(f"{cb:>16}" for cb in AI_MATRIX_CONF_BUCKETS)
+    edge_label = 'edge \\\\ ai'
+    header = f"{edge_label:<10}" + "".join(f"{cb:>16}" for cb in AI_MATRIX_CONF_BUCKETS)
     print(header)
     for edge_b in AI_MATRIX_EDGE_BUCKETS:
         row = f"{edge_b:<10}"
