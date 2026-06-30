@@ -1045,6 +1045,18 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         )}
       </div>
 
+      {/* ═══ Status strip: repo · branch · desktop · IDE · brain · cost ═══ */}
+      <StatusStrip
+        repo={repo}
+        branch={branch}
+        desktopOnline={Boolean(bridge?.latest)}
+        cursorConnected={Boolean(worker?.connections?.cursor)}
+        selectedModelLabel={selectedModel?.label}
+        todayCost={todayCost}
+        savedVsCloud={savedVsCloud}
+        usingLocal={usingLocal}
+      />
+
       <div className="flex flex-1 overflow-hidden">
         {/* ═══ Left Sidebar: IDE nav + File Explorer ═══ */}
         <aside className={`flex shrink-0 flex-col border-r border-zinc-800/80 bg-[#0d0d14] transition-all ${sidebarOpen ? 'w-56' : 'w-0 overflow-hidden'}`}>
@@ -2135,3 +2147,62 @@ function AdminPromoRow({
     </button>
   );
 }
+
+/* ───── Status strip: real-time connection + cost bar under the commit timeline ───── */
+function StatusStrip({
+  repo,
+  branch,
+  desktopOnline,
+  cursorConnected,
+  selectedModelLabel,
+  todayCost,
+  savedVsCloud,
+  usingLocal,
+}: {
+  repo: string | null;
+  branch: string;
+  desktopOnline: boolean;
+  cursorConnected: boolean;
+  selectedModelLabel?: string;
+  todayCost: number;
+  savedVsCloud: number;
+  usingLocal: boolean | undefined;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800/80 bg-[#0d0d14] px-3 py-1 text-[10px] text-zinc-500">
+      {repo && (
+        <span className="flex items-center gap-1">
+          <span className="text-zinc-400">{repo}</span>
+          {branch && <span className="text-zinc-600">·</span>}
+          {branch && <span className="text-violet-400/70">{branch}</span>}
+        </span>
+      )}
+
+      <span className="flex items-center gap-1">
+        <span className={`h-1.5 w-1.5 rounded-full ${desktopOnline ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
+        <span>{desktopOnline ? 'Desktop Online' : 'Desktop Offline'}</span>
+      </span>
+
+      <span className="flex items-center gap-1">
+        <span className={`h-1.5 w-1.5 rounded-full ${cursorConnected ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
+        <span>{cursorConnected ? 'IDE Connected' : 'IDE Disconnected'}</span>
+      </span>
+
+      {selectedModelLabel && (
+        <span className="flex items-center gap-1">
+          <span className="text-zinc-600">Brain:</span>
+          <span className="text-zinc-400">{selectedModelLabel}</span>
+        </span>
+      )}
+
+      <span className="ml-auto flex items-center gap-1">
+        <span className="text-zinc-600">Today:</span>
+        <span className="text-emerald-400">${todayCost.toFixed(2)}</span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-emerald-400/70">Saved ${savedVsCloud.toFixed(2)}</span>
+        {usingLocal && <span className="text-[9px] text-zinc-600">local/promo</span>}
+      </span>
+    </div>
+  );
+}
+
