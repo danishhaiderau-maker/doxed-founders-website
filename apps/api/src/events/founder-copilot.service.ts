@@ -1868,6 +1868,9 @@ export class FounderCopilotService {
       GROK: AiProvider.OPENROUTER,
       CURSOR: AiProvider.CURSOR,
       OPENROUTER: AiProvider.OPENROUTER,
+      JATEVO: AiProvider.JATEVO,
+      SURPLUS: AiProvider.SURPLUS,
+      PHALA: AiProvider.PHALA,
     };
     return map[key] ?? null;
   }

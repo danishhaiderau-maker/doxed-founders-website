@@ -123,6 +123,7 @@ const GLOBAL_LLM_FALLBACK: AiProviderKey[] = [
   'JATEVO',
   'OPENROUTER',
   'DEEPSEEK',
+  'GLM',
   'OPENAI',
   'ANTHROPIC',
   'GEMINI',
