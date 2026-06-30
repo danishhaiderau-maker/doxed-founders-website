@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(fly): bump to Python 3.12 + fix backslash-in-fstring (root cause of bot crash loop)
+fix(api): use Fly Machines API directly instead of flyctl
 
 ## Last Activity
 
