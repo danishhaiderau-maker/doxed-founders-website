@@ -1736,17 +1736,21 @@ model WorkspaceSession {
   workspaceId         String?
   selectedAiProvider  String?
   selectedModelKey    String?
+  selectedIdeProvider String?
   conversation        Json?
   terminalScrollback  Json?
   openFiles           Json?
   activeNav           String?
   panelState          Json?
+  publishDraft        Json?
+  eventLog            Json?
   updatedAt           DateTime @updatedAt
   createdAt           DateTime @default(now())
 
   user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   workspace ConnectedWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
 
+  @@unique([userId, workspaceId])
   @@index([userId])
   @@index([workspaceId])
 }
