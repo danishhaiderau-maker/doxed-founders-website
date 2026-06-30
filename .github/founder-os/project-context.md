@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+feat(schema): add WorkspaceSession columns + unique constraint for vNext
 
 ## Last Activity
 
