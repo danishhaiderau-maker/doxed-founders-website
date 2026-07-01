@@ -39,13 +39,18 @@ import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
 import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
 import {
-  FOUNDER_NODE_APP_VERSION,
   buildVaultEncryptedBlob,
   deriveVaultKey,
   encryptVaultJson,
 } from '@dcf/founder-vault';
 import { buildMergePatchForSync, pullPendingVaultMerges } from './vault-sync-pull';
 import { cleanupLegacyPortableInstallers } from './legacy-cleanup';
+import {
+  discoverCursorAgents,
+  discoverCursorWorkspaces,
+} from './cursor-discovery';
+import { CURSOR_CAPABILITIES } from '@dcf/utils';
+import { FOUNDER_NODE_LOCAL_VERSION, type FounderNodeHeartbeatExt } from './sync-client';
 import {
   bindUpdateTray,
   checkForUpdates,
@@ -337,7 +342,30 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
 
   try {
     const hb = defaultHeartbeat(config.label, vaultRoot);
-    await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, {
+
+    // Phase A — discover real Cursor workspaces/agents from disk.
+    const workspaces = discoverCursorWorkspaces();
+    const agents = discoverCursorAgents();
+    const activeWorkspace = workspaces[0];
+
+    // The cloud persists `desktopBridge` and exposes it via
+    // GET /ide-bridge/workspaces (one workspace per node). Enrich it with the
+    // most-active Cursor workspace so the browser shows real branch + title
+    // instead of only vault-derived file names.
+    const enrichedDesktopBridge = {
+      ...hb.desktopBridge,
+      ...(activeWorkspace
+        ? {
+            branch: activeWorkspace.branch ?? hb.desktopBridge?.branch,
+            taskLabel: activeWorkspace.title,
+            agentStatus:
+              agents[0]?.status === 'running' ? 'running' : hb.desktopBridge?.agentStatus,
+            openFilePaths: hb.desktopBridge?.openFilePaths,
+          }
+        : {}),
+    };
+
+    const heartbeat: FounderNodeHeartbeatExt = {
       ...hb,
       nodeId: config.nodeId,
       storageGb: disk.storageGb,
@@ -347,12 +375,23 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       ollamaModel: ollama?.model,
       founderCloud: getFounderCloudMode(config),
       desktopBridge: {
-        ...hb.desktopBridge,
+        ...enrichedDesktopBridge,
         openFilePaths: metadataPayload.mergePatch?.fileManifest
           ? Object.keys(metadataPayload.mergePatch.fileManifest).slice(0, 12)
-          : hb.desktopBridge?.openFilePaths,
+          : enrichedDesktopBridge.openFilePaths,
       },
-    });
+      capabilities: CURSOR_CAPABILITIES,
+      desktop: {
+        online: true,
+        platform: process.platform,
+        hostname: os.hostname(),
+        uptime: process.uptime(),
+      },
+      workspaces,
+      agents,
+    };
+
+    await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, heartbeat);
 
     await syncVaultMetadata(config.apiBaseUrl, config.nodeId, config.nodeToken, metadataPayload);
 
@@ -466,7 +505,7 @@ function buildTrayMenu(vaultRoot: string) {
   const pending = getPendingUpdate();
   const template: Electron.MenuItemConstructorOptions[] = [
     {
-      label: `Founder Node v${FOUNDER_NODE_APP_VERSION}`,
+      label: `Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`,
       enabled: false,
     },
     {
@@ -615,7 +654,7 @@ if (gotSingleInstanceLock) {
 
 app.whenReady().then(() => {
   if (app.isPackaged) {
-    cleanupLegacyPortableInstallers(FOUNDER_NODE_APP_VERSION);
+    cleanupLegacyPortableInstallers(FOUNDER_NODE_LOCAL_VERSION);
   }
 
   const backgroundKeeper = new BrowserWindow({ show: false });
@@ -627,7 +666,7 @@ app.whenReady().then(() => {
 
   const icon = loadAppIcon();
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
-  tray.setToolTip(`Founder Node v${FOUNDER_NODE_APP_VERSION}`);
+  tray.setToolTip(`Founder Node v${FOUNDER_NODE_LOCAL_VERSION}`);
   bindUpdateTray(tray);
   setUpdateMenuRefresh(() => refreshTrayMenu(vaultRoot));
   refreshTrayMenu(vaultRoot);
@@ -678,7 +717,7 @@ app.whenReady().then(() => {
         nodeId,
         label,
         platform: process.platform,
-        appVersion: FOUNDER_NODE_APP_VERSION,
+        appVersion: FOUNDER_NODE_LOCAL_VERSION,
       });
 
       const draftConfig = {

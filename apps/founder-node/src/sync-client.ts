@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  FOUNDER_NODE_APP_VERSION,
   founderNodeAuthHeader,
   parseTasksJson,
   vaultFilePath,
@@ -10,7 +9,37 @@ import {
   type FounderNodePairRequest,
   type FounderNodePairResponse,
 } from '@dcf/founder-vault';
-import type { DesktopBridgeInput, DeviceMemoryMetadataPayload } from '@dcf/utils';
+import type {
+  BridgeAgent,
+  BridgeCapabilityReport,
+  BridgeWorkspace,
+  DesktopBridgeInput,
+  DeviceMemoryMetadataPayload,
+} from '@dcf/utils';
+
+/**
+ * Phase A — Desktop Runtime.
+ *
+ * The heartbeat type in @dcf/founder-vault is intentionally narrow. Founder
+ * Node extends it here with capability + desktop metadata + discovered Cursor
+ * workspaces/agents. The API currently persists only `desktopBridge` and
+ * `founderCloud`; the extra fields are forward-compatible (NestJS accepts
+ * them on the body) and will be consumed once the cloud side is extended.
+ */
+export type FounderNodeHeartbeatExt = FounderNodeHeartbeat & {
+  capabilities?: BridgeCapabilityReport;
+  desktop?: {
+    online: boolean;
+    platform: string;
+    hostname: string;
+    uptime: number;
+  };
+  workspaces?: BridgeWorkspace[];
+  agents?: BridgeAgent[];
+};
+
+/** Local app version — kept in sync with apps/founder-node/package.json. */
+export const FOUNDER_NODE_LOCAL_VERSION = '0.6.0';
 
 function apiBase(apiBaseUrl: string, path: string): string {
   const base = apiBaseUrl.replace(/\/$/, '');
@@ -40,7 +69,7 @@ export async function sendHeartbeat(
   apiBaseUrl: string,
   nodeId: string,
   nodeToken: string,
-  heartbeat: FounderNodeHeartbeat,
+  heartbeat: FounderNodeHeartbeatExt,
 ): Promise<void> {
   const res = await fetch(apiBase(apiBaseUrl, '/api/founder-node/heartbeat'), {
     method: 'POST',
@@ -138,14 +167,14 @@ export function buildDesktopBridgeFromVault(vaultRoot: string): DesktopBridgeInp
   }
 }
 
-export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeHeartbeat {
+export function defaultHeartbeat(label: string, vaultPath: string): FounderNodeHeartbeatExt {
   const ramGb = Math.round(os.totalmem() / 1e9);
   const desktopBridge = buildDesktopBridgeFromVault(vaultPath);
   return {
     nodeId: '',
     label,
     platform: process.platform,
-    appVersion: FOUNDER_NODE_APP_VERSION,
+    appVersion: FOUNDER_NODE_LOCAL_VERSION,
     ramGb,
     vaultHealthy: true,
     vaultPath,
