@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(gitignore): untrack __pycache__ bytecode + bot_analyzer_sync.json
 
 ## Last Activity
 
