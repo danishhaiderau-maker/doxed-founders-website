@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(showcase): populate session_pnl_usd + trade_count in bot /api/state
+fix(agent-hub): showcase P&L (ref) = sim-start-anchored drift, not raw cumulative
 
 ## Last Activity
 
