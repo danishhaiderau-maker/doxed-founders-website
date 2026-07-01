@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(wipe): preserve research/*.py source during fresh collection
+fix(agent-hub): unify top metrics card with analyzer full-session panel
 
 ## Last Activity
 
