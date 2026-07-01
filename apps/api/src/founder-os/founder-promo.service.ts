@@ -293,4 +293,25 @@ export class FounderPromoService {
     const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
     return this.decryptCredentialsMap(row?.founderPromoAiCredentialsEnc);
   }
+  async getPlatformBrainStatus() {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    return { configured: Boolean(row?.platformBrainDeepseekKeyEnc), updatedAt: row?.updatedAt?.toISOString() ?? null };
+  }
+  async savePlatformBrainKey(userId: string, apiKey: string) {
+    const trimmed = apiKey.trim();
+    if (trimmed.length < 8) throw new BadRequestException('DeepSeek API key is too short');
+    const enc = this.crypto.encrypt(trimmed);
+    await this.prisma.platformSettings.upsert({ where: { id: 'default' }, create: { id: 'default', platformBrainDeepseekKeyEnc: enc }, update: { platformBrainDeepseekKeyEnc: enc, updatedByUserId: userId } });
+    return this.getPlatformBrainStatus();
+  }
+  async removePlatformBrainKey(userId: string) {
+    await this.prisma.platformSettings.update({ where: { id: 'default' }, data: { platformBrainDeepseekKeyEnc: null, updatedByUserId: userId } });
+    return this.getPlatformBrainStatus();
+  }
+  async getDecryptedPlatformDeepseekKey(): Promise<string | null> {
+    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    if (!row?.platformBrainDeepseekKeyEnc) return null;
+    try { return this.crypto.decrypt(row.platformBrainDeepseekKeyEnc); } catch { return null; }
+  }
+
 }

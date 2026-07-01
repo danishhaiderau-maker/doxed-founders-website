@@ -9,6 +9,7 @@ import { SiteNav } from '@/components/site-nav';
 import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
+import { AdminPlatformBrain } from '@/components/admin-platform-brain';
 import {
   AdminControlOverview,
   fetchAccountOverview,
@@ -31,6 +32,7 @@ const SECTIONS = [
   { id: 'social', label: 'Social Messaging' },
   { id: 'platform', label: 'Platform & Treasury' },
   { id: 'moderation', label: 'Moderation' },
+  { id: 'brain', label: 'Platform Brain' },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]['id'];
@@ -810,6 +812,9 @@ export default function AdminControlPage() {
                 Open Trust Center →
               </Link>
             </section>
+          )}
+          {section === 'brain' && token && (
+            <AdminPlatformBrain token={token} />
           )}
         </div>
       </main>
