@@ -156,6 +156,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
       if (!agent) return;
 
+      // Hire expiry (expiresAt) gates LIVE COPY only. The relay sim is the free $20
+      // dress rehearsal that must run WITHOUT a paid rental so people can test the real
+      // Bitfinex API lifecycle (place/fill/manage/close) before hiring for live copy.
+      // So we fetch all ACTIVE/PAUSED bitfinex instances here and skip expired ones ONLY
+      // for live copy (simActive=false) inside the loop -- sim instances run regardless
+      // of hire expiry.
+      const now = Date.now();
       const instances = await this.prisma.tradingAgentInstance.findMany({
         where: {
           agentId: agent.id,
@@ -163,7 +170,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED],
           },
           exchangeProvider: { not: 'paper' },
-          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
         },
       });
 
@@ -172,6 +178,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           (await this.prisma.tradingAgentInstance.findUnique({ where: { id: row.id } })) ?? row;
         if (instance.exchangeProvider !== 'bitfinex') continue;
         const simActive = isCopyRelaySimActive(instance.dashboardState);
+
+        // Live copy requires an active (non-expired) hire. Sim runs without one.
+        if (!simActive && instance.expiresAt && instance.expiresAt.getTime() < now) {
+          continue;
+        }
 
         if (simActive) {
           if (instance.status === TradingAgentInstanceStatus.ACTIVE) {
