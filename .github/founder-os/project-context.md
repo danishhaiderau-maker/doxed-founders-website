@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(scripts): quote -File paths so auto-restart monitor actually starts
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
