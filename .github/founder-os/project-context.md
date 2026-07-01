@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-﻿feat(web): minimalistic workspace UI - chat is the entire interface
+feat(api): relay sim runs without a paid hire -- decouple sim from hire-expiry gate
 
 ## Last Activity
 
