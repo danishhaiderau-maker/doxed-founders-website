@@ -174,3 +174,8 @@ _probe*.ps1
 
 # Stray local dashboard artifacts
 _live_dash.html
+
+# Runtime genome outputs (written by the analyzer each run)
+services/btc-conservative-agent/research/genome/genome_analysis_report.json
+services/btc-conservative-agent/research/genome/genome_discoveries.json
+services/btc-conservative-agent/research/genome/genome_library.json
