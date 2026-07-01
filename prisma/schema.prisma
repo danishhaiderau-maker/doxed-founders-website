@@ -1309,6 +1309,8 @@ model PlatformSettings {
   founderPromoMessage          String?  @db.Text
   /** Encrypted JSON map: { gemini?, deepseek?, cursor?, openai?, anthropic? } */
   founderPromoAiCredentialsEnc String?  @db.Text
+  /** Permanent platform-level DeepSeek API key — always-available fallback brain for all users. */
+  platformBrainDeepseekKeyEnc String?  @db.Text
   /** Admin-recommended agent settings shown to users on hire/observe flows */
   agentShowcaseDefaultSettings String? @db.Text
   /** Max USD margin per hire/signal trade (platform-enforced; default $20). */
