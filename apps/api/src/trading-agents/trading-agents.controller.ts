@@ -77,6 +77,12 @@ export class TradingAgentsController {
   }
 
   @Public()
+  @Get(':slug/bot-health')
+  botHealth(@Param('slug') slug: string) {
+    return this.tradingAgents.getBotHealth(slug);
+  }
+
+  @Public()
   @Get(':slug/analyzer-genome')
   analyzerGenome(@Param('slug') slug: string) {
     return this.tradingAgents.getAnalyzerGenome(slug);
