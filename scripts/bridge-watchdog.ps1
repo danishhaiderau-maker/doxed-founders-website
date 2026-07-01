@@ -1,6 +1,11 @@
-# Bridge :7810 auto-respawn watchdog. Polls /health every ~10s and relaunches the bridge
-# (via ensure-home-bridge.ps1) when it is down. Lock-protected so only one instance runs
-# at a time — safe to invoke from the scheduled task AND a detached hidden loop together.
+﻿# Bridge :7810 + Cloudflare tunnel auto-respawn watchdog. Polls /health every
+# ~10s and relaunches the bridge (via ensure-home-bridge.ps1) when it is down,
+# AND guards the cloudflare tunnel: respawns cloudflared via the bridge
+# /cmd/start-tunnel endpoint when the process is missing or the public URL
+# answers 530 (wedged). This stops the recurring "tunnel_offline_ping=530"
+# popups after a bot crash takes cloudflared down. Lock-protected so only one
+# instance runs at a time - safe to invoke from the scheduled task AND a
+# detached hidden loop together.
 #
 # Survives terminal closure because it is launched -WindowStyle Hidden via Start-Process
 # (detached from any console). The register-bridge-watchdog.ps1 scheduled task
@@ -10,6 +15,8 @@ param(
   [int]$PollIntervalSec = 10,
   [int]$DurationMin = 5,
   [int]$RelaunchCooldownSec = 30,
+  [int]$TunnelRelaunchCooldownSec = 60,
+  [string]$TunnelUrl = "https://bot.doxxedcrypto.digital",
   [switch]$Quiet
 )
 
@@ -19,6 +26,18 @@ $repoRoot = Split-Path -Parent $scriptDir
 $logFile = Join-Path $repoRoot ".home-bridge-watchdog.log"
 $lockFile = Join-Path $repoRoot ".home-bridge-watchdog.lock"
 $pidFile = Join-Path $repoRoot ".home-bridge-watchdog.pid"
+
+# Whether the cloudflare tunnel should be up for this stack. Production showcase
+# keeps the tunnel; legacy local-collection does not. Resolved once at startup
+# from config/home-showcase.lock.json via Get-HomeStackMode.
+$TunnelEnabled = $true
+try {
+  . (Join-Path $scriptDir "home-stack-mode.ps1")
+  $mode = Get-HomeStackMode
+  if ($mode -and $mode.PSObject.Properties.Name -contains "TunnelEnabled") {
+    $TunnelEnabled = [bool]$mode.TunnelEnabled
+  }
+} catch { Add-Content -Path $logFile -Value ("{0} tunnel-mode resolve failed (defaulting TunnelEnabled=true): {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.Message) -ErrorAction SilentlyContinue }
 
 function Wd-Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -36,7 +55,7 @@ try {
     [System.IO.FileAccess]::ReadWrite,
     [System.IO.FileShare]::None)
 } catch {
-  # Lock held by another instance — confirm it is actually alive (not a stale handle
+  # Lock held by another instance - confirm it is actually alive (not a stale handle
   # from a crashed process) before backing off.
   $alive = $false
   if (Test-Path $pidFile) {
@@ -48,7 +67,7 @@ try {
     }
   }
   if ($alive) { exit 0 }
-  # Stale lock — force clear and retry once.
+  # Stale lock - force clear and retry once.
   Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   try {
     $script:LockHandle = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
@@ -70,23 +89,62 @@ function Test-BridgeUp {
   } catch { return $false }
 }
 
+# Cloudflared process presence (cheap, runs every poll).
+function Test-CloudflaredRunning {
+  $p = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*cloudflared*" }
+  return [bool]$p
+}
+
+# Tunnel end-to-end reachability (heavier; called less often). Returns true only
+# when the public URL answers 200 - catches the case where cloudflared is alive
+# but the tunnel is wedged (530).
+function Test-TunnelUp {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("$TunnelUrl/api/ping")
+    $req.Method = "GET"
+    $req.Timeout = 8000
+    $req.ReadWriteTimeout = 8000
+    $resp = $req.GetResponse()
+    $ok = ($resp.StatusCode -eq 200)
+    $resp.Close()
+    return $ok
+  } catch { return $false }
+}
+
+# Respawn cloudflared via the bridge /cmd/start-tunnel endpoint (the same path
+# the Start button uses). The bridge owns the cloudflared launch config, so we
+# delegate rather than launching cloudflared directly.
+function Restart-Tunnel {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$BridgePort/cmd/start-tunnel")
+    $req.Method = "GET"
+    $req.Timeout = 20000
+    $req.ReadWriteTimeout = 20000
+    $resp = $req.GetResponse()
+    $resp.Close()
+    return $true
+  } catch { return $false }
+}
+
 $deadline = (Get-Date).AddMinutes($DurationMin)
 $lastRelaunch = [datetime]::MinValue
+$lastTunnelRelaunch = [datetime]::MinValue
 $ticks = 0
 
-Wd-Log "bridge-watchdog start pid=$PID port=:$BridgePort poll=${PollIntervalSec}s duration=${DurationMin}m"
+Wd-Log "bridge-watchdog start pid=$PID port=:$BridgePort poll=${PollIntervalSec}s duration=${DurationMin}m tunnelEnabled=$TunnelEnabled"
 
 while ((Get-Date) -lt $deadline) {
   $ticks++
   if (Test-BridgeUp) {
-    # Bridge healthy — nothing to log on every tick (would flood); log a heartbeat every ~2 min.
+    # Bridge healthy - nothing to log on every tick (would flood); log a heartbeat every ~2 min.
     if (($ticks % 12) -eq 0) { Wd-Log "tick #$ticks bridge UP" }
   } else {
     $since = ((Get-Date) - $lastRelaunch).TotalSeconds
     if ($since -lt $RelaunchCooldownSec) {
-      Wd-Log "bridge DOWN but cooldown $([int]$since)s/${RelaunchCooldownSec}s — waiting"
+      Wd-Log "bridge DOWN but cooldown $([int]$since)s/${RelaunchCooldownSec}s - waiting"
     } else {
-      Wd-Log "bridge DOWN on :$BridgePort — relaunching via ensure-home-bridge.ps1"
+      Wd-Log "bridge DOWN on :$BridgePort - relaunching via ensure-home-bridge.ps1"
       try {
         $p = Start-Process -FilePath "powershell.exe" -ArgumentList @(
           "-NoProfile","-ExecutionPolicy","Bypass","-File",
@@ -99,6 +157,39 @@ while ((Get-Date) -lt $deadline) {
       $lastRelaunch = Get-Date
     }
   }
+
+  # Cloudflare tunnel guard - only when the stack expects a tunnel. Catches both
+  # a dead cloudflared process (cheap check every poll) and a wedged tunnel that
+  # answers 530 (end-to-end probe every ~60s). Respawn via the bridge so the
+  # launch config stays single-sourced. This is what stops the recurring 530
+  # popups after a bot crash takes cloudflared down.
+  if ($TunnelEnabled) {
+    $tunnelNeedsRespawn = $false
+    if (-not (Test-CloudflaredRunning)) {
+      $tunnelNeedsRespawn = $true
+      Wd-Log "cloudflared process MISSING"
+    } elseif (($ticks % 6) -eq 0) {
+      # End-to-end probe every ~60s - cloudflared may be alive but tunnel wedged.
+      if (-not (Test-TunnelUp)) {
+        $tunnelNeedsRespawn = $true
+        Wd-Log "tunnel $TunnelUrl NOT reachable (530/wedged)"
+      } elseif (($ticks % 12) -eq 0) {
+        Wd-Log "tick #$ticks tunnel UP"
+      }
+    }
+    if ($tunnelNeedsRespawn) {
+      $tSince = ((Get-Date) - $lastTunnelRelaunch).TotalSeconds
+      if ($tSince -lt $TunnelRelaunchCooldownSec) {
+        Wd-Log "tunnel respawn skipped - cooldown $([int]$tSince)s/${TunnelRelaunchCooldownSec}s"
+      } else {
+        Wd-Log "tunnel respawn -> bridge /cmd/start-tunnel"
+        $ok = Restart-Tunnel
+        Wd-Log "tunnel respawn result: $ok"
+        $lastTunnelRelaunch = Get-Date
+      }
+    }
+  }
+
   Start-Sleep -Seconds $PollIntervalSec
 }
 
