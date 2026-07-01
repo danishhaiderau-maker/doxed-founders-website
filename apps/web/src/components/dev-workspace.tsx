@@ -27,7 +27,6 @@ import {
   type FounderOnboardingStatus,
   type PlatformConnectionsHub,
   type RecentAgentsResponse,
-  type RecentAgent,
   type ConnectedWorkspace,
 } from '@/lib/api';
 import { ShareOnXButton, useShareOrigin } from '@/components/share-on-x-button';
@@ -56,7 +55,6 @@ import {
   type FounderEventCategory,
 } from '@/lib/founder-event-bus';
 import { AgentEventTimeline } from '@/components/agent-event-timeline';
-import { RecentAgentsPanel } from '@/components/recent-agents-panel';
 
 type Props = {
   accessToken: string;
@@ -1288,28 +1286,86 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
               >+ New</button>
             </div>
             <div className="min-h-0 max-h-56 overflow-y-auto px-1.5 pb-1.5">
-              {connectedWorkspaces.length === 0 ? (
-                <p className="px-2 py-2 text-[10px] leading-relaxed text-zinc-600">
-                  No workspaces yet — click <span className="text-violet-400">+ New</span> to create one
-                </p>
-              ) : (
-                connectedWorkspaces.slice(0, 10).map((ws) => {
-                  const status = workspaceStatus(ws.lastActiveAt);
-                  const ide = ws.ideProvider ?? 'Unknown IDE';
-                  const metaParts = [ide, ws.branch ?? '—', formatRelativeTime(ws.lastActiveAt)];
+              {(() => {
+                const FRESH_MS = 5 * 60 * 1000;
+                const now = Date.now();
+                const latest = bridge?.latest;
+                const items: {
+                  key: string;
+                  label: string;
+                  ide: string;
+                  branch: string | null;
+                  repo: string | null;
+                  lastActiveAt: string;
+                  dot: string;
+                  dotLabel: string;
+                  source: 'bridge' | 'connected';
+                  id?: string;
+                }[] = [];
+                if (latest?.taskLabel) {
+                  const fresh = latest.updatedAt
+                    ? now - new Date(latest.updatedAt).getTime() < FRESH_MS
+                    : false;
+                  items.push({
+                    key: 'bridge-latest',
+                    label: latest.taskLabel,
+                    ide: 'Cursor',
+                    branch: latest.branch ?? null,
+                    repo: null,
+                    lastActiveAt: latest.updatedAt,
+                    dot: fresh ? 'bg-emerald-400' : 'bg-amber-400',
+                    dotLabel: fresh ? 'Desktop · fresh' : 'Desktop · stale',
+                    source: 'bridge',
+                  });
+                }
+                for (const ws of connectedWorkspaces) {
+                  items.push({
+                    key: `connected-${ws.id}`,
+                    label: ws.label,
+                    ide: ws.ideProvider ?? 'Unknown IDE',
+                    branch: ws.branch,
+                    repo: ws.repository,
+                    lastActiveAt: ws.lastActiveAt,
+                    dot: 'bg-zinc-500',
+                    dotLabel: 'Connected workspace',
+                    source: 'connected',
+                    id: ws.id,
+                  });
+                }
+                if (items.length === 0) {
+                  return (
+                    <p className="px-2 py-2 text-[10px] leading-relaxed text-zinc-600">
+                      No workspaces yet — click <span className="text-violet-400">+ New</span> to create one, or connect Cursor to populate from the desktop bridge.
+                    </p>
+                  );
+                }
+                return items.slice(0, 12).map((ws) => {
+                  const metaParts = [ws.ide, ws.branch ?? '—', formatRelativeTime(ws.lastActiveAt)];
+                  const isActiveConnected = ws.source === 'connected' && ws.id === activeWorkspaceId;
                   return (
                     <div
-                      key={ws.id}
+                      key={ws.key}
                       className={`group flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition ${
-                        activeWorkspaceId === ws.id ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800/50'
+                        isActiveConnected ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-800/50'
                       }`}
                     >
                       <button
-                        onClick={() => handleSwitchWorkspace(ws.id)}
+                        onClick={() => {
+                          if (ws.source === 'connected' && ws.id) handleSwitchWorkspace(ws.id);
+                          else if (ws.source === 'bridge') {
+                            const match = connectedWorkspaces.find(
+                              (c) => c.label && ws.label && c.label.toLowerCase() === ws.label.toLowerCase(),
+                            );
+                            if (match) handleSwitchWorkspace(match.id);
+                            else resumeWorkspace();
+                          } else {
+                            resumeWorkspace();
+                          }
+                        }}
                         className="flex min-w-0 flex-1 items-start gap-2 text-left"
-                        title={ws.repository ?? ws.label}
+                        title={ws.repo ?? ws.label}
                       >
-                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${status.dot}`} title={status.label} />
+                        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${ws.dot}`} title={ws.dotLabel} />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[11px] font-medium text-zinc-300">{ws.label}</p>
                           <p className="truncate text-[9px] text-zinc-600">
@@ -1317,15 +1373,17 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                           </p>
                         </div>
                       </button>
-                      <button
-                        onClick={() => handleDeleteWorkspace(ws.id)}
-                        className="shrink-0 text-[9px] text-zinc-700 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
-                        title="Delete workspace"
-                      >✕</button>
+                      {ws.source === 'connected' && ws.id && (
+                        <button
+                          onClick={() => handleDeleteWorkspace(ws.id!)}
+                          className="shrink-0 text-[9px] text-zinc-700 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                          title="Delete workspace"
+                        >✕</button>
+                      )}
                     </div>
                   );
-                })
-              )}
+                });
+              })()}
             </div>
           </div>
 
@@ -1335,44 +1393,6 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
               Active: {connectedWorkspaces.find((w) => w.id === activeWorkspaceId)?.label ?? 'Unknown'}
             </div>
           )}
-
-          {/* Work Sessions — last 5 active agents */}
-          <div className="flex min-h-0 shrink-0 flex-col border-t border-zinc-800/80">
-            <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Work Sessions</span>
-              {recentAgents && recentAgents.agents.length > 0 && (
-                <span className="rounded bg-zinc-800/60 px-1.5 text-[8px] font-semibold text-zinc-500">{recentAgents.agents.length}</span>
-              )}
-            </div>
-            <div className="min-h-0 max-h-48 overflow-y-auto px-1.5 pb-1.5">
-              {(recentAgents?.agents ?? []).length === 0 ? (
-                <p className="px-2 py-1 text-[9px] text-zinc-700">No active sessions</p>
-              ) : (
-                (recentAgents?.agents ?? []).slice(0, 5).map((agent) => (
-                  <button
-                    key={agent.id}
-                    onClick={() => sendChat(`command cursor: continue ${agent.label}`)}
-                    className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-zinc-800/50"
-                  >
-                    <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
-                      agent.status.toLowerCase().includes('run') ? 'bg-violet-400' :
-                      agent.status.toLowerCase().includes('wait') ? 'bg-amber-400' :
-                      agent.status.toLowerCase().includes('idle') ? 'bg-emerald-400' :
-                      agent.status.toLowerCase().includes('complete') ? 'bg-zinc-600' :
-                      'bg-zinc-600'
-                    }`} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[10px] font-medium text-zinc-300">{agent.label}</p>
-                      <p className="truncate text-[8px] text-zinc-600">
-                        {agent.branch ?? agent.repository ?? '—'}
-                        {agent.lastActivityAt ? ` · ${formatRelativeTimeShort(agent.lastActivityAt)}` : ''}
-                      </p>
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
 
           {/* File Explorer */}
           <div className="flex min-h-0 flex-1 flex-col border-t border-zinc-800/80">
@@ -1617,32 +1637,32 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && !thinking ? (
-                !resumeDismissed && sessionLoaded &&
-                ((restoredSession && (restoredSession.conversation?.length ?? 0) > 0) ||
-                  Boolean(bridge?.latest) ||
-                  Boolean(recentAgents?.agents?.length)) ? (
-                  <ResumeWorkspacePanel
-                    session={restoredSession}
-                    repo={repo}
-                    branch={branch}
-                    worker={worker}
-                    recentAgents={recentAgents}
-                    onResume={resumeWorkspace}
-                    onContinueAgent={(_agent, prompt) =>
-                      sendChat(`command cursor: ${prompt}`)
-                    }
-                  />
-                ) : !resumeDismissed && sessionLoaded && (activeWorkspaceId || bridge?.latest?.taskLabel) ? (
+                !resumeDismissed && sessionLoaded ? (
                   <ColdStartContinuePanel
-                    projectLabel={
-                      connectedWorkspaces.find((w) => w.id === activeWorkspaceId)?.label ??
-                      bridge?.latest?.taskLabel ??
-                      'your project'
+                    taskLabel={bridge?.latest?.taskLabel ?? null}
+                    branch={bridge?.latest?.branch ?? null}
+                    updatedAt={bridge?.latest?.updatedAt ?? null}
+                    founderNodeOnline={
+                      Boolean(worker?.connections?.founderNode) || Boolean(bridge?.latest)
                     }
-                    onContinue={() => resumeWorkspace()}
+                    onResume={() => {
+                      const latest = bridge?.latest;
+                      const taskLabelLower = latest?.taskLabel?.toLowerCase() ?? null;
+                      const match = taskLabelLower
+                        ? connectedWorkspaces.find(
+                            (c) => c.label && c.label.toLowerCase() === taskLabelLower,
+                          )
+                        : null;
+                      if (match) handleSwitchWorkspace(match.id);
+                      else {
+                        userDismissedResumeRef.current = true;
+                        setResumeDismissed(true);
+                        setTimeout(() => chatInputRef.current?.focus(), 0);
+                      }
+                    }}
+                    onConnectFounderNode={() => setActiveNav('settings')}
+                    onFocusInput={() => setTimeout(() => chatInputRef.current?.focus(), 0)}
                   />
-                ) : !resumeDismissed && sessionLoaded ? (
-                  <ColdStartNewProjectPanel onCreateWorkspace={() => handleCreateWorkspace()} />
                 ) : (
                 <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
                 )
@@ -2055,135 +2075,93 @@ function InfraRow({ label, ok }: { label: string; ok: boolean }) {
  * Shown when a workspace is active (or the desktop bridge reports a
  * taskLabel) but there's no saved conversation and no live resume data. */
 function ColdStartContinuePanel({
-  projectLabel,
-  onContinue,
+  taskLabel,
+  branch,
+  updatedAt,
+  founderNodeOnline,
+  onResume,
+  onConnectFounderNode,
+  onFocusInput,
 }: {
-  projectLabel: string;
-  onContinue: () => void;
+  taskLabel: string | null;
+  branch: string | null;
+  updatedAt: string | null;
+  founderNodeOnline: boolean;
+  onResume: () => void;
+  onConnectFounderNode: () => void;
+  onFocusInput: () => void;
 }) {
-  return (
-    <div className="mx-auto max-w-xl space-y-4">
-      <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6 text-center">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Continue</p>
-        <h2 className="mt-2 text-lg font-bold text-white">Continue working on</h2>
-        <p className="mt-1 truncate text-base font-semibold text-violet-200">{projectLabel}</p>
-        <button
-          type="button"
-          onClick={onContinue}
-          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
-        >
-          Continue →
-        </button>
+  // State 1 — bridge has a live task: "Continue where you left off"
+  if (taskLabel) {
+    const lastActive = updatedAt ? formatRelativeTimeShort(updatedAt) : 'recently';
+    return (
+      <div className="mx-auto max-w-xl space-y-4">
+        <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6 text-center">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Continue</p>
+          <h2 className="mt-2 text-lg font-bold text-white">Continue where you left off</h2>
+          <p className="mt-2 truncate text-base font-semibold text-violet-200">{taskLabel}</p>
+          <p className="mt-1 truncate text-xs text-zinc-400">
+            {branch ? `${branch}` : ''}
+            {branch && updatedAt ? ' · ' : ''}
+            {updatedAt ? `Last active: ${lastActive}` : ''}
+          </p>
+          <button
+            type="button"
+            onClick={onResume}
+            className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
+          >
+            Resume →
+          </button>
+        </div>
+        <p className="text-center text-[10px] text-zinc-600">
+          Or start fresh by typing a question below.
+        </p>
       </div>
-      <p className="text-center text-[10px] text-zinc-600">
-        Or start fresh by typing a question below.
-      </p>
-    </div>
-  );
-}
+    );
+  }
 
-/* ───── Cold-start "Start a new project" prompt (no workspace, no bridge) ───── */
-function ColdStartNewProjectPanel({ onCreateWorkspace }: { onCreateWorkspace: () => void }) {
+  // State 2 — Founder Node live but no bridge task: "Desktop is live"
+  if (founderNodeOnline) {
+    return (
+      <div className="mx-auto max-w-xl space-y-4">
+        <div className="rounded-2xl border border-emerald-500/20 bg-gradient-to-b from-emerald-950/20 to-zinc-900/30 p-6 text-center">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-400/80">Live</p>
+          <h2 className="mt-2 text-lg font-bold text-white">Desktop is live</h2>
+          <p className="mt-1 text-xs text-zinc-400">What should we work on?</p>
+          <input
+            type="text"
+            placeholder="Describe a task…"
+            onFocus={(e) => {
+              e.currentTarget.blur();
+              onFocusInput();
+            }}
+            className="mt-5 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500 focus:outline-none"
+          />
+        </div>
+        <p className="text-center text-[10px] text-zinc-600">
+          Type your task above or in the chat input below.
+        </p>
+      </div>
+    );
+  }
+
+  // State 3 — no Founder Node: "Desktop offline"
   return (
     <div className="mx-auto max-w-xl space-y-4">
       <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 text-center">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Founder OS</p>
-        <h2 className="mt-2 text-lg font-bold text-white">Start a new project</h2>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Offline</p>
+        <h2 className="mt-2 text-lg font-bold text-white">Desktop offline</h2>
         <p className="mt-1 text-xs text-zinc-400">
-          Create a workspace to track commits, agents, and builds, or just type a question below to begin.
+          Connect Founder Node to continue where you left off.
         </p>
         <button
           type="button"
-          onClick={onCreateWorkspace}
+          onClick={onConnectFounderNode}
           className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
         >
-          + New Workspace
+          Connect Founder Node
         </button>
       </div>
-    </div>
-  );
-}
-
-/* ───── Resume Workspace Panel (replaces cold-start empty state when session exists) ───── */
-function ResumeWorkspacePanel({
-  session,
-  repo,
-  branch,
-  worker,
-  recentAgents,
-  onResume,
-  onContinueAgent,
-}: {
-  session: WorkspaceSessionData | null;
-  repo: string | null;
-  branch: string;
-  worker: WorkerStatus | null;
-  recentAgents: RecentAgentsResponse | null;
-  onResume: () => void;
-  onContinueAgent: (agent: RecentAgent, prompt: string) => void;
-}) {
-  const messageCount = session?.conversation?.length ?? 0;
-  const lastActive = session?.updatedAt ? formatRelativeTimeShort(session.updatedAt) : 'recently';
-  const cursorOk = Boolean(worker?.connections?.cursor);
-  const nodeOk = Boolean(worker?.connections?.founderNode);
-  const repoOk = Boolean(repo);
-  const agentCount = recentAgents?.agents?.length ?? 0;
-  const hasSession = Boolean(session);
-
-  return (
-    <div className="mx-auto max-w-xl space-y-4">
-      <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Founder OS</p>
-        <h2 className="mt-1 text-xl font-bold text-white">
-          {hasSession ? 'Workspace restored.' : 'Desktop is live.'}
-        </h2>
-        <p className="mt-1 text-xs text-zinc-400">
-          {hasSession
-            ? 'Your laptop stayed working while you were away.'
-            : 'Your desktop is connected. Pick up where you left off.'}
-        </p>
-
-        <div className="mt-5 space-y-1.5 text-xs">
-          <ResumeRow label="Repository" value={repo ?? 'Not linked'} ok={repoOk} />
-          <ResumeRow label="Branch" value={branch} ok={repoOk} />
-          <ResumeRow label="Cursor" value={cursorOk ? 'Connected' : 'Offline'} ok={cursorOk} />
-          <ResumeRow label="Founder Node" value={nodeOk ? 'Online' : 'Offline'} ok={nodeOk} />
-          <ResumeRow label="Terminal" value={session?.terminalScrollback?.length ? `Recovered (${session.terminalScrollback.length} lines)` : 'Empty'} ok={Boolean(session?.terminalScrollback?.length)} />
-          <ResumeRow label="Conversation" value={`${messageCount} message${messageCount === 1 ? '' : 's'} recovered`} ok={messageCount > 0} />
-          {agentCount > 0 && <ResumeRow label="Active Agents" value={`${agentCount} recent agent${agentCount === 1 ? '' : 's'}`} ok={true} />}
-          <ResumeRow label="Last active" value={lastActive} ok={false} />
-        </div>
-
-        <button
-          type="button"
-          onClick={onResume}
-          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
-        >
-          Resume Workspace →
-        </button>
-      </div>
-
-      {agentCount > 0 && (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-4">
-          <RecentAgentsPanel data={recentAgents} onContinueAgent={onContinueAgent} compact />
-        </div>
-      )}
-
-      <p className="text-center text-[10px] text-zinc-600">
-        Or start fresh by typing a question below — your saved session stays in the background.
-      </p>
-    </div>
-  );
-}
-
-function ResumeRow({ label, value, ok }: { label: string; value: string; ok: boolean }) {
-  return (
-    <div className="flex items-center justify-between rounded-md border border-zinc-800/60 bg-zinc-900/40 px-3 py-1.5">
-      <span className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</span>
-      <span className="flex items-center gap-1.5 text-zinc-200">
-        <span className={ok ? 'text-emerald-400' : 'text-zinc-500'}>{ok ? '✓' : '·'}</span>
-        <span className="truncate text-zinc-300">{value}</span>
-      </span>
     </div>
   );
 }
@@ -2223,17 +2201,6 @@ function formatRelativeTime(iso: string): string {
   if (mo < 12) return `${mo} months ago`;
   const yr = Math.floor(day / 365);
   return yr === 1 ? '1 year ago' : `${yr} years ago`;
-}
-
-// Workspace status dot color based on lastActiveAt.
-// green = Running (<5 min), yellow = Waiting (<1 hr), gray = Dormant (older).
-function workspaceStatus(lastActiveAt: string): { dot: string; label: string } {
-  const then = new Date(lastActiveAt).getTime();
-  if (Number.isNaN(then)) return { dot: 'bg-zinc-600', label: 'Dormant' };
-  const diffMs = Date.now() - then;
-  if (diffMs < 5 * 60_000) return { dot: 'bg-emerald-400', label: 'Running' };
-  if (diffMs < 60 * 60_000) return { dot: 'bg-amber-400', label: 'Waiting' };
-  return { dot: 'bg-zinc-600', label: 'Dormant' };
 }
 
 /* ───── Context Panel (replaces placeholder — always live info) ───── */
