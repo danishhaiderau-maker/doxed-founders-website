@@ -180,3 +180,25 @@ _live_dash.html
 services/btc-conservative-agent/research/genome/genome_analysis_report.json
 services/btc-conservative-agent/research/genome/genome_discoveries.json
 services/btc-conservative-agent/research/genome/genome_library.json
+
+# btc-conservative-agent generated reports
+services/btc-conservative-agent/*.csv
+services/btc-conservative-agent/*.txt
+services/btc-conservative-agent/analysis_dashboard.html
+services/btc-conservative-agent/*_3factor.csv
+services/btc-conservative-agent/*_scorecard.json
+services/btc-conservative-agent/*_summary.json
+services/btc-conservative-agent/*_validation.json
+services/btc-conservative-agent/*_heatmap.json
+services/btc-conservative-agent/*_ledger.json
+services/btc-conservative-agent/*_capture.json
+services/btc-conservative-agent/*_specs.json
+services/btc-conservative-agent/*_manifest.json
+services/btc-conservative-agent/*_leaderboard.json
+services/btc-conservative-agent/*_policy.json
+services/btc-conservative-agent/*_integrity.json
+services/btc-conservative-agent/*_positions.json
+services/btc-conservative-agent/*_funnel.json
+services/btc-conservative-agent/*_audit.json
+services/btc-conservative-agent/research_*.txt
+services/btc-conservative-agent/research_*.json
