@@ -171,6 +171,7 @@ docs/exports/*.zip
 logs/
 .probe-*.ps1
 _probe*.ps1
+*.tmp.ps1
 
 # Stray local dashboard artifacts
 _live_dash.html
