@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(housekeep): untrack runtime genome JSONs + ignore tmp probe scripts
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
