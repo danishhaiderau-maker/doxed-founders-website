@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(web): collapsible info accordion + apply to relay sim 'why this tab exists'
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
