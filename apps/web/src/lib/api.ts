@@ -3663,6 +3663,21 @@ export function fetchAnalyzerSessionSummary(slug: string, token?: string) {
   );
 }
 
+export type ServerBotHealth = {
+  ok: boolean;
+  fly: boolean;
+  cloudflare: boolean;
+  botConnected: boolean;
+  source?: string;
+  error?: string;
+};
+
+/** Server-side Fly.io + Cloudflare reachability (proxied through the API to avoid
+ *  browser CORS/region false-negatives). Used by the command center's Fly chip. */
+export function fetchServerBotHealth(slug: string, token?: string) {
+  return apiFetch<ServerBotHealth>(`/trading-agents/${slug}/bot-health`, {}, token);
+}
+
 export function fetchAnalyzerGenome(slug: string, token?: string) {
   return apiFetch<AnalyzerGenome>(
     `/trading-agents/${slug}/analyzer-genome`,
@@ -3956,6 +3971,39 @@ export function flyControlBotStatus(token: string) {
 
 export function getShowcaseHost() {
   return apiFetch<{ host: 'fly' | 'local' }>('/trading-agents/showcase-host');
+}
+
+// Best-effort public bot health probe used by the agent showcase control panel.
+// No access token required — probes the public bot endpoint directly. Failures
+// are expected (CORS / offline) and callers wrap this in try/catch.
+export type BotHealthResponse = {
+  ok: boolean;
+  fly?: boolean;
+  cloudflare?: boolean;
+  status?: string;
+};
+
+export async function fetchBotHealth(slug: string): Promise<BotHealthResponse> {
+  const base =
+    slug === 'conservative-btc'
+      ? 'https://bot.doxxedcrypto.digital'
+      : `https://${slug}.doxxedcrypto.digital`;
+  try {
+    const res = await fetch(`${base}/health`, { method: 'GET' });
+    if (!res.ok) return { ok: false };
+    const json = (await res.json().catch(() => ({}))) as Partial<BotHealthResponse> & {
+      fly?: boolean;
+      cloudflare?: boolean;
+    };
+    return {
+      ok: true,
+      fly: Boolean(json.fly),
+      cloudflare: Boolean(json.cloudflare),
+      status: typeof json.status === 'string' ? json.status : 'online',
+    };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export function resetShowcaseSimulation(token: string) {

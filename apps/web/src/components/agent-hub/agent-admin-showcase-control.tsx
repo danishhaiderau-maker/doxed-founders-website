@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { flyControlBot, getShowcaseHost, pauseTradingAgent, resumeTradingAgent } from '@/lib/api';
+import { flyControlBot, getShowcaseHost, pauseTradingAgent, resumeTradingAgent, fetchServerBotHealth } from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
 const DEFAULT_BOT_PORT = 7002;
@@ -211,6 +211,7 @@ export function AgentAdminShowcaseControl({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
   const [showcaseHost, setShowcaseHost] = useState<'fly' | 'local'>('local');
+  const [serverFlyOnline, setServerFlyOnline] = useState<boolean | null>(null);
   const isFly = showcaseHost === 'fly';
 
   const stopped = executionPaused || !botConnected;
@@ -248,6 +249,27 @@ export function AgentAdminShowcaseControl({
     const t = setInterval(() => void refreshStatus(), 60_000);
     return () => clearInterval(t);
   }, [refreshStatus]);
+
+  // Server-side Fly.io + Cloudflare reachability probe. The browser-side probe of
+  // Fly fails on CORS/region (false negative), so the command center relies on this
+  // server-side signal as the primary source for the "Fly bot (sin)" status chip.
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const json = await fetchServerBotHealth('conservative-btc');
+        if (!cancelled) setServerFlyOnline(Boolean(json.fly || json.cloudflare || json.ok));
+      } catch {
+        // leave as-is; client-side probe remains a secondary fallback
+      }
+    };
+    void probe();
+    const t = setInterval(() => void probe(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -436,7 +458,7 @@ export function AgentAdminShowcaseControl({
         <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
         <StatusChip
           label="Fly bot (sin)"
-          ok={Boolean(botConnected) || Boolean(status?.fly?.online)}
+          ok={Boolean(serverFlyOnline ?? botConnected ?? status?.fly?.online)}
           sub={FLY_BOT_URL}
         />
         <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />

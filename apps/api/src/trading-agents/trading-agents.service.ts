@@ -635,6 +635,46 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
+  /** Server-side Fly.io + Cloudflare tunnel reachability for the conservative-btc showcase.
+   *  Used by the Agent Hub command center so the "Fly bot (sin)" status chip is NOT a
+   *  client-side browser probe (which fails on CORS/region). This bypasses the Neon
+   *  `showcaseBotPublicUrl` wiring that gates `botConnected` on the agent endpoint —
+   *  probing Fly + CF directly via the bot bridge's resilient URL resolver. */
+  async getBotHealth(slug: string): Promise<{
+    ok: boolean;
+    fly: boolean;
+    cloudflare: boolean;
+    botConnected: boolean;
+    source?: string;
+    error?: string;
+  }> {
+    if (slug !== 'conservative-btc') {
+      return { ok: false, fly: false, cloudflare: false, botConnected: false, error: 'only conservative-btc' };
+    }
+    const flyUrl = this.botBridge.getFlyUrl();
+    const cfUrl = (await this.botBridge.resolveBotUrl()) ?? 'https://bot.doxxedcrypto.digital';
+    const probe = async (base: string, path = '/api/ping'): Promise<boolean> => {
+      try {
+        const res = await fetch(`${base}${path}`, {
+          signal: AbortSignal.timeout(6_000),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-relay/1.0' },
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    };
+    const [fly, cloudflare] = await Promise.all([probe(flyUrl), probe(cfUrl)]);
+    const ok = fly || cloudflare;
+    return {
+      ok,
+      fly,
+      cloudflare,
+      botConnected: ok,
+      source: ok ? (fly ? 'fly' : 'cloudflare') : 'unreachable',
+    };
+  }
+
   /** Decision genome from the analyzer (:9001) via bot proxy. */
   async getAnalyzerGenome(slug: string): Promise<{
     ok: boolean;
