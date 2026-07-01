@@ -301,7 +301,11 @@ export function CopyTradeHub({
       />
 
       {(activeDesk === 'live' || activeDesk === 'relay-sim') && (
-        <ShowcaseReferenceBar showcaseAgent={showcaseAgent} botConnected={botConnected} />
+        <ShowcaseReferenceBar
+          showcaseAgent={showcaseAgent}
+          botConnected={botConnected}
+          copyRelaySim={copyRelaySim}
+        />
       )}
 
       {/* The conservative-btc showcase desk surfaces cumulative full-session metrics via
