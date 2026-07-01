@@ -683,7 +683,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     return <div className="flex h-full items-center justify-center text-sm text-zinc-500">Loading workspace…</div>;
   }
 
-  // Cost estimate (approximate differentiator)
+  // Cost estimate — PLACEHOLDER demo values, not real telemetry.
+  // Surfaced in StatusStrip with a "(demo)" suffix until a real cost feed exists.
   const todayCost = 0.82;
   const savedVsCloud = 31.90;
   const usingLocal = selectedModel?.local || selectedModel?.promo;
@@ -708,7 +709,11 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     const stream = `ai:${Date.now().toString(36)}`;
     setActiveStream(stream);
     const modelLabel = selectedModel?.label ?? 'AI';
-    const modelKey = selectedModel?.key ?? 'GLM';
+    // CRITICAL: use the active brain key (not the IDE key) for the LLM provider.
+    // When a user selects an IDE like Cursor as their runtime, selectedModel.key
+    // would be 'CURSOR' — an execution key with no LLM credentials. The API needs
+    // the brain key ('GLM', 'GPT', …) or it returns "API key missing".
+    const modelKey = activeBrain?.key ?? selectedModel?.key ?? 'GLM';
 
     emitEvent('AI', 'request_started', `${modelLabel} connected — collecting live context`, {
       stream,
@@ -904,7 +909,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       ]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      emitEvent('AI', 'request_failed', `Founder Brain error: ${msg}`, {
+      emitEvent('AI', 'request_failed', `Workspace AI error: ${msg}`, {
         stream,
         level: 'error',
         progress: 1,
@@ -913,7 +918,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         ...prev,
         {
           role: 'agent',
-          text: 'Could not reach Founder Brain — check your connection or AI provider in Settings, then try again.',
+          text: 'Couldn\'t reach your AI — check your connection or AI provider in Settings, then try again.',
           model: modelLabel,
         },
       ]);
@@ -1055,10 +1060,11 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         branch={branch}
         desktopOnline={Boolean(bridge?.latest)}
         cursorConnected={Boolean(worker?.connections?.cursor)}
-        selectedModelLabel={selectedModel?.label}
+        selectedModelLabel={activeBrain?.label ?? selectedModel?.label}
         todayCost={todayCost}
         savedVsCloud={savedVsCloud}
         usingLocal={usingLocal}
+        costIsDemo={true}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -1208,7 +1214,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           </div>
         </aside>
 
-        {/* ═══ Center: Founder Brain (~70%) + Terminal ═══ */}
+        {/* ═══ Center: Workspace Chat (~70%) + Terminal ═══ */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {/* Non-workspace nav panels */}
           {activeNav === 'social' && (
@@ -1314,7 +1320,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                     />
                   </div>
                   <div className="border-t border-zinc-800 px-3 py-2 text-[9px] text-zinc-600">
-                    Brains need an AI API key · Execution needs its own IDE key — connect either in Settings → Builder
+                    Click a brain above to chat · Click an execution runtime to dispatch a build agent
                   </div>
                 </div>
               </>
@@ -1328,7 +1334,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             </div>
           </div>
 
-          {/* Founder Brain Chat — the product, large */}
+          {/* Workspace Chat — the product, large */}
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && !thinking ? (
@@ -1482,7 +1488,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                 >📎</button>
                 <textarea ref={chatInputRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-                  placeholder="Ask Founder Brain… it knows your repo, branch, files, agents, and deploys"
+                  placeholder="Continue your project… your repo, branch, files, agents, and deploys are loaded"
                   rows={1}
                   className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/50 focus:outline-none" />
                 <button
@@ -1896,7 +1902,7 @@ function ContextPanel({ repo, branch, runActive, lastDeploy, openFiles, recentCo
   return (
     <div className="mx-auto max-w-2xl space-y-3">
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">Current Context — Founder Brain knows</p>
+        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">Your project context</p>
         <div className="grid grid-cols-2 gap-2 text-xs">
           <CtxRow label="Repository" value={repo ?? 'Not connected'} />
           <CtxRow label="Branch" value={branch} />
@@ -1909,7 +1915,7 @@ function ContextPanel({ repo, branch, runActive, lastDeploy, openFiles, recentCo
         </div>
       </div>
       <p className="text-center text-xs text-zinc-600">
-        Type a command below — &ldquo;fix it&rdquo;, &ldquo;add tests&rdquo;, &ldquo;deploy&rdquo;, &ldquo;review PR&rdquo;. Founder Brain already knows your context.
+        Type a command below — &ldquo;fix it&rdquo;, &ldquo;add tests&rdquo;, &ldquo;deploy&rdquo;, &ldquo;review PR&rdquo;. Your workspace context is loaded.
       </p>
     </div>
   );
@@ -2170,6 +2176,7 @@ function StatusStrip({
   todayCost,
   savedVsCloud,
   usingLocal,
+  costIsDemo,
 }: {
   repo: string | null;
   branch: string;
@@ -2179,7 +2186,9 @@ function StatusStrip({
   todayCost: number;
   savedVsCloud: number;
   usingLocal: boolean | undefined;
+  costIsDemo?: boolean;
 }) {
+  const costSuffix = costIsDemo ? ' (demo)' : '';
   return (
     <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800/80 bg-[#0d0d14] px-3 py-1 text-[10px] text-zinc-500">
       {repo && (
@@ -2209,9 +2218,9 @@ function StatusStrip({
 
       <span className="ml-auto flex items-center gap-1">
         <span className="text-zinc-600">Today:</span>
-        <span className="text-emerald-400">${todayCost.toFixed(2)}</span>
+        <span className="text-emerald-400">${todayCost.toFixed(2)}{costSuffix}</span>
         <span className="text-zinc-600">·</span>
-        <span className="text-emerald-400/70">Saved ${savedVsCloud.toFixed(2)}</span>
+        <span className="text-emerald-400/70">Saved ${savedVsCloud.toFixed(2)}{costSuffix}</span>
         {usingLocal && <span className="text-[9px] text-zinc-600">local/promo</span>}
       </span>
     </div>
