@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+﻿feat(web): minimalistic workspace UI - chat is the entire interface
 
 ## Last Activity
 
