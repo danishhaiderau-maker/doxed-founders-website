@@ -6,10 +6,31 @@ import {
   fetchTradingAgentLeaderboard,
   fetchLeaderboard,
   fetchBuilderRewardsLeaderboard,
+  fetchAnalyzerSessionSummary,
   PlatformStats,
 } from '@/lib/api';
 import type { LandingHighlights } from '@/components/landing/landing-live-highlights';
 import { LandingHeader, LandingSinglePage } from '@/components/landing/landing-mockup-sections';
+import type { TradingAgentSummary } from '@/lib/api';
+
+// Override the conservative-btc agent's stats with the analyzer :9001 full-session
+// summary so the landing-page highlights match the full-session panel on the profile
+// page. Other agents keep their DB-sourced leaderboard numbers.
+function withAnalyzerOverride(
+  agent: TradingAgentSummary,
+  summary: { ok: boolean; total_pnl_pct?: number; total_pnl_usd?: number; trade_count?: number; win_rate?: number; current_balance?: number } | null,
+): TradingAgentSummary {
+  if (!summary || summary.ok !== true || agent.slug !== 'conservative-btc') return agent;
+  return {
+    ...agent,
+    netReturnPct: summary.total_pnl_pct ?? agent.netReturnPct,
+    sessionPnlUsd: summary.total_pnl_usd ?? agent.sessionPnlUsd,
+    tradeCount: summary.trade_count ?? agent.tradeCount,
+    winRatePct: summary.win_rate ?? agent.winRatePct,
+    equityUsd: summary.current_balance ?? agent.equityUsd,
+    balanceUsd: summary.current_balance ?? agent.balanceUsd,
+  };
+}
 
 export function LandingPage() {
   const [platformStats, setPlatformStats] = useState<PlatformStats | null>(null);
@@ -21,11 +42,13 @@ export function LandingPage() {
       fetchTradingAgentLeaderboard().catch(() => [] as Awaited<ReturnType<typeof fetchTradingAgentLeaderboard>>),
       fetchLeaderboard().catch(() => [] as Awaited<ReturnType<typeof fetchLeaderboard>>),
       fetchBuilderRewardsLeaderboard(5).catch(() => null),
-    ]).then(([stats, agents, traders, builders]) => {
+      fetchAnalyzerSessionSummary('conservative-btc').catch(() => null),
+    ]).then(([stats, agents, traders, builders, analyzerSummary]) => {
       setPlatformStats(stats);
+      const overriddenAgents = agents.map((a) => withAnalyzerOverride(a, analyzerSummary));
       setHighlights({
-        agents,
-        topAgent: agents[0] ?? null,
+        agents: overriddenAgents,
+        topAgent: overriddenAgents[0] ?? null,
         traders,
         topTrader: traders[0] ?? null,
         topBuilder: builders?.entries[0] ?? null,
