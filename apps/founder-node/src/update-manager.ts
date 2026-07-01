@@ -95,7 +95,13 @@ function findAsset(
 
 export async function fetchLatestRelease(): Promise<UpdateInfo | null> {
   const res = await fetch(GITHUB_RELEASES, {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Founder-Node-Updater' },
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Founder-Node-Updater',
+      ...(process.env.GITHUB_TOKEN || process.env.FOUNDER_NODE_GITHUB_TOKEN
+        ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN || process.env.FOUNDER_NODE_GITHUB_TOKEN}` }
+        : {}),
+    },
   });
   if (!res.ok) throw new Error(`Release check failed (${res.status})`);
 
