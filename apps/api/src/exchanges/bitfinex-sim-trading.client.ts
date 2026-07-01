@@ -148,6 +148,14 @@ export class BitfinexSimTradingClient {
     };
   }
 
+  /** Paper book has no exchange ledger — realized P&L attribution falls back to reconstruction. */
+  async getRealizedPnlSince(
+    _creds: ExchangeCredentials,
+    _sinceMs: number,
+  ): Promise<number> {
+    return 0;
+  }
+
   async submitLimitOrder(
     _creds: ExchangeCredentials,
     input: {
