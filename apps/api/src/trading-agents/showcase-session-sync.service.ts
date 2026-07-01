@@ -37,7 +37,10 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
     if (!this.botBridge.isEnabled() || this.syncing) return;
     this.syncing = true;
     try {
-      const bot = await this.botBridge.fetchState(true);
+      // Pin the epoch to the single canonical showcase bot (the one the relay mirrors via :7002).
+      // Racing Fly + CF returns different bot_start_time values and would flip the epoch every
+      // poll, wiping every user's armed relay sim via resetAllUserCopySessions.
+      const bot = await this.botBridge.fetchShowcaseCanonicalState(true);
       if (!bot) return;
       await this.syncFromBotState(bot);
     } finally {

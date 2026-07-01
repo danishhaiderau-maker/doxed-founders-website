@@ -147,6 +147,40 @@ export class BotBridgeService {
     return this.fetchState(force, 'live');
   }
 
+  /** Canonical showcase bot state for session-epoch tracking — DOES NOT race Fly.
+   *  Always reads from the single canonical showcase URL (PlatformSettings.showcaseBotPublicUrl,
+   *  fallback to the Cloudflare home tunnel) so the epoch key stays stable across polls.
+   *  Racing Fly + CF returns different bot_start_time values (they are distinct bot instances)
+   *  and flips the epoch on every poll where the race winner changes — which wipes every user's
+   *  armed relay sim via resetAllUserCopySessions. Only the canonical showcase bot (the one the
+   *  relay mirrors via :7002) is authoritative for session-epoch detection. */
+  async fetchShowcaseCanonicalState(force = true): Promise<BotApiState | null> {
+    const now = Date.now();
+    if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
+      return this.cached;
+    }
+    const cf = (await this.resolveBotUrl()) ?? this.DEFAULT_CF_URL;
+    try {
+      const res = await fetch(`${cf}/api/state`, {
+        signal: AbortSignal.timeout(20_000),
+        headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-sync/1.0' },
+      });
+      if (!res.ok) {
+        this.logger.warn(`Canonical showcase ${cf}/api/state HTTP ${res.status}`);
+        return null;
+      }
+      const data = (await res.json()) as BotApiState;
+      if (!data || typeof data !== 'object') return null;
+      this.cached = data;
+      this.lastFetchAt = now;
+      return data;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Canonical showcase ${cf}/api/state fetch failed: ${msg}`);
+      return null;
+    }
+  }
+
   /** Admin panels — fast relay snapshot; do not block on full /api/state (large trades_map). */
   async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
     const now = Date.now();
