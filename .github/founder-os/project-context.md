@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(utils+api): IDE Bridge interface + capability/workspace endpoints
+fix(scripts): quote -File paths so auto-restart monitor actually starts
 
 ## Last Activity
 
