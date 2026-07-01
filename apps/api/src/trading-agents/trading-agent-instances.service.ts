@@ -486,24 +486,39 @@ export class TradingAgentInstancesService {
       const simWasActive = Boolean(
         dash.copyRelaySim && typeof dash.copyRelaySim === 'object' && (dash.copyRelaySim as { active?: boolean }).active,
       );
+      const simStartedAt =
+        dash.copyRelaySim && typeof dash.copyRelaySim === 'object'
+          ? (dash.copyRelaySim as { startedAt?: string }).startedAt
+          : undefined;
 
       await this.expirePendingCopyParticipants(instance.userId, input.agentId);
       this.relaySim.dropSimClient(instance.userId);
+
+      // A showcase session reset refreshes the paper ledger to a $500 baseline, but it must NOT
+      // disarm a relay sim the user explicitly armed — the sim should only stop on explicit user
+      // action (POST /relay-sim/stop). Preserve active + startedAt when the sim was running.
+      const nextSim = simWasActive
+        ? {
+            ...emptyCopyRelaySimState(startingUsd),
+            active: true,
+            startedAt: simStartedAt ?? new Date().toISOString(),
+          }
+        : emptyCopyRelaySimState(startingUsd);
 
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
         data: {
           dashboardState: {
             ...fresh,
-            copyRelaySim: emptyCopyRelaySimState(startingUsd),
+            copyRelaySim: nextSim,
             copyRelayReconcile: null,
             copyRelayCapacity: null,
-            relaySimChannel: false,
+            relaySimChannel: simWasActive,
             copyRelayLimitChain: null,
             tradeLifecycleIntegrity: null,
           },
           lastError: simWasActive
-            ? 'Showcase session reset — relay sim cleared. Start relay sim again for a fresh $500 paper book.'
+            ? 'Showcase session reset — paper ledger refreshed to $500; relay sim stays armed.'
             : null,
         },
       });
