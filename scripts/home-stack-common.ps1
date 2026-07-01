@@ -511,14 +511,14 @@ function Stop-LocalLabFast {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript 2>$null | Out-Null
   } else {
     Stop-ListenPortFast 7800 | Out-Null
-    Stop-ListenPortFast 9001 | Out-Null
+    Stop-ListenPortFast 9500 | Out-Null
     Stop-PythonMatching "15minu_bot.py" | Out-Null
   }
-  return @{ stopped = $true; ports = @(7800, 9001) }
+  return @{ stopped = $true; ports = @(7800, 9500) }
 }
 
 function Stop-AllHomeStackFast {
-  # Legacy: stop global showcase ports only (does not touch local lab :7800/:9001).
+  # Legacy: stop global showcase ports only (does not touch local lab :7800/:9500).
   return Stop-GlobalStackFast -GlobalBotPort $BotPort -GlobalAnalyzerPort $AnalyzerPort
 }
 
