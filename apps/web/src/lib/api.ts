@@ -5258,6 +5258,12 @@ export function fetchDesktopBridge(token: string) {
   return apiFetch<DesktopBridgeResponse>('/copilot/desktop-bridge', undefined, token);
 }
 
+export type BridgeWorkspace = import('@dcf/utils').BridgeWorkspace;
+
+export function fetchIdeBridgeWorkspaces(token: string) {
+  return apiFetch<BridgeWorkspace[]>('/ide-bridge/workspaces', undefined, token);
+}
+
 export type QueueActionResult = {
   action: 'publish' | 'dispatch_build' | 'merge_pr' | 'sync';
   message: string;
