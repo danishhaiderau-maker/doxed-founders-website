@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(gitignore): untrack __pycache__ bytecode + bot_analyzer_sync.json
+fix(wipe): preserve research/*.py source during fresh collection
 
 ## Last Activity
 
