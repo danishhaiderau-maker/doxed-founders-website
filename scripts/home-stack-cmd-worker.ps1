@@ -4,13 +4,23 @@ param(
   [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "reset-home-stack", "wipe-research", "pause-trading", "resume-trading")]
   [string]$Action,
   [int]$BotPort = 7002,
-  [int]$AnalyzerPort = 9500,
+  [int]$AnalyzerPort = 0,
   [ValidateSet("production", "local-collection")]
   [string]$StackMode = "production"
 )
 
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Resolve the analyzer port from the frozen stack mode (config/home-showcase.lock.json)
+# rather than a hardcoded default. The global showcase stack is production -> :9001,
+# the legacy local lab is local-collection -> :9500. A stale bridge may still pass 9500
+# for the production stack (cached before the lock-file fix); override that too so the
+# global showcase never accidentally launches the legacy lab analyzer on :9500.
+. (Join-Path $scriptDir "home-stack-mode.ps1")
+if ($AnalyzerPort -le 0 -or ($AnalyzerPort -eq 9500 -and $StackMode -eq "production")) {
+  $resolvedMode = Get-HomeStackMode
+  if ($resolvedMode.AnalyzerPort -gt 0) { $AnalyzerPort = [int]$resolvedMode.AnalyzerPort }
+}
 . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $BotPort -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
