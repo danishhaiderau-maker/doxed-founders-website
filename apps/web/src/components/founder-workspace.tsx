@@ -6,7 +6,7 @@ import { FounderJourneyProgress } from '@/components/founder-journey-progress';
 import { FounderSocialHub } from '@/components/founder-social-hub';
 import { BuilderSettingsPanel } from '@/components/settings/builder-settings-panel';
 import { DiscoverMyVisibilityPanel } from '@/components/discover/discover-my-visibility-panel';
-import { DevWorkspace } from '@/components/dev-workspace';
+import { MinimalDevWorkspace as DevWorkspace } from '@/components/minimal-dev-workspace';
 import { WorkspaceErrorBoundary } from '@/components/workspace-error-boundary';
 import {
   FounderDashboard,
