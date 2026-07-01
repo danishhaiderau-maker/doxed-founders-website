@@ -146,10 +146,12 @@ while ((Get-Date) -lt $deadline) {
     } else {
       Wd-Log "bridge DOWN on :$BridgePort - relaunching via ensure-home-bridge.ps1"
       try {
-        $p = Start-Process -FilePath "powershell.exe" -ArgumentList @(
-          "-NoProfile","-ExecutionPolicy","Bypass","-File",
-          (Join-Path $scriptDir "ensure-home-bridge.ps1"),"-Quiet"
-        ) -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
+        # Repo path contains a space ("Final Bots"); build the arg list as a
+        # single string with a quoted -File path, otherwise Start-Process
+        # splits the path on the space and the relaunch silently fails.
+        $bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
+        $bridgeArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bridgeScript`" -Quiet"
+        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $bridgeArgString -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
         if ($p) { Wd-Log "ensure-home-bridge launched pid=$($p.Id)" }
       } catch {
         Wd-Log "relaunch FAILED: $($_.Exception.Message)"
