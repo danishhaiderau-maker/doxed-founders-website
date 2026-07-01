@@ -238,6 +238,15 @@ export class IdeBridgeService {
    * events, not workspaces. See `/ide-bridge/recent-agents` for history.
    */
   async getWorkspaces(userId: string): Promise<BridgeWorkspace[]> {
+    // 0. Real workspaces[] array reported by Founder Node v0.6.0+ in heartbeats.
+    //    These are live Cursor workspaces scanned on the desktop — preferred
+    //    over every synthetic source below. Persisted in memoryGraph by the
+    //    founder-node heartbeat handler via DesktopBridgeService.saveWorkspaces.
+    const persistedWorkspaces = await this.desktopBridge.listWorkspaces(userId);
+    if (persistedWorkspaces.length > 0) {
+      return persistedWorkspaces;
+    }
+
     const [bridges, activeRun, connectedWorkspaces] = await Promise.all([
       this.desktopBridge.listForUser(userId),
       this.agentRuns.getActive(userId),

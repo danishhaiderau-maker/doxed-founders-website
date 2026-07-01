@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import type { DeviceMemoryPayload } from '@dcf/utils';
-import { parseFounderCloudState } from '@dcf/utils';
+import { parseFounderCloudState, type BridgeWorkspace } from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
 import { ComputePlaneMode, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -172,6 +172,14 @@ export class FounderNodeService {
         input.label,
         input.desktopBridge,
       );
+    }
+    // Founder Node v0.6.0+ sends workspaces[] (up to 10 real Cursor workspaces).
+    // The typed heartbeat schema lags the desktop client, so read defensively.
+    const workspaces = (input as FounderNodeHeartbeat & {
+      workspaces?: BridgeWorkspace[];
+    }).workspaces;
+    if (Array.isArray(workspaces) && workspaces.length > 0) {
+      void this.desktopBridge.saveWorkspaces(node.userId, node.nodeId, workspaces);
     }
     if (input.founderCloud) {
       void this.persistFounderCloudFromHeartbeat(node.userId, input.label, input.founderCloud);
