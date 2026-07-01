@@ -724,6 +724,16 @@ export function AgentPublicProfile({
     analyzerOk && analyzerSummary!.total_pnl_usd != null
       ? analyzerSummary!.total_pnl_usd
       : (heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500));
+  // Session return % — same source as the full-session AnalyzerPanel (analyzer :9001
+  // total_pnl_pct). The session started at the fresh wipeout, so this is the relevant
+  // period — NOT a rolling 30-day window. Falls back to sessionPnlUsd/startingBalance
+  // when the analyzer summary is unavailable.
+  const cardSessionReturnPct =
+    analyzerOk && analyzerSummary!.total_pnl_pct != null
+      ? analyzerSummary!.total_pnl_pct
+      : heroAgent.startingBalance
+        ? (cardSessionPnlUsd / heroAgent.startingBalance) * 100
+        : (cardSessionPnlUsd / 500) * 100;
   const heroShareText = buildTradingAgentActionShareText({
     agentName: heroAgent.name,
     action: dashboard.latestAiVerdict
@@ -889,9 +899,9 @@ export function AgentPublicProfile({
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <MetricPill label="Win rate" value={`${cardWinRatePct.toFixed(1)}%`} />
                   <MetricPill
-                    label="30D return"
-                    value={formatPercent(heroAgent.netReturnPct)}
-                    accent={heroAgent.netReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                    label="Session return"
+                    value={formatPercent(cardSessionReturnPct)}
+                    accent={cardSessionReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
                   />
                   <MetricPill label="Max drawdown" value="6.2%" />
                   <MetricPill label="Total trades" value={String(cardTradeCount)} />
