@@ -264,6 +264,61 @@ export function AgentRelaySimPanel({
           </div>
         ) : null}
 
+        {/* Real Bitfinex Derivatives wallet — the actual wallet funding the real
+            $20 sim orders. Distinct from the paper $500 sim ledger above. Placed
+            as a separate block so it never collides with the showcase-ref / drift
+            / session P&L editing surface. */}
+        {active ? (
+          <div className="rounded-xl border border-emerald-500/35 bg-emerald-950/15 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300">
+                  Real Bitfinex balance · derivative wallet
+                </p>
+                <p className="mt-1 text-[10px] text-zinc-500">
+                  Live read from your connected Bitfinex API — the real wallet funding each $20 / 100x
+                  sim order. This is real money; the paper $500 ledger above is the sim book.
+                </p>
+              </div>
+              <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold uppercase text-emerald-300">
+                Live API
+              </span>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <ReconcileMetric
+                label="Derivatives total"
+                value={
+                  sim?.realDerivativesWalletUsd != null
+                    ? formatUsd(sim.realDerivativesWalletUsd, 2)
+                    : '—'
+                }
+              />
+              <ReconcileMetric
+                label="Derivatives available"
+                value={
+                  sim?.realDerivativesAvailableUsd != null
+                    ? formatUsd(sim.realDerivativesAvailableUsd, 2)
+                    : '—'
+                }
+              />
+              <ReconcileMetric
+                label="Snapshot"
+                value={
+                  sim?.realWalletSnapshotAt
+                    ? new Date(sim.realWalletSnapshotAt).toLocaleTimeString()
+                    : 'pending'
+                }
+              />
+            </div>
+            {sim?.realDerivativesWalletUsd == null ? (
+              <p className="mt-2 text-[10px] text-amber-300/80">
+                Waiting for first wallet snapshot from Bitfinex — refreshes every few seconds while
+                sim is active.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         {reconcile ? (
           <div className="rounded-xl border border-zinc-800 bg-black/25 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
