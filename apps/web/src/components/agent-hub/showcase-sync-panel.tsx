@@ -66,6 +66,14 @@ export function ShowcaseSyncPanel({
   useEffect(() => {
     const active = mode === 'sim' ? simActive : liveActive;
     if (!active || !autoStopEnabled || !onAutoStop) return;
+    // Don't auto-stop while we have no showcase comparison data yet. The sim
+    // legitimately waits many minutes for the first :7002 signal, and an empty
+    // (low) sync score in that window is not a divergence — tripping the stop
+    // here was flipping the button to "Stopping…" right after Start.
+    const hasComparisonData = Boolean(
+      input.reconcile ?? input.fidelity ?? input.lifecycle,
+    );
+    if (!hasComparisonData) return;
     if (score.pct < threshold && !autoStopped && !autoStopBusy) {
       setAutoStopped(true);
       onAutoStop({ flatten: mode === 'live' && flattenOnBreach });
@@ -81,6 +89,9 @@ export function ShowcaseSyncPanel({
     onAutoStop,
     autoStopped,
     autoStopBusy,
+    input.reconcile,
+    input.fidelity,
+    input.lifecycle,
   ]);
 
   useEffect(() => {
