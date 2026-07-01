@@ -1057,9 +1057,12 @@ def api_manifest():
 @app.route("/api/report/<path:filename>")
 def api_report(filename):
     safe = os.path.basename(filename)
-    for base in (ROOT, ROOT / REPORTS_DIR):
-        path = base / safe
-        if path.is_file() and path.suffix.lower() == ".json":
+    if Path(safe).suffix.lower() != ".json":
+        abort(404)
+    # Analyzer writes reports to DATA_ROOT (agent root); legacy copies may sit
+    # under research/ (ROOT). Search both, DATA_ROOT first, mirroring _read_json.
+    for path in _data_file_candidates(safe):
+        if path.is_file():
             try:
                 with open(path, encoding="utf-8") as f:
                     return jsonify(json.load(f))
