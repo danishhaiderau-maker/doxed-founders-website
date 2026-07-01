@@ -780,7 +780,7 @@ export function AgentPublicProfile({
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
-      {showcaseNote && (
+      {showcaseNote && !(slug === 'conservative-btc' && resolvedDesk === 'showcase') && (
         <p className="mb-4 rounded-xl border border-violet-500/25 bg-violet-950/20 px-4 py-3 text-sm text-violet-100/90">
           {showcaseNote}
         </p>
