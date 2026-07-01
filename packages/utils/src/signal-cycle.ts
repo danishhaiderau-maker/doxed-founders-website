@@ -5,15 +5,18 @@ export const DEFAULT_SUBSCRIBER_MAX_MARGIN_USD = 20;
 export const DEFAULT_SUBSCRIBER_LEVERAGE = 100;
 
 /** Default API poll interval for subscriber copy execution (ms). Override via SUBSCRIBER_EXECUTION_POLL_MS.
- *  Kept at 3s — 250ms flooded the Cloudflare tunnel (~250KB/s continuous /api/relay-state fetches)
- *  and caused the 502 + "context canceled" flaps that dropped signal cycles. A showcase signal
- *  stays in the bot's last_approve_outcome for 30+ seconds (entry TTL 1800s), so 3s catches every
- *  signal with a 12x tunnel load reduction. */
-export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 3000;
+ *  2s — the relay must mirror showcase signals to user Bitfinex sim/live accounts within ~2s so
+ *  pending orders don't sit on :7002 without appearing on SIM. The prior 250ms cadence flooded
+ *  the Cloudflare tunnel (~250KB/s continuous /api/relay-state fetches) and caused 502 +
+ *  "context canceled" flaps that dropped signal cycles; 2s is 8x below that flood threshold.
+ *  A showcase signal stays in the bot's last_approve_outcome for 30+ seconds (entry TTL 1800s),
+ *  so 2s catches every signal with a wide margin. The bot also pushes a webhook
+ *  (ShowcaseRelayEventsService) on each signal — this poll is the 2s backstop. */
+export const DEFAULT_SUBSCRIBER_EXECUTION_POLL_MS = 2000;
 
 /** Default poll interval for bot → signal cycle bridge (ms). Override via SIGNAL_CYCLE_POLL_MS.
- *  Same rationale as above — 3s is fast enough for signal capture and stops tunnel flooding. */
-export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 3000;
+ *  Same rationale as above — 2s backstop for real-time signal mirroring; webhook push is primary. */
+export const DEFAULT_SIGNAL_CYCLE_POLL_MS = 2000;
 
 /** Minimum allowed poll interval (ms) — 100ms for instant showcase relay wake. */
 export const MIN_SUBSCRIBER_POLL_MS = 100;
