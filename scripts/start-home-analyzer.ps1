@@ -116,7 +116,24 @@ if ($NoWait) {
     $lockHandle = $null
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   }
-  Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Normal
+  $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Normal -PassThru
+  # Auto-restart monitor - mirrors start-home-bot.ps1 launching bot-auto-restart.ps1.
+  # Keeps the analyzer alive across crashes/hangs without a human restarting it, which
+  # stops the recurring "analyzer_offline_ping=0" stack-abnormality popups. Skipped for
+  # --once (single pass has nothing to keep alive). Single-string -ArgumentList survives
+  # the space in the repo path ("Final Bots") - array form splits the path and the
+  # monitor never starts.
+  if ($analyzerProc -and $analyzerProc.Id -gt 0 -and -not $Once) {
+    Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") -Value "$($analyzerProc.Id)" -NoNewline -Encoding UTF8
+    $monitorScript = Join-Path $scriptDir "analyzer-auto-restart.ps1"
+    $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -AnalyzerPid $($analyzerProc.Id) -Port $AnalyzerPort"
+    if ($vaultEnv -and (Test-Path $vaultEnv)) { $monitorArgString += " -VaultEnv `"$vaultEnv`"" }
+    $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
+    if ($mon -and $mon.Id -gt 0) {
+      Set-Content -Path (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
+      Write-Host "Auto-restart monitor launched (pid $($mon.Id)) - analyzer will relaunch automatically if it crashes/hangs." -ForegroundColor DarkGray
+    }
+  }
   exit 0
 }
 
