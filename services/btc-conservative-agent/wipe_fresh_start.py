@@ -133,6 +133,14 @@ def wipe_location(base: Path, label: str) -> dict:
         for child in research_dir.iterdir():
             if child.name in PRESERVE_INSIDE_RESEARCH:
                 continue
+            # Preserve source .py files at research/ root — research/ holds the CANONICAL
+            # source (research_dashboard.py, analyzer_research_engine_v62.py,
+            # research_trade_accumulator.py, etc.) that the bot + analyzer import via root
+            # shims. Wiping them breaks analyzer dashboard startup (FileNotFoundError on
+            # research\research_dashboard.py). Only DATA files (csv/jsonl/db/json/txt/html)
+            # and DATA subdirs are wiped; source + genome/ survive.
+            if child.is_file() and child.suffix == ".py":
+                continue
             if child.is_dir():
                 ok, msg = _rm_dir(child)
             else:
