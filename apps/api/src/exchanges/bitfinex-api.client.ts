@@ -561,6 +561,46 @@ export class BitfinexTradingClient {
     };
   }
 
+  /**
+   * Realized P&L attributed to derivatives position closes on the margin wallet since
+   * `sinceMs`. Uses the Bitfinex authenticated ledger endpoint (`v2/auth/r/ledgers/hist`,
+   * wallet=margin) — the same source as `getLedgerFeesSince` — filtered to position-close
+   * PL entries (description mentions "position" but not fee/funding/transfer).
+   *
+   * Returns the sum of those entries' amounts (signed USD: + profit, - loss). When only a
+   * single lot was open over the window (e.g. relay sim, max 1 concurrent), this IS that
+   * lot's exchange-realized P&L. With multiple merged lots it is the position-level P&L
+   * and the caller must fall back to per-lot reconstruction.
+   */
+  async getRealizedPnlSince(
+    creds: ExchangeCredentials,
+    sinceMs: number,
+  ): Promise<number> {
+    try {
+      const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/ledgers/hist', {
+        wallet: 'margin',
+        start: sinceMs,
+        end: Date.now(),
+        limit: 250,
+      });
+      if (!Array.isArray(rows)) return 0;
+      let realised = 0;
+      for (const row of rows) {
+        if (!Array.isArray(row) || row.length < 8) continue;
+        const amount = Number(row[4] ?? 0);
+        if (!Number.isFinite(amount) || amount === 0) continue;
+        const description = String(row[7] ?? '').toLowerCase();
+        if (!/position/i.test(description)) continue;
+        // Exclude fee / funding / transfer ledger rows that may also mention "position".
+        if (/fee|funding|transfer|commission|margin funding/i.test(description)) continue;
+        realised += amount;
+      }
+      return Number(realised.toFixed(4));
+    } catch {
+      return 0;
+    }
+  }
+
   async getLiveAccountMetrics(
     creds: ExchangeCredentials,
     opts?: { sessionStartedAt?: Date; realizedPnlUsd?: number },

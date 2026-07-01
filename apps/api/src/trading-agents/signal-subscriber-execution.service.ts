@@ -920,13 +920,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           : meta.limitPrice ?? mark;
       const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
 
+      // Already-flat path: the exchange position is smaller than the ledger (or flat),
+      // meaning Bitfinex's own stop or a partial external close fired before the relay
+      // could reconcile this orphan lot. Attribute the real realized P&L instead of $0.
+      const flat = await this.resolveAlreadyFlatPnl(
+        agentId,
+        userId,
+        creds,
+        row.id,
+        meta,
+        fillPrice,
+        mark || fillPrice,
+      );
+      const pnlMarginPct =
+        fillPrice && fillPrice > 0
+          ? (flat.pnlUsd / (fillPrice * meta.qty)) * 100 * leverage
+          : 0;
+
       await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
         venue,
-        exit_price: mark,
+        exit_price: mark || fillPrice,
         exit_reason: 'MANUAL_PARTIAL_CLOSE',
-        pnl_usd: 0,
-        pnl_margin_pct: 0,
+        pnl_usd: Math.round(flat.pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         qty_closed: meta.qty,
+        pnl_source: flat.pnlSource,
         source: 'hire',
         event: 'ORPHAN_LEDGER_RECONCILE',
       });
@@ -2099,7 +2117,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     this.exitingLots.add(participantId);
     try {
-    const closeQty = Math.min(meta.qty, Math.abs((await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? meta.qty));
+    const positionAmount = (await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0;
+    const closeQty = Math.min(meta.qty, Math.abs(positionAmount));
 
     try {
       if (meta.stopOrderId) {
@@ -2123,10 +2142,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
 
     const direction = meta.direction;
-    const pnlUsd =
-      direction === 'LONG'
-        ? (opts.mark - opts.fillPrice) * closeQty
-        : (opts.fillPrice - opts.mark) * closeQty;
+    // Already-flat path: the exchange position is gone (protective stop fired or
+    // showcase-mirror exit closed it first), so closeQty=0 and the mark-vs-fill formula
+    // would record $0 — even though Bitfinex realized a real result. Attribute the real
+    // P&L from the Bitfinex margin wallet ledger when only this lot was open, else
+    // reconstruct from this lot's own fill price vs the exit mark using the FULL lot qty
+    // (what the exchange would have realized on this lot's share of the merged position).
+    let pnlUsd: number;
+    let pnlSource: 'open_position' | 'exchange_realised' | 'reconstructed';
+    if (closeQty < MIN_QTY_BTC) {
+      const flat = await this.resolveAlreadyFlatPnl(
+        agentId,
+        userId,
+        creds,
+        participantId,
+        meta,
+        opts.fillPrice,
+        opts.mark,
+      );
+      pnlUsd = flat.pnlUsd;
+      pnlSource = flat.pnlSource;
+    } else {
+      pnlUsd =
+        direction === 'LONG'
+          ? (opts.mark - opts.fillPrice) * closeQty
+          : (opts.fillPrice - opts.mark) * closeQty;
+      pnlSource = 'open_position';
+    }
     const pnlMarginPct =
       opts.reason === 'PROFIT_LOCK' && opts.lockFloor != null
         ? opts.lockFloor
@@ -2148,15 +2190,92 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,
+      pnl_source: pnlSource,
       source: 'hire',
     });
 
     this.logger.log(
-      `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)}`,
+      `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)} pnl_source=${pnlSource}`,
     );
     } finally {
       this.exitingLots.delete(participantId);
     }
+  }
+
+  /**
+   * Resolve the realized P&L for a lot whose exchange position is ALREADY flat when the
+   * relay gets to the close path. Priority (per approved fix):
+   *  1. Bitfinex margin wallet ledger (`v2/auth/r/ledgers/hist` wallet=margin) since the
+   *     lot's entry — when only one lot was open, the position-close ledger entry IS this
+   *     lot's exchange-realized P&L. (`exchange_realised`)
+   *  2. Reconstruct from the lot's own entry fill price vs the relay-observed exit price
+   *     using the FULL lot qty — what the exchange would have realized on this lot's share.
+   *     (`reconstructed`)
+   * Never writes $0 for an already-flat close: that under-attributes P&L and breaks
+   * reconciliation against the user's real wallet.
+   */
+  private async resolveAlreadyFlatPnl(
+    agentId: string,
+    userId: string,
+    creds: ExchangeCredentials,
+    participantId: string,
+    meta: ExecutionPayload,
+    fillPrice: number,
+    exitPrice: number,
+  ): Promise<{ pnlUsd: number; pnlSource: 'exchange_realised' | 'reconstructed' }> {
+    const qty = meta.qty ?? 0;
+    const direction = meta.direction;
+    if (!qty || !direction || !fillPrice || fillPrice <= 0 || !exitPrice || exitPrice <= 0) {
+      return { pnlUsd: 0, pnlSource: 'reconstructed' };
+    }
+
+    const reconstructed =
+      direction === 'LONG'
+        ? (exitPrice - fillPrice) * qty
+        : (fillPrice - exitPrice) * qty;
+
+    // Only attribute via the exchange ledger when a single lot was open — otherwise the
+    // margin wallet's position-close entry is the merged-position P&L, not this lot's
+    // share, and reconstruction is more accurate per-lot.
+    try {
+      const openLotCount = await this.prisma.signalCycleParticipant.count({
+        where: {
+          userId,
+          status: SignalCycleStatus.OPEN,
+          cycle: { agentId },
+        },
+      });
+      if (openLotCount <= 1) {
+        const entryMs = await this.resolveLotEntryMs(participantId);
+        if (entryMs > 0) {
+          const realised = await this.activeTrading.getRealizedPnlSince(creds, entryMs);
+          if (Math.abs(realised) > 0.0001) {
+            return { pnlUsd: realised, pnlSource: 'exchange_realised' };
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Already-flat PnL ledger lookup failed ${participantId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    return { pnlUsd: reconstructed, pnlSource: 'reconstructed' };
+  }
+
+  /** Lot entry timestamp — from the FILLED event, falling back to the participant claim time. */
+  private async resolveLotEntryMs(participantId: string): Promise<number> {
+    const filled = await this.prisma.signalCycleEvent.findFirst({
+      where: { participantId, eventType: 'FILLED' },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+    if (filled) return filled.createdAt.getTime();
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: participantId },
+      select: { createdAt: true },
+    });
+    return participant?.createdAt.getTime() ?? 0;
   }
 
   /**
@@ -2204,6 +2323,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         exit_price: exitPrice,
         exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
         pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_source: 'reconstructed',
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',
       });
@@ -2294,6 +2414,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       exit_reason: meta.stopOrderId ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+      pnl_source: 'reconstructed',
       source: 'hire',
     });
 
@@ -2337,16 +2458,45 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) {
+      // Already-flat path: showcase position exited (or exchange stop fired) before the
+      // relay could close this lot. The exchange realized a real result — attribute it
+      // instead of recording $0 (which under-accounts P&L vs the user's real wallet).
       const fillPrice = participant.fillPrice != null ? Number(participant.fillPrice) : meta.limitPrice ?? 0;
+      const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice || 0);
+      let pnlUsd = 0;
+      let pnlMarginPct = 0;
+      let pnlSource: 'exchange_realised' | 'reconstructed' = 'reconstructed';
+      if (meta.qty && meta.direction) {
+        const flat = await this.resolveAlreadyFlatPnl(
+          agentId,
+          userId,
+          creds,
+          participant.id,
+          meta,
+          fillPrice,
+          exitPrice || fillPrice,
+        );
+        pnlUsd = flat.pnlUsd;
+        pnlSource = flat.pnlSource;
+        pnlMarginPct =
+          fillPrice && fillPrice > 0
+            ? (pnlUsd / (fillPrice * meta.qty)) * 100 *
+              ((cycle.intentEnvelope as SignalIntentEnvelope)?.risk?.leverage_hint ??
+                DEFAULT_SUBSCRIBER_LEVERAGE)
+            : 0;
+      }
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
         venue: 'bitfinex',
-        exit_price: fillPrice,
+        exit_price: exitPrice || fillPrice,
         exit_reason: 'SHOWCASE_MIRROR_ALREADY_FLAT',
-        pnl_usd: 0,
-        pnl_margin_pct: 0,
+        pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+        pnl_source: pnlSource,
         source: 'hire',
       });
-      this.logger.log(`Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded`);
+      this.logger.log(
+        `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
+      );
       return;
     }
 
@@ -2396,6 +2546,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       exit_reason: 'SHOWCASE_MIRROR',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+      pnl_source: 'open_position',
       source: 'hire',
     });
 
@@ -2504,6 +2655,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,
+      pnl_source: 'open_position',
       source: 'hire',
     });
 
