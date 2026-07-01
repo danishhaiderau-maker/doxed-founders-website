@@ -124,12 +124,16 @@ if ($NoWait) {
     # bot dies AND relaunches it automatically (cooldown + backoff + rate cap).
     # Mirrors the Fly restart loop (fly-entrypoint.sh) for the local showcase bot.
     # Pass -VaultEnv so the monitor can re-seed env vars on each relaunch.
-    $monArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",
-                 (Join-Path $scriptDir "bot-auto-restart.ps1"),
-                 "-BotPid","$($botProc.Id)",
-                 "-Port","$BotListenPort")
-    if ($VaultEnv) { $monArgs += @("-VaultEnv",$VaultEnv) }
-    $mon = Start-Process -FilePath "powershell" -ArgumentList $monArgs -WindowStyle Hidden -PassThru
+    $monitorScript = Join-Path $scriptDir "bot-auto-restart.ps1"
+    # Build the argument list as a single string with backtick-quoted paths. The
+    # repo path contains a space ("Final Bots"), and Start-Process -ArgumentList
+    # @("-File",$path) splits the path on the space -> "Processing -File
+    # 'C:\...\Final' failed because the file does not have a '.ps1' extension"
+    # and the monitor never starts (so the bot has NO auto-restart). Quoting the
+    # -File value inside one argument string is the reliable fix.
+    $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -BotPid $($botProc.Id) -Port $BotListenPort"
+    if ($VaultEnv) { $monitorArgString += " -VaultEnv `"$VaultEnv`"" }
+    $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
     if ($mon -and $mon.Id -gt 0) {
       Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
     }
