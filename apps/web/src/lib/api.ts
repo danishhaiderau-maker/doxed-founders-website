@@ -4990,7 +4990,7 @@ export type RecentAgentsResponse = {
 
 export function fetchRecentAgents(token: string) {
   return apiFetch<RecentAgentsResponse>(
-    '/cursor-bridge/recent-agents',
+    '/ide-bridge/recent-agents',
     undefined,
     token,
   );

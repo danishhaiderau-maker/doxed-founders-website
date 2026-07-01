@@ -105,7 +105,7 @@ export default function FounderDenPageClient() {
     session?.accessToken &&
     (!hasFounder || setupIncomplete || (onboardingStatus?.requiredComplete && !wizardDismissed));
 
-  function launchMissionControlPrompt(prompt: string) {
+  function launchDevWorkspacePrompt(prompt: string) {
     setCopilotPrompt(prompt);
     setTab('activity');
     if (typeof window !== 'undefined') {
@@ -114,7 +114,7 @@ export default function FounderDenPageClient() {
       url.searchParams.set('prompt', prompt);
       window.history.replaceState({}, '', url.toString());
       window.requestAnimationFrame(() => {
-        document.getElementById('founder-mission-control')?.scrollIntoView({ behavior: 'smooth' });
+        document.getElementById('founder-dev-workspace')?.scrollIntoView({ behavior: 'smooth' });
       });
     }
   }
@@ -262,7 +262,7 @@ export default function FounderDenPageClient() {
             onTestBrain={
               onboardingStatus.brainReady
                 ? () =>
-                    launchMissionControlPrompt(
+                    launchDevWorkspacePrompt(
                       "What's my setup status? Summarize what's connected and what I should do next.",
                     )
                 : undefined
@@ -281,7 +281,7 @@ export default function FounderDenPageClient() {
             accessToken={session.accessToken}
             initialPath={initialPath as OnboardingPathId | null}
             onRefresh={load}
-            onLaunchPrompt={launchMissionControlPrompt}
+            onLaunchPrompt={launchDevWorkspacePrompt}
             onDismiss={() => setWizardDismissed(true)}
             onMessage={(msg) => {
               setMessage(msg);

@@ -71,6 +71,11 @@ mark2.txt
 # Testing
 coverage/
 
+# Python bytecode (defensive — covers scripts/, packages/, any future Python)
+__pycache__/
+*.pyc
+*.pyo
+
 # Docker
 docker/data/
 
