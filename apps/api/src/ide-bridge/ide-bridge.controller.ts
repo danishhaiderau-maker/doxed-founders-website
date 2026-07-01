@@ -11,6 +11,16 @@ export class IdeBridgeController {
   recentAgents(@CurrentUser() user: AuthUser) {
     return this.ideBridge.getRecentAgents(user.id);
   }
+
+  @Get('capabilities')
+  getCapabilities(@CurrentUser() user: AuthUser) {
+    return this.ideBridge.getCapabilities(user.id);
+  }
+
+  @Get('workspaces')
+  getWorkspaces(@CurrentUser() user: AuthUser) {
+    return this.ideBridge.getWorkspaces(user.id);
+  }
 }
 
 /**

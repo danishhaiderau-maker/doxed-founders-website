@@ -147,4 +147,5 @@ export * from './founder-publish-pipeline';
 export * from './founder-import-wizard';
 export * from './founder-cloud-runtime';
 export * from './ide-adapters';
+export * from './ide-bridge-interface';
 export * from './founder-identity';
