@@ -69,9 +69,12 @@ type Props = {
   onInitialCopilotPromptConsumed?: () => void;
 };
 
-function timeAgo(iso?: string): string {
-  if (!iso) return 'never';
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+function timeAgo(iso?: string | null): string {
+  if (!iso || iso === 'never') return 'never';
+  const ms = new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return 'never';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 0) return 'just now';
   if (s < 60) return s + ' sec ago';
   if (s < 3600) return Math.floor(s / 60) + ' min ago';
   if (s < 86400) return Math.floor(s / 3600) + ' hr ago';
@@ -170,8 +173,19 @@ export function MinimalDevWorkspace({
   const cursorConnected = nodeStatus.cursorConnected;
   const agentCount = agents.length;
   const brainLabel = BRAINS.find((b) => b.key === selectedBrain)?.label || selectedBrain;
-  const repoName = bridge?.latest?.label || (ideWorkspaces[0]?.repository?.split('/').pop()) || 'Not detected';
-  const branchName = bridge?.latest?.branch || ideWorkspaces[0]?.branch || 'unknown';
+  const repoFullName =
+    ideWorkspaces.find((w) => w.repository?.trim())?.repository ||
+    connected.find((c) => c.repository?.trim())?.repository ||
+    null;
+  const repoName =
+    (repoFullName ? (repoFullName.split('/').pop() || repoFullName) : null) ||
+    bridge?.latest?.taskLabel ||
+    'Not detected';
+  const branchName =
+    bridge?.latest?.branch ||
+    ideWorkspaces.find((w) => w.branch?.trim())?.branch ||
+    connected.find((c) => c.branch?.trim())?.branch ||
+    'unknown';
 
   const handleSend = useCallback(async () => {
     const prompt = input.trim();

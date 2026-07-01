@@ -64,9 +64,38 @@ function runNetshElevated(commands: string): void {
   ).unref();
 }
 
+/** Check whether the Founder Node firewall rules already exist. Avoids re-triggering
+ * a UAC elevation prompt on every app launch when the rule was already added. */
+function firewallRuleExists(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'cmd.exe',
+      ['/d', '/s', '/c', `netsh advfirewall firewall show rule name="${RULE_BASE} Out"`],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      resolve(ok);
+    };
+    child.on('error', () => finish(false));
+    child.on('exit', (code) => finish(code === 0));
+    // Safety timeout — netsh should return well under 3s.
+    setTimeout(() => finish(false), 3000);
+  });
+}
+
 export async function tryAddWindowsFirewallRules(): Promise<{ ok: boolean; detail: string }> {
   if (!isWindows()) {
     return { ok: false, detail: 'Firewall helper is only available on Windows.' };
+  }
+  // Skip the proactive add (and the UAC prompt it can trigger) when the rule is
+  // already present from a previous launch. The user-initiated tray action still
+  // force-adds if the rule was removed manually.
+  const already = await firewallRuleExists().catch(() => false);
+  if (already) {
+    return { ok: true, detail: 'Founder Node is already allowed through Windows Firewall.' };
   }
   const exe = getAppExecutablePath();
   const commands = buildFirewallNetshCommands(exe);
