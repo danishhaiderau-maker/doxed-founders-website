@@ -28,7 +28,7 @@ $abnormalities = @()
 
 # 1. Local stack (bot / analyzer / bridge / tunnel)
 $botCode = Probe "http://127.0.0.1:7002/api/ping"
-$anCode = Probe "http://127.0.0.1:9500/"
+$anCode = Probe "http://127.0.0.1:9001/"
 $bridgeCode = Probe "http://127.0.0.1:7810/health"
 $tunnelCode = Probe "https://bot.doxxedcrypto.digital/api/ping" 15
 if ($botCode -ne 200)    { $abnormalities += "bot_offline_ping=$botCode" }

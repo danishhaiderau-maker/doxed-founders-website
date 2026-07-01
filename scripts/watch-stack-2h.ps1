@@ -1,5 +1,5 @@
 # 2-hour stack behavior watch. Emits a heartbeat line each poll and ALERT lines on regressions.
-# Probes: bot :7002, analyzer :9500, bridge :7810 (+tunnel.live), tunnel public, site, duplicate positions.
+# Probes: bot :7002, analyzer :9001, bridge :7810 (+tunnel.live), tunnel public, site, duplicate positions.
 $ProgressPreference = "SilentlyContinue"
 $end = (Get-Date).AddHours(2)
 $iter = 0
@@ -11,7 +11,7 @@ while ((Get-Date) -lt $end) {
   $iter++
   $ts = (Get-Date).ToString("HH:mm:ss")
   $bot      = Probe "http://127.0.0.1:7002/api/ping" 6
-  $an       = Probe "http://127.0.0.1:9500/api/status" 10
+  $an       = Probe "http://127.0.0.1:9001/api/status" 10
   $bridge   = Probe "http://127.0.0.1:7810/health" 5
   $tunnel   = Probe "https://bot.doxxedcrypto.digital/api/ping" 12
   $site     = Probe "https://doxxedcrypto.digital/api/health" 12
@@ -31,7 +31,7 @@ while ((Get-Date) -lt $end) {
   $line = "[$ts] #$iter bot=$bot an=$an bridge=$bridge tunnel=$tunnel site=$site tunLive=$tunLive pos=$posCount dup=$dupIds"
   Write-Output $line
   if ($bot -ne "200")    { Write-Output "ALERT bot :7002 down ($bot)" }
-  if ($an -ne "200")     { Write-Output "ALERT analyzer :9500 down ($an)" }
+  if ($an -ne "200")     { Write-Output "ALERT analyzer :9001 down ($an)" }
   if ($bridge -ne "200") { Write-Output "ALERT bridge :7810 down ($bridge)" }
   if ($tunnel -ne "200") { Write-Output "ALERT public tunnel down ($tunnel)" }
   if ($site -ne "200")   { Write-Output "ALERT site doxxedcrypto.digital down ($site)" }
