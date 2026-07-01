@@ -1204,6 +1204,11 @@ export class BuilderService {
       }
     }
 
+    const platformBrain = await this.tryPlatformDeepseekFallback(userId, effectiveSystem, userPrompt, llmErrors);
+    if (platformBrain) {
+      return { ok: true, text: platformBrain.text, provider: AiProvider.DEEPSEEK, founderBrainTask };
+    }
+
     const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
     if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
       llmErrors.push(this.founderPromo.promoEndedMessage(promoStatus));
@@ -1313,6 +1318,9 @@ export class BuilderService {
       );
       if (promoFallback) return promoFallback;
 
+      const platformBrain = await this.tryPlatformDeepseekFallback(userId, system, userPrompt, llmErrors);
+      if (platformBrain) return platformBrain;
+
       const promoStatus = await this.founderPromo.getUserPromoStatus(userId);
       if (promoStatus.enabled && promoStatus.founderRegistered && !promoStatus.eligible) {
         return { ok: false, llmErrors: [this.founderPromo.promoEndedMessage(promoStatus)] };
@@ -1413,6 +1421,54 @@ export class BuilderService {
     return llmErrors.length > 0 ? { ok: false, llmErrors } : null;
   }
 
+  /** Platform brain fallback — uses the platform-managed DeepSeek key (configured via
+   * /admin/control) to serve copilot chat when the user has no BYOK key and the promo
+   * path is unavailable. Returns null when no platform key is configured so the caller
+   * emits its standard missing-key error. */
+  private async tryPlatformDeepseekFallback(
+    userId: string,
+    system: string,
+    userPrompt: string,
+    existingErrors: string[],
+  ): Promise<{ ok: true; text: string; provider: AiProvider } | null> {
+    let platformKey: string | null = null;
+    try {
+      platformKey = await this.founderPromo.getDecryptedPlatformDeepseekKey();
+    } catch {
+      return null;
+    }
+    if (!platformKey) return null;
+
+    try {
+      const result = await this.completionWithProvider(
+        AiProvider.DEEPSEEK,
+        platformKey,
+        system,
+        userPrompt,
+        undefined,
+      );
+      if (result?.text?.trim()) {
+        await this.logAiTokenUsage(
+          userId,
+          AiProvider.DEEPSEEK,
+          system,
+          userPrompt,
+          result.text.trim(),
+          'copilot_platform_brain',
+          result.usage,
+          'platform_brain',
+        );
+        return { ok: true, text: result.text.trim(), provider: AiProvider.DEEPSEEK };
+      }
+      existingErrors.push('DEEPSEEK (platform brain): empty response');
+    } catch (err) {
+      existingErrors.push(
+        `DEEPSEEK (platform brain): ${err instanceof Error ? err.message : 'request failed'}`,
+      );
+    }
+    return null;
+  }
+
   private async completionWithProvider(
     provider: AiProvider,
     apiKey: string,
@@ -1450,7 +1506,7 @@ export class BuilderService {
     text: string,
     source: string,
     usage?: LlmUsage | null,
-    billingSource: 'byok' | 'platform_promo' = 'byok',
+    billingSource: 'byok' | 'platform_promo' | 'platform_brain' = 'byok',
   ) {
     const promptTokens =
       usage?.promptTokens ?? estimateLlmTokensFromText(`${system}\n${userPrompt}`);
