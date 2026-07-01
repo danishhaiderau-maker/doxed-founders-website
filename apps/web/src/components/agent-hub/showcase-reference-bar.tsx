@@ -156,16 +156,28 @@ export function ShowcaseReferenceBar({
   const deltaTrades = usingDelta && baseline ? Math.max(0, fullTradeCount - baseline.tradeCount) : fullTradeCount;
   const deltaReturnPct = usingDelta ? (deltaPnl / runway) * 100 : fullReturnPct;
 
-  const equity = usingDelta ? runway + deltaPnl : fullEquity;
-  const sessionPnl = deltaPnl;
-  const returnPct = deltaReturnPct;
+  // Prefer the API-authoritative sim-start delta (copyRelaySim.showcasePnlUsd)
+  // when a sim has been started: it is anchored at Start, resets to 0 on Stop,
+  // and is computed from the bot's stable session_pnl_usd — so it does not
+  // flicker with the mark price. Only fall back to the analyzer/localStorage
+  // delta when the API value is unavailable (e.g. tick hasn't landed yet).
+  const apiDeltaPnl =
+    typeof copyRelaySim?.showcasePnlUsd === 'number' ? copyRelaySim.showcasePnlUsd : null;
+  const simHasStarted = Boolean(copyRelaySim?.startedAt);
+  const usingApiDelta = simHasStarted && apiDeltaPnl != null;
+
+  const equity = usingApiDelta ? runway + apiDeltaPnl! : usingDelta ? runway + deltaPnl : fullEquity;
+  const sessionPnl = usingApiDelta ? apiDeltaPnl! : deltaPnl;
+  const returnPct = usingApiDelta ? (apiDeltaPnl! / runway) * 100 : deltaReturnPct;
   const trades = deltaTrades;
 
-  const sessionPnlHint = usingDelta
+  const sessionPnlHint = usingApiDelta
     ? 'Showcase P&L since your sim started'
-    : simActive
-      ? 'Baseline capturing…'
-      : 'Showcase full session · since fresh wipeout';
+    : usingDelta
+      ? 'Showcase P&L since your sim started'
+      : simActive
+        ? 'Baseline capturing…'
+        : 'Showcase full session · since fresh wipeout';
 
   return (
     <section className="rounded-xl border border-violet-500/30 bg-gradient-to-br from-violet-950/25 to-zinc-950/60 px-4 py-3">

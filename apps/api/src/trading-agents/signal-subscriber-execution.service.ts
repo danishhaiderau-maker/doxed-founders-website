@@ -952,7 +952,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const bot = this.botBridge.isEnabled() ? await this.botBridge.fetchStateForExecution(true).catch(() => null) : null;
     if (bot && typeof bot === 'object') {
       const stats = mapBotStateToAgentStats(bot);
-      sim.showcasePnlUsd = stats.sessionPnlUsd;
+      // Only carry forward the trade count here; persistSimState computes the
+      // showcasePnlUsd delta from the sim-start baseline authoritatively so we
+      // do NOT clobber it with the raw cumulative.
       sim.showcaseTradeCount = stats.tradeCount;
     }
     await this.relaySim.persistSimState(instance.id, instance.userId, sim, reconcile);
