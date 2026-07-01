@@ -177,7 +177,15 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const fileInputRef = useRef<HTMLInputElement>(null);
   const announcedCommitsRef = useRef<Set<string>>(new Set());
   const announcedRunIdRef = useRef<string | null>(null);
-  const sessionAppliedRef = useRef(false);
+  // Per-workspace restore guard — replaces the one-shot `sessionAppliedRef`.
+  // Tracks which workspace has had its session evaluated so we don't
+  // double-restore the same workspace, while still allowing re-restoration
+  // when the active workspace changes or when late bridge data arrives.
+  const [restoredWorkspaceId, setRestoredWorkspaceId] = useState<string | null>(null);
+  // Distinguishes an explicit user dismissal (clicked "Resume"/"Continue")
+  // from an auto cold-start dismissal, so late bridge/recentAgents data can
+  // un-dismiss the auto case without overriding a user choice.
+  const userDismissedResumeRef = useRef(false);
 
   // Pre-fill chat from URL prompt (e.g. /founder-den?prompt=fix+it)
   useEffect(() => {
@@ -358,15 +366,18 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     };
   }, [accessToken]);
 
-  // After the session load completes: mark the session "applied" so save effects
-  // can fire, and auto-dismiss the Resume panel only on a true cold-start — no
-  // saved conversation AND no live desktop bridge AND no recent agents. When the
-  // desktop is still working (bridge connected or agents running), keep the
-  // "Resume Desktop" panel visible even without a saved conversation.
+  // After the session load completes: mark the active workspace as evaluated
+  // so save effects can fire, and auto-dismiss the Resume panel only on a true
+  // cold-start — no saved conversation AND no live desktop bridge AND no recent
+  // agents. When the desktop is still working (bridge connected or agents
+  // running), keep the "Resume Desktop" panel visible even without a saved
+  // conversation. Using a per-workspace guard (instead of the legacy one-shot
+  // ref) means switching workspaces re-evaluates, and a separate effect below
+  // un-dismisses when bridge/recentAgents arrive late on the same workspace.
   useEffect(() => {
     if (!sessionLoaded) return;
-    if (sessionAppliedRef.current) return;
-    sessionAppliedRef.current = true;
+    if (restoredWorkspaceId === activeWorkspaceId) return;
+    setRestoredWorkspaceId(activeWorkspaceId);
     const hasConversation = Boolean(restoredSession?.conversation?.length);
     const desktopConnected = Boolean(bridge?.latest);
     const hasAgents = Boolean(recentAgents?.agents?.length);
@@ -374,7 +385,25 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
       setResumeDismissed(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionLoaded, restoredSession, bridge, recentAgents]);
+  }, [sessionLoaded, restoredSession, bridge, recentAgents, activeWorkspaceId, restoredWorkspaceId]);
+
+  // Race fix: if the auto-dismiss fired on a cold-start before bridge/recent
+  // agents arrived, un-dismiss when that live data shows up so the
+  // ResumeWorkspacePanel can render. Skips workspaces the user explicitly
+  // dismissed (via Resume/Continue click) and any state with an active
+  // conversation (chat view takes over anyway).
+  useEffect(() => {
+    if (!sessionLoaded) return;
+    if (!resumeDismissed) return;
+    if (userDismissedResumeRef.current) return;
+    if (chatMessages.length > 0) return;
+    const desktopConnected = Boolean(bridge?.latest);
+    const hasAgents = Boolean(recentAgents?.agents?.length);
+    const hasConversation = Boolean(restoredSession?.conversation?.length);
+    if (desktopConnected || hasAgents || hasConversation) {
+      setResumeDismissed(false);
+    }
+  }, [sessionLoaded, resumeDismissed, bridge, recentAgents, restoredSession, chatMessages.length]);
 
   // Persist the active workspace selection to localStorage so it survives
   // reloads (the legacy session schema has no activeWorkspaceId column). The
@@ -491,6 +520,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
 
   function resumeWorkspace() {
     if (!restoredSession) {
+      userDismissedResumeRef.current = true;
       setResumeDismissed(true);
       return;
     }
@@ -511,6 +541,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     if (Array.isArray(s.terminalScrollback)) {
       setTerminalScrollback(s.terminalScrollback);
     }
+    userDismissedResumeRef.current = true;
     setResumeDismissed(true);
   }
 
@@ -535,10 +566,88 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   }
 
   async function handleSwitchWorkspace(workspaceId: string) {
+    if (!workspaceId) return;
     setActiveWorkspaceId(workspaceId);
-    // The session will be loaded/switched via the workspace session API.
-    // For now, just set the active workspace ID — the session persistence
-    // will use this when saving/loading.
+    try {
+      window.localStorage.setItem('dcf:active-workspace-id', workspaceId);
+    } catch {
+      // ignore storage errors
+    }
+    // Reset resume state for the new workspace — allow the start panel to
+    // re-show and let late bridge data un-dismiss if applicable.
+    userDismissedResumeRef.current = false;
+    setResumeDismissed(false);
+
+    let session: WorkspaceSessionData | null = null;
+    try {
+      session = await fetchConnectedWorkspaceSession(accessToken, workspaceId);
+    } catch {
+      // No session for this workspace yet — fall through to cold-start clear.
+    }
+
+    if (!session) {
+      // Cold start for this workspace: clear the previous workspace's state
+      // and show the ContextPanel / Continue prompt.
+      setRestoredSession(null);
+      setChatMessages([]);
+      setTerminalScrollback([]);
+      resetFounderEventBus();
+      setRestoredWorkspaceId(workspaceId);
+      return;
+    }
+
+    setRestoredSession(session);
+
+    // Hydrate the founder event bus from the persisted rolling event log so
+    // the Agent Event Timeline survives workspace switches.
+    resetFounderEventBus();
+    if (Array.isArray(session.eventLog) && session.eventLog.length > 0) {
+      for (const ev of session.eventLog) {
+        emitEvent(
+          (ev.category as FounderEventCategory) ?? 'SYSTEM',
+          ev.kind ?? 'restored',
+          ev.message ?? '',
+          {
+            level: (ev.level as FounderEvent['level']) ?? 'info',
+            stream: ev.stream,
+            progress: ev.progress,
+            meta: ev.meta,
+          },
+        );
+      }
+    }
+
+    // Restore selected model.
+    if (session.selectedModelKey) {
+      const matched = [...models, ...ideModels].find((m) => m.key === session.selectedModelKey);
+      if (matched) setSelectedModel(matched);
+    }
+    // Restore active nav.
+    if (session.activeNav) setActiveNav(session.activeNav);
+    // Restore panel state.
+    if (session.panelState) {
+      if (typeof session.panelState.terminalOpen === 'boolean') setTerminalOpen(session.panelState.terminalOpen);
+      if (typeof session.panelState.terminalHeight === 'number') setTerminalHeight(session.panelState.terminalHeight);
+      if (typeof session.panelState.sidebarOpen === 'boolean') setSidebarOpen(session.panelState.sidebarOpen);
+    }
+    // Restore conversation + terminal scrollback.
+    if (Array.isArray(session.conversation) && session.conversation.length > 0) {
+      setChatMessages(session.conversation as typeof chatMessages);
+      // Auto-dismiss the resume panel — conversation is already restored.
+      userDismissedResumeRef.current = true;
+      setResumeDismissed(true);
+    } else {
+      setChatMessages([]);
+    }
+    if (Array.isArray(session.terminalScrollback)) {
+      setTerminalScrollback(session.terminalScrollback);
+    } else {
+      setTerminalScrollback([]);
+    }
+
+    // Mark this workspace as restored so the auto-dismiss effect doesn't
+    // re-fire with stale bridge/recentAgents state.
+    setRestoredWorkspaceId(workspaceId);
   }
 
   async function handleDeleteWorkspace(workspaceId: string) {
@@ -558,7 +667,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
 
   // Debounced save on state changes (only after the session has been applied/dismissed).
   useEffect(() => {
-    if (!sessionAppliedRef.current) return;
+    if (!sessionLoaded) return;
     if (!resumeDismissed) return;
     if (!selectedModel) return;
     const patch: Partial<WorkspaceSessionData> = {
@@ -588,7 +697,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
 
   // Save terminal scrollback every Nth line (avoid DB thrash on every line).
   useEffect(() => {
-    if (!sessionAppliedRef.current) return;
+    if (!sessionLoaded) return;
     if (!resumeDismissed) return;
     if (terminalScrollback.length === 0) return;
     if (terminalScrollback.length % 10 !== 0) return; // every 10th line
@@ -705,6 +814,10 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     setThinking(true);
     setLiveContextSteps(null);
     setShowContextPanel(false);
+    // Treat the first sent message as user engagement so the resume/start
+    // panel dismisses and debounced session saves begin firing.
+    userDismissedResumeRef.current = true;
+    setResumeDismissed(true);
 
     const stream = `ai:${Date.now().toString(36)}`;
     setActiveStream(stream);
@@ -1054,13 +1167,21 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
         )}
       </div>
 
-      {/* ═══ Status strip: repo · branch · desktop · IDE · brain · cost ═══ */}
+      {/* ═══ Status strip: repo · branch · desktop · Founder Node · IDE · brain · workspace · agents · sync · cost ═══ */}
       <StatusStrip
         repo={repo}
         branch={branch}
         desktopOnline={Boolean(bridge?.latest)}
+        founderNodeOnline={Boolean(worker?.connections?.founderNode) || Boolean(bridge?.latest)}
         cursorConnected={Boolean(worker?.connections?.cursor)}
         selectedModelLabel={activeBrain?.label ?? selectedModel?.label}
+        workspaceLabel={
+          connectedWorkspaces.find((w) => w.id === activeWorkspaceId)?.label ??
+          bridge?.latest?.taskLabel ??
+          null
+        }
+        agentCount={recentAgents?.agents?.length ?? 0}
+        lastSyncIso={bridge?.latest?.updatedAt ?? recentAgents?.generatedAt ?? null}
         todayCost={todayCost}
         savedVsCloud={savedVsCloud}
         usingLocal={usingLocal}
@@ -1338,8 +1459,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && !thinking ? (
-                sessionLoaded &&
-                !resumeDismissed &&
+                !resumeDismissed && sessionLoaded &&
                 ((restoredSession && (restoredSession.conversation?.length ?? 0) > 0) ||
                   Boolean(bridge?.latest) ||
                   Boolean(recentAgents?.agents?.length)) ? (
@@ -1354,6 +1474,17 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                       sendChat(`command cursor: ${prompt}`)
                     }
                   />
+                ) : !resumeDismissed && sessionLoaded && (activeWorkspaceId || bridge?.latest?.taskLabel) ? (
+                  <ColdStartContinuePanel
+                    projectLabel={
+                      connectedWorkspaces.find((w) => w.id === activeWorkspaceId)?.label ??
+                      bridge?.latest?.taskLabel ??
+                      'your project'
+                    }
+                    onContinue={() => resumeWorkspace()}
+                  />
+                ) : !resumeDismissed && sessionLoaded ? (
+                  <ColdStartNewProjectPanel onCreateWorkspace={() => handleCreateWorkspace()} />
                 ) : (
                 <ContextPanel repo={repo} branch={branch} runActive={runActive ?? false} lastDeploy={lastDeploy} openFiles={openFiles} recentCommits={recentCommits} selectedModel={selectedModel} />
                 )
@@ -1758,6 +1889,59 @@ function InfraRow({ label, ok }: { label: string; ok: boolean }) {
     <div className={`flex items-center justify-between rounded-lg border px-3 py-2 ${ok ? 'border-emerald-500/20 bg-emerald-950/10' : 'border-zinc-800 bg-zinc-900/30'}`}>
       <span className="text-xs text-zinc-300">{label}</span>
       <span className={`text-[10px] font-medium ${ok ? 'text-emerald-300' : 'text-zinc-600'}`}>{ok ? 'Healthy' : 'Offline'}</span>
+    </div>
+  );
+}
+
+/* ───── Cold-start "Continue working on {project}?" prompt ─────
+ * Shown when a workspace is active (or the desktop bridge reports a
+ * taskLabel) but there's no saved conversation and no live resume data. */
+function ColdStartContinuePanel({
+  projectLabel,
+  onContinue,
+}: {
+  projectLabel: string;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="mx-auto max-w-xl space-y-4">
+      <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/20 to-zinc-900/30 p-6 text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-400/80">Continue</p>
+        <h2 className="mt-2 text-lg font-bold text-white">Continue working on</h2>
+        <p className="mt-1 truncate text-base font-semibold text-violet-200">{projectLabel}</p>
+        <button
+          type="button"
+          onClick={onContinue}
+          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
+        >
+          Continue →
+        </button>
+      </div>
+      <p className="text-center text-[10px] text-zinc-600">
+        Or start fresh by typing a question below.
+      </p>
+    </div>
+  );
+}
+
+/* ───── Cold-start "Start a new project" prompt (no workspace, no bridge) ───── */
+function ColdStartNewProjectPanel({ onCreateWorkspace }: { onCreateWorkspace: () => void }) {
+  return (
+    <div className="mx-auto max-w-xl space-y-4">
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Founder OS</p>
+        <h2 className="mt-2 text-lg font-bold text-white">Start a new project</h2>
+        <p className="mt-1 text-xs text-zinc-400">
+          Create a workspace to track commits, agents, and builds, or just type a question below to begin.
+        </p>
+        <button
+          type="button"
+          onClick={onCreateWorkspace}
+          className="mt-5 w-full rounded-lg bg-violet-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-violet-500"
+        >
+          + New Workspace
+        </button>
+      </div>
     </div>
   );
 }
@@ -2171,8 +2355,12 @@ function StatusStrip({
   repo,
   branch,
   desktopOnline,
+  founderNodeOnline,
   cursorConnected,
   selectedModelLabel,
+  workspaceLabel,
+  agentCount,
+  lastSyncIso,
   todayCost,
   savedVsCloud,
   usingLocal,
@@ -2181,42 +2369,73 @@ function StatusStrip({
   repo: string | null;
   branch: string;
   desktopOnline: boolean;
+  founderNodeOnline: boolean;
   cursorConnected: boolean;
   selectedModelLabel?: string;
+  workspaceLabel?: string | null;
+  agentCount?: number;
+  lastSyncIso?: string | null;
   todayCost: number;
   savedVsCloud: number;
   usingLocal: boolean | undefined;
   costIsDemo?: boolean;
 }) {
   const costSuffix = costIsDemo ? ' (demo)' : '';
+  const syncLabel = lastSyncIso ? formatRelativeTime(lastSyncIso) : null;
   return (
-    <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800/80 bg-[#0d0d14] px-3 py-1 text-[10px] text-zinc-500">
+    <div className="flex shrink-0 items-center gap-3 overflow-hidden border-b border-zinc-800/80 bg-[#0d0d14] px-3 py-1 text-[10px] text-zinc-500 whitespace-nowrap">
       {repo && (
-        <span className="flex items-center gap-1">
+        <span className="flex shrink-0 items-center gap-1">
           <span className="text-zinc-400">{repo}</span>
           {branch && <span className="text-zinc-600">·</span>}
           {branch && <span className="text-violet-400/70">{branch}</span>}
         </span>
       )}
 
-      <span className="flex items-center gap-1">
+      <span className="flex shrink-0 items-center gap-1">
         <span className={`h-1.5 w-1.5 rounded-full ${desktopOnline ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
         <span>{desktopOnline ? 'Desktop Online' : 'Desktop Offline'}</span>
       </span>
 
-      <span className="flex items-center gap-1">
+      <span className="flex shrink-0 items-center gap-1">
+        <span className={`h-1.5 w-1.5 rounded-full ${founderNodeOnline ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
+        <span>{founderNodeOnline ? 'Founder Node' : 'No Founder Node'}</span>
+      </span>
+
+      <span className="flex shrink-0 items-center gap-1">
         <span className={`h-1.5 w-1.5 rounded-full ${cursorConnected ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
         <span>{cursorConnected ? 'IDE Connected' : 'IDE Disconnected'}</span>
       </span>
 
       {selectedModelLabel && (
-        <span className="flex items-center gap-1">
+        <span className="flex shrink-0 items-center gap-1">
           <span className="text-zinc-600">Brain:</span>
           <span className="text-zinc-400">{selectedModelLabel}</span>
         </span>
       )}
 
-      <span className="ml-auto flex items-center gap-1">
+      {workspaceLabel && (
+        <span className="flex shrink-0 items-center gap-1">
+          <span className="text-zinc-600">Workspace:</span>
+          <span className="max-w-[140px] truncate text-zinc-400">{workspaceLabel}</span>
+        </span>
+      )}
+
+      {typeof agentCount === 'number' && agentCount > 0 && (
+        <span className="flex shrink-0 items-center gap-1">
+          <span className="text-zinc-600">Agents:</span>
+          <span className="text-zinc-400">{agentCount}</span>
+        </span>
+      )}
+
+      {syncLabel && (
+        <span className="flex shrink-0 items-center gap-1">
+          <span className="text-zinc-600">Last sync:</span>
+          <span className="text-zinc-400">{syncLabel}</span>
+        </span>
+      )}
+
+      <span className="ml-auto flex shrink-0 items-center gap-1">
         <span className="text-zinc-600">Today:</span>
         <span className="text-emerald-400">${todayCost.toFixed(2)}{costSuffix}</span>
         <span className="text-zinc-600">·</span>
