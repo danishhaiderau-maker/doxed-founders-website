@@ -131,6 +131,9 @@ services/btc-conservative-agent/research/reports/
 services/btc-conservative-agent/research/research_accumulator/
 services/btc-conservative-agent/research/research_session_archives/
 services/btc-conservative-agent/research/downloads/
+# Runtime reports/audits emitted into the research subtree (not source).
+services/btc-conservative-agent/research/*_report.json
+services/btc-conservative-agent/research/genome/data_integrity_audit.json
 # Tracked source lives at services/btc-conservative-agent/research/genome/ — do NOT
 # broaden the research/ ignore to the whole subtree; only ignore the runtime dirs above.
 
@@ -167,3 +170,4 @@ docs/exports/*.zip
 .home-use-named-tunnel
 logs/
 .probe-*.ps1
+_probe*.ps1
