@@ -33,7 +33,7 @@ export function AgentDeskSwitcher({
   ];
 
   return (
-    <div className="flex flex-wrap gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-1.5">
+    <div className="flex flex-wrap items-stretch gap-2 rounded-xl border border-zinc-700 bg-gradient-to-b from-zinc-900/90 to-zinc-950/80 p-2 shadow-lg shadow-black/40 ring-1 ring-white/5 backdrop-blur">
       {tabs.map((t) => {
         const disabled =
           t.id === 'live' && !liveAvailable
@@ -44,14 +44,14 @@ export function AgentDeskSwitcher({
         const active = activeDesk === t.id;
         const colorMap = {
           violet: active
-            ? 'bg-violet-600 text-white shadow-violet-900/30'
-            : 'text-violet-300/80 hover:bg-violet-950/40',
+            ? 'bg-violet-500/25 border-violet-400/80 text-violet-100 font-bold shadow-violet-900/40 ring-1 ring-violet-400/40'
+            : 'border-zinc-700/60 text-violet-300/70 hover:bg-violet-950/40 hover:border-violet-600/60 hover:text-violet-100',
           emerald: active
-            ? 'bg-emerald-600 text-white shadow-emerald-900/30'
-            : 'text-emerald-300/80 hover:bg-emerald-950/40',
+            ? 'bg-emerald-500/25 border-emerald-400/80 text-emerald-100 font-bold shadow-emerald-900/40 ring-1 ring-emerald-400/40'
+            : 'border-zinc-700/60 text-emerald-300/70 hover:bg-emerald-950/40 hover:border-emerald-600/60 hover:text-emerald-100',
           sky: active
-            ? 'bg-sky-600 text-white shadow-sky-900/30'
-            : 'text-sky-300/80 hover:bg-sky-950/40',
+            ? 'bg-sky-500/25 border-sky-400/80 text-sky-100 font-bold shadow-sky-900/40 ring-1 ring-sky-400/40'
+            : 'border-zinc-700/60 text-sky-300/70 hover:bg-sky-950/40 hover:border-sky-600/60 hover:text-sky-100',
         }[t.color];
 
         return (
@@ -60,15 +60,15 @@ export function AgentDeskSwitcher({
             type="button"
             disabled={disabled}
             onClick={() => !disabled && onChange(t.id)}
-            className={`flex-1 min-w-[100px] rounded-lg px-3 py-2.5 text-center text-sm font-semibold transition shadow-sm disabled:cursor-not-allowed disabled:opacity-40 ${colorMap}`}
+            className={`flex-1 min-w-[120px] rounded-lg border px-5 py-3 text-center text-sm sm:text-base font-semibold tracking-tight transition-all duration-150 shadow-md disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:border-zinc-700/60 ${colorMap}`}
           >
             <span className="hidden sm:inline">{t.label}</span>
             <span className="sm:hidden">{t.short}</span>
             {t.id === 'relay-sim' && relaySimActive ? (
-              <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+              <span className="ml-2 inline-block h-2 w-2 rounded-full bg-white animate-pulse" />
             ) : null}
             {t.id === 'showcase' && showcaseAvailable ? (
-              <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="ml-2 inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse shadow-emerald-400/80 shadow-[0_0_6px_2px_rgba(52,211,153,0.5)]" />
             ) : null}
           </button>
         );
