@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): unify top metrics card with analyzer full-session panel
+feat(utils+api): IDE Bridge interface + capability/workspace endpoints
 
 ## Last Activity
 
