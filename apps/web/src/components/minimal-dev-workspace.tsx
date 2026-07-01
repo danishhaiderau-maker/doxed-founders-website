@@ -2,13 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  copilotAskStream,
+  copilotAsk,
   fetchConnectedWorkspaces,
   fetchDesktopBridge,
   fetchIdeBridgeWorkspaces,
   fetchRecentAgents,
   type ConnectedWorkspace,
-  type CopilotStreamEvent,
   type DesktopBridgeResponse,
   type RecentAgent,
 } from '@/lib/api';
@@ -185,17 +184,21 @@ export function MinimalDevWorkspace({
     setBusy(true);
     setError(null);
     try {
-      const stream = copilotAskStream(accessToken, { prompt, provider: selectedBrain });
-      let acc = '';
-      let provider = selectedBrain;
-      for await (const ev of stream as AsyncGenerator<CopilotStreamEvent>) {
-        if (ev.type === 'chunk') { acc += ev.text; setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: acc, pending: false } : msg))); }
-        else if (ev.type === 'attribution') { provider = ev.provider || provider; }
-        else if (ev.type === 'done') { acc = ev.answer; setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: acc, provider: ev.answerProvider, pending: false } : msg))); }
-        else if (ev.type === 'error') { setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: 'Warning: ' + ev.message, pending: false } : msg))); setError(ev.message); }
+      const result = await copilotAsk(prompt, accessToken, { provider: selectedBrain });
+      const answer = result.answer || '';
+      const provider = result.answerProvider || selectedBrain;
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.id === assistantId
+            ? { ...msg, text: answer || 'No response.', provider, pending: false }
+            : msg,
+        ),
+      );
+      if (result.llmErrors?.length && !answer) {
+        setError(result.llmErrors.join(', '));
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Chat stream failed';
+      const msg = e instanceof Error ? e.message : 'Chat request failed';
       setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: 'Warning: ' + msg, pending: false } : msg)));
       setError(msg);
     } finally { setBusy(false); }
