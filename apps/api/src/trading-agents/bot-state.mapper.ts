@@ -11,6 +11,9 @@ export type BotApiState = {
   bot_start_time?: number;
   last_fresh_reset_ts?: number;
   trade_count_session?: number;
+  trade_count?: number;
+  /** Cumulative realized session P&L (closed trades) in USD -- stable across polls. */
+  session_pnl_usd?: number;
   bot_version?: string;
   daily_pnl_usd?: number;
   /** Cumulative session analytics from the bot's research analyzer aggregate (since last fresh-collection wipeout). */
@@ -779,8 +782,23 @@ export function mapBotStateToAgentStats(bot: BotApiState, startingBalance = STAR
   else if (openCount > 0) currentAction = 'IN TRADE';
   else if ((bot.orders?.length ?? 0) > 0) currentAction = 'ORDER PENDING';
 
-  const sessionTradeCount = trades.length || bot.trade_count_session || 0;
-  const sessionPnlUsd = equity - startingBalance;
+  const sessionTradeCount =
+    (typeof bot.trade_count === 'number' && Number.isFinite(bot.trade_count)
+      ? bot.trade_count
+      : null) ??
+    (typeof bot.trade_count_session === 'number' && Number.isFinite(bot.trade_count_session)
+      ? bot.trade_count_session
+      : null) ??
+    trades.length ??
+    0;
+  // Prefer the bot's stable cumulative realized session P&L (closed trades only).
+  // Falling back to equity-minus-starting would fold in unrealized P&L of open
+  // positions and make the displayed SESSION P&L flicker green/red with the mark.
+  const botSessionPnl =
+    typeof bot.session_pnl_usd === 'number' && Number.isFinite(bot.session_pnl_usd)
+      ? bot.session_pnl_usd
+      : null;
+  const sessionPnlUsd = botSessionPnl ?? equity - startingBalance;
   const dailyPnlUsd =
     typeof bot.daily_pnl_usd === 'number' && Number.isFinite(bot.daily_pnl_usd)
       ? bot.daily_pnl_usd

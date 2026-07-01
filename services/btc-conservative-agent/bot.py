@@ -19156,6 +19156,32 @@ def _session_trade_count() -> int:
         return sum(1 for t in trades if _trade_row_in_session(t, session_start))
 
 
+def _session_realized_pnl_usd() -> float:
+    """Cumulative realized session P&L (closed trades only) in USD.
+
+    Stable across polls -- does NOT include unrealized P&L of open positions,
+    so the dashboard's "SESSION P&L" stays consistent instead of swinging with
+    the mark price. This is the value the analyzer/Agent Hub display as the
+    showcase bot's session P&L.
+    """
+    session_start = _showcase_trade_session_start()
+    with trade_lock:
+        if session_start:
+            src = [t for t in trades if _trade_row_in_session(t, session_start)]
+        else:
+            src = list(trades)
+        total = 0.0
+        for t in src:
+            val = t.get("net_pnl_usd")
+            if val is None or val == "":
+                val = t.get("net")
+            try:
+                total += float(val or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return round(total, 2)
+
+
 def _snapshot_trades_for_api(session_start: float):
     """Session-filtered trade rows for /api/state — cap size so dashboard polls stay fast."""
     if session_start:
@@ -19358,6 +19384,8 @@ def api_state():
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
         session_trades = trades_copy
         snapshot["trade_count_session"] = _session_trade_count()
+        snapshot["trade_count"] = snapshot["trade_count_session"]
+        snapshot["session_pnl_usd"] = _session_realized_pnl_usd()
         snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
