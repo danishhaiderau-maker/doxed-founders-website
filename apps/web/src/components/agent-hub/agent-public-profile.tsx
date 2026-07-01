@@ -37,10 +37,12 @@ function readStoredDesk(slug: string): AgentDeskId | null {
   if (raw === 'showcase' || raw === 'live' || raw === 'relay-sim') return raw;
   return null;
 }
-import type {
-  PublicAgentStatus,
-  TradingAgentActivityEntry,
-  TradingAgentSummary,
+import {
+  fetchAnalyzerSessionSummary,
+  type AnalyzerSessionSummary,
+  type PublicAgentStatus,
+  type TradingAgentActivityEntry,
+  type TradingAgentSummary,
 } from '@/lib/api';
 
 const STRATEGY_TAGS = ['BTC Markets', 'Low Risk', 'Trend Following', 'Long Bias'];
@@ -479,13 +481,18 @@ function StateIntegrityHeader({ dashboard }: { dashboard: TradingAgentDashboardS
   const ageSec = si.snapshot_age_sec ?? 0;
   const source = dashboard.snapshotSource ?? 'live_bot';
   const wsOk = si.ws_connected && si.rest_healthy;
-  const dot = wsOk ? 'bg-emerald-400' : si.ws_connected ? 'bg-amber-400' : 'bg-rose-400';
+  // REST_FALLBACK (ws down) is NOT "offline" — if REST is healthy and the snapshot is
+  // fresh, the bot is up and serving data via REST. Only a stale snapshot / unhealthy
+  // REST means the bot is truly unreachable. Without this, a bot in long REST_FALLBACK
+  // (ws disconnected for hours) showed a red "Bot offline" dot while still trading fine.
+  const restUp = !wsOk && si.rest_healthy && ageSec < 30;
+  const dot = wsOk ? 'bg-emerald-400' : restUp ? 'bg-amber-400' : 'bg-rose-400';
   return (
     <div className="mb-4 rounded-xl border border-zinc-700/60 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-300">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span className="flex items-center gap-1.5 font-semibold text-zinc-100">
           <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
-          {wsOk ? 'Live bot connected' : si.ws_connected ? 'Bot up · REST stale' : 'Bot offline'}
+          {wsOk ? 'Live bot connected' : restUp ? 'Bot up · REST stale' : 'Bot offline'}
         </span>
         <span>Data from last {windowH > 0 ? `${windowH.toFixed(1)}h` : '—'}</span>
         <span>Running for {uptimeH > 0 ? `${uptimeH.toFixed(1)}h` : '—'}</span>
@@ -630,6 +637,26 @@ export function AgentPublicProfile({
       setActiveDesk(stored);
     }
   }, [slug, relaySimActive, relaySimDeskAvailable]);
+
+  // Pull the same analyzer :9001 full-session summary the AnalyzerPanel uses, so the top
+  // profile metrics card (WIN RATE / TOTAL TRADES / SESSION P&L) matches the full-session panel.
+  const [analyzerSummary, setAnalyzerSummary] = useState<AnalyzerSessionSummary | null>(null);
+  useEffect(() => {
+    if (slug !== 'conservative-btc') return;
+    let cancelled = false;
+    const run = () =>
+      fetchAnalyzerSessionSummary(slug)
+        .then((s) => {
+          if (!cancelled) setAnalyzerSummary(s);
+        })
+        .catch(() => {});
+    void run();
+    const id = setInterval(() => void run(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [slug]);
   const isUserSession = viewScope === 'user' || isCopySession || isLiveSession;
   const isLive = !isUserSession && botConnected && !executionPaused && publicStatus === 'online';
   const heroBadge = isLiveSession
@@ -685,6 +712,18 @@ export function AgentPublicProfile({
             balanceUsd: copyRelaySim.ledger?.derivativesUsd ?? 500,
           }
         : deskShowcaseAgent;
+  // Override the top-card WIN RATE / TOTAL TRADES / SESSION P&L with the analyzer :9001
+  // full-session summary so they match the AnalyzerPanel below. Falls back to heroAgent
+  // when the analyzer summary is unavailable (non-conservative-btc slugs or fetch failure).
+  const analyzerOk = analyzerSummary?.ok === true;
+  const cardWinRatePct =
+    analyzerOk && analyzerSummary!.win_rate != null ? analyzerSummary!.win_rate : heroAgent.winRatePct;
+  const cardTradeCount =
+    analyzerOk && analyzerSummary!.trade_count != null ? analyzerSummary!.trade_count : heroAgent.tradeCount;
+  const cardSessionPnlUsd =
+    analyzerOk && analyzerSummary!.total_pnl_usd != null
+      ? analyzerSummary!.total_pnl_usd
+      : (heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500));
   const heroShareText = buildTradingAgentActionShareText({
     agentName: heroAgent.name,
     action: dashboard.latestAiVerdict
@@ -848,21 +887,19 @@ export function AgentPublicProfile({
                 <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Status</p>
                 <p className={`mt-1 text-sm font-semibold ${statusColor}`}>{statusLabel}</p>
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <MetricPill label="Win rate" value={`${heroAgent.winRatePct.toFixed(0)}%`} />
+                  <MetricPill label="Win rate" value={`${cardWinRatePct.toFixed(1)}%`} />
                   <MetricPill
                     label="30D return"
                     value={formatPercent(heroAgent.netReturnPct)}
                     accent={heroAgent.netReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
                   />
                   <MetricPill label="Max drawdown" value="6.2%" />
-                  <MetricPill label="Total trades" value={String(heroAgent.tradeCount)} />
+                  <MetricPill label="Total trades" value={String(cardTradeCount)} />
                   <MetricPill label="Followers" value={heroAgent.followerCount.toLocaleString()} />
                   <MetricPill
                     label="Session P&L"
-                    value={`${(heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500)) >= 0 ? '+' : ''}${formatUsd(heroAgent.sessionPnlUsd ?? heroAgent.equityUsd - (heroAgent.startingBalance || 500), 0)}`}
-                    accent={
-                      (heroAgent.sessionPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                    }
+                    value={`${cardSessionPnlUsd >= 0 ? '+' : ''}${formatUsd(cardSessionPnlUsd, 2)}`}
+                    accent={cardSessionPnlUsd >= 0 ? 'text-emerald-400' : 'text-red-400'}
                   />
                 </div>
                 <div className="mt-3">
