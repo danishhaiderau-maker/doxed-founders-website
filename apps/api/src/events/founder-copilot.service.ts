@@ -1919,6 +1919,14 @@ export class FounderCopilotService {
   private resolveRequestedAiProvider(providerKey: string | null | undefined): AiProvider | null {
     if (!providerKey?.trim()) return null;
     const key = providerKey.trim().toUpperCase();
+    // IDEs / build agents are NOT chat-completion brains. When the user
+    // selects an IDE (Cursor, OpenHands, Claude Code, VS Code, Windsurf)
+    // as the runtime target, we must NOT force it as the chat LLM — that
+    // would throw NO_PROVIDER_KEY for the IDE's API key even when a
+    // perfectly good brain (DeepSeek, GLM promo, etc.) is available.
+    // Return null so the normal brain routing runs (default → promo → rule-based).
+    const IDE_KEYS = new Set(['CURSOR', 'OPENHANDS', 'CLAUDE_CODE', 'VS_CODE', 'WINDSURF']);
+    if (IDE_KEYS.has(key)) return null;
     const map: Record<string, AiProvider> = {
       GLM: AiProvider.GLM,
       OLLAMA: AiProvider.OLLAMA_LOCAL,
@@ -1928,7 +1936,6 @@ export class FounderCopilotService {
       GEMINI: AiProvider.GEMINI,
       DEEPSEEK: AiProvider.DEEPSEEK,
       GROK: AiProvider.OPENROUTER,
-      CURSOR: AiProvider.CURSOR,
       OPENROUTER: AiProvider.OPENROUTER,
       JATEVO: AiProvider.JATEVO,
       SURPLUS: AiProvider.SURPLUS,
