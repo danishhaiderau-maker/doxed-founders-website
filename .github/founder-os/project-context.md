@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(agent-hub): showcase P&L (ref) = sim-start-anchored drift, not raw cumulative
+﻿feat(web): Today card + IDE dropdown + more brain options + update-manager fix
 
 ## Last Activity
 
