@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-﻿feat(web): Today card + IDE dropdown + more brain options + update-manager fix
+chore(founder-node): bump to v0.6.1 for firewall fix release
 
 ## Last Activity
 
