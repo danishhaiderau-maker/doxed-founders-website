@@ -14682,10 +14682,26 @@ def _record_expired_order(source: dict, reason: str):
     limit_price = (
         source.get("limit_price")
         or source.get("planned_limit_price")
+        or source.get("original_limit_price")
+        or source.get("duplicate_limit_price")
+        or source.get("entry_price")
+        or source.get("price")
+        or source.get("signal_price")
         or master.get("limit_price")
         or master.get("planned_limit_price")
+        or master.get("original_limit_price")
+        or master.get("duplicate_limit_price")
+        or master.get("entry_price")
+        or master.get("signal_price")
+        or master.get("price")
     )
-    signal_price = source.get("signal_price") or master.get("signal_price") or master.get("price")
+    signal_price = (
+        source.get("signal_price")
+        or source.get("price")
+        or master.get("signal_price")
+        or master.get("price")
+        or limit_price
+    )
     fill_metrics = _fill_distance_metrics(source) if source.get("status") == "PENDING" or source.get("entry_type") == "SIM_LIMIT" else {}
     if fill_metrics.get("missed_by_usd") is None and source.get("min_price_since_signal") is not None:
         fill_metrics = _fill_distance_metrics({
