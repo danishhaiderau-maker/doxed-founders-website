@@ -206,10 +206,14 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
     }
     "restart-bridge" {
       Invoke-RestartBridge
+      # Ensure the bridge auto-respawn watchdog is armed so closing the bridge console
+      # no longer leaves the command center without a command path.
+      try { & (Join-Path $scriptDir "register-bridge-watchdog.ps1") -Quiet } catch { }
       return @{
         ok = $true
         message = @(
           "Bridge restart window opened (Doxed Home Bridge :7810)."
+          "Bridge watchdog armed - bridge auto-respawns if the console is closed."
           "Keep it open - Agent Hub buttons need it."
           "Hard-refresh Agent Hub after bridge shows OK."
         ) -join "`n"
