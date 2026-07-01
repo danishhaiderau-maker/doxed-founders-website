@@ -24,6 +24,7 @@ import { ShowcaseSyncPanel } from '@/components/agent-hub/showcase-sync-panel';
 import { RelaySimLiveViewToggle } from '@/components/agent-hub/relay-sim-live-view-toggle';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { downloadRelaySimAudit } from '@/lib/api';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 
 const EMPTY_BOOK: TradingAgentDashboardState['liveBook'] = {
   activeSignals: [],
@@ -200,24 +201,26 @@ export function AgentRelaySimPanel({
       </div>
 
       <div className="mt-4 space-y-4">
-        {/* Why relay sim exists — explicit explainer for the trader */}
-        <div className="rounded-xl border border-sky-500/35 bg-sky-950/15 px-4 py-3 text-xs leading-relaxed text-sky-100/90">
-          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-sky-300">
-            Why this tab exists
-          </p>
-          <p className="mt-1.5">
+        {/* Why relay sim exists — tucked into a collapsible so it stays out of the
+            way once you have read it. Tap to expand. */}
+        <CollapsibleInfo
+          title="Why this tab exists"
+          hint="live-API dress rehearsal - tap to read"
+          accent="blue"
+        >
+          <p>
             Relay sim is the live-API dress rehearsal before real trading. It places a{' '}
             <strong className="text-white">single $20 order at 100x leverage</strong> on your real
-            Bitfinex account — one order at a time, no stacking — so you can watch a complete trade
-            lifecycle (entry → fill → manage → exit) and confirm the exchange API can place,
+            Bitfinex account - one order at a time, no stacking - so you can watch a complete trade
+            lifecycle (entry to fill to manage to exit) and confirm the exchange API can place,
             cancel, and fill orders correctly.
           </p>
-          <p className="mt-1.5 text-sky-200/80">
+          <p className="text-sky-200/80">
             Once you have seen a full lifecycle and are confident the API pipeline works, stop sim
             and resume live copy for real trading. This replaces the old copy-trade path, which is
             retired.
           </p>
-        </div>
+        </CollapsibleInfo>
 
         {!signedIn ? (
           <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-4 text-sm text-zinc-500">
