@@ -1493,7 +1493,7 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
                       }
                       return (
                         <ConnectionDiagnosticsPanel
-                          m={diagModel}
+                          m={diagModel as ModelInfo}
                           capabilities={capabilities}
                           inlineConnectable={INLINE_CONNECTABLE_KEYS.has(diagModel.key)}
                           onPasteKey={() => setInlineConnectKey(diagModel.key)}
@@ -2511,7 +2511,6 @@ function DropdownModelRow({
  * Lets a user paste an API key without leaving the workspace dropdown.
  * Reuses the existing connectCursorCloud / connectAiProvider APIs. */
 function InlineConnectPanel({
-  provider,
   label,
   onSubmit,
   onCancel,
