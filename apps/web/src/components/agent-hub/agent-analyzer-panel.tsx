@@ -20,6 +20,23 @@ function fmtHours(n: number | undefined): string {
   return `${(n / 24).toFixed(1)}d`;
 }
 
+// Analyzer session_start arrives as "YYYY-MM-DD HH:MM:SS TZ" (e.g. "2026-07-01 10:25:10 AEST"),
+// which `new Date()` cannot parse. Fall back to a manual parse that preserves the TZ label.
+function formatSessionStart(raw: string | null | undefined): string {
+  if (!raw) return '—';
+  const direct = new Date(raw);
+  if (!Number.isNaN(direct.getTime())) return direct.toLocaleString();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
+  if (m) {
+    const [, y, mo, d, h, mi, s, tz] = m;
+    const dt = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
+    if (!Number.isNaN(dt.getTime())) {
+      return tz ? `${y}-${mo}-${d} ${h}:${mi} ${tz}` : dt.toLocaleString();
+    }
+  }
+  return raw;
+}
+
 function Metric({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div className="rounded-xl border border-zinc-800/80 bg-black/30 px-3 py-2.5 text-center">
@@ -47,6 +64,7 @@ export function AgentAnalyzerPanel({ slug }: { slug: string }) {
   }, [load]);
 
   const sessionStart = summary?.session_start ?? null;
+  const sessionStartLabel = formatSessionStart(sessionStart);
   const pnl = summary?.total_pnl_usd ?? 0;
   const pnlAccent = pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
 
@@ -76,7 +94,7 @@ export function AgentAnalyzerPanel({ slug }: { slug: string }) {
         ) : summary?.ok ? (
           <>
             <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-              <Metric label="Session start" value={sessionStart ? new Date(sessionStart).toLocaleString() : '—'} />
+              <Metric label="Session start" value={sessionStartLabel} />
               <Metric label="Session length" value={fmtHours(summary?.session_hours)} />
               <Metric label="Starting balance" value={formatUsd(summary?.starting_balance ?? 0, 0)} />
               <Metric label="Current balance" value={formatUsd(summary?.current_balance ?? 0, 0)} />
