@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-node): bump to v0.6.1 for firewall fix release
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
