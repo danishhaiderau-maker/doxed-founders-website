@@ -120,9 +120,16 @@ if ($NoWait) {
   $botProc = Start-Process -FilePath "python" -ArgumentList @("btc_conservative_agent.py") -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   if ($botProc -and $botProc.Id -gt 0) {
     Set-Content -Path (Join-Path $repoRoot ".home-bot.pid") -Value "$($botProc.Id)" -NoNewline
-    # Background monitor: writes logs/last_crash.json when the detached bot dies,
-    # so crashes are captured even with no console watching.
-    $mon = Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $scriptDir "bot-crash-monitor.ps1"),"-BotPid","$($botProc.Id)","-Port","$BotListenPort") -WindowStyle Hidden -PassThru
+    # Background auto-restart monitor: writes logs/last_crash.json when the detached
+    # bot dies AND relaunches it automatically (cooldown + backoff + rate cap).
+    # Mirrors the Fly restart loop (fly-entrypoint.sh) for the local showcase bot.
+    # Pass -VaultEnv so the monitor can re-seed env vars on each relaunch.
+    $monArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",
+                 (Join-Path $scriptDir "bot-auto-restart.ps1"),
+                 "-BotPid","$($botProc.Id)",
+                 "-Port","$BotListenPort")
+    if ($VaultEnv) { $monArgs += @("-VaultEnv",$VaultEnv) }
+    $mon = Start-Process -FilePath "powershell" -ArgumentList $monArgs -WindowStyle Hidden -PassThru
     if ($mon -and $mon.Id -gt 0) {
       Set-Content -Path (Join-Path $repoRoot ".home-bot-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
     }
