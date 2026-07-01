@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import type { AgentShowcaseFlash } from '@dcf/utils';
 import { formatRelativeTime } from '@dcf/utils';
 
@@ -26,6 +27,7 @@ export function AgentShowcaseFlashBanner({
   flash: AgentShowcaseFlash | null;
   className?: string;
 }) {
+  const [open, setOpen] = useState(false);
   if (!flash) return null;
 
   const style = TONE_STYLES[flash.tone];
@@ -38,7 +40,12 @@ export function AgentShowcaseFlashBanner({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="flex flex-wrap items-center gap-2 text-left"
+          >
             <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-300/90">
               Admin research update
             </p>
@@ -54,14 +61,32 @@ export function AgentShowcaseFlashBanner({
                 Fresh $500 run
               </span>
             )}
-          </div>
-          <p className="mt-2 text-base font-bold text-white">{flash.headline}</p>
-          <p className="mt-1.5 max-w-3xl text-sm leading-relaxed text-zinc-300">{flash.body}</p>
-          {flash.sessionStartedAt && (
-            <p className="mt-2 text-xs text-zinc-500">
-              Session started {formatRelativeTime(flash.sessionStartedAt)} · showcase stats below are from this run
-              only
-            </p>
+            <svg
+              className={`ml-1 h-4 w-4 shrink-0 text-zinc-400 transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+          {open ? (
+            <div className="mt-2">
+              <p className="text-base font-bold text-white">{flash.headline}</p>
+              <p className="mt-1.5 max-w-3xl text-sm leading-relaxed text-zinc-300">{flash.body}</p>
+              {flash.sessionStartedAt && (
+                <p className="mt-2 text-xs text-zinc-500">
+                  Session started {formatRelativeTime(flash.sessionStartedAt)} · showcase stats below are from this run
+                  only
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="mt-1.5 truncate text-sm text-zinc-400">{flash.headline}</p>
           )}
         </div>
         {flash.tone === 'new-session' && (

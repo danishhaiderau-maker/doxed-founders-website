@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { CollapsibleInfo } from '@/components/ui/collapsible-info';
 
 type Props = {
   githubTokenConnected?: boolean;
@@ -9,10 +10,13 @@ type Props = {
 
 export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Props) {
   return (
-    <div className="mt-4 space-y-4 text-sm text-zinc-300">
-      <div className="rounded-lg border border-zinc-700/80 bg-zinc-900/40 p-4">
-        <p className="font-semibold text-white">Why connect GitHub?</p>
-        <ul className="mt-2 list-inside list-disc space-y-1.5 text-xs text-zinc-400">
+    <div className="mt-4 space-y-3 text-sm text-zinc-300">
+      <CollapsibleInfo
+        title="Why connect GitHub?"
+        hint="private repos, build feed, agent issues, memory files"
+        accent="zinc"
+      >
+        <ul className="list-inside list-disc space-y-1.5 text-xs text-zinc-400">
           <li>
             <strong className="text-zinc-200">Private repos</strong> — without a token, GitHub hides commits, PRs, and
             issues from our API. Public repos work for basic sync; private repos need you to authorize access.
@@ -32,11 +36,14 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
             Cursor and Copilot stay aligned when your laptop is off.
           </li>
         </ul>
-      </div>
+      </CollapsibleInfo>
 
-      <div className="rounded-lg border border-cyan-500/25 bg-cyan-950/15 p-4">
-        <p className="font-semibold text-cyan-100">How to connect (two steps)</p>
-        <ol className="mt-2 list-inside list-decimal space-y-2 text-xs text-cyan-100/85">
+      <CollapsibleInfo
+        title="How to connect (two steps)"
+        hint={repoLinked ? `linked: ${repoLinked}` : 'link repo + create a PAT'}
+        accent="blue"
+      >
+        <ol className="list-inside list-decimal space-y-2 text-xs text-cyan-100/85">
           <li>
             <strong className="text-cyan-50">Link your repository</strong> in{' '}
             <Link href="/founder-den?tab=build" className="font-medium text-emerald-400 underline hover:text-white">
@@ -79,11 +86,14 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
         {githubTokenConnected && (
           <p className="mt-3 text-xs text-emerald-300">✓ Token saved — you can update or remove it anytime.</p>
         )}
-      </div>
+      </CollapsibleInfo>
 
-      <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-4">
-        <p className="font-semibold text-emerald-200">Privacy — what we access vs what stays yours</p>
-        <div className="mt-2 space-y-2 text-xs text-emerald-100/90">
+      <CollapsibleInfo
+        title="Privacy — what we access vs what stays yours"
+        hint="tap to read the honest answer"
+        accent="emerald"
+      >
+        <div className="space-y-2 text-xs text-emerald-100/90">
           <p>
             <strong className="text-emerald-100">Honest answer:</strong> a GitHub <code>repo</code> token{' '}
             <em>can</em> read private repository content through GitHub&apos;s API. We do{' '}
@@ -122,7 +132,7 @@ export function GitHubPatConnectGuide({ githubTokenConnected, repoLinked }: Prop
             public repos for build-in-public — we can add finer-scoped GitHub App permissions in a future release.
           </p>
         </div>
-      </div>
+      </CollapsibleInfo>
     </div>
   );
 }
