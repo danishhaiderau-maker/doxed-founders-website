@@ -24,8 +24,11 @@ function botPortFrom(status: HomeStatus | null): number {
   return status?.ports?.bot ?? DEFAULT_BOT_PORT;
 }
 
-function analyzerPortFrom(status: HomeStatus | null): number {
-  return status?.ports?.analyzer ?? DEFAULT_ANALYZER_PORT;
+function analyzerPortFrom(): number {
+  // The global showcase analyzer always listens on :9001 (bot.py confirms nothing runs
+  // on :9500 — that was a phantom port). Hardcoded so the command-center label never
+  // shows :9500 again, regardless of any stale port reported by the home status payload.
+  return DEFAULT_ANALYZER_PORT;
 }
 
 function isOnline(section?: { online?: boolean; ok?: boolean } | null): boolean {
@@ -64,7 +67,8 @@ async function probeDirectHomeStatus(): Promise<HomeStatus> {
 
 async function normalizeHomeStatus(raw: HomeStatus & { ok?: boolean }): Promise<HomeStatus> {
   const botPort = raw.ports?.bot ?? DEFAULT_BOT_PORT;
-  const analyzerPort = raw.ports?.analyzer ?? DEFAULT_ANALYZER_PORT;
+  // Analyzer is always :9001 in the global showcase — ignore stale raw.ports.analyzer.
+  const analyzerPort = DEFAULT_ANALYZER_PORT;
   const botDash = raw.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
   const analyzerDash = raw.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
@@ -211,7 +215,7 @@ export function AgentAdminShowcaseControl({
 
   const stopped = executionPaused || !botConnected;
   const botPort = botPortFrom(status);
-  const analyzerPort = analyzerPortFrom(status);
+  const analyzerPort = analyzerPortFrom();
   const botDash = status?.bot?.dashboard ?? `http://127.0.0.1:${botPort}`;
   const analyzerDash = status?.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
@@ -430,7 +434,11 @@ export function AgentAdminShowcaseControl({
         <StatusChip label="Bridge :7810" ok={launcherOnline === true} />
         <StatusChip label={`Showcase bot :${botPort}`} ok={Boolean(status?.bot?.online)} />
         <StatusChip label={`Analyzer :${analyzerPort}`} ok={Boolean(status?.analyzer?.online)} />
-        <StatusChip label="Fly bot (sin)" ok={Boolean(status?.fly?.online)} sub={FLY_BOT_URL} />
+        <StatusChip
+          label="Fly bot (sin)"
+          ok={Boolean(botConnected) || Boolean(status?.fly?.online)}
+          sub={FLY_BOT_URL}
+        />
         <StatusChip label="Cloudflare tunnel" ok={Boolean(status?.tunnel?.live)} sub={PUBLIC_BOT_URL} />
         <StatusChip label="Site mirror (Railway)" ok={Boolean(botConnected)} />
       </div>
