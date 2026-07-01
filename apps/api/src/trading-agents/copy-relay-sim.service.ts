@@ -64,7 +64,12 @@ export class CopyRelaySimService {
       : null;
     if (bot && typeof bot === 'object') {
       const stats = mapBotStateToAgentStats(bot as BotApiState);
-      sim.showcasePnlUsd = stats.sessionPnlUsd;
+      // Anchor the showcase bot's cumulative session P&L at sim start so the
+      // reported `showcasePnlUsd` is the DELTA since Start (0 at the moment of
+      // starting), not a raw cumulative that would misleadingly show the
+      // showcase bot's pre-sim gains/losses as the "ref" value.
+      sim.showcasePnlBaselineUsd = stats.sessionPnlUsd ?? 0;
+      sim.showcasePnlUsd = 0;
       sim.showcaseTradeCount = stats.tradeCount;
     }
 
@@ -101,6 +106,10 @@ export class CopyRelaySimService {
       ...prev,
       active: false,
       stoppedAt: new Date().toISOString(),
+      // Reset the showcase ref/drift to 0 on Stop and clear the baseline so a
+      // subsequent Start re-anchors cleanly.
+      showcasePnlUsd: 0,
+      showcasePnlBaselineUsd: null,
     };
 
     await this.prisma.tradingAgentInstance.update({
@@ -136,6 +145,7 @@ export class CopyRelaySimService {
       sessionPnlUsd: 0,
       showcasePnlUsd: 0,
       showcaseTradeCount: 0,
+      showcasePnlBaselineUsd: null,
     };
 
     const bot = (await this.botBridge.isEnabledAsync())
@@ -143,7 +153,10 @@ export class CopyRelaySimService {
       : null;
     if (bot && typeof bot === 'object') {
       const stats = mapBotStateToAgentStats(bot as BotApiState);
-      sim.showcasePnlUsd = stats.sessionPnlUsd;
+      // Re-anchor the showcase baseline at the reset moment so the ref P&L
+      // reads as 0 immediately after a ledger reset.
+      sim.showcasePnlBaselineUsd = stats.sessionPnlUsd ?? 0;
+      sim.showcasePnlUsd = 0;
       sim.showcaseTradeCount = stats.tradeCount;
     }
 
@@ -387,6 +400,7 @@ export class CopyRelaySimService {
     const instance = await this.prisma.tradingAgentInstance.findUnique({ where: { id: instanceId } });
     if (!instance) return;
     const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const existing = readCopyRelaySimState(dash);
     const client = this.simClients.get(userId);
     const mark = await this.bitfinex.getMarkPrice().catch(() => 0);
     const ledger = client?.getLedger() ?? sim.ledger;
@@ -394,22 +408,62 @@ export class CopyRelaySimService {
     const bot = (await this.botBridge.isEnabledAsync())
       ? await this.botBridge.fetchState(true, 'relay').catch(() => null)
       : null;
-    const showcasePnlUsd =
-      bot && typeof bot === 'object'
-        ? mapBotStateToAgentStats(bot as BotApiState).sessionPnlUsd
-        : sim.showcasePnlUsd;
+
+    // Authoritative showcase ref P&L = DELTA since sim start (current showcase
+    // session P&L minus the baseline captured at Start). Falls back to the
+    // passed-in sim.showcasePnlUsd only if the bot is unreachable on this tick.
+    const baseline = existing.showcasePnlBaselineUsd ?? sim.showcasePnlBaselineUsd;
+    let showcasePnlUsd: number | null;
+    let showcaseTradeCount: number | null;
+    if (bot && typeof bot === 'object') {
+      const stats = mapBotStateToAgentStats(bot as BotApiState);
+      const currentShowcasePnl = stats.sessionPnlUsd ?? 0;
+      showcasePnlUsd =
+        typeof baseline === 'number'
+          ? Number((currentShowcasePnl - baseline).toFixed(2))
+          : currentShowcasePnl;
+      showcaseTradeCount = stats.tradeCount;
+    } else {
+      showcasePnlUsd = sim.showcasePnlUsd;
+      showcaseTradeCount = sim.showcaseTradeCount;
+    }
+
+    // Real Bitfinex Derivatives wallet snapshot — the actual wallet funding the
+    // real $20 sim orders. Read live each persist tick so the panel can display
+    // the user's true exchange balance alongside the paper $500 sim ledger.
+    // Best-effort: never fails the persist if the wallet read errors.
+    let realDerivativesWalletUsd = existing.realDerivativesWalletUsd ?? null;
+    let realDerivativesAvailableUsd = existing.realDerivativesAvailableUsd ?? null;
+    let realWalletSnapshotAt = existing.realWalletSnapshotAt ?? null;
+    try {
+      const wallet = await this.exchanges.getUserBitfinexWalletSnapshot(userId);
+      if (wallet) {
+        realDerivativesWalletUsd = Number(wallet.derivativesTotalUsd.toFixed(2));
+        realDerivativesAvailableUsd = Number(wallet.derivativesUsd.toFixed(2));
+        realWalletSnapshotAt = new Date().toISOString();
+      }
+    } catch (err) {
+      this.logger.warn(
+        `persistSimState: real wallet snapshot failed for ${userId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     await this.prisma.tradingAgentInstance.update({
       where: { id: instanceId },
       data: {
         dashboardState: applyDashboardPatch(dash, {
           copyRelaySim: {
-            ...readCopyRelaySimState(dash),
+            ...existing,
             ...sim,
+            showcasePnlBaselineUsd: baseline ?? sim.showcasePnlBaselineUsd ?? null,
             ledger,
             reconcile,
             sessionPnlUsd,
             showcasePnlUsd,
+            showcaseTradeCount,
+            realDerivativesWalletUsd,
+            realDerivativesAvailableUsd,
+            realWalletSnapshotAt,
           },
           copyRelayReconcile: reconcile,
         }) as unknown as Prisma.InputJsonValue,

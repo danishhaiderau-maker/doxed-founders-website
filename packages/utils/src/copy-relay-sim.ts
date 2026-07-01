@@ -50,6 +50,29 @@ export type CopyRelaySimState = {
   sessionPnlUsd: number;
   showcasePnlUsd: number | null;
   showcaseTradeCount: number | null;
+  /**
+   * Showcase bot's cumulative session P&L captured at sim start. Used as the
+   * anchor so `showcasePnlUsd` can be reported as the DELTA since sim start
+   * (current showcase session P&L - baseline) rather than a raw cumulative
+   * that drifts the display away from "since you clicked Start".
+   * Cleared (null) when the sim stops so the delta resets to 0.
+   */
+  showcasePnlBaselineUsd: number | null;
+  /**
+   * Real Bitfinex Derivatives (margin/USTF0) wallet TOTAL balance, read live
+   * from the user's connected Bitfinex API credentials. This is the actual
+   * wallet funding the real $20 sim orders — distinct from the paper $500
+   * `ledger.derivativesUsd` sim balance. Null when the wallet snapshot could
+   * not be read (credentials missing / API error) or sim is inactive.
+   */
+  realDerivativesWalletUsd: number | null;
+  /**
+   * Real Bitfinex Derivatives AVAILABLE (free margin) balance — the spendable
+   * portion of `realDerivativesWalletUsd` not currently locked in positions.
+   */
+  realDerivativesAvailableUsd: number | null;
+  /** ISO timestamp of the last real-wallet snapshot read. */
+  realWalletSnapshotAt: string | null;
 };
 
 export function emptyCopyRelaySimLedger(
@@ -78,6 +101,10 @@ export function emptyCopyRelaySimState(
     sessionPnlUsd: 0,
     showcasePnlUsd: null,
     showcaseTradeCount: null,
+    showcasePnlBaselineUsd: null,
+    realDerivativesWalletUsd: null,
+    realDerivativesAvailableUsd: null,
+    realWalletSnapshotAt: null,
   };
 }
 
@@ -100,6 +127,14 @@ export function readCopyRelaySimState(dash: unknown): CopyRelaySimState {
     sessionPnlUsd: typeof s.sessionPnlUsd === 'number' ? s.sessionPnlUsd : 0,
     showcasePnlUsd: typeof s.showcasePnlUsd === 'number' ? s.showcasePnlUsd : null,
     showcaseTradeCount: typeof s.showcaseTradeCount === 'number' ? s.showcaseTradeCount : null,
+    showcasePnlBaselineUsd:
+      typeof s.showcasePnlBaselineUsd === 'number' ? s.showcasePnlBaselineUsd : null,
+    realDerivativesWalletUsd:
+      typeof s.realDerivativesWalletUsd === 'number' ? s.realDerivativesWalletUsd : null,
+    realDerivativesAvailableUsd:
+      typeof s.realDerivativesAvailableUsd === 'number' ? s.realDerivativesAvailableUsd : null,
+    realWalletSnapshotAt:
+      typeof s.realWalletSnapshotAt === 'string' ? s.realWalletSnapshotAt : null,
   };
 }
 
