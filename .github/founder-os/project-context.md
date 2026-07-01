@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(api): relay sim runs without a paid hire -- decouple sim from hire-expiry gate
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
