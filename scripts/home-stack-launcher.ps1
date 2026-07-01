@@ -332,7 +332,7 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       Invoke-HomeCommandBackground "stop-all-local"
       return @{
         ok = $true
-        message = "Local lab stop queued (:7800 + :9001 only). Global showcase untouched."
+        message = "Local lab stop queued (:7800 + :9500 only). Global showcase untouched."
       }
     }
     "reset-home-stack" {
