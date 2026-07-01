@@ -142,6 +142,7 @@ scripts/win1.ps1
 scripts/win2.ps1
 scripts/_test.py
 scripts/_*.mjs
+scripts/_*.ps1
 services/btc-conservative-agent/local-collection-data/
 services/btc-conservative-agent/research.db
 services/btc-conservative-agent/research.db-journal
