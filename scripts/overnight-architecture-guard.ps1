@@ -1,5 +1,5 @@
 # Overnight architecture guard — 90s health checks + auto-recovery for global showcase stack.
-# Watches: bridge :7810, bot :7002, analyzer :9500, tunnel, production API, relay sim.
+# Watches: bridge :7810, bot :7002, analyzer :9001, tunnel, production API, relay sim.
 param(
   [int]$IntervalSec = 90,
   [int]$DurationHours = 12,

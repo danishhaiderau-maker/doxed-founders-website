@@ -4,7 +4,7 @@
 # ONLY the bridge (:7810) so the Agent Hub Start button still has a command path.
 param(
   [int]$BotPort = 7002,
-  [int]$AnalyzerPort = 9500,
+  [int]$AnalyzerPort = 9001,
   [int]$BridgePort = 7810,
   [switch]$NoWait,
   # Default: spare the bridge and restart it fresh so the Agent Hub Start button keeps a
@@ -24,7 +24,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 Write-Host ""
 Write-Host "=== Stopping global showcase (all terminals) ===" -ForegroundColor Yellow
 Write-Host "Bot :$BotPort | Analyzer :$AnalyzerPort | tunnel | supervisor | bridge | hidden helpers"
-Write-Host "Local lab :7800/:9001 untouched."
+Write-Host "Local lab :7800/:9500 untouched."
 Write-Host ""
 
 # Protect this stop process + its parent so we do not suicide.
@@ -93,7 +93,7 @@ Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
 
 Start-Sleep -Seconds 3
 
-# 5) Free the ports - kill anything still listening on 7002/7810/9500.
+# 5) Free the ports - kill anything still listening on 7002/7810/9001.
 foreach ($port in $BotPort,$BridgePort,$AnalyzerPort) {
   Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
     Where-Object { $_.LocalPort -eq $port } |

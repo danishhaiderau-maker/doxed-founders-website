@@ -1,5 +1,5 @@
 # Load home-bot.env and run the research analyzer (30-min loop, or --Once).
-# Embedded Flask research dashboard (:9500 global / :9001 local lab — see research/research_dashboard.py).
+# Embedded Flask research dashboard (:9001 global showcase / :9500 local lab — see research/research_dashboard.py).
 param([switch]$Once, [switch]$NoWait, [int]$Port = 0)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

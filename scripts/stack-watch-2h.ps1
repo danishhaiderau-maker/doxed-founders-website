@@ -3,7 +3,7 @@ param(
   [int]$IntervalSec = 300,
   [int]$DurationMin = 120,
   [int]$BotPort = 7002,
-  [int]$AnalyzerPort = 9500,
+  [int]$AnalyzerPort = 9001,
   [int]$BridgePort = 7810
 )
 

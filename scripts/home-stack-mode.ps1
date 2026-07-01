@@ -1,4 +1,4 @@
-# Resolves home stack ports: production showcase (7002/9500) vs legacy local collection.
+# Resolves home stack ports: production showcase (7002/9001) vs legacy local collection (7800/9500).
 param(
   [string]$RepoRoot = ""
 )

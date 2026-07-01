@@ -1,4 +1,4 @@
-# One-shot recovery: bridge :7810 + global showcase :7002/:9500 (no WMI / no Get-NetTCPConnection).
+# One-shot recovery: bridge :7810 + global showcase :7002/:9001 (no WMI / no Get-NetTCPConnection).
 param([switch]$Quiet)
 
 $ErrorActionPreference = "Continue"

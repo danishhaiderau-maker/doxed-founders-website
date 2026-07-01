@@ -1,5 +1,5 @@
 # Robust full kill of every home-stack process — visible OR hidden, powershell/pwsh/cmd, python, cloudflared.
-# Frees ports 7002/7810/9500 and clears locks/pid files. Leaves nothing behind.
+# Frees ports 7002/7810/9001/9500 (global showcase + local lab) and clears locks/pid files. Leaves nothing behind.
 $ErrorActionPreference = "Continue"
 $repoRoot = "c:\Users\user\Desktop\Final Bots\doxedcryptofounder"
 Set-Location $repoRoot
@@ -37,8 +37,8 @@ Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
 
 Start-Sleep -Seconds 3
 
-# 4) Free ports 7002/7810/9500 - kill anything still listening.
-foreach ($port in 7002,7810,9500) {
+# 4) Free ports 7002/7810/9001/9500 - kill anything still listening.
+foreach ($port in 7002,7810,9001,9500) {
   Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
     Where-Object { $_.LocalPort -eq $port } |
     ForEach-Object {
@@ -58,7 +58,7 @@ Start-Sleep -Seconds 2
 
 Write-Output ("killed: " + ($killed -join ' '))
 Write-Output "=== AFTER KILL ==="
-foreach ($port in 7002,7810,9500) {
+foreach ($port in 7002,7810,9001,9500) {
   $listening = [bool](Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $port })
   Write-Output ("port ${port}: " + $listening)
 }
