@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Fix empty Regime tab: /api/report now searches DATA_ROOT (agent root)
 
 ## Last Activity
 
