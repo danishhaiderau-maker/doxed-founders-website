@@ -15,6 +15,8 @@ import {
   fetchConnectedWorkspaces,
   createConnectedWorkspace,
   deleteConnectedWorkspace,
+  connectAiProvider,
+  connectCursorCloud,
   fetchCopilotSocialDraft,
   createBuildPost,
   syncGitHubCommits,
@@ -89,6 +91,16 @@ type ModelInfo = {
   comingSoon?: boolean;
 };
 
+// Derived capability ladder for connection diagnostics. Each rung tells the
+// user what IS working before flagging what is missing.
+type ConnectionCapabilities = {
+  desktopOnline: boolean;
+  founderNodeOnline: boolean;
+  bridgeActive: boolean;
+  cursorCloudKey: boolean;
+  llmReady: boolean;
+};
+
 const ALL_MODELS: Omit<ModelInfo, 'connected' | 'promo'>[] = [
   { key: 'GLM', label: 'GLM 5.2', provider: 'ZhipuAI', model: 'glm-5.2', contextWindow: '128K', costPerMtokens: '$0.14', strengths: 'Coding · Planning · Cheap' },
   { key: 'OLLAMA', label: 'Local Ollama', provider: 'Self-hosted', model: 'local', contextWindow: 'varies', costPerMtokens: 'Free', strengths: 'Private · Offline · Zero cost', local: true },
@@ -129,6 +141,29 @@ const BRAIN_KEYS = new Set(['OPENAI', 'OPENAI_THINKING', 'ANTHROPIC', 'GEMINI', 
 const MARKETPLACE_KEYS = new Set(['OPENROUTER', 'SURPLUS', 'JATEVO']);
 const PRIVATE_KEYS = new Set(['OLLAMA', 'PHALA']);
 
+// Map a model key to the lowercase provider name expected by the
+// /builder/providers/connect API. OPENAI_THINKING shares the OpenAI credential.
+const PROVIDER_API_NAME: Record<string, string> = {
+  GLM: 'glm',
+  ANTHROPIC: 'anthropic',
+  OPENAI: 'openai',
+  OPENAI_THINKING: 'openai',
+  GEMINI: 'gemini',
+  DEEPSEEK: 'deepseek',
+  GROK: 'grok',
+  OPENROUTER: 'openrouter',
+  SURPLUS: 'surplus',
+  JATEVO: 'jatevo',
+};
+
+// Models that can be connected inline with just an API key. Other runtimes
+// (OpenHands / Ollama / Phala) need a base URL or model and are routed to
+// Settings from the diagnostics panel.
+const INLINE_CONNECTABLE_KEYS = new Set([
+  'CURSOR',
+  ...Object.keys(PROVIDER_API_NAME),
+]);
+
 const NAV_ITEMS = [
   { id: 'workspace', label: 'Workspace' },
   { id: 'repositories', label: 'Repositories' },
@@ -152,6 +187,8 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
   const [connectionsHub, setConnectionsHub] = useState<PlatformConnectionsHub | null>(null);
   const [loading, setLoading] = useState(true);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [diagnosticsKey, setDiagnosticsKey] = useState<string | null>(null);
+  const [inlineConnectKey, setInlineConnectKey] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [activeNav, setActiveNav] = useState<string>('workspace');
   const [chatInput, setChatInput] = useState('');
@@ -499,6 +536,42 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
     }
     return selectedModel ?? null;
   }, [selectedModel, models]);
+
+  // Capability ladder: desktop → Founder Node → bridge → Cursor cloud key →
+  // LLM readiness. Used by the dropdown badges so we never show a flat
+  // "Missing key" error without first showing what IS connected.
+  const capabilities = useMemo<ConnectionCapabilities>(() => {
+    const desktopOnline = Boolean(bridge?.latest);
+    const founderNodeOnline = Boolean(worker?.connections?.founderNode) || desktopOnline;
+    const bridgeActive = Boolean(bridge?.latest?.taskLabel);
+    const cursorCloudKey = Boolean(worker?.connections?.cursor);
+    const llmReady = Boolean(
+      activeBrain &&
+        (settings?.secretsStatus?.credentials?.some(
+          (c) => c.connected && c.provider === (activeBrain.provider ?? '').toLowerCase(),
+        ) ||
+          activeBrain.local || // Ollama runs locally — no key needed
+          activeBrain.key === 'GLM'), // GLM promo may not need a key
+    );
+    return { desktopOnline, founderNodeOnline, bridgeActive, cursorCloudKey, llmReady };
+  }, [bridge, worker, settings, activeBrain]);
+
+  // Inline API key connection — invoked by InlineConnectPanel. Routes to the
+  // existing /builder/providers/connect endpoints, then refreshes state so the
+  // dropdown badge flips to "✓ Connected" without leaving the workspace.
+  const handleInlineConnect = useCallback(
+    async (modelKey: string, apiKey: string) => {
+      if (modelKey === 'CURSOR') {
+        await connectCursorCloud(apiKey, accessToken);
+      } else {
+        const provider = PROVIDER_API_NAME[modelKey];
+        if (!provider) throw new Error('Unsupported provider');
+        await connectAiProvider(provider, apiKey, accessToken);
+      }
+      await load();
+    },
+    [accessToken, load],
+  );
 
   const repo = activity?.repoFullName ?? settings?.repoFullName ?? null;
   const branch = bridge?.latest?.branch ?? activity?.defaultBranch ?? 'main';
@@ -1390,40 +1463,125 @@ export function DevWorkspace({ accessToken, socialPanel, settingsPanel, initialC
             {/* AI Model Dropdown — 5 sections: Execution · Brains · Marketplace · Private · Admin Promo */}
             {modelDropdownOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setModelDropdownOpen(false)} />
+                <div className="fixed inset-0 z-30" onClick={() => { setModelDropdownOpen(false); setDiagnosticsKey(null); setInlineConnectKey(null); }} />
                 <div className="absolute left-3 top-12 z-40 w-80 rounded-xl border border-zinc-700 bg-[#12121a] shadow-2xl">
                   <div className="max-h-[400px] overflow-y-auto py-1">
+                    {/* Inline diagnostics + API key connect — replaces the old
+                        "go to Settings" detour. Shown above the sections when a
+                        disconnected row is being investigated. */}
+                    {diagnosticsKey && (() => {
+                      const diagModel =
+                        [...ideModels, ...models, ...COMING_SOON_IDES, ...PRIVATE_EXTRA].find(
+                          (mm) => mm.key === diagnosticsKey,
+                        ) ?? null;
+                      if (!diagModel) return null;
+                      if (inlineConnectKey === diagnosticsKey) {
+                        return (
+                          <div className="mx-2 mb-2">
+                            <InlineConnectPanel
+                              provider={diagModel.key}
+                              label={diagModel.label}
+                              onSubmit={async (k) => {
+                                await handleInlineConnect(diagModel.key, k);
+                                setInlineConnectKey(null);
+                                setDiagnosticsKey(null);
+                              }}
+                              onCancel={() => setInlineConnectKey(null)}
+                            />
+                          </div>
+                        );
+                      }
+                      return (
+                        <ConnectionDiagnosticsPanel
+                          m={diagModel}
+                          capabilities={capabilities}
+                          inlineConnectable={INLINE_CONNECTABLE_KEYS.has(diagModel.key)}
+                          onPasteKey={() => setInlineConnectKey(diagModel.key)}
+                          onOpenSettings={() => {
+                            setActiveNav('settings');
+                            setModelDropdownOpen(false);
+                            setDiagnosticsKey(null);
+                          }}
+                          onClose={() => setDiagnosticsKey(null)}
+                        />
+                      );
+                    })()}
+
                     {/* ── Section 1: EXECUTION (IDEs / build agents) ── */}
                     <DropdownSectionHeader label="Execution" hint="IDEs · build agents" />
                     {ideModels.map((m) => (
-                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }}
+                      />
                     ))}
                     {COMING_SOON_IDES.map((m) => (
-                      <DropdownModelRow key={m.key} m={m as ModelInfo} selectedKey={selectedModel?.key} onSelect={() => {}} disabled />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m as ModelInfo}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={() => {}}
+                        disabled
+                      />
                     ))}
 
                     {/* ── Section 2: BRAINS (cloud LLM providers) ── */}
                     <DropdownDivider />
                     <DropdownSectionHeader label="Brains" hint="cloud LLM providers" />
                     {models.filter((m) => BRAIN_KEYS.has(m.key)).map((m) => (
-                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }}
+                      />
                     ))}
 
                     {/* ── Section 3: MARKETPLACE (third-party aggregators) ── */}
                     <DropdownDivider />
                     <DropdownSectionHeader label="Marketplace" hint="aggregators · routing" />
                     {models.filter((m) => MARKETPLACE_KEYS.has(m.key)).map((m) => (
-                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }}
+                      />
                     ))}
 
                     {/* ── Section 4: PRIVATE (local / private inference) ── */}
                     <DropdownDivider />
                     <DropdownSectionHeader label="Private" hint="local · TEE · on-device" />
                     {models.filter((m) => PRIVATE_KEYS.has(m.key)).map((m) => (
-                      <DropdownModelRow key={m.key} m={m} selectedKey={selectedModel?.key} onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }} />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={(mm) => { setSelectedModel(mm); setModelDropdownOpen(false); }}
+                      />
                     ))}
                     {PRIVATE_EXTRA.map((m) => (
-                      <DropdownModelRow key={m.key} m={m as ModelInfo} selectedKey={selectedModel?.key} onSelect={() => {}} disabled />
+                      <DropdownModelRow
+                        key={m.key}
+                        m={m as ModelInfo}
+                        selectedKey={selectedModel?.key}
+                        capabilities={capabilities}
+                        onConnect={(mm) => setDiagnosticsKey(mm.key)}
+                        onSelect={() => {}}
+                        disabled
+                      />
                     ))}
 
                     {/* ── Section 5: ADMIN PROMO (always visible) ── */}
@@ -2252,14 +2410,52 @@ function DropdownModelRow({
   selectedKey,
   onSelect,
   disabled,
+  capabilities,
+  onConnect,
 }: {
   m: ModelInfo;
   selectedKey?: string;
   onSelect: (m: ModelInfo) => void;
   disabled?: boolean;
+  capabilities: ConnectionCapabilities;
+  onConnect: (m: ModelInfo) => void;
 }) {
   const selected = selectedKey === m.key;
   const isIDE = Boolean(m.isIDE);
+
+  // Capability-aware status badge. Returns {label, tone, actionable?} or null
+  // when no badge is needed (e.g. already covered by promo/local/connected).
+  const badge = useMemo<null | { label: string; tone: 'emerald' | 'amber' | 'sky' | 'violet' | 'zinc'; actionable?: boolean }>(() => {
+    if (m.comingSoon) return null;
+    if (m.connected) {
+      if (m.promo || m.local) return null;
+      return { label: '✓ Connected', tone: 'emerald' };
+    }
+    if (m.promo) return { label: m.promoLabel ?? '✓ Promo', tone: 'amber' };
+    if (m.local) return { label: '✓ Local', tone: 'emerald' };
+    if (isIDE) {
+      if (capabilities.desktopOnline && capabilities.bridgeActive)
+        return { label: '✓ Desktop live', tone: 'emerald' };
+      if (capabilities.desktopOnline && !capabilities.bridgeActive)
+        return { label: 'Desktop online · bridge idle', tone: 'amber' };
+      if (!capabilities.desktopOnline && capabilities.cursorCloudKey)
+        return { label: 'Cloud key set', tone: 'sky' };
+      return { label: 'Connect', tone: 'violet', actionable: true };
+    }
+    // Brain / marketplace / private row missing a key.
+    if (capabilities.desktopOnline)
+      return { label: 'Desktop live · key needed', tone: 'amber', actionable: true };
+    return { label: 'Connect', tone: 'violet', actionable: true };
+  }, [m, isIDE, capabilities]);
+
+  const toneClass: Record<string, string> = {
+    emerald: 'bg-emerald-500/15 text-emerald-300',
+    amber: 'bg-amber-500/15 text-amber-300',
+    sky: 'bg-sky-500/15 text-sky-300',
+    violet: 'bg-violet-500/15 text-violet-300 hover:bg-violet-500/25',
+    zinc: 'bg-zinc-700/60 text-zinc-400',
+  };
+
   return (
     <button
       type="button"
@@ -2288,16 +2484,14 @@ function DropdownModelRow({
         <div className="flex items-center gap-1.5">
           <span className={`text-xs font-medium ${disabled ? 'text-zinc-500' : 'text-zinc-200'}`}>{m.label}</span>
           {isIDE && <span className="rounded bg-sky-500/15 px-1 py-0.5 text-[8px] font-semibold text-sky-300">IDE</span>}
-          {m.promo && <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[8px] font-semibold text-amber-300">{m.promoLabel ?? 'Promo'}</span>}
-          {m.local && <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Free · Local</span>}
-          {!m.comingSoon && m.connected && !m.promo && !m.local && (
-            <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[8px] font-semibold text-emerald-300">Connected</span>
-          )}
-          {!m.comingSoon && !m.connected && !isIDE && !m.local && !m.promo && (
-            <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Missing key</span>
-          )}
-          {!m.comingSoon && isIDE && !m.connected && (
-            <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[8px] font-semibold text-zinc-400">Connect in Settings</span>
+          {badge && (
+            <span
+              role={badge.actionable ? 'button' : undefined}
+              onClick={badge.actionable && !disabled ? (e) => { e.stopPropagation(); onConnect(m); } : undefined}
+              className={`rounded px-1 py-0.5 text-[8px] font-semibold ${toneClass[badge.tone]} ${badge.actionable ? 'cursor-pointer' : ''}`}
+            >
+              {badge.label}
+            </span>
           )}
           {m.comingSoon && (
             <span className="rounded bg-zinc-800 px-1 py-0.5 text-[8px] font-semibold text-zinc-500">Coming Soon</span>
@@ -2310,6 +2504,187 @@ function DropdownModelRow({
         <p className="mt-0.5 text-[9px] text-zinc-600">{m.strengths}</p>
       </div>
     </button>
+  );
+}
+
+/* ───── Inline API key connect panel ─────
+ * Lets a user paste an API key without leaving the workspace dropdown.
+ * Reuses the existing connectCursorCloud / connectAiProvider APIs. */
+function InlineConnectPanel({
+  provider,
+  label,
+  onSubmit,
+  onCancel,
+}: {
+  provider: string;
+  label: string;
+  onSubmit: (key: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [key, setKey] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-900/80 p-3">
+      <div className="text-[10px] font-semibold text-zinc-300">
+        Connect {label}
+      </div>
+      <div className="mt-1 text-[9px] text-zinc-500">
+        Paste your {label} API key — it&apos;s verified and stored without leaving this workspace.
+      </div>
+      <div className="mt-2">
+        <input
+          type="password"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder={`Paste your ${label} API key`}
+          className="w-full rounded-md bg-zinc-800 px-2 py-1.5 text-[10px] text-zinc-200 outline-none focus:ring-1 focus:ring-violet-500"
+        />
+      </div>
+      {error && <div className="mt-1 text-[9px] text-red-400">{error}</div>}
+      <div className="mt-2 flex gap-2">
+        <button
+          type="button"
+          onClick={async () => {
+            if (!key.trim()) return;
+            setVerifying(true);
+            setError(null);
+            try {
+              await onSubmit(key.trim());
+              setVerifying(false);
+            } catch (err) {
+              setVerifying(false);
+              setError(err instanceof Error ? err.message : 'Connection failed. Check your key.');
+            }
+          }}
+          disabled={verifying || !key.trim()}
+          className="rounded-md bg-violet-600/80 px-3 py-1 text-[10px] text-white hover:bg-violet-600 disabled:opacity-50"
+        >
+          {verifying ? 'Verifying…' : 'Connect'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ───── Connection diagnostics panel ─────
+ * Shown when a user clicks a disconnected dropdown row. Walks the capability
+ * ladder (desktop → Founder Node → bridge → IDE → API key) and surfaces a
+ * one-click fix instead of a flat "Missing key" error. */
+function ConnectionDiagnosticsPanel({
+  m,
+  capabilities,
+  inlineConnectable,
+  onPasteKey,
+  onOpenSettings,
+  onClose,
+}: {
+  m: ModelInfo;
+  capabilities: ConnectionCapabilities;
+  inlineConnectable: boolean;
+  onPasteKey: () => void;
+  onOpenSettings: () => void;
+  onClose: () => void;
+}) {
+  const rows: { label: string; ok: boolean; okLabel: string; badLabel: string }[] = [
+    { label: 'Desktop', ok: capabilities.desktopOnline, okLabel: 'Online', badLabel: 'Offline' },
+    { label: 'Founder Node', ok: capabilities.founderNodeOnline, okLabel: 'Connected', badLabel: 'Not connected' },
+    {
+      label: m.isIDE ? m.label : 'Bridge',
+      ok: m.isIDE ? (capabilities.desktopOnline && capabilities.bridgeActive) : capabilities.bridgeActive,
+      okLabel: m.isIDE ? 'Running' : 'Active',
+      badLabel: m.isIDE ? 'Not running' : 'Idle',
+    },
+  ];
+  if (m.isIDE) {
+    rows.push({
+      label: `${m.label} API`,
+      ok: capabilities.cursorCloudKey,
+      okLabel: 'Connected',
+      badLabel: 'Not connected',
+    });
+  } else if (!m.local) {
+    rows.push({
+      label: `${m.label} API`,
+      ok: m.connected,
+      okLabel: 'Connected',
+      badLabel: 'Not connected',
+    });
+  }
+
+  const missingCount = rows.filter((r) => !r.ok).length;
+  const summary = missingCount === 0
+    ? 'Everything is connected.'
+    : `Everything is connected except ${missingCount === 1 ? 'one item' : `${missingCount} items`}.`;
+
+  const needsSettings = !inlineConnectable;
+
+  return (
+    <div className="mx-2 mb-2 rounded-lg border border-zinc-800 bg-zinc-900/90 p-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] font-semibold text-zinc-200">Connection Status</div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[10px] text-zinc-500 hover:text-zinc-300"
+        >
+          Close
+        </button>
+      </div>
+      <div className="mt-2 space-y-1">
+        {rows.map((r) => (
+          <div key={r.label} className="flex items-center justify-between text-[10px]">
+            <span className="flex items-center gap-1.5">
+              <span className={r.ok ? 'text-emerald-400' : 'text-zinc-600'}>{r.ok ? '✓' : '✗'}</span>
+              <span className="text-zinc-400">{r.label}</span>
+            </span>
+            <span className={r.ok ? 'text-emerald-300' : 'text-zinc-500'}>
+              {r.ok ? r.okLabel : r.badLabel}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[9px] text-zinc-500">{summary}</p>
+      {m.isIDE && !capabilities.cursorCloudKey && (
+        <p className="mt-1 text-[9px] text-zinc-600">
+          Without the {m.label} API key, Founder OS cannot resume {m.label} conversations remotely.
+        </p>
+      )}
+      <div className="mt-2 flex gap-2">
+        {needsSettings ? (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="rounded-md bg-violet-600/80 px-3 py-1 text-[10px] text-white hover:bg-violet-600"
+          >
+            Configure in Settings
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onPasteKey}
+            className="rounded-md bg-violet-600/80 px-3 py-1 text-[10px] text-white hover:bg-violet-600"
+          >
+            Paste {m.label} API Key
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] text-zinc-400 hover:bg-zinc-700"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
   );
 }
 
