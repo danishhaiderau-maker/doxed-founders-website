@@ -163,8 +163,8 @@ if ($tunnelOk) {
   }
 }
 
-# Step 4 — background helpers (wire + supervisor only; user-facing consoles above)
-Write-Step "[4/4] Starting auto-wire + health supervisor (hidden)..."
+# Step 4 — background helpers (wire + supervisor + bridge watchdog; user-facing consoles above)
+Write-Step "[4/4] Starting auto-wire + health supervisor + bridge watchdog (hidden)..."
 if (-not (Test-HomeScriptRunning "auto-wire-after-tunnel.ps1")) {
   Start-HiddenPs1 (Join-Path $scriptDir "auto-wire-after-tunnel.ps1") @("-Quiet")
   $messages.Add("Auto-wire (hidden)")
@@ -177,6 +177,10 @@ if (-not (Test-HomeScriptRunning "relay-state-pusher.ps1")) {
   Start-HiddenPs1 (Join-Path $scriptDir "relay-state-pusher.ps1") @("-BotPort", "$BotPort")
   $messages.Add("Relay state pusher (hidden, 4s → Railway)")
 }
+# Bridge :7810 auto-respawn watchdog — survives terminal closure (detached hidden loop).
+# Best-effort: also registers the DoxxedBridgeWatch scheduled task when run as admin.
+& (Join-Path $scriptDir "register-bridge-watchdog.ps1") -Quiet
+$messages.Add("Bridge watchdog (hidden, 10s poll)")
 
 $summary = ($messages -join " | ")
 Write-Host ""

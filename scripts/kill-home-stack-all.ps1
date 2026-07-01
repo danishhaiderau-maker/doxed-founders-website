@@ -9,7 +9,7 @@ $scriptPatterns = @(
   'start-home-bot','start-home-analyzer','restart-home-tunnel','home-stack-supervisor','relay-state-pusher',
   'auto-wire-after-tunnel','wire-home-bot-background','home-stack-cmd-worker','home-stack-control-panel',
   'home-stack-watch','overnight-architecture-guard','tunnel-watchdog','start-local-collection','reset-home-stack',
-  'home-stack-start-all','home-stack-mode'
+  'home-stack-start-all','home-stack-mode','bridge-watchdog'
 )
 $killed = New-Object System.Collections.Generic.List[string]
 
@@ -53,6 +53,8 @@ Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.pid") -Force -ErrorActi
 Remove-Item (Join-Path $repoRoot ".home-stack-supervisor.lock") -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $repoRoot ".home-relay-pusher.lock") -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $repoRoot ".home-bot.pid") -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $repoRoot ".home-bridge-watchdog.lock") -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $repoRoot ".home-bridge-watchdog.pid") -Force -ErrorAction SilentlyContinue
 
 Start-Sleep -Seconds 2
 
