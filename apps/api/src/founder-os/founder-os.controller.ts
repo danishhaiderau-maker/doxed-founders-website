@@ -6,12 +6,14 @@ import { AuthUser } from '../auth/auth.types';
 import { Public } from '../auth/public.decorator';
 import { FounderOsService } from './founder-os.service';
 import { GithubAutoSyncService } from './github-auto-sync.service';
+import { FounderPromoService } from './founder-promo.service';
 
 @Controller('founder-os')
 export class FounderOsController {
   constructor(
     private readonly founderOs: FounderOsService,
     private readonly githubSync: GithubAutoSyncService,
+    private readonly founderPromo: FounderPromoService,
   ) {}
 
   @Get('dashboard')
@@ -224,4 +226,11 @@ export class FounderOsController {
   ) {
     return this.founderOs.awardBounty(user.id, bountyId, body.awardeeUserId);
   }
+  @Get('platform-brain')
+  platformBrainStatus() { return this.founderPromo.getPlatformBrainStatus(); }
+  @Post('platform-brain')
+  savePlatformBrain(@CurrentUser() user: AuthUser, @Body() body: { apiKey: string }) { return this.founderPromo.savePlatformBrainKey(user.id, body.apiKey); }
+  @Post('platform-brain/remove')
+  removePlatformBrain(@CurrentUser() user: AuthUser) { return this.founderPromo.removePlatformBrainKey(user.id); }
+
 }

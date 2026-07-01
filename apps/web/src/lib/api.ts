@@ -5263,6 +5263,18 @@ export type BridgeWorkspace = import('@dcf/utils').BridgeWorkspace;
 export function fetchIdeBridgeWorkspaces(token: string) {
   return apiFetch<BridgeWorkspace[]>('/ide-bridge/workspaces', undefined, token);
 }
+export type PlatformBrainStatus = { configured: boolean; updatedAt: string | null };
+
+export function fetchPlatformBrainStatus(token: string) {
+  return apiFetch<PlatformBrainStatus>('/founder-os/platform-brain', undefined, token);
+}
+export function savePlatformBrainKey(token: string, apiKey: string) {
+  return apiFetch<PlatformBrainStatus>('/founder-os/platform-brain', { method: 'POST', body: JSON.stringify({ apiKey }) }, token);
+}
+export function removePlatformBrainKey(token: string) {
+  return apiFetch<PlatformBrainStatus>('/founder-os/platform-brain/remove', { method: 'POST' }, token);
+}
+
 
 export type QueueActionResult = {
   action: 'publish' | 'dispatch_build' | 'merge_pr' | 'sync';
