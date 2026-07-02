@@ -31,6 +31,12 @@ $pidFile   = Join-Path $repoRoot ".home-bot.pid"
 $lockFile  = Join-Path $repoRoot ".home-bot-auto-restart.lock"
 $restartLog = Join-Path $logsDir "bot_restarts.log"
 
+# Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
+# dot-sources the same file; we mirror it so this monitor stands down when the user
+# clicks Stop (which sets the .home-stack-user-stopped flag) instead of relaunching
+# the bot and undoing the user's stop.
+. (Join-Path $scriptDir "home-stack-common.ps1") -BotPort $Port -AnalyzerPort 9001 -BridgePort 7810
+
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 
 # --- Single-instance lock ----------------------------------------------------
@@ -179,6 +185,14 @@ try {
     Write-RestartLog "crashed	pid=$currentPid	code=$code	consecutive=$consecutiveCrashes	cooldown=${cooldown}s	restarting"
 
     Start-Sleep -Seconds $cooldown
+
+    # User clicked Stop while we were in cooldown -> stand down instead of relaunching.
+    # Stop force-kills python (non-zero exit) so without this guard we would treat the
+    # user's Stop as a crash and immediately undo it. Mirrors home-stack-supervisor.ps1.
+    if (Test-HomeStackUserStopped) {
+      Write-RestartLog "user_stopped	pid=$currentPid	code=$code	standing_down_no_relaunch"
+      break
+    }
 
     # Re-launch.
     $newPid = Start-BotHidden

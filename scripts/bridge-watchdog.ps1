@@ -39,6 +39,15 @@ try {
   }
 } catch { Add-Content -Path $logFile -Value ("{0} tunnel-mode resolve failed (defaulting TunnelEnabled=true): {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.Message) -ErrorAction SilentlyContinue }
 
+# Shared helpers (Test-HomeStackUserStopped / Set-HomeStackUserStopped). The supervisor
+# dot-sources the same file; we mirror it so this watchdog stands down when the user
+# clicks Stop (which sets the .home-stack-user-stopped flag) instead of respawning the
+# bridge/tunnel and undoing the user's stop. The scheduled task (DoxxedBridgeWatch) can
+# re-invoke us within the stop window, so the guard is checked on every relaunch path.
+try {
+  . (Join-Path $scriptDir "home-stack-common.ps1") -BotPort 7002 -AnalyzerPort 9001 -BridgePort $BridgePort
+} catch { Add-Content -Path $logFile -Value ("{0} home-stack-common load failed (Test-HomeStackUserStopped unavailable): {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.Message) -ErrorAction SilentlyContinue }
+
 function Wd-Log([string]$msg) {
   $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
   Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
@@ -144,19 +153,24 @@ while ((Get-Date) -lt $deadline) {
     if ($since -lt $RelaunchCooldownSec) {
       Wd-Log "bridge DOWN but cooldown $([int]$since)s/${RelaunchCooldownSec}s - waiting"
     } else {
-      Wd-Log "bridge DOWN on :$BridgePort - relaunching via ensure-home-bridge.ps1"
-      try {
-        # Repo path contains a space ("Final Bots"); build the arg list as a
-        # single string with a quoted -File path, otherwise Start-Process
-        # splits the path on the space and the relaunch silently fails.
-        $bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
-        $bridgeArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bridgeScript`" -Quiet"
-        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $bridgeArgString -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
-        if ($p) { Wd-Log "ensure-home-bridge launched pid=$($p.Id)" }
-      } catch {
-        Wd-Log "relaunch FAILED: $($_.Exception.Message)"
+      if (Test-HomeStackUserStopped) {
+        Wd-Log "bridge DOWN on :$BridgePort but user stopped stack - standing down, no relaunch"
+        $lastRelaunch = Get-Date
+      } else {
+        Wd-Log "bridge DOWN on :$BridgePort - relaunching via ensure-home-bridge.ps1"
+        try {
+          # Repo path contains a space ("Final Bots"); build the arg list as a
+          # single string with a quoted -File path, otherwise Start-Process
+          # splits the path on the space and the relaunch silently fails.
+          $bridgeScript = Join-Path $scriptDir "ensure-home-bridge.ps1"
+          $bridgeArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$bridgeScript`" -Quiet"
+          $p = Start-Process -FilePath "powershell.exe" -ArgumentList $bridgeArgString -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
+          if ($p) { Wd-Log "ensure-home-bridge launched pid=$($p.Id)" }
+        } catch {
+          Wd-Log "relaunch FAILED: $($_.Exception.Message)"
+        }
+        $lastRelaunch = Get-Date
       }
-      $lastRelaunch = Get-Date
     }
   }
 
@@ -183,6 +197,9 @@ while ((Get-Date) -lt $deadline) {
       $tSince = ((Get-Date) - $lastTunnelRelaunch).TotalSeconds
       if ($tSince -lt $TunnelRelaunchCooldownSec) {
         Wd-Log "tunnel respawn skipped - cooldown $([int]$tSince)s/${TunnelRelaunchCooldownSec}s"
+      } elseif (Test-HomeStackUserStopped) {
+        Wd-Log "tunnel respawn skipped - user stopped stack, standing down"
+        $lastTunnelRelaunch = Get-Date
       } else {
         Wd-Log "tunnel respawn -> bridge /cmd/start-tunnel"
         $ok = Restart-Tunnel

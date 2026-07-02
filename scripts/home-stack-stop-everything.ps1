@@ -43,7 +43,11 @@ $scriptPatterns = @(
   'relay-state-pusher','auto-wire-after-tunnel','wire-home-bot-background','home-stack-cmd-worker',
   'home-stack-control-panel','home-stack-start-everything','home-stack-stop-everything',
   'home-stack-start-all','home-stack-watch','tunnel-watchdog','overnight-architecture-guard',
-  'reset-home-stack','home-stack-mode','home-stack-launcher'
+  'reset-home-stack','home-stack-mode','home-stack-launcher',
+  # Detached/hidden crash monitors launched by start-home-bot / start-home-analyzer /
+  # the bridge watchdog scheduled task. They relaunch the bot/analyzer/tunnel on crash,
+  # so Stop MUST kill them too, otherwise they immediately undo the user's Stop.
+  'bot-auto-restart','analyzer-auto-restart','bridge-watchdog'
 )
 
 $killed = New-Object System.Collections.Generic.List[string]
