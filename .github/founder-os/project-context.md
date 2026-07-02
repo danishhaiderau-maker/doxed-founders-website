@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(founder-node): bump to v0.6.2 for Cursor chat session discovery release
 
 ## Last Activity
 
