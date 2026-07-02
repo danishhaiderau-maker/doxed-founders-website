@@ -467,6 +467,8 @@ model User {
   aiTokenUsageLogs     AiTokenUsageLog[]
   messagesSent         PlatformMessage[] @relation("MessageFrom")
   messagesReceived     PlatformMessage[] @relation("MessageTo")
+  wallMessages         ProjectWallMessage[]
+  wallPins             ProjectWallPin[]
   referredBy           User?  @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
   referrals            User[] @relation("UserReferrals")
 
@@ -665,6 +667,8 @@ model Project {
   investigations   ProjectInvestigation[]
   trustReports     ProjectTrustReport[]
   aiTokenUsageLogs AiTokenUsageLog[]
+  wallMessages     ProjectWallMessage[]
+  wallPins         ProjectWallPin[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -2523,4 +2527,44 @@ model FounderVaultItem {
 
   @@index([userId])
   @@index([userId, createdAt])
+}
+
+/// Telegram-style wall message on a project's community chat hub.
+/// Founders and investors who have joined (followed) the project can post.
+model ProjectWallMessage {
+  id          String   @id @default(cuid())
+  projectId   String
+  authorId    String
+  body        String   @db.Text
+  /// Origin of the message — direct chat or cross-posted from the social hub / build feed.
+  source      String   @default("chat")
+  /// When cross-posted, references the originating entity (e.g. build post id).
+  sourceRefId String?
+  createdAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  pin     ProjectWallPin?
+
+  @@index([projectId, createdAt])
+  @@index([authorId])
+  @@index([source])
+}
+
+/// A DDollar-funded subtopic upgrade (pin / highlight / promote) on a wall message.
+model ProjectWallPin {
+  id          String   @id @default(cuid())
+  messageId   String   @unique
+  projectId   String
+  userId      String
+  kind        String   @default("pin")
+  cost        Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  message ProjectWallMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  project Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
 }

@@ -41,6 +41,7 @@ import {
 } from './founder-build-streak.helper';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
+import { WallService } from '../wall/wall.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { UserXPostingService } from '../x-social/user-x-posting.service';
 import { FounderOsIntegrationService } from './founder-os-integration.service';
@@ -67,6 +68,7 @@ export class FounderOsService {
     private readonly platformConnections: PlatformConnectionsService,
     private readonly founderCloud: FounderCloudService,
     private readonly founderPromo: FounderPromoService,
+    private readonly wall: WallService,
   ) {}
 
   async getPublicPromoTeaser() {
@@ -827,6 +829,14 @@ export class FounderOsService {
         communityThreadId = thread.id;
         await this.points.award(userId, POINTS.FOUNDER_COMMUNITY_POST, 'FOUNDER_COMMUNITY_POST');
         results.community = { ok: true, threadId: thread.id };
+        // Cross-post bridge: social hub publish also surfaces on the project wall.
+        await this.wall.crossPostFromSource({
+          projectId: project.id,
+          authorId: userId,
+          body: `${ann.title}\n${ann.body}`,
+          source: 'social_hub',
+          sourceRefId: thread.id,
+        });
       } catch (err) {
         results.community = {
           ok: false,
