@@ -26,7 +26,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, jsonify, render_template_string, request, send_file, make_response
 import ccxt
 import websocket
 import signal
@@ -5317,6 +5317,94 @@ CHASE_EFFICIENCY_MATRIX_FILE = "chase_efficiency_matrix_report.json"
 SPREAD_BUCKET_ORDER = ("1", "2", "3", "4", "5+")
 
 
+# --- Spread gate (hard order-placement block) ---------------------------------
+# Global per-spread-bucket toggle. When a bucket int is in `_disabled_spread_buckets`,
+# `_place_simulated_limit_order` skips submitting the limit order (sim AND Bitfinex
+# live) and just logs + marks the signal BLOCKED. Default = empty set (all allowed).
+# Buckets are integer conviction/directional spread values clamped to [0, 7]; 7 == "7+".
+SPREAD_GATE_CONFIG_FILE = "spread-gate.json"
+SPREAD_GATE_KNOWN_BUCKETS = [0, 1, 2, 3, 4, 5, 6, 7]
+_disabled_spread_buckets = set()  # set[int] — disabled bucket ints
+_spread_gate_lock = threading.Lock()
+
+
+def _spread_gate_clamp(spread) -> int:
+    """Clamp a raw spread value to a known bucket int (7 == 7+)."""
+    try:
+        s = int(spread or 0)
+    except (TypeError, ValueError):
+        s = 0
+    if s < 0:
+        s = 0
+    if s > SPREAD_GATE_KNOWN_BUCKETS[-1]:
+        s = SPREAD_GATE_KNOWN_BUCKETS[-1]
+    return s
+
+
+def _load_spread_gate_config() -> None:
+    """Read spread-gate.json from the agent root (CWD). Missing/invalid => empty set."""
+    global _disabled_spread_buckets
+    cleaned: set = set()
+    try:
+        with open(SPREAD_GATE_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        buckets = data.get("disabled_buckets") or []
+        if isinstance(buckets, list):
+            for b in buckets:
+                try:
+                    cleaned.add(int(b))
+                except (TypeError, ValueError):
+                    continue
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        cleaned = set()
+    with _spread_gate_lock:
+        _disabled_spread_buckets = cleaned
+
+
+def _save_spread_gate_config(disabled: set) -> None:
+    payload = {"disabled_buckets": sorted(int(x) for x in disabled)}
+    tmp = SPREAD_GATE_CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, SPREAD_GATE_CONFIG_FILE)
+
+
+def _set_disabled_spread_buckets(buckets) -> list:
+    """Replace the in-memory disabled set + persist to spread-gate.json. Returns sorted list."""
+    cleaned: set = set()
+    for b in buckets or []:
+        try:
+            cleaned.add(int(b))
+        except (TypeError, ValueError):
+            continue
+    with _spread_gate_lock:
+        _disabled_spread_buckets = cleaned
+    try:
+        _save_spread_gate_config(cleaned)
+    except OSError as exc:
+        logger.warning(f"[SPREAD GATE] persist failed: {exc} [PIPELINE ENFORCEMENT]")
+    return sorted(cleaned)
+
+
+def _disabled_spread_buckets_snapshot() -> set:
+    with _spread_gate_lock:
+        return set(_disabled_spread_buckets)
+
+
+def _spread_gate_blocks_signal(signal: dict):
+    """Return (blocked_bool, bucket_int) for a signal's directional/conviction spread."""
+    spread = signal.get("directional_spread")
+    if spread is None:
+        spread = signal.get("conviction_spread")
+    bucket = _spread_gate_clamp(spread)
+    return bucket in _disabled_spread_buckets_snapshot(), bucket
+
+
+# Load persisted gate state at module init (defaults to empty set if no file).
+_load_spread_gate_config()
+SPREAD_GATE_BUCKET_ORDER = ("0", "1", "2", "3", "4", "5+")
+
+
 def _resolve_analytics_report_path(filename: str) -> str:
     """Prefer agent root, then research/ — analyzer writes both during collection."""
     if os.path.isabs(filename):
@@ -5616,6 +5704,7 @@ state = {
     "ai_threshold": 50,
     "ai_execution_bands": None,
     "chase_execution_buckets": None,
+    "spread_gate": None,
     "consecutive_losses": 0,
     "loss_pause_until": 0.0,
     "edge_threshold": 3.0,
@@ -10917,6 +11006,69 @@ def chase_bucket_allowed(chase_count) -> bool:
     return bool(buckets.get(bucket, False))
 
 
+def _spread_gate_bucket(spread) -> str:
+    try:
+        s = int(spread)
+    except (TypeError, ValueError):
+        s = 0
+    if s >= 5:
+        return "5+"
+    if s < 0:
+        return "0"
+    return str(s)
+
+
+def _default_spread_gate() -> dict:
+    """Default: spread 0,1,2,3 BLOCKED (unchecked); 4 and 5+ ALLOWED (checked)."""
+    return {k: (k not in ("0", "1", "2", "3")) for k in SPREAD_GATE_BUCKET_ORDER}
+
+
+def get_spread_gate() -> dict:
+    with state_lock:
+        raw = state.get("spread_gate")
+    if not isinstance(raw, dict):
+        return _default_spread_gate()
+    out = _default_spread_gate()
+    for k in out:
+        if k in raw:
+            out[k] = bool(raw[k])
+    return out
+
+
+def set_spread_gate(gate: dict):
+    out = _default_spread_gate()
+    if isinstance(gate, dict):
+        for k in out:
+            if k in gate:
+                out[k] = bool(gate[k])
+    with state_lock:
+        state["spread_gate"] = out
+        save_persistent_config()
+    enabled = [k for k, v in out.items() if v]
+    logger.info(f"[SET] Spread gate allowed buckets={enabled} [PIPELINE ENFORCEMENT]")
+
+
+def spread_gate_allows(spread) -> bool:
+    bucket = _spread_gate_bucket(spread)
+    gate = get_spread_gate()
+    return bool(gate.get(bucket, False))
+
+
+def _signal_directional_spread(signal: dict, ai: dict) -> int:
+    direction = str((signal or {}).get("final_direction") or _signal_direction(signal) or "LONG").upper()
+    ai = ai or {}
+    bull = int(ai.get("bull_score") or signal.get("bull_score_at_entry") or 0)
+    bear = int(ai.get("bear_score") or signal.get("bear_score_at_entry") or 0)
+    return bull - bear if direction == "LONG" else bear - bull
+
+
+def _signal_spread_gate_blocked(signal: dict, ai: dict) -> tuple:
+    """Returns (blocked, bucket, spread). blocked=True means limit submit must be skipped."""
+    spread = _signal_directional_spread(signal, ai or {})
+    bucket = _spread_gate_bucket(spread)
+    return (not spread_gate_allows(spread)), bucket, spread
+
+
 def dashboard_chase_bucket_blocks(chase_count) -> bool:
     """Hard dashboard gate — blocks limit submit, chase steps, and fills for this chase count."""
     return not chase_bucket_allowed(chase_count)
@@ -10970,6 +11122,7 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
     """Snapshot of dashboard execution gates for API / logging."""
     bands = get_ai_execution_bands()
     chase = get_chase_execution_buckets()
+    sg = get_spread_gate()
     mn = min_enabled_chase_count()
     with state_lock:
         lev = int(state.get("leverage") or DEFAULT_RESEARCH_LEVERAGE)
@@ -10983,6 +11136,8 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
         "ai_reviewer_enabled": ai_on,
         "ai_bands_enabled": [k for k, v in bands.items() if v],
         "chase_buckets_enabled": [k for k, v in chase.items() if v],
+        "spread_gate_allowed": [k for k, v in sg.items() if v],
+        "spread_gate_blocked": [k for k, v in sg.items() if not v],
         "min_chase_count_to_submit": mn,
         "virtual_defer_active": dashboard_virtual_defer_required(),
         "virtual_chase_count": vcount,
@@ -11018,6 +11173,14 @@ def evaluate_dashboard_execution_gate(
 
     if not lane_orders_allowed(lane):
         return False, "LANE_DISABLED", False
+
+    sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
+    if sg_blocked:
+        logger.info(
+            f"[SPREAD GATE] spread_bucket={sg_bucket} spread={sg_spread} blocked "
+            f"trade_id={signal.get('trade_id')} — skipping limit order [PIPELINE ENFORCEMENT]"
+        )
+        return False, "SPREAD_BUCKET_BLOCKED", False
 
     win_prob = _signal_ai_win_prob(signal, ai)
     if dashboard_ai_band_blocks(win_prob):
@@ -12022,6 +12185,20 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             f"[SIM] BLOCK limit lane={lane} toggle OFF trade_id={signal.get('trade_id')} "
             f"[PIPELINE ENFORCEMENT]"
         )
+        return False
+    _spread_blocked, _spread_bucket = _spread_gate_blocks_signal(signal)
+    if _spread_blocked:
+        logger.info(
+            f"[SPREAD GATE] bucket={_spread_bucket} disabled -> skipping limit order "
+            f"for trade_id={signal.get('trade_id')} lane={lane} "
+            f"directional_spread={signal.get('directional_spread')} "
+            f"conviction_spread={signal.get('conviction_spread')} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = f"SPREAD_GATE_BUCKET_{_spread_bucket}"
+        signal["exit_reason"] = f"SPREAD_GATE_BUCKET_{_spread_bucket}"
+        signal["order_placed"] = False
         return False
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return False
@@ -16878,6 +17055,10 @@ HTML = """<!DOCTYPE html>
 <h3>Spread Analytics — directional spread (0-chase fills)</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">From analyzer chase matrix — spread 4/5+ often strongest. Updates each analyzer run (~30 min).</p>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Spread</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spreadBucketStats"></tbody></table>
+<h3>Spread hard-gate — block limit orders per spread bucket</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global per-spread-bucket allowlist. <strong>Checked</strong> = signals with that directional spread MAY place a limit order. <strong>Unchecked</strong> = hard block — no limit order, no chase (signal still logged for analytics). Default: 0,1,2,3 unchecked. Persists across restarts.</p>
+<p id="spreadGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
+<div id="spreadGateControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
   <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
 </p>
@@ -17124,6 +17305,11 @@ DASHBOARD_JS = """(function () {
         syncChaseBucketControls(prefs.chase_execution_buckets);
         renderChaseBucketGateStatus(prefs.chase_execution_buckets);
       }
+      if (prefs.spread_gate) {
+        ensureSpreadGateControls();
+        syncSpreadGateControls(prefs.spread_gate);
+        renderSpreadGateStatus(prefs.spread_gate);
+      }
       if (prefs.ai_execution_bands) {
         syncAiBandControls(prefs.ai_execution_bands);
         renderAiBandGateStatus(prefs.ai_execution_bands);
@@ -17134,6 +17320,11 @@ DASHBOARD_JS = """(function () {
       if (chase && typeof chase === 'object') patch.chase_execution_buckets = chase;
       if (bands && typeof bands === 'object') patch.ai_execution_bands = bands;
       if (Object.keys(patch).length > 1) saveDashPrefs(patch);
+    }
+    function persistSpreadGatePrefs(gate) {
+      const patch = { execution_gates_saved_at: Date.now() };
+      if (gate && typeof gate === 'object') patch.spread_gate = gate;
+      saveDashPrefs(patch);
     }
     function executionGatePrefsEqual(a, b) {
       if (!a || !b) return false;
@@ -17151,6 +17342,9 @@ DASHBOARD_JS = """(function () {
         }
         if (prefs.chase_execution_buckets) {
           await post('/api/set_chase_buckets', {buckets: prefs.chase_execution_buckets});
+        }
+        if (prefs.spread_gate) {
+          await post('/api/set_spread_gate', {gate: prefs.spread_gate});
         }
       } finally {
         executionControlSaveCount -= 1;
@@ -17174,6 +17368,14 @@ DASHBOARD_JS = """(function () {
             navigator.sendBeacon('/api/set_chase_buckets', new Blob([body], {type: 'application/json'}));
           } else {
             fetch('/api/set_chase_buckets', {method: 'POST', headers, body, keepalive: true});
+          }
+        }
+        if (prefs.spread_gate) {
+          const body = JSON.stringify({gate: prefs.spread_gate});
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/set_spread_gate', new Blob([body], {type: 'application/json'}));
+          } else {
+            fetch('/api/set_spread_gate', {method: 'POST', headers, body, keepalive: true});
           }
         }
       } catch (e) {}
@@ -17339,6 +17541,60 @@ DASHBOARD_JS = """(function () {
             syncChaseBucketControls(body.chase_execution_buckets);
             renderChaseBucketGateStatus(body.chase_execution_buckets);
             persistExecutionGatePrefs(body.chase_execution_buckets, null);
+          }
+        }
+      } finally {
+        executionControlSaveCount -= 1;
+      }
+    }
+    function readSpreadGateSelections() {
+      const out = {};
+      document.querySelectorAll('.spread-gate-cb').forEach(cb => {
+        out[cb.dataset.bucket] = cb.checked;
+      });
+      return out;
+    }
+    function ensureSpreadGateControls() {
+      const host = document.getElementById('spreadGateControls');
+      if (!host || host.dataset.ready === '1') return;
+      const order = ['0','1','2','3','4','5+'];
+      const labels = {'0':'spread 0','1':'spread 1','2':'spread 2','3':'spread 3','4':'spread 4','5+':'spread 5+'};
+      host.innerHTML = order.map(k =>
+        `<label><input type="checkbox" class="spread-gate-cb" data-bucket="${k}" onchange="updateSpreadGate()"> ${labels[k] || k}</label>`
+      ).join('');
+      host.dataset.ready = '1';
+    }
+    function syncSpreadGateControls(gate) {
+      ensureSpreadGateControls();
+      if (!gate || typeof gate !== 'object') return;
+      document.querySelectorAll('.spread-gate-cb').forEach(cb => {
+        const key = cb.dataset.bucket;
+        if (key in gate) cb.checked = !!gate[key];
+      });
+    }
+    function renderSpreadGateStatus(gate) {
+      const el = document.getElementById('spreadGateStatus');
+      if (!el || !gate) return;
+      const allowed = Object.keys(gate).filter(k => gate[k]);
+      const blocked = Object.keys(gate).filter(k => !gate[k]);
+      el.innerHTML = blocked.length
+        ? `<strong>Blocked spread buckets:</strong> ${blocked.join(', ')} · <strong>Allowed:</strong> ${allowed.join(', ')} · unchecked = no limit order for that spread`
+        : '<strong style="color:#3fb950">All spread buckets ALLOWED — spread gate is open</strong>';
+    }
+    async function updateSpreadGate() {
+      const gate = readSpreadGateSelections();
+      persistSpreadGatePrefs(gate);
+      renderSpreadGateStatus(gate);
+      markExecutionControlsBusy();
+      executionControlSaveCount += 1;
+      try {
+        const res = await post('/api/set_spread_gate', {gate});
+        if (res && res.ok) {
+          const body = await res.json();
+          if (body.spread_gate) {
+            syncSpreadGateControls(body.spread_gate);
+            renderSpreadGateStatus(body.spread_gate);
+            persistSpreadGatePrefs(body.spread_gate);
           }
         }
       } finally {
@@ -18274,6 +18530,18 @@ DASHBOARD_JS = """(function () {
               renderChaseBucketGateStatus(prefs.chase_execution_buckets);
             }
           }
+          if (d.spread_gate) {
+            const useServerSg = !recentLocal || !prefs.spread_gate
+              || executionGatePrefsEqual(prefs.spread_gate, d.spread_gate);
+            if (useServerSg) {
+              syncSpreadGateControls(d.spread_gate);
+              renderSpreadGateStatus(d.spread_gate);
+              persistSpreadGatePrefs(d.spread_gate);
+            } else {
+              syncSpreadGateControls(prefs.spread_gate);
+              renderSpreadGateStatus(prefs.spread_gate);
+            }
+          }
         }
         renderChaseAnalyticsPanel(d.chase_analytics || {});
         renderSpreadAnalyticsPanel(d.spread_analytics || {});
@@ -18628,11 +18896,13 @@ DASHBOARD_JS = """(function () {
     window.updateEdge = updateEdge;
     window.updateAiBands = updateAiBands;
     window.updateChaseBuckets = updateChaseBuckets;
+    window.updateSpreadGate = updateSpreadGate;
     document.addEventListener('change', function (ev) {
       const t = ev.target;
       if (!t || !t.classList) return;
       if (t.classList.contains('ai-band-cb')) updateAiBands();
       if (t.classList.contains('chase-bucket-cb')) updateChaseBuckets();
+      if (t.classList.contains('spread-gate-cb')) updateSpreadGate();
     });
   } catch (e) {
     console.error("DASHBOARD BOOT FAILURE", e);
@@ -19312,6 +19582,7 @@ def api_relay_state():
             "signals": active_list,
         }
         snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
+        snapshot["spread_gate"] = get_spread_gate()
         snapshot["ai_execution_bands"] = get_ai_execution_bands()
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         _enrich_orders_for_relay(snapshot)
@@ -19597,6 +19868,7 @@ def _build_api_state_snapshot():
         snapshot["ai_verdict"] = _ai_execution_verdict_text()
         snapshot["ai_execution_bands"] = get_ai_execution_bands()
         snapshot["chase_execution_buckets"] = get_chase_execution_buckets()
+        snapshot["spread_gate"] = get_spread_gate()
         snapshot["dashboard_execution_gates"] = get_dashboard_execution_status()
         snapshot["chase_analytics"] = _load_chase_analytics_snapshot()
         snapshot["spread_analytics"] = _load_spread_analytics_snapshot()
@@ -20073,6 +20345,60 @@ def set_chase_buckets():
         return jsonify({"status": "error", "msg": "buckets object required"}), 400
     set_chase_execution_buckets(buckets)
     return jsonify({"status": "ok", "chase_execution_buckets": get_chase_execution_buckets()})
+
+
+@app.route('/api/spread-gate', methods=['GET', 'POST', 'OPTIONS'])
+def api_spread_gate():
+    """Hard spread-bucket gate — per-spread-bucket allow/deny for limit order placement.
+
+    GET  -> {disabled_buckets:[int], known_buckets:[int]}
+    POST {disabled_buckets:[int]} -> persists spread-gate.json + updates in-memory set.
+    Ticked (allowed) = NOT in disabled_buckets; unticked (disabled) = in disabled_buckets.
+    Cross-origin enabled so the apps/web founder dashboard can toggle it directly.
+    """
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return resp
+
+    if request.method == 'GET':
+        disabled = _disabled_spread_buckets_snapshot()
+        resp = jsonify({
+            "disabled_buckets": sorted(disabled),
+            "known_buckets": list(SPREAD_GATE_KNOWN_BUCKETS),
+        })
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+
+    data = request.get_json() or {}
+    buckets = data.get("disabled_buckets")
+    if not isinstance(buckets, list):
+        resp = jsonify({"status": "error", "msg": "disabled_buckets list required"})
+        resp.status_code = 400
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    new_disabled = _set_disabled_spread_buckets(buckets)
+    logger.info(
+        f"[SPREAD GATE] updated disabled_buckets={new_disabled} [PIPELINE ENFORCEMENT]"
+    )
+    resp = jsonify({
+        "status": "ok",
+        "disabled_buckets": new_disabled,
+        "known_buckets": list(SPREAD_GATE_KNOWN_BUCKETS),
+    })
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+@app.route('/api/set_spread_gate', methods=['POST'])
+def set_spread_gate_api():
+    data = request.get_json() or {}
+    gate = data.get("gate")
+    if not isinstance(gate, dict):
+        return jsonify({"status": "error", "msg": "gate object required"}), 400
+    set_spread_gate(gate)
+    return jsonify({"status": "ok", "spread_gate": get_spread_gate()})
 
 @app.route('/api/set_edge_threshold', methods=['POST'])
 def api_set_edge_threshold():
@@ -21982,6 +22308,7 @@ def _persistent_config_keys():
         "invert_signal", "debug_enabled", "live_armed", "bitfinex_live_enabled", "account_balance",
         "min_confidence",
         "force_ai_every_signal", "ai_threshold", "ai_execution_bands", "chase_execution_buckets",
+        "spread_gate",
         "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode",
         "profit_gates_lane_enabled",
@@ -22108,6 +22435,16 @@ def load_persistent_config():
                         if k in raw_chase:
                             out[k] = bool(raw_chase[k])
                 state["chase_execution_buckets"] = out
+            if state.get("spread_gate") is None:
+                state["spread_gate"] = _default_spread_gate()
+            else:
+                raw_sg = state.get("spread_gate")
+                out_sg = _default_spread_gate()
+                if isinstance(raw_sg, dict):
+                    for k in out_sg:
+                        if k in raw_sg:
+                            out_sg[k] = bool(raw_sg[k])
+                state["spread_gate"] = out_sg
         logger.info(f"Loaded persistent config from {config_path} - ai_threshold restored")
 
 def save_persistent_config():
