@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(monitor): use timed WaitForExit so heartbeat refreshes while bot is alive
 
 ## Last Activity
 
