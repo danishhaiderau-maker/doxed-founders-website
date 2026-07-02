@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-node): bump to v0.6.2 for Cursor chat session discovery release
+feat(brain): remove roadmap constraints — Founder OS is fully dynamic
 
 ## Last Activity
 
