@@ -38,6 +38,7 @@ import {
 import { defaultOllamaConfig, probeOllama } from './ollama-client';
 import { processPendingInference } from './inference-client';
 import { maybeRebuildVectorIndex, processPendingSyncJobs } from './sync-jobs-client';
+import { processPendingDispatches } from './cursor-dispatch';
 import {
   buildVaultEncryptedBlob,
   deriveVaultKey,
@@ -415,6 +416,13 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     if (merged > 0) {
       notifyDesktop('Founder Vault synced', `Applied ${merged} update(s) from your other device.`);
     }
+
+    // Relay any pending IDE dispatches (Founder OS sidebar → local Cursor).
+    // Fire-and-forget so a slow SendKeys sequence doesn't block the next
+    // heartbeat; errors are logged inside the helper.
+    void processPendingDispatches(vaultRoot).catch((err) =>
+      console.warn('Pending dispatch cycle failed:', err),
+    );
 
     lastSyncOkAt = new Date();
     lastSyncError = null;

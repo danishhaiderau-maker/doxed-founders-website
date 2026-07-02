@@ -7,9 +7,14 @@ import { FounderNodeSyncService } from './founder-node-sync.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { FounderNodeService } from './founder-node.service';
 import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
+import { IdeBridgeModule } from '../ide-bridge/ide-bridge.module';
 
 @Module({
-  imports: [forwardRef(() => EventsModule), DesktopBridgeModule],
+  imports: [
+    forwardRef(() => EventsModule),
+    DesktopBridgeModule,
+    forwardRef(() => IdeBridgeModule),
+  ],
   controllers: [FounderNodeController],
   providers: [
     FounderNodeService,

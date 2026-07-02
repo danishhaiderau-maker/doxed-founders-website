@@ -14,6 +14,7 @@ import {
   fetchIdeBridgeSessions,
   fetchIdeBridgeWorkspaces,
   fetchRecentAgents,
+  dispatchToIdeSession,
   type BridgeSession,
   type ConnectedWorkspace,
   type DesktopBridgeResponse,
@@ -228,6 +229,7 @@ export function MinimalDevWorkspace({
   const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
   const [fullScreenPanel, setFullScreenPanel] = useState<'none' | 'social' | 'settings'>('none');
   const [lastSync, setLastSync] = useState<string>('never');
+  const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const firedInitial = useRef(false);
 
@@ -411,6 +413,30 @@ export function MinimalDevWorkspace({
     setBusy(true);
     setError(null);
 
+    // If a Cursor chat session is selected in the sidebar, also queue the
+    // prompt for relay to the local Cursor IDE via Founder Node. Fire and
+    // forget — the AI brain response below is the primary feedback; the
+    // dispatch just makes Cursor start working on it locally.
+    const sessionForDispatch = selectedSessionId
+      ? sessions.find((s) => s.id === selectedSessionId)
+      : null;
+    const isCursorSession =
+      selectedSessionId &&
+      (sessionForDispatch?.ideProvider === 'cursor' || sessionForDispatch?.ideProvider == null);
+    if (accessToken && isCursorSession && sessionForDispatch) {
+      setDispatchNotice('Queued for local Cursor — Founder Node will type it in shortly.');
+      void dispatchToIdeSession(accessToken, sessionForDispatch.id, prompt, 'cursor')
+        .then(() => {
+          setDispatchNotice('Sent to Cursor via Founder Node.');
+          setTimeout(() => setDispatchNotice(null), 6000);
+        })
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : 'Failed to queue for Cursor';
+          setDispatchNotice(`Cursor relay failed: ${msg}`);
+          setTimeout(() => setDispatchNotice(null), 8000);
+        });
+    }
+
     let firstTokenSeen = false;
     let providerLabel = selectedBrain;
 
@@ -466,7 +492,7 @@ export function MinimalDevWorkspace({
     } finally {
       setBusy(false);
     }
-  }, [input, busy, accessToken, selectedBrain]);
+  }, [input, busy, accessToken, selectedBrain, selectedSessionId, sessions]);
 
   const selectedWs = workspaces.find((w) => w.id === selectedWsId) ?? null;
   const showConnectWizard = !isNodeLive && workspaces.length === 0;
@@ -622,6 +648,9 @@ export function MinimalDevWorkspace({
 
         <div className='border-t border-white/5 bg-[#0a0a0f] px-4 py-3'>
           {error && <div className='mb-2 text-xs text-rose-400'>{error}</div>}
+          {dispatchNotice && (
+            <div className='mb-2 text-xs text-emerald-400/90'>→ {dispatchNotice}</div>
+          )}
           <div className='mx-auto flex max-w-3xl items-end gap-2'>
             <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} rows={1} placeholder='Message Founder OS - shift+enter for newline' className='min-h-[44px] flex-1 resize-none rounded-xl border border-white/10 bg-[#12121a] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-emerald-400/40' />
             <button onClick={handleSend} disabled={busy || !input.trim()} className='rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-40'>{busy ? '...' : 'Send'}</button>

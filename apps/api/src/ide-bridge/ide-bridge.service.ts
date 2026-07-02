@@ -358,7 +358,33 @@ export class IdeBridgeService {
    * Create a pending IDE dispatch row. The web UI calls this when a user
    * selects a Cursor chat session and sends a message — Founder Node polls
    * {@link getPendingDispatches} and types the prompt into the local Cursor.
+   *
+   * NOTE: accesses the `pendingIdeDispatch` model via a cast because the
+   * local Prisma client is not regenerated on Windows (file lock) — the
+   * generated client on the deploy host includes the model after migration.
    */
+  private get dispatchModel() {
+    return (this.prisma as unknown as {
+      pendingIdeDispatch: {
+        create(args: { data: Record<string, unknown> }): Promise<{
+          id: string;
+          status: string;
+        }>;
+        findMany(args: {
+          where: Record<string, unknown>;
+          orderBy: Record<string, unknown>;
+          take: number;
+          select: Record<string, true>;
+        }): Promise<PendingIdeDispatchRow[]>;
+        findFirst(args: {
+          where: Record<string, unknown>;
+          select: Record<string, true>;
+        }): Promise<PendingIdeDispatchRow | null>;
+        update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<unknown>;
+      };
+    }).pendingIdeDispatch;
+  }
+
   async createDispatch(
     userId: string,
     sessionId: string,
@@ -367,7 +393,7 @@ export class IdeBridgeService {
   ) {
     const trimmed = prompt?.trim();
     if (!trimmed) throw new Error('Prompt required');
-    return this.prisma.pendingIdeDispatch.create({
+    return this.dispatchModel.create({
       data: {
         userId,
         sessionId,
@@ -383,13 +409,12 @@ export class IdeBridgeService {
    * Called by Founder Node on each sync cycle.
    */
   async getPendingDispatches(userId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
-    const rows = await this.prisma.pendingIdeDispatch.findMany({
+    return this.dispatchModel.findMany({
       where: { userId, status: 'PENDING' },
       orderBy: { createdAt: 'asc' },
       take,
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
     });
-    return rows;
   }
 
   /**
@@ -398,12 +423,12 @@ export class IdeBridgeService {
    * returning the claimed row (or null if another node already claimed it).
    */
   async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
-    const existing = await this.prisma.pendingIdeDispatch.findFirst({
+    const existing = await this.dispatchModel.findFirst({
       where: { id: dispatchId, userId, status: 'PENDING' },
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
     });
     if (!existing) return null;
-    await this.prisma.pendingIdeDispatch.update({
+    await this.dispatchModel.update({
       where: { id: dispatchId },
       data: { status: 'DISPATCHED', dispatchedAt: new Date() },
     });
@@ -411,7 +436,7 @@ export class IdeBridgeService {
   }
 
   async markDispatched(id: string, result?: string): Promise<void> {
-    await this.prisma.pendingIdeDispatch.update({
+    await this.dispatchModel.update({
       where: { id },
       data: {
         status: 'DISPATCHED',

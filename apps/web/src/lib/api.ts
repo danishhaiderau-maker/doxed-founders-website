@@ -5569,6 +5569,28 @@ export function fetchIdeBridgeSessionMessages(token: string, sessionId: string) 
     token,
   );
 }
+
+/**
+ * Queue a prompt to be relayed to the local Cursor IDE via Founder Node.
+ * The web UI calls this when the user has a Cursor chat session selected and
+ * hits Send — Founder Node picks up the pending dispatch on its next sync
+ * cycle and types the prompt into Cursor's chat pane.
+ */
+export function dispatchToIdeSession(
+  token: string,
+  sessionId: string,
+  prompt: string,
+  ideProvider = 'cursor',
+) {
+  return apiFetch<{ id: string; status: string }>(
+    `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/dispatch`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ prompt, ideProvider }),
+    },
+    token,
+  );
+}
 export type PlatformBrainStatus = { configured: boolean; updatedAt: string | null };
 
 export function fetchPlatformBrainStatus(token: string) {
