@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(founder-os): dynamic brain dropdown, BYOK, clickable connect wizard, GLM key help
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
