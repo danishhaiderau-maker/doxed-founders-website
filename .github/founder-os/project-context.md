@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore: gitignore *.tmp.py (orphaned python temp copies) + remove stale dashboard backup
 
 ## Last Activity
 
