@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(copilot): real typing stream + full Cursor history + model logging
+chore: bump Founder Node to v0.7.2 with Cursor history fix
 
 ## Last Activity
 
