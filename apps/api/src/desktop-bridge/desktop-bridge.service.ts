@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   sanitizeDesktopBridge,
+  type BridgeSession,
   type BridgeWorkspace,
   type DesktopBridgeInput,
   type DesktopBridgeSnapshot,
@@ -10,7 +11,9 @@ import { PrismaService } from '../prisma/prisma.service';
 
 const BRIDGE_KEY = '_desktopBridgeByNode';
 const WORKSPACES_KEY = '_workspacesByNode';
+const SESSIONS_KEY = '_sessionsByNode';
 const MAX_WORKSPACES = 10;
+const MAX_SESSIONS = 20;
 const MAX_STR_LEN = 200;
 
 @Injectable()
@@ -188,5 +191,116 @@ export class DesktopBridgeService {
 
   private optString(v: unknown): string | undefined {
     return typeof v === 'string' && v.trim() ? v.trim().slice(0, MAX_STR_LEN) : undefined;
+  }
+
+  /**
+   * Persist the real Cursor chat/agent sessions[] sent by Founder Node v0.6.1+
+   * in every heartbeat. Stored under `memoryGraph._sessionsByNode[nodeId]` so
+   * it lives alongside the workspaces array without a Prisma schema migration.
+   */
+  async saveSessions(
+    userId: string,
+    nodeId: string,
+    sessions: BridgeSession[],
+  ): Promise<BridgeSession[]> {
+    const cleaned = this.sanitizeSessions(sessions);
+    if (cleaned.length === 0) return [];
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const base =
+      settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
+        ? { ...(settings.memoryGraph as Record<string, unknown>) }
+        : {};
+
+    const byNode =
+      base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
+        ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
+        : {};
+    byNode[nodeId] = cleaned;
+    base[SESSIONS_KEY] = byNode;
+
+    await this.prisma.founderBuilderSettings.upsert({
+      where: { userId },
+      create: { userId, memoryGraph: base as Prisma.InputJsonValue },
+      update: { memoryGraph: base as Prisma.InputJsonValue },
+    });
+
+    return cleaned;
+  }
+
+  /**
+   * Return the most recent sessions[] persisted across all of a user's
+   * Founder Nodes, newest first. Empty array when no node has reported yet.
+   */
+  async listSessions(userId: string): Promise<BridgeSession[]> {
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const graph = settings?.memoryGraph;
+    if (!graph || typeof graph !== 'object' || Array.isArray(graph)) return [];
+    const byNode = (graph as Record<string, unknown>)[SESSIONS_KEY];
+    if (!byNode || typeof byNode !== 'object' || Array.isArray(byNode)) return [];
+
+    const perNode = Object.values(byNode as Record<string, BridgeSession[]>).filter(
+      Array.isArray,
+    ) as BridgeSession[][];
+    if (perNode.length === 0) return [];
+
+    const all = perNode.flat();
+    all.sort(
+      (a, b) =>
+        new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+    );
+    return all.slice(0, MAX_SESSIONS * 2);
+  }
+
+  private sanitizeSessions(input: unknown): BridgeSession[] {
+    if (!Array.isArray(input)) return [];
+    const out: BridgeSession[] = [];
+    for (const raw of input) {
+      if (!raw || typeof raw !== 'object') continue;
+      const s = raw as Record<string, unknown>;
+      const id = typeof s.id === 'string' ? s.id.trim() : '';
+      const title = typeof s.title === 'string' ? s.title.trim() : '';
+      if (!id || !title) continue;
+      const lastActiveAt =
+        typeof s.lastActiveAt === 'string' && !Number.isNaN(Date.parse(s.lastActiveAt))
+          ? s.lastActiveAt
+          : new Date().toISOString();
+      out.push({
+        id,
+        title: title.slice(0, MAX_STR_LEN),
+        subtitle: this.optString(s.subtitle),
+        workspaceId: this.optString(s.workspaceId),
+        repository: this.optString(s.repository),
+        branch: this.optString(s.branch),
+        ideProvider: this.optString(s.ideProvider) ?? 'cursor',
+        restorable: Boolean(s.restorable),
+        lastActiveAt,
+        messageCount:
+          typeof s.messageCount === 'number' && Number.isFinite(s.messageCount)
+            ? Math.max(0, Math.floor(s.messageCount))
+            : undefined,
+        totalLinesAdded:
+          typeof s.totalLinesAdded === 'number' && Number.isFinite(s.totalLinesAdded)
+            ? Math.max(0, Math.floor(s.totalLinesAdded))
+            : undefined,
+        totalLinesRemoved:
+          typeof s.totalLinesRemoved === 'number' && Number.isFinite(s.totalLinesRemoved)
+            ? Math.max(0, Math.floor(s.totalLinesRemoved))
+            : undefined,
+        filesChangedCount:
+          typeof s.filesChangedCount === 'number' && Number.isFinite(s.filesChangedCount)
+            ? Math.max(0, Math.floor(s.filesChangedCount))
+            : undefined,
+        isAgentProject: Boolean(s.isAgentProject) || undefined,
+      });
+      if (out.length >= MAX_SESSIONS) break;
+    }
+    return out;
   }
 }

@@ -21,6 +21,11 @@ export class IdeBridgeController {
   getWorkspaces(@CurrentUser() user: AuthUser) {
     return this.ideBridge.getWorkspaces(user.id);
   }
+
+  @Get('sessions')
+  getSessions(@CurrentUser() user: AuthUser) {
+    return this.ideBridge.getSessions(user.id);
+  }
 }
 
 /**

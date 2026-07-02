@@ -12,6 +12,7 @@ import {
 import type {
   BridgeAgent,
   BridgeCapabilityReport,
+  BridgeSession,
   BridgeWorkspace,
   DesktopBridgeInput,
   DeviceMemoryMetadataPayload,
@@ -36,6 +37,8 @@ export type FounderNodeHeartbeatExt = FounderNodeHeartbeat & {
   };
   workspaces?: BridgeWorkspace[];
   agents?: BridgeAgent[];
+  /** Real Cursor chat/agent sessions read from state.vscdb (v0.6.1+). */
+  sessions?: BridgeSession[];
 };
 
 /** Local app version — kept in sync with apps/founder-node/package.json. */

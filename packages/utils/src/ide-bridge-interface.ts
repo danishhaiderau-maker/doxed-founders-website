@@ -30,12 +30,30 @@ export interface BridgeSession {
   workspaceId?: string;
   /** Session title (e.g., "Fix mobile layout") */
   title: string;
+  /** One-line subtitle summarizing the session (e.g., "Edited 6 files, +115 -15") */
+  subtitle?: string;
+  /** Repository path or name the session was working in */
+  repository?: string;
+  /** Active git branch for the session */
+  branch?: string;
+  /** IDE that owns this session (e.g., 'cursor') */
+  ideProvider?: string;
   /** Conversation messages (if restorable) */
   messages?: BridgeMessage[];
   /** Whether the full conversation can be restored */
   restorable: boolean;
   /** Last activity timestamp */
   lastActiveAt: string;
+  /** Number of messages in the conversation (if available) */
+  messageCount?: number;
+  /** Lines added by the session, if reported by the IDE */
+  totalLinesAdded?: number;
+  /** Lines removed by the session, if reported by the IDE */
+  totalLinesRemoved?: number;
+  /** Number of files touched by the session, if reported by the IDE */
+  filesChangedCount?: number;
+  /** Whether the session is an agent project (vs. a regular chat) */
+  isAgentProject?: boolean;
 }
 
 export interface BridgeMessage {

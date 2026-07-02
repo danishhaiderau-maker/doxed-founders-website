@@ -5,6 +5,7 @@ import {
   DEFAULT_CAPABILITIES,
   OPENHANDS_CAPABILITIES,
   type BridgeCapabilityReport,
+  type BridgeSession,
   type BridgeWorkspace,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
@@ -317,5 +318,13 @@ export class IdeBridgeService {
     }
 
     return workspaces;
+  }
+
+  /**
+   * Return real Cursor chat/agent sessions persisted by Founder Node v0.6.1+
+   * from the global state.vscdb. Newest first, up to 40 entries.
+   */
+  async getSessions(userId: string): Promise<BridgeSession[]> {
+    return this.desktopBridge.listSessions(userId);
   }
 }

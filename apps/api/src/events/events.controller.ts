@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import type { DeviceMemoryPayload } from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthUser } from '../auth/auth.types';
@@ -153,6 +154,48 @@ export class EventsController {
       agentTemplate: body.agentTemplate,
       provider: body.provider,
     });
+  }
+
+  @Post('copilot/ask/stream')
+  async askStream(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    // Prevent any upstream gzip/buffering from holding the first chunk.
+    res.flushHeaders?.();
+
+    const writeEvent = (eventName: string, data: unknown) => {
+      res.write(`event: ${eventName}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      await this.copilot.askStream(
+        user.id,
+        body.prompt,
+        { agentTemplate: body.agentTemplate, provider: body.provider },
+        (event) => {
+          // Strip the discriminator `type` from the payload — it's encoded as
+          // the SSE event name, keeping `data:` clean for the frontend parser.
+          const { type: _type, ...payload } = event as { type: string } & Record<
+            string,
+            unknown
+          >;
+          writeEvent(_type, payload);
+        },
+      );
+      res.end();
+    } catch (err) {
+      writeEvent('error', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+      res.end();
+    }
   }
 
   @Post('copilot/social-draft')

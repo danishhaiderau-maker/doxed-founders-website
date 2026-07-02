@@ -47,6 +47,7 @@ import { buildMergePatchForSync, pullPendingVaultMerges } from './vault-sync-pul
 import { cleanupLegacyPortableInstallers } from './legacy-cleanup';
 import {
   discoverCursorAgents,
+  discoverCursorSessions,
   discoverCursorWorkspaces,
 } from './cursor-discovery';
 import { CURSOR_CAPABILITIES } from '@dcf/utils';
@@ -343,9 +344,10 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   try {
     const hb = defaultHeartbeat(config.label, vaultRoot);
 
-    // Phase A — discover real Cursor workspaces/agents from disk.
+    // Phase A — discover real Cursor workspaces/agents/sessions from disk.
     const workspaces = discoverCursorWorkspaces();
     const agents = discoverCursorAgents();
+    const sessions = discoverCursorSessions();
     const activeWorkspace = workspaces[0];
 
     // The cloud persists `desktopBridge` and exposes it via
@@ -389,6 +391,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       },
       workspaces,
       agents,
+      sessions,
     };
 
     await sendHeartbeat(config.apiBaseUrl, config.nodeId, config.nodeToken, heartbeat);

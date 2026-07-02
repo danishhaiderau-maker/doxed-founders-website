@@ -119,6 +119,41 @@ export type CopilotAskResult = {
   routedAgent?: { template?: string; label?: string } | undefined;
 };
 
+export type MissingConnectionKind =
+  | 'github'
+  | 'cursor'
+  | 'ai_key'
+  | 'founder_node'
+  | 'vault';
+
+export type MissingConnection = {
+  kind: MissingConnectionKind;
+  label: string;
+  detail: string;
+  /** Frontend action key — maps to the inline onboarding flow. */
+  action: 'connect_github' | 'connect_cursor' | 'connect_ai' | 'open_founder_node';
+};
+
+export type CopilotStreamEvent =
+  | { type: 'thinking' }
+  | { type: 'context'; steps: unknown[] }
+  | { type: 'liveSnapshot'; snapshot: unknown }
+  | {
+      type: 'attribution';
+      provider: string;
+      model: string | null;
+      routedAgent: string | null;
+    }
+  | { type: 'token'; text: string }
+  | {
+      type: 'done';
+      answer: string;
+      answerProvider: string;
+      missingConnections?: MissingConnection[];
+      llmErrors?: string[];
+    }
+  | { type: 'error'; message: string };
+
 @Injectable()
 export class FounderCopilotService {
   constructor(
@@ -1720,6 +1755,359 @@ export class FounderCopilotService {
         buildStreak: founder.buildStreakDays,
       },
     };
+  }
+
+  /**
+   * Streaming variant of ask(). Emits SSE events as the response is built:
+   *   thinking → context → liveSnapshot → attribution → token* → done
+   * Special intents (autopilot / cursor dispatch / workforce / continue) reuse
+   * the non-streaming ask() path and emit the result as a single token burst.
+   */
+  async askStream(
+    userId: string,
+    prompt: string,
+    options: { agentTemplate?: string | null; provider?: string | null } | undefined,
+    emit: (event: CopilotStreamEvent) => void,
+  ): Promise<void> {
+    const text = prompt.trim();
+    if (!text) throw new BadRequestException('Prompt required');
+
+    const specialIntent =
+      detectAutopilotIntent(text) ||
+      detectCursorDispatchIntent(text) ||
+      detectContinueMissionIntent(text);
+    if (specialIntent) {
+      emit({ type: 'thinking' });
+      const result = (await this.ask(userId, text, options)) as CopilotAskResult;
+      this.emitNonStreamingResult(result, emit);
+      return;
+    }
+    if (!isFounderRepoStatusPrompt(text)) {
+      const intent = detectWorkforceIntent(text, options?.agentTemplate);
+      if (intent) {
+        emit({ type: 'thinking' });
+        const result = (await this.ask(userId, text, options)) as CopilotAskResult;
+        this.emitNonStreamingResult(result, emit);
+        return;
+      }
+    }
+    const brainTask = classifyFounderBrainTask(text);
+    if (shouldDispatchBuilderForCodeAsk(text, brainTask)) {
+      const cursorCred = await this.prisma.integrationCredential.findFirst({
+        where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+      });
+      const openHandsCred = await this.prisma.integrationCredential.findFirst({
+        where: { userId, provider: 'openhands', verifiedAt: { not: null } },
+      });
+      if (cursorCred || openHandsCred) {
+        emit({ type: 'thinking' });
+        const result = (await this.ask(userId, text, options)) as CopilotAskResult;
+        this.emitNonStreamingResult(result, emit);
+        return;
+      }
+    }
+
+    emit({ type: 'thinking' });
+
+    const memory = await this.getProjectMemory(userId);
+    if (memory.repoFullName) {
+      try {
+        await this.founderOs.syncGitHubCommits(userId);
+      } catch {
+        /* optional sync */
+      }
+    }
+    const refreshedMemory = memory.repoFullName
+      ? await this.getProjectMemory(userId)
+      : memory;
+
+    const founder = await this.prisma.founder.findUnique({
+      where: { userId },
+      include: {
+        projects: {
+          where: { approved: true },
+          take: 1,
+          include: { roadmapItems: { orderBy: { sortOrder: 'asc' } } },
+        },
+        buildPosts: { orderBy: { publishedAt: 'desc' }, take: 5 },
+      },
+    });
+    if (!founder) throw new ForbiddenException('Founder profile required');
+    const project = founder.projects[0];
+
+    const [deepCommits, pullRequests, githubMemory, memoryGraph, extras] = await Promise.all([
+      refreshedMemory.repoFullName
+        ? this.github.listCommits(userId, refreshedMemory.repoFullName, 40)
+        : Promise.resolve([]),
+      refreshedMemory.repoFullName
+        ? this.github.listPullRequests(userId, refreshedMemory.repoFullName)
+        : Promise.resolve([]),
+      refreshedMemory.repoFullName
+        ? this.memory.readRepoMemory(userId, refreshedMemory.repoFullName)
+        : Promise.resolve(null),
+      this.memoryGraph.resolveForUser(userId),
+      this.assembleBrainContextExtras(userId, refreshedMemory.repoFullName),
+    ]);
+
+    const inProgressRoadmap = project?.roadmapItems.find(
+      (r) => r.status === RoadmapStatus.IN_PROGRESS,
+    );
+    const vaultNote = this.buildVaultContextLines(refreshedMemory).join('\n') || null;
+
+    const brainInput: FounderBrainContextInput = {
+      projectName: project?.name ?? founder.name,
+      projectDescription: githubMemory?.projectContext?.slice(0, 400) ?? null,
+      repoFullName: refreshedMemory.repoFullName,
+      currentGoal: refreshedMemory.currentGoal,
+      progressPercent: refreshedMemory.progressPercent,
+      launchReadiness: refreshedMemory.launchReadiness,
+      suggestedNextStep: refreshedMemory.suggestedNextStep,
+      openTasks: refreshedMemory.openTasks.map((t) => t.title),
+      roadmapInProgress: inProgressRoadmap?.title ?? null,
+      memoryGraph,
+      commits: deepCommits.map((c) => ({ sha: c.sha, message: c.message, date: c.date })),
+      pullRequests,
+      recentDeploys: [],
+      projectContextExcerpt: githubMemory?.projectContext ?? null,
+      roadmapExcerpt: githubMemory?.roadmap ?? null,
+      repoTasks: githubMemory?.openTasksFromRepo?.map((t) => t.title),
+      workspaceActivityBlock: null,
+      vaultNote,
+      ...extras,
+    };
+
+    const signalCommits = filterCommitsForIntelligence(brainInput.commits);
+    const intelligence = deriveMissionIntelligence(brainInput);
+    if (isFounderRepoStatusPrompt(text)) {
+      await this.reconcileMissionGraphWithIntelligence(userId, intelligence);
+    }
+    const graph = await this.founderGraph.rebuildForUser(userId, {
+      currentInitiative: intelligence.currentInitiative,
+    });
+    brainInput.founderGraphExcerpt = this.founderGraph.formatForBrain(graph);
+
+    const cursorConnected = Boolean(
+      await this.prisma.integrationCredential.findFirst({
+        where: { userId, provider: 'cursor', verifiedAt: { not: null } },
+        select: { id: true },
+      }),
+    );
+
+    const liveSnapshot = buildLiveFounderContextSnapshot({
+      repoFullName: refreshedMemory.repoFullName,
+      commits: brainInput.commits,
+      desktop: extras.desktopSnapshot ?? null,
+      deployCardCount: extras.deployCardCount ?? 0,
+      founderNodeOnline: Boolean(refreshedMemory.vaultRelay?.nodeOnline),
+      cursorConnected,
+      vaultSynced: Boolean(refreshedMemory.vaultRelay?.lastSyncedAt),
+    });
+    const contextCollection = buildContextCollectionSteps(liveSnapshot);
+    const liveGroundTruth = formatLiveContextGroundTruthBlock(liveSnapshot);
+
+    const contextBlock =
+      `${liveGroundTruth}\n\n` +
+      formatFounderBrainContextForPrompt(brainInput, intelligence) +
+      (!refreshedMemory.repoFullName && !liveSnapshot.branch && liveSnapshot.openFileCount === 0
+        ? '\n\n## Onboarding coach (required)\nRepository is NOT linked. Follow expert PM rules: offer Sovereign (Founder Vault local), Hybrid (GitHub+Cursor), or Production (full cloud). Ask ONE clarifying question. Do NOT invent specific code (e.g. Solidity functions) until the user picks a pathway and describes the product.\n'
+        : '');
+
+    const systemPrompt = `${FOUNDER_BRAIN_LIVE_FIRST_SYSTEM_PROMPT}`;
+    const forcedProvider = this.resolveRequestedAiProvider(options?.provider);
+
+    const preferGrounded =
+      shouldPreferGithubGroundedBrainAnswer(prompt, signalCommits.length) ||
+      isRecapOrHistoryPrompt(text);
+    const skipLlmForGrounded = preferGrounded && !forcedProvider;
+
+    const missingConnections = this.deriveMissingConnections(
+      liveSnapshot,
+      refreshedMemory,
+      Boolean(forcedProvider),
+    );
+
+    emit({ type: 'context', steps: contextCollection });
+    emit({ type: 'liveSnapshot', snapshot: { ...liveSnapshot, missingConnections } });
+
+    await this.events.emit({
+      founderId: founder.id,
+      projectId: project?.id,
+      userId,
+      type: FounderEventType.COPILOT_COMMAND,
+      source: 'copilot',
+      title: prompt.slice(0, 80),
+      payload: { intent: 'ask_stream' },
+    });
+
+    const detectedDecision = detectDecisionFromPrompt(text);
+    if (detectedDecision) {
+      void this.appendDecision(userId, {
+        decision: detectedDecision.decision,
+        reason: detectedDecision.reason,
+        source: 'copilot_chat',
+      }).catch(() => undefined);
+    }
+
+    const routeLabel = getFounderBrainRouteLabel(brainTask);
+
+    if (skipLlmForGrounded) {
+      const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
+      const full = ruleBased + formatContextEvidenceFooter(liveSnapshot);
+      emit({
+        type: 'attribution',
+        provider: 'FOUNDER_BRAIN',
+        model: options?.provider ?? null,
+        routedAgent: routeLabel,
+      });
+      for (const chunk of this.chunkText(full)) emit({ type: 'token', text: chunk });
+      emit({ type: 'done', answer: full, answerProvider: 'FOUNDER_BRAIN', missingConnections });
+      return;
+    }
+
+    const streamResult = await this.builder.tryCopilotChatCompletionStream(
+      userId,
+      systemPrompt,
+      `${prompt}\n\n---\n${contextBlock}`,
+      {
+        founderBrainTask: brainTask,
+        ...(forcedProvider ? { forceProvider: forcedProvider } : {}),
+      },
+    );
+
+    if (!streamResult.ok) {
+      const ruleBased = formatRuleBasedBrainAnswer(intelligence, brainInput, prompt);
+      const full = ruleBased + formatContextEvidenceFooter(liveSnapshot);
+      const forcedProviderMissingKey =
+        forcedProvider &&
+        (streamResult.llmErrors ?? []).some((e) =>
+          /connect API key|not connected|not available as chat provider/i.test(e),
+        );
+      let providerLabel = 'RULE_BASED';
+      let answer = full;
+      if (forcedProviderMissingKey) {
+        const requestedLabel = options?.provider?.trim() ?? String(forcedProvider);
+        answer =
+          `**${requestedLabel} AI API key not configured.**\n\n` +
+          `Your ${requestedLabel} desktop app may show as "Connected" in the Integrations panel, but the AI API key used for chat completions is configured separately in **Settings \u2192 AI Stack**.\n\n` +
+          `To fix: connect a ${requestedLabel} API key in **Settings \u2192 AI Stack**, or pick a different model in the dropdown (GLM 5.2 is free during the promo and requires no key from you).`;
+        providerLabel = 'NO_PROVIDER_KEY';
+      }
+      emit({
+        type: 'attribution',
+        provider: providerLabel,
+        model: options?.provider ?? null,
+        routedAgent: routeLabel,
+      });
+      for (const chunk of this.chunkText(answer)) emit({ type: 'token', text: chunk });
+      emit({
+        type: 'done',
+        answer,
+        answerProvider: providerLabel,
+        missingConnections,
+        llmErrors: streamResult.llmErrors,
+      });
+      return;
+    }
+
+    emit({
+      type: 'attribution',
+      provider: String(streamResult.provider),
+      model: options?.provider ?? null,
+      routedAgent: routeLabel,
+    });
+
+    let full = '';
+    try {
+      for await (const chunk of streamResult.stream) {
+        if (chunk) {
+          full += chunk;
+          emit({ type: 'token', text: chunk });
+        }
+      }
+    } catch (err) {
+      emit({ type: 'error', message: err instanceof Error ? err.message : 'stream failed' });
+      if (full) {
+        emit({
+          type: 'done',
+          answer: full,
+          answerProvider: String(streamResult.provider),
+          missingConnections,
+        });
+      }
+      return;
+    }
+
+    const footer = formatContextEvidenceFooter(liveSnapshot);
+    if (footer) emit({ type: 'token', text: footer });
+    emit({
+      type: 'done',
+      answer: full + footer,
+      answerProvider: String(streamResult.provider),
+      missingConnections,
+    });
+  }
+
+  /** Splits text into small chunks for non-streaming providers / fallbacks. */
+  private chunkText(text: string, size = 80): string[] {
+    if (!text) return [];
+    const out: string[] = [];
+    for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+    return out;
+  }
+
+  /** Emits a non-streaming ask() result as a single token burst + done. */
+  private emitNonStreamingResult(
+    result: CopilotAskResult,
+    emit: (event: CopilotStreamEvent) => void,
+  ) {
+    const answer = String(result.answer ?? '');
+    const provider = String(result.answerProvider ?? 'RULE_BASED');
+    emit({ type: 'attribution', provider, model: null, routedAgent: result.routedAgent?.label ?? null });
+    for (const chunk of this.chunkText(answer)) emit({ type: 'token', text: chunk });
+    emit({ type: 'done', answer, answerProvider: provider });
+  }
+
+  /** Derives missing-connection nudges for inline onboarding. One thing at a time. */
+  private deriveMissingConnections(
+    liveSnapshot: {
+      githubLinked: boolean;
+      cursorConnected: boolean;
+      founderNodeOnline: boolean;
+      vaultSynced: boolean;
+    },
+    memory: Awaited<ReturnType<FounderCopilotService['getProjectMemory']>>,
+    hasForcedProvider: boolean,
+  ): MissingConnection[] {
+    const missing: MissingConnection[] = [];
+    if (!liveSnapshot.githubLinked) {
+      missing.push({
+        kind: 'github',
+        label: 'GitHub',
+        detail: "Link your repo so I can read commits and push code for you.",
+        action: 'connect_github',
+      });
+    }
+    if (
+      !hasForcedProvider &&
+      (memory.defaultAiProvider === 'RULE_BASED' || !memory.defaultAiProvider)
+    ) {
+      missing.push({
+        kind: 'ai_key',
+        label: 'AI key',
+        detail:
+          'Add an AI API key (GLM 5.2 is free during the promo) so I can give you real answers, not rule-based fallbacks.',
+        action: 'connect_ai',
+      });
+    }
+    if (!liveSnapshot.cursorConnected) {
+      missing.push({
+        kind: 'cursor',
+        label: 'Cursor',
+        detail: 'Connect Cursor Cloud so I can dispatch code tasks to your IDE.',
+        action: 'connect_cursor',
+      });
+    }
+    return missing;
   }
 
   private async askViaOrchestrator(
