@@ -355,7 +355,9 @@ async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Pr
     const body = await res.json().catch(() => ({}));
     throw new Error(parseApiError(body, res.status));
   }
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  if (!text || text.trim() === '') return [] as unknown as T;
+  return JSON.parse(text) as T;
 }
 
 export const PAPER_SESSION_TOKEN_KEY = 'dcf-paper-session-token';
@@ -5563,7 +5565,7 @@ export function fetchIdeBridgeSessions(token: string) {
 }
 
 export function fetchIdeBridgeSessionMessages(token: string, sessionId: string) {
-  return apiFetch<BridgeMessage[] | null>(
+  return apiFetch<BridgeMessage[]>(
     `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/messages`,
     undefined,
     token,

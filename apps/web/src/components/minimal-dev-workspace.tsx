@@ -228,6 +228,7 @@ export function MinimalDevWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
   const [fullScreenPanel, setFullScreenPanel] = useState<'none' | 'social' | 'settings'>('none');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lastSync, setLastSync] = useState<string>('never');
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -374,6 +375,7 @@ export function MinimalDevWorkspace({
   const handleSelectSession = useCallback(
     (session: BridgeSession) => {
       setSelectedSessionId(session.id);
+      setSidebarOpen(false);
       const lines: string[] = [];
       lines.push(`Continuing Cursor session: ${session.title}`);
       if (session.subtitle) lines.push(`Last work: ${session.subtitle}`);
@@ -499,7 +501,22 @@ export function MinimalDevWorkspace({
 
   return (
     <div className='flex h-[calc(100vh-3.5rem)] w-full bg-[#08080c] text-zinc-100'>
-      <aside className='flex w-72 shrink-0 flex-col border-r border-white/5 bg-[#0a0a0f]'>
+      {/* Mobile sidebar toggle */}
+      <button
+        onClick={() => setSidebarOpen((v) => !v)}
+        className='fixed left-3 top-16 z-50 flex h-9 w-9 items-center justify-center rounded-lg bg-violet-600/90 text-white shadow-lg md:hidden'
+        aria-label='Toggle sidebar'
+      >
+        {sidebarOpen ? '✕' : '☰'}
+      </button>
+      {/* Mobile backdrop */}
+      {sidebarOpen && (
+        <div
+          className='fixed inset-0 z-30 bg-black/60 md:hidden'
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <aside className={`absolute inset-y-0 left-0 z-40 flex w-72 shrink-0 flex-col border-r border-white/5 bg-[#0a0a0f] transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
         <div className='flex items-center justify-between px-4 py-3'>
           <span className='text-xs font-semibold uppercase tracking-wider text-zinc-400'>Workspaces</span>
           <button onClick={refresh} className='text-xs text-zinc-500 hover:text-zinc-200' aria-label='Refresh'>retry</button>
