@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: increase API body parser limit to 10mb (fixes heartbeat 413 with Cursor message history)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
