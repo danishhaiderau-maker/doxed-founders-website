@@ -3515,11 +3515,9 @@ export function updateAdminFounderPromoSettings(
 export function saveAdminFounderPromoCredentials(
   token: string,
   body: Partial<{
+    glm: string | null;
     gemini: string | null;
     deepseek: string | null;
-    cursor: string | null;
-    openai: string | null;
-    anthropic: string | null;
   }>,
 ) {
   return apiFetch<FounderPromoPlatformSettings>(

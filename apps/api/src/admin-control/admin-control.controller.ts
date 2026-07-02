@@ -153,11 +153,9 @@ export class AdminControlController {
     @CurrentUser() user: AuthUser,
     @Body()
     body: {
+      glm?: string | null;
       gemini?: string | null;
       deepseek?: string | null;
-      cursor?: string | null;
-      openai?: string | null;
-      anthropic?: string | null;
     },
   ) {
     return this.founderPromo.savePromoCredentials(user.id, body);
