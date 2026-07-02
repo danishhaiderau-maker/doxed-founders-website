@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore: remove scratch railway-deploy-latest script
 
 ## Last Activity
 
