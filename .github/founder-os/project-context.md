@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-chore: remove scratch railway-deploy-latest script
+feat(bot): spread hard-gate toggle — block limit orders per spread bucket
 
 ## Last Activity
 
