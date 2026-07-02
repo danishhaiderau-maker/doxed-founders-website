@@ -15,6 +15,7 @@ import { FounderCommandCenterService } from './founder-command-center.service';
 import { FounderAgentRunModule } from '../founder-agent-run/founder-agent-run.module';
 import { DesktopBridgeModule } from '../desktop-bridge/desktop-bridge.module';
 import { FounderGraphModule } from '../founder-graph/founder-graph.module';
+import { RateLimiterService } from './rate-limiter.service';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { FounderGraphModule } from '../founder-graph/founder-graph.module';
     FounderCopilotService,
     FounderMetricsService,
     FounderCommandCenterService,
+    RateLimiterService,
   ],
   exports: [
     EventsService,

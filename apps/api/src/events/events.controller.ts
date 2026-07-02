@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Post, Res, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
 import type { DeviceMemoryPayload } from '@dcf/utils';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -7,6 +7,7 @@ import { EventsService } from './events.service';
 import { FounderAutopilotService } from './founder-autopilot.service';
 import { FounderCopilotService } from './founder-copilot.service';
 import { FounderCommandCenterService } from './founder-command-center.service';
+import { RateLimiterService } from './rate-limiter.service';
 
 @Controller()
 export class EventsController {
@@ -15,6 +16,7 @@ export class EventsController {
     private readonly copilot: FounderCopilotService,
     private readonly autopilot: FounderAutopilotService,
     private readonly commandCenter: FounderCommandCenterService,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   @Get('events')
@@ -146,10 +148,23 @@ export class EventsController {
   }
 
   @Post('copilot/ask')
-  ask(
+  async ask(
     @CurrentUser() user: AuthUser,
     @Body() body: { prompt: string; agentTemplate?: string; provider?: string },
   ) {
+    const rateCheck = await this.rateLimiter.checkLimit(user.id, 'copilot:ask');
+    if (!rateCheck.allowed) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(
+            rateCheck.resetInMs / 1000,
+          )}s`,
+          resetInMs: rateCheck.resetInMs,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     return this.copilot.ask(user.id, body.prompt, {
       agentTemplate: body.agentTemplate,
       provider: body.provider,
@@ -175,6 +190,19 @@ export class EventsController {
     };
 
     try {
+      const rateCheck = await this.rateLimiter.checkLimit(user.id, 'copilot:ask');
+      if (!rateCheck.allowed) {
+        res.statusCode = 429;
+        res.write(
+          `event: error\ndata: ${JSON.stringify({
+            message: `Rate limit: ${rateCheck.reason}. Try again in ${Math.ceil(
+              rateCheck.resetInMs / 1000,
+            )}s`,
+          })}\n\n`,
+        );
+        res.end();
+        return;
+      }
       await this.copilot.askStream(
         user.id,
         body.prompt,
