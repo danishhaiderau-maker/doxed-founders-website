@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   forwardRef,
 } from '@nestjs/common';
 import {
@@ -156,6 +157,7 @@ export type CopilotStreamEvent =
 
 @Injectable()
 export class FounderCopilotService {
+  private readonly logger = new Logger(FounderCopilotService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
@@ -1959,10 +1961,7 @@ export class FounderCopilotService {
         model: options?.provider ?? null,
         routedAgent: routeLabel,
       });
-      for (const chunk of this.chunkText(full)) {
-        emit({ type: 'token', text: chunk });
-        await new Promise((r) => setTimeout(r, 35));
-      }
+      await this.emitTypingChunks(full, emit);
       emit({ type: 'done', answer: full, answerProvider: 'FOUNDER_BRAIN', missingConnections });
       return;
     }
@@ -2001,10 +2000,7 @@ export class FounderCopilotService {
         model: options?.provider ?? null,
         routedAgent: routeLabel,
       });
-      for (const chunk of this.chunkText(answer)) {
-        emit({ type: 'token', text: chunk });
-        await new Promise((r) => setTimeout(r, 35));
-      }
+      await this.emitTypingChunks(answer, emit);
       emit({
         type: 'done',
         answer,
@@ -2022,11 +2018,30 @@ export class FounderCopilotService {
       routedAgent: routeLabel,
     });
 
+    // Log the resolved model so it's easy to confirm which AI brain handled
+    // this request. Founder OS uses its own API keys (admin → AI Stack),
+    // NOT the Cursor API. Cursor is only dispatched to for code tasks.
+    this.logger.log(
+      `askStream provider=${streamResult.provider}` +
+        (forcedProvider ? ` forced=${forcedProvider}` : '') +
+        (options?.provider ? ` brain=${options.provider}` : '') +
+        ` prompt=${text.slice(0, 60).replace(/\s+/g, ' ')}`,
+    );
+
     let full = '';
     try {
       for await (const chunk of streamResult.stream) {
-        if (chunk) {
-          full += chunk;
+        if (!chunk) continue;
+        full += chunk;
+        // Native streaming (GLM/DeepSeek/OpenAI/Anthropic/Gemini/OpenRouter)
+        // yields small token deltas — emit them straight through. Other
+        // providers (or fallbacks) return the full text as ONE chunk via
+        // singleChunkStream, which would arrive as a data dump. Re-emit
+        // any suspiciously large chunk as incremental typing chunks so the
+        // UX matches a real token stream.
+        if (chunk.length > 80) {
+          await this.emitTypingChunks(chunk, emit);
+        } else {
           emit({ type: 'token', text: chunk });
         }
       }
@@ -2044,7 +2059,7 @@ export class FounderCopilotService {
     }
 
     const footer = formatContextEvidenceFooter(liveSnapshot);
-    if (footer) emit({ type: 'token', text: footer });
+    if (footer) await this.emitTypingChunks(footer, emit);
     emit({
       type: 'done',
       answer: full + footer,
@@ -2053,12 +2068,49 @@ export class FounderCopilotService {
     });
   }
 
-  /** Splits text into small chunks for non-streaming providers / fallbacks. */
-  private chunkText(text: string, size = 80): string[] {
+  /**
+   * Splits text into small chunks for non-streaming providers / fallbacks.
+   * Default size is intentionally tiny (~12 chars) so the SSE token stream
+   * feels like real incremental typing instead of a single data dump. At
+   * ~28ms per chunk this is roughly 430 chars/sec — comparable to a fast
+   * LLM token stream and slow enough for the eye to track each chunk.
+   */
+  private chunkText(text: string, size = 12): string[] {
     if (!text) return [];
     const out: string[] = [];
-    for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+    // Try to break on word boundaries when possible so we don't split
+    // mid-word (which looks jittery). Walk through the text emitting
+    // chunks of ~size chars, extending to the next space if it's close.
+    let i = 0;
+    while (i < text.length) {
+      let end = Math.min(i + size, text.length);
+      if (end < text.length) {
+        const nextSpace = text.indexOf(' ', end);
+        if (nextSpace >= 0 && nextSpace - end < 8) end = nextSpace + 1;
+      }
+      out.push(text.slice(i, end));
+      i = end;
+    }
     return out;
+  }
+
+  /**
+   * Emits `text` as a sequence of small `token` events with short delays
+   * between them so non-streaming LLM responses (RULE_BASED fallback,
+   * singleChunkStream providers, or special-intent ask() reroutes) feel
+   * like real incremental typing instead of one large data dump.
+   */
+  private async emitTypingChunks(
+    text: string,
+    emit: (event: CopilotStreamEvent) => void,
+    chunkSize = 12,
+    delayMs = 28,
+  ): Promise<void> {
+    if (!text) return;
+    for (const chunk of this.chunkText(text, chunkSize)) {
+      emit({ type: 'token', text: chunk });
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
   }
 
   /** Emits a non-streaming ask() result as a token stream with small delays to simulate typing. */
@@ -2069,10 +2121,11 @@ export class FounderCopilotService {
     const answer = String(result.answer ?? '');
     const provider = String(result.answerProvider ?? 'RULE_BASED');
     emit({ type: 'attribution', provider, model: null, routedAgent: result.routedAgent?.label ?? null });
-    for (const chunk of this.chunkText(answer)) {
-      emit({ type: 'token', text: chunk });
-      await new Promise((r) => setTimeout(r, 35));
-    }
+    // Founder OS uses its OWN API keys (configured in admin → AI Stack), NOT
+    // the Cursor API. When no real key is configured the request falls back
+    // to RULE_BASED here — that produces a canned template response which
+    // we still emit as typing chunks so the UX matches a real LLM stream.
+    await this.emitTypingChunks(answer, emit);
     emit({ type: 'done', answer, answerProvider: provider });
   }
 

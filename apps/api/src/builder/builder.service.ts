@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import {
   AiProvider,
   ComputePlaneMode,
@@ -99,6 +99,7 @@ function aiProviderForPromoProvider(p: PromoCredentialProvider): AiProvider {
 
 @Injectable()
 export class BuilderService {
+  private readonly logger = new Logger(BuilderService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly sealed: SealedCredentialsService,
@@ -1965,6 +1966,10 @@ export class BuilderService {
         // We have a live stream. Wrap it so the caller keeps consuming and we
         // log usage on completion.
         const firstChunk = first.value as string;
+        this.logger.log(
+          `stream resolved provider=${provider} billing=${billingSource}` +
+            ` model=${model ?? cfg.defaultModel ?? '?'}`,
+        );
         return {
           ok: true,
           provider,
@@ -1991,6 +1996,7 @@ export class BuilderService {
       llmErrors,
     );
     if (platformBrain) {
+      this.logger.log(`stream resolved provider=DEEPSEEK billing=platform_brain (fallback)`);
       return { ok: true, provider: AiProvider.DEEPSEEK, founderBrainTask, stream: platformBrain };
     }
 
@@ -2151,10 +2157,16 @@ export class BuilderService {
       if (first.done) {
         if (first.value?.text) {
           await this.logAiTokenUsage(userId, forceProvider, system, userPrompt, first.value.text, 'copilot_forced', first.value.usage, billingSource);
+          this.logger.log(
+            `forced stream resolved provider=${forceProvider} billing=${billingSource} model=${model ?? cfg.defaultModel ?? '?'} (single-chunk)`,
+          );
           return { ok: true, provider: forceProvider, stream: this.singleChunkStream(first.value.text, forceProvider) };
         }
         return { ok: false, llmErrors: [`${forceProvider}: empty response`] };
       }
+      this.logger.log(
+        `forced stream resolved provider=${forceProvider} billing=${billingSource} model=${model ?? cfg.defaultModel ?? '?'}`,
+      );
       return {
         ok: true,
         provider: forceProvider,

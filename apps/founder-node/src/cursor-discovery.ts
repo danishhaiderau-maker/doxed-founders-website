@@ -355,8 +355,13 @@ type AgentProject = {
 const SESSION_DB_TIMEOUT_MS = 5_000;
 const MAX_SESSIONS = 20;
 const SUBTITLE_MAX = 100;
-const MAX_MESSAGES_PER_SESSION = 30;
-const MAX_SESSIONS_WITH_MESSAGES = 8;
+const MAX_MESSAGES_PER_SESSION = 50;
+const MAX_SESSIONS_WITH_MESSAGES = 12;
+// Wide row scan window: bubble keys aren't strictly time-ordered, so we pull
+// up to this many rows per session and sort by timestamp in memory before
+// trimming to MAX_MESSAGES_PER_SESSION. 500 is generous; Cursor stores far
+// fewer bubbles per composer in practice.
+const BUBBLE_SCAN_LIMIT = 500;
 const MESSAGE_TEXT_MAX = 1000;
 
 function getCursorGlobalStateDbPath(): string | null {
@@ -506,13 +511,47 @@ function extractBubbleText(b: CursorBubble): string {
 function bubbleRole(b: CursorBubble): BridgeMessage['role'] | null {
   if (b.type === 1) return 'user';
   if (b.type === 2) return 'assistant';
+  // Newer Cursor schemas sometimes omit `type` or use different values.
+  // Infer from other signals: an explicit `model` field ⇒ assistant
+  // response; a `context`/`message` field without `model` ⇒ user input.
+  // Without these signals we can't tell, so skip rather than guess wrong.
+  if (typeof b.model === 'string' && b.model.trim()) return 'assistant';
+  if (typeof b.context !== 'undefined' && !('model' in b)) return 'user';
   return null;
 }
 
 function bubbleTimestamp(b: CursorBubble): string | undefined {
   const ms = b.updatedAt ?? b.createdAt ?? b.timestamp ?? b.ts;
-  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined;
-  return new Date(ms).toISOString();
+  if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) {
+    return new Date(ms).toISOString();
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort timestamp extraction from a Cursor bubble key suffix when the
+ * bubble JSON has no `createdAt`/`updatedAt` field. Cursor uses ULIDs (26-char
+ * Crockford Base32, lexically sortable by time) for bubble IDs — the first 10
+ * chars encode a 48-bit millisecond timestamp. We parse it back to ms and use
+ * it only as a fallback when the JSON lacks an explicit timestamp.
+ *
+ * ULID epoch reference: 1468051200000 ms (2017-01-01T00:00:00Z).
+ */
+function timestampFromBubbleKey(key: string): number | undefined {
+  // key shape: bubbleId:<composerId>:<bubbleId>
+  const idx = key.lastIndexOf(':');
+  if (idx < 0) return undefined;
+  const id = key.slice(idx + 1);
+  if (id.length < 10) return undefined;
+  const crockford = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let ts = 0;
+  for (let i = 0; i < 10; i++) {
+    const c = id[i]!.toUpperCase();
+    const v = crockford.indexOf(c);
+    if (v < 0) return undefined;
+    ts = ts * 32 + v;
+  }
+  return Number.isSafeInteger(ts) && ts > 0 ? ts : undefined;
 }
 
 /**
@@ -521,6 +560,12 @@ function bubbleTimestamp(b: CursorBubble): string | undefined {
  * discovery still works even if the bubble table is missing or locked.
  *
  * Sorted oldest → newest so the UI can render the thread in conversation order.
+ *
+ * NOTE: We intentionally scan up to `BUBBLE_SCAN_LIMIT` rows (not just
+ * MAX_MESSAGES_PER_SESSION) because Cursor's bubble IDs are not strictly
+ * time-ordered under a string `ORDER BY key DESC` — scanning more rows then
+ * sorting by timestamp in-memory gives us a more reliable chronological
+ * sample of the conversation thread.
  */
 function readComposerBubbles(
   DatabaseSync: typeof import('node:sqlite').DatabaseSync,
@@ -530,11 +575,13 @@ function readComposerBubbles(
   let db: import('node:sqlite').DatabaseSync | null = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
+    // Scan a wide window of rows so we capture the full conversation even
+    // when the bubble key ordering doesn't match chronological order.
     const stmt = db.prepare(
       "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ESCAPE '\\' ORDER BY key DESC LIMIT ?",
     );
     const prefix = `bubbleId:${composerId}:%`;
-    const rows = stmt.all(prefix, MAX_MESSAGES_PER_SESSION) as BubbleRow[];
+    const rows = stmt.all(prefix, BUBBLE_SCAN_LIMIT) as BubbleRow[];
     if (!Array.isArray(rows) || rows.length === 0) return [];
 
     const messages: Array<{ msg: BridgeMessage; ts: number }> = [];
@@ -551,18 +598,22 @@ function readComposerBubbles(
       const text = extractBubbleText(parsed).slice(0, MESSAGE_TEXT_MAX);
       if (!text) continue;
       const isoTs = bubbleTimestamp(parsed);
+      const fallbackTs = isoTs
+        ? new Date(isoTs).getTime()
+        : timestampFromBubbleKey(row.key ?? '');
       messages.push({
         msg: {
           role,
           content: text,
-          timestamp: isoTs,
+          ...(isoTs ? { timestamp: isoTs } : {}),
           ...(parsed.model ? { model: parsed.model.slice(0, 60) } : {}),
         },
-        ts: isoTs ? new Date(isoTs).getTime() : 0,
+        ts: fallbackTs ?? 0,
       });
     }
 
-    // Newest-first from the DESC key scan → flip to chronological, then trim.
+    // Sort chronologically (oldest first), then trim to the most recent
+    // MAX_MESSAGES_PER_SESSION so the UI shows the tail of the thread.
     messages.sort((a, b) => a.ts - b.ts);
     return messages.slice(-MAX_MESSAGES_PER_SESSION).map((m) => m.msg);
   } catch {
