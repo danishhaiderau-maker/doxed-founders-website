@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-feat(ide-bridge): surface full Cursor chat history in Founder OS
+fix(home-stack): Stop flow actually kills crash monitors ($_ scoping bug)
 
 ## Last Activity
 

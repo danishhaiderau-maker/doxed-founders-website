@@ -1,8 +1,15 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-02T08:36:04.536Z",
+  "updatedAt": "2026-07-02T09:07:48.515Z",
   "currentGoal": "Define your next milestone",
   "tasks": [
+    {
+      "id": "cmr3a5shw00d7o10dbib5iwjn",
+      "title": "**Script the walkthrough** – Outline each section (landing, BTC agent, Founder OS, community, Discover, DDollar, login) ",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
     {
       "id": "cmpznb2gp0053mq0d5n08vtkw",
       "title": "**Complete Security Hardening** – Run OWASP ZAP scan on live site (doxxedcrypto.digital), enforce HSTS header, rotate an",
@@ -34,6 +41,13 @@
     {
       "id": "cmpsfyt37004pn1546t03ed7z",
       "title": "Define MVP user stories",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
+      "id": "cmr3a5sft00d2o10dh9cwym1f",
+      "title": "**Record screen capture** – Use OBS or Loom to capture high-res video of the live site navigation, ensuring smooth trans",
       "status": "QUEUED",
       "kind": "TASK",
       "done": false
@@ -74,6 +88,13 @@
       "done": false
     },
     {
+      "id": "cmr3a5sft00d3o10d138vln1v",
+      "title": "**Voiceover production** – Record confident, energetic marketing narration matching the script; edit for clarity and pac",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
       "id": "cmpznb2gp0051mq0dj6ig0w4x",
       "title": "**Build GitHub Project Board** – Create columns: Backlog, P0 Sprint, P1 Sprint, Done; populate with user stories",
       "status": "QUEUED",
@@ -109,36 +130,15 @@
       "done": false
     },
     {
+      "id": "cmr3a5shw00d9o10dr3q2u2rb",
+      "title": "**Post-production** – Sync voiceover with video, add captions or lower-thirds for key features, export as MP4 (1080p, <5",
+      "status": "QUEUED",
+      "kind": "TASK",
+      "done": false
+    },
+    {
       "id": "cmpznb2il005fmq0d2qni04yr",
       "title": "**Prioritize P0 Sprint** – Select 3-4 user stories for immediate development (core research + content generation)",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpxtzm7l001dmr0dnp6n8vfg",
-      "title": "**MVP User Story Mapping** – Create a GitHub project board with \"Backlog,\" \"P0 Sprint,\" \"P1 Sprint,\" and \"Done\" columns;",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpww2rg503wbpm0du5kgfweq",
-      "title": "Prioritize user stories as P0 (must-have for MVP launch) or P1 (nice-to-have for post-MVP), based on dependency and cade",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmptvvi54000hml0df2u9vhvu",
-      "title": "Map to Founder OS publish cadence",
-      "status": "QUEUED",
-      "kind": "TASK",
-      "done": false
-    },
-    {
-      "id": "cmpsfyt37004on154x626ucef",
-      "title": "Map to Founder OS publish cadence",
       "status": "QUEUED",
       "kind": "TASK",
       "done": false
