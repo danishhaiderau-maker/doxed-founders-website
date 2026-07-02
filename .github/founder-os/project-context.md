@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-feat(web): add founder token rules collapsible to signup + login pages
+feat(reconcile): Phase 1 — orphan-order cancel on orphan exit + foreign surfacing + cancel-by-exchange detection + conformance spec
 
 ## Last Activity
 
