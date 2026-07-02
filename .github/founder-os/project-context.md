@@ -12,7 +12,7 @@ Product & platform (10 recent commits)
 
 ## Last Commit
 
-﻿feat(web): spread hard-gate toggle UI on conservative-btc Agent Hub
+feat(ai-routing): decoupled AI routing layer + admin panel + centralized token logging
 
 ## Last Activity
 
