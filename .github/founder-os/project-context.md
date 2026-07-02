@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(home-stack): Stop flow actually kills crash monitors ($_ scoping bug)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
