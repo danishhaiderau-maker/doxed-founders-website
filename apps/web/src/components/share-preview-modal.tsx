@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { appendPlatformXShareFooter } from '@dcf/utils';
 import { useShareFooter } from '@/components/share-footer-provider';
-import { paraphraseShareTweet } from '@/lib/api';
+import { fetchAiSectionRoutingPublic, paraphraseShareTweet } from '@/lib/api';
 
 type Props = {
   open: boolean;
@@ -47,6 +47,7 @@ export function SharePreviewModal({
   const [paraphrasing, setParaphrasing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
+  const [providerLabel, setProviderLabel] = useState<string | null>(null);
 
   // Sync the local draft whenever the modal is (re)opened with new text.
   useEffect(() => {
@@ -56,6 +57,24 @@ export function SharePreviewModal({
       setNeedsLogin(false);
     }
   }, [open, text]);
+
+  // Resolve which AI provider is routed for share_paraphrase so the button can
+  // announce it (e.g. "Paraphrase with Gemini"). Public endpoint — no token.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetchAiSectionRoutingPublic('share_paraphrase')
+      .then((r) => {
+        if (cancelled) return;
+        setProviderLabel(r?.ready ? (r.providerLabel ?? r.providerKey ?? null) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setProviderLabel(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // Close on Escape.
   useEffect(() => {
@@ -166,7 +185,7 @@ export function SharePreviewModal({
             disabled={paraphrasing}
             className="rounded-lg border border-violet-500/50 bg-violet-950/40 px-4 py-2 text-sm font-medium text-violet-200 transition hover:border-violet-400/70 hover:bg-violet-900/40 disabled:opacity-50"
           >
-            {paraphrasing ? 'Paraphrasing…' : '✨ Paraphrase with AI — make it Twitter-ready'}
+            {paraphrasing ? 'Paraphrasing…' : `✨ Paraphrase with ${providerLabel ?? 'AI'} — make it Twitter-ready`}
           </button>
 
           <a

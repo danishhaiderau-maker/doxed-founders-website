@@ -2636,6 +2636,49 @@ model RateLimit {
   @@unique([userId, endpoint, windowStart])
 }
 
+// ─── AI Routing — decoupled provider registry + per-section routing ───────────
+//
+// Model name is `AiRoutingProvider` (not `AiProvider`) because Prisma already
+// has an `enum AiProvider` used by FounderBuilderSettings.defaultProvider and
+// the builder cascade. The `key` field is the short slug the rest of the
+// system references (deepseek / glm / gemini / claude / openai / xiaomi / ollama).
+model AiRoutingProvider {
+  id              String   @id @default(cuid())
+  key             String   @unique
+  label           String
+  /// OpenAI-compatible chat completions base URL (no /chat/completions suffix).
+  /// For Gemini: point at the OpenAI-compat layer (https://generativelanguage.googleapis.com/v1beta/openai).
+  /// For Anthropic: the messages API base (https://api.anthropic.com/v1) — handled via adapter.
+  baseUrl         String
+  defaultModel    String
+  /// Adapter dispatch hint: openai_compat | anthropic | gemini_native.
+  /// Most providers are openai_compat; Anthropic uses the native messages API.
+  adapter         String   @default("openai_compat")
+  encryptedApiKey String?  @db.Text
+  enabled         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  sections AiSectionRouting[]
+
+  @@index([enabled])
+}
+
+/// One row per AI section on the platform. `section` is a stable slug
+/// (share_paraphrase / wall_summarizer / copilot / quick_build / founder_draft /
+/// platform_brain). `providerKey` references AiRoutingProvider.key.
+model AiSectionRouting {
+  id          String   @id @default(cuid())
+  section     String   @unique
+  providerKey String
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  provider AiRoutingProvider @relation(fields: [providerKey], references: [key], onDelete: Cascade)
+
+  @@index([providerKey])
+}
+
 /// Pending prompt dispatched from the Founder OS web UI to a local IDE
 /// (Cursor) via a paired Founder Node. The web UI creates a row here; the
 /// Founder Node polls `/founder-node/pending-dispatches`, opens the local
