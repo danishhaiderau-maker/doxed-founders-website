@@ -2635,3 +2635,23 @@ model RateLimit {
   updatedAt   DateTime @updatedAt
   @@unique([userId, endpoint, windowStart])
 }
+
+/// Pending prompt dispatched from the Founder OS web UI to a local IDE
+/// (Cursor) via a paired Founder Node. The web UI creates a row here; the
+/// Founder Node polls `/founder-node/pending-dispatches`, opens the local
+/// Cursor IDE, types the prompt into Cursor's chat, and calls
+/// `/founder-node/dispatch/:id/complete` to mark it dispatched.
+model PendingIdeDispatch {
+  id           String    @id @default(uuid())
+  userId       String
+  sessionId    String
+  prompt       String    @db.Text
+  ideProvider  String    @default("cursor")
+  status       String    @default("PENDING")
+  dispatchedAt DateTime?
+  result       String?   @db.Text
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, status])
+  @@index([createdAt])
+}

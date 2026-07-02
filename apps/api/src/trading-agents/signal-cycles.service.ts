@@ -24,6 +24,7 @@ import {
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BotBridgeService } from './bot-bridge.service';
 import {
   resolveEvmTreasuryAddress,

@@ -50,12 +50,18 @@ import {
   discoverCursorSessions,
   discoverCursorWorkspaces,
 } from './cursor-discovery';
-import { CURSOR_CAPABILITIES } from '@dcf/utils';
+import {
+  discoverClaudeCodeAgents,
+  discoverClaudeCodeSessions,
+  discoverClaudeCodeWorkspaces,
+} from './claude-code-discovery';
+import { CLAUDE_CODE_CAPABILITIES, CURSOR_CAPABILITIES } from '@dcf/utils';
 import { FOUNDER_NODE_LOCAL_VERSION, type FounderNodeHeartbeatExt } from './sync-client';
 import {
   bindUpdateTray,
   checkForUpdates,
   checkForUpdatesAfterSyncFailure,
+  configureUpdateChecks,
   downloadAndInstallUpdate,
   getPendingUpdate,
   setUpdateMenuRefresh,
@@ -344,10 +350,16 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   try {
     const hb = defaultHeartbeat(config.label, vaultRoot);
 
-    // Phase A — discover real Cursor workspaces/agents/sessions from disk.
-    const workspaces = discoverCursorWorkspaces();
-    const agents = discoverCursorAgents();
-    const sessions = discoverCursorSessions();
+    // Phase A — discover real Cursor + Claude Code workspaces/agents/sessions.
+    const cursorWorkspaces = discoverCursorWorkspaces();
+    const cursorAgents = discoverCursorAgents();
+    const cursorSessions = discoverCursorSessions();
+    const claudeWorkspaces = discoverClaudeCodeWorkspaces();
+    const claudeAgents = discoverClaudeCodeAgents();
+    const claudeSessions = discoverClaudeCodeSessions();
+    const workspaces = [...cursorWorkspaces, ...claudeWorkspaces];
+    const agents = [...cursorAgents, ...claudeAgents];
+    const sessions = [...cursorSessions, ...claudeSessions];
     const activeWorkspace = workspaces[0];
 
     // The cloud persists `desktopBridge` and exposes it via
@@ -383,6 +395,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
           : enrichedDesktopBridge.openFilePaths,
       },
       capabilities: CURSOR_CAPABILITIES,
+      ideCapabilities: { cursor: CURSOR_CAPABILITIES, claude_code: CLAUDE_CODE_CAPABILITIES },
       desktop: {
         online: true,
         platform: process.platform,
@@ -695,6 +708,7 @@ app.whenReady().then(() => {
     });
   }
 
+  configureUpdateChecks({ apiBaseUrl: config?.apiBaseUrl ?? DEFAULT_API });
   startAutoUpdateChecks();
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 

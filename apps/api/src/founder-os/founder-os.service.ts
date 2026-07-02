@@ -965,14 +965,9 @@ export class FounderOsService {
       },
     });
 
-    if (cred.userId) {
-      await this.notifications.notifyUser(cred.userId, {
-        type: NotificationType.FOUNDER_EVENT,
-        title: 'Deploy detected',
-        body: `New suggested update ready — review and publish everywhere.`,
-        link: '/founder-den?tab=build',
-      });
-    }
+    // Deploy-detected FOUNDER_EVENT notification removed — it was founder-internal build
+    // telemetry that spammed the user Alerts feed ("Day 34 — 8 commits pushed" category).
+    // The suggested update row is still created for the founder-den build tab.
 
     const settings = cred.userId
       ? await this.prisma.founderBuilderSettings.findUnique({ where: { userId: cred.userId } })

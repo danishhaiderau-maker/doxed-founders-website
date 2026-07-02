@@ -3,6 +3,27 @@ import { mergeNotificationPreferences } from '@dcf/utils';
 import { NotificationType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
+/**
+ * Notification types that are founder-internal agent/build telemetry — never shown in the
+ * user Alerts feed. These were emitted by the build queue, founder command center, and
+ * event orchestrator (e.g. "Record a full platform walkthrough…",
+ * "Community Manager delegated a background subagent…", "Day 34 — 8 commits pushed",
+ * "copilot — coordinated by Founder OS event bus"). New emission is cut at source in the
+ * orchestrator/founder-os; this filter also suppresses any rows already in the DB so the
+ * feed is clean without a destructive migration. Legitimate platform broadcasts
+ * (LISTING_*, PLATFORM_MESSAGE, SYSTEM), trade alerts (TRADER_WIN/TRADER_LOSS), and
+ * TRENDING_BUYS are unaffected.
+ */
+const HIDDEN_ALERT_TYPES: NotificationType[] = [
+  NotificationType.BUILD_QUEUE,
+  NotificationType.AGENT_RESULT,
+  NotificationType.FOUNDER_EVENT,
+];
+
+function baseAlertFilter(): Prisma.NotificationWhereInput {
+  return { type: { notIn: HIDDEN_ALERT_TYPES } };
+}
+
 function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | undefined {
   switch (category) {
     case 'following':
@@ -24,14 +45,14 @@ function inboxCategoryFilter(category: string): Prisma.NotificationWhereInput | 
             NotificationType.LISTING_PROOF_REQUEST,
             NotificationType.PLATFORM_MESSAGE,
             NotificationType.SYSTEM,
-            NotificationType.FOUNDER_EVENT,
           ],
         },
       };
     case 'build':
-      return { type: NotificationType.BUILD_QUEUE };
+      // Hidden from the feed — return a filter that matches nothing.
+      return { type: { in: [] as NotificationType[] } };
     case 'agents':
-      return { type: NotificationType.AGENT_RESULT };
+      return { type: { in: [] as NotificationType[] } };
     case 'community':
       return { type: { in: [NotificationType.FOUNDER_UPDATES, NotificationType.POINTS_EARNED] } };
     case 'funding':
@@ -48,7 +69,7 @@ export class NotificationsService {
   async listForUser(userId: string, limit = 30, category?: string) {
     const categoryFilter = category ? inboxCategoryFilter(category) : undefined;
     return this.prisma.notification.findMany({
-      where: { userId, ...categoryFilter },
+      where: { userId, ...baseAlertFilter(), ...categoryFilter },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
@@ -56,7 +77,7 @@ export class NotificationsService {
 
   async unreadCount(userId: string) {
     return this.prisma.notification.count({
-      where: { userId, readAt: null },
+      where: { userId, ...baseAlertFilter(), readAt: null },
     });
   }
 

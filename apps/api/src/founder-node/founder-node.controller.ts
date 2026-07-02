@@ -52,6 +52,18 @@ export class FounderNodeController {
     return this.nodes.getStatus(user.id);
   }
 
+  @Public()
+  @Get('latest-release')
+  async getLatestRelease() {
+    const repo = process.env.FOUNDER_NODE_REPO || 'danishhaiderau-maker/founder-node';
+    const token = process.env.GITHUB_TOKEN;
+    const headers: Record<string, string> = { 'User-Agent': 'founder-os-api' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
+    if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+    return res.json();
+  }
+
   @Get('ollama-status')
   ollamaStatus(@CurrentUser() user: AuthUser) {
     return this.inference.getOllamaStatus(user.id);

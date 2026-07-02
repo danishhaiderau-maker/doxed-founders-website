@@ -341,8 +341,8 @@ export function FounderOnboardingWizard({
                   <div className="mt-2 rounded-md border border-zinc-700/50 bg-black/20 px-3 py-2">
                     <p>
                       <span className="font-semibold text-violet-300">Cursor is recommended</span> because
-                      it&apos;s fully tested and battle-ready. OpenHands is also available. Windsurf, VS Code,
-                      and Claude Code are in the pipeline — being tested now. You can start with Cursor today
+                      it&apos;s fully tested and battle-ready. OpenHands and Claude Code are also available.
+                      Windsurf and VS Code are in the pipeline — being tested now. You can start with Cursor today
                       and switch later without losing your work.
                     </p>
                   </div>

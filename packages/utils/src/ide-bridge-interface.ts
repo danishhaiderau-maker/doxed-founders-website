@@ -180,6 +180,23 @@ export const CURSOR_CAPABILITIES: BridgeCapabilityReport = {
 };
 
 /**
+ * Claude Code's current capability report.
+ * Claude Code stores per-project session history on disk and supports resume
+ * via `claude --resume <sessionId>`, so all capabilities are reported as true.
+ */
+export const CLAUDE_CODE_CAPABILITIES: BridgeCapabilityReport = {
+  discoverWorkspaces: true,
+  listRecentSessions: true,
+  resumeSession: true,
+  sendPrompt: true,
+  streamEvents: true,
+  getGitState: true,
+  getTerminal: true,
+  getDeployments: true,
+  getAgents: true,
+};
+
+/**
  * OpenHands' current capability report.
  */
 export const OPENHANDS_CAPABILITIES: BridgeCapabilityReport = {
