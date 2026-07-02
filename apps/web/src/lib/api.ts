@@ -5679,6 +5679,80 @@ export function removePlatformBrainKey(token: string) {
   return apiFetch<PlatformBrainStatus>('/founder-os/platform-brain/remove', { method: 'POST' }, token);
 }
 
+// ─── AI Routing — admin provider registry + per-section routing ───────────────
+
+export type AiRoutingProviderRow = {
+  key: string;
+  label: string;
+  baseUrl: string;
+  defaultModel: string;
+  adapter: string;
+  enabled: boolean;
+  hasKey: boolean;
+  updatedAt: string;
+};
+
+export type AiSectionRoutingRow = {
+  section: string;
+  label: string;
+  providerKey: string;
+  providerLabel: string;
+  providerEnabled: boolean;
+  providerHasKey: boolean;
+  updatedAt: string;
+};
+
+export type AiSectionRoutingPublic = {
+  section: string;
+  providerKey: string | null;
+  providerLabel: string | null;
+  ready: boolean;
+};
+
+export function fetchAiRoutingProviders(token: string) {
+  return apiFetch<AiRoutingProviderRow[]>('/ai-routing/providers', undefined, token);
+}
+
+export function upsertAiRoutingProvider(
+  input: {
+    key: string;
+    label?: string;
+    baseUrl?: string;
+    defaultModel?: string;
+    adapter?: string;
+    apiKey?: string | null;
+    enabled?: boolean;
+  },
+  token: string,
+) {
+  return apiFetch<AiRoutingProviderRow>(
+    '/ai-routing/providers',
+    { method: 'POST', body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function removeAiRoutingProvider(key: string, token: string) {
+  return apiFetch<{ ok: true }>(`/ai-routing/providers/${encodeURIComponent(key)}`, { method: 'DELETE' }, token);
+}
+
+export function fetchAiRoutingSections(token: string) {
+  return apiFetch<AiSectionRoutingRow[]>('/ai-routing/sections', undefined, token);
+}
+
+export function setAiSectionProvider(section: string, providerKey: string, token: string) {
+  return apiFetch<AiSectionRoutingRow>(
+    `/ai-routing/sections/${encodeURIComponent(section)}`,
+    { method: 'PUT', body: JSON.stringify({ providerKey }) },
+    token,
+  );
+}
+
+/** Public-ish: which provider is routed for a section (used by the X Share modal). No token needed. */
+export function fetchAiSectionRoutingPublic(section: string) {
+  return apiFetch<AiSectionRoutingPublic>(`/ai-routing/section/${encodeURIComponent(section)}`);
+}
+
 export type AvailableBrain = {
   key: string;
   label: string;
