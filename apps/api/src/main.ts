@@ -15,6 +15,8 @@ async function bootstrap() {
   }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  app.useBodyParser('json', { limit: '10mb' });
+  app.useBodyParser('urlencoded', { limit: '10mb', extended: true });
   const http = app.getHttpAdapter().getInstance();
   if (typeof http?.disable === 'function') {
     http.disable('x-powered-by');
