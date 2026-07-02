@@ -16,7 +16,7 @@ const SESSIONS_KEY = '_sessionsByNode';
 const MAX_WORKSPACES = 10;
 const MAX_SESSIONS = 20;
 const MAX_STR_LEN = 200;
-const MAX_MESSAGES_PER_SESSION = 30;
+const MAX_MESSAGES_PER_SESSION = 50;
 const MESSAGE_TEXT_MAX = 1000;
 
 @Injectable()
