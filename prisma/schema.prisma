@@ -469,6 +469,8 @@ model User {
   messagesReceived     PlatformMessage[] @relation("MessageTo")
   wallMessages         ProjectWallMessage[]
   wallPins             ProjectWallPin[]
+  wallSummaryActivations ProjectWallSummary[]
+  wallReadCursors      ProjectWallReadCursor[]
   referredBy           User?  @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
   referrals            User[] @relation("UserReferrals")
 
@@ -669,6 +671,8 @@ model Project {
   aiTokenUsageLogs AiTokenUsageLog[]
   wallMessages     ProjectWallMessage[]
   wallPins         ProjectWallPin[]
+  wallSummary      ProjectWallSummary?
+  wallReadCursors  ProjectWallReadCursor[]
 
   @@index([slug])
   @@index([lifecycleStage])
@@ -2567,4 +2571,53 @@ model ProjectWallPin {
 
   @@index([projectId])
   @@index([userId])
+}
+
+/// Latest Chat Summarizer agent output + the recurring monthly DDollar subscription
+/// state for a project wall. 1 row per project (upserted). Active while expiresAt > now.
+/// Activation cost is 1,000 DDollar/month (action key WALL_SUMMARIZER_MONTHLY).
+model ProjectWallSummary {
+  id                String   @id @default(cuid())
+  projectId         String   @unique
+  /// Concise LLM-generated summary of the most recent summarizer window (last 500 messages).
+  summaryBody       String   @db.Text
+  /// Sentiment label: "positive" | "neutral" | "negative".
+  sentimentLabel    String   @default("neutral")
+  /// LLM reasoning for the chosen sentiment ("what is the sentiment and why").
+  sentimentReasoning String  @default("") @db.Text
+  /// UserId of whoever activated/renewed most recently.
+  activatedBy       String
+  /// DDollar cost per month (1,000 by default).
+  cost              Int      @default(1000)
+  /// Start of the current subscription month.
+  activatedAt       DateTime @default(now())
+  /// When the subscription lapses (activatedAt + 30 days). Active while > now.
+  expiresAt         DateTime
+  /// Last renewal timestamp (set on renewals, null on first activation).
+  renewedAt         DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  project    Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activator  User    @relation(fields: [activatedBy], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+}
+
+/// Per-user per-project read cursor for the Founder Chat drawer unread badges.
+/// `lastReadAt` is the timestamp of the newest message the user has seen;
+/// unread count = ProjectWallMessage rows newer than this. 1 row per (user, project).
+model ProjectWallReadCursor {
+  id         String   @id @default(cuid())
+  userId     String
+  projectId  String
+  lastReadAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([projectId])
 }

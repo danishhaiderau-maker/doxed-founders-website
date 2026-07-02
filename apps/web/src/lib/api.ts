@@ -3023,6 +3023,7 @@ export interface WallGroupEntry {
     followerCount: number;
   };
   messageCount: number;
+  unreadCount: number;
   lastMessage: {
     projectId: string;
     body: string;
@@ -3038,9 +3039,56 @@ export interface WallPinResult {
 }
 
 export const WALL_PIN_COST_DDOLLAR = 500;
+/** DDollar cost per month to keep the Chat Summarizer agent active on a project wall. */
+export const WALL_SUMMARIZER_COST_DDOLLAR = 1000;
 
-export function fetchProjectWall(slug: string, token?: string) {
-  return apiFetch<WallMessage[]>(`/wall/projects/${encodeURIComponent(slug)}/messages`, undefined, token);
+export interface WallMembership {
+  joined: boolean;
+  isFounder: boolean;
+  founderVerified: boolean;
+  liveTrading: boolean;
+  summarizerEligible: boolean;
+}
+
+export interface WallSummary {
+  active: boolean;
+  summaryBody: string | null;
+  sentimentLabel: 'positive' | 'neutral' | 'negative' | null;
+  sentimentReasoning: string | null;
+  activatedAt: string | null;
+  expiresAt: string | null;
+  renewedAt: string | null;
+  cost: number;
+  activatedBy: string | null;
+}
+
+export function fetchProjectWall(slug: string, token?: string, before?: string) {
+  const qs = before ? `?before=${encodeURIComponent(before)}` : '';
+  return apiFetch<WallMessage[]>(
+    `/wall/projects/${encodeURIComponent(slug)}/messages${qs}`,
+    undefined,
+    token,
+  );
+}
+
+export function fetchWallMembership(slug: string, token?: string) {
+  return apiFetch<WallMembership>(
+    `/wall/projects/${encodeURIComponent(slug)}/membership`,
+    undefined,
+    token,
+  );
+}
+
+export function fetchWallSummary(slug: string) {
+  return apiFetch<WallSummary>(`/wall/projects/${encodeURIComponent(slug)}/summary`);
+}
+
+export function activateWallSummarizer(slug: string, token: string) {
+  return apiFetch<WallSummary>(
+    `/wall/projects/${encodeURIComponent(slug)}/summarize`,
+    { method: 'POST' },
+    token,
+  );
 }
 
 export function fetchMyWallGroups(token: string) {

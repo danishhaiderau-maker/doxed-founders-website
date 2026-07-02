@@ -314,4 +314,10 @@ export class FounderPromoService {
     try { return this.crypto.decrypt(row.platformBrainDeepseekKeyEnc); } catch { return null; }
   }
 
+  /** Decrypted platform GLM (ZhipuAI) promo key, or null if not configured. */
+  async getDecryptedPlatformGlmKey(): Promise<string | null> {
+    const map = await this.loadDecryptedCredentials();
+    return map.glm ?? null;
+  }
+
 }
