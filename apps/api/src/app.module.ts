@@ -43,6 +43,7 @@ import { AirdropModule } from './airdrop/airdrop.module';
 import { WorkspaceSessionModule } from './workspace-session/workspace-session.module';
 import { ConnectedWorkspaceModule } from './connected-workspace/connected-workspace.module';
 import { IdeBridgeModule } from './ide-bridge/ide-bridge.module';
+import { WallModule } from './wall/wall.module';
 
 @Module({
   imports: [
@@ -91,6 +92,7 @@ import { IdeBridgeModule } from './ide-bridge/ide-bridge.module';
     WorkspaceSessionModule,
     ConnectedWorkspaceModule,
     IdeBridgeModule,
+    WallModule,
   ],
   providers: [
     {

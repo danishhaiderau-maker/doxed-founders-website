@@ -11,6 +11,7 @@ import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
 import { PlatformMessagesBell } from '@/components/platform-messages-bell';
+import { FounderChatLauncher } from '@/components/founder-chat-launcher';
 import { HUB_NAV_ROWS, type HubNavItem, type HubNavRow } from '@/components/hub-nav-config';
 import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 
@@ -466,6 +467,7 @@ function MobileNavDrawer({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+          <FounderChatLauncher />
           <PlatformMessagesBell />
           <NotificationBell />
           {session ? (
@@ -649,6 +651,9 @@ function SiteNavInner() {
     <>
       <div ref={navRef} className="relative flex flex-col items-end gap-1">
         <nav className="flex items-center gap-1 text-sm">
+        {/* Founder Chat launcher — placed before nav dropdowns (between brand and section links) */}
+        <FounderChatLauncher />
+
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
         <div className="hidden items-center gap-0.5 md:flex">
           {HUB_NAV_ROWS.map((row) => (

@@ -2980,6 +2980,106 @@ export function postCommunityComment(
   }, token);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Founder Chat — project wall (Telegram-style community chat hub)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface WallAuthor {
+  id: string;
+  name: string | null;
+  platformHandle: string | null;
+  avatarUrl: string | null;
+  isVerifiedFounder: boolean;
+  founderSlug?: string | null;
+}
+
+export interface WallMessage {
+  id: string;
+  projectId: string;
+  projectSlug: string;
+  projectName: string;
+  projectTicker: string;
+  projectLogoUrl: string | null;
+  authorId: string;
+  author: WallAuthor;
+  body: string;
+  source: string;
+  sourceRefId: string | null;
+  createdAt: string;
+  pin: { kind: string; userId: string; cost: number; createdAt: string } | null;
+}
+
+export interface WallGroupEntry {
+  project: {
+    id: string;
+    slug: string;
+    name: string;
+    ticker: string;
+    logoUrl: string | null;
+    lifecycleStage: string;
+    isLiveToken: boolean;
+    chain: { slug: string; name: string };
+    founder: { name: string; slug: string; presenceLevel: string } | null;
+    followerCount: number;
+  };
+  messageCount: number;
+  lastMessage: {
+    projectId: string;
+    body: string;
+    createdAt: string;
+    author: { name: string | null; platformHandle: string | null };
+  } | null;
+}
+
+export interface WallPinResult {
+  success: boolean;
+  pin: { id: string; kind: string; cost: number; messageId: string };
+  spentDdollar: number;
+}
+
+export const WALL_PIN_COST_DDOLLAR = 500;
+
+export function fetchProjectWall(slug: string, token?: string) {
+  return apiFetch<WallMessage[]>(`/wall/projects/${encodeURIComponent(slug)}/messages`, undefined, token);
+}
+
+export function fetchMyWallGroups(token: string) {
+  return apiFetch<WallGroupEntry[]>('/wall/me/groups', undefined, token);
+}
+
+export function fetchAggregatedWall(token: string, limit = 60) {
+  return apiFetch<WallMessage[]>(`/wall/me/aggregated?limit=${limit}`, undefined, token);
+}
+
+export function joinProjectWall(slug: string, token: string) {
+  return apiFetch<{ success: boolean; project: { id: string; slug: string; name: string; ticker: string } }>(
+    `/wall/projects/${encodeURIComponent(slug)}/join`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function postProjectWallMessage(slug: string, body: string, token: string) {
+  return apiFetch<WallMessage>(
+    `/wall/projects/${encodeURIComponent(slug)}/messages`,
+    { method: 'POST', body: JSON.stringify({ body }) },
+    token,
+  );
+}
+
+export function pinWallMessage(
+  messageId: string,
+  token: string,
+  kind: 'pin' | 'highlight' | 'promote' = 'pin',
+  amount = WALL_PIN_COST_DDOLLAR,
+) {
+  return apiFetch<WallPinResult>(
+    `/wall/messages/${messageId}/pin`,
+    { method: 'POST', body: JSON.stringify({ kind, amount }) },
+    token,
+  );
+}
+
 export function fetchEngagementStats() {
   return apiFetch<EngagementStats>('/engagement-rewards/stats');
 }

@@ -68,6 +68,7 @@ import { EventsService } from '../events/events.service';
 import { BuilderService } from '../builder/builder.service';
 import { PredictionMarketsService } from '../prediction-markets/prediction-markets.service';
 import { MetricsSyncService } from '../projects/metrics-sync.service';
+import { WallService } from '../wall/wall.service';
 import { NotificationType, ScoutMarketStatus, ListingStatus, PaperTradeSide } from '@prisma/client';
 
 const founderRoomInclude = {
@@ -117,6 +118,7 @@ export class FounderDenService {
     private readonly builder: BuilderService,
     private readonly predictionMarkets: PredictionMarketsService,
     private readonly metricsSync: MetricsSyncService,
+    private readonly wall: WallService,
   ) {}
 
   async getLatestVideos(limit = 12) {
@@ -445,6 +447,17 @@ export class FounderDenService {
     const streak = await updateFounderBuildStreak(this.prisma, founder.id);
     await this.syncPresenceLevel(founder.id);
     await this.points.award(userId, POINTS.FOUNDER_BUILD_POST, 'FOUNDER_BUILD_POST');
+
+    // Cross-post bridge: founder build posts also surface on the project wall.
+    if (dto.projectId) {
+      await this.wall.crossPostFromSource({
+        projectId: dto.projectId,
+        authorId: userId,
+        body: `🛠️ ${post.headline}\n${post.body}`,
+        source: 'build_post',
+        sourceRefId: post.id,
+      });
+    }
 
     return { ...post, buildStreakDays: streak };
   }
@@ -1009,6 +1022,17 @@ export class FounderDenService {
         pinned: dto.channel === 'ANNOUNCEMENTS',
       },
     });
+
+    // Cross-post bridge: social hub / community threads also surface on the project wall.
+    if (userId) {
+      await this.wall.crossPostFromSource({
+        projectId,
+        authorId: userId,
+        body: `${dto.title.trim()}\n${dto.body.trim()}`,
+        source: 'community_thread',
+        sourceRefId: thread.id,
+      });
+    }
 
     await this.syncUserProgressTier(userId);
     if (isFounder) {
